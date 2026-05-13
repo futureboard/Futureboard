@@ -101,14 +101,14 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 px-4 pt-[14vh] backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-transparent px-4 pt-[14vh]"
       onMouseDown={onClose}
     >
       <section
         role="dialog"
         aria-modal="true"
         aria-labelledby="add-track-title"
-        className="w-full max-w-[520px] overflow-hidden rounded-xl border border-white/[0.07] bg-[#1a1e26] shadow-[0_32px_96px_rgba(0,0,0,0.6)]"
+        className="w-full max-w-[520px] overflow-hidden rounded-xl border border-white/[0.08] bg-[#1a1e26] shadow-[0_1px_0_rgba(255,255,255,0.05)_inset,0_0_0_1px_rgba(0,0,0,0.52),0_18px_44px_rgba(0,0,0,0.46),0_44px_120px_rgba(0,0,0,0.42)]"
         onMouseDown={(e) => e.stopPropagation()}
       >
         {/* Header */}

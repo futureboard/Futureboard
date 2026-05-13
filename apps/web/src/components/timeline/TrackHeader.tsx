@@ -13,7 +13,6 @@ import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { SetTrackMuteCommand, SetTrackSoloCommand, SetTrackVolumeCommand, DeleteTrackCommand } from "../../commands";
-import { mixer } from "../../engine/Mixer";
 import { HEADER_WIDTH, TRACK_HEIGHT } from "../../theme";
 
 function volumeToDb(v: number) {
@@ -42,9 +41,8 @@ function TrackBtn({ icon: Icon, active, activeColor, label, onClick }: {
 }
 
 export function TrackHeader({ track, index }: { track: DawTrack; index: number }) {
-  const { setTrackVolume, setTrackMute, setTrackSolo, setTrackArmed } = useProjectStore();
+  const { setTrackArmed } = useProjectStore();
   const { selectedTrackId, setSelectedTrackId, setSelectedClipIds, setFocusedPanel } = useUIStore();
-  const history = useHistoryStore.getState;
   const selected = selectedTrackId === track.id;
   const headerBg = selected ? "#252c35" : "#1c2028";
   const TypeIcon = TYPE_ICONS[track.type] ?? Mic2;

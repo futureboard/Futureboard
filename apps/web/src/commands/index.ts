@@ -25,7 +25,10 @@ function store() {
 
 export class AddTrackCommand implements DawCommand {
   readonly label: string;
-  constructor(private track: DawTrack) {
+  private track: DawTrack;
+
+  constructor(track: DawTrack) {
+    this.track = track;
     this.label = `Add Track "${track.name}"`;
   }
   execute() {
@@ -40,9 +43,11 @@ export class AddTrackCommand implements DawCommand {
 
 export class DeleteTrackCommand implements DawCommand {
   readonly label: string;
+  private trackId: string;
   private snapshot: DawTrack | undefined;
 
-  constructor(private trackId: string) {
+  constructor(trackId: string) {
+    this.trackId = trackId;
     const t = store().project.tracks.find((t) => t.id === trackId);
     this.snapshot = t ? { ...t, clips: [...t.clips] } : undefined;
     this.label = `Delete Track "${this.snapshot?.name ?? trackId}"`;
@@ -63,11 +68,14 @@ export class DeleteTrackCommand implements DawCommand {
 
 export class RenameTrackCommand implements DawCommand {
   readonly label: string;
-  constructor(
-    private trackId: string,
-    private newName: string,
-    private oldName: string,
-  ) {
+  private trackId: string;
+  private newName: string;
+  private oldName: string;
+
+  constructor(trackId: string, newName: string, oldName: string) {
+    this.trackId = trackId;
+    this.newName = newName;
+    this.oldName = oldName;
     this.label = `Rename Track to "${newName}"`;
   }
   execute() { store().setTrackName(this.trackId, this.newName); }
@@ -76,11 +84,15 @@ export class RenameTrackCommand implements DawCommand {
 
 export class SetTrackVolumeCommand implements DawCommand {
   readonly label = "Set Track Volume";
-  constructor(
-    private trackId: string,
-    private newVolume: number,
-    private oldVolume: number,
-  ) {}
+  private trackId: string;
+  private newVolume: number;
+  private oldVolume: number;
+
+  constructor(trackId: string, newVolume: number, oldVolume: number) {
+    this.trackId = trackId;
+    this.newVolume = newVolume;
+    this.oldVolume = oldVolume;
+  }
   execute() {
     store().setTrackVolume(this.trackId, this.newVolume);
     mixer.setVolume(this.trackId, this.newVolume);
@@ -93,11 +105,15 @@ export class SetTrackVolumeCommand implements DawCommand {
 
 export class SetTrackPanCommand implements DawCommand {
   readonly label = "Set Track Pan";
-  constructor(
-    private trackId: string,
-    private newPan: number,
-    private oldPan: number,
-  ) {}
+  private trackId: string;
+  private newPan: number;
+  private oldPan: number;
+
+  constructor(trackId: string, newPan: number, oldPan: number) {
+    this.trackId = trackId;
+    this.newPan = newPan;
+    this.oldPan = oldPan;
+  }
   execute() {
     store().setTrackPan(this.trackId, this.newPan);
     mixer.setPan(this.trackId, this.newPan);
@@ -110,10 +126,12 @@ export class SetTrackPanCommand implements DawCommand {
 
 export class SetTrackMuteCommand implements DawCommand {
   readonly label: string;
-  constructor(
-    private trackId: string,
-    private newMuted: boolean,
-  ) {
+  private trackId: string;
+  private newMuted: boolean;
+
+  constructor(trackId: string, newMuted: boolean) {
+    this.trackId = trackId;
+    this.newMuted = newMuted;
     this.label = newMuted ? "Mute Track" : "Unmute Track";
   }
   execute() {
@@ -128,10 +146,12 @@ export class SetTrackMuteCommand implements DawCommand {
 
 export class SetTrackSoloCommand implements DawCommand {
   readonly label: string;
-  constructor(
-    private trackId: string,
-    private newSolo: boolean,
-  ) {
+  private trackId: string;
+  private newSolo: boolean;
+
+  constructor(trackId: string, newSolo: boolean) {
+    this.trackId = trackId;
+    this.newSolo = newSolo;
     this.label = newSolo ? "Solo Track" : "Unsolo Track";
   }
   execute() {
@@ -150,10 +170,12 @@ export class SetTrackSoloCommand implements DawCommand {
 
 export class AddClipCommand implements DawCommand {
   readonly label: string;
-  constructor(
-    private trackId: string,
-    private clip: DawClip,
-  ) {
+  private trackId: string;
+  private clip: DawClip;
+
+  constructor(trackId: string, clip: DawClip) {
+    this.trackId = trackId;
+    this.clip = clip;
     this.label = `Add Clip "${clip.name}"`;
   }
   execute() { store().addClip(this.trackId, this.clip); }
@@ -162,15 +184,29 @@ export class AddClipCommand implements DawCommand {
 
 export class MoveClipCommand implements DawCommand {
   readonly label = "Move Clip";
+  private clipId: string;
+  private trackId: string;
+  private newStartTime: number;
+  private oldStartTime: number;
+  private newTrackId: string | undefined;
+  private oldTrackId: string | undefined;
+
   constructor(
-    private clipId: string,
-    private trackId: string,
-    private newStartTime: number,
-    private oldStartTime: number,
+    clipId: string,
+    trackId: string,
+    newStartTime: number,
+    oldStartTime: number,
     /** Set when the clip moves to a different track */
-    private newTrackId?: string,
-    private oldTrackId?: string,
-  ) {}
+    newTrackId?: string,
+    oldTrackId?: string,
+  ) {
+    this.clipId = clipId;
+    this.trackId = trackId;
+    this.newStartTime = newStartTime;
+    this.oldStartTime = oldStartTime;
+    this.newTrackId = newTrackId;
+    this.oldTrackId = oldTrackId;
+  }
 
   execute() {
     if (this.newTrackId && this.newTrackId !== this.oldTrackId) {
@@ -190,16 +226,34 @@ export class MoveClipCommand implements DawCommand {
 
 export class ResizeClipCommand implements DawCommand {
   readonly label = "Resize Clip";
+  private clipId: string;
+  private trackId: string;
+  private newStartTime: number;
+  private newOffset: number;
+  private newDuration: number;
+  private oldStartTime: number;
+  private oldOffset: number;
+  private oldDuration: number;
+
   constructor(
-    private clipId: string,
-    private trackId: string,
-    private newStartTime: number,
-    private newOffset: number,
-    private newDuration: number,
-    private oldStartTime: number,
-    private oldOffset: number,
-    private oldDuration: number,
-  ) {}
+    clipId: string,
+    trackId: string,
+    newStartTime: number,
+    newOffset: number,
+    newDuration: number,
+    oldStartTime: number,
+    oldOffset: number,
+    oldDuration: number,
+  ) {
+    this.clipId = clipId;
+    this.trackId = trackId;
+    this.newStartTime = newStartTime;
+    this.newOffset = newOffset;
+    this.newDuration = newDuration;
+    this.oldStartTime = oldStartTime;
+    this.oldOffset = oldOffset;
+    this.oldDuration = oldDuration;
+  }
   execute() {
     store().resizeClip(this.clipId, this.trackId, this.newStartTime, this.newOffset, this.newDuration);
   }
@@ -210,14 +264,15 @@ export class ResizeClipCommand implements DawCommand {
 
 export class SplitClipCommand implements DawCommand {
   readonly label = "Split Clip";
+  private clipId: string;
+  private time: number;
   /** The second clip created by the split — generated at execute() time */
   private splitClipId: string | null = null;
   private originalClip: DawClip | undefined;
 
-  constructor(
-    private clipId: string,
-    private time: number,
-  ) {
+  constructor(clipId: string, time: number) {
+    this.clipId = clipId;
+    this.time = time;
     this.originalClip = store().project.tracks
       .flatMap((t) => t.clips)
       .find((c) => c.id === clipId);
@@ -256,10 +311,12 @@ export class SplitClipCommand implements DawCommand {
 
 export class DeleteClipsCommand implements DawCommand {
   readonly label: string;
+  private clipIds: string[];
   /** Snapshots of all deleted clips (with their original trackIds) */
   private snapshots: Array<{ trackId: string; clip: DawClip }> = [];
 
-  constructor(private clipIds: string[]) {
+  constructor(clipIds: string[]) {
+    this.clipIds = clipIds;
     this.label = clipIds.length === 1 ? "Delete Clip" : `Delete ${clipIds.length} Clips`;
     // Capture the clips now, before deletion
     this._captureSnapshots();
@@ -291,10 +348,12 @@ export class DeleteClipsCommand implements DawCommand {
 
 export class DuplicateClipsCommand implements DawCommand {
   readonly label: string;
+  private clipIds: string[];
   /** IDs of the newly created duplicates — filled at execute() time */
   private newClipIds: string[] = [];
 
-  constructor(private clipIds: string[]) {
+  constructor(clipIds: string[]) {
+    this.clipIds = clipIds;
     this.label = clipIds.length === 1 ? "Duplicate Clip" : `Duplicate ${clipIds.length} Clips`;
   }
 
@@ -314,13 +373,17 @@ export class DuplicateClipsCommand implements DawCommand {
 
 export class UpdateClipCommand implements DawCommand {
   readonly label: string;
+  private clipId: string;
+  private updates: Partial<DawClip>;
   private oldValues: Partial<DawClip>;
 
   constructor(
-    private clipId: string,
-    private updates: Partial<DawClip>,
+    clipId: string,
+    updates: Partial<DawClip>,
     label?: string,
   ) {
+    this.clipId = clipId;
+    this.updates = updates;
     this.label = label ?? "Edit Clip";
     // Capture the current values for the keys we are about to change
     const clip = store().project.tracks

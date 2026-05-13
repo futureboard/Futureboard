@@ -1,4 +1,4 @@
-import { Cpu, GitMerge, Mic2, Music, Sliders, Volume2, VolumeX, Star, Mic, Trash2, X, Scissors, Layers, Activity } from "lucide-react";
+import { Activity, Cpu, GitMerge, Layers, Mic2, Music, Scissors, Sliders, Trash2, Volume2, X } from "lucide-react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
@@ -24,7 +24,7 @@ const TYPE_LABELS: Record<TrackType, string> = {
 
 export function InspectorPanel() {
   const { selectedTrackId, selectedClipIds, selectedMixerTrackId, toggleInspector, masterVolume, setMasterVolume } = useUIStore();
-  const { project, updateClip } = useProjectStore();
+  const { project } = useProjectStore();
   const history = useHistoryStore.getState;
   
   const trackIndex = project.tracks.findIndex((t) => t.id === selectedTrackId);
@@ -316,6 +316,37 @@ function SectionLabel({ label, count }: { label: string; count?: number }) {
         <span className="text-[9px] text-daw-faint opacity-50">{count}</span>
       )}
     </div>
+  );
+}
+
+function InspectorTrackBtn({
+  label,
+  title,
+  active,
+  activeColor,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  active: boolean;
+  activeColor: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-pressed={active}
+      onClick={onClick}
+      className="flex h-6 w-6 shrink-0 items-center justify-center rounded border text-[10px] font-bold transition-colors"
+      style={{
+        background: active ? activeColor : "rgba(255,255,255,0.035)",
+        borderColor: active ? activeColor : "rgba(255,255,255,0.08)",
+        color: active ? "#101216" : "rgba(200,212,224,0.62)",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

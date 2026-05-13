@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DawClip, DawFile, DawProject, DawTrack, FileId, TrackId, WaveformPeaks } from "../types/daw";
+import type { DawClip, DawFile, DawProject, DawTrack, FileId, TimeSignature, TrackId, WaveformPeaks } from "../types/daw";
 
 const STORAGE_KEY = "mochi-daw-project";
 
@@ -10,6 +10,7 @@ function defaultProject(): DawProject {
     version: 1,
     sampleRate: 48000,
     bpm: 120,
+    timeSignature: { numerator: 4, denominator: 4 },
     tracks: [],
     files: [],
   };
@@ -23,6 +24,7 @@ type ProjectStore = {
 
   setProjectName: (name: string) => void;
   setBpm: (bpm: number) => void;
+  setTimeSignature: (timeSig: TimeSignature) => void;
   addTrack: (track: DawTrack) => void;
   removeTrack: (trackId: TrackId) => void;
   setTrackName: (trackId: TrackId, name: string) => void;
@@ -35,6 +37,7 @@ type ProjectStore = {
   moveClip: (clipId: string, trackId: TrackId, startTime: number) => void;
   removeClip: (clipId: string) => void;
   addFile: (file: DawFile) => void;
+  moveClipToTrack: (clipId: string, toTrackId: TrackId, startTime: number) => void;
   setPeaks: (fileId: FileId, peaks: WaveformPeaks) => void;
   saveLocal: () => void;
   loadLocal: () => void;
@@ -49,6 +52,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   setBpm: (bpm) =>
     set((s) => ({ project: { ...s.project, bpm } })),
+
+  setTimeSignature: (timeSignature) =>
+    set((s) => ({ project: { ...s.project, timeSignature } })),
 
   addTrack: (track) =>
     set((s) => ({ project: { ...s.project, tracks: [...s.project.tracks, track] } })),
@@ -144,6 +150,26 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   addFile: (file) =>
     set((s) => ({ project: { ...s.project, files: [...s.project.files, file] } })),
 
+  moveClipToTrack: (clipId, toTrackId, startTime) =>
+    set((s) => {
+      let clip: DawClip | undefined;
+      const tracks = s.project.tracks.map((t) => {
+        const found = t.clips.find((c) => c.id === clipId);
+        if (found) { clip = found; return { ...t, clips: t.clips.filter((c) => c.id !== clipId) }; }
+        return t;
+      });
+      if (!clip) return s;
+      const moved: DawClip = { ...clip, trackId: toTrackId, startTime };
+      return {
+        project: {
+          ...s.project,
+          tracks: tracks.map((t) =>
+            t.id === toTrackId ? { ...t, clips: [...t.clips, moved] } : t
+          ),
+        },
+      };
+    }),
+
   setPeaks: (fileId, peaks) =>
     set((s) => {
       const next = new Map(s.peakCache);
@@ -155,7 +181,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const { project } = get();
     const serializable = {
       ...project,
-      files: project.files.map(({ localObjectUrl: _, ...f }) => f),
+      files: project.files.map((file) => ({
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        duration: file.duration,
+        sampleRate: file.sampleRate,
+        channels: file.channels,
+        storageKey: file.storageKey,
+      })),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
   },

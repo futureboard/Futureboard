@@ -1,4 +1,4 @@
-import { FileAudio2, Search, Upload } from "lucide-react";
+import { ChevronRight, FileAudio2, FlaskConical, FolderOpen, Layers, Search, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { BROWSER_WIDTH } from "../theme";
@@ -10,88 +10,187 @@ function fileBadge(file: DawFile) {
   return "Audio";
 }
 
+// ─── Collapsible section wrapper ──────────────────────────────────────────────
+
+function Section({
+  label,
+  icon: Icon,
+  count,
+  defaultOpen = true,
+  children,
+}: {
+  label: string;
+  icon: React.ElementType;
+  count?: number;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="border-b border-daw-border last:border-b-0">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left transition-colors hover:bg-white/[0.03]"
+      >
+        <ChevronRight
+          size={10}
+          className="shrink-0 text-daw-faint transition-transform"
+          style={{ transform: open ? "rotate(90deg)" : "none" }}
+        />
+        <Icon size={10} className="shrink-0 text-daw-faint" />
+        <span className="flex-1 text-[10px] font-semibold uppercase tracking-widest text-daw-faint">
+          {label}
+        </span>
+        {count !== undefined && (
+          <span className="text-[9px] tabular-nums text-daw-faint opacity-50">{count}</span>
+        )}
+      </button>
+      {open && <div>{children}</div>}
+    </div>
+  );
+}
+
+// ─── Placeholder row (coming soon) ────────────────────────────────────────────
+
+function ComingSoonRow({ label }: { label: string }) {
+  return (
+    <div className="flex h-8 items-center gap-2 px-6 text-daw-faint">
+      <div className="h-px flex-1 bg-daw-border" />
+      <span className="text-[9px] font-medium">{label}</span>
+      <div className="h-px flex-1 bg-daw-border" />
+    </div>
+  );
+}
+
+// ─── File row ─────────────────────────────────────────────────────────────────
+
+function FileRow({ file }: { file: DawFile }) {
+  return (
+    <button className="group flex w-full items-center gap-2 border-b border-daw-border bg-transparent px-3 py-1.5 text-left transition-colors hover:bg-white/[0.035]">
+      <FileAudio2 size={11} className="shrink-0 text-daw-faint group-hover:text-daw-accent" />
+      <span className="min-w-0 flex-1 truncate text-[11px] text-daw-dim group-hover:text-daw-text">
+        {file.name}
+      </span>
+      <span className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px] text-daw-faint">
+        {fileBadge(file)}
+      </span>
+    </button>
+  );
+}
+
+// ─── Browser Panel ────────────────────────────────────────────────────────────
+
 export function BrowserPanel({ onImport }: { onImport?: () => void }) {
   const files = useProjectStore((s) => s.project.files);
   const [query, setQuery] = useState("");
-  const visibleFiles = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return files;
-    return files.filter((file) => file.name.toLowerCase().includes(normalized));
+
+  const filteredFiles = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files;
   }, [files, query]);
 
   return (
     <aside
-      className="flex shrink-0 flex-col overflow-hidden  border border-daw-border bg-daw-panel shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
+      className="flex shrink-0 flex-col overflow-hidden border-r border-daw-border bg-daw-panel"
       style={{ width: BROWSER_WIDTH, minWidth: BROWSER_WIDTH }}
     >
-      <div className="border-b border-daw-border bg-daw-surface px-2 py-0 pb-2">
-        <div className="mb-3 flex items-center justify-between gap-2 py-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="min-w-0">
-              <div className="truncate text-[11px] font-semibold text-daw-text">Browser</div>
-            </div>
-          </div>
-          <button
-            onClick={onImport}
-            title="Import audio"
-            className="flex h-4 w-4 items-center justify-center rounded-lg text-daw-dim transition-colors hover:border-daw-border-light hover:text-daw-text"
-          >
-            <Upload size={14} />
-          </button>
-        </div>
+      {/* header */}
+      <div className="flex h-6 shrink-0 items-center justify-between border-b border-daw-border bg-daw-surface px-3">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-daw-faint">
+          Browser
+        </span>
+        <button
+          onClick={onImport}
+          title="Import audio [Ctrl+I]"
+          className="flex h-5 w-5 items-center justify-center rounded text-daw-faint transition-colors hover:bg-white/[0.06] hover:text-daw-text"
+        >
+          <Upload size={11} />
+        </button>
+      </div>
 
-        <label className="flex h-6 items-center gap-2 rounded-lg border border-daw-border bg-daw-bg px-2.5 text-daw-faint focus-within:border-daw-accent">
-          <Search size={12} />
+      {/* search */}
+      <div className="border-b border-daw-border px-2 py-1.5">
+        <label className="flex h-6 items-center gap-2 rounded border border-daw-border bg-daw-bg px-2 text-daw-faint transition-colors focus-within:border-daw-accent">
+          <Search size={10} />
           <input
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search audio"
-            className="min-w-0 flex-1  bg-transparent text-[11px] text-daw-text outline-none placeholder:text-daw-faint"
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search…"
+            className="min-w-0 flex-1 bg-transparent text-[11px] text-daw-text outline-none placeholder:text-daw-faint"
           />
         </label>
       </div>
 
+      {/* sections */}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {visibleFiles.length === 0 ? (
-          <div className="flex h-full min-h-52 flex-col items-center justify-center  border border-dashed border-daw-border bg-daw-surface/60 px-5 py-7 text-center">
-            <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-daw-surface-high text-daw-faint">
-              <FileAudio2 size={25} />
-            </div>
-            <div className="text-[11px] font-semibold text-daw-text">
-              {files.length === 0 ? "No audio imported" : "No matching audio"}
-            </div>
-            <div className="mt-1.5 max-w-44 text-[12px] leading-5 text-daw-faint">
-              {files.length === 0 ? "Import WAV or MP3 files to build the arrangement." : "Adjust the search term."}
-            </div>
-            {files.length === 0 && (
+
+        {/* IMPORTS */}
+        <Section label="Imports" icon={FolderOpen} count={files.length}>
+          {filteredFiles.length > 0 ? (
+            filteredFiles.map((f) => <FileRow key={f.id} file={f} />)
+          ) : files.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 px-4 py-5 text-center">
+              <FileAudio2 size={20} className="text-daw-faint opacity-30" />
+              <p className="text-[10px] leading-relaxed text-daw-faint">
+                No audio imported yet
+              </p>
               <button
                 onClick={onImport}
-                className="mt-4 h-9 rounded-lg bg-daw-accent px-4 text-[11px] font-semibold text-daw-ink transition-colors hover:bg-daw-accent-h"
+                className="mt-1 h-7 rounded-md bg-daw-accent px-3 text-[10px] font-semibold text-daw-ink transition-colors hover:bg-daw-accent-h"
               >
                 Import Audio
               </button>
-            )}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-1">
-            {visibleFiles.map((file) => (
-              <button
-                key={file.id}
-                className="group flex w-full items-center gap-1 border-y border-daw-border bg-daw-bg px-1 py-1 text-left transition-colors hover:border-daw-border hover:bg-daw-surface-high"
-              >
-                <div className="flex h-6 w-6 shrink-0 items-center justify-center text-daw-cyan group-hover:text-daw-text">
-                  <FileAudio2 size={12} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[11px] font-medium text-daw-text">{file.name}</div>
-                </div>
-                <span className="rounded-md border border-daw-border bg-daw-bg px-1.5 py-0.5 text-[10px] text-daw-faint">
-                  {fileBadge(file)}
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
+            </div>
+          ) : (
+            <p className="px-4 py-2 text-[10px] text-daw-faint">No results for "{query}"</p>
+          )}
+        </Section>
+
+        {/* SAMPLES */}
+        <Section label="Samples" icon={FlaskConical} defaultOpen={false}>
+          <ComingSoonRow label="Sample library — coming soon" />
+          {[
+            "Kick — Hard 01.wav",
+            "Snare — Crackle.wav",
+            "Hi-Hat — Open 16th.wav",
+            "Bass — 808 Sub C.wav",
+          ].map((name) => (
+            <button
+              key={name}
+              disabled
+              className="flex w-full cursor-default items-center gap-2 border-b border-daw-border px-3 py-1.5 opacity-35"
+            >
+              <FileAudio2 size={11} className="shrink-0 text-daw-faint" />
+              <span className="min-w-0 flex-1 truncate text-[11px] text-daw-dim">{name}</span>
+              <span className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px] text-daw-faint">
+                WAV
+              </span>
+            </button>
+          ))}
+        </Section>
+
+        {/* LOOPS */}
+        <Section label="Loops" icon={Layers} defaultOpen={false}>
+          <ComingSoonRow label="Loop library — coming soon" />
+          {[
+            "Drum Loop — 120bpm.wav",
+            "Guitar Riff — Am.wav",
+            "Bass Loop — Funk.wav",
+          ].map((name) => (
+            <button
+              key={name}
+              disabled
+              className="flex w-full cursor-default items-center gap-2 border-b border-daw-border px-3 py-1.5 opacity-35"
+            >
+              <FileAudio2 size={11} className="shrink-0 text-daw-faint" />
+              <span className="min-w-0 flex-1 truncate text-[11px] text-daw-dim">{name}</span>
+              <span className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px] text-daw-faint">
+                WAV
+              </span>
+            </button>
+          ))}
+        </Section>
+
       </div>
     </aside>
   );

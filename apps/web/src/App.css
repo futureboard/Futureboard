@@ -3,6 +3,18 @@ html, body, #root { height: 100%; overflow: hidden; background: #17191d; color: 
 button { cursor: pointer; font-family: inherit; }
 button:disabled { cursor: default; }
 
+/* Electron frameless: draggable title strip; use .app-no-drag on interactive children */
+.drag-region-app {
+  -webkit-app-region: drag;
+}
+
+.app-no-drag,
+.app-no-drag * {
+  -webkit-app-region: no-drag;
+}
+
+
+/* ── Track header fader ───────────────────────────────────────────────── */
 .daw-track-fader {
   width: 100%;
   height: 16px;

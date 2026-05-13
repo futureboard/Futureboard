@@ -3,20 +3,41 @@ export type TrackId = string;
 export type ClipId = string;
 export type FileId = string;
 
+export type TimeSignature = {
+  numerator: number;
+  denominator: number;
+};
+
 export type DawProject = {
   id: ProjectId;
   name: string;
   version: number;
   sampleRate: number;
   bpm: number;
+  timeSignature: TimeSignature;
   tracks: DawTrack[];
   files: DawFile[];
+};
+
+export type TrackType = "audio" | "midi" | "plugin" | "bus";
+
+export type TrackInsert = {
+  id: string;
+  name: string;
+  bypassed: boolean;
+};
+
+export type TrackSend = {
+  id: string;
+  name: string;
+  /** send level 0–1 (1 = 0 dB) */
+  level: number;
 };
 
 export type DawTrack = {
   id: TrackId;
   name: string;
-  type: "audio";
+  type: TrackType;
   color: string;
   volume: number;
   pan: number;
@@ -24,6 +45,8 @@ export type DawTrack = {
   solo: boolean;
   armed: boolean;
   clips: DawClip[];
+  inserts?: TrackInsert[];
+  sends?: TrackSend[];
 };
 
 export type DawClip = {

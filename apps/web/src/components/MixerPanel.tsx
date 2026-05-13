@@ -1,43 +1,47 @@
-import { ChevronDown, SlidersHorizontal } from "lucide-react";
+import { ChevronDown, Minus, Plus, SlidersHorizontal, X } from "lucide-react";
+import { useRef } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { mixer } from "../engine/Mixer";
-import { MIXER_HEIGHT } from "../theme";
 import { VuMeter } from "./ui/VuMeter";
+import { Knob } from "./ui/Knob";
+import { VerticalFader } from "./ui/VerticalFader";
+import { useVuStereoLevels } from "../hooks/useVuLevel";
+import { effectiveTrackMeterMode } from "../utils/meterMode";
+import type { DawFile, DawTrack, TrackInsert, TrackSend } from "../types/daw";
 
-type MixerBtnProps = {
-  label: string;
-  active?: boolean;
-  activeColor: string;
-  onClick?: () => void;
-  title?: string;
-};
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
-function MixerBtn({
-  label,
-  active = false,
-  activeColor,
-  onClick,
-  title,
-}: MixerBtnProps) {
+function volumeToDb(v: number) {
+  if (v <= 0.001) return "-∞";
+  const db = 20 * Math.log10(v);
+  return (db >= 0 ? `+${db.toFixed(1)}` : db.toFixed(1)) + " dB";
+}
+
+function sendToDb(v: number) {
+  if (v <= 0.001) return "-inf";
+  const db = 20 * Math.log10(v);
+  return db >= 0 ? `+${db.toFixed(1)}` : db.toFixed(1);
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function MixBtn({
+  label, active, activeColor, onClick, title, wide = false,
+}: { label: string; active: boolean; activeColor: string; onClick?: () => void; title?: string; wide?: boolean }) {
   return (
     <button
       type="button"
       title={title ?? label}
       onClick={onClick}
-      aria-pressed={active}
       className={[
-        "grid h-6 w-6 place-items-center rounded-md border text-[10px] font-black",
-        "transition-all duration-150",
-        "focus:outline-none focus:ring-2 focus:ring-white/10",
-        active
-          ? "shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_4px_14px_rgba(0,0,0,0.28)]"
-          : "hover:border-white/18 hover:bg-white/[0.045] active:scale-95",
+        "grid place-items-center rounded border text-[10px] font-black transition-colors",
+        wide ? "h-6 flex-1" : "h-5 w-5",
       ].join(" ")}
       style={{
-        background: active ? activeColor : "rgba(255,255,255,0.035)",
+        background: active ? activeColor : "rgba(255,255,255,0.05)",
         borderColor: active ? activeColor : "rgba(255,255,255,0.09)",
-        color: active ? "#0d1015" : "rgba(226,232,240,0.72)",
+        color: active ? "#0d1015" : "rgba(220,232,240,0.6)",
       }}
     >
       {label}
@@ -45,201 +49,385 @@ function MixerBtn({
   );
 }
 
-function volumeToDb(volume: number) {
-  if (volume <= 0.001) return "-∞";
-  const db = 20 * Math.log10(volume);
-  return db >= 0 ? `+${db.toFixed(1)}` : db.toFixed(1);
+function SectionHeader({
+  label, accent, onAdd,
+}: { label: string; accent: string; onAdd?: () => void }) {
+  return (
+    <div className="flex items-center gap-1.5 px-1 py-[5px] justify-between">
+      <div className="flex space-x-2">
+        <div className="h-3 w-[2px] shrink-0 rounded-full" style={{ background: accent }} />
+        <span className="flex-1 text-[9px] font-bold uppercase tracking-widest" style={{ color: accent, opacity: 0.75 }}>
+          {label}
+        </span>
+      </div>
+      <button
+        onClick={onAdd}
+        className="flex h-4 w-4 items-center justify-center rounded text-[10px] transition-colors"
+        style={{ color: "rgba(255,255,255,0.3)" }}
+        onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = accent)}
+        onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.3)")}
+        title={`Add ${label.toLowerCase()}`}
+      >
+        <Plus size={10} />
+      </button>
+    </div>
+  );
 }
 
-type ChannelStripProps = {
+function InsertRow({ insert, accent }: { insert: TrackInsert; accent: string }) {
+  return (
+    <div
+      className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px]"
+      style={{ borderColor: insert.bypassed ? "rgba(255,255,255,0.12)" : accent }}
+    >
+      <span
+        className="flex-1 truncate text-[10px]"
+        style={{ color: insert.bypassed ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.72)" }}
+      >
+        {insert.name}
+      </span>
+      <button className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70">
+        <X size={8} />
+      </button>
+    </div>
+  );
+}
+
+function SendRow({ send }: { send: TrackSend }) {
+  return (
+    <div className="flex items-center gap-1.5 border-l-[2px] border-white/[0.1] px-2 py-[3px]">
+      <span className="flex-1 truncate text-[10px] text-white/60">{send.name}</span>
+      <span className="shrink-0 text-[9px] tabular-nums text-white/35">{sendToDb(send.level)}</span>
+    </div>
+  );
+}
+
+// ─── Responsive level type ────────────────────────────────────────────────────
+
+type StripLevel = "full" | "medium" | "compact";
+
+// ─── Channel Strip ────────────────────────────────────────────────────────────
+
+type StripProps = {
+  track?: DawTrack;           // undefined = Master
   label: string;
-  color?: string;
+  color: string;
   volume: number;
+  pan?: number;
   onVolume: (v: number) => void;
+  onPan?: (v: number) => void;
   muted?: boolean;
   solo?: boolean;
   onMute?: () => void;
   onSolo?: () => void;
-  isMaster?: boolean;
+  fixedWidth?: number;
+  level: StripLevel;
+  onResizeDragStart?: (e: React.PointerEvent) => void;
+  files: DawFile[];
 };
 
 function ChannelStrip({
-  label,
-  color = "#7c8a99",
-  volume,
-  onVolume,
-  muted,
-  solo,
-  onMute,
-  onSolo,
-  isMaster = false,
-}: ChannelStripProps) {
-  const accent = isMaster ? "#48d1cc" : color;
-  const volumePercent = Math.round(volume * 100);
+  track, label, color, volume, pan = 0,
+  onVolume, onPan,
+  muted, solo, onMute, onSolo,
+  fixedWidth, level, onResizeDragStart,
+  files,
+}: StripProps) {
+  const isMaster = !track;
+  const accent = color;
+  const vu = useVuStereoLevels(isMaster ? "master" : (track?.id ?? "master"));
+  const meterMode =
+    isMaster ? "stereo" : track ? effectiveTrackMeterMode(track, files) : "stereo";
+  const inserts: TrackInsert[] = track?.inserts ?? [];
+  const sends: TrackSend[] = track?.sends ?? [];
+
+  const style: React.CSSProperties = fixedWidth !== undefined
+    ? { width: fixedWidth, minWidth: fixedWidth, flexShrink: 0 }
+    : { flex: 1, minWidth: 64, maxWidth: 200 };
+
+  const showFull   = level === "full";
+  const showMedium = level === "full" || level === "medium";
 
   return (
     <section
-      className={[
-        "group relative flex h-full flex-col items-center overflow-hidden",
-        "border-r border-white/[0.07]",
-        "px-2 py-2",
-        isMaster
-          ? "w-[92px] min-w-[92px] bg-[linear-gradient(180deg,rgba(72,209,204,0.07),rgba(255,255,255,0.022))]"
-          : "w-[88px] min-w-[88px] bg-[rgba(255,255,255,0.024)]",
-      ].join(" ")}
+      className="relative flex h-full flex-col border-x border-white/[0.055] select-none"
+      style={{ ...style, background: isMaster ? "rgba(72,209,204,0.035)" : "rgba(255,255,255,0.016)" }}
     >
-      <div
-        className="absolute inset-x-2 top-0 h-[2px] rounded-full opacity-90"
-        style={{ background: accent }}
-      />
+      {/* top colour bar */}
+      <div className="h-[2px] w-full shrink-0" style={{ background: accent }} />
 
-      <div className="w-full pt-0.5">
-        <div
-          className={[
-            "relative overflow-hidden rounded-lg border px-2 py-1.5",
-            "shadow-[inset_0_1px_0_rgba(255,255,255,0.10)]",
-          ].join(" ")}
-          style={{
-            background: `linear-gradient(180deg, ${accent}dd, ${accent}aa)`,
-            borderColor: "rgba(255,255,255,0.12)",
-          }}
-        >
-          <span className="block truncate text-center text-[10.5px] font-bold leading-none text-[#0c1015]">
-            {label}
-          </span>
+      {/* ── INSERTS (full only) ── */}
+      {showFull && (
+        <div className="shrink-0 border-b border-white/[0.05]">
+          <SectionHeader label="Inserts" accent={accent} />
+          {inserts.length === 0 ? (
+            <div className="px-4 pb-[5px] text-[9px] italic text-white/20">empty</div>
+          ) : (
+            inserts.map((ins) => <InsertRow key={ins.id} insert={ins} accent={accent} />)
+          )}
         </div>
-      </div>
+      )}
 
-      <div className="mt-1.5 flex h-6 items-center justify-center gap-1.5">
-        {!isMaster ? (
-          <>
-            <MixerBtn
-              label="M"
-              active={!!muted}
-              activeColor="#f3c969"
-              onClick={onMute}
-              title="Mute"
-            />
-            <MixerBtn
-              label="S"
-              active={!!solo}
-              activeColor="#7bd88f"
-              onClick={onSolo}
-              title="Solo"
-            />
-          </>
-        ) : (
-          <span className="rounded-md border border-white/[0.08] bg-white/[0.035] px-2 py-1 text-[8.5px] font-bold uppercase tracking-[0.12em] text-white/45">
-            Master
-          </span>
-        )}
-      </div>
+      {/* ── SENDS (full only) ── */}
+      {showFull && (
+        <div className="shrink-0 border-b border-white/[0.05]">
+          <SectionHeader label="Sends" accent={accent} />
+          {sends.length === 0 ? (
+            <div className="px-4 pb-[5px] text-[9px] italic text-white/20">empty</div>
+          ) : (
+            sends.map((s) => <SendRow key={s.id} send={s} />)
+          )}
+        </div>
+      )}
 
-      <div
-        className={[
-          "mt-1.5 flex min-h-0 w-full flex-1 items-stretch justify-center gap-1.5",
-          "rounded-xl border border-white/[0.08]",
-          "bg-[linear-gradient(180deg,rgba(0,0,0,0.20),rgba(255,255,255,0.025))]",
-          "px-2 py-2",
-          "shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]",
-        ].join(" ")}
-      >
-        <div className="relative flex min-h-[118px] flex-1 items-center justify-center">
-          <div
-            className="pointer-events-none absolute h-[112px] w-[3px] rounded-full bg-white/[0.07]"
-          />
-          <div
-            className="pointer-events-none absolute bottom-1/2 h-px w-full bg-white/[0.06]"
-          />
-          <div
-            className="pointer-events-none absolute bottom-[9px] w-[3px] rounded-full opacity-85"
-            style={{
-              height: `${Math.max(8, volume * 112)}px`,
-              background: `linear-gradient(180deg, ${accent}ee, ${accent}66)`,
-            }}
-          />
-          <div className="pointer-events-none absolute left-0 top-3 flex h-[96px] flex-col justify-between">
-            {Array.from({ length: 5 }, (_, i) => (
-              <span key={i} className="block h-px w-2 bg-white/[0.09]" />
-            ))}
-          </div>
-
-          <input
-            aria-label={`${label} volume`}
-            type="range"
-            min={0}
+      {/* ── Pan knob (medium+) ── */}
+      {showMedium && !isMaster && (
+        <div className="flex shrink-0 flex-col items-center gap-0.5 border-b border-white/[0.05] py-2">
+          <Knob
+            value={pan}
+            min={-1}
             max={1}
-            step={0.01}
-            value={volume}
-            onChange={(e) => onVolume(parseFloat(e.target.value))}
-            className="daw-vertical-fader relative z-10"
-            style={
-              {
-                "--fader-accent": accent,
-              } as React.CSSProperties
-            }
+            size={40}
+            color={accent}
+            bipolar
+            onChange={onPan ?? (() => {})}
           />
+          <div className="flex w-full items-center justify-between px-3">
+            <span className="text-[8px] text-white/25">L</span>
+            <span className="text-[8px] text-white/25">R</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── M / S (medium+) ── */}
+      {showMedium && (
+        <div className="flex shrink-0 gap-1 border-b border-white/[0.05] px-2 py-1.5">
+          {isMaster ? (
+            <span className="flex-1 text-center text-[8px] font-semibold uppercase tracking-widest text-white/25">
+              master
+            </span>
+          ) : (
+            <>
+              <MixBtn label="M" wide active={!!muted} activeColor="#f3c969" onClick={onMute} title="Mute" />
+              <MixBtn label="S" wide active={!!solo}  activeColor="#7bd88f" onClick={onSolo} title="Solo" />
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Fader + VU (always) ── */}
+      <div className="flex min-h-0 flex-1 gap-1.5 overflow-hidden px-2 py-2">
+        <div
+          className={`flex shrink-0 flex-col items-center gap-0.5 self-stretch min-h-0 ${
+            meterMode === "stereo" ? "w-[14px]" : "w-[7px]"
+          }`}
+        >
+          <span className="h-[10px] shrink-0 text-[6px] font-semibold uppercase leading-none text-white/28">
+            {isMaster ? "LR" : meterMode === "mono" ? "Mono" : "Stereo"}
+          </span>
+          <div className="flex min-h-0 flex-1 w-full justify-center">
+            <VuMeter
+              mode={meterMode}
+              levelL={vu.l}
+              levelR={vu.r}
+              columnWidth={5}
+            />
+          </div>
         </div>
 
-        <div className="flex min-h-[118px] items-center">
-          <VuMeter level={volume * 0.85} height={108} width={5} />
-        </div>
+        {/* Vertical fader */}
+        <VerticalFader value={volume} onChange={onVolume} accent={accent} />
       </div>
 
-      <div className="mt-1.5 grid w-full grid-cols-1 gap-1">
-        <div className="rounded-lg border border-white/[0.08] bg-black/20 px-1.5 py-1.5 text-center">
-          <span className="block text-[10px] font-semibold tabular-nums text-white/72">
-            {volumePercent}
-          </span>
-          <span className="block text-[8px] font-medium tabular-nums text-white/35">
-            {volumeToDb(volume)} dB
-          </span>
-        </div>
+      {/* ── Name + dB readout ── */}
+      <div
+        className="shrink-0 border-t border-white/[0.07] px-1.5 py-1.5 text-center"
+        style={{ background: "rgba(0,0,0,0.18)" }}
+      >
+        <span
+          title={label}
+          className="block truncate text-[10px] font-bold tracking-wide text-white/65"
+        >
+          {label}
+        </span>
+        <span className="block text-[8px] tabular-nums text-white/25">
+          {volumeToDb(volume)}
+        </span>
       </div>
+
+      {/* right-edge resize handle */}
+      {fixedWidth !== undefined && (
+        <div
+          className="absolute inset-y-0 right-0 z-10 w-1 cursor-ew-resize opacity-0 transition-opacity hover:opacity-100"
+          style={{ background: "rgba(255,255,255,0.14)" }}
+          onPointerDown={onResizeDragStart}
+        />
+      )}
     </section>
   );
 }
+
+// ─── Mixer Panel ──────────────────────────────────────────────────────────────
+
 export function MixerPanel() {
   const tracks = useProjectStore((s) => s.project.tracks);
-  const { setTrackVolume, setTrackMute, setTrackSolo } = useProjectStore();
-  const { masterVolume, setMasterVolume, toggleMixer } = useUIStore();
+  const files = useProjectStore((s) => s.project.files);
+  const { setTrackVolume, setTrackPan, setTrackMute, setTrackSolo } = useProjectStore();
+  const {
+    masterVolume, setMasterVolume,
+    toggleMixer,
+    mixerHeight, setMixerHeight,
+    mixerChannelWidth, setMixerChannelWidth,
+    mixerFlexLayout, toggleMixerFlexLayout,
+  } = useUIStore();
+
+  // height resize — useRef so drag state survives re-renders
+  const hDragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const onHeightDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    hDragRef.current = { startY: e.clientY, startH: mixerHeight };
+  };
+  const onHeightDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!hDragRef.current) return;
+    setMixerHeight(hDragRef.current.startH + hDragRef.current.startY - e.clientY);
+  };
+  const onHeightDragEnd = () => { hDragRef.current = null; };
+
+  // strip width resize — useRef
+  const wDragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const onStripResizeDragStart = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    wDragRef.current = { startX: e.clientX, startW: mixerChannelWidth };
+  };
+  const onStripResizeDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!wDragRef.current) return;
+    setMixerChannelWidth(wDragRef.current.startW + e.clientX - wDragRef.current.startX);
+  };
+  const onStripResizeDragEnd = () => { wDragRef.current = null; };
+
+  // responsive: based on available strip content height
+  const contentH = mixerHeight - 33; // minus resize handle + header
+  const stripLevel: StripLevel =
+    contentH >= 340 ? "full" :
+    contentH >= 210 ? "medium" :
+    "compact";
+
+  const fixedWidth = mixerFlexLayout ? undefined : mixerChannelWidth;
 
   return (
     <div
-      className="flex shrink-0 flex-col overflow-hidden border border-daw-border bg-daw-surface-high shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
-      style={{ height: MIXER_HEIGHT, minHeight: MIXER_HEIGHT }}
+      className="flex shrink-0 flex-col overflow-hidden border-t border-daw-border bg-[#111418]"
+      style={{ height: mixerHeight, minHeight: mixerHeight }}
+      onPointerMove={onStripResizeDrag}
+      onPointerUp={onStripResizeDragEnd}
     >
-      <div className="flex h-7 shrink-0 items-center gap-2 border-b border-daw-border bg-daw-surface px-3">
-        <SlidersHorizontal size={12} className="text-daw-faint" />
-        <span className="text-[11px] font-semibold text-daw-text">Mixer</span>
-        <span className="rounded-md border border-daw-border bg-daw-bg px-1.5 py-0.5 text-[9px] text-daw-faint">
+      {/* height resize grip */}
+      <div
+        className="group flex h-[5px] shrink-0 cursor-ns-resize items-center justify-center"
+        onPointerDown={onHeightDragStart}
+        onPointerMove={onHeightDrag}
+        onPointerUp={onHeightDragEnd}
+      >
+        <div className="h-[2px] w-8 rounded-full bg-white/[0.06] transition-colors group-hover:bg-white/25" />
+      </div>
+
+      {/* header */}
+      <div className="flex h-8 pb-1 shrink-0 items-center gap-2 border-b border-white/[0.06] px-3">
+        <SlidersHorizontal size={11} className="text-daw-faint" />
+        <span className="text-[10px] font-semibold text-daw-text">Mixer</span>
+        <span className="rounded border border-white/[0.07] bg-white/[0.03] px-1.5 py-0.5 text-[9px] text-daw-faint">
           {tracks.length + 1} ch
         </span>
+
         <div className="flex-1" />
-        <button onClick={toggleMixer} className="flex h-5 w-5 items-center justify-center rounded-md text-daw-faint transition-colors hover:bg-daw-surface-high hover:text-daw-text">
+
+        {/* fixed / flex toggle */}
+        <button
+          onClick={toggleMixerFlexLayout}
+          title={mixerFlexLayout ? "Switch to Fixed width" : "Switch to Flex width"}
+          className={[
+            "flex h-5 items-center gap-1 rounded border px-1.5 text-[9px] font-semibold transition-colors",
+            mixerFlexLayout
+              ? "border-daw-accent/40 bg-daw-accent/10 text-daw-accent"
+              : "border-white/[0.07] bg-white/[0.03] text-daw-faint hover:text-daw-dim",
+          ].join(" ")}
+        >
+          {mixerFlexLayout ? "Flex" : "Fixed"}
+        </button>
+
+        {/* width stepper (fixed mode only) */}
+        {!mixerFlexLayout && (
+          <div className="flex items-center gap-0 rounded border border-white/[0.07] bg-white/[0.03]">
+            <button
+              onClick={() => setMixerChannelWidth(mixerChannelWidth - 8)}
+              className="flex h-5 w-5 items-center justify-center text-daw-faint transition-colors hover:text-daw-text"
+              title="Narrow"
+            >
+              <Minus size={9} />
+            </button>
+            <span className="min-w-[24px] text-center text-[9px] tabular-nums text-daw-dim">
+              {mixerChannelWidth}
+            </span>
+            <button
+              onClick={() => setMixerChannelWidth(mixerChannelWidth + 8)}
+              className="flex h-5 w-5 items-center justify-center text-daw-faint transition-colors hover:text-daw-text"
+              title="Widen"
+            >
+              <Plus size={9} />
+            </button>
+          </div>
+        )}
+
+        <button
+          onClick={toggleMixer}
+          className="flex h-5 w-5 items-center justify-center rounded text-daw-faint transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+          title="Collapse mixer [M]"
+        >
           <ChevronDown size={11} />
         </button>
       </div>
 
-      <div className="flex flex-1 overflow-x-auto overflow-y-hidden">
+      {/* strips */}
+      <div className="flex min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
         {tracks.length === 0 && (
-          <div className="flex flex-1 items-center justify-center px-6 text-center text-[11px] leading-5 text-daw-faint">
-            Import audio to add mixer channels.
+          <div className="flex flex-1 items-center justify-center text-[11px] text-daw-faint">
+            Add tracks to see mixer channels.
           </div>
         )}
+
         {tracks.map((t) => (
           <ChannelStrip
-            key={t.id} label={t.name} color={t.color}
-            volume={t.volume} muted={t.muted} solo={t.solo}
+            key={t.id}
+            track={t}
+            label={t.name}
+            color={t.color}
+            volume={t.volume}
+            pan={t.pan}
+            muted={t.muted}
+            solo={t.solo}
+            level={stripLevel}
+            fixedWidth={fixedWidth}
+            files={files}
             onVolume={(v) => { setTrackVolume(t.id, v); mixer.setVolume(t.id, v); }}
+            onPan={(v) => { setTrackPan(t.id, v); mixer.setPan(t.id, v); }}
             onMute={() => { setTrackMute(t.id, !t.muted); mixer.setMute(t.id, !t.muted); }}
             onSolo={() => { setTrackSolo(t.id, !t.solo); mixer.setSolo(t.id, !t.solo); }}
+            onResizeDragStart={onStripResizeDragStart}
           />
         ))}
-        {tracks.length > 0 && <div className="min-w-4 flex-1" />}
+
+        {tracks.length > 0 && !mixerFlexLayout && <div className="flex-1" />}
+
         <ChannelStrip
-          label="Master" isMaster volume={masterVolume}
+          label="Master"
+          color="#48d1cc"
+          volume={masterVolume}
+          level={stripLevel}
+          fixedWidth={fixedWidth !== undefined ? Math.max(fixedWidth, 76) : undefined}
+          files={files}
           onVolume={(v) => { setMasterVolume(v); mixer.setMasterVolume(v); }}
+          onResizeDragStart={onStripResizeDragStart}
         />
       </div>
     </div>

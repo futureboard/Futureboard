@@ -18,11 +18,11 @@ export function getTrackColor(index: number): string {
 }
 
 export const TRACK_HEIGHT = 76;
-export const HEADER_WIDTH = 256;
+export const HEADER_WIDTH = 272;
 export const RULER_HEIGHT = 30;
 export const BROWSER_WIDTH = 272;
 export const INSPECTOR_WIDTH = 292;
-export const MIXER_HEIGHT = 300;
+export const MIXER_HEIGHT = 240;
 
 export const C = {
   // Core surfaces

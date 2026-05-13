@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "dev:web": "bun run --cwd apps/web dev",
+    "dev:electron": "bun run --cwd apps/electron dev",
     "dev:server": "bun run --cwd apps/server dev",
     "build:web": "bun run --cwd apps/web build",
     "lint:web": "bun run --cwd apps/web lint"

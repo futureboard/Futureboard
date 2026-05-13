@@ -7,9 +7,9 @@ import { TrackList } from "./TrackList";
 import { Playhead } from "./Playhead";
 import { useUIStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
-import { secondsPerBeat } from "../../utils/musicalTime";
-import { importAudioFilesAsNewTracks } from "../../utils/importAudioToProject";
-import { TRACK_HEIGHT } from "../../theme";
+import { secondsPerBeat, snapTime } from "../../utils/musicalTime";
+import { importAudioFilesAsNewTracks, decodeAndAddAudioFile, addFileToTimeline } from "../../utils/importAudioToProject";
+import { TRACK_HEIGHT, HEADER_WIDTH } from "../../theme";
 
 const MIN_PPS = 10;
 const MAX_PPS = 800;
@@ -22,12 +22,14 @@ export function Timeline() {
   const { tracks, bpm } = useProjectStore((s) => s.project);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const isFileDrag = (e: React.DragEvent) => [...e.dataTransfer.types].includes("Files");
+  const isFileDrag = (e: React.DragEvent) => {
+    const types = [...e.dataTransfer.types];
+    return types.includes("Files") || types.includes("application/x-mochi-file-id");
+  };
 
   const onTimelineDragEnter = (e: React.DragEvent) => {
     if (!isFileDrag(e)) return;
     e.preventDefault();
-    e.stopPropagation();
     fileDragDepth.current += 1;
     setDropHighlight(true);
   };
@@ -53,9 +55,37 @@ export function Timeline() {
     e.preventDefault();
     fileDragDepth.current = 0;
     setDropHighlight(false);
+
+    // Calculate drop time relative to the scroll container
+    // We must offset by HEADER_WIDTH because the timeline tracks start after the track headers
+    let time = 0;
+    if (scrollRef.current) {
+      const rect = scrollRef.current.getBoundingClientRect();
+      const dropX = e.clientX - rect.left - HEADER_WIDTH + scrollRef.current.scrollLeft;
+      time = Math.max(0, dropX / pixelsPerSecond);
+      if (snapToGrid) {
+        const spb = secondsPerBeat(bpm);
+        time = snapTime(time, bpm, useProjectStore.getState().project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+      }
+    }
+
+    const hasMochiFile = e.dataTransfer.types.includes("application/x-mochi-file-id");
+    if (hasMochiFile) {
+      const fileId = e.dataTransfer.getData("application/x-mochi-file-id");
+      const dawFile = useProjectStore.getState().project.files.find(f => f.id === fileId);
+      if (dawFile) addFileToTimeline(dawFile, time); // No trackId -> creates new track
+      return;
+    }
+
     const list = e.dataTransfer.files;
     if (!list?.length) return;
-    await importAudioFilesAsNewTracks(Array.from(list));
+    
+    for (const f of list) {
+      const dawFile = await decodeAndAddAudioFile(f);
+      if (dawFile) {
+        addFileToTimeline(dawFile, time);
+      }
+    }
   };
 
   // Keep a stable ref so the wheel handler never goes stale

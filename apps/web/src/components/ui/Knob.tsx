@@ -9,11 +9,12 @@ type Props = {
   color?: string;
   bipolar?: boolean;   // arc draws from center outward (for pan / EQ knobs)
   onChange: (v: number) => void;
+  onChangeEnd?: (v: number) => void;
 };
 
 export function Knob({
   value, min = 0, max = 1, size = 38,
-  label, color = "#48a6a7", bipolar = false, onChange,
+  label, color = "#48a6a7", bipolar = false, onChange, onChangeEnd,
 }: Props) {
   const startY  = useRef(0);
   const startVal = useRef(0);
@@ -61,23 +62,34 @@ export function Knob({
     e.preventDefault();
     startY.current   = e.clientY;
     startVal.current = value;
+    
+    let latestValue = value;
+
     const onMove = (ev: MouseEvent) => {
       const delta = ((startY.current - ev.clientY) / 150) * (max - min);
-      onChange(Math.round(Math.min(max, Math.max(min, startVal.current + delta)) * 1000) / 1000);
+      latestValue = Math.round(Math.min(max, Math.max(min, startVal.current + delta)) * 1000) / 1000;
+      onChange(latestValue);
     };
+
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      if (onChangeEnd && latestValue !== startVal.current) {
+        onChangeEnd(latestValue);
+      }
     };
+
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [value, min, max, onChange]);
+  }, [value, min, max, onChange, onChangeEnd]);
 
   return (
     <div className="flex flex-col items-center gap-0.5 select-none" style={{ width: size }}>
       <svg width={size} height={size} onMouseDown={handleMouseDown} className="cursor-ns-resize block">
         {/* track ring */}
         <circle cx={cx} cy={cy} r={r} fill="#17191d" stroke="#3a424c" strokeWidth={1.5} />
+        {/* center tick for bipolar */}
+        {bipolar && <line x1={cx} y1={cy - r} x2={cx} y2={cy - r + 3} stroke="#56616e" strokeWidth={1.5} strokeLinecap="round" />}
         {/* arc fill */}
         {arcPath && (
           <path d={arcPath} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" />

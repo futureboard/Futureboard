@@ -13,6 +13,7 @@ export type MetronomeConfig = {
   volume: number;
   accentVolume: number;
   sound: MetronomeSound;
+  subdivision?: "quarter" | "eighth" | "sixteenth";
 };
 
 const DEFAULT_CONFIG: MetronomeConfig = {
@@ -70,21 +71,41 @@ class MetronomeScheduler {
     const beatOffset = nextBeatProjectTime - pTime;
 
     this.nextNoteTime = audioEngine.currentTime + beatOffset;
+    // reset sub-beat counter
+    this.currentSubdivision = 0;
   }
 
+  private currentSubdivision: number = 0;
+
   private scheduleNextNotes() {
-    const { enabled, volume, accentVolume, sound, bpm, timeSignature } = this.getConfig();
+    const { enabled, volume, accentVolume, sound, bpm, timeSignature, subdivision } = this.getConfig();
     const spb = secondsPerBeat(bpm);
     const bpb = beatsPerBar(timeSignature);
+    
+    let subsPerBeat = 1;
+    if (subdivision === "eighth") subsPerBeat = 2;
+    if (subdivision === "sixteenth") subsPerBeat = 4;
+    
+    const stepTime = spb / subsPerBeat;
 
     const lookahead = 0.1; // 100ms
     while (this.nextNoteTime < audioEngine.currentTime + lookahead) {
       if (enabled) {
-        const isAccent = (this.currentBeat % bpb) === 0;
-        this.scheduleClick(isAccent, this.nextNoteTime, volume, accentVolume, sound);
+        const isAccent = this.currentSubdivision === 0 && (this.currentBeat % bpb) === 0;
+        const isBeat = this.currentSubdivision === 0;
+        
+        // Slightly lower volume for sub-beats
+        const finalVolume = isBeat ? volume : volume * 0.6;
+        const finalAccent = isAccent ? accentVolume : finalVolume;
+        
+        this.scheduleClick(isAccent, this.nextNoteTime, finalVolume, finalAccent, sound);
       }
-      this.nextNoteTime += spb;
-      this.currentBeat++;
+      this.nextNoteTime += stepTime;
+      this.currentSubdivision++;
+      if (this.currentSubdivision >= subsPerBeat) {
+        this.currentSubdivision = 0;
+        this.currentBeat++;
+      }
     }
   }
 

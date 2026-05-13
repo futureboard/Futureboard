@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { BROWSER_WIDTH } from "../theme";
 import type { DawFile } from "../types/daw";
+import { decodeAndAddAudioFile } from "../utils/importAudioToProject";
 
 function fileBadge(file: DawFile) {
   if (file.mimeType.includes("mpeg") || file.name.toLowerCase().endsWith(".mp3")) return "MP3";
@@ -66,7 +67,14 @@ function ComingSoonRow({ label }: { label: string }) {
 
 function FileRow({ file }: { file: DawFile }) {
   return (
-    <button className="group flex w-full items-center gap-2 border-b border-daw-border bg-transparent px-3 py-1.5 text-left transition-colors hover:bg-white/[0.035]">
+    <button
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("application/x-mochi-file-id", file.id);
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      className="group flex w-full items-center gap-2 border-b border-daw-border bg-transparent px-3 py-1.5 text-left transition-colors hover:bg-white/[0.035] cursor-grab active:cursor-grabbing"
+    >
       <FileAudio2 size={11} className="shrink-0 text-daw-faint group-hover:text-daw-accent" />
       <span className="min-w-0 flex-1 truncate text-[11px] text-daw-dim group-hover:text-daw-text">
         {file.name}
@@ -91,8 +99,22 @@ export function BrowserPanel({ onImport }: { onImport?: () => void }) {
 
   return (
     <aside
-      className="flex shrink-0 flex-col overflow-hidden border-r border-daw-border bg-daw-panel"
+      className="flex shrink-0 flex-col overflow-hidden border-r border-daw-border bg-daw-panel relative"
       style={{ width: BROWSER_WIDTH, minWidth: BROWSER_WIDTH }}
+      onDragOver={(e) => {
+        if (![...e.dataTransfer.types].includes("Files")) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={async (e) => {
+        if (![...e.dataTransfer.types].includes("Files")) return;
+        e.preventDefault();
+        const list = e.dataTransfer.files;
+        if (!list?.length) return;
+        for (const f of list) {
+          await decodeAndAddAudioFile(f);
+        }
+      }}
     >
       {/* header */}
       <div className="flex h-6 shrink-0 items-center justify-between border-b border-daw-border bg-daw-surface px-3">

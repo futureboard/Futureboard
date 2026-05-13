@@ -18,9 +18,9 @@ function segmentColor(i: number, on: boolean) {
     i >= SEGMENTS - 10 ? "#5ed8da" :
                          "#3ab5b8";
   const dim =
-    i >= SEGMENTS - 2  ? "#3d1e1c" :
-    i >= SEGMENTS - 5  ? "#3a2e10" :
-                         "#133233";
+    i >= SEGMENTS - 2  ? "#28100f" : // dark muted red
+    i >= SEGMENTS - 5  ? "#241c0a" : // dark muted yellow
+                         "#133233";  // dark muted teal
   return on ? color : dim;
 }
 

@@ -197,6 +197,32 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   return (
     <div
       onMouseDown={handleMouseDown}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
+        setSelectedTrackId(track.id);
+        setFocusedPanel("timeline");
+        useUIStore.getState().setContextMenu(true, { x: e.clientX, y: e.clientY }, [
+          {
+            id: "ctx.duplicate_clip",
+            label: "Duplicate",
+            accelerator: "Ctrl+D",
+            action: "edit:duplicate"
+          },
+          {
+            type: "separator",
+            id: "ctx.sep.1"
+          },
+          {
+            id: "ctx.delete_clip",
+            label: "Delete",
+            accelerator: "Del",
+            danger: true,
+            action: "edit:delete"
+          }
+        ]);
+      }}
       className={`group absolute select-none overflow-hidden border shadow-lg ${clip.muted ? "opacity-50" : ""}`}
       style={{
         left,

@@ -2,6 +2,8 @@ import { ChevronDown, Minus, Plus, SlidersHorizontal, X } from "lucide-react";
 import { useRef } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
+import { useHistoryStore } from "../store/historyStore";
+import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrackSoloCommand } from "../commands";
 import { mixer } from "../engine/Mixer";
 import { VuMeter } from "./ui/VuMeter";
 import { Knob } from "./ui/Knob";
@@ -35,11 +37,11 @@ function MixBtn({
       title={title ?? label}
       onClick={onClick}
       className={[
-        "grid place-items-center rounded border text-[10px] font-black transition-colors",
+        "grid place-items-center  text-[10px] border font-black transition-colors",
         wide ? "h-6 flex-1" : "h-5 w-5",
       ].join(" ")}
       style={{
-        background: active ? activeColor : "rgba(255,255,255,0.05)",
+        background: active ? activeColor : "",
         borderColor: active ? activeColor : "rgba(255,255,255,0.09)",
         color: active ? "#0d1015" : "rgba(220,232,240,0.6)",
       }}
@@ -77,7 +79,7 @@ function SectionHeader({
 function InsertRow({ insert, accent }: { insert: TrackInsert; accent: string }) {
   return (
     <div
-      className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px]"
+      className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px] transition-colors hover:bg-white/[0.04]"
       style={{ borderColor: insert.bypassed ? "rgba(255,255,255,0.12)" : accent }}
     >
       <span
@@ -95,7 +97,7 @@ function InsertRow({ insert, accent }: { insert: TrackInsert; accent: string }) 
 
 function SendRow({ send }: { send: TrackSend }) {
   return (
-    <div className="flex items-center gap-1.5 border-l-[2px] border-white/[0.1] px-2 py-[3px]">
+    <div className="flex items-center gap-1.5 border-l-[2px] border-white/[0.1] px-2 py-[3px] transition-colors hover:bg-white/[0.04]">
       <span className="flex-1 truncate text-[10px] text-white/60">{send.name}</span>
       <span className="shrink-0 text-[9px] tabular-nums text-white/35">{sendToDb(send.level)}</span>
     </div>
@@ -120,6 +122,8 @@ type StripProps = {
   solo?: boolean;
   onMute?: () => void;
   onSolo?: () => void;
+  onVolumeEnd?: (v: number) => void;
+  onPanEnd?: (v: number) => void;
   fixedWidth?: number;
   level: StripLevel;
   onResizeDragStart?: (e: React.PointerEvent) => void;
@@ -128,7 +132,7 @@ type StripProps = {
 
 function ChannelStrip({
   track, label, color, volume, pan = 0,
-  onVolume, onPan,
+  onVolume, onPan, onVolumeEnd, onPanEnd,
   muted, solo, onMute, onSolo,
   fixedWidth, level, onResizeDragStart,
   files, selected, onClick,
@@ -143,7 +147,7 @@ function ChannelStrip({
 
   const style: React.CSSProperties = fixedWidth !== undefined
     ? { width: fixedWidth, minWidth: fixedWidth, flexShrink: 0 }
-    : { flex: 1, minWidth: 64, maxWidth: 200 };
+    : { flex: 1, minWidth: 72, maxWidth: 200 };
 
   const showFull   = level === "full";
   const showMedium = level === "full" || level === "medium";
@@ -151,7 +155,20 @@ function ChannelStrip({
   return (
     <section
       onClick={onClick}
-      className={`relative flex h-full flex-col border-x border-white/[0.055] select-none ${selected ? "bg-white/[0.05]" : ""}`}
+      onContextMenu={(e) => {
+        if (!track) return;
+        e.preventDefault();
+        useUIStore.getState().setContextMenu(true, { x: e.clientX, y: e.clientY }, [
+          {
+            id: "ctx.delete_track",
+            label: "Delete Track",
+            danger: true,
+            action: "edit:delete-track"
+          }
+        ]);
+        if (onClick) onClick();
+      }}
+      className={`relative flex h-full flex-col border-x border-white/[0.055] select-none ${selected ? "bg-white/[0.05] ring-1 ring-inset ring-white/[0.05]" : ""}`}
       style={{ ...style, background: selected ? undefined : isMaster ? "rgba(72,209,204,0.035)" : "rgba(255,255,255,0.016)" }}
     >
       {/* top colour bar */}
@@ -192,6 +209,7 @@ function ChannelStrip({
             color={accent}
             bipolar
             onChange={onPan ?? (() => {})}
+            onChangeEnd={onPanEnd}
           />
           <div className="flex w-full items-center justify-between px-3">
             <span className="text-[8px] text-white/25">L</span>
@@ -237,7 +255,7 @@ function ChannelStrip({
         </div>
 
         {/* Vertical fader */}
-        <VerticalFader value={volume} onChange={onVolume} accent={accent} />
+        <VerticalFader value={volume} onChange={onVolume} onChangeEnd={onVolumeEnd} accent={accent} />
       </div>
 
       {/* ── Name + dB readout ── */}
@@ -413,9 +431,11 @@ export function MixerPanel() {
             fixedWidth={fixedWidth}
             files={files}
             onVolume={(v) => { setTrackVolume(t.id, v); mixer.setVolume(t.id, v); }}
+            onVolumeEnd={(v) => { useHistoryStore.getState().push(new SetTrackVolumeCommand(t.id, v, t.volume)); }}
             onPan={(v) => { setTrackPan(t.id, v); mixer.setPan(t.id, v); }}
-            onMute={() => { setTrackMute(t.id, !t.muted); mixer.setMute(t.id, !t.muted); }}
-            onSolo={() => { setTrackSolo(t.id, !t.solo); mixer.setSolo(t.id, !t.solo); }}
+            onPanEnd={(v) => { useHistoryStore.getState().push(new SetTrackPanCommand(t.id, v, t.pan)); }}
+            onMute={() => { useHistoryStore.getState().execute(new SetTrackMuteCommand(t.id, !t.muted)); }}
+            onSolo={() => { useHistoryStore.getState().execute(new SetTrackSoloCommand(t.id, !t.solo)); }}
             onResizeDragStart={onStripResizeDragStart}
             selected={selectedMixerTrackId === t.id}
             onClick={() => {

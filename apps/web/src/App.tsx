@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { AppShell } from "./components/AppShell";
 import { TransportBar } from "./components/TransportBar";
 import { CommandPalette } from "./components/ui/CommandPalette";
+import { ContextMenu } from "./components/ui/ContextMenu";
 import { audioEngine } from "./engine/AudioEngine";
 import { transport } from "./engine/Transport";
 import { metronomeScheduler } from "./engine/MetronomeScheduler";
@@ -25,6 +26,7 @@ metronomeScheduler.setConfigGetter(() => {
     volume: metro.volume,
     accentVolume: metro.accentVolume,
     sound: metro.sound,
+    subdivision: metro.subdivision,
   };
 });
 
@@ -85,6 +87,7 @@ export default function App() {
         <AppShell onImport={() => fileInputRef.current?.click()} />
       </div>
       <CommandPalette />
+      <ContextMenu />
     </div>
   );
 }

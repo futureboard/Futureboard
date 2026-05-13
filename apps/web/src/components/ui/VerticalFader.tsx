@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from "react";
 type Props = {
   value: number;     // 0–1
   onChange: (v: number) => void;
+  onChangeEnd?: (v: number) => void;
   accent?: string;   // hex colour e.g. "#56C7C9"
 };
 
@@ -20,7 +21,7 @@ function hexToRgb(hex: string): [number, number, number] {
   ];
 }
 
-export function VerticalFader({ value, onChange, accent = "#48d1cc" }: Props) {
+export function VerticalFader({ value, onChange, onChangeEnd, accent = "#48d1cc" }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
 
@@ -170,7 +171,12 @@ export function VerticalFader({ value, onChange, accent = "#48d1cc" }: Props) {
     onChange(Math.round(next * 1000) / 1000);
   };
 
-  const onPointerUp = () => { dragRef.current = null; };
+  const onPointerUp = () => {
+    if (dragRef.current && onChangeEnd) {
+      onChangeEnd(latest.current.value);
+    }
+    dragRef.current = null;
+  };
 
   return (
     <div

@@ -59,10 +59,23 @@ export function TrackHeader({ track, index }: { track: DawTrack; index: number }
   return (
     <div
       onClick={() => {
-      setSelectedTrackId(track.id);
-      setSelectedClipIds([]);
-      setFocusedPanel("timeline");
-    }}
+        setSelectedTrackId(track.id);
+        setSelectedClipIds([]);
+        setFocusedPanel("timeline");
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setSelectedTrackId(track.id);
+        setFocusedPanel("timeline");
+        useUIStore.getState().setContextMenu(true, { x: e.clientX, y: e.clientY }, [
+          {
+            id: "ctx.delete_track",
+            label: "Delete Track",
+            danger: true,
+            action: "edit:delete-track"
+          }
+        ]);
+      }}
       className="sticky left-0 z-50 flex shrink-0 cursor-default overflow-hidden border-r border-b border-daw-border transition-colors shadow-[6px_0_16px_rgba(0,0,0,0.32)]"
       style={{
         width: HEADER_WIDTH,

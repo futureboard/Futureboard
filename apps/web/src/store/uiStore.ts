@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { ClipId, TrackId } from "../types/daw";
+import type { AppMenuItem } from "../menu/menuItems";
 import { MIXER_HEIGHT } from "../theme";
 
 type UIStore = {
@@ -44,6 +45,11 @@ type UIStore = {
   commandPaletteOpen: boolean;
   setCommandPaletteOpen: (open: boolean) => void;
   toggleCommandPalette: () => void;
+  // context menu
+  contextMenuOpen: boolean;
+  contextMenuPosition: { x: number; y: number };
+  contextMenuItems: AppMenuItem[];
+  setContextMenu: (open: boolean, position?: { x: number; y: number }, items?: AppMenuItem[]) => void;
 };
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -61,7 +67,7 @@ export const useUIStore = create<UIStore>((set) => ({
   loopStart: 0,
   loopEnd: 4,
   mixerHeight: MIXER_HEIGHT,
-  mixerChannelWidth: 80,
+  mixerChannelWidth: 88,
   mixerFlexLayout: false,
   setPixelsPerSecond: (pixelsPerSecond) => set({ pixelsPerSecond }),
   setScrollX: (scrollX) => set({ scrollX }),
@@ -82,11 +88,19 @@ export const useUIStore = create<UIStore>((set) => ({
   setLoopStart: (loopStart) => set({ loopStart }),
   setLoopEnd: (loopEnd) => set({ loopEnd }),
   setMixerHeight: (mixerHeight) => set({ mixerHeight: Math.max(160, Math.min(520, mixerHeight)) }),
-  setMixerChannelWidth: (mixerChannelWidth) => set({ mixerChannelWidth: Math.max(60, Math.min(180, mixerChannelWidth)) }),
+  setMixerChannelWidth: (mixerChannelWidth) => set({ mixerChannelWidth: Math.max(72, Math.min(180, mixerChannelWidth)) }),
   toggleMixerFlexLayout: () => set((s) => ({ mixerFlexLayout: !s.mixerFlexLayout })),
   draggingClipTargetIdx: null,
   setDraggingClipTargetIdx: (draggingClipTargetIdx) => set({ draggingClipTargetIdx }),
   commandPaletteOpen: false,
   setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
+  contextMenuOpen: false,
+  contextMenuPosition: { x: 0, y: 0 },
+  contextMenuItems: [],
+  setContextMenu: (open, position, items) => set((s) => ({
+    contextMenuOpen: open,
+    contextMenuPosition: position ?? s.contextMenuPosition,
+    contextMenuItems: items ?? s.contextMenuItems,
+  })),
 }));

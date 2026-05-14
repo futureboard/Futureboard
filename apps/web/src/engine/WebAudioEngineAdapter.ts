@@ -173,6 +173,9 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
 
   subscribeTransport(callback: TransportCallback): () => void {
     this._transportCallbacks.add(callback);
+    if (this._transportCallbacks.size === 1 && this._transportRafId === null) {
+      this._startTransportLoop();
+    }
     return () => this._transportCallbacks.delete(callback);
   }
 
@@ -201,13 +204,15 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
 
   private _startTransportLoop(): void {
     const tick = () => {
-      if (this._transportCallbacks.size > 0) {
-        const state = {
-          playing: transport.isPlaying,
-          positionSeconds: transport.projectTime,
-        };
-        for (const cb of this._transportCallbacks) cb(state);
+      if (this._transportCallbacks.size === 0) {
+        this._transportRafId = null;
+        return;
       }
+      const state = {
+        playing: transport.isPlaying,
+        positionSeconds: transport.projectTime,
+      };
+      for (const cb of this._transportCallbacks) cb(state);
       this._transportRafId = requestAnimationFrame(tick);
     };
     this._transportRafId = requestAnimationFrame(tick);

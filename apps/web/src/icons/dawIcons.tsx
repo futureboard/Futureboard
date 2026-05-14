@@ -181,13 +181,15 @@ export type DawIconName =
   | "mute"
   | "automation"
   | "time"
-  // Track types
+  // Track types — must cover every TrackType
   | "audio"
   | "midi"
+  | "instrument"
   | "plugin"
   | "bus"
   | "return"
   | "group"
+  | "master"
   // Audio / MIDI specific
   | "waveform"
   | "piano"
@@ -264,13 +266,15 @@ const REGISTRY: Record<DawIconName, IconEntry> = {
   mute:         { src: "lucide", component: VolumeX },
   automation:   { src: "lucide", component: Activity },
   time:         { src: "lucide", component: Timer },
-  // Track types
+  // Track types — must cover every TrackType ("audio"|"midi"|"instrument"|"plugin"|"bus"|"return"|"group"|"master")
   audio:        { src: "lucide", component: Mic2 },
   midi:         { src: "tabler", component: IconPiano },
+  instrument:   { src: "lucide", component: Cpu },
   plugin:       { src: "tabler", component: IconPlug },
   bus:          { src: "lucide", component: GitMerge },
   return:       { src: "lucide", component: CornerDownLeft },
   group:        { src: "lucide", component: GitFork },
+  master:       { src: "lucide", component: Volume2 },
   // Audio / MIDI
   waveform:     { src: "tabler", component: IconWaveSine },
   piano:        { src: "tabler", component: IconPiano },

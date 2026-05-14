@@ -27,14 +27,18 @@ function volumeToDb(v: number) {
   return (db >= 0 ? `+${db.toFixed(1)}` : db.toFixed(1)) + " dB";
 }
 
-function trackTypeLabel(type: TrackType) {
-  if (type === "midi")       return "MIDI";
-  if (type === "instrument") return "INST";
-  if (type === "plugin")     return "PLUG";
-  if (type === "bus")        return "BUS";
-  if (type === "return")     return "RET";
-  if (type === "group")      return "GRP";
-  return "AUD";
+function trackTypeLabel(type: TrackType): string {
+  switch (type) {
+    case "midi":       return "MIDI";
+    case "instrument": return "INST";
+    case "plugin":     return "PLUG";
+    case "bus":        return "BUS";
+    case "return":     return "RET";
+    case "group":      return "GRP";
+    case "master":     return "MAS";
+    case "audio":      return "AUD";
+    default:           return "AUD";
+  }
 }
 
 function TrackBtn({ icon: Icon, active, activeColor, label, onClick }: {

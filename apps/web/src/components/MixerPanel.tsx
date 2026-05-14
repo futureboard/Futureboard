@@ -21,7 +21,7 @@ import { Knob } from "./ui/Knob";
 import { MixerFader } from "./ui/MixerFader";
 import { useVuStereoLevels } from "../hooks/useVuLevel";
 import { effectiveTrackMeterMode } from "../utils/meterMode";
-import type { DawFile, DawProject, DawTrack, TrackInsert, TrackSend } from "../types/daw";
+import type { DawFile, DawProject, DawTrack, InsertDevice, TrackSend } from "../types/daw";
 import { buildTrackContextMenu } from "../menu/trackContextMenu";
 import { getSendTargets } from "../utils/routingHelpers";
 import { AddTrackSendCommand, RemoveTrackSendCommand } from "../commands";
@@ -85,19 +85,32 @@ const SectionAddButton = forwardRef<HTMLButtonElement, SectionAddButtonProps>(
   }
 );
 
-function InsertsAddMenu({ accent }: { accent: string }) {
+function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string }) {
+  const { addInsertDevice } = useProjectStore();
+  const add = (name: string, type: InsertDevice["type"]) => {
+    if (!trackId) return;
+    const device: InsertDevice = {
+      id: crypto.randomUUID(),
+      type,
+      name,
+      enabled: true,
+      order: 0,
+      params: {},
+    };
+    addInsertDevice(trackId, device);
+  };
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <SectionAddButton accent={accent} title="Add insert" />
+        <SectionAddButton accent={accent} title="Add insert" disabled={!trackId} />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" sideOffset={4}>
         <DropdownMenuLabel>Add Device</DropdownMenuLabel>
-        <DropdownMenuItem icon={Activity}>Add EQ</DropdownMenuItem>
-        <DropdownMenuItem icon={Gauge}>Add Compressor</DropdownMenuItem>
-        <DropdownMenuItem icon={Waves}>Add Reverb</DropdownMenuItem>
-        <DropdownMenuItem icon={AudioLines}>Add Delay</DropdownMenuItem>
-        <DropdownMenuItem icon={Sparkles}>Add Saturation</DropdownMenuItem>
+        <DropdownMenuItem icon={Activity}    onSelect={() => add("EQ", "eq")}>Add EQ</DropdownMenuItem>
+        <DropdownMenuItem icon={Gauge}       onSelect={() => add("Compressor", "compressor")}>Add Compressor</DropdownMenuItem>
+        <DropdownMenuItem icon={Waves}       onSelect={() => add("Reverb", "reverb")}>Add Reverb</DropdownMenuItem>
+        <DropdownMenuItem icon={AudioLines}  onSelect={() => add("Delay", "delay")}>Add Delay</DropdownMenuItem>
+        <DropdownMenuItem icon={Sparkles}    onSelect={() => add("Saturation", "saturator")}>Add Saturation</DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem icon={Boxes} disabled>Browse Devices…</DropdownMenuItem>
         <DropdownMenuItem icon={Plug} disabled>Plugin Manager…</DropdownMenuItem>
@@ -151,20 +164,29 @@ function SendsAddMenu({ accent, track, project }: { accent: string; track: DawTr
   );
 }
 
-function InsertRow({ insert, accent }: { insert: TrackInsert; accent: string }) {
-  const bypassed = !insert.enabled;
+function InsertRow({
+  insert, accent, trackId,
+}: { insert: InsertDevice; accent: string; trackId: string }) {
+  const enabled = insert.enabled;
+  const { toggleInsertDevice, removeInsertDevice } = useProjectStore();
   return (
     <div
       className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px] transition-colors hover:bg-white/[0.04]"
-      style={{ borderColor: bypassed ? "rgba(255,255,255,0.12)" : accent }}
+      style={{ borderColor: enabled ? accent : "rgba(255,255,255,0.12)" }}
     >
-      <span
-        className="flex-1 truncate text-[10px]"
-        style={{ color: bypassed ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.72)" }}
+      <button
+        title={enabled ? "Bypass device" : "Enable device"}
+        onClick={() => toggleInsertDevice(trackId, insert.id)}
+        className="flex-1 truncate text-left text-[10px]"
+        style={{ color: enabled ? "rgba(255,255,255,0.72)" : "rgba(255,255,255,0.3)" }}
       >
         {insert.name}
-      </span>
-      <button className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70">
+      </button>
+      <button
+        title="Remove device"
+        onClick={() => removeInsertDevice(trackId, insert.id)}
+        className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70"
+      >
         <X size={8} />
       </button>
     </div>
@@ -244,7 +266,7 @@ function ChannelStrip({
   const vu = useVuStereoLevels(isMaster ? "master" : (track?.id ?? "master"));
   const meterMode =
     isMaster ? "stereo" : track ? effectiveTrackMeterMode(track, files) : "stereo";
-  const inserts: TrackInsert[] = track?.inserts ?? [];
+  const inserts: InsertDevice[] = track?.inserts ?? [];
   const sends: TrackSend[] = track?.sends ?? [];
 
   const style: React.CSSProperties = fixedWidth !== undefined
@@ -287,11 +309,13 @@ function ChannelStrip({
       {/* ── INSERTS (full only) ── */}
       {showFull && (
         <div className="shrink-0 border-b border-white/[0.045]">
-          <SectionHeader label="Inserts" accent={accent} menu={<InsertsAddMenu accent={accent} />} />
+          <SectionHeader label="Inserts" accent={accent} menu={<InsertsAddMenu accent={accent} trackId={track?.id} />} />
           {inserts.length === 0 ? (
             <EmptySlotRow accent={accent} hint="Click + to add a device" />
           ) : (
-            inserts.map((ins) => <InsertRow key={ins.id} insert={ins} accent={accent} />)
+            track && inserts.map((ins) => (
+              <InsertRow key={ins.id} insert={ins} accent={accent} trackId={track.id} />
+            ))
           )}
         </div>
       )}

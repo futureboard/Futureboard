@@ -404,31 +404,9 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
               );
             })()}
 
-            <SectionLabel label="Inserts" />
-            <div className="grid grid-cols-2 gap-1 px-3 pb-3">
-              {Array.from({ length: 4 }, (_, i) => (
-                <button
-                  key={i}
-                  className="flex h-7 items-center justify-center gap-1.5 rounded border border-dashed text-[9px] transition-colors"
-                  style={{
-                    borderColor: "rgba(255,255,255,0.12)",
-                    background: "rgba(255,255,255,0.025)",
-                    color: "rgba(180,192,204,0.5)",
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.22)";
-                    (e.currentTarget as HTMLElement).style.color = "rgba(180,192,204,0.85)";
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.12)";
-                    (e.currentTarget as HTMLElement).style.color = "rgba(180,192,204,0.5)";
-                  }}
-                >
-                  <Sliders size={9} />
-                  Empty
-                </button>
-              ))}
-            </div>
+            <SectionLabel label="Inserts" count={(track.inserts ?? []).length} />
+            <InspectorInsertsList trackId={track.id} />
+
 
             {/* Advanced (dimmed placeholders) */}
             <SectionLabel label="Advanced" />
@@ -483,6 +461,52 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function InspectorInsertsList({ trackId }: { trackId: string }) {
+  const { project, toggleInsertDevice, removeInsertDevice } = useProjectStore();
+  const track = project.tracks.find((t) => t.id === trackId);
+  const inserts = (track?.inserts ?? []).slice().sort((a, b) => a.order - b.order);
+
+  if (inserts.length === 0) {
+    return (
+      <div className="px-3 pb-3">
+        <p className="py-0.5 text-[10px] text-daw-faint">No inserts — add from Mixer or Effect Editor</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-0.5 px-3 pb-3">
+      {inserts.map((ins) => (
+        <div
+          key={ins.id}
+          className="group flex items-center gap-1.5 rounded border px-2 py-[3px]"
+          style={{
+            borderColor: ins.enabled ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.06)",
+            background: "rgba(255,255,255,0.025)",
+          }}
+        >
+          <Sliders size={9} className="shrink-0 text-daw-faint" />
+          <button
+            onClick={() => toggleInsertDevice(trackId, ins.id)}
+            className="min-w-0 flex-1 truncate text-left text-[10px]"
+            style={{ color: ins.enabled ? "rgba(220,232,240,0.78)" : "rgba(180,192,204,0.4)" }}
+            title={ins.enabled ? "Bypass device" : "Enable device"}
+          >
+            {ins.name}
+          </button>
+          <button
+            onClick={() => removeInsertDevice(trackId, ins.id)}
+            title="Remove device"
+            className="opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100 text-daw-faint"
+          >
+            <X size={9} />
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

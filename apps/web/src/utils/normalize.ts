@@ -2,7 +2,27 @@
  * Normalization helpers — fill in default values for older project state
  * so UI and engine code never crash on missing fields.
  */
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker } from "../types/daw";
+
+export function normalizeLoop(raw: Partial<ProjectLoop> | undefined): ProjectLoop | undefined {
+  if (!raw) return undefined;
+  const startTime = Math.max(0, raw.startTime ?? 0);
+  const endTime = Math.max(startTime, raw.endTime ?? startTime);
+  return {
+    enabled: raw.enabled ?? false,
+    startTime,
+    endTime,
+  };
+}
+
+export function normalizeMarker(raw: Partial<ProjectMarker>): ProjectMarker {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    time: Math.max(0, raw.time ?? 0),
+    label: raw.label ?? "Marker",
+    color: raw.color,
+  };
+}
 
 export function normalizeInsertDevice(raw: Partial<InsertDevice>, index: number): InsertDevice {
   return {
@@ -82,7 +102,7 @@ export function normalizeProject(raw: Partial<DawProject>): DawProject {
     tracks: (raw.tracks ?? []).map((t) => normalizeTrack(t as Partial<DawTrack>)),
     files: raw.files ?? [],
     masterTrackId: raw.masterTrackId,
-    loop: raw.loop,
-    markers: raw.markers ?? [],
+    loop: normalizeLoop(raw.loop as Partial<ProjectLoop> | undefined),
+    markers: (raw.markers ?? []).map((m) => normalizeMarker(m as Partial<ProjectMarker>)),
   };
 }

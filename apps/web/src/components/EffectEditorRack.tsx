@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { GripVertical, Plus, Power, Sliders, X } from "lucide-react";
 import { useUIStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
+import { getTrackInserts } from "../store/selectors";
 import type { InsertDevice } from "../types/daw";
 
 type Param = { name: string; value: number; min: number; max: number; unit: string };
@@ -44,23 +45,9 @@ function getDefaultParams(name: string): Param[] {
   );
 }
 
-function patchTrackInserts(
-  trackId: string,
-  updater: (inserts: InsertDevice[]) => InsertDevice[]
-) {
-  useProjectStore.setState((state) => ({
-    project: {
-      ...state.project,
-      tracks: state.project.tracks.map((t) =>
-        t.id !== trackId ? t : { ...t, inserts: updater(t.inserts ?? []) }
-      ),
-    },
-  }));
-}
-
 export function EffectEditorRack() {
   const { selectedTrackId } = useUIStore();
-  const { project } = useProjectStore();
+  const { project, addInsertDevice, toggleInsertDevice, removeInsertDevice } = useProjectStore();
   const [showAddMenu, setShowAddMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -80,27 +67,26 @@ export function EffectEditorRack() {
 
   const addInsert = (deviceName: string) => {
     if (!selectedTrackId) return;
-    patchTrackInserts(selectedTrackId, (inserts) => [
-      ...inserts,
-      { id: crypto.randomUUID(), type: "custom", name: deviceName, enabled: true, order: inserts.length, params: {} },
-    ]);
+    const device: InsertDevice = {
+      id: crypto.randomUUID(),
+      type: "custom",
+      name: deviceName,
+      enabled: true,
+      order: 0, // store action recomputes order
+      params: {},
+    };
+    addInsertDevice(selectedTrackId, device);
     setShowAddMenu(false);
   };
 
   const toggleBypass = (insertId: string) => {
     if (!selectedTrackId) return;
-    patchTrackInserts(selectedTrackId, (inserts) =>
-      inserts.map((ins) =>
-        ins.id === insertId ? { ...ins, enabled: !ins.enabled } : ins
-      )
-    );
+    toggleInsertDevice(selectedTrackId, insertId);
   };
 
   const removeInsert = (insertId: string) => {
     if (!selectedTrackId) return;
-    patchTrackInserts(selectedTrackId, (inserts) =>
-      inserts.filter((ins) => ins.id !== insertId)
-    );
+    removeInsertDevice(selectedTrackId, insertId);
   };
 
   if (!track) {
@@ -119,7 +105,7 @@ export function EffectEditorRack() {
     );
   }
 
-  const inserts = track.inserts ?? [];
+  const inserts = getTrackInserts(track);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">

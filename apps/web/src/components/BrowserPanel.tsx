@@ -1,6 +1,7 @@
 import { ChevronRight, FileAudio2, FlaskConical, FolderOpen, Layers, Search, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
+import { useUIStore } from "../store/uiStore";
 import { BROWSER_WIDTH } from "../theme";
 import type { DawFile } from "../types/daw";
 import { decodeAndAddAudioFile } from "../utils/importAudioToProject";
@@ -66,17 +67,33 @@ function ComingSoonRow({ label }: { label: string }) {
 // ─── File row ─────────────────────────────────────────────────────────────────
 
 function FileRow({ file }: { file: DawFile }) {
+  const selectedBrowserFileId = useUIStore((s) => s.selectedBrowserFileId);
+  const setSelectedBrowserFileId = useUIStore((s) => s.setSelectedBrowserFileId);
+  const selected = selectedBrowserFileId === file.id;
+
   return (
     <button
       draggable
+      onClick={() => setSelectedBrowserFileId(selected ? null : file.id)}
       onDragStart={(e) => {
         e.dataTransfer.setData("application/x-mochi-file-id", file.id);
         e.dataTransfer.effectAllowed = "copy";
+        setSelectedBrowserFileId(file.id);
       }}
-      className="group flex w-full items-center gap-2 border-b border-daw-border bg-transparent px-3 py-1.5 text-left transition-colors hover:bg-white/[0.035] cursor-grab active:cursor-grabbing"
+      className="group flex w-full items-center gap-2 border-b border-daw-border px-3 py-1.5 text-left transition-colors hover:bg-white/[0.035] cursor-pointer"
+      style={{
+        background: selected ? "rgba(86,199,201,0.08)" : "transparent",
+      }}
     >
-      <FileAudio2 size={11} className="shrink-0 text-daw-faint group-hover:text-daw-accent" />
-      <span className="min-w-0 flex-1 truncate text-[11px] text-daw-dim group-hover:text-daw-text">
+      <FileAudio2
+        size={11}
+        className="shrink-0"
+        style={{ color: selected ? "#56c7c9" : undefined }}
+      />
+      <span
+        className="min-w-0 flex-1 truncate text-[11px]"
+        style={{ color: selected ? "#a8d8d9" : undefined }}
+      >
         {file.name}
       </span>
       <span className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px] text-daw-faint">

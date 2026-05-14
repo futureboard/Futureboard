@@ -1,4 +1,4 @@
-import { Activity, Cpu, GitMerge, Layers, Mic2, Music, Scissors, Sliders, Trash2, Volume2, X } from "lucide-react";
+import { Activity, ArrowUpDown, Cpu, GitMerge, Layers, Mic2, Music, PhoneIncoming, PhoneOutgoing, RotateCcw, Scissors, Sliders, Trash2, Volume2, X } from "lucide-react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
@@ -7,6 +7,7 @@ import { mixer } from "../engine/Mixer";
 import { INSPECTOR_WIDTH } from "../theme";
 import { formatBeatLength } from "../utils/musicalTime";
 import type { TrackType } from "../types/daw";
+import { clipType } from "../types/daw";
 
 const TYPE_ICONS: Record<TrackType, React.ElementType> = {
   audio: Mic2,
@@ -115,60 +116,139 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
           </div>
         )}
 
-        {mode === "clip" && clip && (
-          <>
-            <div className="flex items-stretch border-b border-daw-border">
-              <div className="w-[3px] shrink-0" style={{ background: "#f3c969" }} />
-              <div className="flex-1 px-3 py-3">
-                <input
-                  defaultValue={clip.name}
-                  onBlur={(e) => {
-                    const newName = e.target.value;
-                    if (newName !== clip.name) history().execute(new UpdateClipCommand(clip.id, { name: newName }, "Rename Clip"));
-                  }}
-                  className="w-full bg-transparent text-[13px] font-semibold text-daw-text outline-none placeholder:text-white/20"
-                  placeholder="Clip Name"
-                />
-                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-daw-faint">
-                  <Scissors size={9} />
-                  <span>Audio Clip</span>
+        {mode === "clip" && clip && (() => {
+          const isAudio = clipType(clip) === "audio";
+          return (
+            <>
+              <div className="flex items-stretch border-b border-daw-border">
+                <div className="w-[3px] shrink-0" style={{ background: "#f3c969" }} />
+                <div className="flex-1 px-3 py-3">
+                  <input
+                    defaultValue={clip.name}
+                    onBlur={(e) => {
+                      const newName = e.target.value;
+                      if (newName !== clip.name) history().execute(new UpdateClipCommand(clip.id, { name: newName }, "Rename Clip"));
+                    }}
+                    className="w-full bg-transparent text-[13px] font-semibold text-daw-text outline-none placeholder:text-white/20"
+                    placeholder="Clip Name"
+                  />
+                  <div className="mt-1 flex items-center gap-1.5 text-[10px] text-daw-faint">
+                    {isAudio ? <Scissors size={9} /> : <Music size={9} />}
+                    <span>{isAudio ? "Audio Clip" : "MIDI Clip"}</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="flex flex-col gap-0 border-b border-daw-border">
-              <FaderRow
-                label="GAIN"
-                value={clip.gain}
-                min={0}
-                max={2}
-                color="#f3c969"
-                display={`${Math.round(clip.gain * 100)}%`}
-                onChange={(v) => history().execute(new UpdateClipCommand(clip.id, { gain: v }, "Set Clip Gain"))}
-              />
-              <div className="flex items-center justify-between border-b border-daw-border px-3 py-2">
-                <span className="text-[9px] font-semibold uppercase tracking-widest text-daw-faint">Mute</span>
-                <input type="checkbox" checked={clip.muted ?? false} onChange={(e) => history().execute(new UpdateClipCommand(clip.id, { muted: e.target.checked }, e.target.checked ? "Mute Clip" : "Unmute Clip"))} />
+              <div className="flex flex-col gap-0 border-b border-daw-border">
+                {isAudio && (
+                  <FaderRow
+                    label="GAIN"
+                    value={clip.gain}
+                    min={0}
+                    max={2}
+                    color="#f3c969"
+                    display={`${Math.round(clip.gain * 100)}%`}
+                    onChange={(v) => history().execute(new UpdateClipCommand(clip.id, { gain: v }, "Set Clip Gain"))}
+                  />
+                )}
+                <div className="flex items-center justify-between border-b border-daw-border px-3 py-2">
+                  <span className="text-[9px] font-semibold uppercase tracking-widest text-daw-faint">Mute</span>
+                  <input type="checkbox" checked={clip.muted ?? false} onChange={(e) => history().execute(new UpdateClipCommand(clip.id, { muted: e.target.checked }, e.target.checked ? "Mute Clip" : "Unmute Clip"))} />
+                </div>
               </div>
-            </div>
 
-            <SectionLabel label="Timing" />
-            <div className="flex flex-col gap-2 px-3 pb-3">
-              <div className="flex justify-between text-[10px] text-daw-dim">
-                <span>Start Time</span>
-                <span className="tabular-nums">{clip.startTime.toFixed(3)}s</span>
+              {isAudio && (
+                <>
+                  <SectionLabel label="Fades" />
+                  <div className="flex flex-col gap-0 border-b border-daw-border">
+                    <FaderRow
+                      label="IN"
+                      value={clip.fadeIn ?? 0}
+                      min={0}
+                      max={Math.min(clip.duration, 10)}
+                      color="#f3c969"
+                      display={`${(clip.fadeIn ?? 0).toFixed(2)}s`}
+                      onChange={(v) => history().execute(new UpdateClipCommand(clip.id, { fadeIn: v }, "Set Fade In"))}
+                    />
+                    <FaderRow
+                      label="OUT"
+                      value={clip.fadeOut ?? 0}
+                      min={0}
+                      max={Math.min(clip.duration, 10)}
+                      color="#f3c969"
+                      display={`${(clip.fadeOut ?? 0).toFixed(2)}s`}
+                      onChange={(v) => history().execute(new UpdateClipCommand(clip.id, { fadeOut: v }, "Set Fade Out"))}
+                    />
+                  </div>
+                </>
+              )}
+
+              {!isAudio && (
+                <>
+                  <SectionLabel label="MIDI" />
+                  <div className="flex flex-col gap-0 border-b border-daw-border opacity-45">
+                    <DimRow label="CH" value="1" title="MIDI channel (coming soon)" />
+                    <DimRow label="VEL" value="100" title="Default velocity (coming soon)" />
+                    <DimRow label="QNTZ" value="1/16" title="Quantize (coming soon)" />
+                    <DimRow label="TRNSP" value="0 st" title="Transpose (coming soon)" />
+                  </div>
+                </>
+              )}
+
+              <SectionLabel label="Timing" />
+              <div className="flex flex-col gap-2 px-3 pb-3">
+                <div className="flex justify-between text-[10px] text-daw-dim">
+                  <span>Start Time</span>
+                  <span className="tabular-nums">{clip.startTime.toFixed(3)}s</span>
+                </div>
+                <div className="flex justify-between text-[10px] text-daw-dim">
+                  <span>Duration</span>
+                  <span className="tabular-nums">{clip.duration.toFixed(3)}s</span>
+                </div>
+                <div className="flex justify-between text-[10px] text-daw-dim">
+                  <span>Offset</span>
+                  <span className="tabular-nums">{clip.offset.toFixed(3)}s</span>
+                </div>
               </div>
-              <div className="flex justify-between text-[10px] text-daw-dim">
-                <span>Duration</span>
-                <span className="tabular-nums">{clip.duration.toFixed(3)}s</span>
-              </div>
-              <div className="flex justify-between text-[10px] text-daw-dim">
-                <span>Offset</span>
-                <span className="tabular-nums">{clip.offset.toFixed(3)}s</span>
-              </div>
-            </div>
-          </>
-        )}
+
+              {isAudio && (
+                <>
+                  {/* Pitch (dimmed placeholders) */}
+                  <SectionLabel label="Pitch" />
+                  <div className="flex flex-col gap-0 border-b border-daw-border opacity-45">
+                    <DimRow label="SEMI" value="0 st" title="Semitone pitch offset (coming soon)" />
+                    <DimRow label="FINE" value="0 ¢" title="Fine tune in cents (coming soon)" />
+                  </div>
+
+                  {/* Process buttons (dimmed) */}
+                  <SectionLabel label="Process" />
+                  <div className="grid grid-cols-2 gap-1 px-3 pb-3 opacity-45">
+                    <button
+                      type="button"
+                      disabled
+                      className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
+                      style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
+                      title="Reverse (coming soon)"
+                    >
+                      <RotateCcw size={9} />
+                      Reverse
+                    </button>
+                    <button
+                      type="button"
+                      disabled
+                      className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
+                      style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
+                      title="Normalize (coming soon)"
+                    >
+                      <ArrowUpDown size={9} />
+                      Normalize
+                    </button>
+                  </div>
+                </>
+              )}
+            </>
+          );
+        })()}
 
         {mode === "track" && track && (
           <>
@@ -249,6 +329,32 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
               </button>
             </div>
 
+            {/* Routing */}
+            <SectionLabel label="Routing" />
+            <div className="flex flex-col gap-1.5 px-3 pb-3">
+              <div className="flex items-center gap-2">
+                <PhoneIncoming size={9} className="shrink-0 text-daw-faint opacity-50" />
+                <span className="w-8 shrink-0 text-[9px] text-daw-faint opacity-60">IN</span>
+                <div
+                  className="flex h-6 flex-1 cursor-not-allowed items-center rounded px-2 text-[10px] text-daw-faint opacity-50"
+                  style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
+                  title="Input routing (coming soon)"
+                >
+                  System Input
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <PhoneOutgoing size={9} className="shrink-0 text-daw-faint opacity-50" />
+                <span className="w-8 shrink-0 text-[9px] text-daw-faint opacity-60">OUT</span>
+                <div
+                  className="flex h-6 flex-1 cursor-not-allowed items-center rounded px-2 text-[10px] text-daw-faint opacity-50"
+                  style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
+                  title="Output routing (coming soon)"
+                >
+                  Master
+                </div>
+              </div>
+            </div>
 
             <SectionLabel label="Inserts" />
             <div className="grid grid-cols-2 gap-1 px-3 pb-3">
@@ -274,6 +380,32 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                   Empty
                 </button>
               ))}
+            </div>
+
+            {/* Advanced (dimmed placeholders) */}
+            <SectionLabel label="Advanced" />
+            <div className="flex flex-col gap-0 border-b border-daw-border opacity-45">
+              <DimRow label="LATENCY" value="0 ms" title="Latency compensation (coming soon)" />
+              <DimRow label="DELAY" value="0 ms" title="Track delay offset (coming soon)" />
+              <DimRow label="SEMI" value="0 st" title="Semitone pitch offset (coming soon)" />
+            </div>
+            <div className="flex items-center gap-3 border-b border-daw-border px-3 py-2 opacity-45">
+              <span className="text-[9px] font-semibold uppercase tracking-widest text-daw-faint">Phase</span>
+              <div className="flex-1" />
+              <div
+                className="flex h-5 w-8 cursor-not-allowed items-center justify-center rounded border text-[9px] font-bold text-daw-faint"
+                style={{ borderColor: "rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.02)" }}
+                title="Phase invert (coming soon)"
+              >
+                Ø
+              </div>
+              <div
+                className="flex h-5 w-8 cursor-not-allowed items-center justify-center rounded border text-[9px] font-bold text-daw-faint"
+                style={{ borderColor: "rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.02)" }}
+                title="Mono/stereo mode (coming soon)"
+              >
+                M/S
+              </div>
             </div>
 
             {/* Clips */}
@@ -302,6 +434,25 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function DimRow({ label, value, title }: { label: string; value: string; title?: string }) {
+  return (
+    <div
+      className="flex cursor-not-allowed items-center gap-2.5 border-b border-daw-border px-3 py-2"
+      title={title}
+    >
+      <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+        {label}
+      </span>
+      <div
+        className="flex h-5 flex-1 items-center rounded px-2 text-[9px] text-daw-faint"
+        style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}
+      >
+        {value}
       </div>
     </div>
   );

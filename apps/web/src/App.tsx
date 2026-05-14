@@ -11,6 +11,7 @@ import { useMetronomeStore } from "./store/metronomeStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
 import { platform } from "./platform";
+import { ToastContainer } from "./components/ui/Toast";
 import "./App.css";
 
 // Wire engine modules to app-layer state — runs once at module load time.
@@ -89,6 +90,7 @@ export default function App() {
       </div>
       <CommandPalette />
       <ContextMenu />
+      <ToastContainer />
     </div>
   );
 }

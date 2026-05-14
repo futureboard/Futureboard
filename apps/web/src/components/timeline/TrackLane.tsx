@@ -1,10 +1,15 @@
-import type { DawTrack } from "../../types/daw";
+import type { DawClip, DawTrack } from "../../types/daw";
+import { clipType } from "../../types/daw";
 import { AudioClip } from "./AudioClip";
+import { MidiClip } from "./MidiClip";
 import { TRACK_HEIGHT } from "../../theme";
 import { useUIStore } from "../../store/uiStore";
 import { snapTime, secondsPerBeat } from "../../utils/musicalTime";
 import { useProjectStore } from "../../store/projectStore";
+import { useHistoryStore } from "../../store/historyStore";
+import { AddClipCommand } from "../../commands";
 import { addFileToTimeline, decodeAndAddAudioFile } from "../../utils/importAudioToProject";
+import { showToast } from "../ui/Toast";
 import { useState } from "react";
 
 type Props = {
@@ -29,19 +34,101 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
       ? "rgba(255,255,255,0.010)"
       : "rgba(0,0,0,0.12)";
 
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Only handle clicks directly on the lane (not bubbled up from clips)
+    if (e.target !== e.currentTarget) return;
+
+    const { currentTool, selectedBrowserFileId, pixelsPerSecond, snapToGrid } =
+      useUIStore.getState();
+    const { project } = useProjectStore.getState();
+
+    const selectTrack = () => {
+      useUIStore.getState().setSelectedTrackId(track.id);
+      useUIStore.getState().setFocusedPanel("timeline");
+    };
+
+    if (currentTool === "pen") {
+      // Calculate click time from pointer position
+      const rect = e.currentTarget.getBoundingClientRect();
+      const rawX = e.clientX - rect.left;
+      let time = Math.max(0, rawX / pixelsPerSecond);
+      if (snapToGrid) {
+        const spb = secondsPerBeat(project.bpm);
+        time = snapTime(
+          time,
+          project.bpm,
+          project.timeSignature ?? { numerator: 4, denominator: 4 },
+          pixelsPerSecond * spb,
+        );
+      }
+
+      if (track.type === "audio") {
+        if (!selectedBrowserFileId) {
+          showToast("Select an audio file in the Browser first", true);
+          selectTrack();
+          return;
+        }
+        const file = project.files.find((f) => f.id === selectedBrowserFileId);
+        if (!file) {
+          showToast("Select an audio file in the Browser first", true);
+          selectTrack();
+          return;
+        }
+        const newClip: DawClip = {
+          id: crypto.randomUUID(),
+          name: file.name,
+          type: "audio",
+          fileId: file.id,
+          trackId: track.id,
+          startTime: time,
+          offset: 0,
+          duration: file.duration,
+          gain: 1,
+        };
+        useHistoryStore.getState().execute(new AddClipCommand(track.id, newClip));
+        useUIStore.getState().setSelectedClipIds([newClip.id]);
+      } else {
+        // MIDI / placeholder clip — one bar duration
+        const spb = secondsPerBeat(project.bpm);
+        const barDuration = spb * (project.timeSignature?.numerator ?? 4);
+        const newClip: DawClip = {
+          id: crypto.randomUUID(),
+          name: "MIDI Clip",
+          type: "midi",
+          fileId: "",
+          trackId: track.id,
+          startTime: time,
+          offset: 0,
+          duration: barDuration,
+          gain: 1,
+        };
+        useHistoryStore.getState().execute(new AddClipCommand(track.id, newClip));
+        useUIStore.getState().setSelectedClipIds([newClip.id]);
+      }
+      selectTrack();
+      return;
+    }
+
+    if (currentTool === "automation") {
+      showToast("Automation coming soon");
+      selectTrack();
+      return;
+    }
+
+    // pointer / cut / glue / mute / time — lane click selects track, clears clips
+    useUIStore.getState().setSelectedTrackId(track.id);
+    useUIStore.getState().setSelectedClipIds([]);
+    useUIStore.getState().setFocusedPanel("timeline");
+  };
+
   return (
     <div
-      onPointerDown={() => {
-        useUIStore.getState().setSelectedTrackId(track.id);
-        useUIStore.getState().setSelectedClipIds([]);
-        useUIStore.getState().setFocusedPanel("timeline");
-      }}
+      onPointerDown={handlePointerDown}
       onDragEnter={(e) => {
         if (![...e.dataTransfer.types].includes("Files") && !e.dataTransfer.types.includes("application/x-mochi-file-id")) return;
         setIsDragOver(true);
       }}
-      //@ts-expect-error
-      onDragLeave={(e) => {
+      onDragLeave={() => {
         setIsDragOver(false);
       }}
       onDragOver={(e) => {
@@ -62,13 +149,7 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
         const { pixelsPerSecond, snapToGrid } = useUIStore.getState();
         const { project } = useProjectStore.getState();
 
-        // Calculate drop time
         const rect = e.currentTarget.getBoundingClientRect();
-        // The container is offset by HEADER_WIDTH, but track lane rect.left might already be correct.
-        // TrackLane is rendered inside TrackList which is rendered alongside TimelineRuler, but TrackLane starts at X=0 relative to the scroll container's content.
-        // Actually TrackList has `padding-left: HEADER_WIDTH` or similar? Let's check. 
-        // We know scrollX. The absolute cursor X is e.clientX.
-        // The timeline content starts at rect.left.
         const dropX = e.clientX - rect.left;
         let time = dropX / pixelsPerSecond;
 
@@ -84,16 +165,11 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
           return;
         }
 
-        // It's OS files
         const list = e.dataTransfer.files;
         if (!list?.length) return;
-
-        // Use the drop time for all imported files (or stagger them?)
         for (const f of Array.from(list)) {
           const dawFile = await decodeAndAddAudioFile(f);
-          if (dawFile) {
-            addFileToTimeline(dawFile, Math.max(0, time), track.id);
-          }
+          if (dawFile) addFileToTimeline(dawFile, Math.max(0, time), track.id);
         }
       }}
       className="relative min-w-0 flex-1 overflow-hidden border-b border-daw-border transition-colors"
@@ -101,36 +177,41 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
         height: TRACK_HEIGHT,
         minWidth: width,
         background: bg,
-        // drop-target ring
         outline: dropTarget ? `1.5px solid ${track.color}` : undefined,
         outlineOffset: dropTarget ? "-1.5px" : undefined,
       }}
     >
-      {/* selected track edge highlight */}
       {selected && (
         <div
           className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-40"
           style={{ background: track.color }}
         />
       )}
-
-      {/* drop-target tint overlay */}
       {dropTarget && (
         <div
           className="pointer-events-none absolute inset-0"
           style={{ background: `${track.color}18` }}
         />
       )}
-
-      {track.clips.map((clip) => (
-        <AudioClip
-          key={clip.id}
-          clip={clip}
-          track={track}
-          trackIndex={trackIndex}
-          allTracks={allTracks}
-        />
-      ))}
+      {track.clips.map((clip) =>
+        clipType(clip) === "midi" ? (
+          <MidiClip
+            key={clip.id}
+            clip={clip}
+            track={track}
+            trackIndex={trackIndex}
+            allTracks={allTracks}
+          />
+        ) : (
+          <AudioClip
+            key={clip.id}
+            clip={clip}
+            track={track}
+            trackIndex={trackIndex}
+            allTracks={allTracks}
+          />
+        )
+      )}
     </div>
   );
 }

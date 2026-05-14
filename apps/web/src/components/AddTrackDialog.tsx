@@ -1,4 +1,4 @@
-import { CircleDot, Cpu, GitMerge, Mic2, Music, Plus, X } from "lucide-react";
+import { CircleDot, CornerDownLeft, Cpu, GitMerge, Mic2, Music, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
@@ -49,6 +49,14 @@ const TRACK_TYPES: TrackTypeConfig[] = [
     icon: GitMerge,
     ready: false,
   },
+  {
+    type: "bus" as TrackType,
+    label: "Return Track",
+    description: "Receive sends from other tracks",
+    detail: "FX Returns · Aux",
+    icon: CornerDownLeft,
+    ready: false,
+  },
 ];
 
 export function AddTrackDialog({ onClose }: { onClose: () => void }) {
@@ -62,6 +70,9 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
   const [colorIndex, setColorIndex] = useState(() => tracks.length % TRACK_COLORS.length);
   const [trackCount, setTrackCount] = useState(1);
   const [channelCount, setChannelCount] = useState(2);
+  const [initialVolume, setInitialVolume] = useState(0.8);
+  const [initialPan, setInitialPan] = useState(0);
+  const [armTrack, setArmTrack] = useState(false);
 
   useEffect(() => {
     window.setTimeout(() => inputRef.current?.select(), 0);
@@ -92,11 +103,11 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
         type: selectedType.type,
         color: TRACK_COLORS[(colorIndex + i) % TRACK_COLORS.length],
         channelCount,
-        volume: 0.8,
-        pan: 0,
+        volume: initialVolume,
+        pan: initialPan,
         muted: false,
         solo: false,
-        armed: false,
+        armed: selectedType.type === "audio" ? armTrack : false,
         clips: [],
       };
       useHistoryStore.getState().execute(new AddTrackCommand(track));
@@ -141,7 +152,7 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
         <div className="grid grid-cols-2 gap-2 p-3">
           {TRACK_TYPES.map((cfg) => {
             const Icon = cfg.icon;
-            const active = selectedType.type === cfg.type;
+            const active = selectedType === cfg;
             return (
               <button
                 key={cfg.type}
@@ -257,6 +268,76 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
               </button>
             ))}
           </OptionGroup>
+        </div>
+
+        {/* Config section: Volume, Pan, Arm, Routing */}
+        <div className="grid grid-cols-2 gap-2 border-t border-white/[0.05] px-3 py-2.5">
+          <OptionGroup label="Volume">
+            <div className="flex w-full items-center gap-2">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={initialVolume}
+                onChange={(e) => setInitialVolume(parseFloat(e.target.value))}
+                className="flex-1 cursor-ew-resize appearance-none"
+                style={{ accentColor: selectedColor, height: "3px" }}
+              />
+              <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-daw-dim">
+                {Math.round(initialVolume * 100)}%
+              </span>
+            </div>
+          </OptionGroup>
+
+          <OptionGroup label="Pan">
+            <div className="flex w-full items-center gap-2">
+              <input
+                type="range"
+                min={-1}
+                max={1}
+                step={0.01}
+                value={initialPan}
+                onChange={(e) => setInitialPan(parseFloat(e.target.value))}
+                className="flex-1 cursor-ew-resize appearance-none"
+                style={{ accentColor: "#a99cff", height: "3px" }}
+              />
+              <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-daw-dim">
+                {initialPan === 0 ? "C" : initialPan < 0 ? `L${Math.round(-initialPan * 100)}` : `R${Math.round(initialPan * 100)}`}
+              </span>
+            </div>
+          </OptionGroup>
+        </div>
+
+        {/* Arm + Routing (compact row) */}
+        <div className="flex items-center gap-4 border-t border-white/[0.05] px-3 py-2">
+          {selectedType.type === "audio" && (
+            <label className="flex cursor-pointer items-center gap-2 text-[11px] text-daw-dim">
+              <input
+                type="checkbox"
+                checked={armTrack}
+                onChange={(e) => setArmTrack(e.target.checked)}
+                className="h-3 w-3 cursor-pointer accent-red-400"
+              />
+              Arm for recording
+            </label>
+          )}
+          <div className="ml-auto flex items-center gap-2 opacity-50" title="Routing (coming soon)">
+            <span className="text-[9px] uppercase tracking-widest text-daw-faint">In</span>
+            <div
+              className="flex h-5 w-24 cursor-not-allowed items-center rounded px-2 text-[9px] text-daw-faint"
+              style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
+            >
+              System Input
+            </div>
+            <span className="text-[9px] uppercase tracking-widest text-daw-faint">Out</span>
+            <div
+              className="flex h-5 w-16 cursor-not-allowed items-center rounded px-2 text-[9px] text-daw-faint"
+              style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
+            >
+              Master
+            </div>
+          </div>
         </div>
 
         {/* Footer */}

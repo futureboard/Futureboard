@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "mochi-daw",
+      "dependencies": {
+        "concurrently": "^9.2.1",
+      },
     },
     "apps/electron": {
       "name": "futureboard-studio-electron",

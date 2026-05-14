@@ -3,6 +3,8 @@ import { ChevronDown, Pencil, SlidersHorizontal, Sparkles } from "lucide-react";
 import { useUIStore } from "../store/uiStore";
 import type { BottomPanelTab } from "../store/uiStore";
 import { MixerPanel } from "./MixerPanel";
+import { EditorPanel } from "./EditorPanel";
+import { EffectEditorRack } from "./EffectEditorRack";
 
 type TabDef = {
   id: BottomPanelTab;
@@ -91,53 +93,10 @@ export function BottomWorkspacePanel({ height }: { height?: number }) {
       {/* tab content */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {bottomPanelTab === "mixer" && <MixerPanel embedded />}
-        {bottomPanelTab === "editor" && <EditorPlaceholder />}
-        {bottomPanelTab === "effect-editor" && <EffectEditorPlaceholder />}
+        {bottomPanelTab === "editor" && <EditorPanel />}
+        {bottomPanelTab === "effect-editor" && <EffectEditorRack />}
       </div>
     </div>
   );
 }
 
-function EditorPlaceholder() {
-  return (
-    <PlaceholderEmpty
-      icon={Pencil}
-      title="No editor selected"
-      hint="Select an audio clip or MIDI clip to edit here."
-    />
-  );
-}
-
-function EffectEditorPlaceholder() {
-  return (
-    <PlaceholderEmpty
-      icon={Sparkles}
-      title="No effect selected"
-      hint="Select an insert or device to edit parameters here."
-    />
-  );
-}
-
-function PlaceholderEmpty({
-  icon: Icon,
-  title,
-  hint,
-}: {
-  icon: React.ElementType;
-  title: string;
-  hint: string;
-}) {
-  return (
-    <div className="flex min-h-0 flex-1 items-center justify-center">
-      <div className="flex flex-col items-center gap-2 px-6 text-center">
-        <div
-          className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.025] text-daw-faint"
-        >
-          <Icon size={16} />
-        </div>
-        <div className="text-[12px] font-semibold text-daw-dim">{title}</div>
-        <div className="max-w-[28ch] text-[11px] leading-relaxed text-daw-faint">{hint}</div>
-      </div>
-    </div>
-  );
-}

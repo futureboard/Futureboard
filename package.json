@@ -18,5 +18,8 @@
     "dist:electron:mac": "bun run --cwd apps/electron dist:mac",
     "dist:electron:linux": "bun run --cwd apps/electron dist:linux",
     "lint:web": "bun run --cwd apps/web lint"
+  },
+  "dependencies": {
+    "concurrently": "^9.2.1"
   }
 }

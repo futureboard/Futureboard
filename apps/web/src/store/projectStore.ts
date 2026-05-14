@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DawClip, DawFile, DawProject, DawTrack, FileId, TimeSignature, TrackId, WaveformPeaks, WaveformStatus } from "../types/daw";
+import type { DawClip, DawFile, DawProject, DawTrack, FileId, MidiNote, TimeSignature, TrackId, WaveformPeaks, WaveformStatus } from "../types/daw";
 
 const STORAGE_KEY = "mochi-daw-project";
 
@@ -45,6 +45,9 @@ type ProjectStore = {
   deleteClips: (clipIds: string[]) => void;
   duplicateClips: (clipIds: string[]) => void;
   splitClip: (clipId: string, time: number) => void;
+  addMidiNotes: (clipId: string, notes: MidiNote[]) => void;
+  updateMidiNotes: (clipId: string, updates: Array<Partial<MidiNote> & { id: string }>) => void;
+  removeMidiNotes: (clipId: string, noteIds: string[]) => void;
   addFile: (file: DawFile) => void;
   moveClipToTrack: (clipId: string, toTrackId: TrackId, startTime: number) => void;
   setPeaks: (fileId: FileId, peaks: WaveformPeaks) => void;
@@ -261,6 +264,51 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         },
       };
     }),
+
+  addMidiNotes: (clipId, notes) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) =>
+            c.id === clipId ? { ...c, notes: [...(c.notes ?? []), ...notes] } : c
+          ),
+        })),
+      },
+    })),
+
+  updateMidiNotes: (clipId, updates) => {
+    const map = new Map(updates.map((u) => [u.id, u]));
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) =>
+            c.id === clipId
+              ? { ...c, notes: (c.notes ?? []).map((n) => map.has(n.id) ? { ...n, ...map.get(n.id) } : n) }
+              : c
+          ),
+        })),
+      },
+    }));
+  },
+
+  removeMidiNotes: (clipId, noteIds) => {
+    const ids = new Set(noteIds);
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) =>
+            c.id === clipId ? { ...c, notes: (c.notes ?? []).filter((n) => !ids.has(n.id)) } : c
+          ),
+        })),
+      },
+    }));
+  },
 
   addFile: (file) =>
     set((s) => ({ project: { ...s.project, files: [...s.project.files, file] } })),

@@ -50,10 +50,22 @@ export type DawTrack = {
   sends?: TrackSend[];
 };
 
+export type ClipType = "audio" | "midi";
+
+export type MidiNote = {
+  id: string;
+  pitch: number;    // 0–127
+  start: number;    // seconds from clip start
+  duration: number; // seconds
+  velocity: number; // 1–127
+};
+
 export type DawClip = {
   id: ClipId;
   name: string;
+  type?: ClipType;  // defaults to "audio" for backwards-compat
   fileId: FileId;
+  notes?: MidiNote[];
   trackId: TrackId;
   startTime: number;
   offset: number;
@@ -65,6 +77,11 @@ export type DawClip = {
   muted?: boolean;
   locked?: boolean;
 };
+
+/** Returns the effective clip type, defaulting to "audio" for pre-existing clips. */
+export function clipType(clip: DawClip): ClipType {
+  return clip.type ?? (clip.fileId ? "audio" : "midi");
+}
 
 export type DawFile = {
   id: FileId;

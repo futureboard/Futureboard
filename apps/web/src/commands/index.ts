@@ -6,7 +6,7 @@
  * they do not go through historyStore again (no recursion).
  */
 
-import type { DawClip, DawTrack } from "../types/daw";
+import type { DawClip, DawTrack, MidiNote } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
 import { mixer } from "../engine/Mixer";
 import type { DawCommand } from "./types";
@@ -428,6 +428,32 @@ export class DuplicateClipsCommand implements DawCommand {
   }
 }
 
+export class GlueClipsCommand implements DawCommand {
+  readonly label = "Glue Clips";
+  private sortedClips: DawClip[];
+  private trackId: string;
+  private mergedDuration: number;
+
+  constructor(sortedClips: DawClip[], trackId: string) {
+    this.sortedClips = sortedClips;
+    this.trackId = trackId;
+    const last = sortedClips[sortedClips.length - 1];
+    this.mergedDuration = last.startTime + last.duration - sortedClips[0].startTime;
+  }
+
+  execute() {
+    store().updateClip(this.sortedClips[0].id, { duration: this.mergedDuration });
+    store().deleteClips(this.sortedClips.slice(1).map((c) => c.id));
+  }
+
+  undo() {
+    store().updateClip(this.sortedClips[0].id, { duration: this.sortedClips[0].duration });
+    for (const clip of this.sortedClips.slice(1)) {
+      store().addClip(this.trackId, clip);
+    }
+  }
+}
+
 export class UpdateClipCommand implements DawCommand {
   readonly label: string;
   private clipId: string;
@@ -455,4 +481,43 @@ export class UpdateClipCommand implements DawCommand {
   }
   execute() { store().updateClip(this.clipId, this.updates); }
   undo()    { store().updateClip(this.clipId, this.oldValues); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIDI note commands
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class AddMidiNotesCommand implements DawCommand {
+  readonly label = "Add MIDI Note";
+  constructor(private clipId: string, private notes: MidiNote[]) {}
+  execute() { store().addMidiNotes(this.clipId, this.notes); }
+  undo()    { store().removeMidiNotes(this.clipId, this.notes.map((n) => n.id)); }
+}
+
+export class RemoveMidiNotesCommand implements DawCommand {
+  readonly label = "Delete MIDI Notes";
+  constructor(private clipId: string, private notes: MidiNote[]) {}
+  execute() { store().removeMidiNotes(this.clipId, this.notes.map((n) => n.id)); }
+  undo()    { store().addMidiNotes(this.clipId, this.notes); }
+}
+
+export class UpdateMidiNotesCommand implements DawCommand {
+  readonly label: string;
+  private prevNotes: MidiNote[];
+  private nextNotes: MidiNote[];
+
+  constructor(clipId: string, prevNotes: MidiNote[], nextNotes: MidiNote[], label = "Edit MIDI Notes") {
+    this.label = label;
+    this.prevNotes = prevNotes;
+    this.nextNotes = nextNotes;
+    this._clipId = clipId;
+  }
+  private _clipId: string;
+
+  execute() {
+    store().updateMidiNotes(this._clipId, this.nextNotes);
+  }
+  undo() {
+    store().updateMidiNotes(this._clipId, this.prevNotes);
+  }
 }

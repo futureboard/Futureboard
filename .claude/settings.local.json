@@ -3,7 +3,11 @@
     "allow": [
       "Bash(bun add *)",
       "Bash(bun run *)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(Get-ChildItem -Path \"D:\\\\private\\\\DawProject\" -Force)",
+      "Bash(Select-Object Name, FullName)",
+      "Bash(Format-Table)",
+      "Bash(npx tsc *)"
     ]
   }
 }

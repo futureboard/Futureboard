@@ -5,7 +5,8 @@ import { AddTrackDialog } from "../AddTrackDialog";
 import { TimelineRuler } from "./TimelineRuler";
 import { TrackList } from "./TrackList";
 import { Playhead } from "./Playhead";
-import { useUIStore } from "../../store/uiStore";
+import { FloatingToolsBar } from "./FloatingToolsBar";
+import { useUIStore, type ArrangementTool } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { secondsPerBeat, snapTime } from "../../utils/musicalTime";
 import { decodeAndAddAudioFile, addFileToTimeline } from "../../utils/importAudioToProject";
@@ -18,7 +19,17 @@ export function Timeline() {
   const [addTrackOpen, setAddTrackOpen] = useState(false);
   const [dropHighlight, setDropHighlight] = useState(false);
   const fileDragDepth = useRef(0);
-  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, snapToGrid, toggleSnapToGrid } = useUIStore();
+  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, snapToGrid, toggleSnapToGrid, currentTool } = useUIStore();
+
+  const TOOL_CURSOR: Record<ArrangementTool, string> = {
+    pointer:    "default",
+    pen:        "crosshair",
+    cut:        "crosshair",
+    glue:       "copy",
+    mute:       "pointer",
+    time:       "ew-resize",
+    automation: "crosshair",
+  };
   const { tracks, bpm } = useProjectStore((s) => s.project);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -205,6 +216,8 @@ export function Timeline() {
       />
 
       <div className="relative flex-1 overflow-hidden bg-daw-bg">
+        <FloatingToolsBar />
+
         <div className="absolute inset-0 z-0 pointer-events-none">
           <TimelineGrid />
         </div>
@@ -213,6 +226,7 @@ export function Timeline() {
         <div
           ref={scrollRef}
           className="absolute inset-0 z-10 overflow-auto"
+          style={{ cursor: TOOL_CURSOR[currentTool] }}
           onScroll={(e) => setScrollX(e.currentTarget.scrollLeft)}
         >
           <TrackList timelineWidth={timelineWidth} />

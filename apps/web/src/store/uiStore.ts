@@ -5,6 +5,14 @@ import { MIXER_HEIGHT, BROWSER_WIDTH, INSPECTOR_WIDTH } from "../theme";
 
 export type PanelDock = "left" | "right" | "bottom" | "float";
 export type BottomPanelTab = "mixer" | "editor" | "effect-editor";
+export type ArrangementTool =
+  | "pointer"
+  | "pen"
+  | "cut"
+  | "glue"
+  | "mute"
+  | "time"
+  | "automation";
 export type PanelSizing = "fixed" | "flex";
 
 export type PanelLayout = {
@@ -53,6 +61,12 @@ type UIStore = {
   setLoopEnd: (seconds: number) => void;
   setMixerChannelWidth: (w: number) => void;
   toggleMixerFlexLayout: () => void;
+  // Arrangement editing tool
+  currentTool: ArrangementTool;
+  setCurrentTool: (tool: ArrangementTool) => void;
+  // Browser file selection (used by pen tool to create audio clips)
+  selectedBrowserFileId: string | null;
+  setSelectedBrowserFileId: (id: string | null) => void;
   // cross-track clip drag
   draggingClipTargetIdx: number | null;
   setDraggingClipTargetIdx: (idx: number | null) => void;
@@ -137,6 +151,10 @@ export const useUIStore = create<UIStore>((set) => ({
   setLoopEnd: (loopEnd) => set({ loopEnd }),
   setMixerChannelWidth: (mixerChannelWidth) => set({ mixerChannelWidth: Math.max(72, Math.min(180, mixerChannelWidth)) }),
   toggleMixerFlexLayout: () => set((s) => ({ mixerFlexLayout: !s.mixerFlexLayout })),
+  currentTool: "pointer",
+  setCurrentTool: (currentTool) => set({ currentTool }),
+  selectedBrowserFileId: null,
+  setSelectedBrowserFileId: (selectedBrowserFileId) => set({ selectedBrowserFileId }),
   draggingClipTargetIdx: null,
   setDraggingClipTargetIdx: (draggingClipTargetIdx) => set({ draggingClipTargetIdx }),
   commandPaletteOpen: false,

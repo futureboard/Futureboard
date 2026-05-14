@@ -10,14 +10,13 @@ import {
   SplitClipCommand,
   UpdateClipCommand,
 } from "../../commands";
-import { WaveformCanvas } from "./WaveformCanvas";
 import { TRACK_HEIGHT } from "../../theme";
 import { formatBeatLength, secondsPerBeat, snapTime } from "../../utils/musicalTime";
 import { showToast } from "../ui/Toast";
 
 const LABEL_H = 14;
 const PAD = 7;
-const MIN_SPLIT_MARGIN = 0.05; // seconds from clip edge — prevent splits too close to endpoints
+const MIN_SPLIT_MARGIN = 0.05;
 
 function hex2rgba(hex: string, a: number) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -26,7 +25,6 @@ function hex2rgba(hex: string, a: number) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-// ── Tool cursor map ────────────────────────────────────────────────────────────
 const TOOL_CURSOR: Record<string, string> = {
   pointer:    "grab",
   pen:        "crosshair",
@@ -37,6 +35,18 @@ const TOOL_CURSOR: Record<string, string> = {
   automation: "crosshair",
 };
 
+// Deterministic pseudo-random note bars for visual flair — seeded by clip id
+function noteBarSeeds(clipId: string, count: number): { top: number; left: number; width: number }[] {
+  let h = 0;
+  for (let i = 0; i < clipId.length; i++) h = (Math.imul(31, h) + clipId.charCodeAt(i)) | 0;
+  const rng = () => { h = (Math.imul(1664525, h) + 1013904223) | 0; return (h >>> 0) / 4294967296; };
+  return Array.from({ length: count }, () => ({
+    top: rng() * 0.7 + 0.05,
+    left: rng() * 0.7,
+    width: rng() * 0.25 + 0.05,
+  }));
+}
+
 type Props = {
   clip: DawClip;
   track: DawTrack;
@@ -44,18 +54,14 @@ type Props = {
   allTracks: DawTrack[];
 };
 
-export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
+export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
   const {
     pixelsPerSecond,
     selectedClipIds, setSelectedClipIds, toggleClipSelection,
     setSelectedTrackId, setFocusedPanel, setDraggingClipTargetIdx,
     currentTool,
   } = useUIStore();
-  const { peakCache, waveformStatus, moveClip, moveClipToTrack, project } = useProjectStore();
-  const peaks = peakCache.get(clip.fileId);
-  const sourceFile = project.files.find((f) => f.id === clip.fileId);
-  const status = waveformStatus.get(clip.fileId)
-    ?? (peaks && peaks.peaks.length > 0 ? "ready" : sourceFile ? "loading" : "error");
+  const { moveClip, moveClipToTrack, project } = useProjectStore();
 
   const dragStartX    = useRef(0);
   const dragStartY    = useRef(0);
@@ -65,9 +71,10 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   const left  = clip.startTime * pixelsPerSecond;
   const width = Math.max(4, clip.duration * pixelsPerSecond);
   const clipH = TRACK_HEIGHT - PAD * 2;
-  const waveH = clipH - LABEL_H;
+  const noteH = clipH - LABEL_H;
   const selected = selectedClipIds.includes(clip.id);
   const color = track.color;
+  const noteBars = noteBarSeeds(clip.id, 8);
 
   // ── Cut tool ──────────────────────────────────────────────────────────────
   const handleCutTool = (e: React.MouseEvent) => {
@@ -85,13 +92,12 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
 
     useHistoryStore.getState().execute(new SplitClipCommand(clip.id, splitTime));
 
-    // Select the right-half clip
     const rightClip = useProjectStore.getState().project.tracks
       .flatMap((t) => t.clips)
       .find(
         (c) => c.id !== clip.id &&
           Math.abs(c.startTime - splitTime) < 0.002 &&
-          c.fileId === clip.fileId,
+          c.trackId === clip.trackId,
       );
     setSelectedClipIds(rightClip ? [rightClip.id] : [clip.id]);
   };
@@ -112,11 +118,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     const sids = useUIStore.getState().selectedClipIds;
     const { project: proj } = useProjectStore.getState();
 
-    // Include this clip in the working set
     const targetIds = sids.includes(clip.id) && sids.length >= 2 ? sids : null;
 
     if (!targetIds) {
-      // Not enough selected — just select this clip
       setSelectedClipIds([clip.id]);
       setSelectedTrackId(track.id);
       setFocusedPanel("timeline");
@@ -124,7 +128,6 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       return;
     }
 
-    // Resolve clips and their tracks
     const resolved = targetIds.flatMap((id) =>
       proj.tracks.flatMap((t) =>
         t.clips.filter((c) => c.id === id).map((c) => ({ clip: c, trackId: t.id })),
@@ -139,7 +142,6 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
 
     const sorted = [...resolved].sort((a, b) => a.clip.startTime - b.clip.startTime);
 
-    // Check adjacency — allow up to 0.1 s gap
     for (let i = 0; i < sorted.length - 1; i++) {
       const end = sorted[i].clip.startTime + sorted[i].clip.duration;
       const nextStart = sorted[i + 1].clip.startTime;
@@ -239,7 +241,6 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     if (tool === "glue") { handleGlueTool();  return; }
     if (tool === "time") { handleTimeTool();  return; }
 
-    // pen tool on existing clip falls through to pointer (select, no drag)
     if (tool === "pen") {
       if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
       setSelectedTrackId(track.id);
@@ -247,7 +248,6 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       return;
     }
 
-    // pointer (default) — full drag behavior
     startPointerDrag(e);
   };
 
@@ -373,26 +373,29 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
         </span>
       </div>
 
-      {/* waveform area */}
-      <div className="relative overflow-hidden" style={{ height: waveH, background: hex2rgba(color, 0.19) }}>
+      {/* MIDI note pattern area */}
+      <div
+        className="relative overflow-hidden"
+        style={{ height: noteH, background: hex2rgba(color, 0.12) }}
+      >
         <div className="pointer-events-none absolute inset-y-0 left-0 w-1.5 bg-white/20" />
         <div className="pointer-events-none absolute inset-y-0 right-0 w-1.5 bg-black/20" />
-        <WaveformCanvas
-          peaks={peaks}
-          width={width}
-          height={waveH}
-          color={hex2rgba(color, 0.95)}
-          sourceDuration={sourceFile?.duration ?? peaks?.duration}
-          sampleRate={sourceFile?.sampleRate ?? peaks?.sampleRate}
-          clipOffset={clip.offset}
-          clipDuration={clip.duration}
-          muted={!!clip.muted || track.muted}
-          selected={selected}
-          status={status}
-        />
+        {noteBars.map((bar, i) => (
+          <div
+            key={i}
+            className="pointer-events-none absolute rounded-sm"
+            style={{
+              top:    `${bar.top * 100}%`,
+              left:   `${bar.left * 100}%`,
+              width:  `${bar.width * 100}%`,
+              height: "3px",
+              background: hex2rgba(color, 0.85),
+            }}
+          />
+        ))}
       </div>
 
-      {/* Cut tool indicator — vertical line at cursor position */}
+      {/* Cut tool indicator */}
       {currentTool === "cut" && (
         <div
           className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100"
@@ -402,7 +405,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
         </div>
       )}
 
-      {/* Resize handles — only for pointer tool */}
+      {/* Resize handles — only for pointer/pen tools */}
       {(currentTool === "pointer" || currentTool === "pen") && (
         <>
           <div

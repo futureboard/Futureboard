@@ -120,6 +120,17 @@ input[type=range].vertical::-webkit-slider-thumb {
     );
 }
 
+/* Number input */
+input[type=number] {
+  color: #eef2f5;
+  -moz-appearance: textfield;
+}
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button {
+  opacity: 0.4;
+  filter: invert(1);
+}
+
 /* Waveform loading shimmer */
 @keyframes waveform-shimmer {
   0%, 100% { opacity: 0.10; transform: scaleY(0.85); }

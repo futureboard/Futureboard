@@ -1,30 +1,22 @@
 import { useEffect } from "react";
-import {
-  Activity,
-  Link2,
-  MousePointer2,
-  Pen,
-  Scissors,
-  Timer,
-  VolumeX,
-} from "lucide-react";
 import { useUIStore, type ArrangementTool } from "../../store/uiStore";
+import { DawIcon, type DawIconName } from "../../icons/dawIcons";
 
 type ToolDef = {
   id: ArrangementTool;
   label: string;
-  icon: React.ElementType;
+  icon: DawIconName;
   shortcut: string;
 };
 
 const TOOLS: ToolDef[] = [
-  { id: "pointer",    label: "Select",     icon: MousePointer2, shortcut: "V" },
-  { id: "pen",        label: "Draw",       icon: Pen,           shortcut: "P" },
-  { id: "cut",        label: "Cut",        icon: Scissors,      shortcut: "C" },
-  { id: "glue",       label: "Glue",       icon: Link2,         shortcut: "G" },
-  { id: "mute",       label: "Mute",       icon: VolumeX,       shortcut: "U" },
-  { id: "time",       label: "Stretch",    icon: Timer,         shortcut: "T" },
-  { id: "automation", label: "Automation", icon: Activity,      shortcut: "A" },
+  { id: "pointer",    label: "Select",     icon: "pointer",    shortcut: "V" },
+  { id: "pen",        label: "Draw",       icon: "pen",        shortcut: "P" },
+  { id: "cut",        label: "Cut",        icon: "cut",        shortcut: "C" },
+  { id: "glue",       label: "Glue",       icon: "glue",       shortcut: "G" },
+  { id: "mute",       label: "Mute",       icon: "mute",       shortcut: "U" },
+  { id: "time",       label: "Stretch",    icon: "time",       shortcut: "T" },
+  { id: "automation", label: "Automation", icon: "automation", shortcut: "A" },
 ];
 
 // Map shortcut key → tool id (lowercase for comparison)
@@ -67,7 +59,6 @@ export function FloatingToolsBar() {
       >
         {TOOLS.map((tool, i) => {
           const active = currentTool === tool.id;
-          const Icon = tool.icon;
 
           // Separator after "pointer" and after "glue"
           const hasSeparatorAfter = i === 0 || i === 3;
@@ -94,7 +85,7 @@ export function FloatingToolsBar() {
                     (e.currentTarget as HTMLElement).style.background = "transparent";
                 }}
               >
-                <Icon size={13} />
+                <DawIcon name={tool.icon} size={13} />
                 {active && (
                   <span
                     className="absolute inset-x-1.5 -bottom-[1px] h-px rounded-full"

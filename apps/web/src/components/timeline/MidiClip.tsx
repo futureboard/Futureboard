@@ -35,17 +35,6 @@ const TOOL_CURSOR: Record<string, string> = {
   automation: "crosshair",
 };
 
-// Deterministic pseudo-random note bars for visual flair — seeded by clip id
-function noteBarSeeds(clipId: string, count: number): { top: number; left: number; width: number }[] {
-  let h = 0;
-  for (let i = 0; i < clipId.length; i++) h = (Math.imul(31, h) + clipId.charCodeAt(i)) | 0;
-  const rng = () => { h = (Math.imul(1664525, h) + 1013904223) | 0; return (h >>> 0) / 4294967296; };
-  return Array.from({ length: count }, () => ({
-    top: rng() * 0.7 + 0.05,
-    left: rng() * 0.7,
-    width: rng() * 0.25 + 0.05,
-  }));
-}
 
 type Props = {
   clip: DawClip;
@@ -74,7 +63,23 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
   const noteH = clipH - LABEL_H;
   const selected = selectedClipIds.includes(clip.id);
   const color = track.color;
-  const noteBars = noteBarSeeds(clip.id, 8);
+
+  // ── Real MIDI note preview ─────────────────────────────────────────────────
+  const clipOffset = clip.offset ?? 0;
+  const clipNotes  = clip.notes ?? [];
+  // Only notes that overlap the visible clip window [clipOffset, clipOffset + clip.duration]
+  const visibleNotes = clipNotes.filter(
+    (n) => n.start < clipOffset + clip.duration && n.start + n.duration > clipOffset,
+  );
+  // Pitch range — default to C3–C5 when empty so proportions look reasonable
+  let topPitch = 72, bottomPitch = 48;
+  if (visibleNotes.length > 0) {
+    const lo = Math.min(...visibleNotes.map((n) => n.pitch));
+    const hi = Math.max(...visibleNotes.map((n) => n.pitch));
+    topPitch    = hi + 2;
+    bottomPitch = lo - 2;
+  }
+  const pitchRange = Math.max(12, topPitch - bottomPitch);
 
   // ── Cut tool ──────────────────────────────────────────────────────────────
   const handleCutTool = (e: React.MouseEvent) => {
@@ -380,19 +385,36 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
       >
         <div className="pointer-events-none absolute inset-y-0 left-0 w-1.5 bg-white/20" />
         <div className="pointer-events-none absolute inset-y-0 right-0 w-1.5 bg-black/20" />
-        {noteBars.map((bar, i) => (
-          <div
-            key={i}
-            className="pointer-events-none absolute rounded-sm"
-            style={{
-              top:    `${bar.top * 100}%`,
-              left:   `${bar.left * 100}%`,
-              width:  `${bar.width * 100}%`,
-              height: "3px",
-              background: hex2rgba(color, 0.85),
-            }}
-          />
-        ))}
+        {visibleNotes.length === 0 ? (
+          // Empty MIDI clip — subtle horizontal grid lines
+          [0.33, 0.66].map((f) => (
+            <div key={f} className="pointer-events-none absolute left-0 right-0 h-px"
+                 style={{ top: `${f * 100}%`, background: hex2rgba(color, 0.15) }} />
+          ))
+        ) : (
+          visibleNotes.map((note) => {
+            // Clamp note to clip's visible window
+            const visStart = Math.max(note.start - clipOffset, 0);
+            const visEnd   = Math.min(note.start + note.duration - clipOffset, clip.duration);
+            if (visEnd <= visStart) return null;
+            const leftPct  = (visStart / clip.duration) * 100;
+            const widthPct = ((visEnd - visStart) / clip.duration) * 100;
+            const topPct   = ((topPitch - note.pitch) / pitchRange) * 100;
+            return (
+              <div
+                key={note.id}
+                className="pointer-events-none absolute rounded-sm"
+                style={{
+                  left:   `${leftPct}%`,
+                  width:  `${Math.max(widthPct, 0.5)}%`,
+                  top:    `${topPct}%`,
+                  height: "2px",
+                  background: hex2rgba(color, 0.85),
+                }}
+              />
+            );
+          })
+        )}
       </div>
 
       {/* Cut tool indicator */}

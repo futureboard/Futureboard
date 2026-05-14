@@ -1,4 +1,4 @@
-import { CircleDot, CornerDownLeft, Cpu, GitMerge, Mic2, Music, Plus, X } from "lucide-react";
+import { CircleDot, CornerDownLeft, Cpu, GitMerge, GitFork, Mic2, Music, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
@@ -47,15 +47,23 @@ const TRACK_TYPES: TrackTypeConfig[] = [
     description: "Route and blend multiple channels",
     detail: "Sends · Groups",
     icon: GitMerge,
-    ready: false,
+    ready: true,
   },
   {
-    type: "bus" as TrackType,
+    type: "return",
     label: "Return Track",
     description: "Receive sends from other tracks",
     detail: "FX Returns · Aux",
     icon: CornerDownLeft,
-    ready: false,
+    ready: true,
+  },
+  {
+    type: "group",
+    label: "Group Track",
+    description: "Group and process multiple tracks",
+    detail: "Sub-mix · Stem",
+    icon: GitFork,
+    ready: true,
   },
 ];
 
@@ -109,6 +117,9 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
         solo: false,
         armed: selectedType.type === "audio" ? armTrack : false,
         clips: [],
+        output: "master",
+        sends: [],
+        inserts: [],
       };
       useHistoryStore.getState().execute(new AddTrackCommand(track));
       firstTrackId ??= id;

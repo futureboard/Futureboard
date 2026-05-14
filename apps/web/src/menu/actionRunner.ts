@@ -8,6 +8,7 @@ import { transport } from "../engine/Transport";
 import { getTrackColor } from "../theme";
 import { platform } from "../platform";
 import { importAudioFilesAsNewTracks } from "../utils/importAudioToProject";
+import { midiEditorBridge } from "./midiEditorBridge";
 import {
   AddTrackCommand,
   DeleteTrackCommand,
@@ -183,10 +184,98 @@ export function runAction(actionId: string) {
       break;
     }
 
+    // ── MIDI editor actions (routed through bridge to active panel) ───────────
+    case "midi:select-all":
+      midiEditorBridge.call("selectAll");
+      break;
+
+    case "midi:delete-selected":
+      midiEditorBridge.call("deleteSelected");
+      break;
+
+    case "midi:duplicate-selected":
+      midiEditorBridge.call("duplicateSelected");
+      break;
+
+    case "midi:quantize":
+      midiEditorBridge.call("quantize");
+      break;
+
+    case "midi:nudge-left":
+      midiEditorBridge.call("nudgeLeft");
+      break;
+
+    case "midi:nudge-right":
+      midiEditorBridge.call("nudgeRight");
+      break;
+
+    case "midi:transpose-up":
+      midiEditorBridge.call("transposeUp");
+      break;
+
+    case "midi:transpose-down":
+      midiEditorBridge.call("transposeDown");
+      break;
+
+    case "midi:transpose-octave-up":
+      midiEditorBridge.call("transposeOctaveUp");
+      break;
+
+    case "midi:transpose-octave-down":
+      midiEditorBridge.call("transposeOctaveDown");
+      break;
+
+    case "track:add-bus": {
+      const tracks = projectStore.project.tracks;
+      const id = crypto.randomUUID();
+      const newTrack: DawTrack = {
+        id,
+        name: `Bus ${tracks.filter((t) => t.type === "bus").length + 1}`,
+        type: "bus",
+        color: getTrackColor(tracks.length),
+        channelCount: 2, volume: 1, pan: 0, muted: false, solo: false, armed: false,
+        clips: [], output: "master", sends: [], inserts: [],
+      };
+      history.execute(new AddTrackCommand(newTrack));
+      uiStore.setSelectedTrackId(id);
+      break;
+    }
+
+    case "track:add-return": {
+      const tracks = projectStore.project.tracks;
+      const id = crypto.randomUUID();
+      const newTrack: DawTrack = {
+        id,
+        name: `Return ${tracks.filter((t) => t.type === "return").length + 1}`,
+        type: "return",
+        color: getTrackColor(tracks.length),
+        channelCount: 2, volume: 1, pan: 0, muted: false, solo: false, armed: false,
+        clips: [], output: "master", sends: [], inserts: [],
+      };
+      history.execute(new AddTrackCommand(newTrack));
+      uiStore.setSelectedTrackId(id);
+      break;
+    }
+
+    case "track:add-group": {
+      const tracks = projectStore.project.tracks;
+      const id = crypto.randomUUID();
+      const newTrack: DawTrack = {
+        id,
+        name: `Group ${tracks.filter((t) => t.type === "group").length + 1}`,
+        type: "group",
+        color: getTrackColor(tracks.length),
+        channelCount: 2, volume: 1, pan: 0, muted: false, solo: false, armed: false,
+        clips: [], output: "master", sends: [], inserts: [],
+      };
+      history.execute(new AddTrackCommand(newTrack));
+      uiStore.setSelectedTrackId(id);
+      break;
+    }
+
     // Stubs — not yet implemented
     case "track:add-midi":
     case "track:add-plugin":
-    case "track:add-bus":
     case "track:freeze":
     case "track:flatten":
     case "track:route-to":

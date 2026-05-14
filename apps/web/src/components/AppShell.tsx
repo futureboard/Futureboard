@@ -3,6 +3,7 @@ import { BottomWorkspacePanel } from "./BottomWorkspacePanel";
 import { InspectorPanel } from "./InspectorPanel";
 import { useUIStore } from "../store/uiStore";
 import { BrowserPanel } from "./BrowserPanel";
+import { StatusBar } from "./StatusBar";
 
 export function AppShell({ onImport }: { onImport?: () => void }) {
   const { panels } = useUIStore();
@@ -31,6 +32,8 @@ export function AppShell({ onImport }: { onImport?: () => void }) {
         if (p.id === "mixer") return <BottomWorkspacePanel key={p.id} height={p.size} />;
         return null;
       })}
+
+      <StatusBar />
     </div>
   );
 }

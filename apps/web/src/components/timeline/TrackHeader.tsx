@@ -1,12 +1,15 @@
-import { Cpu, GitMerge, GripVertical, Mic, Mic2, Music, Star, Trash2, Volume2, VolumeX } from "lucide-react";
+import { CornerDownLeft, Cpu, GitFork, GitMerge, GripVertical, Mic, Mic2, Music, Star, Trash2, Volume2, VolumeX } from "lucide-react";
 import type { HTMLAttributes } from "react";
 import type { TrackType } from "../../types/daw";
 
 const TYPE_ICONS: Record<TrackType, React.ElementType> = {
-  audio: Mic2,
-  midi: Music,
-  plugin: Cpu,
-  bus: GitMerge,
+  audio:      Mic2,
+  midi:       Music,
+  instrument: Cpu,
+  plugin:     Cpu,
+  bus:        GitMerge,
+  return:     CornerDownLeft,
+  group:      GitFork,
 };
 
 import type { DawTrack } from "../../types/daw";
@@ -24,9 +27,12 @@ function volumeToDb(v: number) {
 }
 
 function trackTypeLabel(type: TrackType) {
-  if (type === "midi") return "MIDI";
-  if (type === "plugin") return "PLUG";
-  if (type === "bus") return "BUS";
+  if (type === "midi")       return "MIDI";
+  if (type === "instrument") return "INST";
+  if (type === "plugin")     return "PLUG";
+  if (type === "bus")        return "BUS";
+  if (type === "return")     return "RET";
+  if (type === "group")      return "GRP";
   return "AUD";
 }
 

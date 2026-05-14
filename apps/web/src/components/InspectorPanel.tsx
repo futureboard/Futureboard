@@ -1,26 +1,33 @@
-import { Activity, ArrowUpDown, Cpu, GitMerge, Layers, Mic2, Music, PhoneIncoming, PhoneOutgoing, RotateCcw, Scissors, Sliders, Trash2, Volume2, X } from "lucide-react";
+import { Activity, ArrowUpDown, CornerDownLeft, Cpu, GitFork, GitMerge, Layers, Mic2, Music, PhoneIncoming, PhoneOutgoing, RotateCcw, Scissors, Sliders, Trash2, Volume2, X } from "lucide-react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
-import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrackSoloCommand, DeleteTrackCommand, UpdateClipCommand } from "../commands";
+import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrackSoloCommand, SetTrackOutputCommand, DeleteTrackCommand, UpdateClipCommand } from "../commands";
 import { mixer } from "../engine/Mixer";
 import { INSPECTOR_WIDTH } from "../theme";
 import { formatBeatLength } from "../utils/musicalTime";
 import type { TrackType } from "../types/daw";
 import { clipType } from "../types/daw";
+import { getOutputTargets, getSendTargets } from "../utils/routingHelpers";
 
 const TYPE_ICONS: Record<TrackType, React.ElementType> = {
-  audio: Mic2,
-  midi: Music,
-  plugin: Cpu,
-  bus: GitMerge,
+  audio:      Mic2,
+  midi:       Music,
+  instrument: Cpu,
+  plugin:     Cpu,
+  bus:        GitMerge,
+  return:     CornerDownLeft,
+  group:      GitFork,
 };
 
 const TYPE_LABELS: Record<TrackType, string> = {
-  audio: "Audio",
-  midi: "MIDI",
-  plugin: "Plugin",
-  bus: "Bus",
+  audio:      "Audio",
+  midi:       "MIDI",
+  instrument: "Instrument",
+  plugin:     "Plugin",
+  bus:        "Bus",
+  return:     "Return",
+  group:      "Group",
 };
 
 export function InspectorPanel({ width }: { width?: number } = {}) {
@@ -332,11 +339,11 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
             {/* Routing */}
             <SectionLabel label="Routing" />
             <div className="flex flex-col gap-1.5 px-3 pb-3">
-              <div className="flex items-center gap-2">
-                <PhoneIncoming size={9} className="shrink-0 text-daw-faint opacity-50" />
-                <span className="w-8 shrink-0 text-[9px] text-daw-faint opacity-60">IN</span>
+              <div className="flex items-center gap-2 opacity-50">
+                <PhoneIncoming size={9} className="shrink-0 text-daw-faint" />
+                <span className="w-8 shrink-0 text-[9px] text-daw-faint">IN</span>
                 <div
-                  className="flex h-6 flex-1 cursor-not-allowed items-center rounded px-2 text-[10px] text-daw-faint opacity-50"
+                  className="flex h-6 flex-1 cursor-not-allowed items-center rounded px-2 text-[10px] text-daw-faint"
                   style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
                   title="Input routing (coming soon)"
                 >
@@ -344,17 +351,56 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <PhoneOutgoing size={9} className="shrink-0 text-daw-faint opacity-50" />
-                <span className="w-8 shrink-0 text-[9px] text-daw-faint opacity-60">OUT</span>
-                <div
-                  className="flex h-6 flex-1 cursor-not-allowed items-center rounded px-2 text-[10px] text-daw-faint opacity-50"
-                  style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
-                  title="Output routing (coming soon)"
+                <PhoneOutgoing size={9} className="shrink-0 text-daw-faint" />
+                <span className="w-8 shrink-0 text-[9px] text-daw-faint">OUT</span>
+                <select
+                  value={track.output ?? "master"}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    history().execute(new SetTrackOutputCommand(track.id, next, track.output ?? "master"));
+                  }}
+                  className="h-6 flex-1 cursor-pointer rounded px-1.5 text-[10px] text-daw-text outline-none"
+                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.09)" }}
                 >
-                  Master
-                </div>
+                  {getOutputTargets(project, track.id).map((t) => (
+                    <option key={t.id} value={t.id}
+                      style={{ background: "#1a1e26" }}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
+
+            {/* Sends */}
+            {(() => {
+              const sendTargets = getSendTargets(project, track.id);
+              const sends = track.sends ?? [];
+              if (sendTargets.length === 0 && sends.length === 0) return null;
+              return (
+                <>
+                  <SectionLabel label="Sends" />
+                  <div className="flex flex-col gap-0.5 px-3 pb-3">
+                    {sends.map((send) => {
+                      const target = project.tracks.find((t) => t.id === send.targetTrackId);
+                      return (
+                        <div key={send.id} className="flex items-center gap-2 rounded border border-daw-border bg-daw-bg px-2 py-1">
+                          <span className="min-w-0 flex-1 truncate text-[10px] text-daw-dim">
+                            {target?.name ?? send.name}
+                          </span>
+                          <span className="shrink-0 text-[9px] tabular-nums text-daw-faint">
+                            {send.level >= 0.999 ? "0.0" : (20 * Math.log10(Math.max(0.001, send.level))).toFixed(1)} dB
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {sends.length === 0 && (
+                      <p className="py-0.5 text-[10px] text-daw-faint">No sends — add from Mixer</p>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
 
             <SectionLabel label="Inserts" />
             <div className="grid grid-cols-2 gap-1 px-3 pb-3">

@@ -7,13 +7,11 @@ import {
   Plus,
 } from "lucide-react";
 import {
-  beatsPerBar,
   formatBarBeat,
-  getGridIntervalBeats,
-  getGridSubBeats,
   secondsPerBeat,
   snapTime,
 } from "../../utils/musicalTime";
+import { getArrangementGridLines } from "../../utils/musicalGrid";
 import { transport } from "../../engine/Transport";
 import type { TimeSignature } from "../../utils/musicalTime";
 
@@ -53,42 +51,44 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
       ctx.fillRect(0, 0, W, RULER_HEIGHT);
 
       const spb = secondsPerBeat(bpm);
-      const pixelsPerBeat = pixelsPerSecond * spb;
-      const bpb = beatsPerBar(timeSig);
-      const startBeat = scrollX / pixelsPerBeat;
-      const endBeat = (scrollX + W) / pixelsPerBeat;
-      const intervalBeats = getGridIntervalBeats(pixelsPerBeat, timeSig);
-      const subBeats = getGridSubBeats(pixelsPerBeat, timeSig);
 
       ctx.font = "11px Inter Variable, ui-sans-serif, system-ui, sans-serif";
       ctx.textBaseline = "middle";
 
-      // Sub-ticks
-      ctx.strokeStyle = C.surfaceHigh;
-      ctx.lineWidth   = 1;
-      const subStart = Math.floor(startBeat / subBeats) * subBeats;
-      for (let beat = subStart; beat <= endBeat; beat += subBeats) {
-        const x = Math.round(beat * pixelsPerBeat - scrollX);
-        ctx.beginPath();
-        ctx.moveTo(x, RULER_HEIGHT - 5);
-        ctx.lineTo(x, RULER_HEIGHT);
-        ctx.stroke();
-      }
+      // Single pass over all grid lines, tagged by level.
+      // Tick heights: sub = 4 px bottom, beat = 9 px bottom, bar = full height.
+      const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W);
+      for (const line of lines) {
+        const { x, level, showLabel, beat } = line;
 
-      // Major ticks + labels
-      const majStart = Math.floor(startBeat / intervalBeats) * intervalBeats;
-      for (let beat = majStart; beat <= endBeat + intervalBeats; beat += intervalBeats) {
-        const rb = Math.round(beat * 1000) / 1000;
-        const x  = Math.round(rb * pixelsPerBeat - scrollX);
-        const isBar = Math.abs(rb % bpb) < 0.001;
-        ctx.strokeStyle = isBar ? C.borderHard : C.border;
-        ctx.lineWidth = isBar ? 1.5 : 1;
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, RULER_HEIGHT);
-        ctx.stroke();
-        ctx.fillStyle = isBar ? C.text : C.dim;
-        ctx.fillText(formatBarBeat(rb * spb, bpm, timeSig), x + 4, RULER_HEIGHT / 2);
+        if (level === "sub") {
+          ctx.strokeStyle = C.surfaceHigh;
+          ctx.lineWidth   = 1;
+          ctx.beginPath();
+          ctx.moveTo(x, RULER_HEIGHT - 4);
+          ctx.lineTo(x, RULER_HEIGHT);
+          ctx.stroke();
+        } else if (level === "beat") {
+          ctx.strokeStyle = C.border;
+          ctx.lineWidth   = 1;
+          ctx.beginPath();
+          ctx.moveTo(x, RULER_HEIGHT - 9);
+          ctx.lineTo(x, RULER_HEIGHT);
+          ctx.stroke();
+        } else {
+          // bar — full height tick
+          ctx.strokeStyle = C.borderHard;
+          ctx.lineWidth   = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, RULER_HEIGHT);
+          ctx.stroke();
+        }
+
+        if (showLabel) {
+          ctx.fillStyle = level === "bar" ? C.text : C.dim;
+          ctx.fillText(formatBarBeat(beat * spb, bpm, timeSig), x + 4, RULER_HEIGHT / 2);
+        }
       }
     };
 

@@ -79,6 +79,9 @@ type UIStore = {
   contextMenuPosition: { x: number; y: number };
   contextMenuItems: AppMenuItem[];
   setContextMenu: (open: boolean, position?: { x: number; y: number }, items?: AppMenuItem[]) => void;
+  // Project save status — driven by App-level save/dirty detection
+  saveStatus: "saved" | "unsaved" | "saving" | "error";
+  setSaveStatus: (status: UIStore["saveStatus"]) => void;
 };
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -168,4 +171,6 @@ export const useUIStore = create<UIStore>((set) => ({
     contextMenuPosition: position ?? s.contextMenuPosition,
     contextMenuItems: items ?? s.contextMenuItems,
   })),
+  saveStatus: "saved",
+  setSaveStatus: (saveStatus) => set({ saveStatus }),
 }));

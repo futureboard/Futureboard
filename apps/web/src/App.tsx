@@ -7,6 +7,7 @@ import { audioEngine } from "./engine/AudioEngine";
 import { transport } from "./engine/Transport";
 import { metronomeScheduler } from "./engine/MetronomeScheduler";
 import { useProjectStore } from "./store/projectStore";
+import { useUIStore } from "./store/uiStore";
 import { useMetronomeStore } from "./store/metronomeStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
@@ -47,17 +48,31 @@ export default function App() {
   };
 
   const handleSaveProject = async () => {
+    useUIStore.getState().setSaveStatus("saving");
     try {
       await platform.projectStorage.saveProject(useProjectStore.getState().project);
+      useUIStore.getState().setSaveStatus("saved");
     } catch (e) {
       console.warn("[App] save project:", e);
+      useUIStore.getState().setSaveStatus("error");
     }
   };
 
-  // Load saved project metadata from localStorage on mount
+  // Load saved project metadata from localStorage on mount, then mark as saved.
   useEffect(() => {
     loadLocal();
+    useUIStore.getState().setSaveStatus("saved");
   }, [loadLocal]);
+
+  // Mark status bar "unsaved" whenever the project data actually changes.
+  // Using subscribe (not a hook) so this never causes a re-render of App.
+  useEffect(() => {
+    return useProjectStore.subscribe((state, prev) => {
+      if (state.project !== prev.project) {
+        useUIStore.getState().setSaveStatus("unsaved");
+      }
+    });
+  }, []);
 
   // Block browser / OS page zoom (Ctrl/Cmd + wheel, pinch). Timeline keeps its own zoom via a non-passive wheel listener.
   useEffect(() => {

@@ -2,27 +2,19 @@ import {
   Check,
   ChevronRight,
   Circle,
-  Copy,
-  Download,
-  FilePlus,
   FolderOpen,
-  History,
-  Keyboard,
-  Magnet,
   PanelBottom,
   PanelRight,
   Pause,
   Play,
-  Redo2,
   Repeat2,
   Save,
   Share2,
   SkipBack,
   Square,
-  Trash2,
   Timer,
-  Undo2,
 } from "lucide-react";
+import { MenuDawIcon } from "../icons/dawIcons";
 import { useEffect, useRef, useState } from "react";
 import { transport } from "../engine/Transport";
 import { APP_MENUS, type AppMenuGroup, type AppMenuItem } from "../menu/menuItems";
@@ -38,26 +30,7 @@ import logoApp from "../assets/logo.png"
 const TIME_SIG_NUMERATORS = [2, 3, 4, 5, 6, 7, 8, 9, 12];
 const TIME_SIG_DENOMINATORS = [2, 4, 8, 16];
 
-const MENU_ICONS: Record<string, React.ElementType> = {
-  copy: Copy,
-  download: Download,
-  "file-plus": FilePlus,
-  "folder-open": FolderOpen,
-  history: History,
-  keyboard: Keyboard,
-  magnet: Magnet,
-  "panel-bottom": PanelBottom,
-  "panel-right": PanelRight,
-  play: Play,
-  "redo-2": Redo2,
-  repeat: Repeat2,
-  save: Save,
-  "share-2": Share2,
-  "step-back": SkipBack,
-  "trash-2": Trash2,
-  "undo-2": Undo2,
-  x: Square,
-};
+// MENU_ICONS removed — MenuIcon now routes through DawIcon registry
 
 type CommandMenuItem = Extract<AppMenuItem, { type?: "item" }>;
 
@@ -129,12 +102,7 @@ function TopMenuButton({
 }
 
 function MenuIcon({ icon }: { icon?: string }) {
-  const Icon = icon ? MENU_ICONS[icon] : undefined;
-  return (
-    <span className="flex h-4 w-4 shrink-0 items-center justify-center text-daw-faint">
-      {Icon ? <Icon size={12} /> : null}
-    </span>
-  );
+  return <MenuDawIcon icon={icon} size={12} />;
 }
 
 function MenuPanel({
@@ -169,7 +137,7 @@ function MenuPanel({
               <button
                 type="button"
                 disabled={!enabled}
-                className="grid h-7 w-full grid-cols-[1rem_minmax(0,1fr)_0.75rem] items-center gap-2 rounded px-2 text-left text-[11px] text-daw-text transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35"
+                className="grid h-7 w-full grid-cols-[1.25rem_minmax(0,1fr)_0.75rem] items-center gap-2 rounded px-2 text-left text-[11px] text-daw-text transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35"
               >
                 <MenuIcon icon={item.icon} />
                 <span className="min-w-0 flex-1 truncate">{item.label}</span>
@@ -193,11 +161,11 @@ function MenuPanel({
             disabled={!enabled}
             onClick={() => onAction(item)}
             className={[
-              "grid h-7 w-full grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 text-left text-[11px] transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
+              "grid h-7 w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 text-left text-[11px] transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
               item.danger ? "text-daw-red" : "text-daw-text",
             ].join(" ")}
           >
-            <span className="flex h-4 w-4 items-center justify-center text-daw-faint">
+            <span className="flex w-5 shrink-0 items-center justify-center text-daw-faint">
               {checked ? <Check size={12} className="text-daw-accent" /> : <MenuIcon icon={item.icon} />}
             </span>
             <span className="min-w-0 flex-1 truncate">{item.label}</span>

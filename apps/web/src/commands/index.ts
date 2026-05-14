@@ -6,7 +6,7 @@
  * they do not go through historyStore again (no recursion).
  */
 
-import type { DawClip, DawTrack, MidiNote } from "../types/daw";
+import type { DawClip, DawTrack, MidiNote, TrackSend } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
 import { mixer } from "../engine/Mixer";
 import type { DawCommand } from "./types";
@@ -219,6 +219,49 @@ export class SetTrackSoloCommand implements DawCommand {
     store().setTrackSolo(this.trackId, !this.newSolo);
     mixer.setSolo(this.trackId, !this.newSolo);
   }
+}
+
+export class SetTrackOutputCommand implements DawCommand {
+  readonly label = "Set Track Output";
+  private trackId: string;
+  private newOutput: string;
+  private oldOutput: string;
+
+  constructor(trackId: string, newOutput: string, oldOutput: string) {
+    this.trackId = trackId;
+    this.newOutput = newOutput;
+    this.oldOutput = oldOutput;
+  }
+  execute() { store().setTrackOutput(this.trackId, this.newOutput); }
+  undo()    { store().setTrackOutput(this.trackId, this.oldOutput); }
+}
+
+export class AddTrackSendCommand implements DawCommand {
+  readonly label: string;
+  private trackId: string;
+  private send: TrackSend;
+
+  constructor(trackId: string, send: TrackSend) {
+    this.trackId = trackId;
+    this.send = send;
+    this.label = `Add Send to "${send.name}"`;
+  }
+  execute() { store().addTrackSend(this.trackId, this.send); }
+  undo()    { store().removeTrackSend(this.trackId, this.send.id); }
+}
+
+export class RemoveTrackSendCommand implements DawCommand {
+  readonly label: string;
+  private trackId: string;
+  private send: TrackSend;
+
+  constructor(trackId: string, send: TrackSend) {
+    this.trackId = trackId;
+    this.send = send;
+    this.label = `Remove Send to "${send.name}"`;
+  }
+  execute() { store().removeTrackSend(this.trackId, this.send.id); }
+  undo()    { store().addTrackSend(this.trackId, this.send); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

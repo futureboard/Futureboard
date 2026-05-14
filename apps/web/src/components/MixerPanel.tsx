@@ -1,7 +1,7 @@
 import {
   ChevronDown, Minus, Plus, SlidersHorizontal, X,
   Activity, Waves, Sparkles, AudioLines, Gauge, Boxes, Plug,
-  Send, ArrowRightLeft, FolderPlus,
+  Send, FolderPlus, CornerDownLeft, GitMerge,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -22,8 +22,10 @@ import { Knob } from "./ui/Knob";
 import { VerticalFader } from "./ui/VerticalFader";
 import { useVuStereoLevels } from "../hooks/useVuLevel";
 import { effectiveTrackMeterMode } from "../utils/meterMode";
-import type { DawFile, DawTrack, TrackInsert, TrackSend } from "../types/daw";
+import type { DawFile, DawProject, DawTrack, TrackInsert, TrackSend } from "../types/daw";
 import { buildTrackContextMenu } from "../menu/trackContextMenu";
+import { getSendTargets } from "../utils/routingHelpers";
+import { AddTrackSendCommand, RemoveTrackSendCommand } from "../commands";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -135,20 +137,46 @@ function InsertsAddMenu({ accent }: { accent: string }) {
   );
 }
 
-function SendsAddMenu({ accent }: { accent: string }) {
+function SendsAddMenu({ accent, track, project }: { accent: string; track: DawTrack; project: DawProject }) {
+  const targets = getSendTargets(project, track.id);
+  const existingTargetIds = new Set((track.sends ?? []).map((s) => s.targetTrackId));
+
+  function addSend(targetTrackId: string, targetName: string) {
+    if (existingTargetIds.has(targetTrackId)) return;
+    const send: TrackSend = {
+      id: crypto.randomUUID(),
+      name: targetName,
+      targetTrackId,
+      level: 1,
+      enabled: true,
+      preFader: false,
+    };
+    useHistoryStore.getState().execute(new AddTrackSendCommand(track.id, send));
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <SectionAddButton accent={accent} title="Add send" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" sideOffset={4}>
-        <DropdownMenuLabel>Send</DropdownMenuLabel>
-        <DropdownMenuItem icon={Send}>Add Send A</DropdownMenuItem>
-        <DropdownMenuItem icon={Send}>Add Send B</DropdownMenuItem>
-        <DropdownMenuItem icon={ArrowRightLeft}>Add Return Track</DropdownMenuItem>
+        <DropdownMenuLabel>Send to</DropdownMenuLabel>
+        {targets.length === 0 ? (
+          <DropdownMenuItem icon={Send} disabled>No return/bus tracks</DropdownMenuItem>
+        ) : (
+          targets.map((t) => (
+            <DropdownMenuItem
+              key={t.id}
+              icon={t.type === "return" ? CornerDownLeft : GitMerge}
+              disabled={existingTargetIds.has(t.id)}
+              onSelect={() => addSend(t.id, t.name)}
+            >
+              {t.name}
+            </DropdownMenuItem>
+          ))
+        )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem icon={ArrowRightLeft} disabled>Route to Bus…</DropdownMenuItem>
-        <DropdownMenuItem icon={FolderPlus} disabled>Create New Bus…</DropdownMenuItem>
+        <DropdownMenuItem icon={FolderPlus} disabled>Create New Return…</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -188,11 +216,21 @@ function EmptySlotRow({ accent, hint }: { accent: string; hint: string }) {
   );
 }
 
-function SendRow({ send }: { send: TrackSend }) {
+function SendRow({ send, trackId, project }: { send: TrackSend; trackId: string; project: DawProject }) {
+  const targetTrack = project.tracks.find((t) => t.id === send.targetTrackId);
+  const displayName = targetTrack?.name ?? send.name;
+
   return (
-    <div className="flex items-center gap-1.5 border-l-[2px] border-white/[0.1] px-2 py-[3px] transition-colors hover:bg-white/[0.04]">
-      <span className="flex-1 truncate text-[10px] text-white/60">{send.name}</span>
+    <div className="group flex items-center gap-1.5 border-l-[2px] border-white/[0.1] px-2 py-[3px] transition-colors hover:bg-white/[0.04]">
+      <span className="flex-1 truncate text-[10px] text-white/60">{displayName}</span>
       <span className="shrink-0 text-[9px] tabular-nums text-white/35">{sendToDb(send.level)}</span>
+      <button
+        title="Remove send"
+        className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70 ml-0.5"
+        onClick={() => useHistoryStore.getState().execute(new RemoveTrackSendCommand(trackId, send))}
+      >
+        <X size={8} />
+      </button>
     </div>
   );
 }
@@ -205,6 +243,7 @@ type StripLevel = "full" | "medium" | "compact";
 
 type StripProps = {
   track?: DawTrack;           // undefined = Master
+  project: DawProject;
   label: string;
   color: string;
   volume: number;
@@ -224,7 +263,7 @@ type StripProps = {
 };
 
 function ChannelStrip({
-  track, label, color, volume, pan = 0,
+  track, project, label, color, volume, pan = 0,
   onVolume, onPan, onVolumeEnd, onPanEnd,
   muted, solo, onMute, onSolo,
   fixedWidth, level, onResizeDragStart,
@@ -288,13 +327,13 @@ function ChannelStrip({
       )}
 
       {/* ── SENDS (full only) ── */}
-      {showFull && (
+      {showFull && !isMaster && (
         <div className="shrink-0 border-b border-white/[0.045]">
-          <SectionHeader label="Sends" accent={accent} menu={<SendsAddMenu accent={accent} />} />
+          <SectionHeader label="Sends" accent={accent} menu={<SendsAddMenu accent={accent} track={track!} project={project} />} />
           {sends.length === 0 ? (
             <EmptySlotRow accent={accent} hint="Click + to route a send" />
           ) : (
-            sends.map((s) => <SendRow key={s.id} send={s} />)
+            sends.map((s) => <SendRow key={s.id} send={s} trackId={track!.id} project={project} />)
           )}
         </div>
       )}
@@ -391,8 +430,9 @@ function ChannelStrip({
 // ─── Mixer Panel ──────────────────────────────────────────────────────────────
 
 export function MixerPanel({ height, embedded = false }: { height?: number; embedded?: boolean }) {
-  const tracks = useProjectStore((s) => s.project.tracks);
-  const files = useProjectStore((s) => s.project.files);
+  const project = useProjectStore((s) => s.project);
+  const tracks = project.tracks;
+  const files = project.files;
   const { setTrackVolume, setTrackPan } = useProjectStore();
   const {
     masterVolume, setMasterVolume,
@@ -521,17 +561,15 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
       </div>
 
       {/* strips */}
-      <div className="flex min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
-        {tracks.length === 0 && (
-          <div className="flex flex-1 items-center justify-center text-[11px] text-daw-faint">
-            Add tracks to see mixer channels.
-          </div>
-        )}
+      {(() => {
+        const mainTracks    = tracks.filter((t) => t.type !== "bus" && t.type !== "return" && t.type !== "group");
+        const routingTracks = tracks.filter((t) => t.type === "bus" || t.type === "return" || t.type === "group");
 
-        {tracks.map((t) => (
+        const stripFor = (t: DawTrack) => (
           <ChannelStrip
             key={t.id}
             track={t}
+            project={project}
             label={t.name}
             color={t.color}
             volume={t.volume}
@@ -556,28 +594,46 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
               setFocusedPanel("mixer");
             }}
           />
-        ))}
+        );
 
-        {tracks.length > 0 && !mixerFlexLayout && <div className="flex-1" />}
+        return (
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            {/* ── main scrollable tracks ── */}
+            <div className="flex min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
+              {mainTracks.length === 0 && routingTracks.length === 0 && (
+                <div className="flex flex-1 items-center justify-center text-[11px] text-daw-faint">
+                  Add tracks to see mixer channels.
+                </div>
+              )}
+              {mainTracks.map(stripFor)}
+              {mainTracks.length > 0 && !mixerFlexLayout && <div className="flex-1" />}
+            </div>
 
-        <ChannelStrip
-          label="Master"
-          color="#48d1cc"
-          volume={masterVolume}
-          level={stripLevel}
-          fixedWidth={fixedWidth !== undefined ? Math.max(fixedWidth, 76) : undefined}
-          files={files}
-          onVolume={(v) => { setMasterVolume(v); mixer.setMasterVolume(v); }}
-          onResizeDragStart={onStripResizeDragStart}
-          selected={selectedMixerTrackId === "master"}
-          onClick={() => {
-            setSelectedMixerTrackId("master");
-            setSelectedTrackId(null);
-            setSelectedClipIds([]);
-            setFocusedPanel("mixer");
-          }}
-        />
-      </div>
+            {/* ── pinned routing + master zone ── */}
+            <div className="flex shrink-0 border-l border-white/[0.07]">
+              {routingTracks.map(stripFor)}
+              <ChannelStrip
+                label="Master"
+                project={project}
+                color="#48d1cc"
+                volume={masterVolume}
+                level={stripLevel}
+                fixedWidth={fixedWidth !== undefined ? Math.max(fixedWidth, 76) : undefined}
+                files={files}
+                onVolume={(v) => { setMasterVolume(v); mixer.setMasterVolume(v); }}
+                onResizeDragStart={onStripResizeDragStart}
+                selected={selectedMixerTrackId === "master"}
+                onClick={() => {
+                  setSelectedMixerTrackId("master");
+                  setSelectedTrackId(null);
+                  setSelectedClipIds([]);
+                  setFocusedPanel("mixer");
+                }}
+              />
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

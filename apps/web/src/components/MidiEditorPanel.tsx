@@ -4,6 +4,8 @@ import type { DawClip, DawTrack, MidiNote } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
 import { useHistoryStore } from "../store/historyStore";
 import { AddMidiNotesCommand, RemoveMidiNotesCommand, UpdateMidiNotesCommand } from "../commands";
+import { midiEditorBridge } from "../menu/midiEditorBridge";
+import { transport } from "../engine/Transport";
 
 // ── Layout constants (CSS pixels — never scale by DPR for DOM) ───────────────
 const ROW_H     = 14;    // px per semitone
@@ -43,6 +45,13 @@ function snapFloor(sec: number, spb: number, beatsPerStep: number): number {
 function snapRound(sec: number, spb: number, beatsPerStep: number): number {
   const step = spb * beatsPerStep;
   return Math.round(sec / step) * step;
+}
+
+// ── Keyboard guard ────────────────────────────────────────────────────────────
+function isTypingTarget(el: EventTarget | null): boolean {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
 // ── Canvas grid background ────────────────────────────────────────────────────
@@ -133,11 +142,17 @@ export function MidiEditorPanel({
   const trackColor = track?.color ?? "#a99cff";
 
   // ── DOM refs ──────────────────────────────────────────────────────────────
-  const mainRef   = useRef<HTMLDivElement>(null);   // scroll container
-  const pianoRef  = useRef<HTMLDivElement>(null);
-  const velRef    = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const dragRef   = useRef<DragState>({ type: "idle" });
+  const mainRef      = useRef<HTMLDivElement>(null);   // scroll container
+  const pianoRef     = useRef<HTMLDivElement>(null);
+  const velRef       = useRef<HTMLDivElement>(null);
+  const canvasRef    = useRef<HTMLCanvasElement>(null);
+  const playheadRef  = useRef<HTMLDivElement>(null);   // playhead overlay line
+  const dragRef      = useRef<DragState>({ type: "idle" });
+
+  // Measured clientWidth of the scroll container (excluding piano key lane).
+  const [viewportWidth, setViewportWidth] = useState(0);
+  // Stores the time at the viewport center so zoom can re-anchor scroll.
+  const pendingCenterTimeRef = useRef<number | null>(null);
 
   // ── Mutable-value refs (prevent stale closures in window event handlers) ──
   // Pattern: assign on every render so handlers always read current values.
@@ -154,7 +169,19 @@ export function MidiEditorPanel({
   liveNotesRef.current = liveNotes;
 
   const displayNotes = liveNotes ?? notes;
-  const gridW = Math.max(900, clip.duration * pps + 200);
+
+  // Refs for RAF-driven playhead (no React state → no re-renders)
+  const clipStartRef  = useRef(clip.startTime);  clipStartRef.current  = clip.startTime;
+  const clipOffsetRef = useRef(clip.offset ?? 0); clipOffsetRef.current = clip.offset ?? 0;
+  const clipDurRef    = useRef(clip.duration);    clipDurRef.current    = clip.duration;
+
+  // contentWidth must never shrink below the visible viewport so zooming out
+  // always fills the editor. Also ensure at least 4 bars and full clip content.
+  const gridW = Math.max(
+    viewportWidth || 900,           // fill visible scroll area
+    clip.duration * pps + 200,      // full clip content + right padding
+    4 * beatsPerBar * ppb,          // minimum 4 bars
+  );
 
   // ── Coordinate helpers ────────────────────────────────────────────────────
   // clientToGrid: viewport coords → grid content coords.
@@ -191,6 +218,34 @@ export function MidiEditorPanel({
   // pitchToY is stable (depends only on constants), so empty deps is fine
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Viewport width measurement ────────────────────────────────────────────
+  // Keeps gridW in sync when the panel is resized (browser/inspector toggle,
+  // bottom panel resize, window resize, etc.).
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    setViewportWidth(el.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setViewportWidth(entry.contentRect.width);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // ── Re-anchor scroll after zoom ───────────────────────────────────────────
+  // After pps changes we restore the time that was at the viewport center
+  // so the content doesn't appear to jump left/right.
+  useEffect(() => {
+    if (pendingCenterTimeRef.current === null) return;
+    const el = mainRef.current;
+    if (!el) return;
+    const centerTime = pendingCenterTimeRef.current;
+    pendingCenterTimeRef.current = null;
+    el.scrollLeft = Math.max(0, centerTime * pps - el.clientWidth / 2);
+  }, [pps]);
 
   // ── Scroll sync ───────────────────────────────────────────────────────────
   const syncScroll = useCallback(() => {
@@ -251,8 +306,8 @@ export function MidiEditorPanel({
     let affectedIds: string[];
     if (resize) {
       affectedIds = [note.id];
-    } else if (e.shiftKey) {
-      // Toggle: new selection = old ± this note; drag only this note
+    } else if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      // Shift or Ctrl/Cmd: toggle this note in/out of the selection
       const next = new Set(selIdsRef.current);
       next.has(note.id) ? next.delete(note.id) : next.add(note.id);
       setSelIds(next);
@@ -374,13 +429,12 @@ export function MidiEditorPanel({
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-      const ctrl         = e.ctrlKey || e.metaKey;
-      const curNotes     = notesRef.current;
-      const curSel       = selIdsRef.current;
-      const curSpb       = spbRef.current;
-      const curBPS       = GRID_FRACS[gridResRef.current];
+      if (isTypingTarget(e.target)) return;
+      const ctrl     = e.ctrlKey || e.metaKey;
+      const curNotes = notesRef.current;
+      const curSel   = selIdsRef.current;
+      const curSpb   = spbRef.current;
+      const curBPS   = GRID_FRACS[gridResRef.current];
 
       if ((e.key === "Delete" || e.key === "Backspace") && curSel.size > 0) {
         e.preventDefault();
@@ -404,17 +458,21 @@ export function MidiEditorPanel({
         setSelIds(new Set(duped.map((n) => n.id)));
         return;
       }
+      // ArrowUp/Down — transpose; Shift = octave step
       if ((e.key === "ArrowUp" || e.key === "ArrowDown") && curSel.size > 0 && !ctrl) {
         e.preventDefault();
-        const dp   = e.key === "ArrowUp" ? 1 : -1;
+        const dp   = (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 12 : 1);
         const prev = curNotes.filter((n) => curSel.has(n.id)).map((n) => ({ ...n }));
         const next = prev.map((n) => ({ ...n, pitch: Math.max(0, Math.min(127, n.pitch + dp)) }));
-        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Transpose"));
+        const label = Math.abs(dp) === 12 ? "Transpose Octave" : "Transpose";
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, label));
         return;
       }
+      // ArrowLeft/Right — nudge; Shift = fine (1/4 of grid step)
       if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && curSel.size > 0 && !ctrl) {
         e.preventDefault();
-        const ds   = (e.key === "ArrowRight" ? 1 : -1) * curSpb * curBPS;
+        const sign = e.key === "ArrowRight" ? 1 : -1;
+        const ds   = sign * curSpb * curBPS * (e.shiftKey ? 0.25 : 1);
         const prev = curNotes.filter((n) => curSel.has(n.id)).map((n) => ({ ...n }));
         const next = prev.map((n) => ({ ...n, start: Math.max(0, n.start + ds) }));
         useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Nudge Notes"));
@@ -431,6 +489,9 @@ export function MidiEditorPanel({
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
+      // Save center time so the re-anchor effect can restore scroll position.
+      pendingCenterTimeRef.current =
+        (el.scrollLeft + el.clientWidth / 2) / ppsRef.current;
       const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
       setPpb((prev) => Math.max(20, Math.min(400, prev * factor)));
     };
@@ -445,6 +506,106 @@ export function MidiEditorPanel({
     const next = prev.map((n) => ({ ...n, start: snapRound(n.start, spb, GRID_FRACS[gridRes]) }));
     useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Quantize"));
   }
+
+  // ── Playhead RAF loop ──────────────────────────────────────────────────────
+  // Drives the playhead <div> directly via style mutation to avoid re-renders.
+  useEffect(() => {
+    let raf: number;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const el = playheadRef.current;
+      if (!el) return;
+      const localTime = transport.projectTime - clipStartRef.current + clipOffsetRef.current;
+      if (localTime < 0 || localTime > clipDurRef.current) {
+        el.style.display = "none";
+        return;
+      }
+      el.style.display = "block";
+      el.style.left = `${localTime * ppsRef.current}px`;
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []); // empty: all values read via refs
+
+  // ── Bridge registration ────────────────────────────────────────────────────
+  // Register this editor's actions with the global menu/command bridge on mount.
+  useEffect(() => {
+    midiEditorBridge.register({
+      selectAll() {
+        setSelIds(new Set(notesRef.current.map((n) => n.id)));
+      },
+      deleteSelected() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const toDelete = notesRef.current.filter((n) => cur.has(n.id));
+        useHistoryStore.getState().execute(new RemoveMidiNotesCommand(clip.id, toDelete));
+        setSelIds(new Set());
+      },
+      duplicateSelected() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const toDup  = notesRef.current.filter((n) => cur.has(n.id));
+        const maxEnd = Math.max(...toDup.map((n) => n.start + n.duration));
+        const span   = maxEnd - Math.min(...toDup.map((n) => n.start));
+        const duped: MidiNote[] = toDup.map((n) => ({ ...n, id: crypto.randomUUID(), start: n.start + span }));
+        useHistoryStore.getState().execute(new AddMidiNotesCommand(clip.id, duped));
+        setSelIds(new Set(duped.map((n) => n.id)));
+      },
+      quantize() {
+        const cur  = selIdsRef.current;
+        const all  = notesRef.current;
+        const ids  = cur.size > 0 ? [...cur] : all.map((n) => n.id);
+        const prev = all.filter((n) => ids.includes(n.id)).map((n) => ({ ...n }));
+        const next = prev.map((n) => ({ ...n, start: snapRound(n.start, spbRef.current, GRID_FRACS[gridResRef.current]) }));
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Quantize"));
+      },
+      nudgeLeft() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const ds   = -(spbRef.current * GRID_FRACS[gridResRef.current]);
+        const prev = notesRef.current.filter((n) => cur.has(n.id)).map((n) => ({ ...n }));
+        const next = prev.map((n) => ({ ...n, start: Math.max(0, n.start + ds) }));
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Nudge Notes"));
+      },
+      nudgeRight() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const ds   = spbRef.current * GRID_FRACS[gridResRef.current];
+        const prev = notesRef.current.filter((n) => cur.has(n.id)).map((n) => ({ ...n }));
+        const next = prev.map((n) => ({ ...n, start: Math.max(0, n.start + ds) }));
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Nudge Notes"));
+      },
+      transposeUp() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const prev = notesRef.current.filter((n) => cur.has(n.id)).map((n) => ({ ...n }));
+        const next = prev.map((n) => ({ ...n, pitch: Math.min(127, n.pitch + 1) }));
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Transpose"));
+      },
+      transposeDown() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const prev = notesRef.current.filter((n) => cur.has(n.id)).map((n) => ({ ...n }));
+        const next = prev.map((n) => ({ ...n, pitch: Math.max(0, n.pitch - 1) }));
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Transpose"));
+      },
+      transposeOctaveUp() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const prev = notesRef.current.filter((n) => cur.has(n.id)).map((n) => ({ ...n }));
+        const next = prev.map((n) => ({ ...n, pitch: Math.min(127, n.pitch + 12) }));
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Transpose Octave"));
+      },
+      transposeOctaveDown() {
+        const cur = selIdsRef.current;
+        if (cur.size === 0) return;
+        const prev = notesRef.current.filter((n) => cur.has(n.id)).map((n) => ({ ...n }));
+        const next = prev.map((n) => ({ ...n, pitch: Math.max(0, n.pitch - 12) }));
+        useHistoryStore.getState().execute(new UpdateMidiNotesCommand(clip.id, prev, next, "Transpose Octave"));
+      },
+    });
+    return () => midiEditorBridge.unregister();
+  }, [clip.id]); // re-register when the clip changes
 
   // ── Velocity drag ─────────────────────────────────────────────────────────
   function handleVelMouseDown(e: React.MouseEvent, note: MidiNote) {
@@ -521,7 +682,7 @@ export function MidiEditorPanel({
         <ToolBtn onClick={quantize} title="Quantize" active={false}>
           <span className="text-[9px] font-bold">Q</span>
         </ToolBtn>
-        <ToolBtn active={false} title="Duplicate selected (Ctrl+D)"
+        <ToolBtn active={false} disabled={selIds.size === 0} title="Duplicate selected (Ctrl+D)"
           onClick={() => {
             const toDup = notes.filter((n) => selIds.has(n.id));
             if (!toDup.length) return;
@@ -533,7 +694,7 @@ export function MidiEditorPanel({
           }}>
           <Copy size={11} />
         </ToolBtn>
-        <ToolBtn active={false} title="Delete selected (Del)"
+        <ToolBtn active={false} disabled={selIds.size === 0} title="Delete selected (Del)"
           onClick={() => {
             const toDelete = notes.filter((n) => selIds.has(n.id));
             if (!toDelete.length) return;
@@ -555,8 +716,16 @@ export function MidiEditorPanel({
         <div className="flex items-center gap-0.5 rounded border pl-1 pr-0.5 text-[9px] text-daw-faint"
              style={{ borderColor: "rgba(255,255,255,0.07)", background: "rgba(0,0,0,0.15)" }}>
           <span className="tabular-nums">{Math.round(ppb)}px/bt</span>
-          <button onClick={() => setPpb((p) => Math.max(20, p / 1.4))} className="flex h-5 w-5 items-center justify-center rounded hover:bg-white/[0.07]">−</button>
-          <button onClick={() => setPpb((p) => Math.min(400, p * 1.4))} className="flex h-5 w-5 items-center justify-center rounded hover:bg-white/[0.07]">+</button>
+          <button onClick={() => {
+            const el = mainRef.current;
+            if (el) pendingCenterTimeRef.current = (el.scrollLeft + el.clientWidth / 2) / ppsRef.current;
+            setPpb((p) => Math.max(20, p / 1.4));
+          }} className="flex h-5 w-5 items-center justify-center rounded hover:bg-white/[0.07]">−</button>
+          <button onClick={() => {
+            const el = mainRef.current;
+            if (el) pendingCenterTimeRef.current = (el.scrollLeft + el.clientWidth / 2) / ppsRef.current;
+            setPpb((p) => Math.min(400, p * 1.4));
+          }} className="flex h-5 w-5 items-center justify-center rounded hover:bg-white/[0.07]">+</button>
         </div>
       </div>
 
@@ -617,10 +786,19 @@ export function MidiEditorPanel({
                onClick={() => setGridOpen(false)}>
             {/* Inner content: fixed logical size, contains canvas + notes */}
             <div style={{ width: gridW, height: TOTAL_H, position: "relative", userSelect: "none" }}
-                 onMouseDown={handleGridMouseDown}>
+                 onMouseDown={handleGridMouseDown}
+                 onContextMenu={(e) => e.preventDefault()}>
 
               {/* Canvas: grid lines + row backgrounds (DPR-scaled internally) */}
               <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, display: "block" }} />
+
+              {/* Playhead — positioned by RAF loop, no React state */}
+              <div ref={playheadRef} style={{
+                display: "none",
+                position: "absolute", top: 0, width: 1, height: "100%",
+                background: "rgba(255,255,255,0.75)",
+                pointerEvents: "none", zIndex: 10,
+              }} />
 
               {/* MIDI notes — positioned in CSS pixels via timeToX / pitchToY */}
               {displayNotes.map((note) => {
@@ -630,6 +808,17 @@ export function MidiEditorPanel({
                 const sel = selIds.has(note.id);
                 return (
                   <div key={note.id} onMouseDown={(e) => handleNoteMouseDown(e, note)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      // Right-click: delete this note, or the whole selection if it's part of one
+                      const inSel = selIdsRef.current.has(note.id) && selIdsRef.current.size > 0;
+                      const toDelete = inSel
+                        ? notesRef.current.filter((n) => selIdsRef.current.has(n.id))
+                        : [note];
+                      useHistoryStore.getState().execute(new RemoveMidiNotesCommand(clip.id, toDelete));
+                      setSelIds(new Set());
+                    }}
                     style={{
                       position: "absolute",
                       left: x, top: y + 1, width: w, height: ROW_H - 2,
@@ -706,17 +895,19 @@ export function MidiEditorPanel({
 
 // ── Shared sub-components ─────────────────────────────────────────────────────
 function ToolBtn({
-  children, active, onClick, title,
+  children, active, onClick, title, disabled,
 }: {
-  children: React.ReactNode; active: boolean; onClick: () => void; title?: string;
+  children: React.ReactNode; active: boolean; onClick: () => void; title?: string; disabled?: boolean;
 }) {
   return (
-    <button type="button" title={title} onClick={onClick}
+    <button type="button" title={title} onClick={onClick} disabled={disabled}
       className="flex h-6 min-w-[24px] items-center justify-center gap-1 rounded px-1.5 transition-colors"
       style={{
         background:  active ? "rgba(255,255,255,0.12)" : "transparent",
         color:       active ? "#e8eef4" : "rgba(180,192,204,0.55)",
         border:      active ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
+        opacity:     disabled ? 0.35 : 1,
+        cursor:      disabled ? "default" : undefined,
       }}>
       {children}
     </button>

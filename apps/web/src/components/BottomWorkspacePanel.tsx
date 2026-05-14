@@ -1,21 +1,22 @@
 import { useRef } from "react";
-import { ChevronDown, Pencil, SlidersHorizontal, Sparkles } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { useUIStore } from "../store/uiStore";
 import type { BottomPanelTab } from "../store/uiStore";
 import { MixerPanel } from "./MixerPanel";
 import { EditorPanel } from "./EditorPanel";
 import { EffectEditorRack } from "./EffectEditorRack";
+import { DawIcon, type DawIconName } from "../icons/dawIcons";
 
 type TabDef = {
   id: BottomPanelTab;
   label: string;
-  icon: React.ElementType;
+  icon: DawIconName;
 };
 
 const TABS: TabDef[] = [
-  { id: "mixer", label: "Mixer", icon: SlidersHorizontal },
-  { id: "editor", label: "Editor", icon: Pencil },
-  { id: "effect-editor", label: "Effect Editor", icon: Sparkles },
+  { id: "mixer",         label: "Mixer",         icon: "mixer" },
+  { id: "editor",        label: "Editor",         icon: "editor" },
+  { id: "effect-editor", label: "Effect Editor", icon: "effect" },
 ];
 
 export function BottomWorkspacePanel({ height }: { height?: number }) {
@@ -54,7 +55,6 @@ export function BottomWorkspacePanel({ height }: { height?: number }) {
       <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-white/[0.06] bg-[#0f1318] px-2">
         {TABS.map((t) => {
           const active = bottomPanelTab === t.id;
-          const Icon = t.icon;
           return (
             <button
               key={t.id}
@@ -67,7 +67,7 @@ export function BottomWorkspacePanel({ height }: { height?: number }) {
                   : "text-daw-faint hover:bg-white/[0.04] hover:text-daw-dim",
               ].join(" ")}
             >
-              <Icon size={11} className={active ? "text-daw-accent-h" : "opacity-80"} />
+              <DawIcon name={t.icon} size={11} className={active ? "text-daw-accent-h" : "opacity-80"} />
               <span>{t.label}</span>
               {active && (
                 <span

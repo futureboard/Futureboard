@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DawClip, DawFile, DawProject, DawTrack, FileId, MidiNote, TimeSignature, TrackId, WaveformPeaks, WaveformStatus } from "../types/daw";
+import type { DawClip, DawFile, DawProject, DawTrack, FileId, MidiNote, TimeSignature, TrackId, TrackSend, WaveformPeaks, WaveformStatus } from "../types/daw";
 
 const STORAGE_KEY = "mochi-daw-project";
 
@@ -36,6 +36,10 @@ type ProjectStore = {
   setTrackSolo: (trackId: TrackId, solo: boolean) => void;
   setTrackArmed: (trackId: TrackId, armed: boolean) => void;
   setTrackColor: (trackId: TrackId, color: string) => void;
+  setTrackOutput: (trackId: TrackId, output: string) => void;
+  addTrackSend: (trackId: TrackId, send: TrackSend) => void;
+  removeTrackSend: (trackId: TrackId, sendId: string) => void;
+  updateTrackSend: (trackId: TrackId, sendId: string, updates: Partial<TrackSend>) => void;
   reorderTracks: (activeTrackId: TrackId, overTrackId: TrackId) => void;
   addClip: (trackId: TrackId, clip: DawClip) => void;
   moveClip: (clipId: string, trackId: TrackId, startTime: number) => void;
@@ -77,7 +81,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set((s) => ({
       project: {
         ...s.project,
-        tracks: s.project.tracks.filter((t) => t.id !== trackId),
+        tracks: s.project.tracks
+          .filter((t) => t.id !== trackId)
+          .map((t) => ({
+            ...t,
+            // Reset output to "master" if it pointed at the deleted track
+            output: t.output === trackId ? "master" : t.output,
+            // Remove any sends targeting the deleted track
+            sends: t.sends?.filter((send) => send.targetTrackId !== trackId),
+          })),
       },
     })),
 
@@ -134,6 +146,46 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       project: {
         ...s.project,
         tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, color } : t),
+      },
+    })),
+
+  setTrackOutput: (trackId, output) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, output } : t),
+      },
+    })),
+
+  addTrackSend: (trackId, send) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId ? { ...t, sends: [...(t.sends ?? []), send] } : t
+        ),
+      },
+    })),
+
+  removeTrackSend: (trackId, sendId) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId ? { ...t, sends: (t.sends ?? []).filter((s) => s.id !== sendId) } : t
+        ),
+      },
+    })),
+
+  updateTrackSend: (trackId, sendId, updates) =>
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? { ...t, sends: (t.sends ?? []).map((send) => send.id === sendId ? { ...send, ...updates } : send) }
+            : t
+        ),
       },
     })),
 

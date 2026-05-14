@@ -19,7 +19,7 @@ export type DawProject = {
   files: DawFile[];
 };
 
-export type TrackType = "audio" | "midi" | "plugin" | "bus";
+export type TrackType = "audio" | "midi" | "instrument" | "plugin" | "bus" | "return" | "group";
 
 export type TrackInsert = {
   id: string;
@@ -30,8 +30,12 @@ export type TrackInsert = {
 export type TrackSend = {
   id: string;
   name: string;
-  /** send level 0–1 (1 = 0 dB) */
+  /** Target bus/return track ID to receive this send's audio. */
+  targetTrackId: string;
+  /** Send level 0–1 (1 = 0 dB). */
   level: number;
+  enabled?: boolean;
+  preFader?: boolean;
 };
 
 export type DawTrack = {
@@ -48,6 +52,8 @@ export type DawTrack = {
   clips: DawClip[];
   inserts?: TrackInsert[];
   sends?: TrackSend[];
+  /** Output routing target: "master" or a bus/group track ID. Defaults to "master". */
+  output?: string;
 };
 
 export type ClipType = "audio" | "midi";

@@ -132,19 +132,27 @@ export function useKeyboardShortcuts() {
           break;
         }
         case "KeyS": {
-          if (!ctrl) break;
-          e.preventDefault();
-          saveLocal();
+          if (ctrl) {
+            e.preventDefault();
+            saveLocal();
+          } else {
+            e.preventDefault();
+            const ids = useUIStore.getState().selectedClipIds;
+            if (ids.length > 0) {
+              const t = transport.projectTime;
+              ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
+              setSelectedClipIds([]);
+            }
+          }
           break;
         }
         case "KeyX": {
           if (!ctrl) {
             e.preventDefault();
-            const { projectTime } = transport;
-            if (selectedClipIds.length > 0) {
-              selectedClipIds.forEach((id) => {
-                history.execute(new SplitClipCommand(id, projectTime));
-              });
+            const ids = useUIStore.getState().selectedClipIds;
+            if (ids.length > 0) {
+              const t = transport.projectTime;
+              ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
               setSelectedClipIds([]);
             }
           }
@@ -162,13 +170,40 @@ export function useKeyboardShortcuts() {
         case "KeyZ": {
           if (!ctrl) break;
           e.preventDefault();
-          history.undo();
+          if (shift) history.redo();
+          else history.undo();
           break;
         }
         case "KeyY": {
           if (!ctrl) break;
           e.preventDefault();
           history.redo();
+          break;
+        }
+
+        // ── Arrangement tools ──────────────────────────────────────────────
+        case "KeyV": {
+          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("pointer"); }
+          break;
+        }
+        case "KeyP": {
+          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("pen"); }
+          break;
+        }
+        case "KeyC": {
+          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("cut"); }
+          break;
+        }
+        case "KeyG": {
+          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("glue"); }
+          break;
+        }
+        case "KeyT": {
+          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("time"); }
+          break;
+        }
+        case "KeyA": {
+          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("automation"); }
           break;
         }
 
@@ -197,6 +232,34 @@ export function useKeyboardShortcuts() {
         }
         case "KeyL": {
           if (!ctrl) toggleLoop();
+          break;
+        }
+        case "KeyB": {
+          if (!ctrl) togglePanel("browser");
+          break;
+        }
+
+        // ── Panel shortcuts ────────────────────────────────────────────────
+        case "Digit1": {
+          if (ctrl) { e.preventDefault(); togglePanel("browser"); }
+          break;
+        }
+        case "Digit2": {
+          if (ctrl) { e.preventDefault(); togglePanel("inspector"); }
+          break;
+        }
+        case "Digit3": {
+          if (ctrl) { e.preventDefault(); togglePanel("mixer"); }
+          break;
+        }
+
+        // ── Navigation ────────────────────────────────────────────────────
+        case "End": {
+          e.preventDefault();
+          const { tracks } = useProjectStore.getState().project;
+          const end = tracks.reduce((max, tr) =>
+            tr.clips.reduce((m, c) => Math.max(m, c.startTime + c.duration), max), 0);
+          transport.seek(end);
           break;
         }
       }

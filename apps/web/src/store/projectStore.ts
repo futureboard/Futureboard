@@ -1,10 +1,25 @@
 import { create } from "zustand";
-import type { DawClip, DawFile, DawProject, DawTrack, FileId, MidiNote, TimeSignature, TrackId, TrackSend, WaveformPeaks, WaveformStatus } from "../types/daw";
+import { useUIStore } from "./uiStore";
+import type {
+  DawClip,
+  DawFile,
+  DawProject,
+  DawTrack,
+  FileId,
+  InsertDevice,
+  MidiNote,
+  TimeSignature,
+  TrackId,
+  TrackSend,
+  WaveformPeaks,
+  WaveformStatus,
+} from "../types/daw";
+import { normalizeProject, normalizeTrack } from "../utils/normalize";
 
 const STORAGE_KEY = "mochi-daw-project";
 
 function defaultProject(): DawProject {
-  return {
+  return normalizeProject({
     id: crypto.randomUUID(),
     name: "Untitled Project",
     version: 1,
@@ -13,7 +28,14 @@ function defaultProject(): DawProject {
     timeSignature: { numerator: 4, denominator: 4 },
     tracks: [],
     files: [],
-  };
+  });
+}
+
+/** Mark project dirty in the UI store. */
+function markDirty() {
+  if (useUIStore.getState().saveStatus !== "unsaved") {
+    useUIStore.getState().setSaveStatus("unsaved");
+  }
 }
 
 type PeakCache = Map<FileId, WaveformPeaks>;
@@ -24,9 +46,16 @@ type ProjectStore = {
   peakCache: PeakCache;
   waveformStatus: WaveformStatusMap;
 
+  // ── Project-level ──────────────────────────────────────────────────────────
+  createNewProject: (overrides?: Partial<DawProject>) => void;
+  loadProject: (project: DawProject) => void;
+  resetProject: () => void;
   setProjectName: (name: string) => void;
   setBpm: (bpm: number) => void;
   setTimeSignature: (timeSig: TimeSignature) => void;
+  updateProjectSettings: (patch: Partial<Pick<DawProject, "bpm" | "timeSignature" | "sampleRate" | "name">>) => void;
+
+  // ── Tracks ─────────────────────────────────────────────────────────────────
   addTrack: (track: DawTrack) => void;
   removeTrack: (trackId: TrackId) => void;
   setTrackName: (trackId: TrackId, name: string) => void;
@@ -37,10 +66,23 @@ type ProjectStore = {
   setTrackArmed: (trackId: TrackId, armed: boolean) => void;
   setTrackColor: (trackId: TrackId, color: string) => void;
   setTrackOutput: (trackId: TrackId, output: string) => void;
+  setTrackHeight: (trackId: TrackId, height: number | undefined) => void;
+  collapseTrack: (trackId: TrackId, collapsed: boolean) => void;
+  reorderTracks: (activeTrackId: TrackId, overTrackId: TrackId) => void;
+
+  // ── Track sends ────────────────────────────────────────────────────────────
   addTrackSend: (trackId: TrackId, send: TrackSend) => void;
   removeTrackSend: (trackId: TrackId, sendId: string) => void;
   updateTrackSend: (trackId: TrackId, sendId: string, updates: Partial<TrackSend>) => void;
-  reorderTracks: (activeTrackId: TrackId, overTrackId: TrackId) => void;
+
+  // ── Insert devices ─────────────────────────────────────────────────────────
+  addInsertDevice: (trackId: TrackId, device: InsertDevice) => void;
+  removeInsertDevice: (trackId: TrackId, deviceId: string) => void;
+  toggleInsertDevice: (trackId: TrackId, deviceId: string) => void;
+  updateInsertDeviceParams: (trackId: TrackId, deviceId: string, params: Record<string, number | string | boolean>) => void;
+  reorderInsertDevices: (trackId: TrackId, fromIndex: number, toIndex: number) => void;
+
+  // ── Clips ──────────────────────────────────────────────────────────────────
   addClip: (trackId: TrackId, clip: DawClip) => void;
   moveClip: (clipId: string, trackId: TrackId, startTime: number) => void;
   resizeClip: (clipId: string, trackId: TrackId, startTime: number, offset: number, duration: number) => void;
@@ -49,13 +91,22 @@ type ProjectStore = {
   deleteClips: (clipIds: string[]) => void;
   duplicateClips: (clipIds: string[]) => void;
   splitClip: (clipId: string, time: number) => void;
+  moveClipToTrack: (clipId: string, toTrackId: TrackId, startTime: number) => void;
+
+  // ── MIDI notes ─────────────────────────────────────────────────────────────
   addMidiNotes: (clipId: string, notes: MidiNote[]) => void;
   updateMidiNotes: (clipId: string, updates: Array<Partial<MidiNote> & { id: string }>) => void;
   removeMidiNotes: (clipId: string, noteIds: string[]) => void;
+
+  // ── Files / assets ─────────────────────────────────────────────────────────
   addFile: (file: DawFile) => void;
-  moveClipToTrack: (clipId: string, toTrackId: TrackId, startTime: number) => void;
+  removeFile: (fileId: FileId) => void;
+
+  // ── Waveform cache (non-dirty) ─────────────────────────────────────────────
   setPeaks: (fileId: FileId, peaks: WaveformPeaks) => void;
   setWaveformStatus: (fileId: FileId, status: WaveformStatus) => void;
+
+  // ── Persistence ────────────────────────────────────────────────────────────
   saveLocal: () => void;
   loadLocal: () => void;
 };
@@ -65,19 +116,49 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   peakCache: new Map(),
   waveformStatus: new Map(),
 
-  setProjectName: (name) =>
-    set((s) => ({ project: { ...s.project, name } })),
+  // ── Project-level ──────────────────────────────────────────────────────────
 
-  setBpm: (bpm) =>
-    set((s) => ({ project: { ...s.project, bpm } })),
+  createNewProject: (overrides) => {
+    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map() });
+    if (overrides) set((s) => ({ project: { ...s.project, ...overrides } }));
+  },
 
-  setTimeSignature: (timeSignature) =>
-    set((s) => ({ project: { ...s.project, timeSignature } })),
+  loadProject: (project) => {
+    set({ project: normalizeProject(project as Partial<DawProject>), peakCache: new Map(), waveformStatus: new Map() });
+  },
 
-  addTrack: (track) =>
-    set((s) => ({ project: { ...s.project, tracks: [...s.project.tracks, track] } })),
+  resetProject: () => {
+    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map() });
+  },
 
-  removeTrack: (trackId) =>
+  setProjectName: (name) => {
+    set((s) => ({ project: { ...s.project, name } }));
+    markDirty();
+  },
+
+  setBpm: (bpm) => {
+    set((s) => ({ project: { ...s.project, bpm: Math.max(20, Math.min(300, bpm)) } }));
+    markDirty();
+  },
+
+  setTimeSignature: (timeSignature) => {
+    set((s) => ({ project: { ...s.project, timeSignature } }));
+    markDirty();
+  },
+
+  updateProjectSettings: (patch) => {
+    set((s) => ({ project: { ...s.project, ...patch } }));
+    markDirty();
+  },
+
+  // ── Tracks ─────────────────────────────────────────────────────────────────
+
+  addTrack: (track) => {
+    set((s) => ({ project: { ...s.project, tracks: [...s.project.tracks, normalizeTrack(track)] } }));
+    markDirty();
+  },
+
+  removeTrack: (trackId) => {
     set((s) => ({
       project: {
         ...s.project,
@@ -85,111 +166,83 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           .filter((t) => t.id !== trackId)
           .map((t) => ({
             ...t,
-            // Reset output to "master" if it pointed at the deleted track
             output: t.output === trackId ? "master" : t.output,
-            // Remove any sends targeting the deleted track
             sends: t.sends?.filter((send) => send.targetTrackId !== trackId),
           })),
       },
-    })),
+    }));
+    markDirty();
+  },
 
-  setTrackName: (trackId, name) =>
+  setTrackName: (trackId, name) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, name } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, name } : t) },
+    }));
+    markDirty();
+  },
 
-  setTrackVolume: (trackId, volume) =>
+  setTrackVolume: (trackId, volume) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, volume } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, volume } : t) },
+    }));
+    markDirty();
+  },
 
-  setTrackPan: (trackId, pan) =>
+  setTrackPan: (trackId, pan) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, pan } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, pan } : t) },
+    }));
+    markDirty();
+  },
 
-  setTrackMute: (trackId, muted) =>
+  setTrackMute: (trackId, muted) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, muted } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, muted } : t) },
+    }));
+    markDirty();
+  },
 
-  setTrackSolo: (trackId, solo) =>
+  setTrackSolo: (trackId, solo) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, solo } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, solo } : t) },
+    }));
+    markDirty();
+  },
 
-  setTrackArmed: (trackId, armed) =>
+  setTrackArmed: (trackId, armed) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, armed } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, armed } : t) },
+    }));
+    markDirty();
+  },
 
-  setTrackColor: (trackId, color) =>
+  setTrackColor: (trackId, color) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, color } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, color } : t) },
+    }));
+    markDirty();
+  },
 
-  setTrackOutput: (trackId, output) =>
+  setTrackOutput: (trackId, output) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, output } : t),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, output } : t) },
+    }));
+    markDirty();
+  },
 
-  addTrackSend: (trackId, send) =>
+  setTrackHeight: (trackId, height) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) =>
-          t.id === trackId ? { ...t, sends: [...(t.sends ?? []), send] } : t
-        ),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, height } : t) },
+    }));
+  },
 
-  removeTrackSend: (trackId, sendId) =>
+  collapseTrack: (trackId, collapsed) => {
     set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) =>
-          t.id === trackId ? { ...t, sends: (t.sends ?? []).filter((s) => s.id !== sendId) } : t
-        ),
-      },
-    })),
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, collapsed } : t) },
+    }));
+  },
 
-  updateTrackSend: (trackId, sendId, updates) =>
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) =>
-          t.id === trackId
-            ? { ...t, sends: (t.sends ?? []).map((send) => send.id === sendId ? { ...send, ...updates } : send) }
-            : t
-        ),
-      },
-    })),
-
-  reorderTracks: (activeTrackId, overTrackId) =>
+  reorderTracks: (activeTrackId, overTrackId) => {
     set((s) => {
       const tracks = s.project.tracks;
       const oldIndex = tracks.findIndex((t) => t.id === activeTrackId);
@@ -199,9 +252,138 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const [moved] = next.splice(oldIndex, 1);
       next.splice(newIndex, 0, moved);
       return { project: { ...s.project, tracks: next } };
-    }),
+    });
+    markDirty();
+  },
 
-  addClip: (trackId, clip) =>
+  // ── Track sends ────────────────────────────────────────────────────────────
+
+  addTrackSend: (trackId, send) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId ? { ...t, sends: [...(t.sends ?? []), send] } : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  removeTrackSend: (trackId, sendId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId ? { ...t, sends: (t.sends ?? []).filter((s) => s.id !== sendId) } : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  updateTrackSend: (trackId, sendId, updates) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? { ...t, sends: (t.sends ?? []).map((send) => send.id === sendId ? { ...send, ...updates } : send) }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  // ── Insert devices ─────────────────────────────────────────────────────────
+
+  addInsertDevice: (trackId, device) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          const inserts = t.inserts ?? [];
+          const order = inserts.length;
+          return { ...t, inserts: [...inserts, { ...device, order }] };
+        }),
+      },
+    }));
+    markDirty();
+  },
+
+  removeInsertDevice: (trackId, deviceId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          const filtered = (t.inserts ?? []).filter((ins) => ins.id !== deviceId);
+          return { ...t, inserts: filtered.map((ins, i) => ({ ...ins, order: i })) };
+        }),
+      },
+    }));
+    markDirty();
+  },
+
+  toggleInsertDevice: (trackId, deviceId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                inserts: (t.inserts ?? []).map((ins) =>
+                  ins.id === deviceId ? { ...ins, enabled: !ins.enabled } : ins
+                ),
+              }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  updateInsertDeviceParams: (trackId, deviceId, params) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                inserts: (t.inserts ?? []).map((ins) =>
+                  ins.id === deviceId ? { ...ins, params: { ...ins.params, ...params } } : ins
+                ),
+              }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  reorderInsertDevices: (trackId, fromIndex, toIndex) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => {
+          if (t.id !== trackId) return t;
+          const inserts = (t.inserts ?? []).slice();
+          const [moved] = inserts.splice(fromIndex, 1);
+          inserts.splice(toIndex, 0, moved);
+          return { ...t, inserts: inserts.map((ins, i) => ({ ...ins, order: i })) };
+        }),
+      },
+    }));
+    markDirty();
+  },
+
+  // ── Clips ──────────────────────────────────────────────────────────────────
+
+  addClip: (trackId, clip) => {
     set((s) => ({
       project: {
         ...s.project,
@@ -209,9 +391,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           t.id === trackId ? { ...t, clips: [...t.clips, clip] } : t
         ),
       },
-    })),
+    }));
+    markDirty();
+  },
 
-  moveClip: (clipId, _trackId, startTime) =>
+  moveClip: (clipId, _trackId, startTime) => {
     set((s) => ({
       project: {
         ...s.project,
@@ -220,9 +404,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           clips: t.clips.map((c) => c.id === clipId ? { ...c, startTime } : c),
         })),
       },
-    })),
+    }));
+    markDirty();
+  },
 
-  resizeClip: (clipId, _trackId, startTime, offset, duration) =>
+  resizeClip: (clipId, _trackId, startTime, offset, duration) => {
     set((s) => ({
       project: {
         ...s.project,
@@ -231,9 +417,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           clips: t.clips.map((c) => c.id === clipId ? { ...c, startTime, offset, duration } : c),
         })),
       },
-    })),
+    }));
+    markDirty();
+  },
 
-  updateClip: (clipId, updates) =>
+  updateClip: (clipId, updates) => {
     set((s) => ({
       project: {
         ...s.project,
@@ -242,9 +430,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           clips: t.clips.map((c) => c.id === clipId ? { ...c, ...updates } : c),
         })),
       },
-    })),
+    }));
+    markDirty();
+  },
 
-  removeClip: (clipId) =>
+  removeClip: (clipId) => {
     set((s) => ({
       project: {
         ...s.project,
@@ -253,119 +443,71 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           clips: t.clips.filter((c) => c.id !== clipId),
         })),
       },
-    })),
+    }));
+    markDirty();
+  },
 
-  deleteClips: (clipIds) =>
-    set((s) => {
-      const ids = new Set(clipIds);
-      return {
-        project: {
-          ...s.project,
-          tracks: s.project.tracks.map((t) => ({
-            ...t,
-            clips: t.clips.filter((c) => !ids.has(c.id)),
-          })),
-        },
-      };
-    }),
+  deleteClips: (clipIds) => {
+    const ids = new Set(clipIds);
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.filter((c) => !ids.has(c.id)),
+        })),
+      },
+    }));
+    markDirty();
+  },
 
-  duplicateClips: (clipIds) =>
-    set((s) => {
-      const ids = new Set(clipIds);
-      return {
-        project: {
-          ...s.project,
-          tracks: s.project.tracks.map((t) => {
-            const newClips: DawClip[] = [];
-            for (const c of t.clips) {
-              if (ids.has(c.id)) {
-                newClips.push({ ...c, id: crypto.randomUUID(), startTime: c.startTime + c.duration });
-              }
+  duplicateClips: (clipIds) => {
+    const ids = new Set(clipIds);
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => {
+          const newClips: DawClip[] = [];
+          for (const c of t.clips) {
+            if (ids.has(c.id)) {
+              newClips.push({ ...c, id: crypto.randomUUID(), startTime: c.startTime + c.duration });
             }
-            return { ...t, clips: [...t.clips, ...newClips] };
-          }),
-        },
-      };
-    }),
-
-  splitClip: (clipId, time) =>
-    set((s) => {
-      return {
-        project: {
-          ...s.project,
-          tracks: s.project.tracks.map((t) => {
-            const idx = t.clips.findIndex((c) => c.id === clipId);
-            if (idx === -1) return t;
-            const c = t.clips[idx];
-            if (time <= c.startTime || time >= c.startTime + c.duration) return t; // Cannot split outside bounds
-            
-            const firstDuration = time - c.startTime;
-            const c1: DawClip = { ...c, duration: firstDuration };
-            const c2: DawClip = {
-              ...c,
-              id: crypto.randomUUID(),
-              startTime: time,
-              offset: c.offset + firstDuration,
-              duration: c.duration - firstDuration,
-            };
-            
-            const newClips = [...t.clips];
-            newClips.splice(idx, 1, c1, c2);
-            return { ...t, clips: newClips };
-          }),
-        },
-      };
-    }),
-
-  addMidiNotes: (clipId, notes) =>
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => ({
-          ...t,
-          clips: t.clips.map((c) =>
-            c.id === clipId ? { ...c, notes: [...(c.notes ?? []), ...notes] } : c
-          ),
-        })),
-      },
-    })),
-
-  updateMidiNotes: (clipId, updates) => {
-    const map = new Map(updates.map((u) => [u.id, u]));
-    set((s) => ({
-      project: {
-        ...s.project,
-        tracks: s.project.tracks.map((t) => ({
-          ...t,
-          clips: t.clips.map((c) =>
-            c.id === clipId
-              ? { ...c, notes: (c.notes ?? []).map((n) => map.has(n.id) ? { ...n, ...map.get(n.id) } : n) }
-              : c
-          ),
-        })),
+          }
+          return { ...t, clips: [...t.clips, ...newClips] };
+        }),
       },
     }));
+    markDirty();
   },
 
-  removeMidiNotes: (clipId, noteIds) => {
-    const ids = new Set(noteIds);
+  splitClip: (clipId, time) => {
     set((s) => ({
       project: {
         ...s.project,
-        tracks: s.project.tracks.map((t) => ({
-          ...t,
-          clips: t.clips.map((c) =>
-            c.id === clipId ? { ...c, notes: (c.notes ?? []).filter((n) => !ids.has(n.id)) } : c
-          ),
-        })),
+        tracks: s.project.tracks.map((t) => {
+          const idx = t.clips.findIndex((c) => c.id === clipId);
+          if (idx === -1) return t;
+          const c = t.clips[idx];
+          if (time <= c.startTime || time >= c.startTime + c.duration) return t;
+          const firstDuration = time - c.startTime;
+          const c1: DawClip = { ...c, duration: firstDuration };
+          const c2: DawClip = {
+            ...c,
+            id: crypto.randomUUID(),
+            startTime: time,
+            offset: c.offset + firstDuration,
+            duration: c.duration - firstDuration,
+          };
+          const newClips = [...t.clips];
+          newClips.splice(idx, 1, c1, c2);
+          return { ...t, clips: newClips };
+        }),
       },
     }));
+    markDirty();
   },
 
-  addFile: (file) =>
-    set((s) => ({ project: { ...s.project, files: [...s.project.files, file] } })),
-
-  moveClipToTrack: (clipId, toTrackId, startTime) =>
+  moveClipToTrack: (clipId, toTrackId, startTime) => {
     set((s) => {
       let clip: DawClip | undefined;
       const tracks = s.project.tracks.map((t) => {
@@ -383,7 +525,74 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           ),
         },
       };
-    }),
+    });
+    markDirty();
+  },
+
+  // ── MIDI notes ─────────────────────────────────────────────────────────────
+
+  addMidiNotes: (clipId, notes) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) =>
+            c.id === clipId ? { ...c, notes: [...(c.notes ?? []), ...notes] } : c
+          ),
+        })),
+      },
+    }));
+    markDirty();
+  },
+
+  updateMidiNotes: (clipId, updates) => {
+    const map = new Map(updates.map((u) => [u.id, u]));
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) =>
+            c.id === clipId
+              ? { ...c, notes: (c.notes ?? []).map((n) => map.has(n.id) ? { ...n, ...map.get(n.id) } : n) }
+              : c
+          ),
+        })),
+      },
+    }));
+    markDirty();
+  },
+
+  removeMidiNotes: (clipId, noteIds) => {
+    const ids = new Set(noteIds);
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) =>
+            c.id === clipId ? { ...c, notes: (c.notes ?? []).filter((n) => !ids.has(n.id)) } : c
+          ),
+        })),
+      },
+    }));
+    markDirty();
+  },
+
+  // ── Files / assets ─────────────────────────────────────────────────────────
+
+  addFile: (file) => {
+    set((s) => ({ project: { ...s.project, files: [...s.project.files, file] } }));
+    markDirty();
+  },
+
+  removeFile: (fileId) => {
+    set((s) => ({ project: { ...s.project, files: s.project.files.filter((f) => f.id !== fileId) } }));
+    markDirty();
+  },
+
+  // ── Waveform cache ─────────────────────────────────────────────────────────
 
   setPeaks: (fileId, peaks) =>
     set((s) => {
@@ -400,6 +609,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       next.set(fileId, status);
       return { waveformStatus: next };
     }),
+
+  // ── Persistence ────────────────────────────────────────────────────────────
 
   saveLocal: () => {
     const { project } = get();
@@ -423,7 +634,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!raw) return;
     try {
       const project = JSON.parse(raw) as DawProject;
-      set({ project });
+      set({ project: normalizeProject(project as Partial<DawProject>) });
     } catch {
       // corrupt — ignore
     }

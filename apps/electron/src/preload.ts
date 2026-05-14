@@ -4,11 +4,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   IpcChannels,
+  type ExternalWindowConfig,
   type MessageBoxOptions,
   type MessageBoxResult,
   type OpenDialogResult,
   type PickedAudioFile,
   type SaveDialogResult,
+  type WaveformCacheEntryIpc,
 } from "./ipc/channels.js";
 
 const invoke = ipcRenderer.invoke.bind(ipcRenderer);
@@ -45,6 +47,26 @@ const windowBridge = Object.freeze({
   close: (): Promise<void> => invoke(IpcChannels.WindowClose),
 });
 
+const waveformCacheBridge = Object.freeze({
+  get: (key: string): Promise<WaveformCacheEntryIpc | null> =>
+    invoke(IpcChannels.WaveformCacheGet, key),
+  set: (key: string, entry: WaveformCacheEntryIpc): Promise<void> =>
+    invoke(IpcChannels.WaveformCacheSet, key, entry),
+  delete: (key: string): Promise<void> =>
+    invoke(IpcChannels.WaveformCacheDelete, key),
+  clear: (): Promise<void> =>
+    invoke(IpcChannels.WaveformCacheClear),
+});
+
+const windowsBridge = Object.freeze({
+  openExternal: (config: ExternalWindowConfig): Promise<string | null> =>
+    invoke(IpcChannels.WindowsOpenExternal, config),
+  closeExternal: (id: string): Promise<void> =>
+    invoke(IpcChannels.WindowsCloseExternal, id),
+  focusExternal: (id: string): Promise<void> =>
+    invoke(IpcChannels.WindowsFocusExternal, id),
+});
+
 const dawElectron = Object.freeze({
   platform: process.platform,
   frameless: true,
@@ -56,6 +78,8 @@ const dawElectron = Object.freeze({
   project: projectBridge,
   dialog: dialogBridge,
   window: windowBridge,
+  windows: windowsBridge,
+  waveformCache: waveformCacheBridge,
 });
 
 contextBridge.exposeInMainWorld("dawElectron", dawElectron);

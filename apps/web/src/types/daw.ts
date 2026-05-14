@@ -8,6 +8,19 @@ export type TimeSignature = {
   denominator: number;
 };
 
+export type ProjectLoop = {
+  enabled: boolean;
+  startTime: number;
+  endTime: number;
+};
+
+export type ProjectMarker = {
+  id: string;
+  time: number;
+  label: string;
+  color?: string;
+};
+
 export type DawProject = {
   id: ProjectId;
   name: string;
@@ -17,15 +30,47 @@ export type DawProject = {
   timeSignature: TimeSignature;
   tracks: DawTrack[];
   files: DawFile[];
+  masterTrackId?: TrackId;
+  loop?: ProjectLoop;
+  markers?: ProjectMarker[];
 };
 
-export type TrackType = "audio" | "midi" | "instrument" | "plugin" | "bus" | "return" | "group";
+export type TrackType = "audio" | "midi" | "instrument" | "plugin" | "bus" | "return" | "group" | "master";
 
-export type TrackInsert = {
+// Snap division for grid snapping
+export type SnapDivision =
+  | "off"
+  | "1bar"
+  | "1/2"
+  | "1/4"
+  | "1/8"
+  | "1/16"
+  | "1/32"
+  | "1/64";
+
+// Insert device types supported by WebAudio first pass
+export type InsertDeviceType =
+  | "eq"
+  | "compressor"
+  | "delay"
+  | "reverb"
+  | "saturator"
+  | "limiter"
+  | "gain"
+  | "custom";
+
+export type InsertDevice = {
   id: string;
+  type: InsertDeviceType | string;
   name: string;
-  bypassed: boolean;
+  /** false = bypassed/disabled */
+  enabled: boolean;
+  order: number;
+  params: Record<string, number | string | boolean>;
 };
+
+/** @deprecated Use InsertDevice */
+export type TrackInsert = InsertDevice;
 
 export type TrackSend = {
   id: string;
@@ -50,10 +95,14 @@ export type DawTrack = {
   solo: boolean;
   armed: boolean;
   clips: DawClip[];
-  inserts?: TrackInsert[];
+  inserts?: InsertDevice[];
   sends?: TrackSend[];
   /** Output routing target: "master" or a bus/group track ID. Defaults to "master". */
   output?: string;
+  /** Display height in pixels (overrides TRACK_HEIGHT default). */
+  height?: number;
+  /** Whether the track lane is collapsed to minimum height. */
+  collapsed?: boolean;
 };
 
 export type ClipType = "audio" | "midi";

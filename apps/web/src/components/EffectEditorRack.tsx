@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { GripVertical, Plus, Power, Sliders, X } from "lucide-react";
 import { useUIStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
-import type { TrackInsert } from "../types/daw";
+import type { InsertDevice } from "../types/daw";
 
 type Param = { name: string; value: number; min: number; max: number; unit: string };
 
@@ -46,7 +46,7 @@ function getDefaultParams(name: string): Param[] {
 
 function patchTrackInserts(
   trackId: string,
-  updater: (inserts: TrackInsert[]) => TrackInsert[]
+  updater: (inserts: InsertDevice[]) => InsertDevice[]
 ) {
   useProjectStore.setState((state) => ({
     project: {
@@ -82,7 +82,7 @@ export function EffectEditorRack() {
     if (!selectedTrackId) return;
     patchTrackInserts(selectedTrackId, (inserts) => [
       ...inserts,
-      { id: crypto.randomUUID(), name: deviceName, bypassed: false },
+      { id: crypto.randomUUID(), type: "custom", name: deviceName, enabled: true, order: inserts.length, params: {} },
     ]);
     setShowAddMenu(false);
   };
@@ -91,7 +91,7 @@ export function EffectEditorRack() {
     if (!selectedTrackId) return;
     patchTrackInserts(selectedTrackId, (inserts) =>
       inserts.map((ins) =>
-        ins.id === insertId ? { ...ins, bypassed: !ins.bypassed } : ins
+        ins.id === insertId ? { ...ins, enabled: !ins.enabled } : ins
       )
     );
   };
@@ -202,7 +202,7 @@ function DeviceCard({
   onToggleBypass,
   onRemove,
 }: {
-  insert: TrackInsert;
+  insert: InsertDevice;
   onToggleBypass: () => void;
   onRemove: () => void;
 }) {
@@ -224,9 +224,9 @@ function DeviceCard({
     <div
       className="flex h-full w-44 shrink-0 flex-col overflow-hidden rounded-lg border transition-opacity"
       style={{
-        borderColor: insert.bypassed ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.12)",
-        background: insert.bypassed ? "#0e1116" : "#161b22",
-        opacity: insert.bypassed ? 0.55 : 1,
+        borderColor: !insert.enabled ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.12)",
+        background: !insert.enabled ? "#0e1116" : "#161b22",
+        opacity: !insert.enabled ? 0.55 : 1,
       }}
     >
       {/* Device header */}
@@ -241,11 +241,11 @@ function DeviceCard({
         <button
           type="button"
           onClick={onToggleBypass}
-          title={insert.bypassed ? "Enable device" : "Bypass device"}
+          title={!insert.enabled ? "Enable device" : "Bypass device"}
           className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors"
           style={{
-            color: insert.bypassed ? "rgba(180,192,204,0.3)" : "#56c7c9",
-            background: insert.bypassed ? "transparent" : "rgba(86,199,201,0.12)",
+            color: !insert.enabled ? "rgba(180,192,204,0.3)" : "#56c7c9",
+            background: !insert.enabled ? "transparent" : "rgba(86,199,201,0.12)",
           }}
         >
           <Power size={9} />

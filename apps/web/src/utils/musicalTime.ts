@@ -5,7 +5,141 @@ export type TimeSignature = {
 
 export const DEFAULT_TIME_SIGNATURE: TimeSignature = { numerator: 4, denominator: 4 };
 
-const TICKS_PER_BEAT = 100;
+export const TICKS_PER_BEAT = 100;
+
+/** Snap grid divisions. "off" = no snap. */
+export type SnapDivision =
+  | "off"
+  | "1bar"
+  | "1/2"
+  | "1/4"
+  | "1/8"
+  | "1/16"
+  | "1/32"
+  | "1/64";
+
+/** How many quarter-note beats one snap step covers for a given division. */
+export function getGridStepBeats(div: SnapDivision): number {
+  switch (div) {
+    case "off":   return 0;
+    case "1bar":  return 4; // caller should multiply by beatsPerBar if needed
+    case "1/2":   return 2;
+    case "1/4":   return 1;
+    case "1/8":   return 0.5;
+    case "1/16":  return 0.25;
+    case "1/32":  return 0.125;
+    case "1/64":  return 0.0625;
+  }
+}
+
+/** Snap a beat value to the nearest grid step. */
+export function snapBeat(beat: number, div: SnapDivision, timeSig?: TimeSignature): number {
+  const step =
+    div === "1bar"
+      ? (timeSig ? beatsPerBar(timeSig) : 4)
+      : getGridStepBeats(div);
+  if (step <= 0) return beat;
+  return Math.max(0, Math.round(beat / step) * step);
+}
+
+/** Convert a quarter-note beat to a PPQN tick. */
+export function beatToTick(beat: number, ppq = TICKS_PER_BEAT): number {
+  return Math.round(beat * ppq);
+}
+
+/** Convert a PPQN tick back to a quarter-note beat. */
+export function tickToBeat(tick: number, ppq = TICKS_PER_BEAT): number {
+  return tick / ppq;
+}
+
+/** Number of whole bars from beat zero to `beats`. */
+export function barsFromBeats(beats: number, timeSig: TimeSignature): number {
+  return Math.floor(beats / beatsPerBar(timeSig));
+}
+
+/** Convert whole bars to quarter-note beats. */
+export function barsToBeats(bars: number, timeSig: TimeSignature): number {
+  return bars * beatsPerBar(timeSig);
+}
+
+/** Decompose a beat position into { bar (1-based), beat (1-based), tick }. */
+export function beatsToBarsBeats(
+  beats: number,
+  timeSig: TimeSignature,
+  ppq = TICKS_PER_BEAT,
+): { bar: number; beat: number; tick: number } {
+  const bpb = beatsPerBar(timeSig);
+  const bar = Math.floor(beats / bpb) + 1;
+  const beatInBar = Math.floor(beats % bpb) + 1;
+  const tick = Math.round((beats - Math.floor(beats)) * ppq);
+  return { bar, beat: beatInBar, tick };
+}
+
+/**
+ * Parse a "bar.beat" or "bar.beat.tick" string back to an absolute beat count.
+ * Returns null if the string cannot be parsed.
+ */
+export function parseBarBeat(
+  text: string,
+  timeSig: TimeSignature = DEFAULT_TIME_SIGNATURE,
+  ppq = TICKS_PER_BEAT,
+): number | null {
+  const parts = text.trim().split(".");
+  const bar  = parseInt(parts[0] ?? "", 10);
+  const beat = parseInt(parts[1] ?? "1", 10);
+  const tick = parseInt(parts[2] ?? "0", 10);
+  if (isNaN(bar) || isNaN(beat) || isNaN(tick)) return null;
+  const bpb = beatsPerBar(timeSig);
+  return Math.max(0, (bar - 1) * bpb + (beat - 1) + tick / ppq);
+}
+
+// ── Timeline view helpers ────────────────────────────────────────────────────
+
+/** Describes the current timeline viewport in pixel/beat coordinates. */
+export type TimelineView = {
+  pxPerBeat: number;
+  scrollLeft: number;
+  viewportWidth: number;
+};
+
+/** Total scrollable pixel width needed to show `projectLengthBeats`. */
+export function getContentWidth(
+  projectLengthBeats: number,
+  pxPerBeat: number,
+  viewportWidth: number,
+): number {
+  return Math.max(viewportWidth, projectLengthBeats * pxPerBeat + viewportWidth * 0.5);
+}
+
+/**
+ * After a zoom change, compute the new scrollLeft that keeps the beat at the
+ * horizontal center of the viewport fixed in place.
+ */
+export function preserveCenterBeatOnZoom(
+  oldPxPerBeat: number,
+  newPxPerBeat: number,
+  scrollLeft: number,
+  viewportWidth: number,
+): number {
+  const centerBeat = (scrollLeft + viewportWidth / 2) / oldPxPerBeat;
+  return Math.max(0, centerBeat * newPxPerBeat - viewportWidth / 2);
+}
+
+/** Returns the [startBeat, endBeat] range that is currently visible. */
+export function getVisibleBeatRange(
+  scrollLeft: number,
+  viewportWidth: number,
+  pxPerBeat: number,
+): [number, number] {
+  const start = Math.max(0, scrollLeft / pxPerBeat);
+  const end = (scrollLeft + viewportWidth) / pxPerBeat;
+  return [start, end];
+}
+
+/** Clamp a beat value to ≥ 0. */
+export function clampBeat(beat: number): number {
+  return Math.max(0, beat);
+}
 
 export function secondsPerBeat(bpm: number): number {
   return 60 / Math.max(1, bpm);

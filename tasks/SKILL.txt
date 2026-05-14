@@ -1,0 +1,489 @@
+# SKILL.txt — Futureboard Studio Agent Skill
+
+Purpose:
+This skill teaches Claude Code, Codex, and other coding agents how to work with the Futureboard Studio / Mochi DAW task backlog.
+
+Use this skill when:
+- The user asks to implement a task from `tasks/`
+- The user asks to continue DAW development
+- The user mentions a numbered task file such as `006-DawSystem.txt`
+- The user asks to fix a bug in the DAW prototype
+- The user asks to wire UI/state/menu/audio/plugin/window systems
+- The user asks for an incremental patch from a long task spec
+
+This skill is for controlled implementation.
+It is not permission to rewrite the entire repository.
+
+============================================================
+0. Core Behavior
+============================================================
+
+Always work from the smallest safe scope.
+
+Before changing code:
+1. Identify the requested task file.
+2. Read the task file.
+3. Identify the exact requested section/phase.
+4. Inspect the current implementation.
+5. Create a short plan.
+6. Patch only the requested scope.
+7. Run the relevant build/check command.
+8. Report what changed and what remains.
+
+Never implement an entire long task file unless the user explicitly requests it.
+
+============================================================
+1. Main Task Files
+============================================================
+
+Task index:
+
+`tasks/README.txt`
+- Index and usage guide for all task prompts.
+
+`tasks/webapp/001-Plugins.txt`
+- Built-in plugin UI
+- PluginShell
+- Insert device chain
+- Effect Editor integration
+- Horizontal plugin UI only
+- `track.inserts` as source of truth
+
+`tasks/webapp/002-WaveformCache.txt`
+- Web IndexedDB waveform cache
+- Electron cache folder
+- Waveform cache adapter
+- Cache keys/versioning
+- Avoid regenerating peaks
+
+`tasks/webapp/003-LinkMenuBar.txt`
+- Link implemented actions to Menu Bar
+- Command registry
+- Shortcuts
+- Command palette
+- Enabled/checked state
+
+`tasks/webapp/004-WindowingSystem.txt`
+- Internal floating windows
+- Dialog windows
+- Electron external windows
+- Project Wizard
+- Unsaved Changes dialog
+
+`tasks/webapp/005-ProjectDropdown.txt`
+- Zed-like Project Dropdown in Transport Bar
+- Recent Projects
+- Open More Project
+- Dirty guard
+
+`tasks/webapp/006-DawSystem.txt`
+- DAW system/state foundation
+- WebAudio first
+- project state
+- timeline/transport
+- mixer/routing
+- inserts/devices
+- selectors
+- command system
+- dirty/save state
+
+`tasks/webapp/007-TouchScreenSupport.txt`
+- Touch screen support
+- Pen/stylus support
+- Pointer events
+- Long press context menus
+- Touch hit targets
+
+`tasks/bridge/999-AudioEngine.txt`
+- Long-term Rust DSP core
+- WASM runtime
+- AudioWorklet
+- Electron native `.exe` DSP service
+- IPC protocol
+- Native audio service roadmap
+
+`tasks/native/000-ReWriteAll.txt`
+- Native UI rewrite roadmap
+- UI first
+- Do not rewrite audio engine here
+- React prototype remains living spec
+
+============================================================
+2. Agent File Conventions
+============================================================
+
+Claude Code:
+- Read `CLAUDE.md` for project guidance.
+- If task instructions reference `tasks/*.txt`, read only the relevant file/section.
+- Project memory may use `CLAUDE.md`; keep it concise and link to task files instead of duplicating huge specs.
+
+Codex:
+- Read `AGENTS.md` for project guidance.
+- If task instructions reference `tasks/*.txt`, read only the relevant file/section.
+- Do not assume every task file should be loaded at once.
+
+Both:
+- `README.txt` is the index.
+- Long files are reference specs, not one-shot prompts.
+- The user may say “ทำ 006 section 3” or “continue 001 plugin chain”.
+- Respect that scope exactly.
+
+============================================================
+3. Standard Agent Prompt Pattern
+============================================================
+
+When given a task, follow this pattern:
+
+1. Restate the exact task scope.
+2. Read the relevant task file/section.
+3. Inspect existing files.
+4. List files likely to change.
+5. Implement the smallest safe patch.
+6. Run build/check.
+7. Summarize:
+   - changed files
+   - behavior added/fixed
+   - tests/build result
+   - TODOs left intentionally
+
+Example user instruction:
+“Read `tasks/webapp/006-DawSystem.txt`. Implement only section 3 and 4.”
+
+Correct behavior:
+- Only implement Time/Musical Math and Timeline Coordinate System.
+- Do not implement WebAudio engine.
+- Do not rewrite UI.
+- Build and stop.
+
+Incorrect behavior:
+- Implement all of `006-DawSystem.txt`.
+- Rewrite project store, audio engine, UI, and commands in one patch.
+- Change unrelated styles.
+
+============================================================
+4. Hard Rules
+============================================================
+
+Do:
+- Make small patches.
+- Preserve existing working behavior.
+- Use existing stores/actions/selectors where possible.
+- Centralize duplicated logic.
+- Add safe placeholders for future-heavy features.
+- Disable unimplemented UI actions.
+- Keep TypeScript clean.
+- Run build after implementation.
+- Keep Web/Electron boundaries clean.
+- Use platform adapters instead of direct Electron/Node calls in React.
+- Keep current React/Electron app as living spec.
+
+Do not:
+- Rewrite the entire app unless explicitly requested.
+- Rewrite audio engine when doing UI task.
+- Implement native DSP when doing UI task.
+- Implement VST/CLAP hosting unless specifically requested.
+- Add random dependencies.
+- Add fake-success actions.
+- Duplicate project state in multiple stores.
+- Put heavy audio buffers into React persisted state.
+- Parse JSON or allocate heavily in realtime audio paths.
+- Break mouse/keyboard workflow while adding touch support.
+- Replace existing design system without permission.
+
+============================================================
+5. Build and Check Commands
+============================================================
+
+Prefer these commands when relevant:
+
+Frontend:
+- `bun run build`
+- `bun run typecheck` if available
+- `bun run lint` if available
+
+Electron:
+- `bun run build`
+- `bunx electron-builder --dir` if packaging/checking Electron shell
+
+Rust:
+- `cargo check`
+- `cargo test`
+- `cargo build`
+
+Audio/native tasks:
+- Keep WebAudio fallback working.
+- Rust/WASM/native service must be optional until stable.
+
+If a command does not exist:
+- Do not invent success.
+- Say it was unavailable.
+- Run the closest safe command.
+
+============================================================
+6. TypeScript Safety
+============================================================
+
+Avoid syntax that may break strict/erasable TypeScript settings.
+
+Avoid:
+- TypeScript parameter properties if the repo rejects them.
+- Huge `any` usage.
+- Unchecked optional fields.
+- Mutating state directly.
+- Adding duplicate types in random files.
+
+Prefer:
+- explicit interfaces/types
+- small helpers
+- normalized defaults
+- selectors
+- immutable updates
+- narrow type guards
+
+============================================================
+7. UI Rules
+============================================================
+
+The UI style is:
+- dark native DAW
+- compact
+- Zed-ish / pro audio workstation feel
+- 11–13px UI text
+- subtle borders
+- no generic SaaS cards
+- no huge toy controls
+- no random neon
+- no copied plugin branding
+
+Use existing:
+- theme tokens
+- DawIcon registry
+- current layout direction
+- compact density
+
+Plugin UI:
+- Must be horizontal.
+- Must fit the bottom Effect Editor.
+- Must connect to `track.inserts`.
+- Must not be gallery-only mock UI.
+
+Mixer:
+- Professional console feeling.
+- Fader, meter, dB scale, M/S/A sync with store.
+- Do not keep separate fake mixer state.
+
+Timeline:
+- One coordinate system.
+- Ruler, grid, clips, loop region, playhead must align.
+- Z-index layer contract must be clear.
+
+============================================================
+8. State Rules
+============================================================
+
+Single source of truth for project data:
+- project store / project state
+
+Important state ownership:
+- tracks live in project state
+- clips live in track/project state
+- MIDI notes live in MIDI clip state
+- mixer values live in track mixer state
+- inserts live in `track.inserts`
+- device params live in insert device params
+- routing lives in track routing/sends
+- transient meters should not cause full project rerenders
+- transport high-frequency movement should be isolated/throttled
+
+Never:
+- create local-only fake state for things that must persist
+- create a second insert chain outside `track.inserts`
+- create a second mixer model outside track mixer state
+- create a disconnected plugin gallery as the main system
+
+============================================================
+9. Audio Engine Rules
+============================================================
+
+Current:
+- WebAudio prototype remains fallback.
+
+Near-term:
+- WebAudio adapter should be clean and replaceable.
+
+Long-term:
+- Rust DSP core
+- WASM AudioWorklet for Web
+- Native `.exe` DSP service for Electron
+- Future SphereEngine native integration
+
+Rules:
+- UI talks to `AudioEngineAdapter`.
+- UI does not call AudioContext directly.
+- React does not import native/Electron internals directly.
+- Native service IPC must be safe.
+- Do not send huge binary audio data over JSON.
+- Realtime audio path must avoid allocation, blocking, IO, JSON parsing, and logging.
+
+============================================================
+10. Platform Boundary Rules
+============================================================
+
+Web:
+- no Node APIs
+- safe fallbacks
+- IndexedDB/OPFS for larger browser storage where appropriate
+
+Electron:
+- renderer uses preload IPC
+- main handles filesystem/dialog/process
+- no direct `fs`, `child_process`, or Electron imports inside React UI
+
+Native service:
+- spawned by Electron main
+- renderer talks through preload
+- service crash must not crash UI
+- fallback to WebAudio/WASM if unavailable
+
+============================================================
+11. Window/Dialog Rules
+============================================================
+
+Window system supports:
+- internal floating windows
+- internal dialogs
+- Electron external windows later
+
+Project Wizard and Unsaved Changes dialog are critical flows.
+
+Unsaved dialog:
+- Save
+- Don’t Save
+- Cancel
+- Cancel must abort destructive action
+- Escape should behave like Cancel
+- Do not lose project changes without explicit Don’t Save
+
+============================================================
+12. Touch/Pen Rules
+============================================================
+
+Use Pointer Events.
+
+Support:
+- mouse
+- touch
+- pen/stylus
+
+Use:
+- pointer capture
+- touch-action control on DAW surfaces
+- invisible touch hit targets
+- long press context menu
+- no global text-input breakage
+
+Do not:
+- make the whole desktop UI huge
+- break mouse/keyboard workflow
+- turn app into mobile layout
+
+============================================================
+13. Native Rewrite Rules
+============================================================
+
+Native rewrite task is UI-first.
+
+Do:
+- use current React app as living spec
+- build native UI shell in small stages
+- keep audio engine separate
+- port behavior gradually
+- share project model concepts
+
+Do not:
+- delete React app
+- rewrite DSP in native UI task
+- implement all native phases at once
+- break current app while experimenting
+
+============================================================
+14. How to Use Long Task Files
+============================================================
+
+Long task files are reference specs.
+
+Correct:
+“Read `006-DawSystem.txt`, implement only section 3.”
+
+Incorrect:
+“Implement all of `006-DawSystem.txt`.”
+
+When a file is huge:
+- search within it
+- read the requested section
+- ignore unrelated sections
+- ask for clarification only if the requested section is ambiguous
+
+============================================================
+15. Reporting Format
+============================================================
+
+After implementation, report:
+
+Summary:
+- what changed
+
+Files changed:
+- list key files
+
+Validation:
+- build/check command run
+- result
+
+Notes:
+- intentional TODOs
+- unsupported features kept disabled
+- next recommended section
+
+Do not paste enormous diffs into chat unless asked.
+
+============================================================
+16. Failure Handling
+============================================================
+
+If build fails:
+- show the error summary
+- fix if within scope
+- if not within scope, stop and explain
+
+If task scope is too large:
+- implement the first safe subset
+- build
+- clearly say what remains
+
+If an API is missing:
+- add safe skeleton only if needed
+- otherwise leave TODO and disabled UI
+
+Never claim success if build/check was not run or failed.
+
+============================================================
+17. Project Identity
+============================================================
+
+Project:
+- Futureboard Studio / Mochi DAW
+
+Development style:
+- spec-driven vibe coding
+- human-directed
+- agent-assisted
+- prompt-governed
+
+Current goal:
+- discover and stabilize DAW behavior in React/Electron
+- later move audio to Rust/WASM/native service
+- later rewrite UI natively with SphereEngine/SphereUI direction
+
+The current prototype is valuable.
+Treat it as the product spec.

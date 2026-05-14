@@ -18,6 +18,7 @@ const TYPE_ICONS: Record<TrackType, React.ElementType> = {
   bus:        GitMerge,
   return:     CornerDownLeft,
   group:      GitFork,
+  master:     Volume2,
 };
 
 const TYPE_LABELS: Record<TrackType, string> = {
@@ -28,6 +29,7 @@ const TYPE_LABELS: Record<TrackType, string> = {
   bus:        "Bus",
   return:     "Return",
   group:      "Group",
+  master:     "Master",
 };
 
 export function InspectorPanel({ width }: { width?: number } = {}) {

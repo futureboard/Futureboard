@@ -44,12 +44,10 @@ type Props = {
 };
 
 export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
-  const {
-    pixelsPerSecond,
-    selectedClipIds, setSelectedClipIds, toggleClipSelection,
-    setSelectedTrackId, setFocusedPanel, setDraggingClipTargetIdx,
-    currentTool,
-  } = useUIStore();
+  // Specific selectors — avoid subscribing to scrollX which updates at 60fps during scroll.
+  const pixelsPerSecond = useUIStore(s => s.pixelsPerSecond);
+  const selectedClipIds = useUIStore(s => s.selectedClipIds);
+  const currentTool     = useUIStore(s => s.currentTool);
   const { moveClip, moveClipToTrack, project } = useProjectStore();
 
   const dragStartX    = useRef(0);
@@ -104,7 +102,7 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
           Math.abs(c.startTime - splitTime) < 0.002 &&
           c.trackId === clip.trackId,
       );
-    setSelectedClipIds(rightClip ? [rightClip.id] : [clip.id]);
+    useUIStore.getState().setSelectedClipIds(rightClip ? [rightClip.id] : [clip.id]);
   };
 
   // ── Mute tool ─────────────────────────────────────────────────────────────
@@ -126,9 +124,9 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
     const targetIds = sids.includes(clip.id) && sids.length >= 2 ? sids : null;
 
     if (!targetIds) {
-      setSelectedClipIds([clip.id]);
-      setSelectedTrackId(track.id);
-      setFocusedPanel("timeline");
+      useUIStore.getState().setSelectedClipIds([clip.id]);
+      useUIStore.getState().setSelectedTrackId(track.id);
+      useUIStore.getState().setFocusedPanel("timeline");
       showToast("Select 2 or more adjacent clips to glue");
       return;
     }
@@ -160,25 +158,25 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
     useHistoryStore
       .getState()
       .execute(new GlueClipsCommand(sorted.map((r) => r.clip), glueTrackId));
-    setSelectedClipIds([sorted[0].clip.id]);
+    useUIStore.getState().setSelectedClipIds([sorted[0].clip.id]);
   };
 
   // ── Time tool ─────────────────────────────────────────────────────────────
   const handleTimeTool = () => {
-    if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-    setSelectedTrackId(track.id);
+    if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+    useUIStore.getState().setSelectedTrackId(track.id);
     showToast("Time stretch coming soon");
   };
 
   // ── Pointer drag ──────────────────────────────────────────────────────────
   const startPointerDrag = (e: React.MouseEvent) => {
     if (e.shiftKey) {
-      toggleClipSelection(clip.id);
+      useUIStore.getState().toggleClipSelection(clip.id);
     } else if (!selectedClipIds.includes(clip.id)) {
-      setSelectedClipIds([clip.id]);
+      useUIStore.getState().setSelectedClipIds([clip.id]);
     }
-    setSelectedTrackId(track.id);
-    setFocusedPanel("timeline");
+    useUIStore.getState().setSelectedTrackId(track.id);
+    useUIStore.getState().setFocusedPanel("timeline");
 
     dragStartX.current    = e.clientX;
     dragStartY.current    = e.clientY;
@@ -200,14 +198,14 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
       moveClip(clip.id, clip.trackId, t);
 
       const slot = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
-      setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
+      useUIStore.getState().setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
     };
 
     const onUp = (ev: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       setDragging(false);
-      setDraggingClipTargetIdx(null);
+      useUIStore.getState().setDraggingClipTargetIdx(null);
 
       const slot        = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
       const idx         = Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot));
@@ -247,9 +245,9 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
     if (tool === "time") { handleTimeTool();  return; }
 
     if (tool === "pen") {
-      if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-      setSelectedTrackId(track.id);
-      setFocusedPanel("timeline");
+      if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+      useUIStore.getState().setSelectedTrackId(track.id);
+      useUIStore.getState().setFocusedPanel("timeline");
       return;
     }
 
@@ -260,9 +258,9 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
   const handleResizeLeft = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (e.button !== 0) return;
-    if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-    setSelectedTrackId(track.id);
-    setFocusedPanel("timeline");
+    if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+    useUIStore.getState().setSelectedTrackId(track.id);
+    useUIStore.getState().setFocusedPanel("timeline");
 
     const startX       = e.clientX;
     const initStart    = clip.startTime;
@@ -305,9 +303,9 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
   const handleResizeRight = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (e.button !== 0) return;
-    if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-    setSelectedTrackId(track.id);
-    setFocusedPanel("timeline");
+    if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+    useUIStore.getState().setSelectedTrackId(track.id);
+    useUIStore.getState().setFocusedPanel("timeline");
 
     const startX      = e.clientX;
     const initDuration = clip.duration;
@@ -344,9 +342,9 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-        setSelectedTrackId(track.id);
-        setFocusedPanel("timeline");
+        if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+        useUIStore.getState().setSelectedTrackId(track.id);
+        useUIStore.getState().setFocusedPanel("timeline");
         useUIStore.getState().setContextMenu(true, { x: e.clientX, y: e.clientY }, [
           { id: "ctx.duplicate_clip", label: "Duplicate", accelerator: "Ctrl+D", action: "edit:duplicate" },
           { type: "separator", id: "ctx.sep.1" },

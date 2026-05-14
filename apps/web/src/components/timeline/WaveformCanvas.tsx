@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { WaveformPeaks, WaveformStatus } from "../../types/daw";
 
 type Props = {
@@ -19,7 +19,7 @@ type Props = {
   status?: WaveformStatus;
 };
 
-export function WaveformCanvas({
+export const WaveformCanvas = memo(function WaveformCanvas({
   peaks,
   width,
   height,
@@ -133,7 +133,7 @@ export function WaveformCanvas({
       )}
     </div>
   );
-}
+});
 
 // ── Subtle shimmer / placeholder visuals ──────────────────────────────────────
 

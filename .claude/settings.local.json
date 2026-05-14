@@ -7,7 +7,12 @@
       "Bash(Get-ChildItem -Path \"D:\\\\private\\\\DawProject\" -Force)",
       "Bash(Select-Object Name, FullName)",
       "Bash(Format-Table)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(cd /d H:\\\\pj\\\\DawProject)",
+      "Bash(dir /B)",
+      "Bash(Get-ChildItem -Path \"H:\\\\pj\\\\DawProject\\\\apps\\\\web\\\\src\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)"
     ]
   }
 }

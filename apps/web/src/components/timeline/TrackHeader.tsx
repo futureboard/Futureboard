@@ -10,6 +10,7 @@ const TYPE_ICONS: Record<TrackType, React.ElementType> = {
   bus:        GitMerge,
   return:     CornerDownLeft,
   group:      GitFork,
+  master:     Volume2,
 };
 
 import type { DawTrack } from "../../types/daw";

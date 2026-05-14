@@ -16,6 +16,7 @@ import {
   type OpenDialogResult,
   type PickedAudioFile,
   type SaveDialogResult,
+  type WaveformCacheEntryIpc,
 } from "./ipc/channels.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -104,7 +105,7 @@ function createWindow(): BrowserWindow {
       preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
       // V8 bytecode cache for preload + renderer scripts — significantly
       // reduces parse/compile time on second+ launches.
       v8CacheOptions: "code",
@@ -317,6 +318,85 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.WindowClose, (event): void => {
     senderWindow(event)?.close();
   });
+
+  // ── Waveform peak cache ────────────────────────────────────────────────────
+  // Peaks are stored as JSON files under userData/cache/waveforms/.
+  // Renderer sends only the cache key — main decides the actual file path.
+
+  function waveformCacheDir(): string {
+    return path.join(app.getPath("userData"), "cache", "waveforms");
+  }
+
+  function cacheKeyToFilename(key: string): string {
+    // Replace characters that are unsafe in filenames with underscores
+    return key.replace(/[^a-zA-Z0-9_\-:.]/g, "_") + ".json";
+  }
+
+  async function ensureCacheDir(): Promise<string> {
+    const dir = waveformCacheDir();
+    await fs.mkdir(dir, { recursive: true });
+    return dir;
+  }
+
+  ipcMain.handle(
+    IpcChannels.WaveformCacheGet,
+    async (_event, key: unknown): Promise<WaveformCacheEntryIpc | null> => {
+      if (!isValidString(key)) return null;
+      try {
+        const dir = await ensureCacheDir();
+        const filePath = path.join(dir, cacheKeyToFilename(key));
+        const raw = await fs.readFile(filePath, "utf-8");
+        return JSON.parse(raw) as WaveformCacheEntryIpc;
+      } catch {
+        return null;
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.WaveformCacheSet,
+    async (_event, key: unknown, entry: unknown): Promise<void> => {
+      if (!isValidString(key) || typeof entry !== "object" || entry === null) return;
+      try {
+        const dir = await ensureCacheDir();
+        const filePath = path.join(dir, cacheKeyToFilename(key));
+        await fs.writeFile(filePath, JSON.stringify(entry), "utf-8");
+      } catch (e) {
+        console.warn("[WaveformCache] write failed:", e);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.WaveformCacheDelete,
+    async (_event, key: unknown): Promise<void> => {
+      if (!isValidString(key)) return;
+      try {
+        const dir = waveformCacheDir();
+        const filePath = path.join(dir, cacheKeyToFilename(key));
+        await fs.unlink(filePath);
+      } catch {
+        // File may not exist — ignore
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.WaveformCacheClear,
+    async (): Promise<void> => {
+      try {
+        const dir = waveformCacheDir();
+        const entries = await fs.readdir(dir);
+        await Promise.all(
+          entries
+            .filter((f) => f.endsWith(".json"))
+            .map((f) => fs.unlink(path.join(dir, f)).catch(() => {})),
+        );
+      } catch {
+        // Directory may not exist — ignore
+      }
+    },
+  );
 }
 
 // Register IPC handlers eagerly so they are guaranteed to be live before the

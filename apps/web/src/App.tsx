@@ -3,6 +3,7 @@ import { AppShell } from "./components/AppShell";
 import { TransportBar } from "./components/TransportBar";
 import { CommandPalette } from "./components/ui/CommandPalette";
 import { ContextMenu } from "./components/ui/ContextMenu";
+import { WindowHost } from "./components/windows/WindowHost";
 import { audioEngine } from "./engine/AudioEngine";
 import { transport } from "./engine/Transport";
 import { metronomeScheduler } from "./engine/MetronomeScheduler";
@@ -13,6 +14,7 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
 import { platform } from "./platform";
 import { ToastContainer } from "./components/ui/Toast";
+import { useRecentProjectsStore } from "./store/recentProjectsStore";
 import "./App.css";
 
 // Wire engine modules to app-layer state — runs once at module load time.
@@ -62,6 +64,13 @@ export default function App() {
   useEffect(() => {
     loadLocal();
     useUIStore.getState().setSaveStatus("saved");
+    // Register the loaded project as a recent entry
+    const { project: loaded } = useProjectStore.getState();
+    useRecentProjectsStore.getState().addRecentProject({
+      id: loaded.id,
+      name: loaded.name,
+      source: "browser",
+    });
   }, [loadLocal]);
 
   // Mark status bar "unsaved" whenever the project data actually changes.
@@ -105,6 +114,7 @@ export default function App() {
       </div>
       <CommandPalette />
       <ContextMenu />
+      <WindowHost />
       <ToastContainer />
     </div>
   );

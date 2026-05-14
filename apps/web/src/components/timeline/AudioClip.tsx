@@ -45,12 +45,11 @@ type Props = {
 };
 
 export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
-  const {
-    pixelsPerSecond,
-    selectedClipIds, setSelectedClipIds, toggleClipSelection,
-    setSelectedTrackId, setFocusedPanel, setDraggingClipTargetIdx,
-    currentTool,
-  } = useUIStore();
+  // Specific selectors — AudioClip must NOT subscribe to scrollX or unrelated UI state.
+  // Scroll updates scrollX at 60fps; subscribing to the full store would cause a rerender storm.
+  const pixelsPerSecond = useUIStore(s => s.pixelsPerSecond);
+  const selectedClipIds = useUIStore(s => s.selectedClipIds);
+  const currentTool     = useUIStore(s => s.currentTool);
   const { peakCache, waveformStatus, moveClip, moveClipToTrack, project } = useProjectStore();
   const peaks = peakCache.get(clip.fileId);
   const sourceFile = project.files.find((f) => f.id === clip.fileId);
@@ -93,7 +92,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
           Math.abs(c.startTime - splitTime) < 0.002 &&
           c.fileId === clip.fileId,
       );
-    setSelectedClipIds(rightClip ? [rightClip.id] : [clip.id]);
+    useUIStore.getState().setSelectedClipIds(rightClip ? [rightClip.id] : [clip.id]);
   };
 
   // ── Mute tool ─────────────────────────────────────────────────────────────
@@ -117,9 +116,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
 
     if (!targetIds) {
       // Not enough selected — just select this clip
-      setSelectedClipIds([clip.id]);
-      setSelectedTrackId(track.id);
-      setFocusedPanel("timeline");
+      useUIStore.getState().setSelectedClipIds([clip.id]);
+      useUIStore.getState().setSelectedTrackId(track.id);
+      useUIStore.getState().setFocusedPanel("timeline");
       showToast("Select 2 or more adjacent clips to glue");
       return;
     }
@@ -153,25 +152,25 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     useHistoryStore
       .getState()
       .execute(new GlueClipsCommand(sorted.map((r) => r.clip), glueTrackId));
-    setSelectedClipIds([sorted[0].clip.id]);
+    useUIStore.getState().setSelectedClipIds([sorted[0].clip.id]);
   };
 
   // ── Time tool ─────────────────────────────────────────────────────────────
   const handleTimeTool = () => {
-    if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-    setSelectedTrackId(track.id);
+    if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+    useUIStore.getState().setSelectedTrackId(track.id);
     showToast("Time stretch coming soon");
   };
 
   // ── Pointer drag ──────────────────────────────────────────────────────────
   const startPointerDrag = (e: React.MouseEvent) => {
     if (e.shiftKey) {
-      toggleClipSelection(clip.id);
+      useUIStore.getState().toggleClipSelection(clip.id);
     } else if (!selectedClipIds.includes(clip.id)) {
-      setSelectedClipIds([clip.id]);
+      useUIStore.getState().setSelectedClipIds([clip.id]);
     }
-    setSelectedTrackId(track.id);
-    setFocusedPanel("timeline");
+    useUIStore.getState().setSelectedTrackId(track.id);
+    useUIStore.getState().setFocusedPanel("timeline");
 
     dragStartX.current    = e.clientX;
     dragStartY.current    = e.clientY;
@@ -193,14 +192,14 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       moveClip(clip.id, clip.trackId, t);
 
       const slot = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
-      setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
+      useUIStore.getState().setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
     };
 
     const onUp = (ev: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       setDragging(false);
-      setDraggingClipTargetIdx(null);
+      useUIStore.getState().setDraggingClipTargetIdx(null);
 
       const slot        = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
       const idx         = Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot));
@@ -241,9 +240,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
 
     // pen tool on existing clip falls through to pointer (select, no drag)
     if (tool === "pen") {
-      if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-      setSelectedTrackId(track.id);
-      setFocusedPanel("timeline");
+      if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+      useUIStore.getState().setSelectedTrackId(track.id);
+      useUIStore.getState().setFocusedPanel("timeline");
       return;
     }
 
@@ -255,9 +254,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   const handleResizeLeft = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (e.button !== 0) return;
-    if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-    setSelectedTrackId(track.id);
-    setFocusedPanel("timeline");
+    if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+    useUIStore.getState().setSelectedTrackId(track.id);
+    useUIStore.getState().setFocusedPanel("timeline");
 
     const startX       = e.clientX;
     const initStart    = clip.startTime;
@@ -300,9 +299,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   const handleResizeRight = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (e.button !== 0) return;
-    if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-    setSelectedTrackId(track.id);
-    setFocusedPanel("timeline");
+    if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+    useUIStore.getState().setSelectedTrackId(track.id);
+    useUIStore.getState().setFocusedPanel("timeline");
 
     const startX      = e.clientX;
     const initDuration = clip.duration;
@@ -339,9 +338,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!selectedClipIds.includes(clip.id)) setSelectedClipIds([clip.id]);
-        setSelectedTrackId(track.id);
-        setFocusedPanel("timeline");
+        if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
+        useUIStore.getState().setSelectedTrackId(track.id);
+        useUIStore.getState().setFocusedPanel("timeline");
         useUIStore.getState().setContextMenu(true, { x: e.clientX, y: e.clientY }, [
           { id: "ctx.duplicate_clip", label: "Duplicate", accelerator: "Ctrl+D", action: "edit:duplicate" },
           { type: "separator", id: "ctx.sep.1" },

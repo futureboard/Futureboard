@@ -1,5 +1,6 @@
 import {
   Check,
+  ChevronDown,
   ChevronRight,
   Circle,
   FolderOpen,
@@ -25,6 +26,7 @@ import { useMetronomeStore } from "../store/metronomeStore";
 import { useUIStore } from "../store/uiStore";
 import { formatBarBeatTick } from "../utils/musicalTime";
 import logoApp from "../assets/logo.png"
+import { ProjectDropdown } from "./project/ProjectDropdown";
 
 
 const TIME_SIG_NUMERATORS = [2, 3, 4, 5, 6, 7, 8, 9, 12];
@@ -187,12 +189,18 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     toggleLoop,
     snapToGrid,
     toggleSnapToGrid,
+    currentTool,
+    selectedClipIds,
+    selectedTrackId,
   } = useUIStore();
-  const { enabled: metronomeEnabled, toggle: toggleMetronome } = useMetronomeStore();
+  const { enabled: metronomeEnabled, toggle: toggleMetronome, countInEnabled } = useMetronomeStore();
 
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
   const barRef = useRef<HTMLDivElement>(null);
+  const projectBtnRef = useRef<HTMLDivElement>(null);
   const timeSig = project.timeSignature ?? { numerator: 4, denominator: 4 };
+  const saveStatus = useUIStore((s) => s.saveStatus);
 
   useEffect(() => {
     if (!openMenu) return;
@@ -227,24 +235,114 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     setIsPlaying(false);
   };
 
+  const hasClipSel = selectedClipIds.length > 0;
+  const hasTrackSel = !!selectedTrackId;
+
   const getMenuItemState = (item: AppMenuItem) => {
     if (item.type === "separator") return {};
     if (item.type === "submenu") return {};
 
     switch (item.action) {
+      // ── Transport checks ──────────────────────────────────────────────
       case "transport:toggle-loop":
         return { checked: loopEnabled };
+      case "transport:toggle-metronome":
+        return { checked: metronomeEnabled };
+      case "transport:toggle-count-in":
+        return { checked: countInEnabled };
+
+      // ── Snap checks ───────────────────────────────────────────────────
       case "timeline:toggle-snap":
         return { checked: snapToGrid };
+      case "timeline:set-snap-off":
+        return { checked: !snapToGrid };
+      case "timeline:set-snap-bar":
+      case "timeline:set-snap-beat":
+      case "timeline:set-snap-eighth":
+      case "timeline:set-snap-sixteenth":
+      case "timeline:set-snap-thirty-second":
+        return { checked: false };
+
+      // ── Panel visibility checks ───────────────────────────────────────
+      case "panel:toggle-browser":
+      case "window.show_browser":
+        return { checked: panels.browser?.visible };
       case "panel:toggle-inspector":
       case "window.show_inspector":
         return { checked: panels.inspector?.visible };
       case "panel:toggle-mixer":
       case "window.show_mixer":
         return { checked: panels.mixer?.visible };
-      case "panel:toggle-browser":
-      case "window.show_browser":
-        return { checked: panels.browser?.visible };
+      case "panel:toggle-automation":
+        return { checked: false };
+      case "panel:toggle-device-panel":
+        return { checked: false };
+
+      // ── Panel dock position checks ────────────────────────────────────
+      case "panel:browser-dock-left":
+        return { checked: panels.browser?.dock === "left" };
+      case "panel:browser-dock-right":
+        return { checked: panels.browser?.dock === "right" };
+      case "panel:browser-dock-bottom":
+        return { checked: panels.browser?.dock === "bottom" };
+      case "panel:browser-float":
+        return { checked: panels.browser?.dock === "float" };
+
+      case "panel:inspector-dock-left":
+        return { checked: panels.inspector?.dock === "left" };
+      case "panel:inspector-dock-right":
+        return { checked: panels.inspector?.dock === "right" };
+      case "panel:inspector-dock-bottom":
+        return { checked: panels.inspector?.dock === "bottom" };
+      case "panel:inspector-float":
+        return { checked: panels.inspector?.dock === "float" };
+
+      case "panel:mixer-dock-left":
+        return { checked: panels.mixer?.dock === "left" };
+      case "panel:mixer-dock-right":
+        return { checked: panels.mixer?.dock === "right" };
+      case "panel:mixer-dock-bottom":
+        return { checked: panels.mixer?.dock === "bottom" };
+      case "panel:mixer-float":
+        return { checked: panels.mixer?.dock === "float" };
+
+      // ── Arrangement tool checks ───────────────────────────────────────
+      case "tools:select-pointer":
+        return { checked: currentTool === "pointer" };
+      case "tools:select-pen":
+        return { checked: currentTool === "pen" };
+      case "tools:select-cut":
+        return { checked: currentTool === "cut" };
+      case "tools:select-glue":
+        return { checked: currentTool === "glue" };
+      case "tools:select-mute":
+        return { checked: currentTool === "mute" };
+      case "tools:select-time":
+        return { checked: currentTool === "time" };
+      case "tools:select-automation":
+        return { checked: currentTool === "automation" };
+
+      // ── Context-aware enabled states ──────────────────────────────────
+      case "edit:duplicate":
+      case "edit:copy":
+      case "edit:cut":
+        return { enabled: hasClipSel };
+      case "edit:delete":
+        return { enabled: hasClipSel || hasTrackSel };
+      case "clip:split-at-playhead":
+        return { enabled: hasClipSel };
+      case "edit:select-track-clips":
+        return { enabled: hasTrackSel };
+      case "track:duplicate":
+      case "track:rename":
+      case "track:delete":
+        return { enabled: hasTrackSel };
+
+      // stubs that should stay disabled
+      case "track:freeze":
+      case "track:flatten":
+        return { enabled: false };
+
       default:
         return {};
     }
@@ -323,7 +421,10 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
                 <TopMenuButton
                   label={menu.label}
                   open={openMenu === menu.id}
-                  onClick={() => setOpenMenu((current) => (current === menu.id ? null : menu.id))}
+                  onClick={() => {
+                    setOpenMenu((current) => (current === menu.id ? null : menu.id));
+                    setProjectDropdownOpen(false);
+                  }}
                   onMouseEnter={() => {
                     if (openMenu) setOpenMenu(menu.id);
                   }}
@@ -336,13 +437,41 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           </div>
 
           <div className="h-5 w-px shrink-0 bg-daw-border" />
-          <div className="flex min-w-0 max-w-full items-center gap-2 px-1">
-            <div className="min-w-0 flex-1 truncate text-left text-[12px] font-semibold leading-tight text-daw-text" title={project.name}>
-              {project.name}
-            </div>
-            <div className="shrink-0 whitespace-nowrap text-right text-[8px] font-medium uppercase tracking-wide text-daw-faint">
-              Saved locally
-            </div>
+          <div ref={projectBtnRef} className="relative flex min-w-0 max-w-[220px] items-center px-1">
+            <button
+              type="button"
+              onClick={() => {
+                setProjectDropdownOpen((v) => !v);
+                setOpenMenu(null);
+              }}
+              title={project.name}
+              className={[
+                "app-no-drag flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 transition-colors",
+                projectDropdownOpen
+                  ? "bg-daw-surface-high text-daw-text"
+                  : "text-daw-text hover:bg-daw-surface-high",
+              ].join(" ")}
+            >
+              <span className="min-w-0 truncate text-left text-[12px] font-semibold leading-tight">
+                {project.name}
+              </span>
+              <ChevronDown
+                size={10}
+                className={[
+                  "shrink-0 text-daw-faint transition-transform",
+                  projectDropdownOpen ? "rotate-180" : "",
+                ].join(" ")}
+              />
+            </button>
+            <span className="ml-1.5 shrink-0 whitespace-nowrap text-[8px] font-medium uppercase tracking-wide text-daw-faint">
+              {saveStatus === "unsaved" ? "Unsaved" :
+               saveStatus === "saving" ? "Saving..." :
+               saveStatus === "error" ? "Error" :
+               "Saved"}
+            </span>
+            {projectDropdownOpen && (
+              <ProjectDropdown onClose={() => setProjectDropdownOpen(false)} />
+            )}
           </div>
         </div>
 

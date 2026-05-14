@@ -1,0 +1,88 @@
+/**
+ * Normalization helpers — fill in default values for older project state
+ * so UI and engine code never crash on missing fields.
+ */
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend } from "../types/daw";
+
+export function normalizeInsertDevice(raw: Partial<InsertDevice>, index: number): InsertDevice {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    type: raw.type ?? "custom",
+    name: raw.name ?? "Insert",
+    // handle old 'bypassed' field: bypassed=true → enabled=false
+    enabled: raw.enabled !== undefined ? raw.enabled : !(raw as Record<string, unknown>)["bypassed"],
+    order: raw.order !== undefined ? raw.order : index,
+    params: raw.params ?? {},
+  };
+}
+
+export function normalizeSend(raw: Partial<TrackSend>): TrackSend {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    name: raw.name ?? "Send",
+    targetTrackId: raw.targetTrackId ?? "",
+    level: raw.level ?? 1,
+    enabled: raw.enabled !== false,
+    preFader: raw.preFader ?? false,
+  };
+}
+
+export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
+  const inserts = (raw.inserts ?? []).map((ins, i) =>
+    normalizeInsertDevice(ins as Partial<InsertDevice>, i)
+  );
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    name: raw.name ?? "Track",
+    type: raw.type ?? "audio",
+    color: raw.color ?? "#3b82f6",
+    channelCount: raw.channelCount ?? 2,
+    volume: raw.volume ?? 1,
+    pan: raw.pan ?? 0,
+    muted: raw.muted ?? false,
+    solo: raw.solo ?? false,
+    armed: raw.armed ?? false,
+    clips: (raw.clips ?? []).map((c) => normalizeClip(c as Partial<DawClip>)),
+    inserts,
+    sends: (raw.sends ?? []).map((s) => normalizeSend(s as Partial<TrackSend>)),
+    output: raw.output ?? "master",
+    height: raw.height,
+    collapsed: raw.collapsed ?? false,
+  };
+}
+
+export function normalizeClip(raw: Partial<DawClip>): DawClip {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    name: raw.name ?? "Clip",
+    type: raw.type ?? (raw.fileId ? "audio" : "midi"),
+    fileId: raw.fileId ?? "",
+    trackId: raw.trackId ?? "",
+    startTime: raw.startTime ?? 0,
+    offset: raw.offset ?? 0,
+    duration: raw.duration ?? 1,
+    gain: raw.gain ?? 1,
+    fadeIn: raw.fadeIn ?? 0,
+    fadeOut: raw.fadeOut ?? 0,
+    color: raw.color,
+    muted: raw.muted ?? false,
+    locked: raw.locked ?? false,
+    notes: raw.notes ?? [],
+  };
+}
+
+export function normalizeProject(raw: Partial<DawProject>): DawProject {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    name: raw.name ?? "Untitled Project",
+    version: raw.version ?? 1,
+    sampleRate: raw.sampleRate ?? 48000,
+    bpm: Math.max(20, Math.min(300, raw.bpm ?? 120)),
+    timeSignature: raw.timeSignature ?? { numerator: 4, denominator: 4 },
+    tracks: (raw.tracks ?? []).map((t) => normalizeTrack(t as Partial<DawTrack>)),
+    files: raw.files ?? [],
+    masterTrackId: raw.masterTrackId,
+    loop: raw.loop,
+    markers: raw.markers ?? [],
+  };
+}

@@ -2,7 +2,7 @@ import type { DawClip, DawTrack } from "../../types/daw";
 import { clipType } from "../../types/daw";
 import { AudioClip } from "./AudioClip";
 import { MidiClip } from "./MidiClip";
-import { TRACK_HEIGHT } from "../../theme";
+import { HEADER_WIDTH, TRACK_HEIGHT } from "../../theme";
 import { useUIStore } from "../../store/uiStore";
 import { snapTime, secondsPerBeat } from "../../utils/musicalTime";
 import { useProjectStore } from "../../store/projectStore";
@@ -19,9 +19,20 @@ type Props = {
   width: number;
 };
 
+// Overscan: render clips this many seconds beyond the visible edge on each side.
+const OVERSCAN_SECONDS = 4;
+
 export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
-  const selectedTrackId = useUIStore((s) => s.selectedTrackId);
+  const selectedTrackId       = useUIStore((s) => s.selectedTrackId);
   const draggingClipTargetIdx = useUIStore((s) => s.draggingClipTargetIdx);
+  const selectedClipIds       = useUIStore((s) => s.selectedClipIds);
+  const scrollX               = useUIStore((s) => s.scrollX);
+  const pixelsPerSecond       = useUIStore((s) => s.pixelsPerSecond);
+
+  // Viewport bounds in seconds — only clips overlapping this range are rendered.
+  const viewportWidth = typeof window !== "undefined" ? window.innerWidth - HEADER_WIDTH : 1200;
+  const visibleStart  = Math.max(0, scrollX / pixelsPerSecond - OVERSCAN_SECONDS);
+  const visibleEnd    = scrollX / pixelsPerSecond + viewportWidth / pixelsPerSecond + OVERSCAN_SECONDS;
   const [isDragOver, setIsDragOver] = useState(false);
 
   const selected = selectedTrackId === track.id;
@@ -193,25 +204,32 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
           style={{ background: `${track.color}18` }}
         />
       )}
-      {track.clips.map((clip) =>
-        clipType(clip) === "midi" ? (
-          <MidiClip
-            key={clip.id}
-            clip={clip}
-            track={track}
-            trackIndex={trackIndex}
-            allTracks={allTracks}
-          />
-        ) : (
-          <AudioClip
-            key={clip.id}
-            clip={clip}
-            track={track}
-            trackIndex={trackIndex}
-            allTracks={allTracks}
-          />
-        )
-      )}
+      {track.clips
+        .filter((clip) => {
+          // Keep selected clips mounted even when scrolled off — preserves selection state.
+          if (selectedClipIds.includes(clip.id)) return true;
+          // Visibility: clip overlaps [visibleStart, visibleEnd]
+          return clip.startTime < visibleEnd && clip.startTime + clip.duration > visibleStart;
+        })
+        .map((clip) =>
+          clipType(clip) === "midi" ? (
+            <MidiClip
+              key={clip.id}
+              clip={clip}
+              track={track}
+              trackIndex={trackIndex}
+              allTracks={allTracks}
+            />
+          ) : (
+            <AudioClip
+              key={clip.id}
+              clip={clip}
+              track={track}
+              trackIndex={trackIndex}
+              allTracks={allTracks}
+            />
+          )
+        )}
     </div>
   );
 }

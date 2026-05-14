@@ -4,6 +4,8 @@ import { useUIStore } from "../store/uiStore";
 import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
 import { useHistoryStore } from "../store/historyStore";
+import { useRecentProjectsStore } from "../store/recentProjectsStore";
+import { useWindowStore } from "../store/windowStore";
 import { transport } from "../engine/Transport";
 import { getTrackColor } from "../theme";
 import { platform } from "../platform";
@@ -19,10 +21,29 @@ import {
   SetTrackColorCommand,
   SetTrackMuteCommand,
   SetTrackSoloCommand,
+  SplitClipCommand,
 } from "../commands";
 
+function guardDirty(continuation: () => void): void {
+  const saveStatus = useUIStore.getState().saveStatus;
+  if (saveStatus !== "unsaved") {
+    continuation();
+    return;
+  }
+  const ws = useWindowStore.getState();
+  if (ws.isWindowOpen("unsavedChanges")) return;
+  ws.setPendingAction(continuation);
+  ws.openDialog({
+    contentType: "unsavedChanges",
+    title: "Unsaved Changes",
+    modal: true,
+    width: 400,
+    height: 210,
+    closable: true,
+  });
+}
+
 export function runAction(actionId: string) {
-  // Close command palette if open
   const uiStore = useUIStore.getState();
   if (uiStore.commandPaletteOpen) uiStore.setCommandPaletteOpen(false);
 
@@ -32,7 +53,7 @@ export function runAction(actionId: string) {
   const history = useHistoryStore.getState();
 
   switch (actionId) {
-    // ── Tools ──────────────────────────────────────────────────────────────
+    // ── Command palette ────────────────────────────────────────────────────
     case "tools:command-palette":
     case "tools:quick-search":
       uiStore.toggleCommandPalette();
@@ -40,6 +61,29 @@ export function runAction(actionId: string) {
 
     case "command:close":
       uiStore.setCommandPaletteOpen(false);
+      break;
+
+    // ── Arrangement tools ──────────────────────────────────────────────────
+    case "tools:select-pointer":
+      uiStore.setCurrentTool("pointer");
+      break;
+    case "tools:select-pen":
+      uiStore.setCurrentTool("pen");
+      break;
+    case "tools:select-cut":
+      uiStore.setCurrentTool("cut");
+      break;
+    case "tools:select-glue":
+      uiStore.setCurrentTool("glue");
+      break;
+    case "tools:select-mute":
+      uiStore.setCurrentTool("mute");
+      break;
+    case "tools:select-time":
+      uiStore.setCurrentTool("time");
+      break;
+    case "tools:select-automation":
+      uiStore.setCurrentTool("automation");
       break;
 
     // ── Transport ──────────────────────────────────────────────────────────
@@ -61,6 +105,32 @@ export function runAction(actionId: string) {
       transport.seek(0);
       break;
 
+    case "transport:go-to-end": {
+      const { tracks } = projectStore.project;
+      const end = tracks.reduce((max, track) => {
+        const trackEnd = track.clips.reduce((m, c) => Math.max(m, c.startTime + c.duration), 0);
+        return Math.max(max, trackEnd);
+      }, 0);
+      transport.seek(end);
+      break;
+    }
+
+    case "transport:rewind": {
+      const { bpm, timeSignature } = projectStore.project;
+      const timeSig = timeSignature ?? { numerator: 4, denominator: 4 };
+      const barLen = (60 / bpm) * timeSig.numerator;
+      transport.seek(Math.max(0, transport.projectTime - barLen));
+      break;
+    }
+
+    case "transport:fast-forward": {
+      const { bpm, timeSignature } = projectStore.project;
+      const timeSig = timeSignature ?? { numerator: 4, denominator: 4 };
+      const barLen = (60 / bpm) * timeSig.numerator;
+      transport.seek(transport.projectTime + barLen);
+      break;
+    }
+
     case "transport:toggle-loop":
       uiStore.toggleLoop();
       break;
@@ -80,6 +150,12 @@ export function runAction(actionId: string) {
 
     case "edit:redo":
       history.redo();
+      break;
+
+    // clipboard not yet implemented
+    case "edit:cut":
+    case "edit:copy":
+    case "edit:paste":
       break;
 
     case "edit:delete": {
@@ -111,13 +187,60 @@ export function runAction(actionId: string) {
       break;
     }
 
+    case "edit:select-all": {
+      const allIds = projectStore.project.tracks.flatMap((t) => t.clips.map((c) => c.id));
+      uiStore.setSelectedClipIds(allIds);
+      break;
+    }
+
     case "edit:deselect-all":
       uiStore.setSelectedClipIds([]);
       uiStore.setSelectedTrackId(null);
       break;
 
+    case "edit:select-track-clips": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const track = projectStore.project.tracks.find((t) => t.id === selectedTrackId);
+      if (track) uiStore.setSelectedClipIds(track.clips.map((c) => c.id));
+      break;
+    }
+
+    case "edit:select-loop-range":
+      break;
+
+    // ── Clip actions ───────────────────────────────────────────────────────
+    case "clip:split-at-playhead": {
+      const { selectedClipIds } = uiStore;
+      if (selectedClipIds.length === 0) break;
+      const t = transport.projectTime;
+      selectedClipIds.forEach((id) => history.execute(new SplitClipCommand(id, t)));
+      uiStore.setSelectedClipIds([]);
+      break;
+    }
+
+    case "clip:trim-start-to-playhead":
+    case "clip:trim-end-to-playhead":
+    case "clip:crop-to-selection":
+    case "clip:consolidate":
+    case "clip:reverse":
+      break;
+
+    // ── Snap ──────────────────────────────────────────────────────────────
     case "timeline:toggle-snap":
       uiStore.toggleSnapToGrid();
+      break;
+
+    case "timeline:set-snap-bar":
+    case "timeline:set-snap-beat":
+    case "timeline:set-snap-eighth":
+    case "timeline:set-snap-sixteenth":
+    case "timeline:set-snap-thirty-second":
+      if (!useUIStore.getState().snapToGrid) uiStore.toggleSnapToGrid();
+      break;
+
+    case "timeline:set-snap-off":
+      if (useUIStore.getState().snapToGrid) uiStore.toggleSnapToGrid();
       break;
 
     // ── Track context-menu actions ─────────────────────────────────────────
@@ -136,6 +259,16 @@ export function runAction(actionId: string) {
     case "track:duplicate": {
       const { selectedTrackId } = uiStore;
       if (selectedTrackId) history.execute(new DuplicateTrackCommand(selectedTrackId));
+      break;
+    }
+
+    case "track:delete": {
+      const { selectedTrackId } = uiStore;
+      if (selectedTrackId) {
+        history.execute(new DeleteTrackCommand(selectedTrackId));
+        uiStore.setSelectedTrackId(null);
+        uiStore.setSelectedMixerTrackId(null);
+      }
       break;
     }
 
@@ -163,6 +296,14 @@ export function runAction(actionId: string) {
       break;
     }
 
+    // stubs — not yet implemented
+    case "track:change-color":
+    case "track:freeze":
+    case "track:flatten":
+    case "track:route-to":
+    case "track:settings":
+      break;
+
     case "track:add-audio": {
       const tracks = projectStore.project.tracks;
       const newId = crypto.randomUUID();
@@ -183,47 +324,6 @@ export function runAction(actionId: string) {
       uiStore.setSelectedTrackId(newId);
       break;
     }
-
-    // ── MIDI editor actions (routed through bridge to active panel) ───────────
-    case "midi:select-all":
-      midiEditorBridge.call("selectAll");
-      break;
-
-    case "midi:delete-selected":
-      midiEditorBridge.call("deleteSelected");
-      break;
-
-    case "midi:duplicate-selected":
-      midiEditorBridge.call("duplicateSelected");
-      break;
-
-    case "midi:quantize":
-      midiEditorBridge.call("quantize");
-      break;
-
-    case "midi:nudge-left":
-      midiEditorBridge.call("nudgeLeft");
-      break;
-
-    case "midi:nudge-right":
-      midiEditorBridge.call("nudgeRight");
-      break;
-
-    case "midi:transpose-up":
-      midiEditorBridge.call("transposeUp");
-      break;
-
-    case "midi:transpose-down":
-      midiEditorBridge.call("transposeDown");
-      break;
-
-    case "midi:transpose-octave-up":
-      midiEditorBridge.call("transposeOctaveUp");
-      break;
-
-    case "midi:transpose-octave-down":
-      midiEditorBridge.call("transposeOctaveDown");
-      break;
 
     case "track:add-bus": {
       const tracks = projectStore.project.tracks;
@@ -273,42 +373,150 @@ export function runAction(actionId: string) {
       break;
     }
 
-    // Stubs — not yet implemented
     case "track:add-midi":
     case "track:add-plugin":
-    case "track:freeze":
-    case "track:flatten":
-    case "track:route-to":
-    case "track:settings":
+    case "track:add-master-bus":
       break;
 
-    // ── View ───────────────────────────────────────────────────────────────
-    case "panel:toggle-mixer":
-    case "view:toggle-mixer":
-    case "window.show_mixer":
-      uiStore.togglePanel("mixer");
+    // ── MIDI editor actions (routed through bridge to active panel) ─────────
+    case "midi:select-all":
+      midiEditorBridge.call("selectAll");
       break;
-
-    case "panel:toggle-inspector":
-    case "view:toggle-inspector":
-    case "window.show_inspector":
-      uiStore.togglePanel("inspector");
+    case "midi:delete-selected":
+      midiEditorBridge.call("deleteSelected");
+      break;
+    case "midi:duplicate-selected":
+      midiEditorBridge.call("duplicateSelected");
+      break;
+    case "midi:quantize":
+      midiEditorBridge.call("quantize");
+      break;
+    case "midi:nudge-left":
+      midiEditorBridge.call("nudgeLeft");
+      break;
+    case "midi:nudge-right":
+      midiEditorBridge.call("nudgeRight");
+      break;
+    case "midi:transpose-up":
+      midiEditorBridge.call("transposeUp");
+      break;
+    case "midi:transpose-down":
+      midiEditorBridge.call("transposeDown");
+      break;
+    case "midi:transpose-octave-up":
+      midiEditorBridge.call("transposeOctaveUp");
+      break;
+    case "midi:transpose-octave-down":
+      midiEditorBridge.call("transposeOctaveDown");
       break;
 
     // ── Project ────────────────────────────────────────────────────────────
+    case "project:new":
+      guardDirty(() => {
+        useWindowStore.getState().openDialog({
+          contentType: "projectWizard",
+          title: "New Project",
+          modal: true,
+          width: 520,
+          height: 540,
+          resizable: false,
+          closable: true,
+        });
+      });
+      break;
+
+    case "project:rename": {
+      const newName = window.prompt("Rename project:", projectStore.project.name)?.trim();
+      if (newName && newName !== projectStore.project.name) {
+        projectStore.setProjectName(newName);
+      }
+      break;
+    }
+
     case "project:save":
       void platform.projectStorage
         .saveProject(useProjectStore.getState().project)
         .catch((e) => console.warn("[ActionRunner] save project:", e));
       break;
 
+    case "project:save-as":
+    case "project:save-copy":
+      void platform.projectStorage
+        .saveProject(useProjectStore.getState().project, { saveAs: true })
+        .catch((e) => console.warn("[ActionRunner] save-as:", e));
+      break;
+
+    case "project:revert":
+      projectStore.loadLocal();
+      history.clear();
+      break;
+
+    case "project:close":
+      guardDirty(() => {
+        useProjectStore.setState({
+          project: {
+            id: crypto.randomUUID(),
+            name: "Untitled Project",
+            version: 1,
+            sampleRate: 48000,
+            bpm: 120,
+            timeSignature: { numerator: 4, denominator: 4 },
+            tracks: [],
+            files: [],
+          },
+        });
+        history.clear();
+        uiStore.setSelectedClipIds([]);
+        uiStore.setSelectedTrackId(null);
+        uiStore.setSaveStatus("saved");
+      });
+      break;
+
+    case "project:recent-clear":
+      useRecentProjectsStore.getState().clearRecentProjects();
+      break;
+
     case "project:open":
       void platform.projectStorage
         .openProject()
         .then((p) => {
-          if (p) useProjectStore.setState({ project: p });
+          if (p) {
+            useProjectStore.setState({ project: p });
+            useRecentProjectsStore.getState().addRecentProject({
+              id: p.id,
+              name: p.name,
+              source: platform.kind === "electron" ? "local" : "browser",
+            });
+          }
         })
         .catch((e) => console.warn("[ActionRunner] open project:", e));
+      break;
+
+    case "project:new-from-template":
+    case "project:settings":
+    case "project:tempo-settings":
+    case "project:time-signature":
+    case "project:snapshot":
+    case "project:collect-all-and-save":
+    case "project:clean-unused-files":
+    case "project:statistics":
+      break;
+
+    case "project:set-sample-rate-44100":
+    case "project:set-sample-rate-48000":
+    case "project:set-sample-rate-88200":
+    case "project:set-sample-rate-96000":
+    case "project:set-sample-rate-192000":
+    case "project:set-bit-depth-16":
+    case "project:set-bit-depth-24":
+    case "project:set-bit-depth-32float":
+      break;
+
+    // ── Markers (not yet implemented) ──────────────────────────────────────
+    case "marker:add":
+    case "marker:next":
+    case "marker:previous":
+    case "marker:manager":
       break;
 
     // ── File ───────────────────────────────────────────────────────────────
@@ -321,9 +529,140 @@ export function runAction(actionId: string) {
         .catch((e) => console.warn("[ActionRunner] import audio:", e));
       break;
 
-    // file:reveal-in-folder is also handled via the dynamic prefix in the default branch
-    // so future UI can pass a path (e.g. `file:reveal-in-folder:<path>`).
+    case "file:import-midi":
+    case "file:import-stems":
+    case "file:import-folder":
+    case "file:import-session":
+    case "file:export-audio":
+    case "file:export-stems":
+    case "file:export-loop":
+    case "file:export-project-archive":
+    case "file:bounce-selection":
     case "file:reveal-in-folder":
+      break;
+
+    // ── Audio processing (not yet implemented) ─────────────────────────────
+    case "audio:normalize-clip":
+    case "audio:reverse-clip":
+    case "audio:add-fade-in":
+    case "audio:add-fade-out":
+    case "audio:create-crossfade":
+    case "audio:clip-gain":
+    case "audio:bounce-in-place":
+    case "audio:render-selection":
+    case "audio:freeze-selected-tracks":
+    case "audio:settings":
+    case "audio:set-device-default":
+    case "audio:set-device-web-audio":
+    case "audio:set-buffer-64":
+    case "audio:set-buffer-128":
+    case "audio:set-buffer-256":
+    case "audio:set-buffer-512":
+    case "audio:set-buffer-1024":
+      break;
+
+    // ── Cloud (not yet implemented) ────────────────────────────────────────
+    case "cloud:sync":
+    case "cloud:share-project":
+    case "cloud:versions":
+      break;
+
+    // ── Panel toggles ─────────────────────────────────────────────────────
+    case "panel:toggle-browser":
+    case "window.show_browser":
+      uiStore.togglePanel("browser");
+      break;
+
+    case "panel:toggle-mixer":
+    case "view:toggle-mixer":
+    case "window.show_mixer":
+      uiStore.togglePanel("mixer");
+      break;
+
+    case "panel:toggle-inspector":
+    case "view:toggle-inspector":
+    case "window.show_inspector":
+      uiStore.togglePanel("inspector");
+      break;
+
+    // stubs — panels not yet implemented
+    case "panel:toggle-automation":
+    case "panel:toggle-device-panel":
+    case "panel:toggle-midi-editor":
+      break;
+
+    // ── Panel dock positions ───────────────────────────────────────────────
+    case "panel:browser-dock-left":
+      uiStore.setPanelLayout("browser", { dock: "left" });
+      break;
+    case "panel:browser-dock-right":
+      uiStore.setPanelLayout("browser", { dock: "right" });
+      break;
+    case "panel:browser-dock-bottom":
+      uiStore.setPanelLayout("browser", { dock: "bottom" });
+      break;
+    case "panel:browser-float":
+      uiStore.setPanelLayout("browser", { dock: "float" });
+      break;
+
+    case "panel:inspector-dock-left":
+      uiStore.setPanelLayout("inspector", { dock: "left" });
+      break;
+    case "panel:inspector-dock-right":
+      uiStore.setPanelLayout("inspector", { dock: "right" });
+      break;
+    case "panel:inspector-dock-bottom":
+      uiStore.setPanelLayout("inspector", { dock: "bottom" });
+      break;
+    case "panel:inspector-float":
+      uiStore.setPanelLayout("inspector", { dock: "float" });
+      break;
+
+    case "panel:mixer-dock-left":
+      uiStore.setPanelLayout("mixer", { dock: "left" });
+      break;
+    case "panel:mixer-dock-right":
+      uiStore.setPanelLayout("mixer", { dock: "right" });
+      break;
+    case "panel:mixer-dock-bottom":
+      uiStore.setPanelLayout("mixer", { dock: "bottom" });
+      break;
+    case "panel:mixer-float":
+      uiStore.setPanelLayout("mixer", { dock: "float" });
+      break;
+
+    // ── Zoom ──────────────────────────────────────────────────────────────
+    case "view:zoom-in":
+      uiStore.setPixelsPerSecond(Math.min(800, uiStore.pixelsPerSecond * 1.33));
+      break;
+
+    case "view:zoom-out":
+      uiStore.setPixelsPerSecond(Math.max(10, uiStore.pixelsPerSecond * 0.75));
+      break;
+
+    case "view:reset-zoom":
+      uiStore.setPixelsPerSecond(100);
+      break;
+
+    // ── Workspace layouts ──────────────────────────────────────────────────
+    case "layout:default":
+    case "layout:reset-current":
+      uiStore.applyWorkspaceLayout("Default");
+      break;
+    case "layout:editing":
+      uiStore.applyWorkspaceLayout("Editing");
+      break;
+    case "layout:mixing":
+      uiStore.applyWorkspaceLayout("Mixing");
+      break;
+    case "layout:sound-design":
+      uiStore.applyWorkspaceLayout("Sound Design");
+      break;
+    case "layout:minimal":
+      uiStore.applyWorkspaceLayout("Minimal");
+      break;
+    case "layout:laptop":
+      uiStore.applyWorkspaceLayout("Laptop");
       break;
 
     // ── Window ─────────────────────────────────────────────────────────────
@@ -340,11 +679,72 @@ export function runAction(actionId: string) {
       platform.window.close();
       break;
 
+    case "window:toggle-fullscreen":
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => {});
+      } else {
+        void document.documentElement.requestFullscreen().catch(() => {});
+      }
+      break;
+
+    case "window:toggle-always-on-top":
+      break;
+
+    // ── App ────────────────────────────────────────────────────────────────
+    case "app:quit":
+      platform.window.close();
+      break;
+
+    case "app:reload":
+    case "app:force-reload":
+      window.location.reload();
+      break;
+
+    case "app:preferences":
+    case "app:check-for-updates":
+    case "app:about":
+      break;
+
+    // ── Tools stubs ────────────────────────────────────────────────────────
+    case "tools:audio-analyzer":
+    case "tools:loudness-meter":
+    case "tools:spectrum-analyzer":
+    case "tools:phase-meter":
+    case "tools:media-pool":
+    case "tools:sample-browser":
+    case "tools:loop-browser":
+    case "tools:marker-list":
+    case "tools:developer-tools":
+    case "tools:performance-monitor":
+      break;
+
+    // ── Help stubs ─────────────────────────────────────────────────────────
+    case "help:quick-start":
+    case "help:documentation":
+    case "help:keyboard-shortcuts":
+    case "help:release-notes":
+    case "help:roadmap":
+    case "help:github":
+    case "help:report-issue":
+    case "help:request-feature":
+    case "help:community":
+    case "help:diagnostics":
+    case "help:copy-system-info":
+      break;
+
+    // ── Plugin stubs ───────────────────────────────────────────────────────
+    case "plugins:scan":
+    case "plugins:manager":
+    case "plugins:format-vst3":
+    case "plugins:format-clap":
+    case "plugins:format-daux":
+      break;
+
     case "noop":
       break;
 
     default:
-      // file:reveal-in-folder:<path> — show item in OS file manager.
+      // file:reveal-in-folder:<path>
       if (actionId.startsWith("file:reveal-in-folder:")) {
         if (!platform.capabilities.filesystem) break;
         const path = actionId.slice("file:reveal-in-folder:".length);

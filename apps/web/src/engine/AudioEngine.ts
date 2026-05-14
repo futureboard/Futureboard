@@ -1,6 +1,7 @@
 import type { DawFile, FileId, WaveformPeaks } from "../types/daw";
 import { audioStorage } from "./AudioStorage";
 import { generatePeaks } from "./WaveformGenerator";
+import { waveformCache, buildCacheKey, entryPeaksAsFloat32, SAMPLES_PER_PEAK, WAVEFORM_CACHE_VERSION } from "./waveformCache";
 
 type OnPeaks = (fileId: FileId, peaks: WaveformPeaks) => void;
 
@@ -31,17 +32,46 @@ class AudioEngine {
   ): Promise<AudioBuffer> {
     const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
 
-    // Placeholder cache entry so callers can check existence immediately
+    // Placeholder entry so callers can check existence immediately
     this.bufferCache.set(file.id, {
       audioBuffer,
-      peaks: { samplesPerPeak: 256, channelCount: audioBuffer.numberOfChannels, peaks: new Float32Array(0) },
+      peaks: { samplesPerPeak: SAMPLES_PER_PEAK, channelCount: audioBuffer.numberOfChannels, peaks: new Float32Array(0) },
     });
 
-    generatePeaks(file.id, audioBuffer, (fileId, peaks) => {
-      const entry = this.bufferCache.get(fileId);
+    // Check waveform cache before spawning the worker
+    const cacheKey = buildCacheKey(file.id, SAMPLES_PER_PEAK);
+    const cached = await waveformCache.get(cacheKey).catch(() => null);
+
+    if (cached) {
+      const peaks: WaveformPeaks = {
+        samplesPerPeak: cached.samplesPerPeak,
+        channelCount: cached.channelCount,
+        peaks: entryPeaksAsFloat32(cached),
+        sampleRate: cached.sampleRate,
+        duration: cached.duration,
+      };
+      const entry = this.bufferCache.get(file.id);
       if (entry) entry.peaks = peaks;
-      onPeaks(fileId, peaks);
-    });
+      onPeaks(file.id, peaks);
+    } else {
+      generatePeaks(file.id, audioBuffer, (fileId, peaks) => {
+        const entry = this.bufferCache.get(fileId);
+        if (entry) entry.peaks = peaks;
+        onPeaks(fileId, peaks);
+        // Persist peaks to cache non-blocking
+        waveformCache.set(cacheKey, {
+          version: WAVEFORM_CACHE_VERSION,
+          fileId,
+          sampleRate: audioBuffer.sampleRate,
+          channelCount: audioBuffer.numberOfChannels,
+          duration: audioBuffer.duration,
+          samplesPerPeak: SAMPLES_PER_PEAK,
+          peakCount: Math.ceil((peaks.peaks.length / audioBuffer.numberOfChannels) / 2),
+          createdAt: Date.now(),
+          peaks: peaks.peaks,
+        }).catch((e) => console.warn("[WaveformCache] set failed:", e));
+      });
+    }
 
     return audioBuffer;
   }

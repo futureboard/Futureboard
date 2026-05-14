@@ -152,14 +152,15 @@ function SendsAddMenu({ accent, track, project }: { accent: string; track: DawTr
 }
 
 function InsertRow({ insert, accent }: { insert: TrackInsert; accent: string }) {
+  const bypassed = !insert.enabled;
   return (
     <div
       className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px] transition-colors hover:bg-white/[0.04]"
-      style={{ borderColor: insert.bypassed ? "rgba(255,255,255,0.12)" : accent }}
+      style={{ borderColor: bypassed ? "rgba(255,255,255,0.12)" : accent }}
     >
       <span
         className="flex-1 truncate text-[10px]"
-        style={{ color: insert.bypassed ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.72)" }}
+        style={{ color: bypassed ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.72)" }}
       >
         {insert.name}
       </span>

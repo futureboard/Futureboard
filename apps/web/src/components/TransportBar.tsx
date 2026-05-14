@@ -32,6 +32,8 @@ import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
 import { useUIStore } from "../store/uiStore";
 import { formatBarBeatTick } from "../utils/musicalTime";
+import logoApp from "../assets/logo.png"
+
 
 const TIME_SIG_NUMERATORS = [2, 3, 4, 5, 6, 7, 8, 9, 12];
 const TIME_SIG_DENOMINATORS = [2, 4, 8, 16];
@@ -335,6 +337,19 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       <div className="flex w-full min-w-0 items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="app-no-drag flex shrink-0 items-center gap-0.5">
+            <div className="p-1 flex items-center">
+              <div
+                aria-hidden="true"
+                className="h-4 w-4 shrink-0 select-none bg-center bg-contain bg-no-repeat"
+                style={{
+                  backgroundImage: `url(${logoApp})`,
+                  WebkitUserDrag: "none",
+                  userSelect: "none",
+                  pointerEvents: "none",
+                } as React.CSSProperties}
+              />
+            </div>
+
             {APP_MENUS.map((menu) => (
               <div key={menu.id} className="relative">
                 <TopMenuButton

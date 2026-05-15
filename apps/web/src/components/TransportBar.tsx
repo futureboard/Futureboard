@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Circle,
   FolderOpen,
+  MoreHorizontal,
   PanelBottom,
   PanelRight,
   Pause,
@@ -16,26 +17,86 @@ import {
   Timer,
 } from "lucide-react";
 import { MenuDawIcon } from "../icons/dawIcons";
-import { useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { transport } from "../engine/Transport";
 import { APP_MENUS, type AppMenuGroup, type AppMenuItem } from "../menu/menuItems";
 import { runAction } from "../menu/actionRunner";
+import {
+  buildSelectionState,
+  canDeleteSelection,
+  canDuplicateSelection,
+  canCopySelection,
+} from "../store/selectionSelectors";
 import { useProjectStore } from "../store/projectStore";
 import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
 import { useUIStore } from "../store/uiStore";
 import { formatBarBeatTick } from "../utils/musicalTime";
-import logoApp from "../assets/logo.png"
+import logoApp from "../assets/logo.png";
 import { ProjectDropdown } from "./project/ProjectDropdown";
 
-
+// ─── Constants ─────────────────────────────────────────────────────────────
 const TIME_SIG_NUMERATORS = [2, 3, 4, 5, 6, 7, 8, 9, 12];
 const TIME_SIG_DENOMINATORS = [2, 4, 8, 16];
 
-// MENU_ICONS removed — MenuIcon now routes through DawIcon registry
+const FULL_MENU_MIN_WIDTH = 1600; // ≥1600px: all menu buttons visible, no ⋯
+const OVERFLOW_ONLY_WIDTH = 1400; // <1400px: hamburger-only (all menus in ⋯)
+
+const MENU_WIDTH_EST = 260;  // px — used for right-edge clamping
+const MENU_HEIGHT_EST = 500; // px — used for bottom-edge clamping
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+type MenuLayoutMode = "full" | "partial" | "overflow";
 
 type CommandMenuItem = Extract<AppMenuItem, { type?: "item" }>;
 
+/**
+ * One entry per open menu layer.
+ * layers[0]   = the menu-bar button (or ⋯ button) that was clicked
+ * layers[N>0] = the submenu-trigger row that was hovered at depth N
+ */
+type OpenMenuLayer = {
+  id: string;
+  depth: number;
+  anchorRect: DOMRect;
+};
+
+// ─── Positioning helpers ────────────────────────────────────────────────────
+/** Position the root panel (appears below the triggering button). */
+function calcRootStyle(rect: DOMRect): React.CSSProperties {
+  const left = Math.max(4, Math.min(rect.left, window.innerWidth - MENU_WIDTH_EST - 4));
+  return { position: "fixed", top: rect.bottom + 2, left, zIndex: 9999 };
+}
+
+/**
+ * Position a nested submenu (appears to the right of the trigger row).
+ * Flips left if the submenu would overflow the right edge.
+ * Clamps vertically so it stays within the viewport.
+ */
+function calcSubmenuStyle(anchorRect: DOMRect, depth: number): React.CSSProperties {
+  const vpW = window.innerWidth;
+  const vpH = window.innerHeight;
+
+  const preferredLeft = anchorRect.right + 4;
+  const left =
+    preferredLeft + MENU_WIDTH_EST > vpW
+      ? Math.max(4, anchorRect.left - MENU_WIDTH_EST - 4)
+      : preferredLeft;
+
+  const top = Math.max(4, Math.min(anchorRect.top, vpH - MENU_HEIGHT_EST - 4));
+
+  return { position: "fixed", top, left, zIndex: 9999 + depth };
+}
+
+// ─── Small UI helpers ───────────────────────────────────────────────────────
 function Divider() {
   return <div className="mx-0.5 h-7 w-px shrink-0 bg-daw-border" />;
 }
@@ -95,7 +156,9 @@ function TopMenuButton({
       onMouseEnter={onMouseEnter}
       className={[
         "app-no-drag rounded px-2 py-1 text-[11px] font-semibold transition-colors",
-        open ? "bg-daw-surface-high text-daw-text" : "text-daw-dim hover:bg-daw-surface-high hover:text-daw-text",
+        open
+          ? "bg-daw-surface-high text-daw-text"
+          : "text-daw-dim hover:bg-daw-surface-high hover:text-daw-text",
       ].join(" ")}
     >
       {label}
@@ -107,53 +170,104 @@ function MenuIcon({ icon }: { icon?: string }) {
   return <MenuDawIcon icon={icon} size={12} />;
 }
 
+// ─── Recursive MenuPanel ────────────────────────────────────────────────────
+/**
+ * Generic recursive menu panel.
+ *
+ * Path semantics:
+ *   depth   = which index in openPath this panel's items control.
+ *   depth 1 = root panel  (openPath[1] = which of my children is open)
+ *   depth 2 = first child (openPath[2] = which of its children is open)
+ *   …
+ *
+ * A submenu child is visible when openPath[depth] === item.id.
+ * Hovering a submenu trigger sets openPath[depth] = item.id and stores the
+ * trigger's DOMRect in layers[depth], which positions the child portal.
+ * Hovering a leaf item clears openPath[depth+] and layers[depth+].
+ */
 function MenuPanel({
   items,
+  depth,
+  openPath,
+  layers,
+  onPathChange,
+  getItemState,
   onAction,
-  itemState,
-  nested = false,
 }: {
   items: AppMenuGroup["children"];
+  depth: number;
+  openPath: string[];
+  layers: OpenMenuLayer[];
+  onPathChange: (newPath: string[], newLayers: OpenMenuLayer[]) => void;
+  getItemState: (item: AppMenuItem) => Partial<Pick<CommandMenuItem, "checked" | "enabled">>;
   onAction: (item: CommandMenuItem) => void;
-  itemState: (item: AppMenuItem) => Partial<Pick<CommandMenuItem, "checked" | "enabled">>;
-  nested?: boolean;
 }) {
   return (
-    <div
-      className={[
-        "app-no-drag absolute z-[120] min-w-[15rem] rounded-md border border-daw-border bg-daw-surface p-1 shadow-[0_12px_36px_rgba(0,0,0,0.52)]",
-        nested ? "left-full top-[-4px] ml-1" : "left-0 top-[calc(100%+2px)]",
-      ].join(" ")}
-    >
+    <div className="min-w-[15rem] rounded-md border border-daw-border bg-daw-surface p-1 shadow-[0_12px_36px_rgba(0,0,0,0.52)]">
       {items.map((item) => {
         if (item.type === "separator") {
           return <div key={item.id} className="my-1 h-px bg-daw-border" />;
         }
 
-        const state = itemState(item);
+        const state = getItemState(item);
         const enabled = state.enabled ?? item.enabled ?? true;
 
+        // ── Submenu item ──────────────────────────────────────────────────
         if (item.type === "submenu") {
+          const isOpen = openPath[depth] === item.id;
+          const childLayer = isOpen ? layers[depth] : undefined;
+
           return (
-            <div key={item.id} className="group relative">
+            <Fragment key={item.id}>
               <button
                 type="button"
                 disabled={!enabled}
-                className="grid h-7 w-full grid-cols-[1.25rem_minmax(0,1fr)_0.75rem] items-center gap-2 rounded px-2 text-left text-[11px] text-daw-text transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35"
+                onPointerEnter={(e) => {
+                  if (!enabled) {
+                    // Close anything open at this depth
+                    onPathChange(openPath.slice(0, depth), layers.slice(0, depth));
+                    return;
+                  }
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  onPathChange(
+                    [...openPath.slice(0, depth), item.id],
+                    [...layers.slice(0, depth), { id: item.id, depth, anchorRect: rect }],
+                  );
+                }}
+                className={[
+                  "grid h-7 w-full grid-cols-[1.25rem_minmax(0,1fr)_0.75rem] items-center gap-2 rounded px-2 text-left text-[11px] text-daw-text transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
+                  isOpen ? "bg-daw-surface-high" : "",
+                ].join(" ")}
               >
                 <MenuIcon icon={item.icon} />
                 <span className="min-w-0 flex-1 truncate">{item.label}</span>
                 <ChevronRight size={12} className="text-daw-faint" />
               </button>
-              {enabled ? (
-                <div className="hidden group-hover:block">
-                  <MenuPanel items={item.children} onAction={onAction} itemState={itemState} nested />
-                </div>
-              ) : null}
-            </div>
+
+              {/* Child panel rendered into document.body to avoid any overflow clipping */}
+              {isOpen && childLayer &&
+                createPortal(
+                  <div
+                    data-daw-menu
+                    style={calcSubmenuStyle(childLayer.anchorRect, depth)}
+                  >
+                    <MenuPanel
+                      items={item.children}
+                      depth={depth + 1}
+                      openPath={openPath}
+                      layers={layers}
+                      onPathChange={onPathChange}
+                      getItemState={getItemState}
+                      onAction={onAction}
+                    />
+                  </div>,
+                  document.body,
+                )}
+            </Fragment>
           );
         }
 
+        // ── Leaf command item ─────────────────────────────────────────────
         const checked = state.checked ?? item.checked ?? false;
 
         return (
@@ -161,7 +275,15 @@ function MenuPanel({
             key={item.id}
             type="button"
             disabled={!enabled}
-            onClick={() => onAction(item)}
+            onPointerEnter={() => {
+              // Close any submenu open at this depth
+              if (openPath[depth] !== undefined) {
+                onPathChange(openPath.slice(0, depth), layers.slice(0, depth));
+              }
+            }}
+            onClick={() => {
+              if (enabled) onAction(item);
+            }}
             className={[
               "grid h-7 w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 text-left text-[11px] transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
               item.danger ? "text-daw-red" : "text-daw-text",
@@ -171,7 +293,11 @@ function MenuPanel({
               {checked ? <Check size={12} className="text-daw-accent" /> : <MenuIcon icon={item.icon} />}
             </span>
             <span className="min-w-0 flex-1 truncate">{item.label}</span>
-            {item.accelerator ? <span className="pl-5 text-right text-[10px] text-daw-faint">{item.accelerator}</span> : <span />}
+            {item.accelerator ? (
+              <span className="pl-5 text-right text-[10px] text-daw-faint">{item.accelerator}</span>
+            ) : (
+              <span />
+            )}
           </button>
         );
       })}
@@ -179,6 +305,7 @@ function MenuPanel({
   );
 }
 
+// ─── TransportBar ───────────────────────────────────────────────────────────
 export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSave?: () => void }) {
   const { isPlaying, playheadTime, setIsPlaying } = useTransportStore();
   const { project, setBpm, setTimeSignature } = useProjectStore();
@@ -188,38 +315,176 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     loopEnabled,
     toggleLoop,
     snapToGrid,
-    toggleSnapToGrid,
     currentTool,
     selectedClipIds,
     selectedTrackId,
+    focusedPanel,
+    selectedBrowserFileId,
   } = useUIStore();
-  const { enabled: metronomeEnabled, toggle: toggleMetronome, countInEnabled } = useMetronomeStore();
+  const { enabled: metronomeEnabled, toggle: toggleMetronome, countInEnabled } =
+    useMetronomeStore();
 
-  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  // ── Layout mode ───────────────────────────────────────────────────────────
+  const [layoutMode, setLayoutMode] = useState<MenuLayoutMode>("partial");
+  const [visibleMenuCount, setVisibleMenuCount] = useState(APP_MENUS.length);
+
+  // ── Path-based open menu state ─────────────────────────────────────────────
+  //
+  // openPath examples:
+  //   full mode,     Edit open:                   ["edit"]
+  //   full mode,     Edit → Snap Settings:        ["edit", "snapSettings"]
+  //   overflow mode, ⋯ open:                      ["overflow"]
+  //   overflow mode, ⋯ → Edit:                    ["overflow", "edit"]
+  //   overflow mode, ⋯ → Edit → Snap Settings:   ["overflow", "edit", "snapSettings"]
+  //
+  // layers[N].anchorRect positions the panel at depth N+1.
+  const [openPath, setOpenPath] = useState<string[]>([]);
+  const [layers, setLayers] = useState<OpenMenuLayer[]>([]);
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
+
+  // ── Refs ──────────────────────────────────────────────────────────────────
   const barRef = useRef<HTMLDivElement>(null);
-  const projectBtnRef = useRef<HTMLDivElement>(null);
+  const menuAreaRef = useRef<HTMLDivElement>(null);
+  const menuBtnRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const menuBtnWidths = useRef<number[]>([]);
+  const overflowBtnRef = useRef<HTMLDivElement>(null);
+
   const timeSig = project.timeSignature ?? { numerator: 4, denominator: 4 };
   const saveStatus = useUIStore((s) => s.saveStatus);
 
+  // ── Close helper ──────────────────────────────────────────────────────────
+  const closeAllMenus = useCallback(() => {
+    setOpenPath([]);
+    setLayers([]);
+  }, []);
+
+  const updatePath = useCallback((newPath: string[], newLayers: OpenMenuLayer[]) => {
+    setOpenPath(newPath);
+    setLayers(newLayers);
+  }, []);
+
+  // ── Close menus when layout mode changes ──────────────────────────────────
   useEffect(() => {
-    if (!openMenu) return;
-    const close = (e: MouseEvent) => {
-      if (barRef.current && !barRef.current.contains(e.target as Node)) setOpenMenu(null);
+    closeAllMenus();
+  }, [layoutMode, closeAllMenus]);
+
+  // ── Measure button widths once on mount (all buttons visible at this point) ──
+  useLayoutEffect(() => {
+    menuBtnWidths.current = menuBtnRefs.current.map((el) => el?.offsetWidth ?? 0);
+  }, []);
+
+  // ── ResizeObserver + hard breakpoints ─────────────────────────────────────
+  useEffect(() => {
+    const container = menuAreaRef.current;
+    if (!container) return;
+    const OVERFLOW_BTN_W = 34;
+
+    const check = () => {
+      const windowW = window.innerWidth;
+
+      if (windowW >= FULL_MENU_MIN_WIDTH) {
+        setLayoutMode("full");
+        setVisibleMenuCount(APP_MENUS.length);
+        return;
+      }
+
+      if (windowW < OVERFLOW_ONLY_WIDTH) {
+        setLayoutMode("overflow");
+        setVisibleMenuCount(0);
+        return;
+      }
+
+      setLayoutMode("partial");
+      if (menuBtnWidths.current.every((w) => w === 0)) {
+        menuBtnWidths.current = menuBtnRefs.current.map((el) => el?.offsetWidth ?? 0);
+      }
+      const available = container.clientWidth - OVERFLOW_BTN_W;
+      let acc = 0;
+      let count = 0;
+      for (const w of menuBtnWidths.current) {
+        if (acc + w <= available) {
+          acc += w;
+          count++;
+        } else break;
+      }
+      const totalW = menuBtnWidths.current.reduce((s, w) => s + w, 0);
+      setVisibleMenuCount(totalW <= container.clientWidth ? APP_MENUS.length : count);
     };
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [openMenu]);
+
+    const ro = new ResizeObserver(check);
+    ro.observe(container);
+    window.addEventListener("resize", check);
+    check();
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", check);
+    };
+  }, []);
+
+  // ── Click-outside (portal-aware via data-daw-menu attribute) ─────────────
+  const anyMenuOpen = openPath.length > 0;
 
   useEffect(() => {
-    if (!openMenu) return;
+    if (!anyMenuOpen) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (barRef.current?.contains(target)) return;
+      if (target.closest("[data-daw-menu]")) return;
+      closeAllMenus();
+    };
+    window.addEventListener("mousedown", handleMouseDown);
+    return () => window.removeEventListener("mousedown", handleMouseDown);
+  }, [anyMenuOpen, closeAllMenus]);
+
+  // ── Escape key ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!anyMenuOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpenMenu(null);
+      if (e.key === "Escape") closeAllMenus();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openMenu]);
+  }, [anyMenuOpen, closeAllMenus]);
 
+  // ── Menu bar button handlers ───────────────────────────────────────────────
+  const handleMenuBtnClick = (menu: AppMenuGroup, i: number) => {
+    if (openPath[0] === menu.id) {
+      closeAllMenus();
+    } else {
+      const rect = menuBtnRefs.current[i]?.getBoundingClientRect();
+      if (rect) {
+        setOpenPath([menu.id]);
+        setLayers([{ id: menu.id, depth: 0, anchorRect: rect }]);
+      }
+      setProjectDropdownOpen(false);
+    }
+  };
+
+  const handleMenuBtnHover = (menu: AppMenuGroup, i: number) => {
+    // Hover-switch: if any full-mode menu is open and this is a different one
+    if (openPath.length > 0 && openPath[0] !== "overflow" && openPath[0] !== menu.id) {
+      const rect = menuBtnRefs.current[i]?.getBoundingClientRect();
+      if (rect) {
+        setOpenPath([menu.id]);
+        setLayers([{ id: menu.id, depth: 0, anchorRect: rect }]);
+      }
+    }
+  };
+
+  const handleOverflowBtnClick = () => {
+    if (openPath[0] === "overflow") {
+      closeAllMenus();
+    } else {
+      const rect = overflowBtnRef.current?.getBoundingClientRect();
+      if (rect) {
+        setOpenPath(["overflow"]);
+        setLayers([{ id: "overflow", depth: 0, anchorRect: rect }]);
+      }
+      setProjectDropdownOpen(false);
+    }
+  };
+
+  // ── Transport ─────────────────────────────────────────────────────────────
   const handlePlay = async () => {
     await transport.play();
     setIsPlaying(true);
@@ -235,15 +500,23 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     setIsPlaying(false);
   };
 
-  const hasClipSel = selectedClipIds.length > 0;
+  // Build a unified selection snapshot for menu enabled-state predicates.
+  // This is purely read-only — does not affect any store.
+  const selectionState = buildSelectionState({
+    focusedPanel,
+    selectedTrackId,
+    selectedClipIds,
+    selectedBrowserFileId,
+  });
+
+  const hasClipSel  = selectedClipIds.length > 0;
   const hasTrackSel = !!selectedTrackId;
 
+  // ── Item state ────────────────────────────────────────────────────────────
   const getMenuItemState = (item: AppMenuItem) => {
-    if (item.type === "separator") return {};
-    if (item.type === "submenu") return {};
+    if (item.type === "separator" || item.type === "submenu") return {};
 
     switch (item.action) {
-      // ── Transport checks ──────────────────────────────────────────────
       case "transport:toggle-loop":
         return { checked: loopEnabled };
       case "transport:toggle-metronome":
@@ -251,7 +524,6 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "transport:toggle-count-in":
         return { checked: countInEnabled };
 
-      // ── Snap checks ───────────────────────────────────────────────────
       case "timeline:toggle-snap":
         return { checked: snapToGrid };
       case "timeline:set-snap-off":
@@ -263,7 +535,6 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "timeline:set-snap-thirty-second":
         return { checked: false };
 
-      // ── Panel visibility checks ───────────────────────────────────────
       case "panel:toggle-browser":
       case "window.show_browser":
         return { checked: panels.browser?.visible };
@@ -274,11 +545,9 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "window.show_mixer":
         return { checked: panels.mixer?.visible };
       case "panel:toggle-automation":
-        return { checked: false };
       case "panel:toggle-device-panel":
         return { checked: false };
 
-      // ── Panel dock position checks ────────────────────────────────────
       case "panel:browser-dock-left":
         return { checked: panels.browser?.dock === "left" };
       case "panel:browser-dock-right":
@@ -306,7 +575,6 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "panel:mixer-float":
         return { checked: panels.mixer?.dock === "float" };
 
-      // ── Arrangement tool checks ───────────────────────────────────────
       case "tools:select-pointer":
         return { checked: currentTool === "pointer" };
       case "tools:select-pen":
@@ -322,13 +590,13 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "tools:select-automation":
         return { checked: currentTool === "automation" };
 
-      // ── Context-aware enabled states ──────────────────────────────────
       case "edit:duplicate":
+        return { enabled: canDuplicateSelection(selectionState) };
       case "edit:copy":
       case "edit:cut":
-        return { enabled: hasClipSel };
+        return { enabled: canCopySelection(selectionState) };
       case "edit:delete":
-        return { enabled: hasClipSel || hasTrackSel };
+        return { enabled: canDeleteSelection(selectionState) };
       case "clip:split-at-playhead":
         return { enabled: hasClipSel };
       case "edit:select-track-clips":
@@ -338,7 +606,6 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "track:delete":
         return { enabled: hasTrackSel };
 
-      // stubs that should stay disabled
       case "track:freeze":
       case "track:flatten":
         return { enabled: false };
@@ -348,15 +615,13 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     }
   };
 
+  // ── Action handler ────────────────────────────────────────────────────────
   const handleMenuAction = (item: CommandMenuItem) => {
-    setOpenMenu(null);
+    closeAllMenus();
 
     switch (item.action) {
       case "file:import-audio":
         onImport?.();
-        break;
-      case "project:open":
-        runAction("project:open");
         break;
       case "project:save":
         if (onSave) onSave();
@@ -369,32 +634,36 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "transport:stop":
         handleStop();
         break;
-      case "transport:go-to-start":
-        transport.seek(0);
-        break;
-      case "transport:toggle-loop":
-        toggleLoop();
-        break;
-      case "timeline:toggle-snap":
-        toggleSnapToGrid();
-        break;
-      case "panel:toggle-inspector":
-      case "window.show_inspector":
-        togglePanel("inspector");
-        break;
-      case "panel:toggle-mixer":
-      case "window.show_mixer":
-        togglePanel("mixer");
-        break;
-      case "panel:toggle-browser":
-      case "window.show_browser":
-        togglePanel("browser");
-        break;
       default:
+        if (item.action) runAction(item.action);
         break;
     }
   };
 
+  // ── Derived: root portal ──────────────────────────────────────────────────
+  //
+  // The root panel is always at depth=1.
+  // layers[0] = anchor of the button that was clicked.
+  // layers[N] = anchor of the trigger hovered at depth N, positioning the panel at depth N+1.
+  //
+  // In overflow mode the root panel lists all APP_MENUS as submenus.
+  // In full mode the root panel lists the selected menu's children.
+  const rootId = openPath[0] ?? null;
+  const rootLayer = layers[0] ?? null;
+
+  const rootItems: AppMenuGroup["children"] =
+    rootId === "overflow"
+      ? APP_MENUS.map((g) => ({
+          type: "submenu" as const,
+          id: g.id,
+          label: g.label,
+          children: g.children,
+        }))
+      : (APP_MENUS.find((m) => m.id === rootId)?.children ?? []);
+
+  const showOverflowBtn = visibleMenuCount < APP_MENUS.length;
+
+  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div
       ref={barRef}
@@ -402,11 +671,13 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     >
       <div className="flex w-full min-w-0 items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div className="app-no-drag flex shrink-0 items-center gap-0.5">
-            <div className="p-1 flex items-center">
+          <div className="app-no-drag flex min-w-0 shrink items-center gap-0.5">
+
+            {/* App logo */}
+            <div className="flex shrink-0 items-center p-1">
               <div
                 aria-hidden="true"
-                className="h-4 w-4 shrink-0 select-none bg-center bg-contain bg-no-repeat"
+                className="h-4 w-4 shrink-0 select-none bg-contain bg-center bg-no-repeat"
                 style={{
                   backgroundImage: `url(${logoApp})`,
                   WebkitUserDrag: "none",
@@ -416,33 +687,55 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
               />
             </div>
 
-            {APP_MENUS.map((menu) => (
-              <div key={menu.id} className="relative">
-                <TopMenuButton
-                  label={menu.label}
-                  open={openMenu === menu.id}
-                  onClick={() => {
-                    setOpenMenu((current) => (current === menu.id ? null : menu.id));
-                    setProjectDropdownOpen(false);
-                  }}
-                  onMouseEnter={() => {
-                    if (openMenu) setOpenMenu(menu.id);
-                  }}
-                />
-                {openMenu === menu.id ? (
-                  <MenuPanel items={menu.children} onAction={handleMenuAction} itemState={getMenuItemState} />
-                ) : null}
+            {/* Menu buttons — overflow-hidden clips anything that doesn't fit */}
+            <div
+              ref={menuAreaRef}
+              className="flex min-w-0 shrink items-center gap-0.5 overflow-hidden"
+            >
+              {APP_MENUS.map((menu, i) => (
+                <div
+                  key={menu.id}
+                  ref={(el) => { menuBtnRefs.current[i] = el; }}
+                  className={["relative shrink-0", i >= visibleMenuCount ? "hidden" : ""].join(" ")}
+                >
+                  <TopMenuButton
+                    label={menu.label}
+                    open={openPath[0] === menu.id}
+                    onClick={() => handleMenuBtnClick(menu, i)}
+                    onMouseEnter={() => handleMenuBtnHover(menu, i)}
+                  />
+                </div>
+              ))}
+            </div>
+
+            {/* ⋯ overflow button — sibling of overflow-hidden so its portal renders above */}
+            {showOverflowBtn && (
+              <div ref={overflowBtnRef} className="shrink-0">
+                <button
+                  type="button"
+                  onClick={handleOverflowBtnClick}
+                  title="More menus"
+                  className={[
+                    "app-no-drag flex h-6 w-6 items-center justify-center rounded transition-colors",
+                    openPath[0] === "overflow"
+                      ? "bg-daw-surface-high text-daw-text"
+                      : "text-daw-dim hover:bg-daw-surface-high hover:text-daw-text",
+                  ].join(" ")}
+                >
+                  <MoreHorizontal size={13} />
+                </button>
               </div>
-            ))}
+            )}
           </div>
 
           <div className="h-5 w-px shrink-0 bg-daw-border" />
-          <div ref={projectBtnRef} className="relative flex min-w-0 max-w-[220px] items-center px-1">
+
+          <div className="relative flex min-w-0 max-w-[220px] items-center px-1">
             <button
               type="button"
               onClick={() => {
                 setProjectDropdownOpen((v) => !v);
-                setOpenMenu(null);
+                closeAllMenus();
               }}
               title={project.name}
               className={[
@@ -464,10 +757,13 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
               />
             </button>
             <span className="ml-1.5 shrink-0 whitespace-nowrap text-[8px] font-medium uppercase tracking-wide text-daw-faint">
-              {saveStatus === "unsaved" ? "Unsaved" :
-               saveStatus === "saving" ? "Saving..." :
-               saveStatus === "error" ? "Error" :
-               "Saved"}
+              {saveStatus === "unsaved"
+                ? "Unsaved"
+                : saveStatus === "saving"
+                  ? "Saving..."
+                  : saveStatus === "error"
+                    ? "Error"
+                    : "Saved"}
             </span>
             {projectDropdownOpen && (
               <ProjectDropdown onClose={() => setProjectDropdownOpen(false)} />
@@ -475,21 +771,29 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           </div>
         </div>
 
+        {/* Right-side transport controls */}
         <div className="app-no-drag flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-0.5 sm:flex-nowrap">
-          <IconBtn
-            icon={SkipBack}
-            label="Return to start [Enter]"
-            onClick={() => transport.seek(0)}
-          />
+          <IconBtn icon={SkipBack} label="Return to start [Enter]" onClick={() => transport.seek(0)} />
           {isPlaying ? (
             <IconBtn icon={Pause} label="Pause [Space]" active onClick={handlePause} />
           ) : (
             <IconBtn icon={Play} label="Play [Space]" onClick={handlePlay} size={15} />
           )}
-          <IconBtn icon={Square} label="Stop [Enter]" onClick={handleStop} disabled={!isPlaying && playheadTime === 0} />
+          <IconBtn
+            icon={Square}
+            label="Stop [Enter]"
+            onClick={handleStop}
+            disabled={!isPlaying && playheadTime === 0}
+          />
           <IconBtn icon={Circle} label="Record" accent danger size={12} />
           <IconBtn icon={Repeat2} label="Loop [L]" active={loopEnabled} onClick={toggleLoop} size={13} />
-          <IconBtn icon={Timer} label="Metronome [K]" active={metronomeEnabled} onClick={toggleMetronome} size={13} />
+          <IconBtn
+            icon={Timer}
+            label="Metronome [K]"
+            active={metronomeEnabled}
+            onClick={toggleMetronome}
+            size={13}
+          />
 
           <Divider />
 
@@ -514,7 +818,9 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           <div className="flex h-7 items-center gap-0.5 px-1">
             <select
               value={timeSig.numerator}
-              onChange={(e) => setTimeSignature({ ...timeSig, numerator: parseInt(e.target.value) })}
+              onChange={(e) =>
+                setTimeSignature({ ...timeSig, numerator: parseInt(e.target.value) })
+              }
               className="w-5 cursor-pointer appearance-none border-none bg-transparent text-center text-[11px] font-semibold text-daw-text outline-none"
               title="Beats per bar"
             >
@@ -527,7 +833,9 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
             <span className="text-[10px] opacity-25">/</span>
             <select
               value={timeSig.denominator}
-              onChange={(e) => setTimeSignature({ ...timeSig, denominator: parseInt(e.target.value) })}
+              onChange={(e) =>
+                setTimeSignature({ ...timeSig, denominator: parseInt(e.target.value) })
+              }
               className="w-5 cursor-pointer appearance-none border-none bg-transparent text-center text-[11px] font-semibold text-daw-text outline-none"
               title="Note value per beat"
             >
@@ -542,9 +850,24 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           <Divider />
 
           <div className="flex gap-1">
-            <IconBtn icon={FolderOpen} label="Toggle Browser [B]" active={panels.browser?.visible} onClick={() => togglePanel("browser")} />
-            <IconBtn icon={PanelBottom} label="Toggle Mixer [M]" active={panels.mixer?.visible} onClick={() => togglePanel("mixer")} />
-            <IconBtn icon={PanelRight} label="Toggle Inspector [I]" active={panels.inspector?.visible} onClick={() => togglePanel("inspector")} />
+            <IconBtn
+              icon={FolderOpen}
+              label="Toggle Browser [B]"
+              active={panels.browser?.visible}
+              onClick={() => togglePanel("browser")}
+            />
+            <IconBtn
+              icon={PanelBottom}
+              label="Toggle Mixer [M]"
+              active={panels.mixer?.visible}
+              onClick={() => togglePanel("mixer")}
+            />
+            <IconBtn
+              icon={PanelRight}
+              label="Toggle Inspector [I]"
+              active={panels.inspector?.visible}
+              onClick={() => togglePanel("inspector")}
+            />
           </div>
 
           <Divider />
@@ -554,6 +877,25 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           <IconBtn icon={Share2} label="Share" disabled />
         </div>
       </div>
+
+      {/* ── Root portal menu ───────────────────────────────────────────────────
+          Rendered at document.body so no overflow-hidden ancestor can clip it.
+          data-daw-menu lets the click-outside handler identify menu elements. */}
+      {rootId && rootLayer &&
+        createPortal(
+          <div data-daw-menu style={calcRootStyle(rootLayer.anchorRect)}>
+            <MenuPanel
+              items={rootItems}
+              depth={1}
+              openPath={openPath}
+              layers={layers}
+              onPathChange={updatePath}
+              getItemState={getMenuItemState}
+              onAction={handleMenuAction}
+            />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

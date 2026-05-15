@@ -81,7 +81,7 @@ export function TrackHeader({
   isDragging?: boolean;
 }) {
   const { setTrackArmed } = useProjectStore();
-  const { selectedTrackId, setSelectedTrackId, setSelectedClipIds, setFocusedPanel } = useUIStore();
+  const { selectedTrackId, setSelectedTrackId, setSelectedMixerTrackId, setSelectedClipIds, setFocusedPanel } = useUIStore();
   const selected = selectedTrackId === track.id;
   const headerBg = selected ? "#252c35" : "#1c2028";
   const TypeIcon = TYPE_ICONS[track.type] ?? Mic2;
@@ -92,6 +92,7 @@ export function TrackHeader({
     <div
       onClick={() => {
         setSelectedTrackId(track.id);
+        setSelectedMixerTrackId(track.id);
         setSelectedClipIds([]);
         setFocusedPanel("timeline");
       }}

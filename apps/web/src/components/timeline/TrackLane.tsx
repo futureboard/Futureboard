@@ -121,7 +121,6 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
     }
 
     if (currentTool === "automation") {
-      showToast("Automation coming soon");
       selectTrack();
       return;
     }

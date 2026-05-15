@@ -1,6 +1,7 @@
 import { useProjectStore } from "../../store/projectStore";
 import { TrackHeader } from "./TrackHeader";
 import { TrackLane } from "./TrackLane";
+import { AutomationLaneView } from "./AutomationLaneView";
 import { HEADER_WIDTH, TRACK_HEIGHT } from "../../theme";
 import {
   DndContext,
@@ -18,15 +19,25 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { DawTrack } from "../../types/daw";
 
+/** Total pixel height of one track including all visible automation lanes. */
+function trackTotalHeight(track: DawTrack): number {
+  const laneHeight = (track.automationLanes ?? [])
+    .filter((l) => l.visible)
+    .reduce((sum, l) => sum + l.height, 0);
+  return TRACK_HEIGHT + laneHeight;
+}
+
 function SortableTrackRow({
   track,
   index,
+  topOffset,
   allTracks,
   timelineWidth,
   minTimelineWidth,
 }: {
   track: DawTrack;
   index: number;
+  topOffset: number;
   allTracks: DawTrack[];
   timelineWidth: number;
   minTimelineWidth: number;
@@ -42,7 +53,7 @@ function SortableTrackRow({
 
   const style: React.CSSProperties = {
     minWidth: minTimelineWidth,
-    top: index * TRACK_HEIGHT,
+    top: topOffset,
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.7 : 1,
@@ -51,24 +62,39 @@ function SortableTrackRow({
     outlineOffset: isDragging ? "-1px" : undefined,
   };
 
+  const visibleLanes = (track.automationLanes ?? []).filter((l) => l.visible);
+
   return (
     <div
       ref={setNodeRef}
-      className="absolute left-0 right-0 flex min-w-full"
+      className="absolute left-0 right-0 flex min-w-full flex-col"
       style={style}
     >
-      <TrackHeader
-        track={track}
-        index={index}
-        dragHandleProps={{ ...attributes, ...listeners }}
-        isDragging={isDragging}
-      />
-      <TrackLane
-        track={track}
-        allTracks={allTracks}
-        trackIndex={index}
-        width={timelineWidth}
-      />
+      {/* Main track row */}
+      <div className="flex">
+        <TrackHeader
+          track={track}
+          index={index}
+          dragHandleProps={{ ...attributes, ...listeners }}
+          isDragging={isDragging}
+        />
+        <TrackLane
+          track={track}
+          allTracks={allTracks}
+          trackIndex={index}
+          width={timelineWidth}
+        />
+      </div>
+
+      {/* Automation lanes */}
+      {visibleLanes.map((lane) => (
+        <AutomationLaneView
+          key={lane.id}
+          lane={lane}
+          trackColor={track.color}
+          width={timelineWidth + HEADER_WIDTH}
+        />
+      ))}
     </div>
   );
 }
@@ -90,7 +116,15 @@ export function TrackList({ timelineWidth }: { timelineWidth: number }) {
   }
 
   const minTimelineWidth = HEADER_WIDTH + timelineWidth;
-  const contentHeight = tracks.length * TRACK_HEIGHT;
+
+  // Compute accumulated top offsets per track (supports variable lane heights).
+  const topOffsets: number[] = [];
+  let accumulated = 0;
+  for (const track of tracks) {
+    topOffsets.push(accumulated);
+    accumulated += trackTotalHeight(track);
+  }
+  const contentHeight = accumulated;
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
@@ -121,6 +155,7 @@ export function TrackList({ timelineWidth }: { timelineWidth: number }) {
               key={track.id}
               track={track}
               index={i}
+              topOffset={topOffsets[i]}
               allTracks={tracks}
               timelineWidth={timelineWidth}
               minTimelineWidth={minTimelineWidth}

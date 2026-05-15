@@ -329,7 +329,7 @@ function registerIpcHandlers(): void {
 
   function cacheKeyToFilename(key: string): string {
     // Replace characters that are unsafe in filenames with underscores
-    return key.replace(/[^a-zA-Z0-9_\-:.]/g, "_") + ".json";
+    return key.replace(/[^a-zA-Z0-9_\-]/g, "_") + ".json";
   }
 
   async function ensureCacheDir(): Promise<string> {

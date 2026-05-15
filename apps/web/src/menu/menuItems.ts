@@ -1019,6 +1019,102 @@ export const APP_MENUS: AppMenuGroup[] = [
   },
 
   {
+    id: "automation",
+    label: "Automation",
+    children: [
+      {
+        id: "automation.add_volume_lane",
+        label: "Add Volume Automation",
+        icon: "volume-2",
+        action: "automation:add-volume-lane",
+        description: "Add a volume automation lane to the selected track",
+      },
+      {
+        id: "automation.add_pan_lane",
+        label: "Add Pan Automation",
+        icon: "blend",
+        action: "automation:add-pan-lane",
+        description: "Add a pan automation lane to the selected track",
+      },
+      {
+        type: "separator" as const,
+        id: "automation.sep.points",
+      },
+      {
+        id: "automation.delete_selected_points",
+        label: "Delete Selected Points",
+        accelerator: "Delete",
+        icon: "trash-2",
+        danger: true,
+        action: "automation:delete-selected-points",
+      },
+      {
+        id: "automation.clear_lane",
+        label: "Clear Selected Lane",
+        icon: "eraser",
+        action: "automation:clear-lane",
+      },
+      {
+        type: "separator" as const,
+        id: "automation.sep.curve",
+      },
+      {
+        id: "automation.curve_linear",
+        label: "Curve: Linear",
+        icon: "trending-up",
+        action: "automation:set-curve-linear",
+      },
+      {
+        id: "automation.curve_hold",
+        label: "Curve: Hold",
+        icon: "step-forward",
+        action: "automation:set-curve-hold",
+      },
+      {
+        type: "separator" as const,
+        id: "automation.sep.mode",
+      },
+      {
+        id: "automation.mode",
+        type: "submenu" as const,
+        label: "Automation Mode",
+        icon: "activity",
+        children: [
+          {
+            id: "automation.mode.off",
+            label: "Off",
+            checked: true,
+            action: "automation:set-mode-off",
+          },
+          {
+            id: "automation.mode.read",
+            label: "Read",
+            action: "automation:set-mode-read",
+          },
+          {
+            id: "automation.mode.touch",
+            label: "Touch",
+            enabled: false,
+            action: "automation:set-mode-touch",
+          },
+          {
+            id: "automation.mode.latch",
+            label: "Latch",
+            enabled: false,
+            action: "automation:set-mode-latch",
+          },
+          {
+            id: "automation.mode.write",
+            label: "Write",
+            enabled: false,
+            action: "automation:set-mode-write",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
     id: "window",
     label: "Window",
     children: [

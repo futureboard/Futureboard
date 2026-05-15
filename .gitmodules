@@ -1,0 +1,3 @@
+[submodule "frameworks/SphereEngine"]
+	path = frameworks/SphereEngine
+	url = https://github.com/arizkami/SphereEngine

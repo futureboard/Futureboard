@@ -1,5 +1,6 @@
 import type { DawTrack } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
+import { createTrackVolumeTarget, createTrackPanTarget } from "../utils/automationTargets";
 import { useUIStore } from "../store/uiStore";
 import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
@@ -11,6 +12,7 @@ import { getTrackColor } from "../theme";
 import { platform } from "../platform";
 import { importAudioFilesAsNewTracks } from "../utils/importAudioToProject";
 import { midiEditorBridge } from "./midiEditorBridge";
+import { buildSelectionState, getActiveSelectionContext } from "../store/selectionSelectors";
 import {
   AddTrackCommand,
   DeleteTrackCommand,
@@ -159,15 +161,18 @@ export function runAction(actionId: string) {
       break;
 
     case "edit:delete": {
-      const { selectedClipIds, selectedTrackId, focusedPanel } = uiStore;
-      if (focusedPanel === "timeline" && selectedClipIds.length > 0) {
-        history.execute(new DeleteClipsCommand(selectedClipIds));
+      const sel = buildSelectionState(uiStore);
+      const ctx = getActiveSelectionContext(sel);
+      if (ctx.kind === "clips") {
+        history.execute(new DeleteClipsCommand(ctx.clipIds));
         uiStore.setSelectedClipIds([]);
-      } else if (selectedTrackId) {
-        history.execute(new DeleteTrackCommand(selectedTrackId));
+      } else if (ctx.kind === "tracks") {
+        history.execute(new DeleteTrackCommand(ctx.trackIds[0]));
         uiStore.setSelectedTrackId(null);
         uiStore.setSelectedMixerTrackId(null);
       }
+      // Phase 3: ctx.kind === "midi-notes"  → delete selected notes
+      // Phase 2: ctx.kind === "insert-device" → remove device from track
       break;
     }
 
@@ -182,14 +187,26 @@ export function runAction(actionId: string) {
     }
 
     case "edit:duplicate": {
-      const { selectedClipIds } = uiStore;
-      if (selectedClipIds.length > 0) history.execute(new DuplicateClipsCommand(selectedClipIds));
+      const sel = buildSelectionState(uiStore);
+      const ctx = getActiveSelectionContext(sel);
+      if (ctx.kind === "clips") {
+        history.execute(new DuplicateClipsCommand(ctx.clipIds));
+      }
+      // Phase 3: ctx.kind === "midi-notes" → duplicate notes
       break;
     }
 
     case "edit:select-all": {
-      const allIds = projectStore.project.tracks.flatMap((t) => t.clips.map((c) => c.id));
-      uiStore.setSelectedClipIds(allIds);
+      const sel = buildSelectionState(uiStore);
+      const ctx = getActiveSelectionContext(sel);
+      if (ctx.kind === "midi-notes") {
+        // Let the MIDI editor select all notes in the active clip
+        midiEditorBridge.call("selectAll");
+      } else {
+        // Arrangement default: select all clips in the project
+        const allIds = projectStore.project.tracks.flatMap((t) => t.clips.map((c) => c.id));
+        uiStore.setSelectedClipIds(allIds);
+      }
       break;
     }
 
@@ -586,9 +603,74 @@ export function runAction(actionId: string) {
       break;
 
     // stubs — panels not yet implemented
-    case "panel:toggle-automation":
     case "panel:toggle-device-panel":
     case "panel:toggle-midi-editor":
+      break;
+
+    case "panel:toggle-automation":
+      // Toggle automation lanes visibility for selected track
+      runAction("automation:toggle-lanes");
+      break;
+
+    // ── Automation ────────────────────────────────────────────────────────────
+    case "automation:add-volume-lane": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const target = createTrackVolumeTarget(selectedTrackId);
+      const existing = projectStore.project.tracks
+        .find((t) => t.id === selectedTrackId)
+        ?.automationLanes?.some((l) => l.target.id === target.id);
+      if (!existing) projectStore.addAutomationLane(selectedTrackId, target);
+      break;
+    }
+
+    case "automation:add-pan-lane": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const target = createTrackPanTarget(selectedTrackId);
+      const existing = projectStore.project.tracks
+        .find((t) => t.id === selectedTrackId)
+        ?.automationLanes?.some((l) => l.target.id === target.id);
+      if (!existing) projectStore.addAutomationLane(selectedTrackId, target);
+      break;
+    }
+
+    case "automation:toggle-lanes": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const track = projectStore.project.tracks.find((t) => t.id === selectedTrackId);
+      if (!track) break;
+      const lanes = track.automationLanes ?? [];
+      const anyVisible = lanes.some((l) => l.visible);
+      for (const lane of lanes) {
+        if (anyVisible ? lane.visible : !lane.visible) {
+          projectStore.toggleAutomationLaneVisible(selectedTrackId, lane.id);
+        }
+      }
+      break;
+    }
+
+    case "automation:clear-lane": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const track = projectStore.project.tracks.find((t) => t.id === selectedTrackId);
+      const lane = track?.automationLanes?.[0];
+      if (lane) projectStore.clearAutomationLane(selectedTrackId, lane.id);
+      break;
+    }
+
+    case "automation:delete-selected-points":
+    case "automation:set-curve-linear":
+    case "automation:set-curve-hold":
+      // Handled inside AutomationLaneView context menus — no global selection yet.
+      break;
+
+    case "automation:set-mode-off":
+    case "automation:set-mode-read":
+    case "automation:set-mode-touch":
+    case "automation:set-mode-latch":
+    case "automation:set-mode-write":
+      // Automation mode — Read is default; Touch/Latch/Write are disabled in menu.
       break;
 
     // ── Panel dock positions ───────────────────────────────────────────────

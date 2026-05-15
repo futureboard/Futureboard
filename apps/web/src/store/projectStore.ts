@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import { useUIStore } from "./uiStore";
 import type {
+  AutomationLane,
+  AutomationPoint,
+  AutomationTarget,
   DawClip,
   DawFile,
   DawProject,
@@ -105,6 +108,18 @@ type ProjectStore = {
   // ── Waveform cache (non-dirty) ─────────────────────────────────────────────
   setPeaks: (fileId: FileId, peaks: WaveformPeaks) => void;
   setWaveformStatus: (fileId: FileId, status: WaveformStatus) => void;
+
+  // ── Automation lanes ───────────────────────────────────────────────────────
+  addAutomationLane: (trackId: TrackId, target: AutomationTarget) => AutomationLane;
+  removeAutomationLane: (trackId: TrackId, laneId: string) => void;
+  toggleAutomationLaneVisible: (trackId: TrackId, laneId: string) => void;
+  clearAutomationLane: (trackId: TrackId, laneId: string) => void;
+
+  // ── Automation points ──────────────────────────────────────────────────────
+  addAutomationPoint: (trackId: TrackId, laneId: string, point: AutomationPoint) => void;
+  updateAutomationPoint: (trackId: TrackId, laneId: string, pointId: string, patch: Partial<AutomationPoint>) => void;
+  removeAutomationPoint: (trackId: TrackId, laneId: string, pointId: string) => void;
+  removeAutomationPoints: (trackId: TrackId, laneId: string, pointIds: string[]) => void;
 
   // ── Persistence ────────────────────────────────────────────────────────────
   saveLocal: () => void;
@@ -589,6 +604,172 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   removeFile: (fileId) => {
     set((s) => ({ project: { ...s.project, files: s.project.files.filter((f) => f.id !== fileId) } }));
+    markDirty();
+  },
+
+  // ── Automation lanes ───────────────────────────────────────────────────────
+
+  addAutomationLane: (trackId, target) => {
+    const lane: AutomationLane = {
+      id: crypto.randomUUID(),
+      trackId,
+      target,
+      visible: true,
+      height: 72,
+      points: [],
+    };
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? { ...t, automationLanes: [...(t.automationLanes ?? []), lane] }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+    return lane;
+  },
+
+  removeAutomationLane: (trackId, laneId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? { ...t, automationLanes: (t.automationLanes ?? []).filter((l) => l.id !== laneId) }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  toggleAutomationLaneVisible: (trackId, laneId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                automationLanes: (t.automationLanes ?? []).map((l) =>
+                  l.id === laneId ? { ...l, visible: !l.visible } : l
+                ),
+              }
+            : t
+        ),
+      },
+    }));
+  },
+
+  clearAutomationLane: (trackId, laneId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                automationLanes: (t.automationLanes ?? []).map((l) =>
+                  l.id === laneId ? { ...l, points: [] } : l
+                ),
+              }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  // ── Automation points ──────────────────────────────────────────────────────
+
+  addAutomationPoint: (trackId, laneId, point) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                automationLanes: (t.automationLanes ?? []).map((l) =>
+                  l.id === laneId ? { ...l, points: [...l.points, point] } : l
+                ),
+              }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  updateAutomationPoint: (trackId, laneId, pointId, patch) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                automationLanes: (t.automationLanes ?? []).map((l) =>
+                  l.id === laneId
+                    ? {
+                        ...l,
+                        points: l.points.map((p) =>
+                          p.id === pointId ? { ...p, ...patch } : p
+                        ),
+                      }
+                    : l
+                ),
+              }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  removeAutomationPoint: (trackId, laneId, pointId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                automationLanes: (t.automationLanes ?? []).map((l) =>
+                  l.id === laneId
+                    ? { ...l, points: l.points.filter((p) => p.id !== pointId) }
+                    : l
+                ),
+              }
+            : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  removeAutomationPoints: (trackId, laneId, pointIds) => {
+    const ids = new Set(pointIds);
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                automationLanes: (t.automationLanes ?? []).map((l) =>
+                  l.id === laneId
+                    ? { ...l, points: l.points.filter((p) => !ids.has(p.id)) }
+                    : l
+                ),
+              }
+            : t
+        ),
+      },
+    }));
     markDirty();
   },
 

@@ -2,7 +2,7 @@
  * Normalization helpers — fill in default values for older project state
  * so UI and engine code never crash on missing fields.
  */
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint } from "../types/daw";
 
 export function normalizeLoop(raw: Partial<ProjectLoop> | undefined): ProjectLoop | undefined {
   if (!raw) return undefined;
@@ -47,6 +47,35 @@ export function normalizeSend(raw: Partial<TrackSend>): TrackSend {
   };
 }
 
+export function normalizeAutomationPoint(raw: Partial<AutomationPoint>): AutomationPoint {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    beat: Math.max(0, raw.beat ?? 0),
+    value: raw.value ?? 0,
+    curve: raw.curve ?? "linear",
+    selected: false,
+  };
+}
+
+export function normalizeAutomationLane(raw: Partial<AutomationLane>): AutomationLane {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    trackId: raw.trackId ?? "",
+    target: raw.target ?? {
+      id: "",
+      kind: "track-volume",
+      label: "Volume",
+      min: 0,
+      max: 1,
+      defaultValue: 1,
+      displayScale: "linear",
+    },
+    visible: raw.visible !== false,
+    height: raw.height ?? 72,
+    points: (raw.points ?? []).map((p) => normalizeAutomationPoint(p as Partial<AutomationPoint>)),
+  };
+}
+
 export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
   const inserts = (raw.inserts ?? []).map((ins, i) =>
     normalizeInsertDevice(ins as Partial<InsertDevice>, i)
@@ -68,6 +97,9 @@ export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
     output: raw.output ?? "master",
     height: raw.height,
     collapsed: raw.collapsed ?? false,
+    automationLanes: (raw.automationLanes ?? []).map((l) =>
+      normalizeAutomationLane(l as Partial<AutomationLane>)
+    ),
   };
 }
 

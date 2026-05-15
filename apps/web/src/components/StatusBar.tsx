@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useUIStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
+import { buildSelectionState, getSelectionSummary } from "../store/selectionSelectors";
 import { transport } from "../engine/Transport";
 import { C } from "../theme";
 import { formatBarBeat } from "../utils/musicalTime";
@@ -57,16 +58,18 @@ function Sep() {
 // ── StatusBar ─────────────────────────────────────────────────────────────────
 export function StatusBar() {
   // Store subscriptions — individual selectors avoid broad re-renders
-  const selectedClipIds = useUIStore((s) => s.selectedClipIds);
-  const selectedTrackId = useUIStore((s) => s.selectedTrackId);
-  const currentTool     = useUIStore((s) => s.currentTool);
-  const snapToGrid      = useUIStore((s) => s.snapToGrid);
-  const pixelsPerSecond = useUIStore((s) => s.pixelsPerSecond);
-  const saveStatus      = useUIStore((s) => s.saveStatus);
+  const selectedClipIds       = useUIStore((s) => s.selectedClipIds);
+  const selectedTrackId       = useUIStore((s) => s.selectedTrackId);
+  const selectedBrowserFileId = useUIStore((s) => s.selectedBrowserFileId);
+  const focusedPanel          = useUIStore((s) => s.focusedPanel);
+  const currentTool           = useUIStore((s) => s.currentTool);
+  const snapToGrid            = useUIStore((s) => s.snapToGrid);
+  const pixelsPerSecond       = useUIStore((s) => s.pixelsPerSecond);
+  const saveStatus            = useUIStore((s) => s.saveStatus);
 
-  const tracks       = useProjectStore((s) => s.project.tracks);
-  const bpm          = useProjectStore((s) => s.project.bpm);
-  const timeSignature = useProjectStore((s) => s.project.timeSignature);
+  const project       = useProjectStore((s) => s.project);
+  const bpm           = project.bpm;
+  const timeSignature = project.timeSignature;
 
   // High-frequency values live in local state, updated by a throttled RAF loop
   // so they never go through Zustand and don't trigger global re-renders.
@@ -110,20 +113,16 @@ export function StatusBar() {
     return () => cancelAnimationFrame(raf);
   }, []); // empty deps: bpm/timeSig are read via refs
 
-  // Selection summary — recomputed only when selection or tracks change
+  // Selection summary via centralized selector — recomputed when selection or project changes.
   const selText = useMemo(() => {
-    const n = selectedClipIds.length;
-    if (n > 1) return `${n} clips`;
-    if (n === 1) {
-      const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === selectedClipIds[0]);
-      if (clip) return `${clip.type === "midi" ? "MIDI" : "Audio"}: ${clip.name}`;
-    }
-    if (selectedTrackId) {
-      const track = tracks.find((t) => t.id === selectedTrackId);
-      if (track) return track.name;
-    }
-    return "No selection";
-  }, [selectedClipIds, selectedTrackId, tracks]);
+    const sel = buildSelectionState({
+      focusedPanel,
+      selectedTrackId,
+      selectedClipIds,
+      selectedBrowserFileId,
+    });
+    return getSelectionSummary(project, sel) || "No selection";
+  }, [focusedPanel, selectedTrackId, selectedClipIds, selectedBrowserFileId, project]);
 
   const timeSig  = timeSignature ?? { numerator: 4, denominator: 4 };
   const ppb      = Math.round(pxPerBeat(pixelsPerSecond, bpm));

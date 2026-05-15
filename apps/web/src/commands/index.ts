@@ -450,7 +450,7 @@ export class DuplicateClipsCommand implements DawCommand {
   readonly label: string;
   private clipIds: string[];
   /** IDs of the newly created duplicates — filled at execute() time */
-  private newClipIds: string[] = [];
+  newClipIds: string[] = [];
 
   constructor(clipIds: string[]) {
     this.clipIds = clipIds;

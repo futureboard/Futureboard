@@ -103,6 +103,8 @@ export type DawTrack = {
   height?: number;
   /** Whether the track lane is collapsed to minimum height. */
   collapsed?: boolean;
+  /** Automation lanes attached to this track. */
+  automationLanes?: AutomationLane[];
 };
 
 export type ClipType = "audio" | "midi";
@@ -161,3 +163,64 @@ export type WaveformPeaks = {
 };
 
 export type WaveformStatus = "idle" | "loading" | "ready" | "error";
+
+// ── Automation ────────────────────────────────────────────────────────────────
+
+export type AutomationTargetKind =
+  | "track-volume"
+  | "track-pan"
+  | "track-mute"
+  | "track-send"
+  | "clip-gain"
+  | "device-param"
+  | "master-volume"
+  | "transport-bpm";
+
+export type AutomationCurveType = "linear" | "hold" | "smooth";
+
+export type AutomationPoint = {
+  id: string;
+  /** Position in quarter-note beats from project start. */
+  beat: number;
+  /** Real parameter value (not normalized). */
+  value: number;
+  curve?: AutomationCurveType;
+  selected?: boolean;
+};
+
+export type AutomationTarget = {
+  id: string;
+  kind: AutomationTargetKind;
+  trackId?: TrackId;
+  sendId?: string;
+  deviceId?: string;
+  paramId?: string;
+  label: string;
+  unit?: string;
+  min: number;
+  max: number;
+  defaultValue: number;
+  displayScale?: "linear" | "db" | "percent" | "pan";
+};
+
+export type AutomationLane = {
+  id: string;
+  trackId: TrackId;
+  target: AutomationTarget;
+  visible: boolean;
+  /** Display height in pixels. */
+  height: number;
+  points: AutomationPoint[];
+};
+
+export type AutomationClip = {
+  id: string;
+  trackId: TrackId;
+  target: AutomationTarget;
+  startBeat: number;
+  durationBeats: number;
+  muted: boolean;
+  points: AutomationPoint[];
+  name?: string;
+  color?: string;
+};

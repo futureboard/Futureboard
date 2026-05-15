@@ -109,7 +109,7 @@ export default function App() {
           const _semitones = semitones;
           const sine = new Float32Array(44100).map((_, i) => Math.sin(i * 0.01));
           const decoded = { fileId: "test", sampleRate: 44100, channels: 1, length: sine.length, duration: 1, channelData: [sine] };
-          const result = await audioProcessingService.processClipAudio(decoded, { speedRatio: 1, pitchSemitones: _semitones, preservePitch: true, quality: "draft" });
+          const { result } = await audioProcessingService.processClipAudio(decoded, { speedRatio: 1, pitchSemitones: _semitones, preservePitch: true, mode: "polyphonic", quality: "draft" });
           console.log(`[Debug] TS pitch ${_semitones}st → length ${result.length}`);
           return result;
         },
@@ -131,7 +131,8 @@ export default function App() {
           const key = buildDecodedCacheKey(clip.fileId, loaded.audioBuffer.sampleRate);
           const decoded = audioCacheManager.getDecodedAudio(key);
           if (!decoded) { console.warn("[Debug] No decoded audio in cache for", clip.fileId); return; }
-          const result = await audioProcessingService.processClipAudio(decoded, clip.audioProcess);
+          const params = { ...clip.audioProcess, mode: clip.audioProcess.mode ?? "polyphonic" as const };
+          const { result } = await audioProcessingService.processClipAudio(decoded, params);
           console.log(`[Debug] Processed clip "${clip.name}": ${result.length} samples, ${result.duration.toFixed(3)}s`);
           return result;
         },

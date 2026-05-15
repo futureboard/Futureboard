@@ -99,6 +99,11 @@ type UIStore = {
   // Marquee Selection gesture
   marqueeSelection: MarqueeSelectionState | null;
   setMarqueeSelection: (marqueeSelection: MarqueeSelectionState | null) => void;
+  // Track area virtualization scroll state
+  scrollY: number;
+  setScrollY: (v: number) => void;
+  trackAreaHeight: number;
+  setTrackAreaHeight: (h: number) => void;
 };
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -192,4 +197,8 @@ export const useUIStore = create<UIStore>((set) => ({
   setSaveStatus: (saveStatus) => set({ saveStatus }),
   marqueeSelection: null,
   setMarqueeSelection: (marqueeSelection) => set({ marqueeSelection }),
+  scrollY: 0,
+  setScrollY: (scrollY) => set({ scrollY }),
+  trackAreaHeight: 600,
+  setTrackAreaHeight: (trackAreaHeight) => set({ trackAreaHeight }),
 }));

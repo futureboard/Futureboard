@@ -107,16 +107,21 @@ export const DEFAULT_AUDIO_PROCESS: AudioClipProcess = {
   speedRatio: 1,
   pitchSemitones: 0,
   preservePitch: true,
+  mode: "polyphonic",
   quality: "balanced",
 };
 
+const VALID_MODES = new Set(["resample", "monophonic", "polyphonic", "percussive", "granular"]);
+
 function normalizeAudioProcess(raw?: Partial<AudioClipProcess>): AudioClipProcess {
   if (!raw) return DEFAULT_AUDIO_PROCESS;
+  const rawMode = raw.mode as string | undefined;
   return {
-    speedRatio: Math.max(0.25, Math.min(4, raw.speedRatio ?? 1)),
+    speedRatio:     Math.max(0.25, Math.min(4, raw.speedRatio ?? 1)),
     pitchSemitones: Math.max(-24, Math.min(24, raw.pitchSemitones ?? 0)),
-    preservePitch: raw.preservePitch ?? true,
-    quality: raw.quality ?? "balanced",
+    preservePitch:  raw.preservePitch ?? true,
+    mode:           (rawMode && VALID_MODES.has(rawMode) ? rawMode : "polyphonic") as AudioClipProcess["mode"],
+    quality:        raw.quality ?? "balanced",
   };
 }
 

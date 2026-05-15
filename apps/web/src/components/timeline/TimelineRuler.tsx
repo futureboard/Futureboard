@@ -78,13 +78,13 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
           ctx.strokeStyle = C.border;
           ctx.lineWidth   = 1;
           ctx.beginPath();
-          ctx.moveTo(cx, RULER_HEIGHT - 9);
+          ctx.moveTo(cx, RULER_HEIGHT - 10);
           ctx.lineTo(cx, RULER_HEIGHT);
           ctx.stroke();
         } else {
-          // bar — full height tick
-          ctx.strokeStyle = C.borderHard;
-          ctx.lineWidth   = 1;
+          // bar — full height, brighter tick
+          ctx.strokeStyle = "rgba(255,255,255,0.38)";
+          ctx.lineWidth   = 1.5;
           ctx.beginPath();
           ctx.moveTo(cx, 0);
           ctx.lineTo(cx, RULER_HEIGHT);

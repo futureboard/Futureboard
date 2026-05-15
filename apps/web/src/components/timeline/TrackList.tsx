@@ -1,4 +1,5 @@
 import { useProjectStore } from "../../store/projectStore";
+import { useUIStore } from "../../store/uiStore";
 import { TrackHeader } from "./TrackHeader";
 import { TrackLane } from "./TrackLane";
 import { AutomationLaneView } from "./AutomationLaneView";
@@ -99,9 +100,13 @@ function SortableTrackRow({
   );
 }
 
+const OVERSCAN = 3;
+
 export function TrackList({ timelineWidth }: { timelineWidth: number }) {
   const tracks = useProjectStore((s) => s.project.tracks);
   const reorderTracks = useProjectStore((s) => s.reorderTracks);
+  const scrollY = useUIStore((s) => s.scrollY);
+  const trackAreaHeight = useUIStore((s) => s.trackAreaHeight);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
@@ -125,6 +130,16 @@ export function TrackList({ timelineWidth }: { timelineWidth: number }) {
     accumulated += trackTotalHeight(track);
   }
   const contentHeight = accumulated;
+
+  // Compute visible slice with overscan
+  const visibleStart = scrollY;
+  const visibleEnd   = scrollY + Math.max(trackAreaHeight, TRACK_HEIGHT);
+  const visibleTracks = tracks.filter((_, i) => {
+    const top = topOffsets[i];
+    const bot = top + trackTotalHeight(tracks[i]);
+    return bot >= visibleStart - OVERSCAN * TRACK_HEIGHT &&
+           top <= visibleEnd + OVERSCAN * TRACK_HEIGHT;
+  });
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
@@ -150,19 +165,28 @@ export function TrackList({ timelineWidth }: { timelineWidth: number }) {
           items={tracks.map((t) => t.id)}
           strategy={verticalListSortingStrategy}
         >
-          {tracks.map((track, i) => (
-            <SortableTrackRow
-              key={track.id}
-              track={track}
-              index={i}
-              topOffset={topOffsets[i]}
-              allTracks={tracks}
-              timelineWidth={timelineWidth}
-              minTimelineWidth={minTimelineWidth}
-            />
-          ))}
+          {visibleTracks.map((track) => {
+            const i = tracks.indexOf(track);
+            return (
+              <SortableTrackRow
+                key={track.id}
+                track={track}
+                index={i}
+                topOffset={topOffsets[i]}
+                allTracks={tracks}
+                timelineWidth={timelineWidth}
+                minTimelineWidth={minTimelineWidth}
+              />
+            );
+          })}
         </SortableContext>
       </DndContext>
+
+      {import.meta.env.DEV && (
+        <div className="pointer-events-none fixed bottom-2 left-2 z-[9999] rounded bg-black/70 px-2 py-0.5 text-[9px] tabular-nums text-white/50">
+          tracks: {visibleTracks.length}/{tracks.length}
+        </div>
+      )}
     </div>
   );
 }

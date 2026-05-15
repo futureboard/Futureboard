@@ -54,11 +54,27 @@ export function rustSpeedChannels(channels: F32[], speedRatio: number): Float32A
 export function rustPitchChannels(channels: F32[], semitones: number): Float32Array[] | null {
   if (!_module) return null;
   try {
-    return channels.map((ch) => _module!.process_pitch_mono(new Float32Array(ch), semitones));
+    const result = channels.map((ch) => _module!.process_pitch_mono(new Float32Array(ch), semitones));
+    if (import.meta.env.DEV && semitones !== 0 && result.length > 0) {
+      const inLen  = channels[0].length;
+      const outLen = result[0].length;
+      const inRms  = _rms(channels[0]);
+      const outRms = _rms(result[0]);
+      console.debug(`[RustDsp] pitch ${semitones > 0 ? "+" : ""}${semitones}st — in:${inLen} out:${outLen} rms ${inRms.toFixed(5)}→${outRms.toFixed(5)}`);
+    }
+    return result;
   } catch (e) {
     console.warn("[RustDsp] process_pitch_mono error:", e);
     return null;
   }
+}
+
+/** Root-mean-square of a Float32Array (dev-only diagnostic). */
+function _rms(buf: Float32Array): number {
+  if (buf.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  return Math.sqrt(sum / buf.length);
 }
 
 /** Apply time-stretch to all channels via WASM. Returns null if WASM unavailable. */
@@ -68,9 +84,13 @@ export function rustTimeStretchChannels(
 ): Float32Array[] | null {
   if (!_module) return null;
   try {
-    return channels.map((ch) =>
+    const result = channels.map((ch) =>
       _module!.process_time_stretch_mono(new Float32Array(ch), stretchRatio),
     );
+    if (import.meta.env.DEV && result.length > 0) {
+      console.debug(`[RustDsp] stretch ×${stretchRatio.toFixed(3)} — in:${channels[0].length} out:${result[0].length}`);
+    }
+    return result;
   } catch (e) {
     console.warn("[RustDsp] process_time_stretch_mono error:", e);
     return null;

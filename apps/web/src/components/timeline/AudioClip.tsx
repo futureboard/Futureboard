@@ -63,8 +63,14 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   const dragStartTime = useRef(0);
   const [dragging, setDragging] = useState(false);
 
+  // Effective visual duration accounts for speed processing:
+  // speedRatio=2.0 → audio plays in half the time → clip appears half as wide.
+  // Pure pitch shift (preservePitch=true, speedRatio=1) does not change duration.
+  const speedRatio = clip.audioProcess?.speedRatio ?? 1;
+  const effectiveDuration = speedRatio !== 1 ? clip.duration / speedRatio : clip.duration;
+
   const left  = clip.startTime * pixelsPerSecond;
-  const width = Math.max(4, clip.duration * pixelsPerSecond);
+  const width = Math.max(4, effectiveDuration * pixelsPerSecond);
   const clipH = TRACK_HEIGHT - PAD * 2;
   const waveH = clipH - LABEL_H;
   const selected = selectedClipIds.includes(clip.id);
@@ -436,7 +442,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
           {clip.name}
         </span>
         <span className="ml-auto shrink-0 text-[9px] tabular-nums text-black/60">
-          {formatBeatLength(clip.duration, project.bpm, project.timeSignature)}
+          {formatBeatLength(effectiveDuration, project.bpm, project.timeSignature)}
         </span>
       </div>
 
@@ -452,7 +458,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
           sourceDuration={sourceFile?.duration ?? peaks?.duration}
           sampleRate={sourceFile?.sampleRate ?? peaks?.sampleRate}
           clipOffset={clip.offset}
-          clipDuration={clip.duration}
+          clipDuration={effectiveDuration}
           muted={!!clip.muted || track.muted}
           selected={selected}
           status={status}

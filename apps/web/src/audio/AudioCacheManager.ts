@@ -59,6 +59,10 @@ class LRUAudioMap {
     return this._bytes;
   }
 
+  keys(): IterableIterator<string> {
+    return this._map.keys();
+  }
+
   /** Remove entries whose key starts with the given prefix. */
   deleteByPrefix(prefix: string): void {
     for (const [k, v] of this._map) {
@@ -112,11 +116,19 @@ class AudioCacheManager {
 
   /** Remove all cached data for a specific file (decoded + any processed variants). */
   clearFileCache(fileId: string): void {
-    const decodedPrefix = `dec:`;
-    const processedPrefix = `proc:`;
-    // Delete entries containing the fileId
-    this._decoded.deleteByPrefix(`${decodedPrefix}v1:${fileId}`);
-    this._processed.deleteByPrefix(`${processedPrefix}v1:${fileId}`);
+    // Match any cache version so old entries don't linger after version bumps.
+    const segment = `:${fileId}:`;
+    for (const key of [...this._decoded.keys()]) {
+      if (key.includes(segment)) this._decoded.delete(key);
+    }
+    for (const key of [...this._processed.keys()]) {
+      if (key.includes(segment)) this._processed.delete(key);
+    }
+  }
+
+  /** Remove only processed variants (decoded stays warm — expensive to re-decode). */
+  clearAllProcessed(): void {
+    this._processed.clear();
   }
 
   clearAllAudioCache(): void {

@@ -1,4 +1,4 @@
-import type { AudioProcessQuality } from "../types/daw";
+import type { AudioProcessQuality, AudioPitchMode } from "../types/daw";
 
 // ── Decoded audio ─────────────────────────────────────────────────────────────
 
@@ -24,6 +24,7 @@ export type AudioProcessParams = {
   speedRatio: number;
   pitchSemitones: number;
   preservePitch: boolean;
+  mode: AudioPitchMode;
   quality: AudioProcessQuality;
 };
 

@@ -60,7 +60,7 @@ function WindowContent({ contentType, id, payload }: ContentProps) {
       return (
         <SettingsDialog
           windowId={id}
-          initialTab={(payload?.initialTab as "general" | "audio" | "midi" | "project" | "appearance" | "advanced") ?? "general"}
+          initialTab={(payload?.initialTab as "general" | "audio" | "midi" | "project" | "shortcuts" | "appearance" | "advanced") ?? "general"}
         />
       );
     default:

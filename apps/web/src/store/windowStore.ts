@@ -54,6 +54,7 @@ type WindowStore = {
   isWindowOpen: (contentType: AppWindowContentType) => boolean;
   openDialog: (config: Omit<OpenWindowConfig, "kind">) => string;
   openFloating: (config: Omit<OpenWindowConfig, "kind">) => string;
+  updateWindowPayload: (id: string, patch: Record<string, unknown>) => void;
   setPendingAction: (action: (() => void) | null) => void;
   consumePendingAction: () => (() => void) | null;
 };
@@ -142,6 +143,14 @@ export const useWindowStore = create<WindowStore>((set, get) => ({
 
   openFloating(config) {
     return get().openWindow({ ...config, kind: "floating", resizable: config.resizable ?? true });
+  },
+
+  updateWindowPayload(id, patch) {
+    set((s) => ({
+      windows: s.windows.map((w) =>
+        w.id === id ? { ...w, payload: { ...w.payload, ...patch } } : w
+      ),
+    }));
   },
 
   setPendingAction(action) {

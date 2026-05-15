@@ -15,7 +15,11 @@
 use wasm_bindgen::prelude::*;
 
 use crate::commands::EngineCommand;
-use crate::dsp::{granular::time_stretch_granular, pitch::pitch_shift_draft, resample::resample_linear};
+use crate::dsp::{
+    granular::time_stretch_granular,
+    pitch::{pitch_shift_draft, pitch_shift_draft_quality, GRAIN_SIZE_DRAFT, GRAIN_SIZE_BALANCED, GRAIN_SIZE_HIGH},
+    resample::resample_linear,
+};
 use crate::engine::{DspEngine, EngineConfig};
 
 // ── Standalone DSP exports ────────────────────────────────────────────────────
@@ -38,7 +42,31 @@ pub fn process_pitch_mono(input: &[f32], semitones: f32) -> Vec<f32> {
 /// stretch_ratio 2.0 → twice as long (slower). 0.5 → half length (faster).
 #[wasm_bindgen]
 pub fn process_time_stretch_mono(input: &[f32], stretch_ratio: f32) -> Vec<f32> {
-    time_stretch_granular(input, stretch_ratio, 2048)
+    time_stretch_granular(input, stretch_ratio, GRAIN_SIZE_BALANCED)
+}
+
+/// Pitch-shift with explicit grain size for quality control.
+/// grain_size: use GRAIN_SIZE_DRAFT(1024), GRAIN_SIZE_BALANCED(2048), or GRAIN_SIZE_HIGH(4096).
+#[wasm_bindgen]
+pub fn process_pitch_mono_quality(input: &[f32], semitones: f32, grain_size: u32) -> Vec<f32> {
+    pitch_shift_draft_quality(input, semitones, grain_size as usize)
+}
+
+/// Time-stretch with explicit grain size for quality control.
+#[wasm_bindgen]
+pub fn process_time_stretch_mono_quality(input: &[f32], stretch_ratio: f32, grain_size: u32) -> Vec<f32> {
+    time_stretch_granular(input, stretch_ratio, grain_size as usize)
+}
+
+/// Returns the grain size for the given quality string index:
+/// 0=draft(1024), 1=balanced(2048), 2=high(4096).
+#[wasm_bindgen]
+pub fn grain_size_for_quality(quality_index: u32) -> u32 {
+    match quality_index {
+        0 => GRAIN_SIZE_DRAFT    as u32,
+        2 => GRAIN_SIZE_HIGH     as u32,
+        _ => GRAIN_SIZE_BALANCED as u32,
+    }
 }
 
 // ── Panic hook ────────────────────────────────────────────────────────────────

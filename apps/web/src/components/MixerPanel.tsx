@@ -11,7 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/menu";
-import { forwardRef, useRef, type ButtonHTMLAttributes } from "react";
+import { forwardRef, useRef, useState, useEffect, type ButtonHTMLAttributes } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
@@ -414,6 +414,20 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
 
   const mixerHeight = height ?? panels.mixer?.size ?? 300;
 
+  // horizontal virtualization state for main strip scroll area
+  const mainScrollRef = useRef<HTMLDivElement>(null);
+  const [stripScrollLeft, setStripScrollLeft] = useState(0);
+  const [stripViewWidth, setStripViewWidth] = useState(0);
+
+  useEffect(() => {
+    const el = mainScrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setStripViewWidth(el.clientWidth));
+    ro.observe(el);
+    setStripViewWidth(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
+
   // height resize — useRef so drag state survives re-renders
   const hDragRef = useRef<{ startY: number; startH: number } | null>(null);
   const onHeightDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -534,6 +548,23 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
         const mainTracks    = tracks.filter((t) => t.type !== "bus" && t.type !== "return" && t.type !== "group");
         const routingTracks = tracks.filter((t) => t.type === "bus" || t.type === "return" || t.type === "group");
 
+        // Horizontal virtualization for mainTracks (fixed-width mode only)
+        const STRIP_OVERSCAN = 3;
+        let visibleMain = mainTracks;
+        let leadSpacer  = 0;
+        let tailSpacer  = 0;
+
+        if (!mixerFlexLayout && fixedWidth !== undefined && stripViewWidth > 0) {
+          const firstVisible = Math.max(0, Math.floor(stripScrollLeft / fixedWidth) - STRIP_OVERSCAN);
+          const lastVisible  = Math.min(
+            mainTracks.length - 1,
+            Math.ceil((stripScrollLeft + stripViewWidth) / fixedWidth) + STRIP_OVERSCAN,
+          );
+          leadSpacer  = firstVisible * fixedWidth;
+          tailSpacer  = Math.max(0, (mainTracks.length - 1 - lastVisible) * fixedWidth);
+          visibleMain = mainTracks.slice(firstVisible, lastVisible + 1);
+        }
+
         const stripFor = (t: DawTrack) => (
           <ChannelStrip
             key={t.id}
@@ -568,14 +599,22 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
         return (
           <div className="flex min-h-0 flex-1 overflow-hidden">
             {/* ── main scrollable tracks ── */}
-            <div className="flex min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
+            <div
+              ref={mainScrollRef}
+              className="flex min-h-0 flex-1 overflow-x-auto overflow-y-hidden"
+              onScroll={(e) => setStripScrollLeft(e.currentTarget.scrollLeft)}
+            >
               {mainTracks.length === 0 && routingTracks.length === 0 && (
                 <div className="flex flex-1 items-center justify-center text-[11px] text-daw-faint">
                   Add tracks to see mixer channels.
                 </div>
               )}
-              {mainTracks.map(stripFor)}
-              {mainTracks.length > 0 && !mixerFlexLayout && <div className="flex-1" />}
+              {/* lead spacer keeps scroll position accurate */}
+              {leadSpacer > 0 && <div style={{ width: leadSpacer, flexShrink: 0 }} />}
+              {visibleMain.map(stripFor)}
+              {/* tail spacer */}
+              {tailSpacer > 0 && <div style={{ width: tailSpacer, flexShrink: 0 }} />}
+              {mainTracks.length > 0 && !mixerFlexLayout && leadSpacer === 0 && tailSpacer === 0 && <div className="flex-1" />}
             </div>
 
             {/* ── pinned routing + master zone ── */}
@@ -600,6 +639,12 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
                 }}
               />
             </div>
+
+            {import.meta.env.DEV && (
+              <div className="pointer-events-none fixed bottom-8 left-2 z-[9999] rounded bg-black/70 px-2 py-0.5 text-[9px] tabular-nums text-white/50">
+                strips: {visibleMain.length}/{mainTracks.length}
+              </div>
+            )}
           </div>
         );
       })()}

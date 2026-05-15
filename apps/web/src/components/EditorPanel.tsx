@@ -86,7 +86,7 @@ function AudioEditor({ clip, track }: { clip: DawClip; track: DawTrack | null | 
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Waveform + ruler */}
-        <div className="relative flex min-h-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           <div
             ref={waveRef}
             className="relative flex-1 overflow-hidden"
@@ -124,7 +124,7 @@ function AudioEditor({ clip, track }: { clip: DawClip; track: DawTrack | null | 
 
         {/* Right controls panel */}
         <div
-          className="flex w-44 shrink-0 flex-col overflow-y-auto border-l"
+          className="flex w-[320px] min-w-[300px] max-w-[360px] shrink-0 flex-col overflow-y-auto overflow-x-hidden border-l"
           style={{ borderColor: "rgba(255,255,255,0.06)", background: "#111418" }}
         >
           <CtrlSection label="Gain">
@@ -167,7 +167,7 @@ function AudioEditor({ clip, track }: { clip: DawClip; track: DawTrack | null | 
           </CtrlSection>
 
           <CtrlSection label="Process">
-            <div className="grid grid-cols-2 gap-1 px-2.5 pb-2">
+            <div className="grid grid-cols-2 gap-1.5 px-3 pb-2.5">
               <PlaceholderBtn icon={RotateCcw} label="Reverse" />
               <PlaceholderBtn icon={ArrowUpDown} label="Normalize" />
               <PlaceholderBtn icon={VolumeX} label="Silence" />
@@ -191,7 +191,7 @@ function AudioEditor({ clip, track }: { clip: DawClip; track: DawTrack | null | 
 function CtrlSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="border-b" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
-      <div className="px-2.5 pb-1 pt-2.5 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+      <div className="px-3 pb-1 pt-2.5 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
         {label}
       </div>
       {children}
@@ -211,8 +211,8 @@ function SliderRow({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-2 px-2.5 pb-2">
-      <span className="w-12 shrink-0 text-[9px] text-daw-faint">{label}</span>
+    <div className="flex items-center gap-2.5 px-3 pb-2">
+      <span className="w-14 shrink-0 text-[10px] text-daw-faint">{label}</span>
       <input
         type="range"
         min={min}
@@ -220,10 +220,10 @@ function SliderRow({
         step={step}
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="flex-1 cursor-ew-resize appearance-none"
+        className="min-w-0 flex-1 cursor-ew-resize appearance-none"
         style={{ accentColor: "#56c7c9", height: "3px" }}
       />
-      <span className="w-9 shrink-0 text-right text-[9px] tabular-nums text-daw-dim">
+      <span className="w-11 shrink-0 text-right text-[10px] tabular-nums text-daw-dim">
         {display}
       </span>
     </div>
@@ -232,9 +232,13 @@ function SliderRow({
 
 function InfoRow({ label, value, truncate }: { label: string; value: string; truncate?: boolean }) {
   return (
-    <div className="flex items-center gap-2 px-2.5 pb-1.5">
-      <span className="w-12 shrink-0 text-[9px] text-daw-faint">{label}</span>
-      <span className={`text-[9px] tabular-nums text-daw-dim ${truncate ? "min-w-0 flex-1 truncate" : ""}`}>
+    <div className="flex items-center gap-2.5 px-3 pb-1.5">
+      <span className="w-14 shrink-0 text-[10px] text-daw-faint">{label}</span>
+      <span
+        className="text-[10px] tabular-nums text-daw-dim"
+        style={truncate ? { minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } : undefined}
+        title={truncate ? value : undefined}
+      >
         {value}
       </span>
     </div>

@@ -16,6 +16,8 @@ import { audioCacheManager } from "../audio/AudioCacheManager";
 import { buildDecodedCacheKey } from "../audio/audioCacheKeys";
 import { audioEngine } from "../engine/AudioEngine";
 import { DawSelect } from "./ui/DawSelect";
+import { clipScheduler } from "../engine/ClipScheduler";
+import { transport } from "../engine/Transport";
 
 const TYPE_ICONS: Record<TrackType, React.ElementType> = {
   audio:      Mic2,
@@ -164,12 +166,23 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                     max={2}
                     color="#f3c969"
                     display={`${Math.round(clip.gain * 100)}%`}
-                    onChange={(v) => history().execute(new UpdateClipCommand(clip.id, { gain: v }, "Set Clip Gain"))}
+                    onChange={(v) => {
+                      history().execute(new UpdateClipCommand(clip.id, { gain: v }, "Set Clip Gain"));
+                      clipScheduler.updateClipGain(clip.id, v);
+                    }}
                   />
                 )}
                 <div className="flex items-center justify-between border-b border-daw-border px-3 py-2">
                   <span className="text-[9px] font-semibold uppercase tracking-widest text-daw-faint">Mute</span>
-                  <input type="checkbox" checked={clip.muted ?? false} onChange={(e) => history().execute(new UpdateClipCommand(clip.id, { muted: e.target.checked }, e.target.checked ? "Mute Clip" : "Unmute Clip"))} />
+                  <input
+                    type="checkbox"
+                    checked={clip.muted ?? false}
+                    onChange={(e) => {
+                      const muted = e.target.checked;
+                      history().execute(new UpdateClipCommand(clip.id, { muted }, muted ? "Mute Clip" : "Unmute Clip"));
+                      clipScheduler.updateClipMute(clip.id, muted);
+                    }}
+                  />
                 </div>
               </div>
 
@@ -545,7 +558,27 @@ function InspectorTrackBtn({
 
 // ── Audio process section ─────────────────────────────────────────────────────
 
+import type { ProcessorKind } from "../audio/AudioProcessingService";
+
 type ProcessStatus = "idle" | "processing" | "cached" | "failed";
+
+const MODE_LABELS: Record<AudioClipProcess["mode"], string> = {
+  resample:    "Resample (tape)",
+  monophonic:  "Monophonic",
+  polyphonic:  "Polyphonic",
+  percussive:  "Percussive",
+  granular:    "Granular / Texture",
+};
+
+function processorLabel(kind: ProcessorKind, mode: AudioClipProcess["mode"]): string {
+  switch (kind) {
+    case "rust-wasm":   return "✓ Rust WASM";
+    case "ts-wsola":    return `✓ WSOLA (${mode})`;
+    case "ts-granular": return `✓ Granular (${mode})`;
+    case "ts-resample": return "✓ Resample";
+    default:            return "✓ Ready";
+  }
+}
 
 function ClipProcessSection({ clip }: { clip: DawClip }) {
   const history = useHistoryStore.getState;
@@ -554,10 +587,11 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
   // Local draft so slider drags don't spam history until mouseup
   const [draft, setDraft] = useState<AudioClipProcess>(proc);
   const [processStatus, setProcessStatus] = useState<ProcessStatus>("idle");
+  const [processorUsed, setProcessorUsed] = useState<ProcessorKind | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep draft in sync when a different clip is selected
-  const procKey = `${clip.id}:${proc.speedRatio}:${proc.pitchSemitones}:${proc.preservePitch}`;
+  const procKey = `${clip.id}:${proc.speedRatio}:${proc.pitchSemitones}:${proc.preservePitch}:${proc.mode}:${proc.quality}`;
   const [lastKey, setLastKey] = useState(procKey);
   if (lastKey !== procKey) {
     setLastKey(procKey);
@@ -573,7 +607,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
   // Trigger processing whenever committed params change (debounced 300ms).
   useEffect(() => {
     const hasEffect = proc.speedRatio !== 1 || proc.pitchSemitones !== 0;
-    if (!hasEffect) { setProcessStatus("idle"); return; }
+    if (!hasEffect) { setProcessStatus("idle"); setProcessorUsed(null); return; }
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
@@ -585,27 +619,33 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
 
       setProcessStatus("processing");
       try {
-        await audioProcessingService.processClipAudio(decoded, {
-          speedRatio: proc.speedRatio,
+        const { processorUsed: kind } = await audioProcessingService.processClipAudio(decoded, {
+          speedRatio:     proc.speedRatio,
           pitchSemitones: proc.pitchSemitones,
-          preservePitch: proc.preservePitch,
-          quality: proc.quality,
+          preservePitch:  proc.preservePitch,
+          mode:           proc.mode ?? "polyphonic",
+          quality:        proc.quality,
         });
         setProcessStatus("cached");
+        setProcessorUsed(kind);
+        transport.rescheduleIfPlaying();
       } catch {
         setProcessStatus("failed");
+        setProcessorUsed(null);
       }
     }, 300);
 
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [clip.fileId, proc.speedRatio, proc.pitchSemitones, proc.preservePitch, proc.quality]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clip.fileId, proc.speedRatio, proc.pitchSemitones, proc.preservePitch, proc.mode, proc.quality]);
 
-  const isModified =
-    draft.speedRatio !== 1 ||
-    draft.pitchSemitones !== 0;
+  const isModified = draft.speedRatio !== 1 || draft.pitchSemitones !== 0;
 
   const inputCls =
     "flex h-5 flex-1 items-center rounded px-2 text-[10px] text-daw-text bg-daw-bg border border-daw-border focus:outline-none focus:border-blue-500 tabular-nums";
+
+  // When preserve-pitch is off, mode is irrelevant (resample path always used)
+  const modeDisabled = !draft.preservePitch;
 
   return (
     <>
@@ -617,10 +657,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
             SPEED
           </span>
           <input
-            type="range"
-            min={0.25}
-            max={4}
-            step={0.01}
+            type="range" min={0.25} max={4} step={0.01}
             value={draft.speedRatio}
             onChange={(e) => setDraft((s) => ({ ...s, speedRatio: parseFloat(e.target.value) }))}
             onMouseUp={() => commit({ speedRatio: draft.speedRatio })}
@@ -628,10 +665,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
             style={{ accentColor: "#5fced0", height: "3px" }}
           />
           <input
-            type="number"
-            min={0.25}
-            max={4}
-            step={0.05}
+            type="number" min={0.25} max={4} step={0.05}
             value={draft.speedRatio.toFixed(2)}
             onChange={(e) => {
               const v = Math.max(0.25, Math.min(4, parseFloat(e.target.value) || 1));
@@ -647,10 +681,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
             PITCH
           </span>
           <input
-            type="range"
-            min={-24}
-            max={24}
-            step={1}
+            type="range" min={-24} max={24} step={1}
             value={draft.pitchSemitones}
             onChange={(e) => setDraft((s) => ({ ...s, pitchSemitones: parseInt(e.target.value, 10) }))}
             onMouseUp={() => commit({ pitchSemitones: draft.pitchSemitones })}
@@ -658,10 +689,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
             style={{ accentColor: "#a99cff", height: "3px" }}
           />
           <input
-            type="number"
-            min={-24}
-            max={24}
-            step={1}
+            type="number" min={-24} max={24} step={1}
             value={draft.pitchSemitones}
             onChange={(e) => {
               const v = Math.max(-24, Math.min(24, parseInt(e.target.value, 10) || 0));
@@ -678,22 +706,35 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
           </span>
           <span className="flex-1 text-[10px] text-daw-dim">Preserve Pitch</span>
           <button
-            type="button"
-            role="switch"
-            aria-checked={draft.preservePitch}
+            type="button" role="switch" aria-checked={draft.preservePitch}
             onClick={() => commit({ preservePitch: !draft.preservePitch })}
             className={`relative inline-flex h-4 w-8 items-center rounded-full transition-colors ${
-              draft.preservePitch
-                ? "bg-blue-600"
-                : "border border-daw-border bg-daw-surface"
+              draft.preservePitch ? "bg-blue-600" : "border border-daw-border bg-daw-surface"
             }`}
           >
-            <span
-              className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${
-                draft.preservePitch ? "translate-x-4" : "translate-x-0.5"
-              }`}
-            />
+            <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${
+              draft.preservePitch ? "translate-x-4" : "translate-x-0.5"
+            }`} />
           </button>
+        </div>
+
+        {/* Mode */}
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
+          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+            MODE
+          </span>
+          <DawSelect
+            value={modeDisabled ? "resample" : (draft.mode ?? "polyphonic")}
+            onChange={(val) => commit({ mode: val as AudioClipProcess["mode"] })}
+            disabled={modeDisabled}
+            options={[
+              { value: "resample",    label: MODE_LABELS.resample },
+              { value: "monophonic",  label: MODE_LABELS.monophonic },
+              { value: "polyphonic",  label: MODE_LABELS.polyphonic },
+              { value: "percussive",  label: MODE_LABELS.percussive },
+              { value: "granular",    label: MODE_LABELS.granular },
+            ]}
+          />
         </div>
 
         {/* Quality */}
@@ -705,9 +746,9 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
             value={draft.quality}
             onChange={(val) => commit({ quality: val as AudioClipProcess["quality"] })}
             options={[
-              { value: "draft", label: "Draft" },
+              { value: "draft",    label: "Draft" },
               { value: "balanced", label: "Balanced" },
-              { value: "high", label: "High (coming soon)", disabled: true },
+              { value: "high",     label: "High", disabled: true },
             ]}
           />
         </div>
@@ -719,17 +760,16 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
           <span
             className="text-[9px] tabular-nums"
             style={{
-              color:
-                processStatus === "cached"
-                  ? "#7bd88f"
-                  : processStatus === "failed"
-                  ? "#f06a61"
-                  : "#a99cff",
+              color: processStatus === "cached" ? "#7bd88f"
+                   : processStatus === "failed"  ? "#f06a61"
+                   : "#a99cff",
             }}
           >
             {processStatus === "processing" && "⏳ Processing…"}
-            {processStatus === "cached" && "✓ Ready"}
-            {processStatus === "failed" && "✗ Failed"}
+            {processStatus === "cached" && processorUsed
+              ? processorLabel(processorUsed, draft.mode ?? "polyphonic")
+              : processStatus === "cached" ? "✓ Ready" : null}
+            {processStatus === "failed" && "✗ Failed — check console"}
           </span>
         </div>
       )}
@@ -737,7 +777,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
       {/* Reset row */}
       {isModified && (
         <div className="flex items-center gap-2 px-3 py-2 border-b border-daw-border">
-          <span className="flex-1 text-[10px] text-daw-text-muted">
+          <span className="flex-1 text-[10px] text-daw-faint">
             {draft.speedRatio !== 1 ? `${draft.speedRatio.toFixed(2)}×` : ""}
             {draft.speedRatio !== 1 && draft.pitchSemitones !== 0 ? " · " : ""}
             {draft.pitchSemitones !== 0
@@ -746,7 +786,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
           </span>
           <button
             type="button"
-            onClick={() => commit({ speedRatio: 1, pitchSemitones: 0, preservePitch: true })}
+            onClick={() => commit({ speedRatio: 1, pitchSemitones: 0, preservePitch: true, mode: "polyphonic" })}
             className="flex items-center gap-1 rounded px-2 py-0.5 text-[9px] text-daw-faint hover:text-daw-text hover:bg-white/5 border border-daw-border"
             title="Reset speed and pitch to defaults"
           >
@@ -758,25 +798,17 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
 
       {/* Dimmed future process actions */}
       <div className="grid grid-cols-2 gap-1 px-3 pb-3 pt-2 opacity-40">
-        <button
-          type="button"
-          disabled
+        <button type="button" disabled
           className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
           style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
-          title="Reverse (coming soon)"
-        >
-          <RotateCcw size={9} />
-          Reverse
+          title="Reverse (coming soon)">
+          <RotateCcw size={9} /> Reverse
         </button>
-        <button
-          type="button"
-          disabled
+        <button type="button" disabled
           className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
           style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
-          title="Normalize (coming soon)"
-        >
-          <ArrowUpDown size={9} />
-          Normalize
+          title="Normalize (coming soon)">
+          <ArrowUpDown size={9} /> Normalize
         </button>
       </div>
     </>

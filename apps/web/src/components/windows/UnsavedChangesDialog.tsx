@@ -40,7 +40,7 @@ export function UnsavedChangesDialog({ windowId: _ }: Props) {
   void ws;
 
   return (
-    <div className="flex flex-col gap-4 text-[12px]">
+    <div className="flex flex-col gap-4 text-[12px] p-4">
       <p className="text-daw-text">
         You have unsaved changes in this project. Do you want to save before continuing?
       </p>

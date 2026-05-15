@@ -856,9 +856,31 @@ export function runAction(actionId: string) {
       break;
 
     // ── Help stubs ─────────────────────────────────────────────────────────
+    case "help:keyboard-shortcuts": {
+      const ws = useWindowStore.getState();
+      if (!ws.isWindowOpen("preferences")) {
+        ws.openDialog({
+          contentType: "preferences",
+          title: "Preferences",
+          width: 860,
+          height: 600,
+          minWidth: 720,
+          minHeight: 480,
+          modal: true,
+          closable: true,
+          payload: { initialTab: "shortcuts" },
+        });
+      } else {
+        const prefsWin = ws.windows.find((w) => w.contentType === "preferences");
+        if (prefsWin) {
+          ws.updateWindowPayload(prefsWin.id, { initialTab: "shortcuts" });
+          ws.focusWindow(prefsWin.id);
+        }
+      }
+      break;
+    }
     case "help:quick-start":
     case "help:documentation":
-    case "help:keyboard-shortcuts":
     case "help:release-notes":
     case "help:roadmap":
     case "help:github":

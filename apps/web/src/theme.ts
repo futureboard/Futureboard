@@ -18,7 +18,7 @@ export function getTrackColor(index: number): string {
 }
 
 export const TRACK_HEIGHT = 76;
-export const HEADER_WIDTH = 272;
+export const HEADER_WIDTH = 320;
 export const RULER_HEIGHT = 30;
 export const BROWSER_WIDTH = 272;
 export const INSPECTOR_WIDTH = 292;

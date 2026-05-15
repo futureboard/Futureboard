@@ -76,6 +76,23 @@ class Transport {
       metronomeScheduler.seek();
     }
   }
+
+  /**
+   * Reschedule all clips from the current playhead position without stopping
+   * playback or resetting the playhead. No-op when transport is not playing.
+   *
+   * Call this after processed audio cache is invalidated (e.g. speed/pitch change)
+   * or when clip params (gain, mute, position) change while playing.
+   */
+  rescheduleIfPlaying(): void {
+    if (this._state !== "playing") return;
+    // Snapshot current position so schedule() reads the right playhead time
+    const currentPos = this.projectTime;
+    this.transportStartAudioTime    = audioEngine.currentTime;
+    this.transportStartProjectTime  = currentPos;
+    this._playheadTime              = currentPos;
+    clipScheduler.schedule(this.getTracks());
+  }
 }
 
 export const transport = new Transport();

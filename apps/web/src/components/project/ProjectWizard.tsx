@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import {
+  FileText, Mic2, Music, SlidersHorizontal, Square, FolderOpen, Plus,
+} from "lucide-react";
 import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { useWindowStore } from "../../store/windowStore";
 import { useRecentProjectsStore } from "../../store/recentProjectsStore";
-import { DawSelect } from "../ui/DawSelect";
 import { getTrackColor } from "../../theme";
 import type { DawTrack } from "../../types/daw";
 
@@ -24,16 +26,73 @@ type WizardState = {
 };
 
 const TEMPLATE_PRESETS: Record<Template, Partial<WizardState>> = {
-  empty: { audioTrackCount: 0, midiTrackCount: 0 },
-  recording: { audioTrackCount: 4, midiTrackCount: 0, bpm: 120 },
-  "beat-making": { audioTrackCount: 0, midiTrackCount: 4, bpm: 140 },
-  mixing: { audioTrackCount: 8, midiTrackCount: 0 },
-  scoring: { audioTrackCount: 0, midiTrackCount: 8, timeSignatureNumerator: 4 },
+  empty:        { audioTrackCount: 0, midiTrackCount: 0 },
+  recording:    { audioTrackCount: 4, midiTrackCount: 0, bpm: 120 },
+  "beat-making":{ audioTrackCount: 0, midiTrackCount: 4, bpm: 140 },
+  mixing:       { audioTrackCount: 8, midiTrackCount: 0 },
+  scoring:      { audioTrackCount: 0, midiTrackCount: 8, timeSignatureNumerator: 4 },
 };
 
-const SAMPLE_RATES = [44100, 48000, 88200, 96000];
+const TEMPLATES: { id: Template; label: string; icon: React.ElementType; detail: string }[] = [
+  { id: "empty",       label: "Empty",      icon: Square,           detail: "Blank canvas"   },
+  { id: "recording",   label: "Recording",  icon: Mic2,             detail: "4 audio tracks" },
+  { id: "beat-making", label: "Beat Making",icon: Music,            detail: "4 MIDI tracks"  },
+  { id: "mixing",      label: "Mixing",     icon: SlidersHorizontal,detail: "8 audio tracks" },
+  { id: "scoring",     label: "Scoring",    icon: FileText,         detail: "8 MIDI tracks"  },
+];
+
+const SAMPLE_RATES = [44100, 48000, 88200, 96000] as const;
+const SR_LABEL: Record<number, string> = { 44100: "44.1k", 48000: "48k", 88200: "88.2k", 96000: "96k" };
+
+// ─── Shared sub-components ────────────────────────────────────────────────────
+
+function OptionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wide text-daw-faint">
+        {label}
+      </div>
+      <div className="flex items-center gap-1.5">{children}</div>
+    </div>
+  );
+}
+
+function Stepper({
+  value, min, max, onChange,
+}: { value: number; min: number; max: number; onChange: (v: number) => void }) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => onChange(Math.max(min, value - 1))}
+        className="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.07] bg-[#13161c] text-[12px] font-semibold text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+      >
+        <span className="select-none leading-none">−</span>
+      </button>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value) || min)))}
+        className="h-7 min-w-0 flex-1 rounded-md border border-white/[0.07] bg-[#13161c] text-center text-[12px] font-semibold tabular-nums text-daw-text outline-none focus:border-daw-accent/50"
+      />
+      <button
+        type="button"
+        onClick={() => onChange(Math.min(max, value + 1))}
+        className="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.07] bg-[#13161c] text-[12px] font-semibold text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+      >
+        <span className="select-none leading-none">+</span>
+      </button>
+    </>
+  );
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
 
 export function ProjectWizard({ windowId }: Props) {
+  const nameRef = useRef<HTMLInputElement>(null);
+
   const [state, setState] = useState<WizardState>({
     name: "Untitled Project",
     bpm: 120,
@@ -47,14 +106,12 @@ export function ProjectWizard({ windowId }: Props) {
 
   const set = (patch: Partial<WizardState>) => setState((s) => ({ ...s, ...patch }));
 
-  const applyTemplate = (t: Template) => {
-    set({ template: t, ...TEMPLATE_PRESETS[t] });
-  };
+  const applyTemplate = (t: Template) => set({ template: t, ...TEMPLATE_PRESETS[t] });
 
   const handleCreate = () => {
-    const history = useHistoryStore.getState();
-    const uiStore = useUIStore.getState();
-    const ws = useWindowStore.getState();
+    const history  = useHistoryStore.getState();
+    const uiStore  = useUIStore.getState();
+    const ws       = useWindowStore.getState();
 
     const tracks: DawTrack[] = [];
 
@@ -121,142 +178,172 @@ export function ProjectWizard({ windowId }: Props) {
     ws.closeWindow(windowId);
   };
 
-  const labelClass = "block text-[10px] text-daw-text-muted uppercase tracking-wide mb-1";
-  const inputClass = "w-full bg-daw-bg border border-daw-border rounded px-2 py-1 text-[12px] text-daw-text focus:outline-none focus:border-blue-500";
+  const totalTracks = state.audioTrackCount + state.midiTrackCount;
+  const templateLabel = TEMPLATES.find((t) => t.id === state.template)?.label ?? state.template;
 
   return (
-    <div className="flex flex-col gap-4 text-[12px]">
-      {/* Project Name */}
-      <div>
-        <label className={labelClass}>Project Name</label>
-        <input
-          className={inputClass}
-          value={state.name}
-          onChange={(e) => set({ name: e.target.value })}
-          // eslint-disable-next-line jsx-a11y/no-autofocus
-          autoFocus
-          onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-        />
-      </div>
+    <div className="flex flex-col">
 
-      {/* Template */}
-      <div>
-        <label className={labelClass}>Template</label>
-        <div className="grid grid-cols-5 gap-1">
-          {(Object.keys(TEMPLATE_PRESETS) as Template[]).map((t) => (
-            <button
-              key={t}
-              onClick={() => applyTemplate(t)}
-              className={`py-1 px-1.5 text-[10px] rounded border capitalize ${
-                state.template === t
-                  ? "border-blue-500 bg-blue-600/20 text-blue-300"
-                  : "border-daw-border text-daw-text-muted hover:border-daw-text hover:text-daw-text"
-              }`}
-            >
-              {t.replace("-", " ")}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* BPM + Time Signature */}
-      <div className="grid grid-cols-3 gap-3">
-        <div>
-          <label className={labelClass}>BPM</label>
+      {/* ── Project name ── */}
+      <div className="px-3 py-2.5">
+        <label
+          className="flex h-8 items-center gap-2.5 rounded-lg border bg-[#13161c] px-3 transition-colors focus-within:border-daw-accent/50"
+          style={{ borderColor: "rgba(255,255,255,0.07)" }}
+        >
+          <FolderOpen size={13} className="shrink-0 text-daw-faint" />
           <input
-            type="number"
-            className={inputClass}
-            value={state.bpm}
-            min={40}
-            max={320}
-            onChange={(e) => set({ bpm: Math.max(40, Math.min(320, Number(e.target.value))) })}
+            ref={nameRef}
+            // eslint-disable-next-line jsx-a11y/no-autofocus
+            autoFocus
+            value={state.name}
+            onChange={(e) => set({ name: e.target.value })}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleCreate(); } }}
+            placeholder="Project name"
+            className="min-w-0 flex-1 bg-transparent text-[12px] font-medium text-daw-text outline-none placeholder:text-daw-faint"
           />
+        </label>
+      </div>
+
+      {/* ── Template cards ── */}
+      <div className="border-t border-white/[0.05] px-3 py-2.5">
+        <div className="mb-2 text-[9px] font-semibold uppercase tracking-wide text-daw-faint">Template</div>
+        <div className="grid grid-cols-5 gap-1.5">
+          {TEMPLATES.map(({ id, label, icon: Icon, detail }) => {
+            const active = state.template === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => applyTemplate(id)}
+                className={[
+                  "flex flex-col items-center gap-1.5 rounded-lg border py-2.5 px-1 text-center transition-all",
+                  active
+                    ? "border-daw-accent/50 bg-daw-accent/[0.07]"
+                    : "border-white/[0.06] bg-[#1f242c] hover:border-white/[0.1] hover:bg-[#232830]",
+                ].join(" ")}
+              >
+                <div
+                  className="flex h-7 w-7 items-center justify-center rounded-lg border"
+                  style={
+                    active
+                      ? { background: "rgba(86,199,201,0.12)", borderColor: "rgba(86,199,201,0.3)", color: "#56C7C9" }
+                      : { background: "#13161c", borderColor: "rgba(255,255,255,0.07)", color: "#566372" }
+                  }
+                >
+                  <Icon size={13} />
+                </div>
+                <div>
+                  <div className={`text-[10px] font-semibold leading-tight ${active ? "text-daw-text" : "text-daw-dim"}`}>
+                    {label}
+                  </div>
+                  <div className="mt-0.5 text-[9px] leading-tight text-daw-faint opacity-70">
+                    {detail}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
         </div>
-        <div>
-          <label className={labelClass}>Time Sig. (Num)</label>
+      </div>
+
+      {/* ── BPM + Time Signature ── */}
+      <div className="grid grid-cols-2 gap-2.5 border-t border-white/[0.05] px-3 py-2.5">
+        <OptionGroup label="BPM">
+          <Stepper value={state.bpm} min={40} max={320} onChange={(v) => set({ bpm: v })} />
+        </OptionGroup>
+
+        <OptionGroup label="Time Signature">
           <input
             type="number"
-            className={inputClass}
-            value={state.timeSignatureNumerator}
             min={1}
             max={16}
-            onChange={(e) => set({ timeSignatureNumerator: Number(e.target.value) })}
+            value={state.timeSignatureNumerator}
+            onChange={(e) => set({ timeSignatureNumerator: Math.max(1, Math.min(16, Number(e.target.value))) })}
+            className="h-7 w-10 shrink-0 rounded-md border border-white/[0.07] bg-[#13161c] text-center text-[12px] font-semibold tabular-nums text-daw-text outline-none focus:border-daw-accent/50"
           />
-        </div>
-        <div>
-          <label className={labelClass}>Time Sig. (Den)</label>
-          <DawSelect
-            className="w-full"
-            value={String(state.timeSignatureDenominator)}
-            onChange={(val) => set({ timeSignatureDenominator: Number(val) })}
-            options={[2, 4, 8, 16].map((d) => ({
-              value: String(d),
-              label: String(d),
-            }))}
-          />
-        </div>
+          <span className="shrink-0 text-[14px] font-light text-daw-faint select-none">/</span>
+          {([2, 4, 8, 16] as const).map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => set({ timeSignatureDenominator: d })}
+              className={[
+                "h-7 flex-1 rounded-md border px-1 text-[11px] font-semibold transition-colors",
+                state.timeSignatureDenominator === d
+                  ? "border-daw-accent/50 bg-daw-accent/[0.14] text-daw-text"
+                  : "border-white/[0.07] bg-[#13161c] text-daw-faint hover:bg-white/[0.05] hover:text-daw-text",
+              ].join(" ")}
+            >
+              {d}
+            </button>
+          ))}
+        </OptionGroup>
       </div>
 
-      {/* Sample Rate */}
-      <div>
-        <label className={labelClass}>Sample Rate</label>
-        <DawSelect
-          className="w-full"
-          value={String(state.sampleRate)}
-          onChange={(val) => set({ sampleRate: Number(val) })}
-          options={SAMPLE_RATES.map((sr) => ({
-            value: String(sr),
-            label: `${sr.toLocaleString()} Hz`,
-          }))}
-        />
+      {/* ── Sample Rate ── */}
+      <div className="border-t border-white/[0.05] px-3 py-2.5">
+        <OptionGroup label="Sample Rate">
+          {SAMPLE_RATES.map((sr) => (
+            <button
+              key={sr}
+              type="button"
+              onClick={() => set({ sampleRate: sr })}
+              className={[
+                "h-7 flex-1 rounded-md border px-2 text-[11px] font-semibold tabular-nums transition-colors",
+                state.sampleRate === sr
+                  ? "border-daw-accent/50 bg-daw-accent/[0.14] text-daw-text"
+                  : "border-white/[0.07] bg-[#13161c] text-daw-faint hover:bg-white/[0.05] hover:text-daw-text",
+              ].join(" ")}
+            >
+              {SR_LABEL[sr]}
+            </button>
+          ))}
+        </OptionGroup>
       </div>
 
-      {/* Starter Tracks */}
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className={labelClass}>Audio Tracks</label>
-          <input
-            type="number"
-            className={inputClass}
-            value={state.audioTrackCount}
-            min={0}
-            max={32}
-            onChange={(e) => set({ audioTrackCount: Number(e.target.value) })}
-          />
-        </div>
-        <div>
-          <label className={labelClass}>MIDI Tracks</label>
-          <input
-            type="number"
-            className={inputClass}
-            value={state.midiTrackCount}
-            min={0}
-            max={32}
-            onChange={(e) => set({ midiTrackCount: Number(e.target.value) })}
-          />
-        </div>
+      {/* ── Starter tracks ── */}
+      <div className="grid grid-cols-2 gap-2.5 border-t border-white/[0.05] px-3 py-2.5">
+        <OptionGroup label="Audio Tracks">
+          <Stepper value={state.audioTrackCount} min={0} max={32} onChange={(v) => set({ audioTrackCount: v })} />
+        </OptionGroup>
+
+        <OptionGroup label="MIDI Tracks">
+          <Stepper value={state.midiTrackCount} min={0} max={32} onChange={(v) => set({ midiTrackCount: v })} />
+        </OptionGroup>
       </div>
 
-      {/* Summary */}
-      <div className="text-[10px] text-daw-text-muted border-t border-daw-border pt-3">
-        {state.bpm} BPM · {state.timeSignatureNumerator}/{state.timeSignatureDenominator} · {state.sampleRate.toLocaleString()} Hz
-        {(state.audioTrackCount + state.midiTrackCount) > 0
-          ? ` · ${state.audioTrackCount + state.midiTrackCount} tracks`
-          : " · Empty"}
+      {/* ── Summary strip ── */}
+      <div className="border-t border-white/[0.05] px-3 py-2">
+        <span className="text-[10px] tabular-nums text-daw-faint">
+          {state.bpm} BPM
+          {" · "}
+          {state.timeSignatureNumerator}/{state.timeSignatureDenominator}
+          {" · "}
+          {SR_LABEL[state.sampleRate]} Hz
+          {" · "}
+          {templateLabel}
+          {totalTracks > 0 && ` · ${totalTracks} track${totalTracks !== 1 ? "s" : ""}`}
+        </span>
       </div>
 
-      {/* Actions */}
-      <div className="flex gap-2 justify-end border-t border-daw-border pt-3 -mb-1">
+      {/* ── Footer ── */}
+      <div className="flex items-center justify-end gap-2 border-t border-white/[0.05] px-3 py-2.5">
         <button
-          className="px-3 py-1.5 text-[11px] bg-daw-surface hover:bg-white/10 text-daw-text border border-daw-border rounded"
+          type="button"
           onClick={() => useWindowStore.getState().closeWindow(windowId)}
+          className="h-7 rounded-md border border-white/[0.07] bg-transparent px-3 text-[11px] font-medium text-daw-faint transition-colors hover:bg-white/[0.05] hover:text-daw-text"
         >
           Cancel
         </button>
         <button
-          className="px-3 py-1.5 text-[11px] bg-blue-600 hover:bg-blue-500 text-white rounded font-medium"
+          type="button"
           onClick={handleCreate}
+          className="flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-semibold text-[#0d1117] transition-colors"
+          style={{ background: "rgba(86,199,201,0.85)" }}
+          onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,1)")}
+          onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,0.85)")}
         >
+          <Plus size={12} />
           Create Project
         </button>
       </div>

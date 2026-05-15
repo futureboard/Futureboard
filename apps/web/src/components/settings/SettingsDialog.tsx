@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSettingsStore, APP_SETTINGS_DEFAULTS as DEFAULTS } from "../../store/settingsStore";
 import { useProjectStore } from "../../store/projectStore";
 import { useWindowStore } from "../../store/windowStore";
 import { DawSelect } from "../ui/DawSelect";
+import { KeyboardShortcutsPanel } from "./KeyboardShortcutsPanel";
 import type { AppSettings, PreferredBufferSize, PreferredEngine, StartupBehavior } from "../../store/settingsStore";
 
-type SettingsTab = "general" | "audio" | "midi" | "project" | "appearance" | "advanced";
+type SettingsTab = "general" | "audio" | "midi" | "project" | "appearance" | "advanced" | "shortcuts";
 
 type ProjectDraft = {
   name: string;
@@ -20,7 +21,7 @@ type Props = { windowId: string; initialTab?: SettingsTab };
 // ── Shared control classes ────────────────────────────────────────────────────
 
 const inputCls =
-  "w-full bg-daw-bg border border-daw-border rounded px-2 py-1 text-[12px] text-daw-text focus:outline-none focus:border-blue-500";
+  "w-full bg-[#151a21] border border-[rgba(255,255,255,0.08)] rounded px-2 h-[28px] text-[12px] text-daw-text focus:outline-none focus:border-[rgba(114,215,215,0.5)] transition-colors";
 
 // ── Reusable setting row ──────────────────────────────────────────────────────
 
@@ -34,11 +35,11 @@ function SettingsRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-4 py-2.5 border-b border-daw-border/50 last:border-0">
+    <div className="flex items-center gap-4 min-h-[50px] border-b border-[rgba(255,255,255,0.05)] last:border-0 py-2">
       <div className="flex-1 min-w-0">
         <div className="text-[12px] text-daw-text leading-none">{label}</div>
         {description && (
-          <div className="text-[10px] text-daw-text-muted mt-0.5 leading-snug">{description}</div>
+          <div className="text-[11px] text-daw-text-muted mt-1 leading-snug">{description}</div>
         )}
       </div>
       <div className="flex-shrink-0">{children}</div>
@@ -59,13 +60,15 @@ function SettingsToggle({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-4 w-8 items-center rounded-full transition-colors focus:outline-none ${
-        checked ? "bg-blue-600" : "bg-daw-surface border border-daw-border"
+      className={`relative inline-flex h-[17px] w-[30px] items-center rounded-full transition-colors focus:outline-none ${
+        checked
+          ? "bg-[rgba(114,215,215,0.7)]"
+          : "bg-[#1e2530] border border-[rgba(255,255,255,0.1)]"
       }`}
     >
       <span
-        className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${
-          checked ? "translate-x-4" : "translate-x-0.5"
+        className={`inline-block h-[13px] w-[13px] transform rounded-full shadow transition-transform ${
+          checked ? "translate-x-[15px] bg-white" : "translate-x-[2px] bg-[#6b7280]"
         }`}
       />
     </button>
@@ -99,7 +102,7 @@ function SettingsSelect<T extends string | number>({
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[10px] text-daw-text-muted uppercase tracking-widest font-semibold mb-1 mt-5 first:mt-0 pb-1 border-b border-daw-border">
+    <div className="text-[10px] text-[rgba(255,255,255,0.3)] uppercase tracking-[0.12em] font-medium mb-0 mt-5 first:mt-0 pb-1.5 border-b border-[rgba(255,255,255,0.05)]">
       {children}
     </div>
   );
@@ -216,7 +219,7 @@ function ProjectTab({ projectDraft, setProjectDraft }: { projectDraft: ProjectDr
               setProjectDraft({ timeSignatureNumerator: Math.max(1, Number(e.target.value)) })
             }
           />
-          <span className="text-daw-text-muted text-sm">/</span>
+          <span className="text-[rgba(255,255,255,0.3)] text-xs">/</span>
           <DawSelect
             className="w-14"
             value={String(projectDraft.timeSignatureDenominator)}
@@ -275,7 +278,7 @@ function AdvancedTab({ draft, setDraft, onReset }: { draft: AppSettings; setDraf
       <SectionHeader>Maintenance</SectionHeader>
       <SettingsRow label="Reset to Defaults" description="Restore all settings to their original values">
         <button
-          className="px-3 py-1 text-[11px] bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded"
+          className="px-3 h-[28px] text-[11px] bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded transition-colors"
           onClick={onReset}
         >
           Reset All Settings
@@ -290,11 +293,23 @@ function AdvancedTab({ draft, setDraft, onReset }: { draft: AppSettings; setDraf
 export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
   const store = useSettingsStore();
   const { project } = useProjectStore();
-  const { closeWindow } = useWindowStore();
+  const { closeWindow, updateWindowPayload } = useWindowStore();
 
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
-  // Project drafts
+  // React to tab-switch requests pushed via updateWindowPayload from actionRunner
+  const payloadTab = useWindowStore(
+    (s) => s.windows.find((w) => w.id === windowId)?.payload?.initialTab as SettingsTab | undefined,
+  );
+  useEffect(() => {
+    if (payloadTab && payloadTab !== activeTab) setActiveTab(payloadTab);
+  }, [payloadTab]); // intentionally excludes activeTab to avoid loop
+
+  // Clear the pending tab request once we've acted on it so repeated menu presses work
+  useEffect(() => {
+    if (payloadTab) updateWindowPayload(windowId, { initialTab: undefined });
+  }, [payloadTab, windowId, updateWindowPayload]);
+
   const [projectDraft, setProjectDraft] = useState<ProjectDraft>({
     name: project.name,
     bpm: project.bpm,
@@ -303,7 +318,6 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     sampleRate: project.sampleRate,
   });
 
-  // App settings draft
   const [appDraft, setAppDraft] = useState<AppSettings>({
     startupBehavior: store.startupBehavior,
     autoSave: store.autoSave,
@@ -347,28 +361,32 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
   };
 
   const tabs: { id: SettingsTab; label: string }[] = [
-    { id: "general", label: "General" },
-    { id: "audio", label: "Audio" },
-    { id: "midi", label: "MIDI" },
-    { id: "project", label: "Project" },
-    { id: "appearance", label: "Appearance" },
-    { id: "advanced", label: "Advanced" },
+    { id: "general",   label: "General"   },
+    { id: "audio",     label: "Audio"     },
+    { id: "midi",      label: "MIDI"      },
+    { id: "project",   label: "Project"   },
+    { id: "shortcuts", label: "Shortcuts" },
+    { id: "appearance",label: "Appearance"},
+    { id: "advanced",  label: "Advanced"  },
   ];
 
   return (
-    <div className="flex h-full w-full bg-[#11151b] overflow-hidden rounded-[12px] shadow-2xl border border-white/10 select-none">
+    <div className="flex h-full w-full bg-[#0f1319] overflow-hidden shadow-2xl border border-[rgba(255,255,255,0.07)] select-none">
       {/* Sidebar */}
-      <div className="w-36 flex-shrink-0 bg-daw-sunken border-r border-daw-border flex flex-col py-3">
+      <div className="w-[160px] flex-shrink-0 bg-[#0c0f14] border-r border-[rgba(255,255,255,0.06)] flex flex-col pt-2 pb-2">
         {tabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`px-4 py-2 text-left text-[11px] font-medium transition-colors ${
+            className={`relative flex items-center h-[32px] px-4 text-left text-[12px] font-medium transition-colors ${
               activeTab === tab.id
-                ? "bg-blue-600/20 text-blue-300 border-r-2 border-blue-500"
-                : "text-daw-text-muted hover:text-daw-text hover:bg-white/5"
+                ? "text-[rgba(114,215,215,0.95)] bg-[rgba(114,215,215,0.07)]"
+                : "text-[rgba(255,255,255,0.4)] hover:text-[rgba(255,255,255,0.7)] hover:bg-[rgba(255,255,255,0.04)]"
             }`}
           >
+            {activeTab === tab.id && (
+              <span className="absolute left-0 top-[4px] bottom-[4px] w-[2px] bg-[rgba(114,215,215,0.85)] rounded-r" />
+            )}
             {tab.label}
           </button>
         ))}
@@ -377,12 +395,14 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
       {/* Content area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
-        <div className="px-5 py-4 flex-shrink-0">
-          <h1 className="text-sm font-semibold text-daw-text capitalize">{activeTab} Settings</h1>
+        <div className="h-[32px] flex items-center px-5 flex-shrink-0 border-b border-[rgba(255,255,255,0.05)]">
+          <span className="text-[11px] font-medium text-[rgba(255,255,255,0.45)] uppercase tracking-[0.1em]">
+            {activeTab === "shortcuts" ? "Keyboard Shortcuts" : activeTab}
+          </span>
         </div>
 
         {/* Tab body */}
-        <div className="flex-1 overflow-y-auto px-5 pb-6">
+        <div className="flex-1 overflow-y-auto px-5 pb-4 pt-1">
           {activeTab === "general" && (
             <GeneralTab draft={appDraft} setDraft={patchApp} />
           )}
@@ -390,13 +410,14 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
             <AudioTab draft={appDraft} setDraft={patchApp} />
           )}
           {activeTab === "midi" && (
-            <div className="py-12 flex flex-col items-center justify-center opacity-40">
+            <div className="py-12 flex flex-col items-center justify-center opacity-30">
               <p className="text-[11px] text-daw-text-muted">MIDI device management coming soon</p>
             </div>
           )}
           {activeTab === "project" && (
             <ProjectTab projectDraft={projectDraft} setProjectDraft={patchProject} />
           )}
+          {activeTab === "shortcuts" && <KeyboardShortcutsPanel />}
           {activeTab === "appearance" && (
             <AppearanceTab draft={appDraft} setDraft={patchApp} />
           )}
@@ -410,22 +431,22 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-2 px-4 py-2.5 border-t border-daw-border bg-daw-surface flex-shrink-0">
+        <div className="h-[42px] flex items-center gap-2 px-4 border-t border-[rgba(255,255,255,0.06)] flex-shrink-0">
           <div className="flex-1" />
           <button
-            className="px-3 py-1 text-[11px] bg-daw-surface hover:bg-white/10 text-daw-text border border-daw-border rounded"
+            className="px-3 h-[26px] text-[11px] text-[rgba(255,255,255,0.5)] hover:text-[rgba(255,255,255,0.8)] hover:bg-[rgba(255,255,255,0.06)] rounded transition-colors"
             onClick={handleCancel}
           >
             Cancel
           </button>
           <button
-            className="px-3 py-1 text-[11px] bg-daw-surface hover:bg-white/10 text-daw-text border border-daw-border rounded"
+            className="px-3 h-[26px] text-[11px] text-[rgba(255,255,255,0.5)] hover:text-[rgba(255,255,255,0.8)] bg-[rgba(255,255,255,0.04)] hover:bg-[rgba(255,255,255,0.08)] border border-[rgba(255,255,255,0.08)] rounded transition-colors"
             onClick={handleApply}
           >
             Apply
           </button>
           <button
-            className="px-3 py-1.5 text-[11px] bg-blue-600 hover:bg-blue-500 text-white rounded font-medium"
+            className="px-3 h-[26px] text-[11px] bg-[rgba(114,215,215,0.15)] hover:bg-[rgba(114,215,215,0.22)] text-[rgba(114,215,215,0.9)] border border-[rgba(114,215,215,0.25)] rounded font-medium transition-colors"
             onClick={handleDone}
           >
             Done

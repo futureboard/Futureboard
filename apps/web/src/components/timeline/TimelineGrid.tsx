@@ -5,10 +5,9 @@ import { C, HEADER_WIDTH } from "../../theme";
 import { getArrangementGridLines, type GridLineLevel } from "../../utils/musicalGrid";
 import type { TimeSignature } from "../../utils/musicalTime";
 
-// White-on-dark colors matching the Piano Roll grid visual model.
-// Three levels: subdivision (faintest) → beat (medium) → bar (strongest).
+// White-on-dark grid hierarchy: sub (faintest) → beat (medium) → bar (strongest).
 const GRID_COLOR: Record<GridLineLevel, string> = {
-  bar:  "rgba(255,255,255,0.18)",
+  bar:  "rgba(255,255,255,0.26)",
   beat: C.gridMajor,   // rgba(255,255,255,0.095)
   sub:  C.gridMinor,   // rgba(255,255,255,0.045)
 };
@@ -49,6 +48,7 @@ export function TimelineGrid() {
         // line.x is already Math.round()'d — add 0.5 for crisp 1 px lines.
         const cx = line.x + 0.5;
         ctx.strokeStyle = GRID_COLOR[line.level];
+        ctx.lineWidth = line.level === "bar" ? 1.5 : 1;
         ctx.beginPath();
         ctx.moveTo(cx, 0);
         ctx.lineTo(cx, H);

@@ -111,10 +111,23 @@ export type ClipType = "audio" | "midi";
 
 export type AudioProcessQuality = "draft" | "balanced" | "high";
 
+/**
+ * Processing mode for pitch/time stretching.
+ * Each mode routes to a different DSP algorithm or configuration.
+ */
+export type AudioPitchMode =
+  | "resample"    // tape-speed: no pitch preservation, speedRatio changes pitch+duration
+  | "monophonic"  // WSOLA — first-pass; will get PSOLA later
+  | "polyphonic"  // WSOLA with cross-correlation grain search (default)
+  | "percussive"  // short-grain OLA, transient-friendly
+  | "granular";   // classic OLA, designed for texture/sound-design
+
 export type AudioClipProcess = {
   speedRatio: number;
   pitchSemitones: number;
   preservePitch: boolean;
+  /** @default "polyphonic" */
+  mode: AudioPitchMode;
   quality: AudioProcessQuality;
 };
 

@@ -12,6 +12,7 @@ import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { secondsPerBeat, snapTime, timelineXToTime } from "../../utils/musicalTime";
 import { decodeAndAddAudioFile, addFileToTimeline } from "../../utils/importAudioToProject";
 import { TIMELINE_Z } from "../../utils/timelineZ";
+import { HEADER_WIDTH } from "../../theme";
 
 const MIN_PPS = 10;
 const MAX_PPS = 800;
@@ -20,7 +21,7 @@ export function Timeline() {
   const [addTrackOpen, setAddTrackOpen] = useState(false);
   const [dropHighlight, setDropHighlight] = useState(false);
   const fileDragDepth = useRef(0);
-  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, snapToGrid, toggleSnapToGrid, currentTool, marqueeSelection, setMarqueeSelection } = useUIStore();
+  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, setScrollY, setTrackAreaHeight, snapToGrid, toggleSnapToGrid, currentTool, marqueeSelection, setMarqueeSelection } = useUIStore();
 
   const TOOL_CURSOR: Record<ArrangementTool, string> = {
     pointer:    "default",
@@ -260,6 +261,16 @@ export function Timeline() {
     };
   }, [resetDragState, setMarqueeSelection]);
 
+  // Track the scroll container height for vertical virtualization
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setTrackAreaHeight(el.clientHeight));
+    ro.observe(el);
+    setTrackAreaHeight(el.clientHeight);
+    return () => ro.disconnect();
+  }, [setTrackAreaHeight]);
+
   // Keep a stable ref so the wheel handler never goes stale
   const ppsRef = useRef(pixelsPerSecond);
   ppsRef.current = pixelsPerSecond;
@@ -277,14 +288,15 @@ export function Timeline() {
       const oldPPS = ppsRef.current;
       const newPPS = Math.min(MAX_PPS, Math.max(MIN_PPS, oldPPS * factor));
 
-      // Anchor zoom to cursor: keep the time-position under the pointer fixed
-      const cursorX    = e.offsetX;
-      const timeAtCursor = (el.scrollLeft + cursorX) / oldPPS;
+      // Anchor zoom to cursor: keep the time under the pointer fixed.
+      // offsetX is viewport-relative; subtract HEADER_WIDTH to get content-space x.
+      const contentX = Math.max(0, e.offsetX - HEADER_WIDTH);
+      const timeAtCursor = (el.scrollLeft + contentX) / oldPPS;
 
       setPixelsPerSecond(newPPS);
 
       requestAnimationFrame(() => {
-        el.scrollLeft = Math.max(0, timeAtCursor * newPPS - cursorX);
+        el.scrollLeft = Math.max(0, timeAtCursor * newPPS - contentX);
       });
     };
 
@@ -294,8 +306,17 @@ export function Timeline() {
 
   // ── zoom buttons ─────────────────────────────────────────────────────────────
   const zoom = (f: number) => {
-    const newPPS = Math.min(MAX_PPS, Math.max(MIN_PPS, pixelsPerSecond * f));
+    const oldPPS = pixelsPerSecond;
+    const newPPS = Math.min(MAX_PPS, Math.max(MIN_PPS, oldPPS * f));
+    const el = scrollRef.current;
+    if (!el) { setPixelsPerSecond(newPPS); return; }
+    // Anchor zoom to the center of the visible content area (excluding sticky header).
+    const contentW = el.clientWidth - HEADER_WIDTH;
+    const timeAtCenter = (el.scrollLeft + contentW / 2) / oldPPS;
     setPixelsPerSecond(newPPS);
+    requestAnimationFrame(() => {
+      el.scrollLeft = Math.max(0, timeAtCenter * newPPS - contentW / 2);
+    });
   };
 
   const pixelsPerBeat = pixelsPerSecond * secondsPerBeat(bpm);
@@ -307,6 +328,7 @@ export function Timeline() {
 
   return (
     <div
+      ref={timelineRef}
       className="relative flex flex-1 flex-col overflow-hidden border border-daw-border bg-daw-sunken shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
       onDragEnter={onTimelineDragEnter}
       onDragLeave={onTimelineDragLeave}
@@ -350,7 +372,10 @@ export function Timeline() {
           ref={scrollRef}
           className="absolute inset-0 overflow-auto"
           style={{ cursor: TOOL_CURSOR[currentTool], zIndex: TIMELINE_Z.scrollArea }}
-          onScroll={(e) => setScrollX(e.currentTarget.scrollLeft)}
+          onScroll={(e) => {
+            setScrollX(e.currentTarget.scrollLeft);
+            setScrollY(e.currentTarget.scrollTop);
+          }}
         >
           <TrackList timelineWidth={timelineWidth} />
         </div>

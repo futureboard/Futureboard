@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EQ Eight</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body {
+      font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    }
+    * { font-family: inherit; box-sizing: border-box; }
+    body {
+      margin: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: #0a0a0a;
+    }
+    .num, input, select, button {
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1, "cv02" 1, "cv03" 1, "cv04" 1;
+    }
+    select { appearance: none; background: transparent; outline: none; cursor: pointer; }
+    ::-webkit-scrollbar { display: none; }
+    .text-xxs { font-size: 0.625rem; line-height: 0.875rem; }
+    .knob-drag { cursor: ns-resize; user-select: none; }
+
+    /* Q slider */
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      background: #222;
+      height: 3px;
+      border-radius: 2px;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 10px; height: 10px;
+      background: #06b6d4;
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 10px; height: 10px;
+      background: #06b6d4;
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="plugin"
+  style="width:650px;height:300px"
+  class="bg-[#1b1b1b] border border-[#2a2a2a] rounded shadow-[0_20px_60px_rgba(0,0,0,0.7)] flex flex-col overflow-hidden select-none text-xs relative">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <header class="flex-shrink-0 h-8 bg-[#1e1e1e] border-b border-[#272727] flex items-center justify-between px-3">
+    <div class="flex items-center gap-2.5">
+      <button id="btn-power"
+        class="w-3.5 h-3.5 rounded-full bg-cyan-500 shadow-[0_0_5px_rgba(6,182,212,0.7)] hover:bg-cyan-400 transition-colors focus:outline-none"
+        title="Bypass"></button>
+      <span class="text-[11px] font-bold tracking-[0.08em] text-[#e2e2e2]">EQ EIGHT</span>
+    </div>
+    <div class="flex items-center gap-1.5">
+      <div class="flex items-center gap-1.5 bg-[#161616] border border-[#2a2a2a] rounded-full px-2.5 py-[3px] cursor-pointer hover:border-[#3a3a3a] transition-colors">
+        <span class="text-[9px] text-[#777]">Default Master</span>
+        <svg width="6" height="4" viewBox="0 0 6 4" fill="none"><path d="M3 4L0 0H6L3 4Z" fill="#555"/></svg>
+      </div>
+      <button class="text-[10px] font-medium text-[#777] bg-[#242424] border border-[#2e2e2e] rounded px-2 py-0.5 hover:bg-[#2c2c2c] transition-colors">A / B</button>
+      <button id="btn-reset" class="text-[10px] font-medium text-[#777] bg-[#242424] border border-[#2e2e2e] rounded px-2 py-0.5 hover:bg-[#2c2c2c] transition-colors">Reset</button>
+      <button class="w-6 h-6 flex items-center justify-center text-[#555] hover:bg-[#272727] rounded transition-colors">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── Body ────────────────────────────────────────────────────────────── -->
+  <div class="flex flex-1 min-h-0">
+
+    <!-- Bypass overlay -->
+    <div id="bypass-overlay"
+      class="absolute inset-0 bg-[#1b1b1b]/60 z-50 pointer-events-none hidden"
+      style="top:32px"></div>
+
+    <!-- Left: canvas + strip -->
+    <div class="flex flex-col border-r border-[#272727]" style="width:495px">
+
+      <!-- Canvas wrapper -->
+      <div id="graph-wrap" class="relative flex-1 min-h-0 bg-[#131313] overflow-hidden">
+        <canvas id="eq-canvas" style="position:absolute;top:0;left:0;cursor:crosshair"></canvas>
+      </div>
+
+      <!-- Band strip -->
+      <div id="band-strip"
+        class="flex-shrink-0 h-[42px] bg-[#181818] border-t border-[#272727] flex items-center gap-1 px-2">
+      </div>
+    </div>
+
+    <!-- Right panel -->
+    <div class="flex flex-col gap-2 p-2.5 bg-[#181818]" style="width:155px">
+
+      <div class="flex items-center justify-between pb-1.5 border-b border-[#242424]">
+        <span class="text-[9px] font-semibold uppercase tracking-widest text-[#555]">Band</span>
+        <span id="lbl-band-num" class="text-[11px] font-bold text-cyan-400">3</span>
+      </div>
+
+      <!-- Active -->
+      <div id="panel-active" class="flex items-center justify-between bg-[#131313] border border-[#242424] rounded px-2 py-[5px] cursor-pointer hover:border-[#363636] transition-colors">
+        <span class="text-[9px] uppercase tracking-wide text-[#555]">Active</span>
+        <div id="active-ind" class="w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_4px_rgba(6,182,212,0.8)]"></div>
+      </div>
+
+      <!-- Type -->
+      <div class="flex flex-col gap-[5px]">
+        <span class="text-[9px] uppercase tracking-wide text-[#4a4a4a] px-0.5">Type</span>
+        <div class="bg-[#131313] border border-[#242424] rounded px-2 py-[5px] relative hover:border-[#363636] transition-colors">
+          <select id="sel-type" class="w-full text-[#ccc] text-[11px] pr-3">
+            <option value="highpass">High-Pass</option>
+            <option value="lowshelf">Low-Shelf</option>
+            <option value="bell">Bell</option>
+            <option value="highshelf">High-Shelf</option>
+            <option value="lowpass">Low-Pass</option>
+          </select>
+          <div class="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
+            <svg width="6" height="4" viewBox="0 0 6 4"><path d="M3 4L0 0H6L3 4Z" fill="#555"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Freq -->
+      <div class="flex flex-col gap-[5px] group knob-drag" data-param="freq">
+        <div class="flex justify-between items-center px-0.5">
+          <span class="text-[9px] uppercase tracking-wide text-[#4a4a4a]">Freq</span>
+          <span class="text-[9px] text-cyan-700 opacity-0 group-hover:opacity-100 transition-opacity">↕</span>
+        </div>
+        <div class="flex items-center justify-between bg-[#131313] border border-[#242424] rounded px-2 py-[5px] group-hover:border-cyan-900 transition-colors">
+          <span id="lbl-freq" class="text-[11px] text-[#ddd] num">250</span>
+          <span class="text-[9px] text-[#484848]">Hz</span>
+        </div>
+      </div>
+
+      <!-- Gain -->
+      <div id="gain-wrap" class="flex flex-col gap-[5px] group knob-drag" data-param="gain">
+        <div class="flex justify-between items-center px-0.5">
+          <span class="text-[9px] uppercase tracking-wide text-[#4a4a4a]">Gain</span>
+          <span class="text-[9px] text-cyan-700 opacity-0 group-hover:opacity-100 transition-opacity">↕</span>
+        </div>
+        <div class="flex items-center justify-between bg-[#131313] border border-[#242424] rounded px-2 py-[5px] group-hover:border-cyan-900 transition-colors">
+          <span id="lbl-gain" class="text-[11px] text-[#ddd] num">+2.5</span>
+          <span class="text-[9px] text-[#484848]">dB</span>
+        </div>
+      </div>
+
+      <!-- Q -->
+      <div class="flex flex-col gap-[5px] group knob-drag" data-param="q">
+        <div class="flex justify-between items-center px-0.5">
+          <span class="text-[9px] uppercase tracking-wide text-[#4a4a4a]">Q</span>
+          <span class="text-[9px] text-cyan-700 opacity-0 group-hover:opacity-100 transition-opacity">↕</span>
+        </div>
+        <div class="flex items-center justify-between bg-[#131313] border border-[#242424] rounded px-2 py-[5px] group-hover:border-cyan-900 transition-colors">
+          <span id="lbl-q" class="text-[11px] text-[#ddd] num">1.20</span>
+        </div>
+        <input type="range" id="slider-q" min="0.1" max="12" step="0.01" value="1.2" class="w-full mt-[1px]" />
+      </div>
+
+    </div><!-- /right panel -->
+  </div><!-- /body -->
+</div><!-- /plugin -->
+
+<script>
+// ── Constants ───────────────────────────────────────────────────────────────
+const LOG_MIN  = Math.log10(20);
+const LOG_MAX  = Math.log10(20000);
+const DB_RANGE = 18;      // ±18 dB display
+const SAMPLES  = 512;
+const ORDER    = 2;       // Butterworth order → 12 dB/oct
+
+// Canvas margins (CSS px)
+const ML = 30, MR = 6, MT = 10, MB = 20;
+
+// ── State ────────────────────────────────────────────────────────────────────
+let isPowerOn  = true;
+let selBand    = 2;         // selected band index (0-based)
+
+const DEFAULTS = [
+  { id:1, active:true, type:"highpass",  freq:50,    gain:0,    q:0.7  },
+  { id:2, active:true, type:"lowshelf",  freq:120,   gain:0,    q:0.8  },
+  { id:3, active:true, type:"bell",      freq:250,   gain:2.5,  q:1.2  },
+  { id:4, active:true, type:"bell",      freq:750,   gain:-1.5, q:1.4  },
+  { id:5, active:true, type:"bell",      freq:1500,  gain:1.0,  q:1.0  },
+  { id:6, active:true, type:"bell",      freq:3500,  gain:0,    q:1.1  },
+  { id:7, active:true, type:"highshelf", freq:8000,  gain:1.5,  q:0.8  },
+  { id:8, active:true, type:"lowpass",   freq:16000, gain:0,    q:0.7  },
+];
+let bands = clone(DEFAULTS);
+function clone(a) { return JSON.parse(JSON.stringify(a)); }
+
+// ── DOM ──────────────────────────────────────────────────────────────────────
+const canvas   = document.getElementById("eq-canvas");
+const cx       = canvas.getContext("2d");
+const gWrap    = document.getElementById("graph-wrap");
+const strip    = document.getElementById("band-strip");
+const lblNum   = document.getElementById("lbl-band-num");
+const selType  = document.getElementById("sel-type");
+const lblFreq  = document.getElementById("lbl-freq");
+const lblGain  = document.getElementById("lbl-gain");
+const lblQ     = document.getElementById("lbl-q");
+const sliderQ  = document.getElementById("slider-q");
+const btnPower = document.getElementById("btn-power");
+const btnReset = document.getElementById("btn-reset");
+const bpOver   = document.getElementById("bypass-overlay");
+const actPanel = document.getElementById("panel-active");
+const actInd   = document.getElementById("active-ind");
+const gainWrap = document.getElementById("gain-wrap");
+
+// ── Canvas resize ────────────────────────────────────────────────────────────
+let dpr = 1, CW = 0, CH = 0, GW = 0, GH = 0;
+
+function resizeCanvas() {
+  dpr = window.devicePixelRatio || 1;
+  const r = gWrap.getBoundingClientRect();
+  CW = r.width;  CH = r.height;
+  canvas.width  = Math.round(CW * dpr);
+  canvas.height = Math.round(CH * dpr);
+  canvas.style.width  = CW + "px";
+  canvas.style.height = CH + "px";
+  GW = CW - ML - MR;
+  GH = CH - MT - MB;
+}
+
+// ── Coordinate helpers ───────────────────────────────────────────────────────
+function freqToX(f) {
+  return ML + ((Math.log10(f) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * GW;
+}
+function xToFreq(x) {
+  return Math.pow(10, LOG_MIN + ((x - ML) / GW) * (LOG_MAX - LOG_MIN));
+}
+function gainToY(g) {
+  return MT + GH * 0.5 - (g / DB_RANGE) * GH * 0.5;
+}
+function yToGain(y) {
+  return ((MT + GH * 0.5 - y) / (GH * 0.5)) * DB_RANGE;
+}
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function smoothstep(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+// ── EQ response math ─────────────────────────────────────────────────────────
+function bandContrib(b, freq) {
+  switch (b.type) {
+    case "bell": {
+      // Gaussian in log2 frequency — standard visual bell approximation
+      const d = Math.log2(freq / b.freq);
+      const w = Math.max(0.06, 1 / b.q);
+      return b.gain * Math.exp(-(d * d) / (2 * w * w));
+    }
+    case "lowshelf": {
+      // Smoothstep transition in log10 space
+      const logR = Math.log10(freq / b.freq);
+      const hw   = clamp(0.55 / Math.sqrt(b.q), 0.07, 1.1);
+      return b.gain * (1 - smoothstep(-hw, hw, logR));
+    }
+    case "highshelf": {
+      const logR = Math.log10(freq / b.freq);
+      const hw   = clamp(0.55 / Math.sqrt(b.q), 0.07, 1.1);
+      return b.gain * smoothstep(-hw, hw, logR);
+    }
+    case "highpass": {
+      // Butterworth 2nd-order HP magnitude: H(f)=f^n/sqrt(f^2n+fc^2n)
+      const ratio = freq / b.freq;
+      const r2n   = Math.pow(ratio, 2 * ORDER);
+      return 20 * Math.log10(Math.sqrt(r2n / (1 + r2n)) + 1e-10);
+    }
+    case "lowpass": {
+      // Butterworth 2nd-order LP magnitude: H(f)=1/sqrt(1+(f/fc)^2n)
+      const ratio = freq / b.freq;
+      const r2n   = Math.pow(ratio, 2 * ORDER);
+      return 20 * Math.log10(Math.sqrt(1 / (1 + r2n)) + 1e-10);
+    }
+    default: return 0;
+  }
+}
+
+function totalGainAt(freq) {
+  let g = 0;
+  for (const b of bands) if (b.active) g += bandContrib(b, freq);
+  return clamp(g, -DB_RANGE, DB_RANGE);
+}
+
+// Sample the full curve into an array of canvas points
+function sampleCurve() {
+  const pts = new Array(SAMPLES + 1);
+  for (let i = 0; i <= SAMPLES; i++) {
+    const x = ML + (i / SAMPLES) * GW;
+    pts[i] = { x, y: gainToY(totalGainAt(xToFreq(x))) };
+  }
+  return pts;
+}
+
+// ── Drawing ──────────────────────────────────────────────────────────────────
+function draw() {
+  cx.save();
+  cx.scale(dpr, dpr);
+
+  // Background
+  cx.fillStyle = "#131313";
+  cx.fillRect(0, 0, CW, CH);
+
+  // ── Grid (clipped to plot area) ───────────────────────────────────────────
+  cx.save();
+  cx.beginPath(); cx.rect(ML, MT, GW, GH); cx.clip();
+
+  // dB horizontals
+  const dbGrid = [-12, -6, 6, 12];
+  for (const db of dbGrid) {
+    const y = gainToY(db);
+    cx.strokeStyle = "#1d1d1d";
+    cx.lineWidth = 0.5;
+    cx.setLineDash([]);
+    cx.beginPath(); cx.moveTo(ML, y); cx.lineTo(ML + GW, y); cx.stroke();
+  }
+  // 0 dB center line
+  const y0 = gainToY(0);
+  cx.strokeStyle = "#272727";
+  cx.lineWidth = 1;
+  cx.setLineDash([3, 4]);
+  cx.beginPath(); cx.moveTo(ML, y0); cx.lineTo(ML + GW, y0); cx.stroke();
+  cx.setLineDash([]);
+
+  // Frequency verticals
+  const freqGrid = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+  cx.strokeStyle = "#1c1c1c";
+  cx.lineWidth = 0.5;
+  for (const f of freqGrid) {
+    const x = freqToX(f);
+    cx.beginPath(); cx.moveTo(x, MT); cx.lineTo(x, MT + GH); cx.stroke();
+  }
+
+  cx.restore(); // end clip
+
+  // ── Axis labels ────────────────────────────────────────────────────────────
+  cx.font = '400 8.5px "Inter", sans-serif';
+  cx.fillStyle = "#383838";
+
+  // dB labels
+  cx.textAlign = "right"; cx.textBaseline = "middle";
+  for (const db of [-12, -6, 0, 6, 12]) {
+    cx.fillText((db > 0 ? "+" : "") + db, ML - 4, gainToY(db));
+  }
+
+  // Freq labels
+  cx.textAlign = "center"; cx.textBaseline = "top";
+  const freqLabels = [
+    [20,"20"],[50,"50"],[100,"100"],[200,"200"],[500,"500"],
+    [1000,"1k"],[2000,"2k"],[5000,"5k"],[10000,"10k"],[20000,"20k"],
+  ];
+  for (const [f, lbl] of freqLabels) {
+    cx.fillText(lbl, freqToX(f), MT + GH + 4);
+  }
+
+  // ── EQ curve (clipped) ────────────────────────────────────────────────────
+  cx.save();
+  cx.beginPath(); cx.rect(ML, MT, GW, GH); cx.clip();
+
+  const pts = sampleCurve();
+
+  if (isPowerOn) {
+    // Gradient fill: top → bottom, fading from cyan to transparent
+    const grad = cx.createLinearGradient(0, MT, 0, MT + GH);
+    grad.addColorStop(0.0, "rgba(6,182,212,0.26)");
+    grad.addColorStop(0.45, "rgba(6,182,212,0.10)");
+    grad.addColorStop(1.0, "rgba(6,182,212,0.01)");
+
+    cx.beginPath();
+    cx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) cx.lineTo(pts[i].x, pts[i].y);
+    cx.lineTo(pts[pts.length - 1].x, MT + GH);
+    cx.lineTo(pts[0].x, MT + GH);
+    cx.closePath();
+    cx.fillStyle = grad;
+    cx.fill();
+
+    // Curve stroke
+    cx.beginPath();
+    cx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) cx.lineTo(pts[i].x, pts[i].y);
+    cx.strokeStyle = "#06b6d4";
+    cx.lineWidth   = 1.5;
+    cx.lineJoin    = "round";
+    cx.shadowColor = "rgba(6,182,212,0.40)";
+    cx.shadowBlur  = 6;
+    cx.stroke();
+    cx.shadowBlur = 0;
+
+  } else {
+    // Bypassed: draw flat 0dB line, dimmed
+    cx.beginPath();
+    cx.moveTo(ML, y0); cx.lineTo(ML + GW, y0);
+    cx.strokeStyle = "#333";
+    cx.lineWidth = 1;
+    cx.stroke();
+  }
+
+  // ── Band nodes ───────────────────────────────────────────────────────────
+  for (let i = 0; i < bands.length; i++) {
+    const b = bands[i];
+    if (!b.active && i !== selBand) continue;
+
+    const nx   = freqToX(b.freq);
+    // Node sits on the actual combined curve
+    const ny   = gainToY(isPowerOn ? totalGainAt(b.freq) : 0);
+    const isSel = i === selBand;
+    const r    = isSel ? 6 : 4.5;
+
+    cx.beginPath();
+    cx.arc(nx, ny, r, 0, Math.PI * 2);
+
+    if (isSel) {
+      cx.shadowColor = "rgba(6,182,212,0.9)";
+      cx.shadowBlur  = 12;
+      cx.fillStyle   = "#06b6d4";
+      cx.fill();
+      cx.shadowBlur  = 0;
+      cx.strokeStyle = "rgba(255,255,255,0.85)";
+      cx.lineWidth   = 1.5;
+      cx.stroke();
+    } else if (b.active) {
+      cx.fillStyle   = "#181818";
+      cx.fill();
+      cx.strokeStyle = "rgba(6,182,212,0.75)";
+      cx.lineWidth   = 1;
+      cx.stroke();
+    } else {
+      cx.fillStyle   = "#151515";
+      cx.fill();
+      cx.strokeStyle = "#333";
+      cx.lineWidth   = 1;
+      cx.stroke();
+    }
+
+    // Band number inside node
+    cx.font = `600 7px "Inter", sans-serif`;
+    cx.textAlign    = "center";
+    cx.textBaseline = "middle";
+    cx.fillStyle = isSel ? "#041010" : (b.active ? "#22d3ee" : "#3a3a3a");
+    cx.fillText(b.id, nx, ny + 0.5);
+  }
+
+  cx.restore(); // end clip
+
+  cx.textBaseline = "alphabetic";
+  cx.restore();  // end dpr scale
+}
+
+// ── Hit-testing ──────────────────────────────────────────────────────────────
+const HIT_R = 10; // px
+
+function hitAt(mx, my) {
+  // Prioritise selected band to avoid jumpy selection switches
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < bands.length; i++) {
+      if (pass === 0 && i !== selBand) continue;
+      if (pass === 1 && i === selBand) continue;
+      const b = bands[i];
+      if (!b.active && i !== selBand) continue;
+      const nx = freqToX(b.freq);
+      const ny = gainToY(isPowerOn ? totalGainAt(b.freq) : 0);
+      if (Math.hypot(mx - nx, my - ny) <= HIT_R) return i;
+    }
+  }
+  return -1;
+}
+
+// ── Canvas interaction ────────────────────────────────────────────────────────
+let dragging = false, dragIdx = -1;
+let dragSX = 0, dragSY = 0;
+let dragFreq0 = 0, dragGain0 = 0, dragQ0 = 0;
+
+canvas.addEventListener("mousedown", (e) => {
+  if (!isPowerOn) return;
+  const r  = canvas.getBoundingClientRect();
+  const mx = e.clientX - r.left;
+  const my = e.clientY - r.top;
+  const idx = hitAt(mx, my);
+
+  if (idx >= 0) {
+    dragging = true; dragIdx = idx; selBand = idx;
+    dragSX = e.clientX; dragSY = e.clientY;
+    dragFreq0 = bands[idx].freq;
+    dragGain0 = bands[idx].gain;
+    dragQ0    = bands[idx].q;
+    canvas.style.cursor = "grabbing";
+    renderAll();
+  } else {
+    // Background click → teleport selected band to cursor
+    if (mx >= ML && mx <= ML + GW && my >= MT && my <= MT + GH) {
+      bands[selBand].freq = clamp(xToFreq(mx), 20, 20000);
+      if (!bands[selBand].type.includes("pass")) {
+        bands[selBand].gain = clamp(yToGain(my), -DB_RANGE, DB_RANGE);
+      }
+      renderAll();
+    }
+  }
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  const dx = e.clientX - dragSX;
+  const dy = e.clientY - dragSY;
+  const b  = bands[dragIdx];
+
+  // Horizontal → logarithmic frequency shift
+  const logShift = (dx / GW) * (LOG_MAX - LOG_MIN);
+  b.freq = clamp(Math.pow(10, Math.log10(dragFreq0) + logShift), 20, 20000);
+
+  // Vertical → gain (Bell/Shelf) or Q (HP/LP)
+  if (b.type.includes("pass")) {
+    b.q = clamp(dragQ0 - dy * 0.04, 0.1, 10);
+  } else {
+    b.gain = clamp(dragGain0 - dy * ((DB_RANGE * 2) / GH), -DB_RANGE, DB_RANGE);
+  }
+  renderAll();
+});
+
+window.addEventListener("mouseup", () => {
+  if (dragging) {
+    dragging = false; dragIdx = -1;
+    canvas.style.cursor = "crosshair";
+  }
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (dragging) return;
+  const r  = canvas.getBoundingClientRect();
+  canvas.style.cursor = hitAt(e.clientX - r.left, e.clientY - r.top) >= 0 ? "grab" : "crosshair";
+});
+
+canvas.addEventListener("mouseleave", () => {
+  if (!dragging) canvas.style.cursor = "crosshair";
+});
+
+canvas.addEventListener("dblclick", (e) => {
+  const r   = canvas.getBoundingClientRect();
+  const idx = hitAt(e.clientX - r.left, e.clientY - r.top);
+  if (idx >= 0) { bands[idx].active = !bands[idx].active; renderAll(); }
+});
+
+// ── Panel controls ────────────────────────────────────────────────────────────
+selType.addEventListener("change", () => {
+  bands[selBand].type = selType.value;
+  if (selType.value.includes("pass")) bands[selBand].gain = 0;
+  renderAll();
+});
+
+actPanel.addEventListener("click", () => {
+  bands[selBand].active = !bands[selBand].active;
+  renderAll();
+});
+
+sliderQ.addEventListener("input", () => {
+  bands[selBand].q = parseFloat(sliderQ.value);
+  renderAll();
+});
+
+// Panel knob-drags
+document.querySelectorAll(".knob-drag").forEach(el => {
+  el.addEventListener("mousedown", (e) => {
+    if (!isPowerOn) return;
+    const param  = el.dataset.param;
+    const startY = e.clientY;
+    const start  = bands[selBand][param];
+
+    const onMove = (me) => {
+      const dy = startY - me.clientY;
+      if (param === "gain") {
+        if (!bands[selBand].type.includes("pass"))
+          bands[selBand].gain = clamp(start + dy * 0.12, -DB_RANGE, DB_RANGE);
+      } else if (param === "freq") {
+        const f = Math.pow(1.007, dy);
+        bands[selBand].freq = clamp(start * f, 20, 20000);
+      } else if (param === "q") {
+        bands[selBand].q = clamp(start + dy * 0.04, 0.1, 12);
+        sliderQ.value = bands[selBand].q;
+      }
+      renderAll();
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup",   onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup",   onUp);
+    e.preventDefault();
+  });
+});
+
+// ── Global buttons ────────────────────────────────────────────────────────────
+btnPower.addEventListener("click", () => {
+  isPowerOn = !isPowerOn;
+  btnPower.className = isPowerOn
+    ? "w-3.5 h-3.5 rounded-full bg-cyan-500 shadow-[0_0_5px_rgba(6,182,212,0.7)] hover:bg-cyan-400 transition-colors focus:outline-none"
+    : "w-3.5 h-3.5 rounded-full bg-[#3a3a3a] hover:bg-[#454545] transition-colors focus:outline-none";
+  bpOver.style.display = isPowerOn ? "none" : "block";
+  draw();
+});
+
+btnReset.addEventListener("click", () => {
+  bands  = clone(DEFAULTS);
+  selBand = 2;
+  renderAll();
+});
+
+// ── Band strip ────────────────────────────────────────────────────────────────
+const TYPE_ABBR = { highpass:"HP", lowshelf:"LS", bell:"B", highshelf:"HS", lowpass:"LP" };
+
+function renderStrip() {
+  strip.innerHTML = "";
+  bands.forEach((b, i) => {
+    const btn = document.createElement("button");
+    const sel = i === selBand;
+    btn.className = [
+      "flex-1 h-[30px] rounded flex flex-col items-center justify-center gap-[1px]",
+      "border transition-colors",
+      sel
+        ? "bg-cyan-600 border-cyan-500/40 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
+        : "bg-[#131313] border-[#222] text-[#4a4a4a] hover:bg-[#1c1c1c] hover:text-[#777]",
+    ].join(" ");
+    const dotCls = b.active
+      ? (sel ? "bg-white/65" : "bg-cyan-700")
+      : "bg-[#2e2e2e]";
+    btn.innerHTML = `
+      <div class="w-[5px] h-[5px] rounded-full ${dotCls}"></div>
+      <span class="text-[10px] font-semibold leading-none">${b.id}</span>
+      <span class="text-[7px] opacity-55 leading-none">${TYPE_ABBR[b.type]}</span>
+    `;
+    btn.addEventListener("click", () => { selBand = i; renderAll(); });
+    strip.appendChild(btn);
+  });
+}
+
+// ── Panel update ──────────────────────────────────────────────────────────────
+function fmtFreq(f) {
+  if (f >= 10000) return (f / 1000).toFixed(1) + "k";
+  if (f >= 1000)  return (f / 1000).toFixed(f % 100 === 0 ? 1 : 2).replace(/\.?0+$/, "") + "k";
+  return Math.round(f).toString();
+}
+
+function updatePanel() {
+  const b = bands[selBand];
+  lblNum.textContent = b.id;
+  lblNum.className   = b.active
+    ? "text-[11px] font-bold text-cyan-400"
+    : "text-[11px] font-bold text-[#484848]";
+
+  selType.value = b.type;
+  lblFreq.textContent = fmtFreq(b.freq);
+  lblGain.textContent = (b.gain >= 0 ? "+" : "") + b.gain.toFixed(1);
+  lblQ.textContent    = b.q.toFixed(2);
+  sliderQ.value       = b.q;
+
+  actInd.className = b.active
+    ? "w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_4px_rgba(6,182,212,0.8)]"
+    : "w-2 h-2 rounded-full bg-[#2e2e2e]";
+
+  // Dim gain param for HP/LP (gain is meaningless)
+  gainWrap.style.opacity = b.type.includes("pass") ? "0.3" : "1";
+  gainWrap.style.pointerEvents = b.type.includes("pass") ? "none" : "";
+}
+
+// ── Render all ────────────────────────────────────────────────────────────────
+function renderAll() {
+  draw();
+  updatePanel();
+  renderStrip();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+resizeCanvas();
+renderAll();
+
+window.addEventListener("resize", () => { resizeCanvas(); renderAll(); });
+</script>
+</body>
+</html>

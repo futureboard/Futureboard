@@ -2,5 +2,21 @@
 name = "futureboard-core"
 version = "0.1.0"
 edition = "2024"
+description = "Futureboard Studio DSP Core — WebAudioCore Framework"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = "debuginfo"

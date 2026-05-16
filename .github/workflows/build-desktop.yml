@@ -26,7 +26,7 @@ jobs:
             platform: mac
             artifact-name: futureboard-mac
             artifact-glob: apps/electron/release/*.dmg
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             platform: linux
             artifact-name: futureboard-linux
             artifact-glob: apps/electron/release/*.AppImage
@@ -55,10 +55,32 @@ jobs:
         run: bun install
 
       - name: Install Linux build dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y libarchive-tools fakeroot rpm libopenjp2-tools
+
+      - name: Setup Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            frameworks/SphereWebAudioCore/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('frameworks/SphereWebAudioCore/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build WASM (SphereWebAudioCore)
+        run: wasm-pack build frameworks/SphereWebAudioCore --target web --release --out-dir pkg
 
       - name: Build & package (${{ matrix.platform }})
         run: bun run dist:electron:${{ matrix.platform }}
@@ -85,7 +107,7 @@ jobs:
   release:
     name: Publish Release
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write

@@ -37,6 +37,70 @@ export type DawProject = {
 
 export type TrackType = "audio" | "midi" | "instrument" | "plugin" | "bus" | "return" | "group" | "master";
 
+export type TrackInputType =
+  | "none"
+  | "system-audio"
+  | "audio-channel"   // specific channel(s) from global input device
+  | "audio-device"
+  | "midi-device"
+  | "bus"
+  | "track";
+
+export type TrackOutputType =
+  | "master"
+  | "bus"
+  | "track"
+  | "hardware"
+  | "none";
+
+/**
+ * Structured input routing referencing the global device rather than a raw device id.
+ * kind = "audio-channel": mono or stereo channel from the globally selected input device.
+ * kind = "midi-input": a specific enabled MIDI device or all enabled inputs.
+ */
+export type TrackInputRouting = {
+  kind: "none" | "audio-channel" | "midi-input" | "bus" | "track";
+  /** 1-based mono channel index (kind === "audio-channel", mono). */
+  channel?: number;
+  /** 1-based [L, R] stereo pair (kind === "audio-channel", stereo). */
+  channelPair?: [number, number];
+  /** Specific MIDI device ID; undefined = all enabled inputs (kind === "midi-input"). */
+  midiDeviceId?: string;
+  /** MIDI channel filter (kind === "midi-input"). */
+  midiChannel?: "all" | number;
+  /** Bus or track ID (kind === "bus" | "track"). */
+  targetId?: string;
+};
+
+export type TrackOutputRouting = {
+  kind: "master" | "bus" | "hardware" | "none";
+  /** Bus/return track id (kind === "bus"). */
+  targetId?: string;
+  /** 1-based [L, R] hardware output pair (kind === "hardware"). */
+  hardwarePair?: [number, number];
+};
+
+export type TrackRouting = {
+  // Legacy flat fields kept for backward compat — normalizeRouting populates these.
+  inputType: TrackInputType;
+  inputId?: string;
+  inputChannel?: number | "stereo";
+  outputType: TrackOutputType;
+  outputId?: string;
+  /** Structured input sub-object (takes precedence in UI when present). */
+  input?: TrackInputRouting;
+  /** Structured output sub-object (takes precedence in UI when present). */
+  output?: TrackOutputRouting;
+};
+
+export type TrackAdvanced = {
+  latencyMs: number;
+  delayMs: number;
+  semitone: number;
+  phaseInvert: boolean;
+  midSideMode: "off" | "mid" | "side" | "sum" | "difference";
+};
+
 // Snap division for grid snapping
 export type SnapDivision =
   | "off"
@@ -99,6 +163,14 @@ export type DawTrack = {
   sends?: TrackSend[];
   /** Output routing target: "master" or a bus/group track ID. Defaults to "master". */
   output?: string;
+  /** Structured I/O routing (input source + output destination). */
+  routing?: TrackRouting;
+  /** Advanced per-track processing parameters. */
+  advanced?: TrackAdvanced;
+  /** Monitor input mode for audio/instrument tracks. */
+  monitorMode?: "off" | "auto" | "in";
+  /** Channel mode override. */
+  channelMode?: "mono" | "stereo";
   /** Display height in pixels (overrides TRACK_HEIGHT default). */
   height?: number;
   /** Whether the track lane is collapsed to minimum height. */

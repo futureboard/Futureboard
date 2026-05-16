@@ -1,11 +1,12 @@
 import { normalizeEquz8Params } from "../../../../../../plugins/Equz8/Core";
-import { smoothParam } from "../audioMath";
+import { dbToGain, smoothParam } from "../audioMath";
 import type { InsertAudioNode, InsertNodeFactory, InsertUpdateContext } from "../types";
 
 const BIQUAD_TYPE: Record<string, BiquadFilterType> = {
   highpass:  "highpass",
   lowshelf:  "lowshelf",
   bell:      "peaking",
+  notch:     "notch",
   highshelf: "highshelf",
   lowpass:   "lowpass",
 };
@@ -15,6 +16,7 @@ const NEUTRAL: Record<string, { freq?: number; gain: number; q?: number }> = {
   highpass:  { freq: 20,    gain: 0, q: 0.707 },
   lowshelf:  { freq: 20,    gain: 0, q: 0.707 },
   peaking:   { freq: 1000,  gain: 0, q: 1 },
+  notch:     { freq: 1000,  gain: 0, q: 1 },
   highshelf: { freq: 20000, gain: 0, q: 0.707 },
   lowpass:   { freq: 20000, gain: 0, q: 0.707 },
 };
@@ -47,6 +49,8 @@ export const createEquz8Node: InsertNodeFactory = (audioCtx, device, updateCtx) 
   function applyParams(params: Record<string, number | string | boolean>, ctx: InsertUpdateContext): void {
     const model = normalizeEquz8Params(params);
     const now = ctx.now;
+
+    smoothParam(outputGain.gain, dbToGain(model.outputDb), now);
 
     model.bands.forEach((band, i) => {
       const f = filters[i];

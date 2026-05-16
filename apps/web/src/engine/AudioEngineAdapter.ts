@@ -52,6 +52,8 @@ export interface AudioEngineAdapter {
   setTrackPan(trackId: TrackId, pan: number): void;
   setTrackMute(trackId: TrackId, muted: boolean): void;
   setTrackSolo(trackId: TrackId, solo: boolean): void;
+  setTrackPhaseInvert(trackId: TrackId, inverted: boolean): void;
+  setTrackOutput(trackId: TrackId, output: string): void;
   setMasterVolume(volume: number): void;
 
   // ── Insert devices ─────────────────────────────────────────────────────────

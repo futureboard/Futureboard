@@ -54,6 +54,11 @@ export function useKeyboardShortcuts() {
         if (!inEditable) runAction("file:import-audio");
         return;
       }
+      if (ctrl && !shift && e.code === "KeyR") {
+        e.preventDefault();
+        if (!inEditable) runAction("audio:render-selection");
+        return;
+      }
       if (ctrl && !shift && e.code === "Comma") {
         e.preventDefault();
         if (!inEditable) runAction("app:preferences");
@@ -304,7 +309,18 @@ export function useKeyboardShortcuts() {
       }
     };
 
+    const onMainShortcut = (e: Event) => {
+      const action = (e as CustomEvent<string>).detail;
+      if (action === "audio:render-selection" && !isEditableTarget(document.activeElement)) {
+        runAction(action);
+      }
+    };
+
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("futureboard:main-shortcut", onMainShortcut);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("futureboard:main-shortcut", onMainShortcut);
+    };
   }, []); // reads state from Zustand getState() — no deps needed
 }

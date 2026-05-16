@@ -232,8 +232,14 @@ export class SetTrackOutputCommand implements DawCommand {
     this.newOutput = newOutput;
     this.oldOutput = oldOutput;
   }
-  execute() { store().setTrackOutput(this.trackId, this.newOutput); }
-  undo()    { store().setTrackOutput(this.trackId, this.oldOutput); }
+  execute() {
+    store().setTrackOutput(this.trackId, this.newOutput);
+    mixer.setTrackOutput(this.trackId, this.newOutput);
+  }
+  undo() {
+    store().setTrackOutput(this.trackId, this.oldOutput);
+    mixer.setTrackOutput(this.trackId, this.oldOutput);
+  }
 }
 
 export class AddTrackSendCommand implements DawCommand {

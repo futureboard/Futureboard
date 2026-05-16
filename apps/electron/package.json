@@ -31,6 +31,7 @@
   "build": {
     "appId": "org.mochilinux.studio",
     "productName": "Futureboard Studio",
+    "executableName": "Futureboard Studio",
     "copyright": "Copyright © ${author}",
     "publish": null,
     "afterPack": "scripts/after-pack.cjs",
@@ -57,6 +58,15 @@
         "filter": ["**/*"]
       }
     ],
+    "fileAssociations": [
+      {
+        "ext": "mochiproj",
+        "name": "Futureboard Studio Project",
+        "description": "Futureboard Studio Project File",
+        "role": "Editor",
+        "icon": "icons/icon.ico"
+      }
+    ],
     "win": {
       "target": [
         {
@@ -64,7 +74,8 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "icons/icon.ico"
+      "icon": "icons/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -84,6 +95,7 @@
       ],
       "category": "public.app-category.music",
       "icon": "icons/app.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "hardenedRuntime": false,
       "identity": null
     },
@@ -94,8 +106,9 @@
           "arch": ["x64"]
         }
       ],
-      "category": "AudioVideo",
-      "icon": "icons/app.png"
+      "category": "AudioVideo;Audio;Music",
+      "icon": "icons/app.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }

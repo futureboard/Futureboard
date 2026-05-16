@@ -19,6 +19,8 @@ import { useMetronomeStore } from "./store/metronomeStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
 import { platform } from "./platform";
+import { audioDeviceService } from "./engine/AudioDeviceService";
+import { midiDeviceService } from "./engine/MidiDeviceService";
 import { ToastContainer } from "./components/ui/Toast";
 import { PerfMonitor } from "./components/PerfMonitor";
 import { useRecentProjectsStore } from "./store/recentProjectsStore";
@@ -51,6 +53,21 @@ export default function App() {
 
   useEffect(() => {
     webAudioEngineAdapter.init().catch(console.error);
+  }, []);
+
+  // Device services startup.
+  // Electron: auto-scan immediately (Chromium usually grants silently).
+  // Web: only listen for hotplug; user must explicitly grant permissions via UI.
+  useEffect(() => {
+    if (platform.kind === "electron") {
+      // Try to get labeled device list; fall back to bare enumeration if denied.
+      void audioDeviceService.requestAudioPermission().catch(() => {
+        void audioDeviceService.refreshAudioDevices();
+      });
+      void midiDeviceService.requestMidiAccess();
+    }
+    audioDeviceService.listenForDeviceChanges();
+    return () => audioDeviceService.stopListening();
   }, []);
 
   const handleImportClick = async () => {
@@ -96,6 +113,12 @@ export default function App() {
       }
     });
   }, []);
+
+  // Re-sync the audio engine whenever a different project is loaded.
+  // project.id changes only on load/new-project, not on every edit.
+  useEffect(() => {
+    webAudioEngineAdapter.loadProject(project).catch(console.error);
+  }, [project.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ctrl+Shift+P toggles the performance/GPU monitor overlay.
   useEffect(() => {

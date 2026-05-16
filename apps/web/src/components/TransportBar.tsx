@@ -41,6 +41,7 @@ import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
 import { useUIStore } from "../store/uiStore";
 import { DawSelect } from "./ui/DawSelect";
+import { NumberInput } from "./ui/NumberInput";
 import { formatBarBeatTick } from "../utils/musicalTime";
 import logoApp from "../assets/logo.png";
 import { ProjectDropdown } from "./project/ProjectDropdown";
@@ -847,13 +848,14 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
 
           <div className="flex h-7 items-center gap-1 px-1">
             <span className="text-[8px] font-medium text-daw-faint">BPM</span>
-            <input
-              type="number"
+            <NumberInput
+              className="w-12 !h-5"
+              align="center"
               min={20}
               max={300}
               value={project.bpm}
-              onChange={(e) => setBpm(parseInt(e.target.value) || 120)}
-              className="w-10 border-none bg-transparent text-center text-[11px] font-semibold text-daw-text outline-none"
+              ariaLabel="Project tempo BPM"
+              onChange={(value) => setBpm(Math.round(value) || 120)}
             />
           </div>
 
@@ -863,7 +865,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
               onChange={(val) =>
                 setTimeSignature({ ...timeSig, numerator: parseInt(val) })
               }
-              className="!h-5 !w-4 !bg-transparent !border-none !px-0"
+              className="!h-5 !w-5 !bg-transparent !border-none !px-0"
               hideChevron
               options={TIME_SIG_NUMERATORS.map((n) => ({
                 value: String(n),

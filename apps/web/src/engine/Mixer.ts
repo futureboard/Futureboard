@@ -20,6 +20,7 @@ type TrackNodes = {
   gain:        GainNode;
   insertInput:  GainNode;
   insertOutput: GainNode;
+  phaseNode:   GainNode;      // gain = 1 (normal) or -1 (phase inverted)
   panner:      StereoPannerNode;
   splitter:    ChannelSplitterNode;
   merger:      ChannelMergerNode;
@@ -38,6 +39,7 @@ type TrackNodes = {
 
 class Mixer {
   private tracks      = new Map<TrackId, TrackNodes>();
+  private _outputNodes = new Map<TrackId, AudioNode>();
   private masterGain:      GainNode            | null = null;
   private masterSplitter:  ChannelSplitterNode | null = null;
   private masterMerger:    ChannelMergerNode   | null = null;
@@ -85,6 +87,7 @@ class Mixer {
       const gain         = ctx.createGain();
       const insertInput  = ctx.createGain();
       const insertOutput = ctx.createGain();
+      const phaseNode    = ctx.createGain();      // value = 1 or -1
       const panner       = ctx.createStereoPanner();
       const splitter     = ctx.createChannelSplitter(2);
       const merger       = ctx.createChannelMerger(2);
@@ -96,25 +99,28 @@ class Mixer {
         a.smoothingTimeConstant = ANALYSER_SMOOTH;
       }
 
-      gain.gain.value  = volume;
-      panner.pan.value = pan;
+      gain.gain.value      = volume;
+      panner.pan.value     = pan;
+      phaseNode.gain.value = 1; // normal polarity
 
-      // gain → insertInput → (insert chain slots) → insertOutput → panner → split → analysers → merger → master
-      // When empty, insertInput connects directly to insertOutput
+      // gain → insertInput → [insert chain] → insertOutput → phaseNode → panner → split → analysers → merger → master
       gain.connect(insertInput);
       insertInput.connect(insertOutput);
-      insertOutput.connect(panner);
+      insertOutput.connect(phaseNode);
+      phaseNode.connect(panner);
       panner.connect(splitter);
       splitter.connect(analyserL, 0);
       splitter.connect(analyserR, 1);
       splitter.connect(merger, 0, 0);
       splitter.connect(merger, 1, 1);
       merger.connect(this.master);
+      this._outputNodes.set(trackId, this.master);
 
       this.tracks.set(trackId, {
         gain,
         insertInput,
         insertOutput,
+        phaseNode,
         panner,
         splitter,
         merger,
@@ -267,6 +273,14 @@ class Mixer {
     this.master.gain.setTargetAtTime(value, audioEngine.currentTime, 0.01);
   }
 
+  /** Invert (or restore) the polarity of a track's output signal. */
+  setPhaseInvert(trackId: TrackId, inverted: boolean) {
+    const nodes = this.tracks.get(trackId);
+    if (!nodes) return;
+    const target = inverted ? -1 : 1;
+    nodes.phaseNode.gain.setTargetAtTime(target, audioEngine.currentTime, 0.005);
+  }
+
   removeTrack(trackId: TrackId) {
     const nodes = this.tracks.get(trackId);
     if (nodes) {
@@ -279,13 +293,37 @@ class Mixer {
       nodes.gain.disconnect();
       nodes.insertInput.disconnect();
       nodes.insertOutput.disconnect();
+      nodes.phaseNode.disconnect();
       nodes.panner.disconnect();
       nodes.splitter.disconnect();
       nodes.analyserL.disconnect();
       nodes.analyserR.disconnect();
       nodes.merger.disconnect();
       this.tracks.delete(trackId);
+      this._outputNodes.delete(trackId);
     }
+  }
+
+  /**
+   * Re-route a track's output to a different destination.
+   * `output` is "master", empty, or a track ID whose gain input acts as the bus.
+   */
+  setTrackOutput(trackId: TrackId, output: string): void {
+    const nodes = this.tracks.get(trackId);
+    if (!nodes) return;
+
+    const currentOutput = this._outputNodes.get(trackId);
+    if (currentOutput) {
+      try { nodes.merger.disconnect(currentOutput); } catch { /* already disconnected */ }
+    }
+
+    const newOutput: AudioNode =
+      !output || output === "master" || output === "none"
+        ? this.master
+        : (this.tracks.get(output as TrackId)?.gain ?? this.master);
+
+    nodes.merger.connect(newOutput);
+    this._outputNodes.set(trackId, newOutput);
   }
 
   // ── private ──────────────────────────────────────────────────────────────────

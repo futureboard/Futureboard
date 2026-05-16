@@ -285,6 +285,23 @@ function createWindow(): BrowserWindow {
     win.webContents.openDevTools({ mode: "detach" });
   }
 
+  win.webContents.on("before-input-event", (event, input) => {
+    const isReloadShortcut =
+      input.type === "keyDown" &&
+      input.code === "KeyR" &&
+      (input.control || input.meta) &&
+      !input.shift &&
+      !input.alt;
+
+    if (!isReloadShortcut) return;
+
+    event.preventDefault();
+    void win.webContents.executeJavaScript(
+      `window.dispatchEvent(new CustomEvent("futureboard:main-shortcut", { detail: "audio:render-selection" }));`,
+      true,
+    );
+  });
+
   return win;
 }
 

@@ -13,6 +13,8 @@ import { platform } from "../platform";
 import { importAudioFilesAsNewTracks } from "../utils/importAudioToProject";
 import { audioAssetManager } from "../engine/AudioAssetManager";
 import { midiEditorBridge } from "./midiEditorBridge";
+import { audioDeviceService } from "../engine/AudioDeviceService";
+import { midiDeviceService } from "../engine/MidiDeviceService";
 import { buildSelectionState, getActiveSelectionContext } from "../store/selectionSelectors";
 import {
   AddTrackCommand,
@@ -331,15 +333,49 @@ export function runAction(actionId: string) {
         type: "audio",
         color: getTrackColor(tracks.length),
         channelCount: 2,
+        channelMode: "stereo",
         volume: 0.8,
         pan: 0,
         muted: false,
         solo: false,
         armed: false,
         clips: [],
+        sends: [],
+        inserts: [],
+        output: "master",
+        routing: { inputType: "system-audio", outputType: "master" },
+        advanced: { latencyMs: 0, delayMs: 0, semitone: 0, phaseInvert: false, midSideMode: "off" },
+        monitorMode: "off",
       };
       history.execute(new AddTrackCommand(newTrack));
       uiStore.setSelectedTrackId(newId);
+      break;
+    }
+
+    case "track:add-midi": {
+      const tracks = projectStore.project.tracks;
+      const id = crypto.randomUUID();
+      const newTrack: DawTrack = {
+        id,
+        name: `MIDI Track ${tracks.filter((t) => t.type === "midi").length + 1}`,
+        type: "midi",
+        color: getTrackColor(tracks.length),
+        channelCount: 2,
+        channelMode: "stereo",
+        volume: 0.8,
+        pan: 0,
+        muted: false,
+        solo: false,
+        armed: false,
+        clips: [],
+        sends: [],
+        inserts: [],
+        routing: { inputType: "midi-device", outputType: "none" },
+        advanced: { latencyMs: 0, delayMs: 0, semitone: 0, phaseInvert: false, midSideMode: "off" },
+        monitorMode: "off",
+      };
+      history.execute(new AddTrackCommand(newTrack));
+      uiStore.setSelectedTrackId(id);
       break;
     }
 
@@ -391,9 +427,26 @@ export function runAction(actionId: string) {
       break;
     }
 
-    case "track:add-midi":
     case "track:add-plugin":
     case "track:add-master-bus":
+      break;
+
+    // ── Audio device actions ───────────────────────────────────────────────
+    case "audio:refresh-devices":
+      void audioDeviceService.refreshAudioDevices();
+      break;
+
+    case "audio:enable-input":
+      void audioDeviceService.requestAudioPermission();
+      break;
+
+    // ── MIDI device actions ────────────────────────────────────────────────
+    case "midi:enable":
+      void midiDeviceService.requestMidiAccess();
+      break;
+
+    case "midi:refresh-devices":
+      midiDeviceService.refreshMidiDevices();
       break;
 
     // ── MIDI editor actions (routed through bridge to active panel) ─────────

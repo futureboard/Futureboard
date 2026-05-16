@@ -12,7 +12,9 @@ import type {
   InsertDevice,
   MidiNote,
   TimeSignature,
+  TrackAdvanced,
   TrackId,
+  TrackRouting,
   TrackSend,
   WaveformPeaks,
   WaveformStatus,
@@ -74,6 +76,8 @@ type ProjectStore = {
   setTrackHeight: (trackId: TrackId, height: number | undefined) => void;
   collapseTrack: (trackId: TrackId, collapsed: boolean) => void;
   reorderTracks: (activeTrackId: TrackId, overTrackId: TrackId) => void;
+  updateTrackRouting: (trackId: TrackId, patch: Partial<TrackRouting>) => void;
+  updateTrackAdvanced: (trackId: TrackId, patch: Partial<TrackAdvanced>) => void;
 
   // ── Track sends ────────────────────────────────────────────────────────────
   addTrackSend: (trackId: TrackId, send: TrackSend) => void;
@@ -273,6 +277,30 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       next.splice(newIndex, 0, moved);
       return { project: { ...s.project, tracks: next } };
     });
+    markDirty();
+  },
+
+  updateTrackRouting: (trackId, patch) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId ? { ...t, routing: { ...(t.routing ?? {}), ...patch } as TrackRouting } : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  updateTrackAdvanced: (trackId, patch) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId ? { ...t, advanced: { ...(t.advanced ?? {}), ...patch } as TrackAdvanced } : t
+        ),
+      },
+    }));
     markDirty();
   },
 

@@ -80,10 +80,20 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
     }
     transport.stop();
     clipScheduler.cancelAll();
+
+    // Create all track nodes first so bus routing targets exist when we wire outputs.
     for (const track of project.tracks) {
       mixer.getOrCreateTrack(track.id, track.volume, track.pan);
-      if (track.muted) mixer.setMute(track.id, true);
-      if (track.solo)  mixer.setSolo(track.id, true);
+    }
+    // Now sync all per-track state (mute/solo/phase/output).
+    for (const track of project.tracks) {
+      mixer.setVolume(track.id, track.volume);
+      mixer.setPan(track.id, track.pan);
+      mixer.setMute(track.id, track.muted ?? false);
+      mixer.setSolo(track.id, track.solo ?? false);
+      mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
+      const outId = track.routing?.outputId;
+      if (outId && outId !== "master") mixer.setTrackOutput(track.id, outId);
     }
   }
 
@@ -93,6 +103,9 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
     }
     for (const track of project.tracks) {
       mixer.getOrCreateTrack(track.id, track.volume, track.pan);
+      mixer.setVolume(track.id, track.volume);
+      mixer.setPan(track.id, track.pan);
+      mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
     }
   }
 
@@ -150,6 +163,9 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
       return this._wasmAdapter.createTrack(track);
     }
     mixer.getOrCreateTrack(track.id, track.volume, track.pan);
+    mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
+    const outId = track.routing?.outputId;
+    if (outId && outId !== "master") mixer.setTrackOutput(track.id, outId);
   }
 
   removeTrack(trackId: TrackId): void {
@@ -219,6 +235,20 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
       return this._wasmAdapter.setTrackSolo(trackId, solo);
     }
     mixer.setSolo(trackId, solo);
+  }
+
+  setTrackPhaseInvert(trackId: TrackId, inverted: boolean): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setTrackPhaseInvert(trackId, inverted);
+    }
+    mixer.setPhaseInvert(trackId, inverted);
+  }
+
+  setTrackOutput(trackId: TrackId, output: string): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setTrackOutput(trackId, output);
+    }
+    mixer.setTrackOutput(trackId, output);
   }
 
   setMasterVolume(volume: number): void {

@@ -523,6 +523,24 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "midi:transpose-octave-down",
         description: "Transpose selected notes down one octave",
       },
+      {
+        type: "separator",
+        id: "midi.sep.devices",
+      },
+      {
+        id: "midi.enable_devices",
+        label: "Enable MIDI Devices",
+        icon: "wifi",
+        action: "midi:enable",
+        description: "Request Web MIDI access and list connected MIDI devices",
+      },
+      {
+        id: "midi.refresh_devices",
+        label: "Refresh MIDI Devices",
+        icon: "refresh-cw",
+        action: "midi:refresh-devices",
+        description: "Re-enumerate all connected MIDI inputs and outputs",
+      },
     ],
   },
 
@@ -630,7 +648,7 @@ export const APP_MENUS: AppMenuGroup[] = [
         accelerator: "Ctrl+Shift+T",
         icon: "piano",
         action: "track:add-midi",
-        enabled: false,
+        description: "Add a new MIDI track routed to All MIDI Inputs",
       },
       {
         id: "project.add_plugin_track",
@@ -888,7 +906,8 @@ export const APP_MENUS: AppMenuGroup[] = [
       },
       {
         id: "audio.render_selection",
-        label: "Render Selection",
+        label: "Render Audio",
+        accelerator: "Ctrl+R",
         icon: "box",
         action: "audio:render-selection",
       },
@@ -897,6 +916,24 @@ export const APP_MENUS: AppMenuGroup[] = [
         label: "Freeze Selected Tracks",
         icon: "snowflake",
         action: "audio:freeze-selected-tracks",
+      },
+      {
+        type: "separator",
+        id: "audio.sep.devices",
+      },
+      {
+        id: "audio.enable_input",
+        label: "Enable Audio Input",
+        icon: "mic",
+        action: "audio:enable-input",
+        description: "Request microphone permission and enumerate audio devices",
+      },
+      {
+        id: "audio.refresh_devices",
+        label: "Refresh Audio Devices",
+        icon: "refresh-cw",
+        action: "audio:refresh-devices",
+        description: "Re-enumerate all connected audio input and output devices",
       },
       {
         type: "separator",
@@ -1570,7 +1607,6 @@ export const APP_MENUS: AppMenuGroup[] = [
       {
         id: "tools.reload_window",
         label: "Reload Window",
-        accelerator: "Ctrl+R",
         icon: "refresh-cw",
         action: "app:reload",
       },

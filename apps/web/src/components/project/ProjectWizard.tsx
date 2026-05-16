@@ -10,6 +10,7 @@ import { useRecentProjectsStore } from "../../store/recentProjectsStore";
 import { getTrackColor } from "../../theme";
 import type { DawTrack } from "../../types/daw";
 import { platform } from "../../platform";
+import { NumberInput } from "../ui/NumberInput";
 
 type Props = { windowId: string };
 
@@ -72,13 +73,14 @@ function Stepper({
       >
         <span className="select-none leading-none">−</span>
       </button>
-      <input
-        type="number"
+      <NumberInput
         min={min}
         max={max}
         value={value}
-        onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value) || min)))}
-        className="h-7 min-w-0 flex-1 rounded-md border border-white/[0.07] bg-[#13161c] text-center text-[12px] font-semibold tabular-nums text-daw-text outline-none focus:border-daw-accent/50"
+        className="!h-7 min-w-0 flex-1"
+        align="center"
+        ariaLabel="Numeric value"
+        onChange={(next) => onChange(Math.max(min, Math.min(max, next || min)))}
       />
       <button
         type="button"
@@ -332,13 +334,14 @@ export function ProjectWizard({ windowId }: Props) {
         </OptionGroup>
 
         <OptionGroup label="Time Signature">
-          <input
-            type="number"
+          <NumberInput
             min={1}
             max={16}
             value={state.timeSignatureNumerator}
-            onChange={(e) => set({ timeSignatureNumerator: Math.max(1, Math.min(16, Number(e.target.value))) })}
-            className="h-7 w-10 shrink-0 rounded-md border border-white/[0.07] bg-[#13161c] text-center text-[12px] font-semibold tabular-nums text-daw-text outline-none focus:border-daw-accent/50"
+            className="!h-7 w-12 shrink-0"
+            align="center"
+            ariaLabel="Time signature numerator"
+            onChange={(value) => set({ timeSignatureNumerator: Math.max(1, Math.min(16, value)) })}
           />
           <span className="shrink-0 text-[14px] font-light text-daw-faint select-none">/</span>
           {([2, 4, 8, 16] as const).map((d) => (

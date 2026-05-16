@@ -2,9 +2,16 @@ import { useEffect, useState } from "react";
 import { useSettingsStore, APP_SETTINGS_DEFAULTS as DEFAULTS } from "../../store/settingsStore";
 import { useProjectStore } from "../../store/projectStore";
 import { useWindowStore } from "../../store/windowStore";
+import { useDeviceStore } from "../../store/deviceStore";
+import { useAudioSettingsStore } from "../../store/audioSettingsStore";
+import { audioDeviceService } from "../../engine/AudioDeviceService";
+import { midiDeviceService } from "../../engine/MidiDeviceService";
+import { platform } from "../../platform";
 import { DawSelect } from "../ui/DawSelect";
+import { NumberInput } from "../ui/NumberInput";
 import { KeyboardShortcutsPanel } from "./KeyboardShortcutsPanel";
 import type { AppSettings, PreferredBufferSize, PreferredEngine, StartupBehavior } from "../../store/settingsStore";
+import { RefreshCw, AlertCircle } from "lucide-react";
 
 type SettingsTab = "general" | "audio" | "midi" | "project" | "appearance" | "advanced" | "shortcuts";
 
@@ -110,6 +117,112 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
 
 // ── Tab content panels ────────────────────────────────────────────────────────
 
+function MidiTab() {
+  const { midiInputs, midiOutputs, midiPermission } = useDeviceStore();
+  const audioSettings = useAudioSettingsStore();
+  const isWeb = platform.kind === "web";
+  const needsPermission = isWeb && (midiPermission === "unknown" || midiPermission === "prompting");
+  const denied = isWeb && midiPermission === "denied";
+  const unsupported = midiPermission === "unsupported";
+
+  const isInputEnabled = (id: string) =>
+    audioSettings.midiEnabledInputIds.length === 0 || audioSettings.midiEnabledInputIds.includes(id);
+
+  return (
+    <div className="flex flex-col">
+      <SectionHeader>MIDI Inputs</SectionHeader>
+
+      {unsupported && (
+        <div className="mb-3 flex items-center gap-2 rounded border border-daw-border bg-daw-bg px-3 py-2">
+          <AlertCircle size={11} className="shrink-0 text-daw-faint" />
+          <span className="text-[11px] text-daw-faint">Web MIDI is not supported in this browser.</span>
+        </div>
+      )}
+
+      {needsPermission && (
+        <div className="mb-3 flex items-center gap-2 rounded border border-[rgba(114,215,215,0.2)] bg-[rgba(114,215,215,0.04)] px-3 py-2">
+          <AlertCircle size={11} className="shrink-0 text-[rgba(114,215,215,0.7)]" />
+          <span className="text-[11px] text-[rgba(114,215,215,0.7)]">
+            MIDI access not yet granted.
+          </span>
+          <button
+            onClick={() => midiDeviceService.requestMidiAccess()}
+            className="ml-auto shrink-0 rounded border border-[rgba(114,215,215,0.3)] px-2 py-0.5 text-[10px] text-[rgba(114,215,215,0.85)] hover:bg-[rgba(114,215,215,0.08)] transition-colors"
+          >
+            Enable MIDI
+          </button>
+        </div>
+      )}
+
+      {denied && (
+        <div className="mb-3 text-[11px] text-red-400/80">
+          MIDI access denied — check browser site permissions.
+        </div>
+      )}
+
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] text-daw-faint">
+          {midiInputs.length === 0 ? "No MIDI inputs detected" : `${midiInputs.length} input${midiInputs.length !== 1 ? "s" : ""} found`}
+        </span>
+        <div className="flex items-center gap-1.5">
+          {audioSettings.midiEnabledInputIds.length > 0 && (
+            <button
+              onClick={() => audioSettings.enableAllMidiInputs()}
+              className="text-[10px] text-daw-faint hover:text-daw-text transition-colors"
+            >
+              Enable All
+            </button>
+          )}
+          <button
+            title="Refresh MIDI devices"
+            onClick={() => midiDeviceService.refreshMidiDevices()}
+            className="flex h-6 w-6 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors"
+          >
+            <RefreshCw size={10} />
+          </button>
+        </div>
+      </div>
+
+      {midiInputs.length > 0 && (
+        <div className="flex flex-col gap-1 mb-3">
+          {midiInputs.map((d) => (
+            <div
+              key={d.id}
+              className="flex items-center gap-2 rounded border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.025)] px-2.5 py-1.5"
+            >
+              <span className="flex-1 min-w-0 truncate text-[11px] text-daw-text">{d.name}</span>
+              <SettingsToggle
+                checked={isInputEnabled(d.id)}
+                onChange={() => audioSettings.toggleMidiInput(d.id)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <SectionHeader>MIDI Outputs</SectionHeader>
+      <div className="flex flex-col gap-1">
+        {midiOutputs.length === 0 ? (
+          <span className="text-[10px] text-daw-faint py-1">No MIDI outputs detected</span>
+        ) : (
+          midiOutputs.map((d) => (
+            <div
+              key={d.id}
+              className="flex items-center gap-2 rounded border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.025)] px-2.5 py-1.5"
+            >
+              <span className="flex-1 min-w-0 truncate text-[11px] text-daw-text">{d.name}</span>
+              <SettingsToggle
+                checked={audioSettings.midiEnabledOutputIds.includes(d.id)}
+                onChange={() => audioSettings.toggleMidiOutput(d.id)}
+              />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 function GeneralTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: Partial<AppSettings>) => void }) {
   return (
     <div className="flex flex-col">
@@ -147,8 +260,72 @@ function GeneralTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: Par
 }
 
 function AudioTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: Partial<AppSettings>) => void }) {
+  const { audioInputs, audioOutputs, audioPermission } = useDeviceStore();
+  const audioSettings = useAudioSettingsStore();
+  const isWeb = platform.kind === "web";
+  const needsPermission = isWeb && audioPermission !== "granted" && audioInputs.length === 0;
+
+  const inputOptions = [
+    { value: "__default__", label: "System Default" },
+    ...audioInputs.map((d) => ({ value: d.id, label: d.name })),
+  ];
+  const outputOptions = [
+    { value: "__default__", label: "System Default" },
+    ...audioOutputs.map((d) => ({ value: d.id, label: d.name })),
+  ];
+
   return (
     <div className="flex flex-col">
+      <SectionHeader>Devices</SectionHeader>
+
+      {needsPermission && (
+        <div className="mb-3 flex items-center gap-2 rounded border border-yellow-500/20 bg-yellow-500/5 px-3 py-2">
+          <AlertCircle size={11} className="shrink-0 text-yellow-400" />
+          <span className="text-[11px] text-yellow-400/80">
+            Microphone permission required to list audio devices.
+          </span>
+          <button
+            onClick={() => audioDeviceService.requestAudioPermission()}
+            className="ml-auto shrink-0 rounded border border-yellow-500/30 px-2 py-0.5 text-[10px] text-yellow-400 hover:bg-yellow-500/10 transition-colors"
+          >
+            Allow
+          </button>
+        </div>
+      )}
+
+      <SettingsRow label="Input Device" description="Global audio input used for all audio tracks">
+        <div className="flex items-center gap-1.5">
+          <DawSelect
+            className="w-44"
+            value={audioSettings.audioInputDeviceId ?? "__default__"}
+            onChange={(v) => audioSettings.setAudioInputDevice(v === "__default__" ? null : v)}
+            options={inputOptions}
+          />
+          <button
+            title="Refresh devices"
+            onClick={() => audioDeviceService.refreshAudioDevices()}
+            className="flex h-7 w-7 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors"
+          >
+            <RefreshCw size={11} />
+          </button>
+        </div>
+      </SettingsRow>
+
+      <SettingsRow label="Output Device" description="Global audio output for the master bus">
+        <DawSelect
+          className="w-44"
+          value={audioSettings.audioOutputDeviceId ?? "__default__"}
+          onChange={(v) => audioSettings.setAudioOutputDevice(v === "__default__" ? null : v)}
+          options={outputOptions}
+        />
+      </SettingsRow>
+
+      {audioInputs.length > 0 && (
+        <div className="mt-1 mb-2 text-[10px] text-daw-faint px-0.5">
+          {audioInputs.length} input{audioInputs.length !== 1 ? "s" : ""} · {audioOutputs.length} output{audioOutputs.length !== 1 ? "s" : ""} detected
+        </div>
+      )}
+
       <SectionHeader>Engine</SectionHeader>
       <SettingsRow label="Audio Engine" description="Select the audio processing backend">
         <SettingsSelect<PreferredEngine>
@@ -176,11 +353,6 @@ function AudioTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: Parti
           ]}
         />
       </SettingsRow>
-
-      <SectionHeader>Monitoring</SectionHeader>
-      <SettingsRow label="Input Monitoring" description="Hear audio inputs during recording">
-        <SettingsToggle checked={draft.enableDevTools} onChange={(v) => setDraft({ enableDevTools: v })} />
-      </SettingsRow>
     </div>
   );
 }
@@ -198,26 +370,25 @@ function ProjectTab({ projectDraft, setProjectDraft }: { projectDraft: ProjectDr
         />
       </SettingsRow>
       <SettingsRow label="Tempo (BPM)">
-        <input
-          type="number"
-          className={`${inputCls} w-24`}
+        <NumberInput
+          className="w-24 !h-[28px]"
           value={projectDraft.bpm}
           min={40}
           max={300}
-          onChange={(e) => setProjectDraft({ bpm: Math.max(40, Number(e.target.value)) })}
+          ariaLabel="Tempo BPM"
+          onChange={(value) => setProjectDraft({ bpm: Math.max(40, value) })}
         />
       </SettingsRow>
       <SettingsRow label="Time Signature">
         <div className="flex items-center gap-1.5">
-          <input
-            type="number"
-            className={`${inputCls} w-14 text-center`}
+          <NumberInput
+            className="w-14 !h-[28px]"
+            align="center"
             value={projectDraft.timeSignatureNumerator}
             min={1}
             max={32}
-            onChange={(e) =>
-              setProjectDraft({ timeSignatureNumerator: Math.max(1, Number(e.target.value)) })
-            }
+            ariaLabel="Time signature numerator"
+            onChange={(value) => setProjectDraft({ timeSignatureNumerator: Math.max(1, value) })}
           />
           <span className="text-[rgba(255,255,255,0.3)] text-xs">/</span>
           <DawSelect
@@ -409,11 +580,7 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
           {activeTab === "audio" && (
             <AudioTab draft={appDraft} setDraft={patchApp} />
           )}
-          {activeTab === "midi" && (
-            <div className="py-12 flex flex-col items-center justify-center opacity-30">
-              <p className="text-[11px] text-daw-text-muted">MIDI device management coming soon</p>
-            </div>
-          )}
+          {activeTab === "midi" && <MidiTab />}
           {activeTab === "project" && (
             <ProjectTab projectDraft={projectDraft} setProjectDraft={patchProject} />
           )}

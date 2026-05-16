@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   EQUZ8_DB_RANGE,
   EQUZ8_FREQ_MAX,
   EQUZ8_FREQ_MIN,
+  EQUZ8_OUTPUT_DB_MAX,
+  EQUZ8_OUTPUT_DB_MIN,
   bandContributionDb,
   clamp,
   normalizeEquz8Params,
@@ -30,20 +32,23 @@ const TYPE_LABEL: Record<Equz8BandType, string> = {
   highpass: "HP",
   lowshelf: "LS",
   bell:     "BELL",
+  notch:    "NOTCH",
   highshelf:"HS",
   lowpass:  "LP",
 };
 
+const TYPE_OPTIONS: Equz8BandType[] = ["highpass", "lowshelf", "bell", "notch", "highshelf", "lowpass"];
+
 const LOG_MIN  = Math.log10(EQUZ8_FREQ_MIN);
 const LOG_MAX  = Math.log10(EQUZ8_FREQ_MAX);
-const ML = 46, MR = 14, MT = 22, MB = 34;
+const ML = 46, MR = 18, MT = 20, MB = 31;
 const SAMPLES  = 640;
 const SPEC_N   = 128;
-const NODE_R   = 8;
-const NODE_R_SEL = 11;
-const NODE_HIT = 16;
-const EDITOR_WIDTH = 1180;
-const EDITOR_HEIGHT = 430;
+const NODE_R   = 7;
+const NODE_R_SEL = 10;
+const NODE_HIT = 18;
+const EDITOR_WIDTH = 980;
+const EDITOR_HEIGHT = 300;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -327,6 +332,7 @@ function draw2d(
   enabled: boolean,
   spec: SpecState,
   gpuActive: boolean,
+  analyzerEnabled: boolean,
 ): NodePos[] {
   const { w, h } = syncSize(canvas);
   const dpr   = devicePixelRatio || 1;
@@ -338,10 +344,10 @@ function draw2d(
   ctx.save();
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#090d14";
+  ctx.fillRect(0, 0, w, h);
 
-  if (!gpuActive) {
-    ctx.fillStyle = "#0c0f15";
-    ctx.fillRect(0, 0, w, h);
+  if (analyzerEnabled && !gpuActive) {
     drawSpecCanvas(ctx, spec, plot);
   }
 
@@ -353,10 +359,9 @@ function draw2d(
     ctx.rect(plot.left, plot.top, plot.width, plot.height);
     ctx.clip();
 
-    // Per-band fills
     model.bands.forEach((band, i) => {
       if (!band.active) return;
-      drawBandFill(ctx, band, i, plot);
+      drawBandFill(ctx, band, i, plot, i === model.selectedBand);
     });
 
     // Combined EQ curve
@@ -386,13 +391,13 @@ function drawSpecCanvas(ctx: CanvasRenderingContext2D, spec: SpecState, plot: Pl
     const barH  = amp  * plot.height * 0.9;
     const pkY   = plot.bottom - peak * plot.height * 0.9;
 
-    const alpha = lerp(0.16, 0.045, t) * (0.35 + amp * 0.75);
+    const alpha = lerp(0.105, 0.035, t) * (0.35 + amp * 0.65);
 
-    ctx.fillStyle = `rgba(124,199,255,${alpha.toFixed(3)})`;
+    ctx.fillStyle = `rgba(114,215,215,${alpha.toFixed(3)})`;
     ctx.fillRect(x, plot.bottom - barH, barW - 0.5, barH);
 
     // Peak dot
-    ctx.fillStyle = "rgba(124,199,255,0.46)";
+    ctx.fillStyle = "rgba(114,215,215,0.28)";
     ctx.fillRect(x, pkY - 0.5, barW - 0.5, 1.5);
   }
   ctx.restore();
@@ -487,10 +492,12 @@ function drawBandFill(
   band: Equz8Band,
   bandIndex: number,
   plot: PlotRect,
+  selected: boolean,
 ) {
   const color  = BAND_COLORS[bandIndex]! ;
   const y0line = gainToY(0, plot);
 
+  const pts: Array<{ x: number; y: number }> = [];
   ctx.beginPath();
   ctx.moveTo(plot.left, y0line);
 
@@ -498,24 +505,27 @@ function drawBandFill(
     const x    = plot.left + (i / SAMPLES) * plot.width;
     const freq = xToFreq(x, plot);
     const db   = band.active ? bandContributionDb(band, freq) : 0;
-    ctx.lineTo(x, gainToY(db, plot));
+    const y = gainToY(clamp(db, -EQUZ8_DB_RANGE, EQUZ8_DB_RANGE), plot);
+    pts.push({ x, y });
+    ctx.lineTo(x, y);
   }
 
   ctx.lineTo(plot.right, y0line);
   ctx.closePath();
 
-  // Gradient fill based on band color
   const hex = color.replace("#", "");
   const r   = parseInt(hex.slice(0, 2), 16);
   const g   = parseInt(hex.slice(2, 4), 16);
   const b   = parseInt(hex.slice(4, 6), 16);
 
-  const grad = ctx.createLinearGradient(0, plot.top, 0, plot.bottom);
-  grad.addColorStop(0,   `rgba(${r},${g},${b},0.22)`);
-  grad.addColorStop(0.5, `rgba(${r},${g},${b},0.09)`);
-  grad.addColorStop(1,   `rgba(${r},${g},${b},0.03)`);
-  ctx.fillStyle = grad;
+  ctx.fillStyle = `rgba(${r},${g},${b},${selected ? 0.105 : 0.035})`;
   ctx.fill();
+
+  ctx.beginPath();
+  pts.forEach((p, i) => { i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); });
+  ctx.strokeStyle = `rgba(${r},${g},${b},${selected ? 0.48 : 0.18})`;
+  ctx.lineWidth = selected ? 1.1 : 0.75;
+  ctx.stroke();
 }
 
 function drawCurve(ctx: CanvasRenderingContext2D, bands: Equz8Band[], plot: PlotRect) {
@@ -667,10 +677,12 @@ function plotRect(w: number, h: number): PlotRect {
   return { left: ML, right: w - MR, top: MT, bottom: h - MB, width: w - ML - MR, height: h - MT - MB };
 }
 function freqToX(f: number, p: PlotRect) {
-  return p.left + ((Math.log10(f) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * p.width;
+  const freq = clamp(f, EQUZ8_FREQ_MIN, EQUZ8_FREQ_MAX);
+  return p.left + ((Math.log10(freq) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * p.width;
 }
 function xToFreq(x: number, p: PlotRect) {
-  return clamp(Math.pow(10, LOG_MIN + ((x - p.left) / p.width) * (LOG_MAX - LOG_MIN)), EQUZ8_FREQ_MIN, EQUZ8_FREQ_MAX);
+  const pct = clamp((x - p.left) / Math.max(1, p.width), 0, 1);
+  return clamp(Math.pow(10, LOG_MIN + pct * (LOG_MAX - LOG_MIN)), EQUZ8_FREQ_MIN, EQUZ8_FREQ_MAX);
 }
 function gainToY(db: number, p: PlotRect) {
   return p.top + p.height * 0.5 - (db / EQUZ8_DB_RANGE) * p.height * 0.5;
@@ -679,10 +691,11 @@ function yToGain(y: number, p: PlotRect) {
   return clamp(((p.top + p.height * 0.5 - y) / (p.height * 0.5)) * EQUZ8_DB_RANGE, -EQUZ8_DB_RANGE, EQUZ8_DB_RANGE);
 }
 function normalizeBand(b: Equz8Band): Equz8Band {
+  const fixedGain = b.type.includes("pass") || b.type === "notch" ? 0 : clamp(b.gain, -EQUZ8_DB_RANGE, EQUZ8_DB_RANGE);
   return {
     ...b,
     freq: clamp(b.freq, EQUZ8_FREQ_MIN, EQUZ8_FREQ_MAX),
-    gain: b.type.includes("pass") ? 0 : clamp(b.gain, -EQUZ8_DB_RANGE, EQUZ8_DB_RANGE),
+    gain: fixedGain,
     q:    clamp(b.q, 0.1, 12),
   };
 }
@@ -690,6 +703,10 @@ function formatFreq(f: number): string {
   if (f >= 10000) return `${(f / 1000).toFixed(1)}k`;
   if (f >= 1000)  return `${(f / 1000).toFixed(f % 100 === 0 ? 1 : 2).replace(/\.?0+$/, "")}k`;
   return String(Math.round(f));
+}
+function fmtDb(db: number): string {
+  if (Math.abs(db) < 0.05) return "+0.0 dB";
+  return `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
 }
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -755,7 +772,8 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
       const m       = modelRef.current;
       const en      = enabledRef.current;
       const gpu     = gpuRef.current;
-      const gpuOn   = gpuReadyRef.current && !!gpu;
+      const analyzerOn = m.analyzer;
+      const gpuOn   = analyzerOn && gpuReadyRef.current && !!gpu;
 
       // Sync GPU canvas size
       if (gpuCanvas && gpuOn) {
@@ -764,7 +782,7 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
         renderGpu(gpu!, specRef.current, plot, w, h);
       }
 
-      const positions = draw2d(c2dCanvas, m, en, specRef.current, gpuOn);
+      const positions = draw2d(c2dCanvas, m, en, specRef.current, gpuOn, analyzerOn);
       nodePos.current = positions;
       id = requestAnimationFrame(tick);
     };
@@ -776,6 +794,11 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
     const m     = modelRef.current;
     const bands = m.bands.map((b, j) => j === i ? normalizeBand({ ...b, ...patch }) : b);
     onParamsChange(serializeEquz8Params({ ...m, bands }));
+  }, [onParamsChange]);
+
+  const updateParams = useCallback((patch: Partial<Equz8Params>) => {
+    const m = modelRef.current;
+    onParamsChange(serializeEquz8Params({ ...m, ...patch }));
   }, [onParamsChange]);
 
   const selectBand = useCallback((i: number) => {
@@ -812,16 +835,21 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
     const hit  = hitBand(x, y, rect.width, rect.height);
     const bi   = hit >= 0 ? hit : m.selectedBand;
     const band = m.bands[bi]!;
+    let startFreq = band.freq;
+    let startGain = band.gain;
+    let startQ = band.q;
     selectBand(bi);
 
     if (hit < 0 && x >= plot.left && x <= plot.right && y >= plot.top && y <= plot.bottom) {
+      startFreq = xToFreq(x, plot);
+      startGain = band.type.includes("pass") || band.type === "notch" ? 0 : yToGain(y, plot);
       updateBand(bi, {
-        freq: xToFreq(x, plot),
-        gain: band.type.includes("pass") ? band.gain : yToGain(y, plot),
+        freq: startFreq,
+        gain: startGain,
       });
     }
 
-    dragRef.current = { bandIndex: bi, startX: e.clientX, startY: e.clientY, startFreq: band.freq, startGain: band.gain, startQ: band.q };
+    dragRef.current = { bandIndex: bi, startX: e.clientX, startY: e.clientY, startFreq, startGain, startQ };
     e.currentTarget.setPointerCapture(e.pointerId);
   }, [hitBand, selectBand, updateBand]);
 
@@ -831,14 +859,14 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
     if (!drag || !canvas) return;
     const rect = canvas.getBoundingClientRect();
     const plot = plotRect(rect.width, rect.height);
-    const dx   = e.clientX - drag.startX;
-    const dy   = e.clientY - drag.startY;
     const band = modelRef.current.bands[drag.bandIndex]!;
-    const logShift = (dx / Math.max(1, plot.width)) * (LOG_MAX - LOG_MIN);
-    const freq = clamp(Math.pow(10, Math.log10(drag.startFreq) + logShift), EQUZ8_FREQ_MIN, EQUZ8_FREQ_MAX);
-    updateBand(drag.bandIndex, band.type.includes("pass")
-      ? { freq, q: drag.startQ - dy * 0.035 }
-      : { freq, gain: drag.startGain - dy * ((EQUZ8_DB_RANGE * 2) / Math.max(1, plot.height)) });
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const freq = xToFreq(x, plot);
+    const qDrag = e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || band.type.includes("pass") || band.type === "notch";
+    const q = clamp(drag.startQ + (drag.startY - e.clientY) * 0.035, 0.1, 12);
+    const gain = band.type.includes("pass") || band.type === "notch" ? 0 : yToGain(y, plot);
+    updateBand(drag.bandIndex, qDrag ? { freq, q } : { freq, gain });
   }, [updateBand]);
 
   const onPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -846,8 +874,58 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
     e.currentTarget.releasePointerCapture(e.pointerId);
   }, []);
 
+  const onGraphWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
+    const canvas = c2dCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const m = modelRef.current;
+    const plot = plotRect(rect.width, rect.height);
+    const band = m.bands[m.selectedBand]!;
+    const nx = freqToX(band.freq, plot);
+    const ny = gainToY(enabledRef.current && m.power ? totalEqGainDb(m.bands, band.freq) : 0, plot);
+    if (Math.hypot(x - nx, y - ny) > NODE_HIT + 4) return;
+    e.preventDefault();
+    updateBand(m.selectedBand, { q: clamp(band.q - e.deltaY * 0.012, 0.1, 12) });
+  }, [updateBand]);
+
+  const onGraphContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = c2dCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const hit = hitBand(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+    if (hit < 0) return;
+    e.preventDefault();
+    const band = modelRef.current.bands[hit]!;
+    selectBand(hit);
+    updateBand(hit, { active: !band.active });
+  }, [hitBand, selectBand, updateBand]);
+
+  const onGraphDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = c2dCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const plot = plotRect(rect.width, rect.height);
+    if (x < plot.left || x > plot.right || y < plot.top || y > plot.bottom) return;
+    const m = modelRef.current;
+    const bandIndex = m.bands.findIndex((band) => !band.active);
+    const target = bandIndex >= 0 ? bandIndex : m.selectedBand;
+    const band = m.bands[target]!;
+    selectBand(target);
+    updateBand(target, {
+      active: true,
+      type: band.type.includes("pass") || band.type === "notch" ? "bell" : band.type,
+      freq: xToFreq(x, plot),
+      gain: yToGain(y, plot),
+    });
+  }, [selectBand, updateBand]);
+
   const sel    = model.bands[model.selectedBand]!;
   const selPos = nodePos.current[model.selectedBand];
+  const graphRect = c2dCanvasRef.current?.getBoundingClientRect();
 
   return (
     <div
@@ -857,9 +935,9 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
         minWidth: EDITOR_WIDTH,
         height: "100%",
         minHeight: EDITOR_HEIGHT,
-        maxHeight: 520,
+        maxHeight: 300,
         flex: `0 0 ${EDITOR_WIDTH}px`,
-        background: "#0c0f15",
+        background: "#090d14",
         border: "1px solid rgba(255,255,255,0.09)",
         boxShadow: "0 8px 40px rgba(0,0,0,0.75), 0 1px 0 rgba(255,255,255,0.04) inset",
       }}
@@ -868,7 +946,7 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
       <div
         className="flex h-8 shrink-0 items-center gap-3 px-3"
         style={{
-          background: "linear-gradient(180deg,#1c2030 0%,#181d29 100%)",
+          background: "#111722",
           borderBottom: "1px solid rgba(255,255,255,0.07)",
         }}
       >
@@ -912,13 +990,14 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
-          {/* Output gain readout */}
-          <span
-            className="tabular-nums rounded-[2px] px-2 py-[3px]"
-            style={{ fontSize: "10px", color: "#7888a0", background: "#111724", border: "1px solid rgba(255,255,255,0.06)" }}
-          >
-            {enabled && model.power ? "+0.0 dB" : "BYPASSED"}
-          </span>
+          <HeaderDragValue
+            label="OUT"
+            value={fmtDb(model.outputDb)}
+            onDrag={(delta) => updateParams({ outputDb: clamp(model.outputDb + delta * 0.08, EQUZ8_OUTPUT_DB_MIN, EQUZ8_OUTPUT_DB_MAX) })}
+          />
+          <HeaderButton active={model.analyzer} onClick={() => updateParams({ analyzer: !model.analyzer })}>
+            Analyzer
+          </HeaderButton>
           <button
             type="button"
             onClick={onReset}
@@ -929,6 +1008,9 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
           >
             Reset
           </button>
+          <HeaderButton active={enabled} onClick={onToggleEnabled}>
+            {enabled ? "Bypass" : "Enable"}
+          </HeaderButton>
         </div>
       </div>
 
@@ -940,7 +1022,7 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
           <canvas
             ref={gpuCanvasRef}
             className="absolute inset-0 h-full w-full"
-            style={{ zIndex: 0 }}
+            style={{ zIndex: 0, opacity: model.analyzer ? 1 : 0 }}
           />
           {/* Canvas2D overlay (EQ curve, nodes) */}
           <canvas
@@ -951,7 +1033,9 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
-            onDoubleClick={() => updateBand(model.selectedBand, { active: !sel.active })}
+            onWheel={onGraphWheel}
+            onContextMenu={onGraphContextMenu}
+            onDoubleClick={onGraphDoubleClick}
           />
 
           {/* Bypass overlay */}
@@ -965,8 +1049,8 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
               band={sel}
               bandIndex={model.selectedBand}
               nodePos={selPos}
-              containerWidth={EDITOR_WIDTH}
-              containerHeight={EDITOR_HEIGHT}
+              containerWidth={graphRect?.width ?? EDITOR_WIDTH}
+              containerHeight={graphRect?.height ?? EDITOR_HEIGHT}
               onUpdate={(patch) => updateBand(model.selectedBand, patch)}
               onToggleActive={() => updateBand(model.selectedBand, { active: !sel.active })}
             />
@@ -980,6 +1064,54 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
           onToggleActive={(i) => updateBand(i, { active: !model.bands[i]!.active })}
         />
       </div>
+    </div>
+  );
+}
+
+function HeaderButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-[4px] px-2 py-[3px] text-[9px] font-semibold transition-colors"
+      style={{
+        color: active ? "#7cc7ff" : "#5b6c84",
+        background: active ? "rgba(124,199,255,0.11)" : "#0b1018",
+        border: `1px solid ${active ? "rgba(124,199,255,0.34)" : "rgba(255,255,255,0.07)"}`,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function HeaderDragValue({
+  label,
+  value,
+  onDrag,
+}: {
+  label: string;
+  value: string;
+  onDrag: (delta: number) => void;
+}) {
+  const ref = useRef<{ y: number } | null>(null);
+  return (
+    <div
+      className="flex cursor-ns-resize items-center gap-1 rounded-[4px] px-2 py-[3px]"
+      style={{ color: "#7888a0", background: "#0b1018", border: "1px solid rgba(255,255,255,0.07)" }}
+      onPointerDown={(e) => { ref.current = { y: e.clientY }; e.currentTarget.setPointerCapture(e.pointerId); }}
+      onPointerMove={(e) => {
+        const start = ref.current;
+        if (!start) return;
+        onDrag(start.y - e.clientY);
+        ref.current = { y: e.clientY };
+      }}
+      onPointerUp={(e) => { ref.current = null; e.currentTarget.releasePointerCapture(e.pointerId); }}
+      onPointerCancel={(e) => { ref.current = null; e.currentTarget.releasePointerCapture(e.pointerId); }}
+      title={`${label} ${value}`}
+    >
+      <span className="text-[8px] font-semibold tracking-[0.12em]" style={{ color: "#45566e" }}>{label}</span>
+      <span className="text-[10px] tabular-nums">{value}</span>
     </div>
   );
 }
@@ -1015,24 +1147,24 @@ function FloatingInspector({
   if (top  + PANEL_H > containerHeight - PAD)  top  = containerHeight - PANEL_H - PAD;
 
   const color   = BAND_COLORS[bandIndex]!;
-  const isPass  = band.type.includes("pass");
+  const isGainless = band.type.includes("pass") || band.type === "notch";
 
   return (
     <div
-      className="pointer-events-auto absolute flex flex-col gap-2 rounded-[10px] p-3"
+      className="pointer-events-auto absolute flex flex-col gap-2 rounded-xl p-3"
       style={{
         left, top,
         width: PANEL_W,
         zIndex: 10,
-        background: "rgba(12,16,24,0.94)",
-        border: `1px solid rgba(${hexToRgb(color)},0.35)`,
+        background: "rgba(9,13,20,0.16)",
+        border: `1px solid #3a3a3a`,
         boxShadow: `0 4px 24px rgba(0,0,0,0.7), 0 0 0 1px rgba(${hexToRgb(color)},0.1)`,
         backdropFilter: "blur(12px)",
       }}
     >
       {/* Header */}
       <div className="flex items-center justify-between">
-        <span className="font-bold tabular-nums" style={{ fontSize: "14px", color }}>Band {band.id}</span>
+        <span className="font-bold tabular-nums" style={{ fontSize: "11px" }}>Band {band.id}</span>
         <button
           type="button"
           onClick={onToggleActive}
@@ -1046,12 +1178,12 @@ function FloatingInspector({
       </div>
 
       {/* Type selector */}
-      <div className="flex gap-1">
-        {(["highpass", "lowshelf", "bell", "highshelf", "lowpass"] as Equz8BandType[]).map((t) => (
+      <div className="flex space-x-1">
+        {TYPE_OPTIONS.map((t) => (
           <button
             key={t}
             type="button"
-            onClick={() => onUpdate({ type: t, gain: t.includes("pass") ? 0 : band.gain })}
+            onClick={() => onUpdate({ type: t, gain: t.includes("pass") || t === "notch" ? 0 : band.gain })}
             className="flex-1 rounded-md py-[3px] text-[8px] uppercase transition-all"
             style={band.type === t
               ? { background: `rgba(${hexToRgb(color)},0.22)`, color, border: `1px solid rgba(${hexToRgb(color)},0.5)`, fontWeight: 600 }
@@ -1062,46 +1194,42 @@ function FloatingInspector({
         ))}
       </div>
 
-      {/* Freq */}
-      <InspectorRow
-        label="FREQ"
-        value={formatFreq(band.freq)}
-        unit="Hz"
-        color={color}
-        onDrag={(d) => onUpdate({ freq: clamp(band.freq * Math.pow(1.006, d), EQUZ8_FREQ_MIN, EQUZ8_FREQ_MAX) })}
-      />
+      <div className="flex space-x-2">
+        {/* Freq */}
+        <InspectorRow
+          label="FREQ"
+          value={formatFreq(band.freq)}
+          unit="Hz"
+          color={color}
+          onDrag={(d) => onUpdate({ freq: clamp(band.freq * Math.pow(1.006, d), EQUZ8_FREQ_MIN, EQUZ8_FREQ_MAX) })}
+        />
 
-      {/* Gain */}
-      <InspectorRow
-        label="GAIN"
-        value={`${band.gain >= 0 ? "+" : ""}${band.gain.toFixed(1)}`}
-        unit="dB"
-        color={color}
-        disabled={isPass}
-        onDrag={(d) => onUpdate({ gain: clamp(band.gain + d * 0.1, -EQUZ8_DB_RANGE, EQUZ8_DB_RANGE) })}
-      />
+        {/* Gain */}
+        <InspectorRow
+          label="GAIN"
+          value={`${band.gain >= 0 ? "+" : ""}${band.gain.toFixed(1)}`}
+          unit="dB"
+          color={color}
+          disabled={isGainless}
+          onDrag={(d) => onUpdate({ gain: clamp(band.gain + d * 0.1, -EQUZ8_DB_RANGE, EQUZ8_DB_RANGE) })}
+        />
 
-      {/* Q */}
-      <InspectorRow
-        label="Q"
-        value={band.q.toFixed(2)}
-        color={color}
-        onDrag={(d) => onUpdate({ q: clamp(band.q + d * 0.03, 0.1, 12) })}
-      />
+        {/* Q */}
+        <InspectorRow
+          label="Q"
+          value={band.q.toFixed(2)}
+          color={color}
+          onDrag={(d) => onUpdate({ q: clamp(band.q + d * 0.03, 0.1, 12) })}
+        />
+      </div>
 
-      {/* Q slider */}
-      <input
-        type="range" min={0.1} max={12} step={0.01} value={band.q}
-        onChange={(e) => onUpdate({ q: parseFloat(e.target.value) })}
-        className="w-full"
-        style={{ accentColor: "#7cc7ff", height: "3px", cursor: "ew-resize" }}
-      />
+
     </div>
   );
 }
 
 function InspectorRow({
-  label, value, unit, color, disabled, onDrag,
+  label, value, unit, disabled, onDrag,
 }: {
   label: string; value: string; unit?: string; color: string; disabled?: boolean; onDrag: (d: number) => void;
 }) {
@@ -1113,13 +1241,13 @@ function InspectorRow({
       onPointerMove={(e) => { const s = ref.current; if (!s) return; onDrag(s.y - e.clientY); ref.current = { y: e.clientY }; }}
       onPointerUp={(e)   => { ref.current = null; e.currentTarget.releasePointerCapture(e.pointerId); }}
     >
-      <span className="uppercase tracking-[0.12em]" style={{ fontSize: "8px", color: "rgba(100,130,165,0.6)" }}>{label}</span>
+      <span className="uppercase tracking-[0.12em]" style={{ fontSize: "8px", color: "#fff" }}>{label}</span>
       <div
         className="flex items-center justify-between rounded px-2"
-        style={{ height: "26px", background: "#080b11", border: `1px solid rgba(${hexToRgb(color)},0.24)`, borderRadius: 6 }}
+        style={{ height: "26px", background: "", borderRadius: 6 }}
       >
         <span className="tabular-nums" style={{ fontSize: "12px", color: "#c0d0e0", fontWeight: 500 }}>{value}</span>
-        {unit && <span style={{ fontSize: "9px", color: "rgba(90,115,145,0.65)" }}>{unit}</span>}
+        {unit && <span style={{ fontSize: "9px", color: "rgba(90,115,145,0.65)" }}>&nbsp;&nbsp;{unit}</span>}
       </div>
     </div>
   );
@@ -1143,8 +1271,8 @@ function BandStrip({
 }) {
   return (
     <div
-      className="flex h-[52px] shrink-0 items-center gap-[4px] px-2"
-      style={{ background: "#0a0d14", borderTop: "1px solid rgba(255,255,255,0.07)" }}
+      className="flex h-[60px] shrink-0 items-center gap-[5px] px-2"
+      style={{ background: "#080c12", borderTop: "1px solid rgba(255,255,255,0.07)" }}
     >
       {model.bands.map((band, i) => {
         const isSel  = i === model.selectedBand;
@@ -1156,12 +1284,12 @@ function BandStrip({
             type="button"
             onClick={() => onSelect(i)}
             onDoubleClick={(e) => { e.stopPropagation(); onToggleActive(i); }}
-            className="relative flex h-[38px] flex-1 flex-col items-center justify-center gap-[3px] rounded-none transition-all"
+            className="relative flex h-[46px] flex-1 flex-col items-start justify-center gap-[2px] rounded-[6px] px-2 transition-all"
             style={isSel
-              ? { background: `rgba(${rgb},0.16)`, border: `1px solid rgba(${rgb},0.55)`, boxShadow: `0 0 10px rgba(${rgb},0.12) inset` }
+              ? { background: `rgba(${rgb},0.15)`, border: `1px solid rgba(${rgb},0.55)`, boxShadow: `0 0 12px rgba(${rgb},0.13) inset` }
               : band.active
-              ? { background: "#0f1219", border: "1px solid rgba(255,255,255,0.07)" }
-              : { background: "#0a0c12", border: "1px solid rgba(255,255,255,0.04)", opacity: 0.45 }}
+              ? { background: "#0d121a", border: "1px solid rgba(255,255,255,0.07)" }
+              : { background: "#080a0f", border: "1px solid rgba(255,255,255,0.04)", opacity: 0.48 }}
           >
             {/* Active dot */}
             <span
@@ -1172,19 +1300,19 @@ function BandStrip({
               className="tabular-nums font-bold leading-none"
               style={{ fontSize: "11px", color: isSel ? color : band.active ? "rgba(180,200,220,0.7)" : "#2a3545" }}
             >
-              {band.id}
-            </span>
-            <span
-              className="leading-none tracking-wide"
-              style={{ fontSize: "7.5px", color: isSel ? color : "rgba(80,105,135,0.7)" }}
-            >
-              {TYPE_LABEL[band.type]}
+              {band.id} <span style={{ fontSize: "7.5px", color: isSel ? `rgba(${rgb},0.86)` : "rgba(80,105,135,0.75)" }}>{TYPE_LABEL[band.type]}</span>
             </span>
             <span
               className="tabular-nums leading-none"
-              style={{ fontSize: "7px", color: isSel ? `rgba(${rgb},0.75)` : "rgba(60,80,110,0.8)" }}
+              style={{ fontSize: "8px", color: isSel ? `rgba(${rgb},0.85)` : "rgba(95,120,150,0.72)" }}
             >
               {formatFreq(band.freq)}
+            </span>
+            <span
+              className="tabular-nums leading-none"
+              style={{ fontSize: "7px", color: isSel ? `rgba(${rgb},0.7)` : "rgba(60,80,110,0.75)" }}
+            >
+              {band.type.includes("pass") || band.type === "notch" ? `Q ${band.q.toFixed(2)}` : `${band.gain >= 0 ? "+" : ""}${band.gain.toFixed(1)}  Q ${band.q.toFixed(1)}`}
             </span>
           </button>
         );

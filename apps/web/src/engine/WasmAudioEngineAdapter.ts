@@ -234,6 +234,10 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
     this._sendCommand({ type: "SetTrackSolo", track_id: trackId, solo });
   }
 
+  setTrackPhaseInvert(_trackId: TrackId, _inverted: boolean): void {}
+
+  setTrackOutput(_trackId: TrackId, _output: string): void {}
+
   setMasterVolume(volume: number): void {
     this._sendCommand({ type: "SetMasterVolume", volume });
   }

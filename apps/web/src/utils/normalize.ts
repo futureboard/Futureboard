@@ -2,7 +2,7 @@
  * Normalization helpers — fill in default values for older project state
  * so UI and engine code never crash on missing fields.
  */
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint, AudioClipProcess } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint, AudioClipProcess, TrackRouting, TrackInputRouting, TrackOutputRouting, TrackAdvanced } from "../types/daw";
 
 export function normalizeLoop(raw: Partial<ProjectLoop> | undefined): ProjectLoop | undefined {
   if (!raw) return undefined;
@@ -76,14 +76,104 @@ export function normalizeAutomationLane(raw: Partial<AutomationLane>): Automatio
   };
 }
 
+export const DEFAULT_TRACK_ADVANCED: TrackAdvanced = {
+  latencyMs: 0,
+  delayMs: 0,
+  semitone: 0,
+  phaseInvert: false,
+  midSideMode: "off",
+};
+
+function defaultRoutingForType(type: DawTrack["type"]): TrackRouting {
+  switch (type) {
+    case "master":
+      return { inputType: "bus", outputType: "hardware" };
+    case "midi":
+      return { inputType: "midi-device", outputType: "master" };
+    case "bus":
+    case "group":
+    case "return":
+      return { inputType: "bus", outputType: "master" };
+    default:
+      return { inputType: "system-audio", outputType: "master" };
+  }
+}
+
+/** Derive a TrackInputRouting from legacy flat fields (migration helper). */
+function legacyToInputRouting(raw: Partial<TrackRouting>, type: DawTrack["type"]): TrackInputRouting {
+  // If already has new sub-object, pass it through (strip unknown keys).
+  if (raw.input) {
+    const i = raw.input;
+    return { kind: i.kind, channel: i.channel, channelPair: i.channelPair, midiDeviceId: i.midiDeviceId, midiChannel: i.midiChannel, targetId: i.targetId };
+  }
+  if (type === "midi") {
+    return { kind: "midi-input", midiDeviceId: raw.inputId, midiChannel: "all" };
+  }
+  if (type === "master" || type === "bus" || type === "group" || type === "return") {
+    return { kind: raw.inputType === "bus" ? "bus" : "none", targetId: raw.inputId };
+  }
+  // audio / instrument / plugin — default to stereo system input
+  if (raw.inputType === "audio-channel") {
+    const ch = raw.inputChannel;
+    if (typeof ch === "number") return { kind: "audio-channel", channel: ch };
+    return { kind: "audio-channel", channelPair: [1, 2] };
+  }
+  return { kind: "audio-channel", channelPair: [1, 2] };
+}
+
+/** Derive a TrackOutputRouting from legacy flat fields (migration helper). */
+function legacyToOutputRouting(raw: Partial<TrackRouting>): TrackOutputRouting {
+  if (raw.output) {
+    const o = raw.output;
+    return { kind: o.kind, targetId: o.targetId, hardwarePair: o.hardwarePair };
+  }
+  if (!raw.outputType || raw.outputType === "master") return { kind: "master" };
+  if (raw.outputType === "bus") return { kind: "bus", targetId: raw.outputId };
+  if (raw.outputType === "hardware") return { kind: "hardware" };
+  return { kind: "none" };
+}
+
+export function normalizeRouting(raw: Partial<TrackRouting> | undefined, type: DawTrack["type"]): TrackRouting {
+  const defaults = defaultRoutingForType(type);
+  if (!raw) {
+    return {
+      ...defaults,
+      input: legacyToInputRouting(defaults, type),
+      output: legacyToOutputRouting(defaults),
+    };
+  }
+  const base: TrackRouting = {
+    inputType: raw.inputType ?? defaults.inputType,
+    inputId: raw.inputId,
+    inputChannel: raw.inputChannel,
+    outputType: raw.outputType ?? defaults.outputType,
+    outputId: raw.outputId,
+    input: legacyToInputRouting(raw, type),
+    output: legacyToOutputRouting(raw),
+  };
+  return base;
+}
+
+export function normalizeAdvanced(raw: Partial<TrackAdvanced> | undefined): TrackAdvanced {
+  if (!raw) return { ...DEFAULT_TRACK_ADVANCED };
+  return {
+    latencyMs: raw.latencyMs ?? 0,
+    delayMs: raw.delayMs ?? 0,
+    semitone: raw.semitone ?? 0,
+    phaseInvert: raw.phaseInvert ?? false,
+    midSideMode: raw.midSideMode ?? "off",
+  };
+}
+
 export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
+  const type = raw.type ?? "audio";
   const inserts = (raw.inserts ?? []).map((ins, i) =>
     normalizeInsertDevice(ins as Partial<InsertDevice>, i)
   );
   return {
     id: raw.id ?? crypto.randomUUID(),
     name: raw.name ?? "Track",
-    type: raw.type ?? "audio",
+    type,
     color: raw.color ?? "#3b82f6",
     channelCount: raw.channelCount ?? 2,
     volume: raw.volume ?? 1,
@@ -95,6 +185,10 @@ export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
     inserts,
     sends: (raw.sends ?? []).map((s) => normalizeSend(s as Partial<TrackSend>)),
     output: raw.output ?? "master",
+    routing: normalizeRouting(raw.routing as Partial<TrackRouting> | undefined, type),
+    advanced: normalizeAdvanced(raw.advanced as Partial<TrackAdvanced> | undefined),
+    monitorMode: raw.monitorMode ?? "off",
+    channelMode: raw.channelMode ?? (raw.channelCount === 1 ? "mono" : "stereo"),
     height: raw.height,
     collapsed: raw.collapsed ?? false,
     automationLanes: (raw.automationLanes ?? []).map((l) =>

@@ -28,6 +28,12 @@ class ClipScheduler {
     for (const track of tracks) {
       const trackInput = mixer.getOrCreateTrack(track.id, track.volume, track.pan).gain;
 
+      // Sync phase invert from project state every time we reschedule.
+      mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
+
+      // Track-level playback delay offset (positive = shift later, negative clamped to 0).
+      const trackDelayS = Math.max(0, (track.advanced?.delayMs ?? 0) / 1000);
+
       for (const clip of track.clips) {
         const clipEnd = clip.startTime + clip.duration;
         if (clipEnd <= playheadTime) continue;
@@ -89,12 +95,12 @@ class ClipScheduler {
 
         if (clip.startTime >= playheadTime) {
           clipOffset = clip.offset / bufferTimeScale;
-          scheduleAt = audioNow + (clip.startTime - playheadTime);
+          scheduleAt = audioNow + (clip.startTime - playheadTime) + trackDelayS;
         } else {
           // Playhead is inside the clip — scale offset into processed buffer time.
           const rawOffset = clip.offset + (playheadTime - clip.startTime);
           clipOffset      = rawOffset / bufferTimeScale;
-          scheduleAt      = audioNow;
+          scheduleAt      = Math.max(audioNow, audioNow + trackDelayS);
         }
 
         const outputTimeScale = soundTouchParams ? soundTouchParams.speedRatio : bufferTimeScale * realtimeRate;

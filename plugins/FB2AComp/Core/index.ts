@@ -16,6 +16,15 @@ export type FB2AParams = {
   outputTrimDb: number;      // -12..12
 };
 
+export type FB2AOpticalModel = {
+  thresholdDb: number;
+  ratio: number;
+  kneeDb: number;
+  attackSec: number;
+  releaseSec: number;
+  estimatedReductionDb: number;
+};
+
 export const FB2A_DEFAULT_PARAMS: FB2AParams = {
   power: true,
   peakReduction: 35,
@@ -43,7 +52,7 @@ export function normalizeFB2AParams(
   return {
     power:             asBool(raw?.power, d.power),
     peakReduction:     clamp(asNum(raw?.peakReduction, d.peakReduction), 0, 100),
-    gainDb:            clamp(asNum(raw?.gainDb, d.gainDb), -12, 24),
+    gainDb:            clamp(asNum(raw?.gainDb ?? raw?.gain, d.gainDb), -12, 24),
     mode:              VALID_MODES.includes(mode as FB2AMode) ? (mode as FB2AMode) : d.mode,
     emphasis:          clamp(asNum(raw?.emphasis, d.emphasis), 0, 100),
     mix:               clamp(asNum(raw?.mix, d.mix), 0, 100),
@@ -51,8 +60,8 @@ export function normalizeFB2AParams(
     color:             clamp(asNum(raw?.color, d.color), 0, 100),
     stereoLink:        clamp(asNum(raw?.stereoLink, d.stereoLink), 0, 100),
     meter:             VALID_METERS.includes(meter as FB2AMeterMode) ? (meter as FB2AMeterMode) : d.meter,
-    sidechainLowCutHz: clamp(asNum(raw?.sidechainLowCutHz, d.sidechainLowCutHz), 20, 500),
-    outputTrimDb:      clamp(asNum(raw?.outputTrimDb, d.outputTrimDb), -12, 12),
+    sidechainLowCutHz: clamp(asNum(raw?.sidechainLowCutHz ?? raw?.scCut, d.sidechainLowCutHz), 20, 500),
+    outputTrimDb:      clamp(asNum(raw?.outputTrimDb ?? raw?.trim, d.outputTrimDb), -12, 12),
   };
 }
 
@@ -68,7 +77,35 @@ export function serializeFB2AParams(
 }
 
 export function peakReductionToThresholdDb(peakReduction: number): number {
-  return -6 - (peakReduction / 100) * 42;
+  return -8 - Math.pow(clamp(peakReduction, 0, 100) / 100, 1.18) * 38;
+}
+
+export function opticalModelFromParams(p: FB2AParams): FB2AOpticalModel {
+  const amount = clamp(p.peakReduction, 0, 100) / 100;
+  const emphasis = clamp(p.emphasis, 0, 100) / 100;
+  const scCut = clamp(p.sidechainLowCutHz, 20, 500);
+  const scRelief = ((scCut - 20) / 480) * 5.5;
+  const emphasisPush = (emphasis - 0.5) * 7;
+  const limit = p.mode === "limit";
+  const thresholdDb = clamp(peakReductionToThresholdDb(p.peakReduction) - emphasisPush + scRelief, -54, -3);
+  const ratio = limit ? 12 + amount * 8 : 2.2 + amount * 1.6;
+  const kneeDb = limit ? 2.5 + (1 - amount) * 2 : 8 + (1 - amount) * 8;
+  const attackSec = clamp((limit ? 0.004 : 0.008) + (1 - amount) * 0.032 - emphasis * 0.003, 0.002, 0.07);
+  const releaseSec = clamp(0.12 + amount * 0.68 + emphasis * 0.12, 0.08, 1.1);
+  const estimatedReductionDb = estimateGainReductionDb(p);
+  return { thresholdDb, ratio, kneeDb, attackSec, releaseSec, estimatedReductionDb };
+}
+
+export function estimateGainReductionDb(p: FB2AParams): number {
+  const amount = clamp(p.peakReduction, 0, 100) / 100;
+  const modeBoost = p.mode === "limit" ? 1.28 : 1;
+  const emphasisBoost = 0.9 + (clamp(p.emphasis, 0, 100) / 100) * 0.22;
+  const scRelief = 1 - ((clamp(p.sidechainLowCutHz, 20, 500) - 20) / 480) * 0.16;
+  return clamp(Math.pow(amount, 0.86) * 18 * modeBoost * emphasisBoost * scRelief, 0, 24);
+}
+
+export function colorToDrive(color: number): number {
+  return clamp(color, 0, 100) / 100;
 }
 
 export function clamp(v: number, min: number, max: number): number {

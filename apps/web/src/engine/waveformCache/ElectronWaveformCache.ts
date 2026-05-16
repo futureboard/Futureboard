@@ -22,9 +22,8 @@ export class ElectronWaveformCache implements WaveformCacheAdapter {
     try {
       const entry = await bridge.get(key);
       if (!entry) return null;
-      // Convert serialized number[] back to Float32Array
       if (Array.isArray(entry.peaks)) {
-        return { ...entry, peaks: new Float32Array(entry.peaks) };
+        return { ...entry, peaks: new Int16Array(entry.peaks) };
       }
       return entry;
     } catch (e) {
@@ -37,10 +36,9 @@ export class ElectronWaveformCache implements WaveformCacheAdapter {
     const bridge = getBridge();
     if (!bridge) return this.fallback.set(key, entry);
     try {
-      // JSON-serialize peaks as plain array for IPC transport
       const serialized = {
         ...entry,
-        peaks: Array.from(entry.peaks instanceof Float32Array ? entry.peaks : entry.peaks),
+        peaks: Array.from(entry.peaks instanceof Int16Array || entry.peaks instanceof Float32Array ? entry.peaks : entry.peaks),
       };
       await bridge.set(key, serialized);
     } catch (e) {

@@ -149,6 +149,28 @@ function mimeFor(filePath: string): string {
   return MIME_BY_EXT[ext] ?? "application/octet-stream";
 }
 
+function isImportableAudioPath(filePath: string): boolean {
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  return (AUDIO_EXTENSIONS as readonly string[]).includes(ext);
+}
+
+async function readPickedAudioFile(filePath: string): Promise<PickedAudioFile | null> {
+  const normalized = path.normalize(filePath);
+  if (!isImportableAudioPath(normalized)) return null;
+  const [buf, stat] = await Promise.all([fs.readFile(normalized), fs.stat(normalized)]);
+  return {
+    name: path.basename(normalized),
+    mimeType: mimeFor(normalized),
+    bytes: buf.buffer.slice(
+      buf.byteOffset,
+      buf.byteOffset + buf.byteLength,
+    ) as ArrayBuffer,
+    path: normalized,
+    size: stat.size,
+    lastModified: Math.round(stat.mtimeMs),
+  };
+}
+
 function senderWindow(event: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(event.sender);
 }
@@ -179,21 +201,26 @@ function registerIpcHandlers(): void {
       const files: PickedAudioFile[] = [];
       for (const p of result.filePaths) {
         try {
-          const buf = await fs.readFile(p);
-          files.push({
-            name: path.basename(p),
-            mimeType: mimeFor(p),
-            bytes: buf.buffer.slice(
-              buf.byteOffset,
-              buf.byteOffset + buf.byteLength,
-            ) as ArrayBuffer,
-            path: p,
-          });
+          const picked = await readPickedAudioFile(p);
+          if (picked) files.push(picked);
         } catch (err) {
           console.error("Failed reading audio file", p, err);
         }
       }
       return files;
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.FsReadAudioFile,
+    async (_event, filePath: unknown): Promise<PickedAudioFile | null> => {
+      if (!isValidString(filePath)) return null;
+      try {
+        return await readPickedAudioFile(filePath);
+      } catch (err) {
+        console.error("Failed reading audio file", filePath, err);
+        return null;
+      }
     },
   );
 

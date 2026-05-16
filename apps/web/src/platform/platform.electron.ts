@@ -40,20 +40,57 @@ const capabilities: PlatformCapabilities = {
 const fileSystem: FileSystemAdapter = {
   async pickAudioFiles(): Promise<File[]> {
     const picked = await bridge().fs.pickAudioFiles();
-    return picked.map(
-      ({ name, mimeType, bytes }) =>
-        new File([bytes], name, { type: mimeType }),
-    );
+    return picked.map(fileFromPickedAudio);
+  },
+  async readAudioFile(path: string): Promise<File | null> {
+    const picked = await bridge().fs.readAudioFile(path);
+    return picked ? fileFromPickedAudio(picked) : null;
   },
   async revealInFileManager(path: string): Promise<void> {
     await bridge().fs.revealInFileManager(path);
   },
 };
 
+function fileFromPickedAudio(
+  picked: Awaited<ReturnType<DawElectronBridge["fs"]["pickAudioFiles"]>>[number],
+): File {
+  const file = new File([picked.bytes], picked.name, {
+    type: picked.mimeType,
+    lastModified: picked.lastModified,
+  });
+  Object.defineProperty(file, "__futureboardPath", {
+    value: picked.path,
+    enumerable: false,
+    configurable: false,
+  });
+  return file;
+}
+
 // Renderer-side project path tracking. We don't expose this in `DawProject`
 // itself; it's purely so a subsequent "Save" (without "Save As") can skip
 // the dialog. Cleared when a different project is opened.
 let lastProjectPath: string | undefined;
+
+function serializeProject(project: DawProject): DawProject {
+  return {
+    ...project,
+    files: project.files.map((file) => ({
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      lastModified: file.lastModified,
+      originalFileName: file.originalFileName,
+      duration: file.duration,
+      sampleRate: file.sampleRate,
+      channels: file.channels,
+      storageProvider: file.storageProvider,
+      cacheKey: file.cacheKey,
+      waveformCacheKeys: file.waveformCacheKeys,
+      storageKey: file.storageKey,
+    })),
+  };
+}
 
 const projectStorage: ProjectStorageAdapter = {
   async saveProject(
@@ -67,7 +104,7 @@ const projectStorage: ProjectStorageAdapter = {
       if (result.canceled || !result.path) return null;
       targetPath = result.path;
     }
-    const ok = await b.project.write(targetPath, JSON.stringify(project, null, 2));
+    const ok = await b.project.write(targetPath, JSON.stringify(serializeProject(project), null, 2));
     if (!ok) return null;
     lastProjectPath = targetPath;
     return { path: targetPath };

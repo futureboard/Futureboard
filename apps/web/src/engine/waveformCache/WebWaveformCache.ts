@@ -74,11 +74,10 @@ export class WebWaveformCache implements WaveformCacheAdapter {
   async get(key: string): Promise<WaveformCacheEntry | null> {
     try {
       const db = await this.db();
-      const raw = await idbGet(db, key) as (WaveformCacheEntry & { peaks: number[] | Float32Array }) | undefined;
+      const raw = await idbGet(db, key) as (WaveformCacheEntry & { peaks: number[] | Float32Array | Int16Array }) | undefined;
       if (!raw) return null;
-      // IDB stores Float32Array via structured clone — reconstruct just in case
-      if (!(raw.peaks instanceof Float32Array) && Array.isArray(raw.peaks)) {
-        raw.peaks = new Float32Array(raw.peaks);
+      if (!(raw.peaks instanceof Int16Array) && !(raw.peaks instanceof Float32Array) && Array.isArray(raw.peaks)) {
+        raw.peaks = new Int16Array(raw.peaks);
       }
       return raw;
     } catch {
@@ -89,12 +88,11 @@ export class WebWaveformCache implements WaveformCacheAdapter {
   async set(key: string, entry: WaveformCacheEntry): Promise<void> {
     try {
       const db = await this.db();
-      // Store peaks as Float32Array — IDB handles structured clone natively
       const stored: WaveformCacheEntry = {
         ...entry,
-        peaks: entry.peaks instanceof Float32Array
+        peaks: entry.peaks instanceof Int16Array || entry.peaks instanceof Float32Array
           ? entry.peaks
-          : new Float32Array(entry.peaks),
+          : new Int16Array(entry.peaks),
       };
       await idbSet(db, key, stored);
     } catch {

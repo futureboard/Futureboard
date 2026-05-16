@@ -52,11 +52,12 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   const pixelsPerSecond = useUIStore(s => s.pixelsPerSecond);
   const selectedClipIds = useUIStore(s => s.selectedClipIds);
   const currentTool     = useUIStore(s => s.currentTool);
-  const { peakCache, waveformStatus, moveClip, moveClipToTrack, project } = useProjectStore();
+  const { peakCache, waveformStatus, waveformProgress, moveClip, moveClipToTrack, project } = useProjectStore();
   const peaks = peakCache.get(clip.fileId);
   const sourceFile = project.files.find((f) => f.id === clip.fileId);
   const status = waveformStatus.get(clip.fileId)
     ?? (peaks && peaks.peaks.length > 0 ? "ready" : sourceFile ? "loading" : "error");
+  const progress = waveformProgress.get(clip.fileId) ?? 0;
 
   const dragStartX    = useRef(0);
   const dragStartY    = useRef(0);
@@ -462,6 +463,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
           muted={!!clip.muted || track.muted}
           selected={selected}
           status={status}
+          progress={progress}
         />
       </div>
 

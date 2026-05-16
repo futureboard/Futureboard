@@ -43,11 +43,13 @@ function markDirty() {
 
 type PeakCache = Map<FileId, WaveformPeaks>;
 type WaveformStatusMap = Map<FileId, WaveformStatus>;
+type WaveformProgressMap = Map<FileId, number>;
 
 type ProjectStore = {
   project: DawProject;
   peakCache: PeakCache;
   waveformStatus: WaveformStatusMap;
+  waveformProgress: WaveformProgressMap;
 
   // ── Project-level ──────────────────────────────────────────────────────────
   createNewProject: (overrides?: Partial<DawProject>) => void;
@@ -108,6 +110,7 @@ type ProjectStore = {
   // ── Waveform cache (non-dirty) ─────────────────────────────────────────────
   setPeaks: (fileId: FileId, peaks: WaveformPeaks) => void;
   setWaveformStatus: (fileId: FileId, status: WaveformStatus) => void;
+  setWaveformProgress: (fileId: FileId, progress: number) => void;
 
   // ── Automation lanes ───────────────────────────────────────────────────────
   addAutomationLane: (trackId: TrackId, target: AutomationTarget) => AutomationLane;
@@ -130,20 +133,21 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: defaultProject(),
   peakCache: new Map(),
   waveformStatus: new Map(),
+  waveformProgress: new Map(),
 
   // ── Project-level ──────────────────────────────────────────────────────────
 
   createNewProject: (overrides) => {
-    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map() });
+    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
     if (overrides) set((s) => ({ project: { ...s.project, ...overrides } }));
   },
 
   loadProject: (project) => {
-    set({ project: normalizeProject(project as Partial<DawProject>), peakCache: new Map(), waveformStatus: new Map() });
+    set({ project: normalizeProject(project as Partial<DawProject>), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
   },
 
   resetProject: () => {
-    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map() });
+    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
   },
 
   setProjectName: (name) => {
@@ -781,7 +785,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       next.set(fileId, peaks);
       const status = new Map(s.waveformStatus);
       status.set(fileId, "ready");
-      return { peakCache: next, waveformStatus: status };
+      const progress = new Map(s.waveformProgress);
+      progress.set(fileId, 1);
+      return { peakCache: next, waveformStatus: status, waveformProgress: progress };
     }),
 
   setWaveformStatus: (fileId, status) =>
@@ -789,6 +795,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const next = new Map(s.waveformStatus);
       next.set(fileId, status);
       return { waveformStatus: next };
+    }),
+
+  setWaveformProgress: (fileId, progress) =>
+    set((s) => {
+      const next = new Map(s.waveformProgress);
+      next.set(fileId, Math.max(0, Math.min(1, progress)));
+      return { waveformProgress: next };
     }),
 
   // ── Persistence ────────────────────────────────────────────────────────────
@@ -804,6 +817,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         duration: file.duration,
         sampleRate: file.sampleRate,
         channels: file.channels,
+        size: file.size,
+        lastModified: file.lastModified,
+        originalFileName: file.originalFileName,
+        storageProvider: file.storageProvider,
+        cacheKey: file.cacheKey,
+        waveformCacheKeys: file.waveformCacheKeys,
         storageKey: file.storageKey,
       })),
     };
@@ -815,7 +834,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!raw) return;
     try {
       const project = JSON.parse(raw) as DawProject;
-      set({ project: normalizeProject(project as Partial<DawProject>) });
+      set({ project: normalizeProject(project as Partial<DawProject>), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
     } catch {
       // corrupt — ignore
     }

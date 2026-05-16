@@ -18,11 +18,11 @@ class AudioStorage {
     });
   }
 
-  async save(fileId: string, buffer: ArrayBuffer): Promise<void> {
+  async save(fileId: string, source: ArrayBuffer | Blob): Promise<void> {
     const db = await this.dbPromise;
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(buffer, fileId);
+      tx.objectStore(STORE).put(source, fileId);
       tx.oncomplete = () => resolve();
       tx.onerror    = () => reject(tx.error);
     });
@@ -33,7 +33,22 @@ class AudioStorage {
     return new Promise((resolve, reject) => {
       const tx  = db.transaction(STORE, "readonly");
       const req = tx.objectStore(STORE).get(fileId);
-      req.onsuccess = () => resolve((req.result as ArrayBuffer) ?? null);
+      req.onsuccess = async () => {
+        const result = req.result as ArrayBuffer | Blob | undefined;
+        if (!result) resolve(null);
+        else if (result instanceof Blob) resolve(await result.arrayBuffer());
+        else resolve(result);
+      };
+      req.onerror   = () => reject(req.error);
+    });
+  }
+
+  async has(fileId: string): Promise<boolean> {
+    const db = await this.dbPromise;
+    return new Promise((resolve, reject) => {
+      const tx  = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).getKey(fileId);
+      req.onsuccess = () => resolve(req.result !== undefined);
       req.onerror   = () => reject(req.error);
     });
   }

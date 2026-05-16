@@ -5,18 +5,15 @@ type Props = {
   peaks?: WaveformPeaks;
   width: number;
   height: number;
-  /** Source audio duration in seconds. Falls back to peaks.duration. */
   sourceDuration?: number;
-  /** Source audio sample rate. Falls back to peaks.sampleRate. */
   sampleRate?: number;
-  /** Clip's offset into the source audio. */
   clipOffset?: number;
-  /** Clip's visible duration in seconds. */
   clipDuration?: number;
   color?: string;
   muted?: boolean;
   selected?: boolean;
   status?: WaveformStatus;
+  progress?: number;
 };
 
 export const WaveformCanvas = memo(function WaveformCanvas({
@@ -31,10 +28,10 @@ export const WaveformCanvas = memo(function WaveformCanvas({
   muted = false,
   selected = false,
   status,
+  progress = 0,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // ── Draw waveform when peaks/dimensions/clip range/color change ─────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || width < 1 || height < 1) return;
@@ -49,15 +46,22 @@ export const WaveformCanvas = memo(function WaveformCanvas({
     canvas.style.width = `${cssW}px`;
     canvas.style.height = `${cssH}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = "rgba(8,12,16,0.18)";
+    ctx.fillRect(0, 0, cssW, cssH);
 
-    if (!peaks || peaks.peaks.length === 0) return;
+    if (!peaks || peaks.peaks.length === 0) {
+      drawPlaceholder(ctx, cssW, cssH, color, muted, status === "error" || status === "missing");
+      return;
+    }
 
     const channelCount = peaks.channelCount || 1;
     const totalPeaks = peaks.peaks.length / (channelCount * 2);
-    if (totalPeaks <= 0) return;
+    if (totalPeaks <= 0) {
+      drawPlaceholder(ctx, cssW, cssH, color, muted, false);
+      return;
+    }
 
-    // Resolve clip range in source-time.
+    const valueScale = peaks.peaks instanceof Int16Array ? 1 / 32767 : 1;
     const sr = sampleRate ?? peaks.sampleRate ?? 48000;
     const srcDur = sourceDuration ?? peaks.duration ?? (totalPeaks * peaks.samplesPerPeak) / sr;
     const srcStart = Math.max(0, Math.min(srcDur, clipOffset));
@@ -72,7 +76,6 @@ export const WaveformCanvas = memo(function WaveformCanvas({
     ctx.fillStyle = color;
     ctx.globalAlpha = muted ? 0.4 : selected ? 1 : 0.9;
 
-    // Walk columns; each column maps to a source-time range and aggregates peaks.
     for (let x = 0; x < cssW; x++) {
       const t0 = srcStart + (x / cssW) * visibleSeconds;
       const t1 = srcStart + ((x + 1) / cssW) * visibleSeconds;
@@ -81,12 +84,11 @@ export const WaveformCanvas = memo(function WaveformCanvas({
 
       let min = 0;
       let max = 0;
-      // Combine across channels (mono visual mix-down for v0.1).
       for (let p = p0; p <= p1; p++) {
         for (let ch = 0; ch < channelCount; ch++) {
           const base = (p * channelCount + ch) * 2;
-          const lo = peaks.peaks[base];
-          const hi = peaks.peaks[base + 1];
+          const lo = peaks.peaks[base] * valueScale;
+          const hi = peaks.peaks[base + 1] * valueScale;
           if (lo < min) min = lo;
           if (hi > max) max = hi;
         }
@@ -98,12 +100,11 @@ export const WaveformCanvas = memo(function WaveformCanvas({
     }
 
     ctx.globalAlpha = 1;
-  }, [peaks, width, height, color, muted, selected, clipOffset, clipDuration, sampleRate, sourceDuration]);
+  }, [peaks, width, height, color, muted, selected, clipOffset, clipDuration, sampleRate, sourceDuration, status]);
 
-  // ── Loading / error / missing overlays ──────────────────────────────────────
   const isReady = status === "ready" || (!status && !!peaks && peaks.peaks.length > 0);
   const showLoading = !isReady && (status === "loading" || (!status && !peaks));
-  const showError = status === "error";
+  const showError = status === "error" || status === "missing";
 
   return (
     <div className="relative" style={{ width, height }}>
@@ -113,71 +114,40 @@ export const WaveformCanvas = memo(function WaveformCanvas({
         style={{ width, height, opacity: muted ? 0.55 : 1 }}
       />
       {!isReady && (
-        <div
-          className="pointer-events-none absolute inset-0 flex items-center justify-center"
-          aria-hidden
-        >
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center" aria-hidden>
           {showError ? (
-            <span
-              className="text-[9px] font-medium tracking-wide"
-              style={{ color: "rgba(240,122,114,0.85)" }}
-            >
-              waveform error
+            <span className="rounded border border-white/10 bg-black/20 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-red-300/80">
+              {status === "missing" ? "missing audio" : "waveform error"}
             </span>
-          ) : showLoading ? (
-            <LoadingBars color={color} width={width} height={height} />
-          ) : (
-            <PlaceholderBars color={color} width={width} height={height} />
-          )}
+          ) : showLoading && progress > 0 ? (
+            <span className="rounded border border-white/10 bg-black/20 px-1.5 py-0.5 text-[9px] font-medium tabular-nums text-white/45">
+              waveform {Math.round(progress * 100)}%
+            </span>
+          ) : null}
         </div>
       )}
     </div>
   );
 });
 
-// ── Subtle shimmer / placeholder visuals ──────────────────────────────────────
-
-function LoadingBars({ color, width, height }: { color: string; width: number; height: number }) {
-  const bars = Math.max(8, Math.floor(width / 6));
-  return (
-    <div className="flex h-full w-full items-center justify-between px-1">
-      {Array.from({ length: bars }).map((_, i) => {
-        const h = 0.25 + 0.45 * Math.abs(Math.sin(i * 0.7));
-        return (
-          <span
-            key={i}
-            className="block waveform-shimmer"
-            style={{
-              width: 2,
-              height: `${Math.round(height * h)}px`,
-              background: color,
-              opacity: 0.18,
-              borderRadius: 1,
-              animationDelay: `${(i % 8) * 80}ms`,
-            }}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function PlaceholderBars({ color, width, height }: { color: string; width: number; height: number }) {
-  const bars = Math.max(6, Math.floor(width / 10));
-  return (
-    <div className="flex h-full w-full items-center justify-between px-1 opacity-50">
-      {Array.from({ length: bars }).map((_, i) => (
-        <span
-          key={i}
-          className="block"
-          style={{
-            width: 1,
-            height: `${Math.round(height * 0.15)}px`,
-            background: color,
-            opacity: 0.22,
-          }}
-        />
-      ))}
-    </div>
-  );
+function drawPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  color: string,
+  muted: boolean,
+  error: boolean
+) {
+  const mid = height / 2;
+  ctx.globalAlpha = muted ? 0.18 : 0.28;
+  ctx.strokeStyle = error ? "rgba(240,122,114,0.45)" : color;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x < width; x++) {
+    const y = mid + Math.sin(x * 0.07) * height * 0.08 + Math.sin(x * 0.017) * height * 0.04;
+    if (x === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
 }

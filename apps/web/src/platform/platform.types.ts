@@ -31,6 +31,8 @@ export type PlatformCapabilities = {
 export interface FileSystemAdapter {
   /** Prompt the user to pick one or more audio files. Returns real `File` objects. */
   pickAudioFiles(): Promise<File[]>;
+  /** Read an audio asset from a trusted native path. Electron only; web returns null. */
+  readAudioFile(path: string): Promise<File | null>;
   /** Reveal a file in the OS file manager. No-op or throws on web. */
   revealInFileManager(path: string): Promise<void>;
 }

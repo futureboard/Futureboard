@@ -1,14 +1,14 @@
 import type { DawFile, FileId, WaveformPeaks } from "../types/daw";
 import { audioStorage } from "./AudioStorage";
 import { generatePeaks } from "./WaveformGenerator";
-import { waveformCache, buildCacheKey, entryPeaksAsFloat32, SAMPLES_PER_PEAK, WAVEFORM_CACHE_VERSION } from "./waveformCache";
-import { audioCacheManager } from "../audio/AudioCacheManager";
-import { audioBufferToDecodedAudio } from "../audio/audioCacheTypes";
-import { buildDecodedCacheKey } from "../audio/audioCacheKeys";
+import { waveformCache, buildCacheKey, entryPeaksAsInt16, SAMPLES_PER_PEAK, WAVEFORM_CACHE_VERSION, WAVEFORM_PEAK_LEVELS } from "./waveformCache";
+import { platform } from "../platform";
 import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 import soundTouchProcessorUrl from "@soundtouchjs/audio-worklet/processor?url";
 
 type OnPeaks = (fileId: FileId, peaks: WaveformPeaks) => void;
+type OnWaveformProgress = (fileId: FileId, progress: number) => void;
+type OnWaveformError = (fileId: FileId, message: string) => void;
 
 type LoadedBuffer = {
   audioBuffer: AudioBuffer;
@@ -45,13 +45,11 @@ class AudioEngine {
   private async decodeAndCache(
     file: DawFile,
     arrayBuffer: ArrayBuffer,
-    onPeaks: OnPeaks
+    onPeaks: OnPeaks,
+    onProgress?: OnWaveformProgress,
+    onError?: OnWaveformError
   ): Promise<AudioBuffer> {
-    const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
-
-    // Store in the DSP cache so AudioProcessingService can find it for processing.
-    const decoded = audioBufferToDecodedAudio(file.id, audioBuffer);
-    audioCacheManager.setDecodedAudio(buildDecodedCacheKey(file.id, audioBuffer.sampleRate), decoded);
+    const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
 
     // Placeholder entry so callers can check existence immediately
     this.bufferCache.set(file.id, {
@@ -60,16 +58,20 @@ class AudioEngine {
     });
 
     // Check waveform cache before spawning the worker
-    const cacheKey = buildCacheKey(file.id, SAMPLES_PER_PEAK);
-    const cached = await waveformCache.get(cacheKey).catch(() => null);
+    const cacheKeys = [...WAVEFORM_PEAK_LEVELS].reverse().map((samplesPerPeak) => buildCacheKey(file.id, samplesPerPeak));
+    const cachedEntries = await Promise.all(cacheKeys.map((key) => waveformCache.get(key).catch(() => null)));
+    const cached = cachedEntries.find(Boolean);
 
     if (cached) {
       const peaks: WaveformPeaks = {
+        fileId: file.id,
         samplesPerPeak: cached.samplesPerPeak,
         channelCount: cached.channelCount,
-        peaks: entryPeaksAsFloat32(cached),
+        peakCount: cached.peakCount,
+        peaks: entryPeaksAsInt16(cached),
         sampleRate: cached.sampleRate,
         duration: cached.duration,
+        version: cached.version,
       };
       const entry = this.bufferCache.get(file.id);
       if (entry) entry.peaks = peaks;
@@ -79,19 +81,19 @@ class AudioEngine {
         const entry = this.bufferCache.get(fileId);
         if (entry) entry.peaks = peaks;
         onPeaks(fileId, peaks);
-        // Persist peaks to cache non-blocking
+        const cacheKey = buildCacheKey(fileId, peaks.samplesPerPeak);
         waveformCache.set(cacheKey, {
           version: WAVEFORM_CACHE_VERSION,
           fileId,
           sampleRate: audioBuffer.sampleRate,
           channelCount: audioBuffer.numberOfChannels,
           duration: audioBuffer.duration,
-          samplesPerPeak: SAMPLES_PER_PEAK,
-          peakCount: Math.ceil((peaks.peaks.length / audioBuffer.numberOfChannels) / 2),
+          samplesPerPeak: peaks.samplesPerPeak,
+          peakCount: peaks.peakCount ?? Math.ceil((peaks.peaks.length / audioBuffer.numberOfChannels) / 2),
           createdAt: Date.now(),
           peaks: peaks.peaks,
         }).catch((e) => console.warn("[WaveformCache] set failed:", e));
-      });
+      }, onProgress, onError);
     }
 
     return audioBuffer;
@@ -100,12 +102,8 @@ class AudioEngine {
   // ── public API ───────────────────────────────────────────────────────────────
 
   /** Import: decode, cache in memory, persist to IndexedDB. */
-  async loadBuffer(file: DawFile, arrayBuffer: ArrayBuffer, onPeaks: OnPeaks): Promise<AudioBuffer> {
-    const buf = await this.decodeAndCache(file, arrayBuffer, onPeaks);
-    // Persist raw bytes to IndexedDB (non-blocking)
-    audioStorage.save(file.id, arrayBuffer).catch((e) =>
-      console.warn("[AudioStorage] save failed:", e)
-    );
+  async loadBuffer(file: DawFile, arrayBuffer: ArrayBuffer, onPeaks: OnPeaks, onProgress?: OnWaveformProgress, onError?: OnWaveformError): Promise<AudioBuffer> {
+    const buf = await this.decodeAndCache(file, arrayBuffer, onPeaks, onProgress, onError);
     return buf;
   }
 
@@ -118,8 +116,16 @@ class AudioEngine {
 
     try {
       const stored = await audioStorage.load(file.id);
-      if (!stored) return null;
-      return await this.decodeAndCache(file, stored, onPeaks);
+      if (stored) return await this.decodeAndCache(file, stored, onPeaks);
+      if (file.storageProvider === "file-handle" && file.cacheKey) {
+        const source = await platform.fileSystem.readAudioFile(file.cacheKey);
+        if (!source) return null;
+        audioStorage.save(file.id, source).catch((e) =>
+          console.warn("[AudioStorage] restore source save failed:", e)
+        );
+        return await this.decodeAndCache(file, await source.arrayBuffer(), onPeaks);
+      }
+      return null;
     } catch (e) {
       console.warn("[AudioEngine] restoreBuffer failed for", file.name, e);
       return null;

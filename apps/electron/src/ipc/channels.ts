@@ -5,6 +5,7 @@
 
 export const IpcChannels = {
   FsPickAudioFiles: "daw:fs:pickAudioFiles",
+  FsReadAudioFile: "daw:fs:readAudioFile",
   FsRevealInFileManager: "daw:fs:revealInFileManager",
 
   ProjectSaveDialog: "daw:project:saveDialog",
@@ -38,6 +39,8 @@ export type PickedAudioFile = {
   mimeType: string;
   bytes: ArrayBuffer;
   path: string;
+  size: number;
+  lastModified: number;
 };
 
 export type MessageBoxOptions = {

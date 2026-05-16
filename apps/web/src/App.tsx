@@ -41,7 +41,7 @@ metronomeScheduler.setConfigGetter(() => {
 });
 
 export default function App() {
-  const { setPeaks, loadLocal, project } = useProjectStore();
+  const { setPeaks, setWaveformStatus, loadLocal, project } = useProjectStore();
   useKeyboardShortcuts();
 
   useEffect(() => {
@@ -157,11 +157,15 @@ export default function App() {
   useEffect(() => {
     for (const file of project.files) {
       if (audioEngine.getBuffer(file.id)) continue;   // already in memory
-      audioEngine
-        .restoreBuffer(file, (fid, peaks) => setPeaks(fid, peaks))
-        .catch((e) => console.warn("[App] restoreBuffer:", e));
+      setWaveformStatus(file.id, "loading");
+      audioEngine.restoreBuffer(file, (fid, peaks) => setPeaks(fid, peaks)).then((buffer) => {
+        if (buffer === null) setWaveformStatus(file.id, "missing");
+      }).catch((e) => {
+        console.warn("[App] restoreBuffer:", e);
+        setWaveformStatus(file.id, "error");
+      });
     }
-  }, [project.files, setPeaks]);
+  }, [project.files, setPeaks, setWaveformStatus]);
 
   return (
     <div className="flex h-full flex-col bg-daw-bg -space-y-[1px] text-daw-text">

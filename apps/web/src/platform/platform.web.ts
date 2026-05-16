@@ -69,6 +69,9 @@ function pickAudioFilesViaHiddenInput(): Promise<File[]> {
 
 const fileSystem: FileSystemAdapter = {
   pickAudioFiles: pickAudioFilesViaHiddenInput,
+  async readAudioFile(_path: string): Promise<File | null> {
+    return null;
+  },
   async revealInFileManager(_path: string): Promise<void> {
     throw new Error("revealInFileManager is not supported on web");
   },
@@ -77,15 +80,21 @@ const fileSystem: FileSystemAdapter = {
 function serializeProject(project: DawProject): unknown {
   return {
     ...project,
-    files: project.files.map((file) => ({
-      id: file.id,
-      name: file.name,
-      mimeType: file.mimeType,
-      duration: file.duration,
-      sampleRate: file.sampleRate,
-      channels: file.channels,
-      storageKey: file.storageKey,
-    })),
+      files: project.files.map((file) => ({
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+        lastModified: file.lastModified,
+        originalFileName: file.originalFileName,
+        duration: file.duration,
+        sampleRate: file.sampleRate,
+        channels: file.channels,
+        storageProvider: file.storageProvider,
+        cacheKey: file.cacheKey,
+        waveformCacheKeys: file.waveformCacheKeys,
+        storageKey: file.storageKey,
+      })),
   };
 }
 

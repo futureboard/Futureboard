@@ -22,6 +22,8 @@ export type DawBridgePickedAudioFile = {
   mimeType: string;
   bytes: ArrayBuffer;
   path: string;
+  size: number;
+  lastModified: number;
 };
 
 export type DawBridgeMessageBoxKind =
@@ -55,6 +57,7 @@ export type DawBridgeOpenDialogResult = {
 
 export interface DawBridgeFs {
   pickAudioFiles(): Promise<DawBridgePickedAudioFile[]>;
+  readAudioFile(path: string): Promise<DawBridgePickedAudioFile | null>;
   revealInFileManager(path: string): Promise<void>;
 }
 

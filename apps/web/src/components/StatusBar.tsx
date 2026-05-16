@@ -6,6 +6,7 @@ import { transport } from "../engine/Transport";
 import { C } from "../theme";
 import { formatBarBeat } from "../utils/musicalTime";
 import { pxPerBeat } from "../utils/musicalGrid";
+import { audioCacheManager } from "../audio/AudioCacheManager";
 
 // ── Save status ───────────────────────────────────────────────────────────────
 type SaveStatus = "saved" | "unsaved" | "saving" | "error";
@@ -68,6 +69,7 @@ export function StatusBar() {
   const saveStatus            = useUIStore((s) => s.saveStatus);
 
   const project       = useProjectStore((s) => s.project);
+  const peakCache     = useProjectStore((s) => s.peakCache);
   const bpm           = project.bpm;
   const timeSignature = project.timeSignature;
 
@@ -128,6 +130,17 @@ export function StatusBar() {
   const ppb      = Math.round(pxPerBeat(pixelsPerSecond, bpm));
   const saveSt   = saveStatus as SaveStatus;
   const fpsColor = fps >= 55 ? C.green : fps >= 30 ? C.yellow : C.red;
+  const audioStats = audioCacheManager.getStats();
+  const sourceBytes = project.files.reduce((sum, file) => sum + (file.size ?? 0), 0);
+  const peakBytes = [...peakCache.values()].reduce((sum, peaks) => sum + peaks.peaks.byteLength, 0);
+  const missingAssets = project.files.filter((file) => file.storageProvider === "missing").length;
+  const audioDebug = [
+    sourceBytes > 0 ? `${formatBytes(sourceBytes)} source` : null,
+    audioStats.decodedBytes > 0 ? `${formatBytes(audioStats.decodedBytes)} decoded` : null,
+    peakBytes > 0 ? `peaks ${formatBytes(peakBytes)}` : null,
+    audioStats.processedBytes > 0 ? `processed ${formatBytes(audioStats.processedBytes)}` : null,
+    missingAssets > 0 ? `${missingAssets} missing` : null,
+  ].filter(Boolean).join(" · ");
 
   return (
     <div
@@ -190,8 +203,16 @@ export function StatusBar() {
           </>
         )}
         <Sep />
-        <span className="text-daw-faint">Audio OK</span>
+        <span className="max-w-[36ch] truncate text-daw-faint" title={audioDebug || "Audio OK"}>
+          {audioDebug || "Audio OK"}
+        </span>
       </div>
     </div>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))}MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))}KB`;
 }

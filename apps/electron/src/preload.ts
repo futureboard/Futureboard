@@ -19,6 +19,8 @@ const isMac = process.platform === "darwin";
 const fsBridge = Object.freeze({
   pickAudioFiles: (): Promise<PickedAudioFile[]> =>
     invoke(IpcChannels.FsPickAudioFiles),
+  readAudioFile: (filePath: string): Promise<PickedAudioFile | null> =>
+    invoke(IpcChannels.FsReadAudioFile, filePath),
   revealInFileManager: (filePath: string): Promise<void> =>
     invoke(IpcChannels.FsRevealInFileManager, filePath),
 });

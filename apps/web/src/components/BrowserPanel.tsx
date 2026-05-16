@@ -69,7 +69,13 @@ function ComingSoonRow({ label }: { label: string }) {
 function FileRow({ file }: { file: DawFile }) {
   const selectedBrowserFileId = useUIStore((s) => s.selectedBrowserFileId);
   const setSelectedBrowserFileId = useUIStore((s) => s.setSelectedBrowserFileId);
+  const status = useProjectStore((s) => s.waveformStatus.get(file.id));
   const selected = selectedBrowserFileId === file.id;
+  const assetLabel = status === "missing"
+    ? "Missing"
+    : file.storageProvider === "indexeddb"
+      ? "Cached"
+      : "Ready";
 
   return (
     <button
@@ -98,6 +104,12 @@ function FileRow({ file }: { file: DawFile }) {
       </span>
       <span className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px] text-daw-faint">
         {fileBadge(file)}
+      </span>
+      <span
+        className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px]"
+        style={{ color: status === "missing" ? "rgba(240,122,114,0.85)" : "rgba(154,166,178,0.8)" }}
+      >
+        {assetLabel}
       </span>
     </button>
   );

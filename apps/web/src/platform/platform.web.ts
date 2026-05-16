@@ -2,6 +2,7 @@ import type { DawProject } from "../types/daw";
 import type {
   DialogAdapter,
   FileSystemAdapter,
+  FolderProjectAdapter,
   MessageBoxOptions,
   Platform,
   PlatformCapabilities,
@@ -72,6 +73,9 @@ const fileSystem: FileSystemAdapter = {
   async readAudioFile(_path: string): Promise<File | null> {
     return null;
   },
+  async statAudioFile(_path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null> {
+    return null;
+  },
   async revealInFileManager(_path: string): Promise<void> {
     throw new Error("revealInFileManager is not supported on web");
   },
@@ -86,6 +90,7 @@ function serializeProject(project: DawProject): unknown {
         mimeType: file.mimeType,
         size: file.size,
         lastModified: file.lastModified,
+        hash: file.hash,
         originalFileName: file.originalFileName,
         duration: file.duration,
         sampleRate: file.sampleRate,
@@ -138,6 +143,17 @@ const dialog: DialogAdapter = {
   },
 };
 
+const folderProject: FolderProjectAdapter = {
+  isSupported: false,
+  getProjectRoot: () => null,
+  setProjectRoot: () => { /* no-op on web */ },
+  getProjectFilePath: () => null,
+  browseLocation: async () => null,
+  createProject: async () => null,
+  importAudio: async () => null,
+  openByPath: async () => null,
+};
+
 const windowAdapter: WindowAdapter = {
   minimize() {
     /* no-op on web */
@@ -157,4 +173,5 @@ export const webPlatform: Platform = {
   projectStorage,
   dialog,
   window: windowAdapter,
+  folderProject,
 };

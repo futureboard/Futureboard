@@ -1,31 +1,32 @@
 {
-  "name": "futureboard-studio-electron",
+  "name": "futureboard-studio",
   "private": true,
-  "version": "2026.05.14",
-  "description": "Futureboard Studio — Electron shell",
-  "author": "Mochi Linux Studio",
+  "version": "2026.05-alpha1",
+  "description": "Futureboard Studio",
+  "author": "Arizkami",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p .",
     "dev": "concurrently -k -n tsc,electron -c blue,magenta \"tsc -p . --watch\" \"wait-on dist/main.js && electron .\"",
     "start": "electron .",
-    "build:renderer": "bun run --cwd ../web build",
-    "build:all": "bun run build:renderer && bun run build",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "build:renderer": "bun run --cwd ../web build:electron",
+    "copy:renderer": "node scripts/copy-renderer.cjs",
+    "build:all": "bun run build:renderer && bun run build && bun run copy:renderer",
+    "pack": "bun run build:all && electron-builder --dir",
+    "dist": "bun run build:all && electron-builder",
     "dist:win": "bun run build:all && electron-builder --win",
     "dist:mac": "bun run build:all && electron-builder --mac",
     "dist:linux": "bun run build:all && electron-builder --linux"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.8.0",
     "concurrently": "^9.0.0",
-    "electron": "^35.0.0",
-    "electron-builder": "^25.1.8",
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
     "rcedit": "^5.0.2",
-    "typescript": "^5.5.0",
-    "wait-on": "^8.0.0"
+    "typescript": "^6.0.3",
+    "wait-on": "^9.0.10"
   },
   "build": {
     "appId": "org.mochilinux.studio",
@@ -49,11 +50,6 @@
       "!**/*.tsbuildinfo"
     ],
     "extraResources": [
-      {
-        "from": "../web/dist",
-        "to": "renderer",
-        "filter": ["**/*"]
-      },
       {
         "from": "icons",
         "to": "icons",

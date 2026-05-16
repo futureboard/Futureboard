@@ -44,6 +44,11 @@ import { DawSelect } from "./ui/DawSelect";
 import { formatBarBeatTick } from "../utils/musicalTime";
 import logoApp from "../assets/logo.png";
 import { ProjectDropdown } from "./project/ProjectDropdown";
+import { platform } from "../platform";
+
+const _isElectron = platform.kind === "electron";
+const _isMac = _isElectron && typeof window !== "undefined" && window.dawElectron?.platform === "darwin";
+const WCO_CLASS = _isElectron ? (_isMac ? "pl-35 pr-0" : "pr-35") : "";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const TIME_SIG_NUMERATORS = [2, 3, 4, 5, 6, 7, 8, 9, 12];
@@ -384,6 +389,8 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
 
   const timeSig = project.timeSignature ?? { numerator: 4, denominator: 4 };
   const saveStatus = useUIStore((s) => s.saveStatus);
+  const waveformStatus = useProjectStore((s) => s.waveformStatus);
+  const missingAssetCount = project.files.filter((file) => waveformStatus.get(file.id) === "missing" || file.storageProvider === "missing").length;
 
   // ── Close helper ──────────────────────────────────────────────────────────
   const closeAllMenus = useCallback(() => {
@@ -700,7 +707,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
   return (
     <div
       ref={barRef}
-      className="drag-region-app relative z-[100] flex h-9 shrink-0 select-none items-stretch border-b border-daw-border bg-daw-sunken px-2 pr-35 shadow-[0_8px_24px_rgba(0,0,0,0.22)]"
+      className={`drag-region-app relative z-[100] flex h-9 shrink-0 select-none items-stretch border-b border-daw-border bg-daw-sunken px-2 shadow-[0_8px_24px_rgba(0,0,0,0.22)] ${WCO_CLASS}`}
     >
       <div className="flex w-full min-w-0 items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -796,7 +803,9 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
                   ? "Saving..."
                   : saveStatus === "error"
                     ? "Error"
-                    : "Saved"}
+                    : missingAssetCount > 0
+                      ? `Saved · ${missingAssetCount} missing`
+                      : "Saved"}
             </span>
             {projectDropdownOpen && (
               <ProjectDropdown onClose={() => setProjectDropdownOpen(false)} />

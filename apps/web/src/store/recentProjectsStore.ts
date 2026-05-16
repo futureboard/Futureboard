@@ -7,6 +7,12 @@ export type RecentProject = {
   id: string;
   name: string;
   path?: string;
+  /** Absolute path to the .mochiproj file (folder projects). */
+  projectFilePath?: string;
+  /** Absolute path to the project folder root (folder projects). */
+  projectRoot?: string;
+  /** How this project is stored. */
+  storageMode?: "folder" | "browser" | "cloud";
   source: "local" | "browser" | "remote";
   lastOpenedAt: number;
   lastModifiedAt?: number;

@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef } from "react";
+import { memo, useLayoutEffect, useRef } from "react";
 import type { WaveformPeaks, WaveformStatus } from "../../types/daw";
 
 type Props = {
@@ -32,7 +32,7 @@ export const WaveformCanvas = memo(function WaveformCanvas({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || width < 1 || height < 1) return;
     const ctx = canvas.getContext("2d");
@@ -46,7 +46,7 @@ export const WaveformCanvas = memo(function WaveformCanvas({
     canvas.style.width = `${cssW}px`;
     canvas.style.height = `${cssH}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "rgba(8,12,16,0.18)";
+    ctx.fillStyle = "rgba(8,12,16,0.72)";
     ctx.fillRect(0, 0, cssW, cssH);
 
     if (!peaks || peaks.peaks.length === 0) {
@@ -103,15 +103,15 @@ export const WaveformCanvas = memo(function WaveformCanvas({
   }, [peaks, width, height, color, muted, selected, clipOffset, clipDuration, sampleRate, sourceDuration, status]);
 
   const isReady = status === "ready" || (!status && !!peaks && peaks.peaks.length > 0);
-  const showLoading = !isReady && (status === "loading" || (!status && !peaks));
+  const showLoading = !isReady && (status === "loading" || status === "idle" || (!status && !peaks));
   const showError = status === "error" || status === "missing";
 
   return (
-    <div className="relative" style={{ width, height }}>
+    <div className="relative overflow-hidden" style={{ width, height, background: "rgba(8,12,16,0.72)" }}>
       <canvas
         ref={canvasRef}
         className="block"
-        style={{ width, height, opacity: muted ? 0.55 : 1 }}
+        style={{ width, height, opacity: muted ? 0.55 : 1, background: "rgba(8,12,16,0.72)" }}
       />
       {!isReady && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center" aria-hidden>
@@ -119,9 +119,9 @@ export const WaveformCanvas = memo(function WaveformCanvas({
             <span className="rounded border border-white/10 bg-black/20 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-red-300/80">
               {status === "missing" ? "missing audio" : "waveform error"}
             </span>
-          ) : showLoading && progress > 0 ? (
+          ) : showLoading ? (
             <span className="rounded border border-white/10 bg-black/20 px-1.5 py-0.5 text-[9px] font-medium tabular-nums text-white/45">
-              waveform {Math.round(progress * 100)}%
+              {progress > 0 ? `waveform ${Math.round(progress * 100)}%` : "Generating waveform..."}
             </span>
           ) : null}
         </div>

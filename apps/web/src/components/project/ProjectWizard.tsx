@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import {
-  FileText, Mic2, Music, SlidersHorizontal, Square, FolderOpen, Plus,
+  FileText, Mic2, Music, SlidersHorizontal, Square, FolderOpen, Plus, Loader,
 } from "lucide-react";
 import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
@@ -9,6 +9,7 @@ import { useWindowStore } from "../../store/windowStore";
 import { useRecentProjectsStore } from "../../store/recentProjectsStore";
 import { getTrackColor } from "../../theme";
 import type { DawTrack } from "../../types/daw";
+import { platform } from "../../platform";
 
 type Props = { windowId: string };
 
@@ -23,6 +24,8 @@ type WizardState = {
   template: Template;
   audioTrackCount: number;
   midiTrackCount: number;
+  /** Electron only: absolute path chosen for project location. */
+  location: string;
 };
 
 const TEMPLATE_PRESETS: Record<Template, Partial<WizardState>> = {
@@ -93,6 +96,8 @@ function Stepper({
 export function ProjectWizard({ windowId }: Props) {
   const nameRef = useRef<HTMLInputElement>(null);
 
+  const isElectron = platform.kind === "electron" && platform.folderProject.isSupported;
+
   const [state, setState] = useState<WizardState>({
     name: "Untitled Project",
     bpm: 120,
@@ -102,16 +107,33 @@ export function ProjectWizard({ windowId }: Props) {
     template: "empty",
     audioTrackCount: 0,
     midiTrackCount: 0,
+    location: "",
   });
+  const [isCreating, setIsCreating] = useState(false);
 
   const set = (patch: Partial<WizardState>) => setState((s) => ({ ...s, ...patch }));
 
   const applyTemplate = (t: Template) => set({ template: t, ...TEMPLATE_PRESETS[t] });
 
-  const handleCreate = () => {
-    const history  = useHistoryStore.getState();
-    const uiStore  = useUIStore.getState();
-    const ws       = useWindowStore.getState();
+  const handleBrowseLocation = async () => {
+    const loc = await platform.folderProject.browseLocation();
+    if (loc) set({ location: loc });
+  };
+
+  const handleCreate = async () => {
+    if (isCreating) return;
+    const history = useHistoryStore.getState();
+    const uiStore = useUIStore.getState();
+    const ws = useWindowStore.getState();
+    const projectName = state.name.trim() || "Untitled Project";
+
+    // Validate Electron: location is required
+    if (isElectron && !state.location) {
+      await platform.folderProject.browseLocation().then((loc) => {
+        if (loc) set({ location: loc });
+      });
+      return;
+    }
 
     const tracks: DawTrack[] = [];
 
@@ -147,33 +169,61 @@ export function ProjectWizard({ windowId }: Props) {
       });
     }
 
-    useProjectStore.setState({
-      project: {
-        id: crypto.randomUUID(),
-        name: state.name.trim() || "Untitled Project",
-        version: 1,
-        sampleRate: state.sampleRate,
-        bpm: state.bpm,
-        timeSignature: {
-          numerator: state.timeSignatureNumerator,
-          denominator: state.timeSignatureDenominator,
-        },
-        tracks,
-        files: [],
+    const newProject = {
+      id: crypto.randomUUID(),
+      name: projectName,
+      version: 1,
+      sampleRate: state.sampleRate,
+      bpm: state.bpm,
+      timeSignature: {
+        numerator: state.timeSignatureNumerator,
+        denominator: state.timeSignatureDenominator,
       },
-    });
+      tracks,
+      files: [],
+    };
+
+    // Electron: create folder structure first, then save initial project file
+    if (isElectron) {
+      setIsCreating(true);
+      try {
+        const folderResult = await platform.folderProject.createProject({
+          name: projectName,
+          location: state.location,
+        });
+        if (!folderResult) {
+          setIsCreating(false);
+          return;
+        }
+        useProjectStore.setState({ project: newProject });
+        await platform.projectStorage.saveProject(newProject);
+        useRecentProjectsStore.getState().addRecentProject({
+          id: newProject.id,
+          name: newProject.name,
+          projectFilePath: folderResult.projectFilePath,
+          projectRoot: folderResult.projectRoot,
+          storageMode: "folder",
+          source: "local",
+        });
+      } catch (e) {
+        console.error("[ProjectWizard] folder create failed:", e);
+        setIsCreating(false);
+        return;
+      }
+    } else {
+      useProjectStore.setState({ project: newProject });
+      useRecentProjectsStore.getState().addRecentProject({
+        id: newProject.id,
+        name: newProject.name,
+        storageMode: "browser",
+        source: "browser",
+      });
+    }
 
     history.clear();
     uiStore.setSelectedClipIds([]);
     uiStore.setSelectedTrackId(null);
     uiStore.setSaveStatus("saved");
-
-    const { project } = useProjectStore.getState();
-    useRecentProjectsStore.getState().addRecentProject({
-      id: project.id,
-      name: project.name,
-      source: "browser",
-    });
 
     ws.closeWindow(windowId);
   };
@@ -197,12 +247,41 @@ export function ProjectWizard({ windowId }: Props) {
             autoFocus
             value={state.name}
             onChange={(e) => set({ name: e.target.value })}
-            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleCreate(); } }}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void handleCreate(); } }}
             placeholder="Project name"
             className="min-w-0 flex-1 bg-transparent text-[12px] font-medium text-daw-text outline-none placeholder:text-daw-faint"
           />
         </label>
       </div>
+
+      {/* ── Project location (Electron only) ── */}
+      {isElectron && (
+        <div className="border-t border-white/[0.05] px-3 py-2.5">
+          <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wide text-daw-faint">
+            Location
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div
+              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border bg-[#13161c] px-2.5 py-1.5"
+              style={{ borderColor: state.location ? "rgba(255,255,255,0.07)" : "rgba(255,100,100,0.2)" }}
+            >
+              <FolderOpen size={12} className="shrink-0 text-daw-faint" />
+              <span className="min-w-0 flex-1 truncate text-[11px] text-daw-dim" title={state.location || undefined}>
+                {state.location
+                  ? `${state.location}/${state.name.trim() || "Untitled Project"}/`
+                  : <span className="text-daw-faint">No location selected</span>}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => { void handleBrowseLocation(); }}
+              className="h-7 shrink-0 rounded-md border border-white/[0.07] bg-[#13161c] px-2.5 text-[11px] font-medium text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+            >
+              Browse…
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Template cards ── */}
       <div className="border-t border-white/[0.05] px-3 py-2.5">
@@ -330,21 +409,23 @@ export function ProjectWizard({ windowId }: Props) {
       <div className="flex items-center justify-end gap-2 border-t border-white/[0.05] px-3 py-2.5">
         <button
           type="button"
+          disabled={isCreating}
           onClick={() => useWindowStore.getState().closeWindow(windowId)}
-          className="h-7 rounded-md border border-white/[0.07] bg-transparent px-3 text-[11px] font-medium text-daw-faint transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+          className="h-7 rounded-md border border-white/[0.07] bg-transparent px-3 text-[11px] font-medium text-daw-faint transition-colors hover:bg-white/[0.05] hover:text-daw-text disabled:opacity-40"
         >
           Cancel
         </button>
         <button
           type="button"
-          onClick={handleCreate}
-          className="flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-semibold text-[#0d1117] transition-colors"
+          disabled={isCreating || (isElectron && !state.location)}
+          onClick={() => { void handleCreate(); }}
+          className="flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-semibold text-[#0d1117] transition-colors disabled:opacity-40"
           style={{ background: "rgba(86,199,201,0.85)" }}
-          onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,1)")}
+          onMouseEnter={(e) => { if (!isCreating) (e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,1)"; }}
           onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,0.85)")}
         >
-          <Plus size={12} />
-          Create Project
+          {isCreating ? <Loader size={12} className="animate-spin" /> : <Plus size={12} />}
+          {isCreating ? "Creating…" : "Create Project"}
         </button>
       </div>
     </div>

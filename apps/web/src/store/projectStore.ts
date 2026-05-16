@@ -105,6 +105,7 @@ type ProjectStore = {
 
   // ── Files / assets ─────────────────────────────────────────────────────────
   addFile: (file: DawFile) => void;
+  updateFile: (fileId: FileId, updates: Partial<DawFile>) => void;
   removeFile: (fileId: FileId) => void;
 
   // ── Waveform cache (non-dirty) ─────────────────────────────────────────────
@@ -606,6 +607,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     markDirty();
   },
 
+  updateFile: (fileId, updates) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        files: s.project.files.map((file) =>
+          file.id === fileId ? { ...file, ...updates } : file
+        ),
+      },
+    }));
+    markDirty();
+  },
+
   removeFile: (fileId) => {
     set((s) => ({ project: { ...s.project, files: s.project.files.filter((f) => f.id !== fileId) } }));
     markDirty();
@@ -819,6 +832,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         channels: file.channels,
         size: file.size,
         lastModified: file.lastModified,
+        hash: file.hash,
         originalFileName: file.originalFileName,
         storageProvider: file.storageProvider,
         cacheKey: file.cacheKey,

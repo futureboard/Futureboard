@@ -1,4 +1,4 @@
-import type { DawTrack } from "../types/daw";
+import type { DawFile, DawTrack, WaveformPeaks } from "../types/daw";
 import { audioEngine } from "./AudioEngine";
 import { metronomeScheduler } from "./MetronomeScheduler";
 import { clipScheduler } from "./ClipScheduler";
@@ -11,13 +11,27 @@ class Transport {
   private transportStartProjectTime = 0;
   private _playheadTime = 0;
   private trackGetter: (() => DawTrack[]) | null = null;
+  private fileGetter: (() => DawFile[]) | null = null;
+  private peaksCallback: ((fileId: string, peaks: WaveformPeaks) => void) | null = null;
 
   setTrackGetter(fn: () => DawTrack[]): void {
     this.trackGetter = fn;
   }
 
+  setFileGetter(fn: () => DawFile[]): void {
+    this.fileGetter = fn;
+  }
+
+  setPeaksCallback(fn: (fileId: string, peaks: WaveformPeaks) => void): void {
+    this.peaksCallback = fn;
+  }
+
   private getTracks(): DawTrack[] {
     return this.trackGetter?.() ?? [];
+  }
+
+  private getFiles(): DawFile[] {
+    return this.fileGetter?.() ?? [];
   }
 
   get state(): PlayState {
@@ -44,9 +58,32 @@ class Transport {
     });
     this.transportStartAudioTime = audioEngine.currentTime;
     this.transportStartProjectTime = this._playheadTime;
+    await this.ensurePlayableBuffers();
     this._state = "playing";
     metronomeScheduler.start();
     clipScheduler.schedule(this.getTracks());
+  }
+
+  private async ensurePlayableBuffers(): Promise<void> {
+    const files = new Map(this.getFiles().map((file) => [file.id, file]));
+    const neededFileIds = new Set<string>();
+    const playheadTime = this._playheadTime;
+    for (const track of this.getTracks()) {
+      for (const clip of track.clips) {
+        if (clip.startTime + clip.duration > playheadTime && clip.fileId) {
+          neededFileIds.add(clip.fileId);
+        }
+      }
+    }
+
+    for (const fileId of neededFileIds) {
+      if (audioEngine.getBuffer(fileId)) continue;
+      const file = files.get(fileId);
+      if (!file) continue;
+      await audioEngine.restoreBuffer(file, (fid, peaks) => {
+        this.peaksCallback?.(fid, peaks);
+      });
+    }
   }
 
   pause() {

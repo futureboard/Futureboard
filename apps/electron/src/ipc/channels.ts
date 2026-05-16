@@ -6,6 +6,7 @@
 export const IpcChannels = {
   FsPickAudioFiles: "daw:fs:pickAudioFiles",
   FsReadAudioFile: "daw:fs:readAudioFile",
+  FsStatAudioFile: "daw:fs:statAudioFile",
   FsRevealInFileManager: "daw:fs:revealInFileManager",
 
   ProjectSaveDialog: "daw:project:saveDialog",
@@ -30,6 +31,17 @@ export const IpcChannels = {
   WaveformCacheSet: "daw:waveformCache:set",
   WaveformCacheDelete: "daw:waveformCache:delete",
   WaveformCacheClear: "daw:waveformCache:clear",
+
+  // System / diagnostics (Electron only)
+  SysGetGpuInfo: "daw:sys:getGpuInfo",
+
+  // Folder-based project operations (Electron only)
+  ProjectFolderBrowseLocation: "daw:project:folderBrowseLocation",
+  ProjectFolderCreate: "daw:project:folderCreate",
+  ProjectFolderSave: "daw:project:folderSave",
+  ProjectFolderOpenFile: "daw:project:folderOpenFile",
+  ProjectFolderImportAudio: "daw:project:folderImportAudio",
+  FsEnsureProjectFolders: "daw:fs:ensureProjectFolders",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
@@ -38,6 +50,14 @@ export type PickedAudioFile = {
   name: string;
   mimeType: string;
   bytes: ArrayBuffer;
+  path: string;
+  size: number;
+  lastModified: number;
+};
+
+export type AudioFileStat = {
+  name: string;
+  mimeType: string;
   path: string;
   size: number;
   lastModified: number;
@@ -78,6 +98,37 @@ export type WaveformCacheEntryIpc = {
   peakCount: number;
   createdAt: number;
   peaks: number[];
+};
+
+export type FolderProjectCreateOptions = {
+  name: string;
+  location: string;
+};
+
+export type FolderProjectCreateResult = {
+  projectRoot: string;
+  projectFilePath: string;
+};
+
+export type FolderImportAudioResult = {
+  relativePath: string;
+  absolutePath: string;
+  name: string;
+  size: number;
+  lastModified: number;
+};
+
+export type BrowseFolderResult = {
+  canceled: boolean;
+  folderPath?: string;
+};
+
+export type GpuFeatureStatus = {
+  hardwareAccelerationEnabled: boolean;
+  features: Record<string, string>;
+  gpuDescription: string | null;
+  electronVersion: string;
+  chromeVersion: string;
 };
 
 export type ExternalWindowConfig = {

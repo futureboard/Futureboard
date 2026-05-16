@@ -11,6 +11,11 @@ import {
   type PickedAudioFile,
   type SaveDialogResult,
   type WaveformCacheEntryIpc,
+  type FolderProjectCreateOptions,
+  type FolderProjectCreateResult,
+  type FolderImportAudioResult,
+  type BrowseFolderResult,
+  type GpuFeatureStatus,
 } from "./ipc/channels.js";
 
 const invoke = ipcRenderer.invoke.bind(ipcRenderer);
@@ -21,6 +26,8 @@ const fsBridge = Object.freeze({
     invoke(IpcChannels.FsPickAudioFiles),
   readAudioFile: (filePath: string): Promise<PickedAudioFile | null> =>
     invoke(IpcChannels.FsReadAudioFile, filePath),
+  statAudioFile: (filePath: string) =>
+    invoke(IpcChannels.FsStatAudioFile, filePath),
   revealInFileManager: (filePath: string): Promise<void> =>
     invoke(IpcChannels.FsRevealInFileManager, filePath),
 });
@@ -34,6 +41,17 @@ const projectBridge = Object.freeze({
     invoke(IpcChannels.ProjectRead, filePath),
   write: (filePath: string, contents: string): Promise<boolean> =>
     invoke(IpcChannels.ProjectWrite, filePath, contents),
+  // Folder-based project operations
+  browseFolderLocation: (): Promise<BrowseFolderResult> =>
+    invoke(IpcChannels.ProjectFolderBrowseLocation),
+  createFolderProject: (options: FolderProjectCreateOptions): Promise<FolderProjectCreateResult | null> =>
+    invoke(IpcChannels.ProjectFolderCreate, options),
+  saveFolderProject: (projectRoot: string, contents: string): Promise<boolean> =>
+    invoke(IpcChannels.ProjectFolderSave, projectRoot, contents),
+  openFolderFile: (filePath: string): Promise<string | null> =>
+    invoke(IpcChannels.ProjectFolderOpenFile, filePath),
+  importAudioToFolder: (projectRoot: string, sourcePath: string): Promise<FolderImportAudioResult | null> =>
+    invoke(IpcChannels.ProjectFolderImportAudio, projectRoot, sourcePath),
 });
 
 const dialogBridge = Object.freeze({
@@ -50,12 +68,12 @@ const windowBridge = Object.freeze({
 });
 
 const waveformCacheBridge = Object.freeze({
-  get: (key: string): Promise<WaveformCacheEntryIpc | null> =>
-    invoke(IpcChannels.WaveformCacheGet, key),
-  set: (key: string, entry: WaveformCacheEntryIpc): Promise<void> =>
-    invoke(IpcChannels.WaveformCacheSet, key, entry),
-  delete: (key: string): Promise<void> =>
-    invoke(IpcChannels.WaveformCacheDelete, key),
+  get: (key: string, projectRoot?: string): Promise<WaveformCacheEntryIpc | null> =>
+    invoke(IpcChannels.WaveformCacheGet, key, projectRoot),
+  set: (key: string, entry: WaveformCacheEntryIpc, projectRoot?: string): Promise<void> =>
+    invoke(IpcChannels.WaveformCacheSet, key, entry, projectRoot),
+  delete: (key: string, projectRoot?: string): Promise<void> =>
+    invoke(IpcChannels.WaveformCacheDelete, key, projectRoot),
   clear: (): Promise<void> =>
     invoke(IpcChannels.WaveformCacheClear),
 });
@@ -67,6 +85,11 @@ const windowsBridge = Object.freeze({
     invoke(IpcChannels.WindowsCloseExternal, id),
   focusExternal: (id: string): Promise<void> =>
     invoke(IpcChannels.WindowsFocusExternal, id),
+});
+
+const sysBridge = Object.freeze({
+  getGpuInfo: (): Promise<GpuFeatureStatus> =>
+    invoke(IpcChannels.SysGetGpuInfo),
 });
 
 const dawElectron = Object.freeze({
@@ -82,6 +105,7 @@ const dawElectron = Object.freeze({
   window: windowBridge,
   windows: windowsBridge,
   waveformCache: waveformCacheBridge,
+  sys: sysBridge,
 });
 
 contextBridge.exposeInMainWorld("dawElectron", dawElectron);

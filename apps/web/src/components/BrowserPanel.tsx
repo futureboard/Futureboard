@@ -1,10 +1,12 @@
-import { ChevronRight, FileAudio2, FlaskConical, FolderOpen, Layers, Search, Upload } from "lucide-react";
+import { ChevronRight, FileAudio2, FlaskConical, FolderOpen, Layers, Link2, Search, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { BROWSER_WIDTH } from "../theme";
 import type { DawFile } from "../types/daw";
 import { decodeAndAddAudioFile } from "../utils/importAudioToProject";
+import { audioAssetManager } from "../engine/AudioAssetManager";
+import { platform } from "../platform";
 
 function fileBadge(file: DawFile) {
   if (file.mimeType.includes("mpeg") || file.name.toLowerCase().endsWith(".mp3")) return "MP3";
@@ -71,6 +73,7 @@ function FileRow({ file }: { file: DawFile }) {
   const setSelectedBrowserFileId = useUIStore((s) => s.setSelectedBrowserFileId);
   const status = useProjectStore((s) => s.waveformStatus.get(file.id));
   const selected = selectedBrowserFileId === file.id;
+  const missing = status === "missing" || file.storageProvider === "missing";
   const assetLabel = status === "missing"
     ? "Missing"
     : file.storageProvider === "indexeddb"
@@ -78,8 +81,10 @@ function FileRow({ file }: { file: DawFile }) {
       : "Ready";
 
   return (
-    <button
+    <div
       draggable
+      role="button"
+      tabIndex={0}
       onClick={() => setSelectedBrowserFileId(selected ? null : file.id)}
       onDragStart={(e) => {
         e.dataTransfer.setData("application/x-mochi-file-id", file.id);
@@ -107,11 +112,30 @@ function FileRow({ file }: { file: DawFile }) {
       </span>
       <span
         className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px]"
-        style={{ color: status === "missing" ? "rgba(240,122,114,0.85)" : "rgba(154,166,178,0.8)" }}
+        style={{ color: missing ? "rgba(240,122,114,0.85)" : "rgba(154,166,178,0.8)" }}
       >
         {assetLabel}
       </span>
-    </button>
+      {missing && (
+        <button
+          type="button"
+          title="Relink missing audio"
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-daw-border bg-daw-bg text-daw-faint transition-colors hover:border-daw-accent hover:text-daw-text"
+          onClick={async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const files = await platform.fileSystem.pickAudioFiles();
+            const picked = files[0];
+            if (!picked) return;
+            await audioAssetManager.relinkMissingAsset(file.id, picked).catch((error) => {
+              console.warn("[BrowserPanel] relink failed:", error);
+            });
+          }}
+        >
+          <Link2 size={10} />
+        </button>
+      )}
+    </div>
   );
 }
 

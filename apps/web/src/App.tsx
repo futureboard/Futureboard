@@ -1,10 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { TransportBar } from "./components/TransportBar";
 import { CommandPalette } from "./components/ui/CommandPalette";
 import { ContextMenu } from "./components/ui/ContextMenu";
 import { WindowHost } from "./components/windows/WindowHost";
 import { audioEngine } from "./engine/AudioEngine";
+import { audioAssetManager } from "./engine/AudioAssetManager";
 import { mixer } from "./engine/Mixer";
 import { transport } from "./engine/Transport";
 import { metronomeScheduler } from "./engine/MetronomeScheduler";
@@ -19,12 +20,15 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
 import { platform } from "./platform";
 import { ToastContainer } from "./components/ui/Toast";
+import { PerfMonitor } from "./components/PerfMonitor";
 import { useRecentProjectsStore } from "./store/recentProjectsStore";
 import "./App.css";
 
 // Wire engine modules to app-layer state — runs once at module load time.
 // Engine modules stay store-free; this adapter is the only crossing point.
 transport.setTrackGetter(() => useProjectStore.getState().project.tracks);
+transport.setFileGetter(() => useProjectStore.getState().project.files);
+transport.setPeaksCallback((fileId, peaks) => useProjectStore.getState().setPeaks(fileId, peaks));
 
 metronomeScheduler.setConfigGetter(() => {
   const { project } = useProjectStore.getState();
@@ -41,7 +45,8 @@ metronomeScheduler.setConfigGetter(() => {
 });
 
 export default function App() {
-  const { setPeaks, setWaveformStatus, loadLocal, project } = useProjectStore();
+  const { setWaveformStatus, loadLocal, project } = useProjectStore();
+  const [perfVisible, setPerfVisible] = useState(false);
   useKeyboardShortcuts();
 
   useEffect(() => {
@@ -90,6 +95,18 @@ export default function App() {
         useUIStore.getState().setSaveStatus("unsaved");
       }
     });
+  }, []);
+
+  // Ctrl+Shift+P toggles the performance/GPU monitor overlay.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "P") {
+        e.preventDefault();
+        setPerfVisible((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // Block browser / OS page zoom (Ctrl/Cmd + wheel, pinch). Timeline keeps its own zoom via a non-passive wheel listener.
@@ -153,19 +170,15 @@ export default function App() {
     }
   }, [project.tracks, project.bpm]);
 
-  // After project files are known, restore their AudioBuffers from IndexedDB
+  // After project files are known, validate asset availability and hydrate cached peaks.
   useEffect(() => {
-    for (const file of project.files) {
-      if (audioEngine.getBuffer(file.id)) continue;   // already in memory
-      setWaveformStatus(file.id, "loading");
-      audioEngine.restoreBuffer(file, (fid, peaks) => setPeaks(fid, peaks)).then((buffer) => {
-        if (buffer === null) setWaveformStatus(file.id, "missing");
-      }).catch((e) => {
-        console.warn("[App] restoreBuffer:", e);
-        setWaveformStatus(file.id, "error");
+    audioAssetManager
+      .restoreProjectAssets(project)
+      .catch((e) => {
+        console.warn("[App] restoreProjectAssets:", e);
+        for (const file of project.files) setWaveformStatus(file.id, "error");
       });
-    }
-  }, [project.files, setPeaks, setWaveformStatus]);
+  }, [project, setWaveformStatus]);
 
   return (
     <div className="flex h-full flex-col bg-daw-bg -space-y-[1px] text-daw-text">
@@ -181,6 +194,7 @@ export default function App() {
       <ContextMenu />
       <WindowHost />
       <ToastContainer />
+      <PerfMonitor visible={perfVisible} />
     </div>
   );
 }

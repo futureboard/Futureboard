@@ -25,8 +25,8 @@ export interface WaveformCacheAdapter {
   clear(): Promise<void>;
 }
 
-export function buildCacheKey(fileId: string, samplesPerPeak: number = SAMPLES_PER_PEAK): string {
-  return `waveform:v${WAVEFORM_CACHE_VERSION}:${fileId}:${samplesPerPeak}`;
+export function buildCacheKey(fileId: string, samplesPerPeak: number = SAMPLES_PER_PEAK, channel = 0): string {
+  return `waveform:v${WAVEFORM_CACHE_VERSION}:${fileId}:ch${channel}:${samplesPerPeak}`;
 }
 
 export function entryPeaksAsFloat32(entry: WaveformCacheEntry): Float32Array {

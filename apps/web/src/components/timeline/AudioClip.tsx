@@ -205,6 +205,8 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     let draggedTrackId = clip.trackId;
     let duplicated = false;
     let lastSeconds = clip.startTime;
+    let rafId: number | null = null;
+    let pendingTime = clip.startTime;
 
     const onMove = (ev: MouseEvent) => {
       // Duplicate on threshold when Alt was held at drag start.
@@ -252,15 +254,27 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
         t = snapTime(t, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
       }
       lastSeconds = t;
-      moveClip(draggedClipId, draggedTrackId, t);
+      pendingTime = t;
 
       const slot = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
       useUIStore.getState().setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
+
+      if (rafId === null) {
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          moveClip(draggedClipId, draggedTrackId, pendingTime);
+        });
+      }
     };
 
     const onUp = (ev: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+        moveClip(draggedClipId, draggedTrackId, pendingTime);
+      }
       setDragging(false);
       useUIStore.getState().setDraggingClipTargetIdx(null);
 
@@ -448,7 +462,13 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       </div>
 
       {/* waveform area */}
-      <div className="relative overflow-hidden" style={{ height: waveH, background: hex2rgba(color, 0.19) }}>
+      <div
+        className="relative overflow-hidden"
+        style={{
+          height: waveH,
+          background: `linear-gradient(180deg, ${hex2rgba(color, 0.16)}, rgba(8,12,16,0.72))`,
+        }}
+      >
         <div className="pointer-events-none absolute inset-y-0 left-0 w-1.5 bg-white/20" />
         <div className="pointer-events-none absolute inset-y-0 right-0 w-1.5 bg-black/20" />
         <WaveformCanvas

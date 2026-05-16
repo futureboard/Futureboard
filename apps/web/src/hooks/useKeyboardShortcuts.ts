@@ -2,29 +2,66 @@ import { useEffect } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useTransportStore } from "../store/transportStore";
-import { useMetronomeStore } from "../store/metronomeStore";
 import { useHistoryStore } from "../store/historyStore";
 import { transport } from "../engine/Transport";
 import { beatsPerBar, secondsPerBeat } from "../utils/musicalTime";
 import { DeleteClipsCommand, DeleteTrackCommand, DuplicateClipsCommand, SplitClipCommand } from "../commands";
+import { useMetronomeStore } from "../store/metronomeStore";
+import { runAction } from "../menu/actionRunner";
 
-function isTyping(e: KeyboardEvent): boolean {
-  const t = e.target as HTMLElement;
-  return (
-    t.tagName === "INPUT" ||
-    t.tagName === "TEXTAREA" ||
-    t.tagName === "SELECT" ||
-    t.isContentEditable
-  );
+/** Returns true when the event target is a text input — most shortcuts should be suppressed. */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!target || !(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (target.isContentEditable) return true;
+  const role = target.getAttribute("role");
+  if (role === "textbox" || role === "combobox" || role === "searchbox") return true;
+  return false;
 }
 
 export function useKeyboardShortcuts() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e)) return;
-
       const ctrl = e.ctrlKey || e.metaKey;
       const shift = e.shiftKey;
+      const inEditable = isEditableTarget(e.target);
+
+      // ── Global shortcuts — always fire regardless of focus ───────────────
+      // These must preventDefault to block browser default file dialogs.
+      if (ctrl && !shift && e.code === "KeyS") {
+        e.preventDefault();
+        runAction("project:save");
+        return;
+      }
+      if (ctrl && shift && e.code === "KeyS") {
+        e.preventDefault();
+        runAction("project:save-as");
+        return;
+      }
+      if (ctrl && !shift && e.code === "KeyO") {
+        e.preventDefault();
+        if (!inEditable) runAction("project:open");
+        return;
+      }
+      if (ctrl && !shift && e.code === "KeyN") {
+        e.preventDefault();
+        if (!inEditable) runAction("project:new");
+        return;
+      }
+      if (ctrl && !shift && e.code === "KeyI") {
+        e.preventDefault();
+        if (!inEditable) runAction("file:import-audio");
+        return;
+      }
+      if (ctrl && !shift && e.code === "Comma") {
+        e.preventDefault();
+        if (!inEditable) runAction("app:preferences");
+        return;
+      }
+
+      // ── Block non-global shortcuts while typing ──────────────────────────
+      if (inEditable) return;
 
       const {
         pixelsPerSecond,
@@ -37,7 +74,7 @@ export function useKeyboardShortcuts() {
         toggleCommandPalette,
       } = useUIStore.getState();
 
-      const { project, saveLocal } = useProjectStore.getState();
+      const { project } = useProjectStore.getState();
       const { isPlaying, setIsPlaying } = useTransportStore.getState();
       const history = useHistoryStore.getState();
       const timeSig = project.timeSignature ?? { numerator: 4, denominator: 4 };
@@ -68,8 +105,7 @@ export function useKeyboardShortcuts() {
           break;
         }
 
-        // ── Playhead nudge ─────────────────────────────────────────────────
-        // ← / → by 1 beat; Shift+← / Shift+→ by 1 bar
+        // ── Playhead nudge: ← / → by 1 beat; Shift+← / Shift+→ by 1 bar ──
         case "ArrowLeft": {
           if (ctrl) break;
           e.preventDefault();
@@ -85,8 +121,8 @@ export function useKeyboardShortcuts() {
           break;
         }
 
-        // ── Zoom ───────────────────────────────────────────────────────────
-        case "Equal":       // +/=
+        // ── Zoom ──────────────────────────────────────────────────────────
+        case "Equal":
         case "NumpadAdd": {
           if (ctrl) break;
           e.preventDefault();
@@ -108,7 +144,7 @@ export function useKeyboardShortcuts() {
           break;
         }
 
-        // ── Edit ───────────────────────────────────────────────────────────
+        // ── Edit ──────────────────────────────────────────────────────────
         case "Delete":
         case "Backspace": {
           const { focusedPanel } = useUIStore.getState();
@@ -131,31 +167,18 @@ export function useKeyboardShortcuts() {
           useUIStore.getState().setSelectedMixerTrackId(null);
           break;
         }
-        case "KeyS": {
-          if (ctrl) {
-            e.preventDefault();
-            saveLocal();
-          } else {
-            e.preventDefault();
-            const ids = useUIStore.getState().selectedClipIds;
-            if (ids.length > 0) {
-              const t = transport.projectTime;
-              ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
-              setSelectedClipIds([]);
-            }
-          }
+
+        // ── Edit via runAction ─────────────────────────────────────────────
+        case "KeyZ": {
+          if (!ctrl) break;
+          e.preventDefault();
+          runAction(shift ? "edit:redo" : "edit:undo");
           break;
         }
-        case "KeyX": {
-          if (!ctrl) {
-            e.preventDefault();
-            const ids = useUIStore.getState().selectedClipIds;
-            if (ids.length > 0) {
-              const t = transport.projectTime;
-              ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
-              setSelectedClipIds([]);
-            }
-          }
+        case "KeyY": {
+          if (!ctrl) break;
+          e.preventDefault();
+          runAction("edit:redo");
           break;
         }
         case "KeyD": {
@@ -167,27 +190,41 @@ export function useKeyboardShortcuts() {
           }
           break;
         }
-        case "KeyZ": {
-          if (!ctrl) break;
+
+        // ── Clip split ────────────────────────────────────────────────────
+        case "KeyS": {
+          // Ctrl+S is handled above. Plain S splits at playhead.
+          if (ctrl) break;
           e.preventDefault();
-          if (shift) history.redo();
-          else history.undo();
+          const ids = useUIStore.getState().selectedClipIds;
+          if (ids.length > 0) {
+            const t = transport.projectTime;
+            ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
+            setSelectedClipIds([]);
+          }
           break;
         }
-        case "KeyY": {
-          if (!ctrl) break;
+        case "KeyX": {
+          if (ctrl) break;
           e.preventDefault();
-          history.redo();
+          const ids = useUIStore.getState().selectedClipIds;
+          if (ids.length > 0) {
+            const t = transport.projectTime;
+            ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
+            setSelectedClipIds([]);
+          }
           break;
         }
 
-        // ── Arrangement tools ──────────────────────────────────────────────
+        // ── Arrangement tools ─────────────────────────────────────────────
         case "KeyV": {
           if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("pointer"); }
           break;
         }
         case "KeyP": {
-          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("pen"); }
+          if (ctrl) break;
+          e.preventDefault();
+          useUIStore.getState().setCurrentTool("pen");
           break;
         }
         case "KeyC": {
@@ -203,18 +240,18 @@ export function useKeyboardShortcuts() {
           break;
         }
         case "KeyA": {
-          if (!ctrl) { e.preventDefault(); useUIStore.getState().setCurrentTool("automation"); }
+          if (ctrl) { e.preventDefault(); runAction("edit:select-all"); }
+          else { e.preventDefault(); useUIStore.getState().setCurrentTool("automation"); }
           break;
         }
 
-        // ── View toggles ───────────────────────────────────────────────────
+        // ── View toggles ──────────────────────────────────────────────────
         case "KeyK": {
           if (ctrl) {
             e.preventDefault();
             toggleCommandPalette();
           } else {
-            const { toggle: toggleMetronome } = useMetronomeStore.getState();
-            toggleMetronome();
+            useMetronomeStore.getState().toggle();
           }
           break;
         }
@@ -223,10 +260,12 @@ export function useKeyboardShortcuts() {
           break;
         }
         case "KeyI": {
+          // Ctrl+I handled above; plain I toggles inspector
           if (!ctrl) togglePanel("inspector");
           break;
         }
         case "KeyN": {
+          // Ctrl+N handled above; plain N toggles snap
           if (!ctrl) toggleSnapToGrid();
           break;
         }
@@ -239,7 +278,7 @@ export function useKeyboardShortcuts() {
           break;
         }
 
-        // ── Panel shortcuts ────────────────────────────────────────────────
+        // ── Panel shortcuts ───────────────────────────────────────────────
         case "Digit1": {
           if (ctrl) { e.preventDefault(); togglePanel("browser"); }
           break;

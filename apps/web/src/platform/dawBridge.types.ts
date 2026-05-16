@@ -26,6 +26,8 @@ export type DawBridgePickedAudioFile = {
   lastModified: number;
 };
 
+export type DawBridgeAudioFileStat = Omit<DawBridgePickedAudioFile, "bytes">;
+
 export type DawBridgeMessageBoxKind =
   | "none"
   | "info"
@@ -58,14 +60,56 @@ export type DawBridgeOpenDialogResult = {
 export interface DawBridgeFs {
   pickAudioFiles(): Promise<DawBridgePickedAudioFile[]>;
   readAudioFile(path: string): Promise<DawBridgePickedAudioFile | null>;
+  statAudioFile(path: string): Promise<DawBridgeAudioFileStat | null>;
   revealInFileManager(path: string): Promise<void>;
 }
+
+export type DawBridgeFolderCreateOptions = {
+  name: string;
+  location: string;
+};
+
+export type DawBridgeFolderCreateResult = {
+  projectRoot: string;
+  projectFilePath: string;
+};
+
+export type DawBridgeFolderImportResult = {
+  relativePath: string;
+  absolutePath: string;
+  name: string;
+  size: number;
+  lastModified: number;
+};
+
+export type DawBridgeBrowseFolderResult = {
+  canceled: boolean;
+  folderPath?: string;
+};
 
 export interface DawBridgeProject {
   showSaveDialog(suggestedName?: string): Promise<DawBridgeSaveDialogResult>;
   showOpenDialog(): Promise<DawBridgeOpenDialogResult>;
   read(path: string): Promise<string | null>;
   write(path: string, contents: string): Promise<boolean>;
+  // Folder project operations
+  browseFolderLocation(): Promise<DawBridgeBrowseFolderResult>;
+  createFolderProject(options: DawBridgeFolderCreateOptions): Promise<DawBridgeFolderCreateResult | null>;
+  saveFolderProject(projectRoot: string, contents: string): Promise<boolean>;
+  openFolderFile(filePath: string): Promise<string | null>;
+  importAudioToFolder(projectRoot: string, sourcePath: string): Promise<DawBridgeFolderImportResult | null>;
+}
+
+export type DawBridgeGpuFeatureStatus = {
+  hardwareAccelerationEnabled: boolean;
+  features: Record<string, string>;
+  gpuDescription: string | null;
+  electronVersion: string;
+  chromeVersion: string;
+};
+
+export interface DawBridgeSys {
+  getGpuInfo(): Promise<DawBridgeGpuFeatureStatus>;
 }
 
 export interface DawBridgeDialog {
@@ -92,6 +136,7 @@ export interface DawElectronBridge {
   project: DawBridgeProject;
   dialog: DawBridgeDialog;
   window: DawBridgeWindow;
+  sys: DawBridgeSys;
 }
 
 declare global {

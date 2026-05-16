@@ -169,15 +169,18 @@ export type DawFile = {
   mimeType: string;
   size?: number;
   lastModified?: number;
+  hash?: string;
   originalFileName?: string;
   duration: number;
   sampleRate: number;
   channels: number;
-  storageProvider?: "indexeddb" | "opfs" | "file-handle" | "missing";
+  storageProvider?: "indexeddb" | "opfs" | "file-handle" | "project-folder" | "missing";
   cacheKey?: string;
   waveformCacheKeys?: string[];
   storageKey?: string;
   localObjectUrl?: string;
+  /** Relative path from the project folder root (folder-based projects only). */
+  relativePath?: string;
 };
 
 export type WaveformPeaks = {

@@ -9,7 +9,7 @@ import { useProjectStore } from "../../store/projectStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { AddClipCommand } from "../../commands";
 import { isPrimaryModifier } from "../../hooks/useModifierKeys";
-import { addFileToTimeline, decodeAndAddAudioFile } from "../../utils/importAudioToProject";
+import { addFileToTimeline, importAudioFileToTimelineProgressive } from "../../utils/importAudioToProject";
 import { showToast } from "../ui/Toast";
 import { useState } from "react";
 
@@ -186,8 +186,7 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
         const list = e.dataTransfer.files;
         if (!list?.length) return;
         for (const f of Array.from(list)) {
-          const dawFile = await decodeAndAddAudioFile(f);
-          if (dawFile) addFileToTimeline(dawFile, Math.max(0, time), track.id);
+          await importAudioFileToTimelineProgressive(f, Math.max(0, time), track.id);
         }
       }}
       className="relative min-w-0 flex-1 overflow-hidden border-b border-daw-border transition-colors"

@@ -4,6 +4,8 @@ import type { DawElectronBridge } from "./dawBridge.types";
 import type {
   DialogAdapter,
   FileSystemAdapter,
+  FolderImportAudioResult,
+  FolderProjectAdapter,
   MessageBoxOptions,
   Platform,
   PlatformCapabilities,
@@ -12,6 +14,7 @@ import type {
   SaveProjectResult,
   WindowAdapter,
 } from "./platform.types";
+import { setElectronWaveformCacheProjectRoot } from "../engine/waveformCache";
 
 function bridge(): DawElectronBridge {
   const b = typeof window !== "undefined" ? window.dawElectron : undefined;
@@ -46,6 +49,9 @@ const fileSystem: FileSystemAdapter = {
     const picked = await bridge().fs.readAudioFile(path);
     return picked ? fileFromPickedAudio(picked) : null;
   },
+  async statAudioFile(path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null> {
+    return bridge().fs.statAudioFile(path);
+  },
   async revealInFileManager(path: string): Promise<void> {
     await bridge().fs.revealInFileManager(path);
   },
@@ -66,12 +72,27 @@ function fileFromPickedAudio(
   return file;
 }
 
-// Renderer-side project path tracking. We don't expose this in `DawProject`
-// itself; it's purely so a subsequent "Save" (without "Save As") can skip
-// the dialog. Cleared when a different project is opened.
+// Renderer-side project path tracking. We don't expose these in `DawProject`
+// itself; they are purely runtime state for save/open operations.
 let lastProjectPath: string | undefined;
+// Non-null when the current project is a folder-based project (.mochiproj inside a folder).
+let currentProjectRoot: string | null = null;
+// Timestamp written when the project file was first created (folder mode only).
+let folderProjectCreatedAt: number | null = null;
 
-function serializeProject(project: DawProject): DawProject {
+/** Resolve a relative path (forward-slash) against a project root (native path). */
+function joinProjectPath(root: string, relPath: string): string {
+  const sep = root.includes("\\") ? "\\" : "/";
+  return `${root}${sep}${relPath.replace(/\//g, sep)}`;
+}
+
+/** Derive the project root from a .mochiproj file path. */
+function rootFromFilePath(filePath: string): string {
+  const lastSlash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
+  return filePath.substring(0, lastSlash);
+}
+
+function serializeProject(project: DawProject): object {
   return {
     ...project,
     files: project.files.map((file) => ({
@@ -80,6 +101,7 @@ function serializeProject(project: DawProject): DawProject {
       mimeType: file.mimeType,
       size: file.size,
       lastModified: file.lastModified,
+      hash: file.hash,
       originalFileName: file.originalFileName,
       duration: file.duration,
       sampleRate: file.sampleRate,
@@ -88,7 +110,66 @@ function serializeProject(project: DawProject): DawProject {
       cacheKey: file.cacheKey,
       waveformCacheKeys: file.waveformCacheKeys,
       storageKey: file.storageKey,
+      relativePath: file.relativePath,
     })),
+  };
+}
+
+function serializeFolderProject(project: DawProject): object {
+  const now = Date.now();
+  return {
+    schemaVersion: 1,
+    createdAt: folderProjectCreatedAt ?? now,
+    updatedAt: now,
+    ...project,
+    files: project.files.map((file) => ({
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      lastModified: file.lastModified,
+      hash: file.hash,
+      originalFileName: file.originalFileName,
+      duration: file.duration,
+      sampleRate: file.sampleRate,
+      channels: file.channels,
+      storageProvider: "project-folder" as const,
+      relativePath: file.relativePath,
+      waveformCacheKeys: file.waveformCacheKeys,
+      // cacheKey and storageKey are absolute paths — do not persist them
+    })),
+  };
+}
+
+function setProjectRootInternal(root: string | null): void {
+  currentProjectRoot = root;
+  setElectronWaveformCacheProjectRoot(root);
+}
+
+function resolveOpenedProject(
+  parsed: DawProject & { schemaVersion?: number; createdAt?: number; updatedAt?: number },
+  filePath: string,
+): DawProject {
+  const root = rootFromFilePath(filePath);
+  setProjectRootInternal(root);
+  lastProjectPath = filePath;
+  if (parsed.createdAt != null) folderProjectCreatedAt = parsed.createdAt;
+
+  return {
+    ...parsed,
+    files: (parsed.files ?? []).map((file) => {
+      if (file.relativePath) {
+        const absPath = joinProjectPath(root, file.relativePath);
+        return {
+          ...file,
+          storageProvider: "project-folder" as const,
+          cacheKey: absPath,
+          storageKey: absPath,
+          localObjectUrl: undefined,
+        };
+      }
+      return file;
+    }),
   };
 }
 
@@ -98,6 +179,38 @@ const projectStorage: ProjectStorageAdapter = {
     opts?: SaveProjectOptions,
   ): Promise<SaveProjectResult | null> {
     const b = bridge();
+
+    // Folder project mode: save atomically inside the project root
+    if (currentProjectRoot && !opts?.saveAs) {
+      const ok = await b.project.saveFolderProject(
+        currentProjectRoot,
+        JSON.stringify(serializeFolderProject(project), null, 2),
+      );
+      if (!ok) return null;
+      return { path: lastProjectPath, projectRoot: currentProjectRoot };
+    }
+
+    // Save As for folder project: ask for new location then create folder project
+    if (currentProjectRoot && opts?.saveAs) {
+      const browseResult = await b.project.browseFolderLocation();
+      if (browseResult.canceled || !browseResult.folderPath) return null;
+      const createResult = await b.project.createFolderProject({
+        name: project.name,
+        location: browseResult.folderPath,
+      });
+      if (!createResult) return null;
+      setProjectRootInternal(createResult.projectRoot);
+      lastProjectPath = createResult.projectFilePath;
+      folderProjectCreatedAt = Date.now();
+      const ok = await b.project.saveFolderProject(
+        currentProjectRoot,
+        JSON.stringify(serializeFolderProject(project), null, 2),
+      );
+      if (!ok) return null;
+      return { path: lastProjectPath, projectRoot: currentProjectRoot };
+    }
+
+    // Legacy mode: show save dialog
     let targetPath = lastProjectPath;
     if (!targetPath || opts?.saveAs) {
       const result = await b.project.showSaveDialog(`${project.name}.mochiproj`);
@@ -109,6 +222,7 @@ const projectStorage: ProjectStorageAdapter = {
     lastProjectPath = targetPath;
     return { path: targetPath };
   },
+
   async openProject(): Promise<DawProject | null> {
     const b = bridge();
     const result = await b.project.showOpenDialog();
@@ -116,9 +230,61 @@ const projectStorage: ProjectStorageAdapter = {
     const raw = await b.project.read(result.path);
     if (raw == null) return null;
     try {
-      const project = JSON.parse(raw) as DawProject;
+      const parsed = JSON.parse(raw) as DawProject & { schemaVersion?: number; createdAt?: number };
+      if (parsed.schemaVersion != null || (parsed.files ?? []).some((f) => f.relativePath)) {
+        return resolveOpenedProject(parsed, result.path);
+      }
+      setProjectRootInternal(null);
       lastProjectPath = result.path;
-      return project;
+      folderProjectCreatedAt = null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  },
+};
+
+const folderProject: FolderProjectAdapter = {
+  isSupported: true,
+
+  getProjectRoot(): string | null {
+    return currentProjectRoot;
+  },
+
+  setProjectRoot(root: string | null): void {
+    setProjectRootInternal(root);
+  },
+
+  getProjectFilePath(): string | null {
+    return lastProjectPath ?? null;
+  },
+
+  async browseLocation(): Promise<string | null> {
+    const result = await bridge().project.browseFolderLocation();
+    if (result.canceled || !result.folderPath) return null;
+    return result.folderPath;
+  },
+
+  async createProject(opts: { name: string; location: string }): Promise<{ projectRoot: string; projectFilePath: string } | null> {
+    const result = await bridge().project.createFolderProject(opts);
+    if (!result) return null;
+    setProjectRootInternal(result.projectRoot);
+    lastProjectPath = result.projectFilePath;
+    folderProjectCreatedAt = Date.now();
+    return result;
+  },
+
+  async importAudio(sourcePath: string): Promise<FolderImportAudioResult | null> {
+    if (!currentProjectRoot) return null;
+    return bridge().project.importAudioToFolder(currentProjectRoot, sourcePath);
+  },
+
+  async openByPath(filePath: string): Promise<DawProject | null> {
+    const raw = await bridge().project.openFolderFile(filePath);
+    if (raw == null) return null;
+    try {
+      const parsed = JSON.parse(raw) as DawProject & { schemaVersion?: number; createdAt?: number };
+      return resolveOpenedProject(parsed, filePath);
     } catch {
       return null;
     }
@@ -159,4 +325,5 @@ export const electronPlatform: Platform = {
   projectStorage,
   dialog,
   window: windowAdapter,
+  folderProject,
 };

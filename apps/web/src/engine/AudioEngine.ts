@@ -120,9 +120,6 @@ class AudioEngine {
       if (file.storageProvider === "file-handle" && file.cacheKey) {
         const source = await platform.fileSystem.readAudioFile(file.cacheKey);
         if (!source) return null;
-        audioStorage.save(file.id, source).catch((e) =>
-          console.warn("[AudioStorage] restore source save failed:", e)
-        );
         return await this.decodeAndCache(file, await source.arrayBuffer(), onPeaks);
       }
       return null;

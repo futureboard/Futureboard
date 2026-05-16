@@ -1,10 +1,18 @@
 import type { WaveformCacheAdapter, WaveformCacheEntry } from "./types";
 import { MemoryWaveformCache } from "./MemoryWaveformCache";
 
+// When a folder project is active, peak cache is written to
+// <projectRoot>/Cache/Peaks/ instead of the global userData cache.
+let _projectRoot: string | null = null;
+
+export function setElectronWaveformCacheProjectRoot(root: string | null): void {
+  _projectRoot = root;
+}
+
 type WaveformCacheBridge = {
-  get(key: string): Promise<WaveformCacheEntry | null>;
-  set(key: string, entry: WaveformCacheEntry & { peaks: number[] }): Promise<void>;
-  delete(key: string): Promise<void>;
+  get(key: string, projectRoot?: string): Promise<WaveformCacheEntry | null>;
+  set(key: string, entry: WaveformCacheEntry & { peaks: number[] }, projectRoot?: string): Promise<void>;
+  delete(key: string, projectRoot?: string): Promise<void>;
   clear(): Promise<void>;
 };
 
@@ -20,7 +28,7 @@ export class ElectronWaveformCache implements WaveformCacheAdapter {
     const bridge = getBridge();
     if (!bridge) return this.fallback.get(key);
     try {
-      const entry = await bridge.get(key);
+      const entry = await bridge.get(key, _projectRoot ?? undefined);
       if (!entry) return null;
       if (Array.isArray(entry.peaks)) {
         return { ...entry, peaks: new Int16Array(entry.peaks) };
@@ -40,7 +48,7 @@ export class ElectronWaveformCache implements WaveformCacheAdapter {
         ...entry,
         peaks: Array.from(entry.peaks instanceof Int16Array || entry.peaks instanceof Float32Array ? entry.peaks : entry.peaks),
       };
-      await bridge.set(key, serialized);
+      await bridge.set(key, serialized, _projectRoot ?? undefined);
     } catch (e) {
       console.warn("[ElectronWaveformCache] set failed:", e);
       await this.fallback.set(key, entry);
@@ -51,7 +59,7 @@ export class ElectronWaveformCache implements WaveformCacheAdapter {
     const bridge = getBridge();
     if (!bridge) return this.fallback.delete(key);
     try {
-      await bridge.delete(key);
+      await bridge.delete(key, _projectRoot ?? undefined);
     } catch {
       await this.fallback.delete(key);
     }

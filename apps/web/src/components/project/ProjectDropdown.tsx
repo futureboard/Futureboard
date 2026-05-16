@@ -2,8 +2,11 @@ import { Check, Cloud, FolderOpen, Plus, Search, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { platform } from "../../platform";
 import { useProjectStore } from "../../store/projectStore";
+import { useHistoryStore } from "../../store/historyStore";
 import { useRecentProjectsStore, type RecentProject } from "../../store/recentProjectsStore";
 import { useUIStore } from "../../store/uiStore";
+import { useWindowStore } from "../../store/windowStore";
+import { audioAssetManager } from "../../engine/AudioAssetManager";
 import { showToast } from "../ui/Toast";
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -91,6 +94,7 @@ function ActionRow({
 export function ProjectDropdown({ onClose }: { onClose: () => void }) {
   const { project } = useProjectStore();
   const { saveStatus } = useUIStore();
+  const waveformStatus = useProjectStore((s) => s.waveformStatus);
   const { recentProjects, removeRecentProject, clearRecentProjects } = useRecentProjectsStore();
   const [search, setSearch] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -122,11 +126,18 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
     };
   }, [onClose]);
 
+  const missingAssets = project.files.filter((file) => waveformStatus.get(file.id) === "missing" || file.storageProvider === "missing").length;
+  const projectRoot = platform.folderProject.getProjectRoot();
+  const storageModeLabel = projectRoot
+    ? "Folder project"
+    : platform.kind === "electron"
+      ? "Saved locally"
+      : "Browser storage";
   const saveLabel =
     saveStatus === "unsaved" ? "Unsaved changes" :
     saveStatus === "saving" ? "Saving..." :
     saveStatus === "error" ? "Save error" :
-    "Saved locally";
+    `${storageModeLabel}${missingAssets > 0 ? ` · ${missingAssets} missing asset${missingAssets === 1 ? "" : "s"}` : ""}`;
 
   const filteredRecent = recentProjects.filter(
     (p) =>
@@ -140,12 +151,24 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
       try {
         const opened = await platform.projectStorage.openProject();
         if (opened) {
-          useProjectStore.getState().setProjectName(opened.name);
+          useProjectStore.getState().loadProject(opened);
+          useHistoryStore.getState().clear();
+          useUIStore.getState().setSelectedClipIds([]);
+          useUIStore.getState().setSelectedTrackId(null);
+          useUIStore.getState().setSelectedBrowserFileId(null);
+          useUIStore.getState().setSaveStatus("saved");
+          const projectRoot = platform.folderProject.getProjectRoot();
           useRecentProjectsStore.getState().addRecentProject({
             id: opened.id ?? crypto.randomUUID(),
             name: opened.name,
+            projectRoot: projectRoot ?? undefined,
+            projectFilePath: projectRoot
+              ? `${projectRoot}/${opened.name}.mochiproj`
+              : undefined,
+            storageMode: projectRoot ? "folder" : "browser",
             source: "local",
           });
+          void audioAssetManager.restoreProjectAssets(opened);
           showToast(`Opened: ${opened.name}`);
         }
       } catch {
@@ -153,27 +176,61 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
       }
     } else {
       showToast(
-        "Local folder opening is available in Electron. Web projects use browser storage.",
+        "Folder projects are available in Futureboard Lite / Electron.",
         true,
       );
     }
   };
 
-  const handleSelectRecent = (p: RecentProject) => {
+  const handleSelectRecent = async (p: RecentProject) => {
     onClose();
+    // Folder project: load by file path
+    if (p.storageMode === "folder" && p.projectFilePath && platform.folderProject.isSupported) {
+      try {
+        const opened = await platform.folderProject.openByPath(p.projectFilePath);
+        if (opened) {
+          useProjectStore.getState().loadProject(opened);
+          useHistoryStore.getState().clear();
+          useUIStore.getState().setSelectedClipIds([]);
+          useUIStore.getState().setSelectedTrackId(null);
+          useUIStore.getState().setSelectedBrowserFileId(null);
+          useUIStore.getState().setSaveStatus("saved");
+          useRecentProjectsStore.getState().addRecentProject({
+            ...p,
+            lastOpenedAt: Date.now(),
+          });
+          void audioAssetManager.restoreProjectAssets(opened);
+          showToast(`Opened: ${opened.name}`);
+          return;
+        } else {
+          showToast(`Could not open "${p.name}" — file may have moved.`, true);
+          return;
+        }
+      } catch {
+        showToast(`Failed to open "${p.name}".`, true);
+        return;
+      }
+    }
+    // Fallback: just switch name (legacy behaviour)
     useProjectStore.getState().setProjectName(p.name);
     useRecentProjectsStore.getState().addRecentProject({
-      id: p.id,
-      name: p.name,
-      path: p.path,
-      source: p.source,
+      ...p,
+      lastOpenedAt: Date.now(),
     });
     showToast(`Switched to: ${p.name}`);
   };
 
   const handleNewProject = () => {
     onClose();
-    showToast("New project flow not yet implemented.");
+    useWindowStore.getState().openDialog({
+      contentType: "projectWizard",
+      title: "New Project",
+      modal: true,
+      width: 520,
+      height: platform.kind === "electron" ? 620 : 540,
+      resizable: false,
+      closable: true,
+    });
   };
 
   const handleClearRecent = () => {
@@ -224,8 +281,8 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
               <ProjectRow
                 key={p.id}
                 name={p.name}
-                subtext={p.path ?? p.source}
-                onClick={() => handleSelectRecent(p)}
+                subtext={p.projectRoot ?? p.path ?? p.source}
+                onClick={() => { void handleSelectRecent(p); }}
                 onRemove={() => removeRecentProject(p.id)}
               />
             ))}

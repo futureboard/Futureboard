@@ -4,6 +4,7 @@ import { ElectronWaveformCache } from "./ElectronWaveformCache";
 import { MemoryWaveformCache } from "./MemoryWaveformCache";
 
 export * from "./types";
+export { setElectronWaveformCacheProjectRoot } from "./ElectronWaveformCache";
 
 function createAdapter(): WaveformCacheAdapter {
   const isElectron =

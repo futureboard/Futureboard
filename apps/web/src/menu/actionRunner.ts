@@ -11,6 +11,7 @@ import { transport } from "../engine/Transport";
 import { getTrackColor } from "../theme";
 import { platform } from "../platform";
 import { importAudioFilesAsNewTracks } from "../utils/importAudioToProject";
+import { audioAssetManager } from "../engine/AudioAssetManager";
 import { midiEditorBridge } from "./midiEditorBridge";
 import { buildSelectionState, getActiveSelectionContext } from "../store/selectionSelectors";
 import {
@@ -435,7 +436,7 @@ export function runAction(actionId: string) {
           title: "New Project",
           modal: true,
           width: 520,
-          height: 540,
+          height: platform.kind === "electron" ? 620 : 540,
           resizable: false,
           closable: true,
         });
@@ -451,16 +452,60 @@ export function runAction(actionId: string) {
     }
 
     case "project:save":
+      useUIStore.getState().setSaveStatus("saving");
       void platform.projectStorage
         .saveProject(useProjectStore.getState().project)
-        .catch((e) => console.warn("[ActionRunner] save project:", e));
+        .then((result) => {
+          if (result) {
+            useUIStore.getState().setSaveStatus("saved");
+            const proj = useProjectStore.getState().project;
+            const projectRoot = result.projectRoot ?? platform.folderProject.getProjectRoot() ?? undefined;
+            const filePath = result.path ?? platform.folderProject.getProjectFilePath() ?? undefined;
+            useRecentProjectsStore.getState().addRecentProject({
+              id: proj.id,
+              name: proj.name,
+              projectFilePath: filePath,
+              projectRoot,
+              storageMode: projectRoot ? "folder" : (platform.kind === "electron" ? "folder" : "browser"),
+              source: platform.kind === "electron" ? "local" : "browser",
+            });
+          } else {
+            useUIStore.getState().setSaveStatus("unsaved");
+          }
+        })
+        .catch((e) => {
+          console.warn("[ActionRunner] save project:", e);
+          useUIStore.getState().setSaveStatus("error");
+        });
       break;
 
     case "project:save-as":
     case "project:save-copy":
+      useUIStore.getState().setSaveStatus("saving");
       void platform.projectStorage
         .saveProject(useProjectStore.getState().project, { saveAs: true })
-        .catch((e) => console.warn("[ActionRunner] save-as:", e));
+        .then((result) => {
+          if (result) {
+            useUIStore.getState().setSaveStatus("saved");
+            const proj = useProjectStore.getState().project;
+            const projectRoot = result.projectRoot ?? platform.folderProject.getProjectRoot() ?? undefined;
+            const filePath = result.path ?? platform.folderProject.getProjectFilePath() ?? undefined;
+            useRecentProjectsStore.getState().addRecentProject({
+              id: proj.id,
+              name: proj.name,
+              projectFilePath: filePath,
+              projectRoot,
+              storageMode: projectRoot ? "folder" : (platform.kind === "electron" ? "folder" : "browser"),
+              source: platform.kind === "electron" ? "local" : "browser",
+            });
+          } else {
+            useUIStore.getState().setSaveStatus("unsaved");
+          }
+        })
+        .catch((e) => {
+          console.warn("[ActionRunner] save-as:", e);
+          useUIStore.getState().setSaveStatus("error");
+        });
       break;
 
     case "project:revert":
@@ -498,12 +543,23 @@ export function runAction(actionId: string) {
         .openProject()
         .then((p) => {
           if (p) {
-            useProjectStore.setState({ project: p });
+            useProjectStore.getState().loadProject(p);
+            useHistoryStore.getState().clear();
+            useUIStore.getState().setSelectedClipIds([]);
+            useUIStore.getState().setSelectedTrackId(null);
+            useUIStore.getState().setSelectedBrowserFileId(null);
+            useUIStore.getState().setSaveStatus("saved");
+            const projectRoot = platform.folderProject.getProjectRoot() ?? undefined;
+            const filePath = platform.folderProject.getProjectFilePath() ?? undefined;
             useRecentProjectsStore.getState().addRecentProject({
               id: p.id,
               name: p.name,
+              projectRoot,
+              projectFilePath: filePath,
+              storageMode: projectRoot ? "folder" : (platform.kind === "electron" ? "folder" : "browser"),
               source: platform.kind === "electron" ? "local" : "browser",
             });
+            void audioAssetManager.restoreProjectAssets(p);
           }
         })
         .catch((e) => console.warn("[ActionRunner] open project:", e));

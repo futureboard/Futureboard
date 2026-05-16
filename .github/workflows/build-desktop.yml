@@ -52,7 +52,7 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install
 
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-22.04'

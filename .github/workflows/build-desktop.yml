@@ -80,7 +80,7 @@ jobs:
         run: cargo install wasm-pack --locked
 
       - name: Build WASM (SphereWebAudioCore)
-        run: wasm-pack build frameworks/SphereWebAudioCore --target web --release --out-dir pkg
+        run: wasm-pack build frameworks/SphereWebAudioCore --target web --release --out-dir  apps/web/src/engine/wasm-pkg
 
       - name: Build & package (${{ matrix.platform }})
         run: bun run dist:electron:${{ matrix.platform }}

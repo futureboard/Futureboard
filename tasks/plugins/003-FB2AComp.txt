@@ -1,0 +1,465 @@
+# 003-FB2AComp.txt
+
+Task: Design and implement FB-2A Comp, a production-usable built-in optical compressor inspired by classic LA-2A-style leveling amplifiers.
+
+Goal:
+Create a musical, simple, realtime compressor plugin with optical-style program-dependent release, compact UI, persistent params, and safe WebAudio/AudioWorklet integration.
+
+References:
+- Teletronix / Universal Audio LA-2A manual material: optical/tube leveling amplifier behavior and control concept.
+  https://media.uaudio.com/assetlibrary/l/a/la-2a_manual.pdf
+- LA-2A overview: classic electro-optical compressor, average attack around 10 ms; release has fast partial recovery and long program-dependent tail.
+  https://en.wikipedia.org/wiki/LA-2A_Leveling_Amplifier
+- Audiofanzine LA-2A overview: heavy/long compression creates slower release behavior.
+  https://en.audiofanzine.com/studio-compressor/teletronix/LA-2A/editorial/articles/Legendary%20Optical%20Compressor.html
+- Web Audio AudioWorklet realtime process model.
+  https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletProcessor/process
+
+Important:
+Do not copy exact hardware branding or claim circuit-accurate modeling.
+This is a Futureboard built-in compressor with opto-inspired behavior.
+
+============================================================
+0. Scope
+============================================================
+
+Implement a built-in plugin named FB-2A Comp.
+
+Required:
+- `plugins/FB2AComp`
+- typed params/defaults/serialization
+- horizontal Effect Editor UI
+- add menu integration
+- persistent `InsertDevice.params`
+- realtime audio processing path
+- gain reduction metering
+
+Do not implement:
+- exact LA-2A clone claims
+- tube circuit simulation in first pass
+- external plugin hosting
+- separate fake state
+
+============================================================
+1. Product Identity
+============================================================
+
+Plugin name:
+- FB-2A Comp
+
+Short name:
+- FB2A
+
+Type:
+- `optical-compressor`
+
+Category:
+- `dynamics`
+
+Sound target:
+- smooth leveling
+- forgiving vocal/bass compression
+- simple two-knob workflow
+- musical release that slows down after sustained gain reduction
+- optional color/saturation but not required in Phase 1
+
+Control philosophy:
+- simple like classic optical compressors
+- advanced controls available but secondary
+
+============================================================
+2. Package Structure
+============================================================
+
+Create:
+
+plugins/
+  FB2AComp/
+    package.json
+    index.ts
+    Core/
+      index.ts
+      params.ts
+      detector.ts
+      gainComputer.ts
+      smoothing.ts
+      presets.ts
+    Editor/
+      PluginEditor.tsx
+      GainReductionMeter.tsx optional
+
+Rules:
+- DSP math is pure and testable.
+- UI writes params through callbacks only.
+- No app store imports in plugin package.
+
+============================================================
+3. Parameter Model
+============================================================
+
+Typed model:
+
+```ts
+export type FB2AMode = "compress" | "limit";
+export type FB2AMeterMode = "gr" | "output" | "input";
+
+export type FB2AParams = {
+  power: boolean;
+  peakReduction: number; // 0..100
+  gainDb: number;        // -12..24
+  mode: FB2AMode;
+  emphasis: number;      // 0..100, sidechain high frequency emphasis
+  mix: number;           // 0..100 parallel mix
+  noise: boolean;        // UI placeholder, false default
+  color: number;         // 0..100 saturation amount
+  stereoLink: number;    // 0..100
+  meter: FB2AMeterMode;
+  sidechainLowCutHz: number; // 20..500
+  outputTrimDb: number;      // -12..12
+};
+```
+
+Default:
+
+```ts
+{
+  power: true,
+  peakReduction: 35,
+  gainDb: 0,
+  mode: "compress",
+  emphasis: 45,
+  mix: 100,
+  noise: false,
+  color: 12,
+  stereoLink: 100,
+  meter: "gr",
+  sidechainLowCutHz: 90,
+  outputTrimDb: 0
+}
+```
+
+Normalization:
+- clamp numeric values
+- unknown mode -> `"compress"`
+- unknown meter -> `"gr"`
+- `noise` defaults false and may be UI-disabled in Phase 1
+
+============================================================
+4. Compressor Design
+============================================================
+
+This is not a transparent VCA compressor. It is a musical leveler.
+
+Signal path:
+
+```txt
+input -> detector sidechain -> opto envelope -> gain computer -> smoothed gain
+input -> gain reduction -> makeup/output/color/mix -> output
+```
+
+Detector:
+- use RMS-ish envelope, not pure peak
+- rectified signal squared and smoothed
+- sidechain input can be high-passed to avoid bass over-triggering
+- emphasis raises high frequencies in detector
+
+Detector per sample:
+
+```ts
+level = sqrt(smooth(input * input))
+levelDb = 20 * log10(level + 1e-12)
+```
+
+Threshold mapping:
+- classic UI does not expose threshold
+- derive threshold from `peakReduction`
+
+```ts
+thresholdDb = -6 - peakReduction / 100 * 42
+```
+
+Ratio:
+- compress mode: soft ratio around 3:1 to 4:1
+- limit mode: soft ratio around 8:1 to 12:1
+- use soft knee, not hard knee
+
+Soft knee:
+- knee width 8..14 dB
+- gain reduction ramps smoothly around threshold
+
+Gain computer:
+
+```ts
+overDb = inputDb - thresholdDb
+compressedDb = thresholdDb + overDb / ratio
+targetGrDb = min(0, compressedDb - inputDb)
+```
+
+Store/display gain reduction as positive dB:
+- UI meter shows `-grDb`, e.g. 3 dB reduction.
+
+============================================================
+5. Optical Envelope Behavior
+============================================================
+
+Classic opto behavior:
+- attack is not ultra-fast
+- release has multiple time constants
+- sustained compression releases slower
+
+Target:
+- attack around 10 ms
+- initial release around 60 ms for partial recovery
+- long tail 0.5..5 seconds depending on previous reduction depth/history
+
+Implementation:
+- maintain two release envelopes:
+  - fast release state
+  - slow memory state
+- when target gain reduction is stronger, attack toward target
+- when releasing, blend fast/slow based on accumulated compression history
+
+Pseudo:
+
+```ts
+if (targetGrDb < currentGrDb) {
+  // more reduction, attack
+  currentGrDb = smoothToward(currentGrDb, targetGrDb, attackMs)
+  memory = max(memory, -targetGrDb)
+} else {
+  // release
+  releaseMs = lerp(80, 3500, clamp(memory / 24, 0, 1))
+  currentGrDb = smoothToward(currentGrDb, targetGrDb, releaseMs)
+  memory = smoothToward(memory, 0, 2500)
+}
+```
+
+Important:
+- gain reduction is negative dB internally
+- output gain linear = `dbToGain(currentGrDb + gainDb + outputTrimDb)`
+
+============================================================
+6. Saturation / Color
+============================================================
+
+Phase 1:
+- optional simple tanh saturation after compression
+- color=0 bypasses saturator
+
+```ts
+drive = 1 + color / 100 * 4
+y = tanh(x * drive) / tanh(drive)
+```
+
+Phase 2:
+- add pre-emphasis/de-emphasis tone curve
+- add transformer-like low-frequency softening
+
+Do not add random hiss/noise by default.
+
+============================================================
+7. Stereo Handling
+============================================================
+
+Stereo link:
+- 100 = linked detector, both channels use same gain reduction
+- 0 = independent dual mono
+- intermediate = blend linked and independent gain reduction
+
+Implementation:
+- compute detector L/R
+- linkedLevel = max or RMS average
+- independent target L/R
+- linked target
+- final target:
+
+```ts
+targetL = lerp(independentL, linked, stereoLink / 100)
+targetR = lerp(independentR, linked, stereoLink / 100)
+```
+
+============================================================
+8. Audio Runtime Integration
+============================================================
+
+Preferred:
+- AudioWorklet processor for sample-accurate envelope/gain reduction
+
+Files:
+
+apps/web/src/engine/worklets/FB2ACompProcessor.worklet.ts or .js
+apps/web/src/engine/devices/FB2ACompNode.ts
+
+Host API:
+
+```ts
+class FB2ACompNode {
+  input: AudioNode;
+  output: AudioNode;
+  updateParams(params: FB2AParams): void;
+  onMeter(callback: (meter: FB2AMeterState) => void): () => void;
+  dispose(): void;
+}
+```
+
+Meter state:
+
+```ts
+type FB2AMeterState = {
+  inputPeakL: number;
+  inputPeakR: number;
+  outputPeakL: number;
+  outputPeakR: number;
+  gainReductionDbL: number;
+  gainReductionDbR: number;
+};
+```
+
+Meter update rate:
+- no more than 30 Hz to UI
+- never postMessage every sample/block if too frequent
+
+Fallback:
+- If AudioWorklet unavailable, use DynamicsCompressorNode approximation:
+  - threshold mapped from peakReduction
+  - ratio from mode
+  - attack 0.01
+  - release 0.5
+- Still show UI but mark as approximate in debug logs only.
+
+============================================================
+9. UI Design
+============================================================
+
+Must fit bottom Effect Editor horizontally.
+
+Size target:
+- width: 560..720 px
+- height: 200..280 px
+
+Layout:
+
+Header:
+- power LED
+- `FB-2A COMP`
+- mode switch: Compress / Limit
+- reset
+
+Main:
+- large Peak Reduction knob
+- large Gain knob
+- central analog-style gain reduction meter
+- mode and meter selector
+
+Secondary strip:
+- Emphasis
+- Mix
+- Color
+- Stereo Link
+- Sidechain Low Cut
+- Output Trim
+
+Meter:
+- GR mode shows 0..20 dB reduction, needle moves left/down
+- Input/Output mode shows level
+- smooth UI animation with RAF, not project state
+
+Interaction:
+- knobs vertical drag
+- double click resets
+- shift drag fine
+- all values write to `InsertDevice.params`
+
+Visual:
+- warm amber/orange accent, but restrained
+- dark DAW native style
+- no huge skeuomorphic panel
+- no copied Teletronix/LA-2A branding
+
+============================================================
+10. Presets
+============================================================
+
+Required presets:
+- Smooth Vocal
+- Bass Leveler
+- Drum Room Glue
+- Gentle Bus
+- Limit Peaks
+- Parallel Crush
+- Bright Vocal
+- Warm Pad
+
+Presets are full `FB2AParams`.
+
+============================================================
+11. Tests
+============================================================
+
+Core tests:
+- normalize clamps params
+- threshold mapping from peakReduction
+- soft knee is continuous
+- no NaN/Inf for silence, loud input, and extreme params
+- attack reduces gain within expected timeframe
+- release has fast initial and slow tail behavior
+- stereoLink 100 makes L/R GR equal
+- stereoLink 0 allows independent GR
+
+DSP tests:
+- sine above threshold gets reduced
+- makeup gain increases output
+- mix=0 returns dry
+- mix=100 returns compressed
+- bypass returns dry
+- limit mode compresses more than compress mode
+
+Manual QA:
+- Add FB-2A Comp from insert menu.
+- UI appears in Effect Editor.
+- Peak Reduction changes GR meter.
+- Gain changes output.
+- Compress/Limit changes behavior.
+- Params persist after save/reload.
+- Bypass no pop.
+- Remove disconnects graph.
+
+============================================================
+12. Implementation Phases
+============================================================
+
+Phase 1: Package/UI/params
+- Create `plugins/FB2AComp`
+- Defaults, normalize, serialize
+- Editor UI with meter placeholder
+- Add menu integration
+- Persist params
+
+Phase 2: Core DSP
+- Pure compressor math
+- Unit tests for detector/gain computer/envelope
+
+Phase 3: AudioWorklet
+- Realtime compressor
+- Meter events
+- Bypass smoothing
+
+Phase 4: Polish
+- Presets
+- Better meter
+- Saturation/color tuning
+- Automation readiness
+
+============================================================
+13. Done Criteria
+============================================================
+
+FB-2A Comp is done when:
+- It can be added as an insert.
+- It has a compact horizontal editor.
+- It compresses audio in realtime.
+- Gain reduction meter works.
+- Params persist in `track.inserts`.
+- Bypass/remove are safe.
+- Build passes.
+- Core DSP tests cover envelope and gain computer behavior.

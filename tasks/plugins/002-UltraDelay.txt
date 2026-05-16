@@ -1,0 +1,440 @@
+# 002-UltraDelay.txt
+
+Task: Design and implement UltraDelay, a production-usable built-in delay plugin for Futureboard Studio / Mochi DAW.
+
+Goal:
+Create a real stereo delay plugin with tempo sync, free time, feedback filtering, ping-pong routing, modulation, ducking, and a compact horizontal WebUI editor.
+
+References:
+- MDN DelayNode: `DelayNode` is the Web Audio delay-line node; feedback cycles in WebAudio require at least one DelayNode.
+  https://developer.mozilla.org/en-US/docs/Web/API/DelayNode
+- Web Audio API / AudioWorklet processing model for realtime custom delay lines.
+  https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletProcessor/process
+- General WebAudio delay graph pattern: source -> delay -> feedback gain/filter -> delay, with dry/wet mixing.
+  https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API
+
+============================================================
+0. Scope
+============================================================
+
+Implement a built-in plugin named UltraDelay.
+
+Required:
+- plugin package under `plugins/UltraDelay`
+- params/defaults/serialization
+- Effect Editor UI
+- add menu integration
+- persistent `InsertDevice.params`
+- realtime audio path
+
+Do not implement:
+- external plugin hosting
+- unrelated transport changes
+- fake state outside `track.inserts`
+- huge standalone page UI
+
+============================================================
+1. Product Identity
+============================================================
+
+Plugin name:
+- UltraDelay
+
+Short name:
+- Delay
+
+Type:
+- `delay`
+
+Category:
+- `space`
+
+Sound target:
+- clean tempo-synced DAW delay
+- usable ping-pong for stereo tracks
+- filtered feedback that does not explode
+- modulation capable of chorus-like movement
+- low CPU and stable for multiple insert instances
+
+============================================================
+2. Package Structure
+============================================================
+
+Create:
+
+plugins/
+  UltraDelay/
+    package.json
+    index.ts
+    Core/
+      index.ts
+      params.ts
+      time.ts
+      dsp.ts
+      filters.ts
+      presets.ts
+    Editor/
+      PluginEditor.tsx
+
+Rules:
+- `Core` is UI independent.
+- `Editor` is React only.
+- App owns state and passes params/update callbacks.
+- No direct project store import in plugin package.
+
+============================================================
+3. Parameter Model
+============================================================
+
+Typed model:
+
+```ts
+export type DelayTimeDivision =
+  | "1/64" | "1/32" | "1/16" | "1/8" | "1/4" | "1/2" | "1/1"
+  | "1/16T" | "1/8T" | "1/4T" | "1/2T"
+  | "1/16D" | "1/8D" | "1/4D" | "1/2D";
+
+export type UltraDelayMode = "stereo" | "pingpong" | "dual" | "mono";
+
+export type UltraDelayParams = {
+  power: boolean;
+  mode: UltraDelayMode;
+  sync: boolean;
+  timeL: DelayTimeDivision;
+  timeR: DelayTimeDivision;
+  timeMsL: number;       // 1..4000
+  timeMsR: number;       // 1..4000
+  link: boolean;
+  feedback: number;      // 0..98 percent
+  crossFeedback: number; // 0..100 percent
+  width: number;         // 0..150 percent
+  lowCutHz: number;      // 20..2000
+  highCutHz: number;     // 1000..20000
+  saturation: number;    // 0..100
+  modulation: number;    // 0..100
+  modRateHz: number;     // 0.01..10
+  ducking: number;       // 0..100
+  mix: number;           // 0..100
+  outputDb: number;      // -24..12
+  freeze: boolean;
+};
+```
+
+Default:
+
+```ts
+{
+  power: true,
+  mode: "pingpong",
+  sync: true,
+  timeL: "1/4",
+  timeR: "1/8D",
+  timeMsL: 375,
+  timeMsR: 563,
+  link: false,
+  feedback: 34,
+  crossFeedback: 65,
+  width: 100,
+  lowCutHz: 180,
+  highCutHz: 9000,
+  saturation: 8,
+  modulation: 8,
+  modRateHz: 0.25,
+  ducking: 0,
+  mix: 20,
+  outputDb: 0,
+  freeze: false
+}
+```
+
+Normalization:
+- clamp numeric ranges
+- unknown divisions fallback to defaults
+- `feedback` hard clamps below self-oscillation unless `freeze`
+- `freeze` allows near-infinite repeat but must stay finite
+
+============================================================
+4. Tempo Sync Math
+============================================================
+
+Input:
+- project BPM from transport/project state
+- time division string
+
+Quarter note:
+
+```ts
+quarterMs = 60000 / bpm
+```
+
+Base divisions:
+- `1/1` = 4 quarter notes
+- `1/2` = 2
+- `1/4` = 1
+- `1/8` = 0.5
+- `1/16` = 0.25
+- `1/32` = 0.125
+- `1/64` = 0.0625
+
+Triplet:
+- multiply by `2/3`
+
+Dotted:
+- multiply by `1.5`
+
+Clamp output:
+- 1..4000 ms
+
+Acceptance:
+- BPM 120, `1/4` = 500 ms
+- BPM 120, `1/8` = 250 ms
+- BPM 120, `1/8D` = 375 ms
+- BPM 120, `1/8T` = 166.666 ms
+
+============================================================
+5. DSP Design
+============================================================
+
+Phase 1 WebAudio graph:
+
+```txt
+input -> dryGain -> output
+input -> split L/R
+L -> delayL -> feedback filter/saturation -> feedback matrix -> delay inputs
+R -> delayR -> feedback filter/saturation -> feedback matrix -> delay inputs
+delay outputs -> wet width/mix -> output
+```
+
+Use WebAudio nodes where possible:
+- `DelayNode` for delay lines
+- `GainNode` for feedback/wet/dry/output
+- `BiquadFilterNode` for low/high cut in feedback path
+- `WaveShaperNode` optional for saturation
+- `ChannelSplitterNode` / `ChannelMergerNode`
+
+Important WebAudio rule:
+- feedback cycles must include a `DelayNode`
+- never set feedback gain >= 1
+
+Feedback:
+- `feedbackGain = feedback / 100 * 0.98`
+- freeze: `0.995`, but clamp output with limiter/saturation
+
+Ping-pong:
+- left delay feeds right input through crossFeedback
+- right delay feeds left input through crossFeedback
+- direct same-side feedback reduced by `1 - crossFeedback`
+
+Stereo:
+- left feeds left, right feeds right
+
+Dual:
+- independent L/R delay times
+
+Mono:
+- input mono sum feeds both delays
+
+Filtering:
+- low cut before or inside feedback path
+- high cut inside feedback path to darken repeats
+- default high cut 9000 Hz
+- default low cut 180 Hz
+
+Modulation:
+- modulates delay time subtly
+- use LFO depth in milliseconds, not percent directly
+- max safe modulation depth:
+  - `depthMs = modulation / 100 * min(20, delayMs * 0.05)`
+- smooth delayTime automation with `setTargetAtTime`
+
+Ducking:
+- sidechain from dry input envelope
+- reduce wet gain while dry signal is loud
+- Phase 1 may implement simple envelope follower in AudioWorklet
+- If using WebAudio-only graph, ducking can be UI-only until worklet phase
+
+Mix:
+- equal-power dry/wet
+
+Realtime safety:
+- delay time changes smoothed
+- feedback changes smoothed
+- no clicks when toggling sync/free/link
+- bypass crossfades 5..20 ms
+
+============================================================
+6. AudioWorklet Phase
+============================================================
+
+Preferred long-term:
+
+apps/web/src/engine/worklets/UltraDelayProcessor.worklet.ts
+
+Processor owns:
+- circular delay buffers
+- fractional delay read with linear or allpass interpolation
+- per-sample feedback matrix
+- envelope follower for ducking
+- simple saturation
+- output limiter guard
+
+Processor does not:
+- parse JSON per block
+- allocate arrays per block
+- log from process
+
+Message format:
+
+```ts
+type UltraDelayWorkletParams = {
+  timeSamplesL: number;
+  timeSamplesR: number;
+  feedback: number;
+  crossFeedback: number;
+  lowCutCoeff: number;
+  highCutCoeff: number;
+  saturation: number;
+  modulationDepthSamples: number;
+  modulationRateHz: number;
+  ducking: number;
+  wet: number;
+  dry: number;
+  outputGain: number;
+  mode: number;
+  freeze: boolean;
+};
+```
+
+All heavy conversion happens on main thread or adapter, not in audio process.
+
+============================================================
+7. UI Design
+============================================================
+
+Must be horizontal and fit Effect Editor.
+
+Size target:
+- width: 650..760 px
+- height: 220..280 px
+
+Header:
+- power LED
+- `ULTRADELAY`
+- mode segmented control: Mono / Stereo / Ping / Dual
+- sync toggle
+- reset
+
+Main panel:
+- two large time lanes, L and R
+- if sync: dropdowns for divisions
+- if free: numeric ms drag/readout
+- link button between L/R
+- animated repeat taps visualization
+
+Control strip:
+- Feedback
+- Cross
+- Low Cut
+- High Cut
+- Mod
+- Rate
+- Duck
+- Width
+- Mix
+- Output
+- Freeze
+
+Interaction:
+- vertical drag numeric fields
+- Shift drag fine
+- double click reset
+- mouse wheel optional for time divisions
+
+Visual:
+- dark DAW compact
+- green/blue delay accent
+- no large marketing UI
+- not cards inside cards
+
+============================================================
+8. Presets
+============================================================
+
+Required presets:
+- Quarter Ping
+- Eighth Doubler
+- Vocal Slap
+- Tape Echo
+- Wide Dotted
+- Dub Feedback
+- Clean Stereo
+- Frozen Loop
+
+Presets must be complete params.
+
+============================================================
+9. Tests
+============================================================
+
+Core math:
+- divisionToMs for BPM values
+- normalize clamps feedback/time/filter
+- link behavior copies L time to R when enabled
+- wet/dry equal-power gains finite
+
+DSP:
+- impulse produces repeat at expected sample
+- feedback repeat decays
+- feedback never grows beyond guard under normal params
+- ping-pong alternates channels
+- low/high cuts affect repeat tone
+- freeze stays finite
+
+Manual QA:
+- Add UltraDelay insert.
+- Open Effect Editor.
+- Switch sync/free.
+- Change BPM and verify synced delay updates.
+- Ping-pong audibly alternates.
+- Bypass has no pop.
+- Remove insert disconnects graph.
+- Save/reload project preserves params.
+
+============================================================
+10. Implementation Phases
+============================================================
+
+Phase 1: Package/UI/params
+- Create package and editor.
+- Add menus.
+- Persist params.
+- No DSP required.
+
+Phase 2: WebAudio graph
+- DelayNode-based stereo/ping-pong delay.
+- Feedback filters.
+- Mix/output/bypass.
+
+Phase 3: Worklet DSP
+- Fractional delay.
+- Ducking.
+- Saturation.
+- Safer modulation.
+
+Phase 4: Polish
+- Presets.
+- Repeat visualization.
+- Automation readiness.
+
+============================================================
+11. Done Criteria
+============================================================
+
+UltraDelay is done when:
+- It can be added as an insert.
+- It has a usable horizontal editor.
+- It produces real delay in playback.
+- Sync divisions follow BPM.
+- Ping-pong and stereo modes work.
+- Params persist in `track.inserts`.
+- Build passes.

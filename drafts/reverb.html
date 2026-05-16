@@ -1,0 +1,1054 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UltraVerb Draft</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #07090d;
+        --shell: #10141c;
+        --panel: #141a24;
+        --panel-2: #0d1118;
+        --line: rgba(255, 255, 255, 0.085);
+        --line-strong: rgba(255, 255, 255, 0.14);
+        --text: #edf2ff;
+        --muted: #8b95a8;
+        --faint: #5e6879;
+        --accent: #7cc7ff;
+        --accent-2: #a78bfa;
+        --green: #85f3b4;
+        --yellow: #ffd37a;
+        --red: #ff7d8a;
+        --radius: 10px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background:
+          radial-gradient(circle at 28% 12%, rgba(124, 199, 255, 0.12), transparent 28%),
+          radial-gradient(circle at 86% 18%, rgba(167, 139, 250, 0.12), transparent 30%),
+          linear-gradient(180deg, #090b10 0%, #050608 100%);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+        padding: 32px;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button {
+        border: 0;
+        color: inherit;
+      }
+
+      .plugin {
+        width: 960px;
+        height: 420px;
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: 16px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 34%),
+          linear-gradient(180deg, #111722 0%, #0b0e14 100%);
+        box-shadow:
+          0 28px 80px rgba(0, 0, 0, 0.5),
+          inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      }
+
+      .header {
+        display: grid;
+        grid-template-columns: 230px 1fr 250px;
+        align-items: center;
+        height: 54px;
+        gap: 14px;
+        border-bottom: 1px solid var(--line);
+        padding: 0 14px;
+        background: rgba(0, 0, 0, 0.18);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .power {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        border: 1px solid rgba(124, 199, 255, 0.35);
+        background: rgba(124, 199, 255, 0.14);
+        color: var(--accent);
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        font-size: 13px;
+        font-weight: 800;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+
+      .title-stack {
+        min-width: 0;
+      }
+
+      .eyebrow {
+        color: var(--faint);
+        font-size: 9px;
+        font-weight: 750;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+      }
+
+      .title {
+        margin-top: 2px;
+        color: var(--text);
+        font-size: 16px;
+        font-weight: 820;
+        letter-spacing: 0;
+        line-height: 1;
+      }
+
+      .mode-row {
+        display: flex;
+        justify-content: center;
+        min-width: 0;
+      }
+
+      .segment {
+        display: flex;
+        gap: 2px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(0, 0, 0, 0.22);
+        padding: 3px;
+      }
+
+      .segment button {
+        min-width: 72px;
+        height: 26px;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 720;
+      }
+
+      .segment button.active {
+        background: linear-gradient(180deg, rgba(124, 199, 255, 0.22), rgba(124, 199, 255, 0.1));
+        color: #f7fbff;
+        box-shadow: inset 0 0 0 1px rgba(124, 199, 255, 0.28);
+      }
+
+      .preset-row {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .preset {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 158px;
+        height: 28px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: rgba(255, 255, 255, 0.035);
+        padding: 0 9px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 680;
+      }
+
+      .mini-btn {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.035);
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .main {
+        display: grid;
+        grid-template-columns: 1.35fr 1fr 204px;
+        gap: 10px;
+        height: calc(100% - 54px);
+        padding: 10px;
+      }
+
+      .panel {
+        min-width: 0;
+        min-height: 0;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.014)),
+          var(--panel);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      }
+
+      .visual {
+        position: relative;
+        display: grid;
+        grid-template-rows: 34px 1fr 48px;
+        overflow: hidden;
+      }
+
+      .panel-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+        padding: 0 11px;
+      }
+
+      .panel-title {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 780;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .readout-big {
+        color: var(--text);
+        font-size: 17px;
+        font-weight: 820;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .visual-body {
+        position: relative;
+        min-height: 0;
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+          radial-gradient(circle at 50% 55%, rgba(124, 199, 255, 0.14), transparent 50%),
+          #080b11;
+        background-size:
+          100% 36px,
+          48px 100%,
+          auto,
+          auto;
+      }
+
+      #tailCanvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .visual-labels {
+        position: absolute;
+        inset: 12px 12px auto 12px;
+        display: flex;
+        justify-content: space-between;
+        pointer-events: none;
+        color: rgba(237, 242, 255, 0.42);
+        font-size: 10px;
+        font-weight: 680;
+      }
+
+      .tail-legend {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+        padding: 8px;
+        border-top: 1px solid rgba(255, 255, 255, 0.055);
+        background: rgba(0, 0, 0, 0.16);
+      }
+
+      .stat {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.035);
+        padding: 6px 8px;
+      }
+
+      .stat span:first-child {
+        color: var(--faint);
+        font-size: 9px;
+        font-weight: 760;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .stat span:last-child {
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 760;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-rows: 90px 1fr 76px;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .macro-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+      }
+
+      .knob-card {
+        display: grid;
+        place-items: center;
+        gap: 4px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 255, 255, 0.03);
+        padding: 7px 4px 6px;
+        min-width: 0;
+      }
+
+      .knob {
+        --p: 50;
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        position: relative;
+        background:
+          conic-gradient(from -135deg, var(--accent) calc(var(--p) * 2.7deg), rgba(255, 255, 255, 0.1) 0 270deg, transparent 0),
+          linear-gradient(145deg, #1b2330, #090c12);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.12),
+          0 8px 16px rgba(0, 0, 0, 0.3);
+      }
+
+      .knob::after {
+        content: "";
+        position: absolute;
+        width: 2px;
+        height: 13px;
+        top: 7px;
+        left: 50%;
+        transform: translateX(-50%) rotate(calc(-135deg + var(--p) * 2.7deg));
+        transform-origin: 50% 12px;
+        border-radius: 99px;
+        background: #f8fbff;
+      }
+
+      .knob-label {
+        color: var(--faint);
+        font-size: 9px;
+        font-weight: 780;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .knob-value {
+        color: var(--text);
+        font-size: 11px;
+        font-weight: 760;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .section-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        min-height: 0;
+      }
+
+      .control-section {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 10px;
+      }
+
+      .section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .mini-toggle {
+        display: flex;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.2);
+      }
+
+      .mini-toggle button {
+        height: 22px;
+        min-width: 39px;
+        background: transparent;
+        color: var(--faint);
+        cursor: pointer;
+        font-size: 10px;
+        font-weight: 760;
+      }
+
+      .mini-toggle button.active {
+        color: var(--text);
+        background: rgba(124, 199, 255, 0.18);
+      }
+
+      .slider {
+        display: grid;
+        grid-template-columns: 66px 1fr 54px;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .slider label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 680;
+      }
+
+      .slider output {
+        color: var(--text);
+        font-size: 11px;
+        font-weight: 760;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      input[type="range"] {
+        --value: 50%;
+        appearance: none;
+        width: 100%;
+        height: 4px;
+        border-radius: 999px;
+        outline: none;
+        background: linear-gradient(90deg, var(--accent) var(--value), rgba(255, 255, 255, 0.11) var(--value));
+      }
+
+      input[type="range"]::-webkit-slider-thumb {
+        appearance: none;
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        border: 2px solid #121821;
+        background: #f8fbff;
+        box-shadow: 0 0 0 4px rgba(124, 199, 255, 0.12);
+        cursor: ew-resize;
+      }
+
+      input[type="range"]::-moz-range-thumb {
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        border: 2px solid #121821;
+        background: #f8fbff;
+        box-shadow: 0 0 0 4px rgba(124, 199, 255, 0.12);
+        cursor: ew-resize;
+      }
+
+      .bottom-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr 112px;
+        gap: 10px;
+      }
+
+      .switch-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 9px 10px;
+      }
+
+      .switch-label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 760;
+      }
+
+      .switch {
+        position: relative;
+        width: 42px;
+        height: 22px;
+        border-radius: 999px;
+        border: 1px solid rgba(124, 199, 255, 0.28);
+        background: rgba(124, 199, 255, 0.12);
+      }
+
+      .switch::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        right: 3px;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 14px rgba(124, 199, 255, 0.45);
+      }
+
+      .side {
+        display: grid;
+        grid-template-rows: 1fr 104px;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .meter-panel {
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .meter-row {
+        display: grid;
+        grid-template-columns: 28px 1fr 42px;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .meter-row span {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .meter {
+        height: 7px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.075);
+      }
+
+      .meter i {
+        display: block;
+        width: var(--w);
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--green), var(--yellow) 68%, var(--red));
+      }
+
+      .output-card {
+        flex: 1;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(0, 0, 0, 0.16);
+        padding: 12px;
+      }
+
+      .output-value {
+        color: var(--text);
+        font-size: 28px;
+        line-height: 1;
+        font-weight: 830;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .output-label {
+        margin-top: 6px;
+        color: var(--faint);
+        font-size: 9px;
+        font-weight: 780;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .routing {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+        padding: 10px;
+      }
+
+      .route-btn {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: rgba(255, 255, 255, 0.035);
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 10px;
+        font-weight: 780;
+      }
+
+      .route-btn.active {
+        border-color: rgba(124, 199, 255, 0.35);
+        background: rgba(124, 199, 255, 0.12);
+        color: var(--text);
+      }
+
+      @media (max-width: 980px) {
+        body {
+          padding: 18px;
+        }
+
+        .plugin {
+          width: min(940px, 100vw - 36px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="plugin" aria-label="UltraVerb plugin draft">
+      <header class="header">
+        <div class="brand">
+          <button class="power" type="button" aria-label="Bypass">I</button>
+          <div class="title-stack">
+            <div class="eyebrow">Futureboard FX</div>
+            <div class="title">UltraVerb</div>
+          </div>
+        </div>
+
+        <div class="mode-row">
+          <div class="segment" role="tablist" aria-label="Reverb mode">
+            <button type="button">Room</button>
+            <button type="button">Plate</button>
+            <button type="button" class="active">Hall</button>
+            <button type="button">Space</button>
+          </div>
+        </div>
+
+        <div class="preset-row">
+          <div class="preset">
+            <span>Wide Hall A</span>
+            <span>v</span>
+          </div>
+          <button class="mini-btn" type="button" title="A/B">A/B</button>
+          <button class="mini-btn" type="button" title="Reset">R</button>
+        </div>
+      </header>
+
+      <section class="main">
+        <section class="panel visual">
+          <div class="panel-top">
+            <div class="panel-title">Tail Shape</div>
+            <div class="readout-big"><span id="rtRead">2.40</span>s</div>
+          </div>
+          <div class="visual-body">
+            <canvas id="tailCanvas"></canvas>
+            <div class="visual-labels">
+              <span>Early reflections</span>
+              <span>Late field</span>
+            </div>
+          </div>
+          <div class="tail-legend">
+            <div class="stat">
+              <span>Size</span>
+              <span id="statSize">64%</span>
+            </div>
+            <div class="stat">
+              <span>Density</span>
+              <span id="statDensity">72%</span>
+            </div>
+            <div class="stat">
+              <span>Damp</span>
+              <span id="statDamp">46%</span>
+            </div>
+            <div class="stat">
+              <span>Width</span>
+              <span id="statWidth">112%</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="controls">
+          <div class="macro-row">
+            <div class="knob-card">
+              <div class="knob" data-knob="size" style="--p: 64"></div>
+              <div class="knob-label">Size</div>
+              <div class="knob-value" id="sizeRead">64%</div>
+            </div>
+            <div class="knob-card">
+              <div class="knob" data-knob="decay" style="--p: 34"></div>
+              <div class="knob-label">Decay</div>
+              <div class="knob-value" id="decayRead">2.40s</div>
+            </div>
+            <div class="knob-card">
+              <div class="knob" data-knob="mix" style="--p: 28"></div>
+              <div class="knob-label">Mix</div>
+              <div class="knob-value" id="mixRead">28%</div>
+            </div>
+            <div class="knob-card">
+              <div class="knob" data-knob="width" style="--p: 75"></div>
+              <div class="knob-label">Width</div>
+              <div class="knob-value" id="widthRead">112%</div>
+            </div>
+          </div>
+
+          <div class="section-grid">
+            <div class="panel control-section">
+              <div class="section-head">
+                <span>Space</span>
+                <div class="mini-toggle">
+                  <button type="button">Eco</button>
+                  <button type="button" class="active">HQ</button>
+                </div>
+              </div>
+              <div class="slider">
+                <label for="preDelay">Pre</label>
+                <input id="preDelay" type="range" min="0" max="160" value="24" />
+                <output id="preRead">24ms</output>
+              </div>
+              <div class="slider">
+                <label for="diffusion">Diffuse</label>
+                <input id="diffusion" type="range" min="0" max="100" value="72" />
+                <output id="diffRead">72%</output>
+              </div>
+              <div class="slider">
+                <label for="early">Early</label>
+                <input id="early" type="range" min="-24" max="6" value="-8" />
+                <output id="earlyRead">-8dB</output>
+              </div>
+              <div class="slider">
+                <label for="late">Late</label>
+                <input id="late" type="range" min="-24" max="6" value="0" />
+                <output id="lateRead">0dB</output>
+              </div>
+            </div>
+
+            <div class="panel control-section">
+              <div class="section-head">
+                <span>Tone</span>
+                <div class="mini-toggle">
+                  <button type="button" class="active">Post</button>
+                  <button type="button">Pre</button>
+                </div>
+              </div>
+              <div class="slider">
+                <label for="lowCut">Low Cut</label>
+                <input id="lowCut" type="range" min="20" max="900" value="140" />
+                <output id="lowRead">140Hz</output>
+              </div>
+              <div class="slider">
+                <label for="highCut">High Cut</label>
+                <input id="highCut" type="range" min="3000" max="20000" value="12000" />
+                <output id="highRead">12.0k</output>
+              </div>
+              <div class="slider">
+                <label for="damping">Damping</label>
+                <input id="damping" type="range" min="0" max="100" value="46" />
+                <output id="dampRead">46%</output>
+              </div>
+              <div class="slider">
+                <label for="modDepth">Motion</label>
+                <input id="modDepth" type="range" min="0" max="100" value="18" />
+                <output id="modRead">18%</output>
+              </div>
+            </div>
+          </div>
+
+          <div class="bottom-row">
+            <div class="panel switch-card">
+              <span class="switch-label">Freeze</span>
+              <span class="switch" aria-hidden="true"></span>
+            </div>
+            <div class="panel switch-card">
+              <span class="switch-label">Stereo Field</span>
+              <span class="switch" aria-hidden="true"></span>
+            </div>
+            <div class="panel routing">
+              <button class="route-btn active" type="button">INS</button>
+              <button class="route-btn" type="button">SEND</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="side">
+          <section class="panel meter-panel">
+            <div class="section-head">
+              <span>Level</span>
+              <span>-6 dB</span>
+            </div>
+            <div class="meter-row">
+              <span>IN L</span>
+              <div class="meter"><i style="--w: 72%"></i></div>
+              <span>-8.2</span>
+            </div>
+            <div class="meter-row">
+              <span>IN R</span>
+              <div class="meter"><i style="--w: 68%"></i></div>
+              <span>-8.9</span>
+            </div>
+            <div class="meter-row">
+              <span>WET</span>
+              <div class="meter"><i style="--w: 42%"></i></div>
+              <span>-14.1</span>
+            </div>
+            <div class="output-card">
+              <div class="output-value" id="outputRead">0.0</div>
+              <div class="output-label">Output dB</div>
+            </div>
+          </section>
+
+          <section class="panel control-section">
+            <div class="section-head">
+              <span>Output</span>
+            </div>
+            <div class="slider">
+              <label for="output">Trim</label>
+              <input id="output" type="range" min="-18" max="12" value="0" />
+              <output id="trimRead">0.0</output>
+            </div>
+            <div class="slider">
+              <label for="ducking">Duck</label>
+              <input id="ducking" type="range" min="0" max="100" value="0" />
+              <output id="duckRead">0%</output>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script>
+      const state = {
+        size: 64,
+        decay: 2.4,
+        mix: 28,
+        width: 112,
+        preDelay: 24,
+        diffusion: 72,
+        early: -8,
+        late: 0,
+        lowCut: 140,
+        highCut: 12000,
+        damping: 46,
+        modDepth: 18,
+        output: 0,
+        ducking: 0,
+      };
+
+      const $ = (selector) => document.querySelector(selector);
+      const canvas = $("#tailCanvas");
+      const ctx = canvas.getContext("2d");
+
+      function pct(input) {
+        const min = Number(input.min);
+        const max = Number(input.max);
+        const value = Number(input.value);
+        return ((value - min) / (max - min)) * 100;
+      }
+
+      function setRangeVisual(input) {
+        input.style.setProperty("--value", `${pct(input)}%`);
+      }
+
+      function format(id, value) {
+        if (id === "preDelay") return `${Math.round(value)}ms`;
+        if (id === "lowCut") return `${Math.round(value)}Hz`;
+        if (id === "highCut") return `${(value / 1000).toFixed(1)}k`;
+        if (id === "early" || id === "late") return `${value > 0 ? "+" : ""}${Math.round(value)}dB`;
+        if (id === "output") return value.toFixed(1);
+        if (id === "ducking" || id === "diffusion" || id === "damping" || id === "modDepth") return `${Math.round(value)}%`;
+        return String(value);
+      }
+
+      const rangeMap = [
+        ["preDelay", "preRead"],
+        ["diffusion", "diffRead"],
+        ["early", "earlyRead"],
+        ["late", "lateRead"],
+        ["lowCut", "lowRead"],
+        ["highCut", "highRead"],
+        ["damping", "dampRead"],
+        ["modDepth", "modRead"],
+        ["output", "trimRead"],
+        ["ducking", "duckRead"],
+      ];
+
+      for (const [id, outId] of rangeMap) {
+        const input = $(`#${id}`);
+        const out = $(`#${outId}`);
+        setRangeVisual(input);
+        input.addEventListener("input", () => {
+          const value = Number(input.value);
+          state[id] = value;
+          out.textContent = format(id, value);
+          setRangeVisual(input);
+          syncReadouts();
+          drawTail();
+        });
+      }
+
+      function makeKnob(el, key, min, max, formatter) {
+        let dragging = false;
+        let p = ((state[key] - min) / (max - min)) * 100;
+
+        function update(nextP) {
+          p = Math.max(0, Math.min(100, nextP));
+          const value = min + (max - min) * (p / 100);
+          state[key] = value;
+          el.style.setProperty("--p", p.toFixed(1));
+          formatter(value);
+          syncReadouts();
+          drawTail();
+        }
+
+        el.addEventListener("pointerdown", (event) => {
+          dragging = true;
+          el.setPointerCapture(event.pointerId);
+        });
+
+        el.addEventListener("pointermove", (event) => {
+          if (!dragging) return;
+          update(p - event.movementY + event.movementX * 0.35);
+        });
+
+        el.addEventListener("pointerup", () => {
+          dragging = false;
+        });
+
+        el.addEventListener("pointercancel", () => {
+          dragging = false;
+        });
+
+        update(p);
+      }
+
+      makeKnob($('[data-knob="size"]'), "size", 0, 100, (value) => {
+        $("#sizeRead").textContent = `${Math.round(value)}%`;
+      });
+
+      makeKnob($('[data-knob="decay"]'), "decay", 0.3, 6.5, (value) => {
+        $("#decayRead").textContent = `${value.toFixed(2)}s`;
+        $("#rtRead").textContent = value.toFixed(2);
+      });
+
+      makeKnob($('[data-knob="mix"]'), "mix", 0, 100, (value) => {
+        $("#mixRead").textContent = `${Math.round(value)}%`;
+      });
+
+      makeKnob($('[data-knob="width"]'), "width", 0, 150, (value) => {
+        $("#widthRead").textContent = `${Math.round(value)}%`;
+      });
+
+      document.querySelectorAll(".segment button").forEach((button) => {
+        button.addEventListener("click", () => {
+          document.querySelectorAll(".segment button").forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+        });
+      });
+
+      document.querySelectorAll(".mini-toggle button, .route-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+          const parent = button.parentElement;
+          parent.querySelectorAll("button").forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+        });
+      });
+
+      function syncReadouts() {
+        $("#statSize").textContent = `${Math.round(state.size)}%`;
+        $("#statDensity").textContent = `${Math.round(state.diffusion)}%`;
+        $("#statDamp").textContent = `${Math.round(state.damping)}%`;
+        $("#statWidth").textContent = `${Math.round(state.width)}%`;
+        $("#outputRead").textContent = state.output.toFixed(1);
+      }
+
+      function resizeCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = Math.max(1, Math.round(rect.width * dpr));
+        canvas.height = Math.max(1, Math.round(rect.height * dpr));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        drawTail();
+      }
+
+      function drawTail() {
+        const rect = canvas.getBoundingClientRect();
+        const w = rect.width;
+        const h = rect.height;
+        ctx.clearRect(0, 0, w, h);
+
+        const decayNorm = (state.decay - 0.3) / (6.5 - 0.3);
+        const dampNorm = state.damping / 100;
+        const widthNorm = state.width / 150;
+        const mixNorm = state.mix / 100;
+        const density = state.diffusion / 100;
+
+        const gradient = ctx.createLinearGradient(0, 0, w, 0);
+        gradient.addColorStop(0, `rgba(124, 199, 255, ${0.22 + mixNorm * 0.18})`);
+        gradient.addColorStop(0.52, `rgba(167, 139, 250, ${0.18 + widthNorm * 0.18})`);
+        gradient.addColorStop(1, "rgba(124, 199, 255, 0.02)");
+
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = gradient;
+        ctx.beginPath();
+        const points = 120;
+        for (let i = 0; i <= points; i += 1) {
+          const t = i / points;
+          const x = 18 + t * (w - 36);
+          const envelope = Math.exp(-t * (2.1 + (1 - decayNorm) * 3.2));
+          const motion = Math.sin(t * Math.PI * (5 + density * 8)) * (12 + widthNorm * 10) * envelope;
+          const y = h * 0.68 - envelope * h * (0.42 + mixNorm * 0.08) + motion;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        const fill = ctx.createLinearGradient(0, h * 0.2, 0, h);
+        fill.addColorStop(0, "rgba(124, 199, 255, 0.18)");
+        fill.addColorStop(0.7, "rgba(167, 139, 250, 0.04)");
+        fill.addColorStop(1, "rgba(124, 199, 255, 0)");
+        ctx.lineTo(w - 18, h - 18);
+        ctx.lineTo(18, h - 18);
+        ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill();
+
+        for (let i = 0; i < 18; i += 1) {
+          const t = i / 17;
+          const x = 24 + t * (w * 0.34);
+          const y = 28 + ((i * 31) % Math.max(60, h - 56));
+          const alpha = (1 - t) * (0.4 + density * 0.36);
+          ctx.fillStyle = `rgba(237, 242, 255, ${alpha})`;
+          ctx.fillRect(x, y, 2, 18 * (1 - t * 0.72));
+        }
+
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.08 + (1 - dampNorm) * 0.08})`;
+        ctx.lineWidth = 1;
+        for (let i = 1; i < 4; i += 1) {
+          const y = (h / 4) * i;
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(w, y);
+          ctx.stroke();
+        }
+      }
+
+      syncReadouts();
+      resizeCanvas();
+      window.addEventListener("resize", resizeCanvas);
+    </script>
+  </body>
+</html>

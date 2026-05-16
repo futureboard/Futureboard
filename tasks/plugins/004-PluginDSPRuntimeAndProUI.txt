@@ -1,0 +1,1040 @@
+Task: Make Insert Plugins Actually Process Audio, Then Upgrade Plugin UI to Production DAW Quality
+
+Context:
+The current plugin system can add insert devices into `track.inserts`, and the Effect Editor can render plugin editors. However, the audio engine does not currently route track audio through those insert devices.
+
+Observed current behavior:
+- User clicks Add Insert / Add Equz8 / Add UltraVerb / Add UltraDelay / Add FB-2A Comp.
+- Device appears in Mixer and/or Effect Editor.
+- Parameter UI changes are stored in project state.
+- Playback audio does not change.
+
+Likely root cause from current code:
+- `ClipScheduler` connects each playing clip into `mixer.getOrCreateTrack(track.id, track.volume, track.pan).gain`.
+- `Mixer` currently builds a simple fixed track graph:
+  `track gain -> stereo panner -> analyser split -> track meter -> master`
+- There is no insert DSP graph between track input and track output.
+- `track.inserts` is not synchronized into WebAudio nodes.
+- Plugin definitions have UI and parameter schemas, but no DSP factory/runtime binding.
+
+Goal:
+Implement a real, working built-in insert DSP runtime for the current WebAudio prototype, and improve the plugin editors so they feel like professional DAW devices instead of rough mockups.
+
+The first working target is:
+- Add an insert.
+- Play audio.
+- Hear the insert affect the sound immediately.
+- Change plugin parameters while playing.
+- Hear smooth realtime changes without stopping playback.
+- Bypass/remove/reorder inserts without breaking the audio graph.
+- UI looks compact, horizontal, polished, and production-grade.
+
+This task is not VST/CLAP hosting.
+This task is not the full native/Rust rewrite.
+This task must keep the current WebAudio prototype working.
+
+References already available in repo:
+- `tasks/SKILL.txt`
+- `tasks/webapp/001-Plugins.txt`
+- `tasks/bridge/999-AudioEngine.txt`
+- `frameworks/SphereEngine/website/spheredoc/docs/audio/daux.mdx`
+- `frameworks/SphereEngine/website/spheredoc/docs/audio/fft.mdx`
+- `frameworks/SphereEngine/website/spheredoc/docs/components/sliders.mdx`
+- `frameworks/SphereEngine/website/spheredoc/docs/components/buttons.mdx`
+- `frameworks/SphereEngine/website/spheredoc/docs/components/containers.mdx`
+
+============================================================
+0. Non-Negotiable Rules
+============================================================
+
+Do:
+- Keep `track.inserts` as the single source of truth.
+- Build the runtime around the existing `Mixer`, `ClipScheduler`, and plugin registry.
+- Make WebAudio DSP work first.
+- Use AudioWorklet only where native WebAudio nodes are not enough or where latency/quality requires it.
+- Smooth parameter changes using `setTargetAtTime`, `linearRampToValueAtTime`, or equivalent safe ramps.
+- Keep parameter updates realtime-safe: no heavy graph rebuild on every slider tick unless unavoidable.
+- Keep UI compact and horizontal.
+- Run build after changes.
+- Manually test playback with at least EQ, delay, reverb, and compressor.
+
+Do not:
+- Create a second fake insert chain.
+- Keep plugin DSP disconnected from `track.inserts`.
+- Put plugin audio state in React component local state as the source of truth.
+- Allocate, parse JSON, log repeatedly, fetch, or block inside realtime audio code.
+- Rebuild convolver impulse responses on every mousemove.
+- Add random dependencies unless there is a strong reason.
+- Rewrite the whole DAW.
+- Break current clip playback, pitch/speed processing, mixer volume/pan/mute/solo, or metering.
+
+============================================================
+1. Desired Final Audio Graph
+============================================================
+
+Current simplified track graph:
+
+Clip source(s)
+-> clip gain
+-> track gain
+-> panner
+-> meter
+-> master
+
+Target track graph:
+
+Clip source(s)
+-> clip gain
+-> track input
+-> track pre-gain / mute-solo gain
+-> insert chain in `track.inserts` order
+-> track panner
+-> track analyser / meter tap
+-> master
+
+Each insert should behave like:
+
+if enabled:
+  input -> plugin DSP graph -> output
+else:
+  input -> bypass path -> output
+
+Important:
+- Bypass must be click-safe and pop-free.
+- Disabled devices should pass dry signal unchanged.
+- Removing a device must disconnect old nodes cleanly.
+- Reordering devices must rebuild only the chain connections, not destroy unrelated track nodes.
+- Track meters should show post-insert/post-pan signal unless a later pre/post meter mode is added.
+
+Acceptance:
+[ ] Audio from clips reaches track input.
+[ ] Track input routes through insert chain.
+[ ] Insert order affects sound.
+[ ] Bypass passes unchanged audio.
+[ ] Remove disconnects nodes without leaking connections.
+[ ] Existing volume/pan/mute/solo still work.
+[ ] Track and master meters still move.
+
+============================================================
+2. Add a WebAudio Insert Runtime Layer
+============================================================
+
+Create a small runtime module responsible for converting `InsertDevice` into connected WebAudio nodes.
+
+Suggested files:
+- `apps/web/src/engine/plugins/InsertDspRuntime.ts`
+- `apps/web/src/engine/plugins/types.ts`
+- `apps/web/src/engine/plugins/factories/equz8Node.ts`
+- `apps/web/src/engine/plugins/factories/ultraDelayNode.ts`
+- `apps/web/src/engine/plugins/factories/ultraVerbNode.ts`
+- `apps/web/src/engine/plugins/factories/fb2aCompNode.ts`
+- optional shared helpers:
+  - `apps/web/src/engine/plugins/audioMath.ts`
+  - `apps/web/src/engine/plugins/paramSmoothing.ts`
+
+Runtime interfaces:
+
+```ts
+export type InsertAudioNode = {
+  id: string;
+  input: AudioNode;
+  output: AudioNode;
+  update(params: Record<string, number | string | boolean>, context: InsertUpdateContext): void;
+  setEnabled(enabled: boolean): void;
+  dispose(): void;
+};
+
+export type InsertUpdateContext = {
+  now: number;
+  sampleRate: number;
+  bpm: number;
+};
+
+export type InsertNodeFactory = (
+  ctx: AudioContext,
+  device: InsertDevice,
+  context: InsertUpdateContext
+) => InsertAudioNode;
+```
+
+Runtime responsibilities:
+- Create DSP nodes when an insert is first seen.
+- Reuse existing DSP nodes when only params change.
+- Rebuild the track chain when insert order/add/remove changes.
+- Update parameters without rebuilding topology where possible.
+- Dispose nodes when insert is removed or track is removed.
+- Expose simple methods for `Mixer`:
+  - `syncTrackInserts(trackId, inserts, options)`
+  - `setTrackTempoContext(bpm)`
+  - `removeTrack(trackId)`
+
+Acceptance:
+[ ] Runtime can create node instances from plugin type/name/id.
+[ ] Runtime reuses nodes across parameter changes.
+[ ] Runtime removes stale nodes.
+[ ] Runtime can reconnect a chain in order.
+[ ] Runtime is independent from React.
+
+============================================================
+3. Modify Mixer to Own the Insert Chain
+============================================================
+
+Update `apps/web/src/engine/Mixer.ts`.
+
+Current `TrackNodes` shape is centered around:
+- `gain`
+- `panner`
+- `splitter`
+- `merger`
+- analysers
+
+Refactor toward clearer signal points:
+
+```ts
+type TrackNodes = {
+  input: GainNode;
+  volumeGain: GainNode;
+  insertInput: GainNode;
+  insertOutput: GainNode;
+  panner: StereoPannerNode;
+  splitter: ChannelSplitterNode;
+  merger: ChannelMergerNode;
+  analyserL: AnalyserNode;
+  analyserR: AnalyserNode;
+  ...
+};
+```
+
+Target internal chain:
+
+`input -> volumeGain -> insertInput -> [runtime insert chain] -> insertOutput -> panner -> splitter -> merger -> master`
+
+Important:
+- `getTrackInput(trackId)` should return `input`, not the old volume gain.
+- Volume/mute/solo should control `volumeGain`.
+- Insert runtime should connect between `insertInput` and `insertOutput`.
+- Initial empty insert chain must connect `insertInput -> insertOutput`.
+
+Required Mixer methods:
+
+```ts
+syncTrackInserts(trackId: TrackId, inserts: InsertDevice[], bpm: number): void;
+updateInsertParams(trackId: TrackId, deviceId: string, params: Record<string, number | string | boolean>, bpm: number): void;
+setInsertEnabled(trackId: TrackId, deviceId: string, enabled: boolean): void;
+```
+
+Simpler acceptable first pass:
+- Implement only `syncTrackInserts(trackId, inserts, bpm)`.
+- Call it whenever project tracks/inserts change.
+- Internally reuse existing nodes by device id.
+
+Acceptance:
+[ ] Empty chain sounds identical to before.
+[ ] Adding EQ changes sound.
+[ ] Adding Delay produces audible repeats.
+[ ] Adding Reverb produces audible ambience.
+[ ] Adding FB-2A changes dynamics/level.
+[ ] Existing `setVolume`, `setPan`, `setMute`, `setSolo` still work.
+[ ] `removeTrack` disposes insert nodes.
+
+============================================================
+4. Sync Project Inserts into Audio Engine
+============================================================
+
+The audio graph must update when `project.tracks[].inserts` changes.
+
+Find the current place where:
+- `transport.setTrackGetter(...)` is wired.
+- mixer volume/pan/mute/solo are synchronized.
+- project state changes are observed from React.
+
+Add a small bridge that pushes insert state into `mixer.syncTrackInserts`.
+
+Suggested implementation:
+- In `App.tsx` or a dedicated engine sync hook, watch `project.tracks`.
+- For every track, call:
+  `mixer.syncTrackInserts(track.id, track.inserts ?? [], project.tempo ?? transport tempo)`
+- Keep the logic cheap:
+  - runtime should internally diff by device id/order/enabled/params.
+  - React bridge can be simple.
+
+Important:
+- Do not perform audio node construction inside React components.
+- React can notify the engine; the engine owns nodes.
+- Do not require stopping playback after changing insert params.
+
+Acceptance:
+[ ] Add insert while stopped, then play: DSP works.
+[ ] Add insert while playing: DSP starts working.
+[ ] Move parameter while playing: sound updates.
+[ ] Bypass while playing: sound bypasses.
+[ ] Remove while playing: audio continues without crash.
+
+============================================================
+5. Built-In DSP: Equz8
+============================================================
+
+Implement a real WebAudio EQ for `Equz8`.
+
+Use native `BiquadFilterNode` chain:
+- `highpass` -> `BiquadFilterNode.type = "highpass"`
+- `lowshelf` -> `"lowshelf"`
+- `bell` -> `"peaking"`
+- `highshelf` -> `"highshelf"`
+- `lowpass` -> `"lowpass"`
+
+For each enabled band:
+- frequency Hz -> `filter.frequency`
+- gain dB -> `filter.gain` for shelf/peaking
+- Q -> `filter.Q` where applicable
+
+For disabled bands:
+- Best first pass: keep node in chain but set neutral behavior.
+  - peaking: gain 0 dB
+  - shelf: gain 0 dB
+  - highpass/lowpass: if disabled, bypass node in topology or set harmless extremes.
+- Better pass: rebuild only band topology when band enable/type changes.
+
+Output:
+- Add output gain if `outputDb`/equivalent exists.
+- If current Equz8 params do not include output, add it carefully with default 0 dB.
+
+Analyzer:
+- Optional visual analyzer can be UI-only first.
+- Later use `AnalyserNode` or shared FFT analyzer tap.
+
+Parameter smoothing:
+- frequency/Q/gain/output should ramp over 5-20 ms.
+- Avoid zipper noise on slider movement.
+
+Acceptance:
+[ ] Boost/cut EQ bands clearly changes tone.
+[ ] Highpass removes bass.
+[ ] Lowpass removes highs.
+[ ] Bypass restores dry tone.
+[ ] Changing bands while playing does not click heavily.
+[ ] UI curve roughly matches audible behavior.
+
+============================================================
+6. Built-In DSP: UltraDelay
+============================================================
+
+Implement a real stereo delay.
+
+First WebAudio graph target:
+
+Dry path:
+`input -> dryGain -> output`
+
+Wet path:
+`input -> split L/R -> delayL/delayR -> feedback filters/saturation -> feedback loop -> wetGain -> stereo merge -> output`
+
+Minimum viable version:
+- Use two `DelayNode`s.
+- Use `GainNode` for feedback.
+- Use `BiquadFilterNode` highpass/lowpass in feedback path.
+- Use dry/wet gains based on `mix`.
+- Support free time in ms and tempo sync division via BPM.
+- Support ping-pong by cross-feeding L into R and R into L.
+
+Do not exceed safe feedback:
+- Clamp feedback to <= 0.98.
+- If saturation is not implemented yet, keep it neutral.
+- Freeze can hold high feedback later; first pass may map freeze to feedback 0.98 and wet-only behavior if safe.
+
+Tempo sync:
+- Use `divisionToMs()` from `plugins/UltraDelay/Core`.
+- Need BPM from project/transport context.
+- Smooth delay time changes carefully. Delay time changes can pitch-glide; acceptable, but no discontinuous clicks.
+
+Mix:
+- Use equal-power dry/wet if possible:
+  - dry = cos(mix * pi/2)
+  - wet = sin(mix * pi/2)
+- Or linear first pass if simpler.
+
+Acceptance:
+[ ] Delay is clearly audible at default preset.
+[ ] Feedback repeats are audible and stable.
+[ ] Ping-pong changes stereo motion.
+[ ] LowCut/HighCut darkens or thins repeats.
+[ ] Sync divisions follow BPM.
+[ ] Bypass passes dry unchanged.
+[ ] Feedback never self-explodes at normal values.
+
+============================================================
+7. Built-In DSP: UltraVerb
+============================================================
+
+Implement a real reverb that is useful now and replaceable later.
+
+Recommended first pass:
+- Use `ConvolverNode` with a generated impulse response.
+- Generate IR when major reverb params change:
+  - mode
+  - size
+  - decay
+  - damping
+  - width
+- Do not regenerate IR on every tiny slider movement while dragging.
+- Debounce or quantize IR rebuilds to avoid UI/audio stalls.
+- Use native filters and gains for realtime controls:
+  - preDelayMs -> `DelayNode.delayTime`
+  - lowCutHz -> `BiquadFilterNode("highpass")`
+  - highCutHz -> `BiquadFilterNode("lowpass")`
+  - mix -> dry/wet gains
+  - outputDb -> output gain
+
+Suggested graph:
+
+Dry:
+`input -> dryGain -> output`
+
+Wet:
+`input -> preDelay -> lowCut -> highCut -> convolver -> width stage -> wetGain -> output`
+
+IR generation:
+- Length based on decay seconds and sample rate, with reasonable cap.
+- Use exponential decay noise.
+- Damping can reduce high-frequency content over time.
+- Width can generate decorrelated L/R IR channels.
+- Mode can change early reflection density/decay shape.
+
+Performance:
+- IR generation can allocate, but only outside realtime audio rendering.
+- Use debounce around 80-150 ms for sliders that require IR rebuild.
+- Never rebuild IR inside an AudioWorklet process callback.
+
+Optional better later:
+- Replace Convolver with AudioWorklet Schroeder/FDN reverb.
+- Add freeze as a Worklet feature.
+
+Acceptance:
+[ ] Reverb is audible at default preset.
+[ ] Decay changes tail length.
+[ ] PreDelay separates dry sound from reverb onset.
+[ ] LowCut/HighCut shape wet signal.
+[ ] Mix works.
+[ ] Bypass works.
+[ ] Moving decay/size does not freeze the app badly.
+
+============================================================
+8. Built-In DSP: FB-2A Comp
+============================================================
+
+Implement a real compressor first, then improve opto character later.
+
+Minimum viable WebAudio version:
+- Use `DynamicsCompressorNode` for gain reduction.
+- Map FB-2A params to compressor params:
+  - peakReduction -> threshold lower as value increases
+  - mode compress/limit -> ratio/knee behavior
+  - emphasis -> sidechain/brightness behavior if possible, or tone coloration later
+  - gainDb -> post gain
+  - outputTrimDb -> final trim
+  - mix -> dry/wet parallel blend
+  - stereoLink -> not supported by native node directly; keep for later or implement with Worklet
+
+Suggested graph:
+
+Dry:
+`input -> dryGain -> output`
+
+Compressed:
+`input -> compressor -> color/tone stage -> makeupGain -> wetGain -> output`
+
+Parameter mapping:
+- `thresholdDb = peakReductionToThresholdDb(peakReduction)`
+- ratio:
+  - compress: 3:1 to 4:1
+  - limit: 10:1 to 20:1
+- attack: opto-ish slower than FET
+  - 5-15 ms
+- release:
+  - 250-800 ms
+- knee:
+  - soft, 6-12 dB
+
+Color:
+- First pass can be a subtle waveshaper only if easy.
+- Noise should default off and must not add loud hiss.
+- Avoid hardware clone branding.
+
+Metering:
+- Native `DynamicsCompressorNode.reduction` can be sampled for GR display.
+- Do not store high-frequency meter data in project state.
+- UI should read meter through a transient store/hook or plugin runtime meter API.
+
+Acceptance:
+[ ] PeakReduction audibly compresses louder material.
+[ ] Gain/output controls change level.
+[ ] Mix blends dry/compressed signal.
+[ ] Limit mode is stronger than compress mode.
+[ ] Bypass works.
+[ ] Meter displays approximate GR if implemented.
+
+============================================================
+9. Generic Plugin DSP Factory Rules
+============================================================
+
+Plugin registry should describe both UI and DSP.
+
+Extend registry carefully:
+
+```ts
+type BuiltInPlugin = {
+  id: string;
+  name: string;
+  shortName: string;
+  type: string;
+  category: string;
+  color: string;
+  defaultParams: () => Record<string, number | string | boolean>;
+  Editor: ComponentType<PluginEditorProps>;
+  createAudioNode?: InsertNodeFactory;
+};
+```
+
+Or keep DSP factories in a separate registry:
+
+```ts
+const INSERT_DSP_FACTORIES: Record<string, InsertNodeFactory> = {
+  eq: createEquz8Node,
+  reverb: createUltraVerbNode,
+  delay: createUltraDelayNode,
+  "optical-compressor": createFB2ACompNode,
+};
+```
+
+Preferred:
+- Separate DSP registry from React registry to avoid engine importing React.
+- Engine must not import `.tsx` plugin editors.
+- UI can import plugin UI registry.
+- Engine can import plugin core param normalizers and DSP factories.
+
+Acceptance:
+[ ] Engine code does not import React components.
+[ ] UI registry does not own audio nodes.
+[ ] DSP factory lookup works by device id/type/name.
+[ ] Unknown devices pass through safely.
+
+============================================================
+10. Parameter Update Contract
+============================================================
+
+Every plugin node must support:
+
+```ts
+update(params, context)
+setEnabled(enabled)
+dispose()
+```
+
+Rules:
+- `update` can be called often.
+- `update` must normalize/clamp params using plugin Core helpers.
+- `update` should ramp AudioParams instead of assigning abruptly.
+- Heavy work must be throttled/debounced.
+- `dispose` must disconnect all owned nodes and clear timers.
+
+Recommended helpers:
+
+```ts
+export function dbToGain(db: number): number;
+export function percentToNorm(p: number): number;
+export function smoothParam(param: AudioParam, value: number, now: number, time = 0.015): void;
+export function equalPowerMix(mixPercent: number): { dry: number; wet: number };
+```
+
+Acceptance:
+[ ] Slider changes are audible while playing.
+[ ] No crashes when params are missing/old.
+[ ] Parameter changes do not force transport reschedule.
+[ ] No runaway timers after removing plugin.
+
+============================================================
+11. Bypass Design
+============================================================
+
+Bypass must sound clean.
+
+Simplest safe bypass:
+- Each plugin has dry bypass path and wet/processed path.
+- `setEnabled(false)` crossfades:
+  - processed gain to 0
+  - bypass gain to 1
+- `setEnabled(true)` crossfades back.
+
+If plugin graph is naturally inline-only:
+- Use a wrapper:
+  - `input -> dryBypassGain -> output`
+  - `input -> processorInput -> processorOutput -> wetEnabledGain -> output`
+
+Rules:
+- Do not disconnect/reconnect on every bypass click if crossfade can handle it.
+- Use 5-20 ms ramp.
+- UI bypass and audio bypass must use the same `insert.enabled`.
+
+Acceptance:
+[ ] Bypass is audible.
+[ ] Bypass does not click badly.
+[ ] UI enabled state matches audio state.
+
+============================================================
+12. Rebuild Effect Editor into a Professional Device Surface
+============================================================
+
+Current plugin editors are functional but not professional enough.
+
+Upgrade direction:
+- Compact dark DAW device surface.
+- Horizontal, rack-friendly.
+- Dense but readable.
+- No tall cards.
+- No generic SaaS panels.
+- No giant marketing-style areas.
+- No random neon.
+- No hardware clone labels/logos.
+
+Effect Editor target layout:
+
+Top row:
+- selected track identity
+- insert chain chips
+- add device button
+- selected device power
+- remove/reset/preset actions
+
+Main area:
+- one selected plugin editor shown large enough to use well
+- optional compact chain overview on left/top
+- horizontal scroll only when genuinely needed
+
+Important:
+- Do not show every plugin editor at full size simultaneously if it makes the bottom panel crowded.
+- Prefer selecting one device in the chain and showing it in a polished editor area.
+- Device chips can show all inserts.
+
+Acceptance:
+[ ] Effect Editor feels like a plugin rack, not a mock gallery.
+[ ] User can select a device from chain and edit it.
+[ ] Add/remove/bypass are easy to discover.
+[ ] UI fits current bottom panel height.
+[ ] No text overlaps at common desktop widths.
+
+============================================================
+13. Professional Plugin Shell
+============================================================
+
+Create a reusable shell for plugin editors.
+
+Suggested file:
+- `apps/web/src/components/plugins/PluginShell.tsx`
+
+Props:
+
+```ts
+type PluginShellProps = {
+  name: string;
+  shortName: string;
+  color: string;
+  enabled: boolean;
+  onToggleEnabled: () => void;
+  onReset?: () => void;
+  children: React.ReactNode;
+};
+```
+
+Shell requirements:
+- Power button with clear enabled/bypassed state.
+- Plugin name and short name.
+- Preset dropdown placeholder.
+- Reset button.
+- Optional A/B placeholder.
+- Compact header.
+- Content area designed for horizontal controls.
+- Disabled state visibly dims without becoming unreadable.
+
+Acceptance:
+[ ] All built-in plugin editors use the shell.
+[ ] Shell does not store project params.
+[ ] Shell looks consistent across plugins.
+
+============================================================
+14. Shared Professional Plugin Controls
+============================================================
+
+Create compact shared controls instead of ad-hoc controls in every plugin.
+
+Suggested file:
+- `apps/web/src/components/plugins/PluginControls.tsx`
+
+Controls:
+- `PluginKnob`
+- `PluginFader`
+- `PluginMiniSlider`
+- `PluginToggle`
+- `PluginSegmented`
+- `PluginSelect`
+- `PluginNumber`
+- `PluginMeter`
+- `PluginGraphPanel`
+- `PluginSection`
+
+Rules:
+- 10-12px labels.
+- Stable dimensions.
+- No layout shift while dragging.
+- Use icon buttons where appropriate.
+- Use existing DAW theme tokens.
+- Keyboard/mouse friendly.
+- Pointer events ready for touch later.
+
+Acceptance:
+[ ] Plugin editors share controls.
+[ ] UI is visually consistent.
+[ ] Controls remain readable in bottom panel.
+[ ] Slider/knob values update project params.
+
+============================================================
+15. Equz8 UI Upgrade
+============================================================
+
+Equz8 should feel like a serious parametric EQ.
+
+Layout:
+- Large frequency response graph left/center.
+- Band nodes on graph.
+- Bottom band strip with 8 compact band cells.
+- Right side selected band controls:
+  - type
+  - enabled
+  - frequency
+  - gain
+  - Q
+- Output/analyzer controls compact.
+
+Graph:
+- Log frequency grid 20 Hz - 20 kHz.
+- dB grid -18 to +18.
+- Draw combined curve from Core helper.
+- Draw active band nodes.
+- Selected band highlighted.
+- Disabled band subdued.
+
+Interaction:
+- Drag node left/right = frequency.
+- Drag node up/down = gain.
+- Modifier or wheel can adjust Q later.
+- Double click toggles band or resets selected parameter.
+
+Acceptance:
+[ ] Looks clean and pro.
+[ ] Band controls are not cramped.
+[ ] Graph matches params.
+[ ] DSP sound follows graph.
+
+============================================================
+16. UltraDelay UI Upgrade
+============================================================
+
+UltraDelay should feel like a modern stereo delay.
+
+Layout:
+- Left: stereo tap visualization.
+- Center: timing and mode section.
+- Right: feedback/filter/mix section.
+- Small output/meter strip.
+
+Controls:
+- Mode segmented: stereo / pingpong / dual / mono.
+- Sync toggle.
+- L/R time controls with division dropdowns or ms boxes.
+- Link toggle.
+- Feedback and cross-feedback.
+- LowCut/HighCut.
+- Width.
+- Saturation/modulation/ducking.
+- Mix/output/freeze.
+
+Visual:
+- Draw L/R taps with spacing based on delay time.
+- Show feedback amount as repeated fading taps.
+- Ping-pong should visually cross lanes.
+
+Acceptance:
+[ ] Timing controls are easy to use.
+[ ] Sync/free mode is clear.
+[ ] Visual responds to time/mode/feedback.
+[ ] DSP follows UI.
+
+============================================================
+17. UltraVerb UI Upgrade
+============================================================
+
+UltraVerb should feel spacious but still compact.
+
+Layout:
+- Left: reverb shape/tail display.
+- Center: space controls.
+- Right: tone/mix/output controls.
+
+Controls:
+- Mode segmented: room / plate / hall / space.
+- Size.
+- Decay.
+- PreDelay.
+- Diffusion.
+- Damping.
+- LowCut/HighCut.
+- Width.
+- Modulation/rate.
+- Early/Late level.
+- Mix/output.
+- Freeze.
+
+Visual:
+- Tail curve based on decay.
+- Early reflection ticks before tail.
+- Damping represented by darker high-frequency tail.
+
+Acceptance:
+[ ] Reverb parameters feel grouped logically.
+[ ] UI does not look like a generic form.
+[ ] DSP follows main parameters.
+[ ] IR rebuilds do not freeze the UI badly.
+
+============================================================
+18. FB-2A Comp UI Upgrade
+============================================================
+
+FB-2A should feel like an original Futureboard optical compressor, not a copied hardware faceplate.
+
+Layout:
+- Left: large compact VU/GR meter.
+- Center: Peak Reduction and Gain controls.
+- Right: mode, emphasis, mix, sidechain, output trim, meter mode.
+
+Controls:
+- Peak Reduction.
+- Gain.
+- Mode compress/limit.
+- Emphasis.
+- Mix.
+- Color.
+- Stereo Link.
+- Sidechain Low Cut.
+- Output Trim.
+- Meter mode.
+- Noise toggle, default off.
+
+Visual:
+- Meter should be smooth and readable.
+- Warm accent is okay, but do not clone LA-2A branding/layout.
+
+Acceptance:
+[ ] Compressor looks distinctive and polished.
+[ ] Meter works or has a clear temporary state.
+[ ] DSP compression is audible.
+[ ] Controls are easy to read.
+
+============================================================
+19. Metering and Analyzer Data
+============================================================
+
+Do not store realtime meter/analyzer samples in project state.
+
+For plugin meters:
+- Use runtime meter refs, lightweight event emitter, Zustand transient store, or polling hook.
+- Throttle UI updates to 30-60 fps.
+- Audio thread should write cheap values only.
+
+For future SphereEngine alignment:
+- `FFTAnalyzer` doc describes audio-thread push and UI-thread read.
+- Design JS side similarly:
+  - audio graph/analyser captures samples
+  - UI reads smoothed magnitude/levels
+  - no heavy state persistence
+
+Acceptance:
+[ ] Plugin meters do not cause project rerenders.
+[ ] Track/master meters still work.
+[ ] Analyzer visual can be disabled if expensive.
+
+============================================================
+20. Testing Checklist
+============================================================
+
+Manual audio tests:
+
+1. Start app.
+2. Import or load an audio clip with full-range material.
+3. Play track with no inserts.
+4. Confirm audio sounds unchanged from previous behavior.
+5. Add Equz8.
+6. Enable highpass around 300 Hz.
+7. Confirm bass is reduced.
+8. Boost high shelf.
+9. Confirm highs increase.
+10. Bypass Equz8.
+11. Confirm dry sound returns.
+12. Add UltraDelay after Equz8.
+13. Set mix 40%, feedback 50%.
+14. Confirm repeats are audible.
+15. Toggle pingpong.
+16. Confirm stereo motion changes.
+17. Add UltraVerb after delay.
+18. Increase decay/mix.
+19. Confirm reverb is audible.
+20. Add FB-2A Comp before delay/reverb.
+21. Increase peak reduction.
+22. Confirm dynamics/level changes.
+23. Reorder devices if UI supports it.
+24. Confirm order changes sound.
+25. Remove a plugin while playing.
+26. Confirm playback continues without crash.
+27. Stop/play again.
+28. Confirm inserts persist and DSP works.
+
+UI tests:
+
+1. Select an audio track.
+2. Open Effect Editor.
+3. Add Equz8.
+4. Confirm selected plugin editor opens.
+5. Add UltraDelay, UltraVerb, FB-2A.
+6. Select each device chip.
+7. Confirm each plugin UI is horizontal and polished.
+8. Resize app / bottom panel moderately.
+9. Confirm labels do not overlap.
+10. Toggle bypass from UI and confirm both visual and audio state change.
+
+Build:
+- `bun run --cwd apps/web build`
+
+If available:
+- `bun run --cwd apps/web typecheck`
+- relevant tests if any exist.
+
+Acceptance:
+[ ] Manual audio tests pass.
+[ ] Manual UI tests pass.
+[ ] Build passes.
+
+============================================================
+21. Implementation Phases
+============================================================
+
+Phase 1: Audio Graph Foundation
+- Refactor Mixer track graph to include insert input/output.
+- Implement insert runtime passthrough chain.
+- Sync `track.inserts` into mixer.
+- Verify empty chain unchanged.
+
+Done when:
+[ ] Empty insert chain plays exactly like before.
+[ ] Runtime can add/remove passthrough nodes safely.
+
+Phase 2: Equz8 DSP
+- Implement Biquad chain.
+- Bind Equz8 params.
+- Smooth updates.
+- Test audible EQ changes.
+
+Done when:
+[ ] EQ works during playback.
+
+Phase 3: Delay/Reverb/Compressor DSP
+- Implement UltraDelay WebAudio graph.
+- Implement UltraVerb Convolver graph.
+- Implement FB-2A native compressor graph.
+- Bind params and bypass.
+
+Done when:
+[ ] All current built-in plugins audibly affect playback.
+
+Phase 4: Effect Editor UX
+- Switch from showing all full plugin cards to a selected-device professional editor if needed.
+- Add polished DeviceChainBar.
+- Add PluginShell.
+- Add shared controls.
+
+Done when:
+[ ] Plugin editor feels like a real DAW device rack.
+
+Phase 5: Plugin UI Polish
+- Upgrade Equz8 graph/interactions.
+- Upgrade UltraDelay visual.
+- Upgrade UltraVerb visual.
+- Upgrade FB-2A meter surface.
+
+Done when:
+[ ] UI looks production-grade and remains compact.
+
+Phase 6: Meters/Analyzer and Stress Testing
+- Add lightweight plugin meters where useful.
+- Test add/remove/param changes while playing.
+- Fix leaks/clicks/performance issues.
+
+Done when:
+[ ] Long playback with insert edits does not stutter or crash.
+
+============================================================
+22. Final Acceptance Checklist
+============================================================
+
+Audio:
+[ ] Add insert changes actual playback sound.
+[ ] Equz8 DSP works.
+[ ] UltraDelay DSP works.
+[ ] UltraVerb DSP works.
+[ ] FB-2A Comp DSP works.
+[ ] Bypass works and is pop-safe enough.
+[ ] Remove works while playing.
+[ ] Parameter changes work while playing.
+[ ] Insert order is respected.
+[ ] Empty chain remains transparent.
+[ ] Mixer volume/pan/mute/solo still work.
+[ ] Meters still work.
+
+Architecture:
+[ ] Engine owns audio nodes, React does not.
+[ ] `track.inserts` remains single source of truth.
+[ ] DSP registry is separated from React editor registry or cleanly isolated.
+[ ] Unknown insert types pass through safely.
+[ ] No duplicate fake insert state.
+[ ] No heavy realtime allocations/logging.
+
+UI:
+[ ] Effect Editor looks professional.
+[ ] Plugin editors are horizontal and compact.
+[ ] Device chain is clear.
+[ ] Selected device is obvious.
+[ ] Controls are readable.
+[ ] No generic card-gallery feeling.
+[ ] No copied hardware branding.
+[ ] No text overlap in normal desktop layouts.
+
+Validation:
+[ ] `bun run --cwd apps/web build` passes.
+[ ] Manual audio test checklist passes.
+[ ] Any skipped DSP feature is explicitly marked TODO and not shown as fake-working.
+
+============================================================
+23. Notes for the Implementing Agent
+============================================================
+
+Start small.
+
+Recommended first patch:
+1. Add insert runtime passthrough infrastructure.
+2. Refactor Mixer graph with `insertInput` and `insertOutput`.
+3. Sync `track.inserts` from project state to mixer.
+4. Implement Equz8 Biquad DSP only.
+5. Build and manually test EQ.
+
+Only after Equz8 is actually audible, continue to delay/reverb/compressor.
+
+Do not spend the first patch polishing UI while DSP is still disconnected.
+The top priority is to make Add Insert mean "this changes the sound."
+

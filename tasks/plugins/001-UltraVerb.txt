@@ -1,0 +1,522 @@
+# 001-UltraVerb.txt
+
+Task: Design and implement UltraVerb, a production-usable built-in reverb plugin for Futureboard Studio / Mochi DAW.
+
+Goal:
+Create a real built-in algorithmic reverb plugin that works in the current Web UI insert chain and can later move cleanly into Rust/WASM/native DSP.
+
+This task is intentionally detailed. Implement it in small phases. Do not attempt every phase in one patch unless the user explicitly asks for a full implementation.
+
+References:
+- Freeverb / Csound manual: stereo reverb based on Jezar's public domain Freeverb, using eight parallel comb filters per channel followed by four serial allpass filters.
+  https://csound.com/docs/manual/freeverb.html
+- Schroeder reverb overview: classic efficient topology using parallel comb filters plus serial allpass filters.
+  https://ringbuffer.org/dsp/Reverb/schroeder_reverb/
+- Schroeder allpass paper context and modern discussion of allpass filters in reverb/diffusion.
+  https://www.mdpi.com/2076-3417/10/1/187
+- Web Audio AudioWorklet guidance: realtime DSP must run off the UI thread and process small render blocks safely.
+  https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletProcessor/process
+
+============================================================
+0. Scope
+============================================================
+
+Implement a built-in plugin named UltraVerb.
+
+Required surfaces:
+- `plugins/UltraVerb`
+- WebUI Effect Editor plugin panel
+- Insert add menus
+- `track.inserts[].params` persistence
+- Realtime WebAudio/AudioWorklet DSP path, or a safe WebAudio fallback if AudioWorklet is not ready
+- Offline/cache path later, if the audio architecture supports it
+
+Do not implement:
+- VST/CLAP hosting
+- Native service process
+- Full convolution reverb
+- Random gallery UI
+- Local-only fake plugin state
+
+UltraVerb must be an insert effect. All params must be stored in `InsertDevice.params`.
+
+============================================================
+1. Product Identity
+============================================================
+
+Plugin name:
+- UltraVerb
+
+Short name:
+- Verb
+
+Type:
+- `reverb`
+
+Category:
+- `space`
+
+Primary use:
+- musical room/plate/hall ambience
+- low CPU enough for multiple inserts
+- smooth parameter automation
+- compact horizontal DAW UI
+
+Sound target:
+- cleaner than a toy reverb
+- dense tail without metallic ringing
+- usable default preset on vocals, pads, drums, and buses
+- not physically perfect; musically controllable
+
+Design references:
+- Freeverb-style late reverb as the first production pass
+- Schroeder/Moorer style early reflections and diffusion
+- Later optional FDN mode
+
+============================================================
+2. Plugin Package Structure
+============================================================
+
+Create:
+
+plugins/
+  UltraVerb/
+    package.json
+    index.ts
+    Core/
+      index.ts
+      params.ts
+      dsp.ts
+      filters.ts
+      delayLine.ts
+      presets.ts
+    Editor/
+      PluginEditor.tsx
+      UltraVerbMeter.tsx optional
+      UltraVerbCurve.tsx optional
+
+Rules:
+- `Core` contains pure reusable DSP/math/defaults.
+- `Editor` contains React UI only.
+- `index.ts` exports plugin metadata, defaults, editor, and core helpers.
+- Do not import React from `Core`.
+- Do not import app store from plugin package.
+- App passes params/update callbacks into editor.
+
+Package metadata:
+
+```json
+{
+  "name": "@futureboard/plugin-ultraverb",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0"
+  }
+}
+```
+
+============================================================
+3. Device Registry Requirements
+============================================================
+
+Add UltraVerb to the built-in plugin/device registry once that registry exists.
+If the project still uses hardcoded add menus, update those menus in the smallest safe patch.
+
+Definition:
+
+```ts
+{
+  id: "ultraverb",
+  type: "reverb",
+  name: "UltraVerb",
+  shortName: "Verb",
+  category: "space",
+  color: "#7cc7ff",
+  defaultParams: serializeUltraVerbParams(ULTRAVERB_DEFAULT_PARAMS)
+}
+```
+
+Mixer menu:
+- label: `Add UltraVerb`
+- icon: use existing `Waves` or equivalent
+
+Effect Editor add menu:
+- label: `UltraVerb`
+
+Existing plain `Reverb` may remain as a generic placeholder only if it does not conflict.
+Preferred: use UltraVerb as the built-in reverb entry.
+
+============================================================
+4. Parameter Model
+============================================================
+
+All params are persisted as `Record<string, number | string | boolean>` in `InsertDevice.params`.
+
+Core typed model:
+
+```ts
+export type UltraVerbMode = "room" | "plate" | "hall" | "space";
+
+export type UltraVerbParams = {
+  power: boolean;
+  mode: UltraVerbMode;
+  mix: number;          // 0..100 percent
+  size: number;         // 0..100 percent, maps delay lengths / room scale
+  decay: number;        // 0.1..20 seconds target RT60-like control
+  preDelayMs: number;   // 0..250 ms
+  diffusion: number;    // 0..100 percent, allpass feedback / count
+  damping: number;      // 0..100 percent, high frequency absorption
+  lowCutHz: number;     // 20..1000 Hz
+  highCutHz: number;    // 1000..20000 Hz
+  width: number;        // 0..150 percent
+  modulation: number;   // 0..100 percent, subtle delay modulation
+  modRateHz: number;    // 0.05..5 Hz
+  earlyLevel: number;   // -inf..+6 dB stored -60..6
+  lateLevel: number;    // -inf..+6 dB stored -60..6
+  outputDb: number;     // -24..+12 dB
+  freeze: boolean;
+};
+```
+
+Default:
+
+```ts
+{
+  power: true,
+  mode: "hall",
+  mix: 22,
+  size: 55,
+  decay: 2.4,
+  preDelayMs: 18,
+  diffusion: 72,
+  damping: 48,
+  lowCutHz: 140,
+  highCutHz: 12000,
+  width: 105,
+  modulation: 12,
+  modRateHz: 0.35,
+  earlyLevel: -8,
+  lateLevel: 0,
+  outputDb: 0,
+  freeze: false
+}
+```
+
+Normalization rules:
+- clamp every numeric param
+- unknown mode falls back to `"hall"`
+- missing params use defaults
+- `freeze` forces feedback close to 1.0 but must never produce NaN/Inf
+- `mix` uses equal-power dry/wet law in DSP
+
+Serialization:
+- `normalizeUltraVerbParams(raw)`
+- `serializeUltraVerbParams(params)`
+
+Acceptance:
+- New insert starts with full default params.
+- Existing projects with `{}` params still load safely.
+- Changing a control writes only to `track.inserts[].params`.
+
+============================================================
+5. DSP Design
+============================================================
+
+Phase 1 DSP target:
+- stereo algorithmic reverb inspired by Freeverb
+- eight lowpass feedback comb filters per channel
+- four serial allpass diffusers per channel
+- pre-delay
+- input low/high cut
+- output gain
+- width/mid-side blend
+- wet/dry mix
+
+Recommended sample-rate-scaled delay lengths:
+
+Base Freeverb-like lengths at 44.1 kHz:
+- left combs: `[1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]`
+- right combs: left + stereo spread 23 samples
+- allpass: `[556, 441, 341, 225]`
+- right allpass: left + 23 samples
+
+Scale:
+
+```ts
+scaledSamples = Math.round(baseSamples * sampleRate / 44100 * roomScale)
+```
+
+`size` mapping:
+- `roomScale = 0.55 + size / 100 * 1.65`
+
+`decay` mapping:
+- convert desired decay seconds into feedback coefficient per comb length:
+
+```ts
+feedback = Math.pow(10, (-3 * delaySeconds) / decaySeconds)
+```
+
+Clamp feedback:
+- normal: 0.05..0.94
+- freeze: 0.995
+
+Damping:
+- lowpass inside comb feedback:
+
+```ts
+damp = damping / 100
+filterState = output * (1 - damp) + filterState * damp
+feedbackInput = filterState * feedback
+```
+
+Diffusion:
+- allpass feedback coefficient:
+  - low diffusion: 0.35
+  - default: 0.55
+  - high: 0.72
+
+Pre-delay:
+- circular delay line before reverb tank
+- delay length smooth changes via ramp or crossfade
+- never allocate in process callback
+
+Modulation:
+- subtle LFO on selected comb read positions or allpass delay offsets
+- Phase 1 may keep modulation disabled in DSP while exposing UI
+- Phase 2 implement fractional delay with linear interpolation
+- Avoid pitch seasick artifacts at default
+
+Width:
+- convert wet L/R to M/S
+- side gain from 0..1.5
+- `width=100` = unchanged
+- `width=0` = mono wet
+- `width=150` = wider wet with safe gain compensation
+
+Mix:
+- equal-power:
+
+```ts
+wetGain = Math.sin((mix / 100) * Math.PI / 2)
+dryGain = Math.cos((mix / 100) * Math.PI / 2)
+```
+
+Realtime safety:
+- no allocations in `process()`
+- no JSON parsing in `process()`
+- parameters are copied to atomic/simple numeric state at block boundaries
+- no console logging from audio thread
+- avoid denormals by zeroing tiny states under `1e-20`
+
+============================================================
+6. Audio Runtime Integration
+============================================================
+
+Short-term WebAudio path:
+- If using existing WebAudio mixer graph, insert UltraVerb by building an AudioNode chain.
+- Use `DelayNode`, `BiquadFilterNode`, `GainNode`, `StereoPannerNode` only for fallback.
+- For serious realtime tail, prefer AudioWorklet.
+
+Preferred implementation:
+
+apps/web/src/engine/devices/UltraVerbNode.ts
+apps/web/src/engine/worklets/UltraVerbProcessor.worklet.ts or .js
+
+Host API:
+
+```ts
+class UltraVerbNode {
+  input: AudioNode;
+  output: AudioNode;
+  updateParams(params: UltraVerbParams): void;
+  dispose(): void;
+}
+```
+
+Processor message:
+- send packed numeric params, not arbitrary JSON every block
+- send only when params changed
+
+Fallback:
+- If AudioWorklet registration fails, create simple graph:
+  - input -> dryGain -> output
+  - input -> preDelay -> low/high cut -> feedback delay/allpass approximation -> wetGain -> output
+- UI must not crash.
+
+Acceptance:
+- Adding UltraVerb does not break playback.
+- Bypass toggles device without popping.
+- Removing device disconnects nodes.
+- Multiple UltraVerb instances can coexist.
+
+============================================================
+7. UI / Editor Design
+============================================================
+
+Must fit bottom Effect Editor.
+
+Size target:
+- width: 650 to 760 px
+- height: 220 to 300 px
+- horizontal layout
+- no full-page hero/card UI
+
+Layout:
+
+Header:
+- power/bypass LED
+- `ULTRAVERB`
+- preset dropdown placeholder
+- A/B placeholder disabled
+- reset
+
+Main body:
+- left: decay/space visualization
+- center: primary controls
+- right: filter/width/output controls
+
+Primary controls:
+- Mix
+- Decay
+- Size
+- PreDelay
+- Diffusion
+- Damping
+
+Secondary controls:
+- Low Cut
+- High Cut
+- Width
+- Mod
+- Rate
+- Early
+- Late
+- Output
+- Freeze
+
+Interaction:
+- knobs support vertical drag
+- numeric readout under or beside each knob
+- double click resets param to default
+- shift drag = fine adjustment
+- all controls write through `onParamsChange`
+
+Visual:
+- dark compact DAW style
+- subtle cyan/blue space accent
+- small text 9..12 px
+- no oversized toy knobs
+- no generic SaaS cards
+
+Accessibility:
+- every interactive control has title
+- buttons have visible focus state
+- range controls have aria label
+
+============================================================
+8. Presets
+============================================================
+
+Add presets in `Core/presets.ts`.
+
+Required presets:
+- Default Hall
+- Small Room
+- Tight Plate
+- Vocal Plate
+- Drum Ambience
+- Long Hall
+- Wide Space
+- Freeze Pad
+
+Each preset stores complete `UltraVerbParams`.
+
+Preset UI:
+- dropdown in header
+- selecting preset writes all params
+- user edits switch label to `Custom`
+
+============================================================
+9. Testing
+============================================================
+
+Core tests:
+- normalize clamps values
+- serialize round trip
+- feedback coefficients finite
+- generated delay lengths positive and unique enough
+- impulse input produces decaying tail
+- bypass returns dry signal
+- freeze does not produce NaN/Inf
+
+DSP tests:
+- process 1 second of silence -> silence
+- impulse -> nonzero tail under max amplitude
+- decay increases tail duration
+- damping reduces high frequency energy
+- width=0 makes wet L/R similar
+- outputDb affects gain predictably
+
+Web build checks:
+- `bun run --cwd apps/web build`
+- no TypeScript errors
+
+Manual QA:
+- Add UltraVerb from Mixer insert menu
+- UI appears in Effect Editor
+- Move Mix/Decay/Size controls; params persist
+- Save/reload project; params survive
+- Bypass toggles instantly
+- Remove insert; audio graph disconnects
+- Add two UltraVerb devices; both retain independent params
+
+============================================================
+10. Implementation Phases
+============================================================
+
+Phase 1: Plugin package and UI only
+- Create `plugins/UltraVerb`
+- Add typed params/defaults/normalize/serialize
+- Add editor UI
+- Wire add menu
+- Render in Effect Editor
+- Persist params
+- No DSP yet
+
+Phase 2: WebAudio fallback DSP
+- Build simple AudioNode reverb graph
+- Wire insert chain to audio graph if current engine supports inserts
+- Bypass/remove safe
+- Keep CPU low
+
+Phase 3: AudioWorklet DSP
+- Implement comb/allpass in worklet
+- Parameter smoothing
+- No allocations in process
+- Multiple instances
+
+Phase 4: Polishing
+- Presets
+- Freeze
+- Modulation
+- Better meters/visualization
+- Optional offline render compatibility
+
+============================================================
+11. Done Criteria
+============================================================
+
+UltraVerb is done when:
+- It can be added as an insert.
+- Its editor is horizontal and usable.
+- Params persist in `track.inserts`.
+- It produces real reverb in playback.
+- It can be bypassed/removed safely.
+- Build passes.
+- At least core DSP/unit tests exist for delay/reverb math.

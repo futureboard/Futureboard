@@ -7,6 +7,7 @@ import type {
   DawClip,
   DawFile,
   DawProject,
+  DawProjectAsset,
   DawTrack,
   FileId,
   InsertDevice,
@@ -111,6 +112,11 @@ type ProjectStore = {
   addFile: (file: DawFile) => void;
   updateFile: (fileId: FileId, updates: Partial<DawFile>) => void;
   removeFile: (fileId: FileId) => void;
+
+  // ── Project asset manifest (Electron folder-project assets) ────────────────
+  addAsset: (asset: DawProjectAsset) => void;
+  updateAsset: (assetId: string, updates: Partial<DawProjectAsset>) => void;
+  removeAsset: (assetId: string) => void;
 
   // ── Waveform cache (non-dirty) ─────────────────────────────────────────────
   setPeaks: (fileId: FileId, peaks: WaveformPeaks) => void;
@@ -652,6 +658,40 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     markDirty();
   },
 
+  // ── Project asset manifest ─────────────────────────────────────────────────
+
+  addAsset: (asset) => {
+    set((s) => {
+      // Deduplicate: if same id already present, skip (idempotent)
+      const existing = (s.project.assets ?? []).some((a) => a.id === asset.id);
+      if (existing) return s;
+      return { project: { ...s.project, assets: [...(s.project.assets ?? []), asset] } };
+    });
+    markDirty();
+  },
+
+  updateAsset: (assetId, updates) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        assets: (s.project.assets ?? []).map((a) =>
+          a.id === assetId ? { ...a, ...updates } : a
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  removeAsset: (assetId) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        assets: (s.project.assets ?? []).filter((a) => a.id !== assetId),
+      },
+    }));
+    markDirty();
+  },
+
   // ── Automation lanes ───────────────────────────────────────────────────────
 
   addAutomationLane: (trackId, target) => {
@@ -866,6 +906,25 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         cacheKey: file.cacheKey,
         waveformCacheKeys: file.waveformCacheKeys,
         storageKey: file.storageKey,
+        relativePath: file.relativePath,
+      })),
+      // Assets are persisted to localStorage so the Browser panel survives
+      // page refresh (folder project path restored on next native open).
+      assets: (project.assets ?? []).map((a) => ({
+        id: a.id,
+        type: a.type,
+        name: a.name,
+        originalName: a.originalName,
+        relativePath: a.relativePath,
+        size: a.size,
+        hash: a.hash,
+        durationSeconds: a.durationSeconds,
+        sampleRate: a.sampleRate,
+        channels: a.channels,
+        mimeType: a.mimeType,
+        createdAt: a.createdAt,
+        updatedAt: a.updatedAt,
+        // missing is runtime-only; will be re-evaluated on next open
       })),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));

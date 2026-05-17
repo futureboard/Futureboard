@@ -24,6 +24,7 @@ class ClipScheduler {
 
     const playheadTime = transport.projectTime;
     const audioNow     = audioEngine.currentTime;
+    let scheduledCount = 0;
 
     for (const track of tracks) {
       const trackInput = mixer.getOrCreateTrack(track.id, track.volume, track.pan).gain;
@@ -39,7 +40,13 @@ class ClipScheduler {
         if (clipEnd <= playheadTime) continue;
 
         const loaded = audioEngine.getBuffer(clip.fileId);
-        if (!loaded) continue;
+        if (!loaded) {
+          console.warn("[WebAudio] scheduling clip skipped: missing buffer", {
+            clipId: clip.id,
+            fileId: clip.fileId,
+          });
+          continue;
+        }
 
         // Resolve the AudioBuffer to play — use processed version if available.
         let audioBuffer: AudioBuffer | null = loaded.audioBuffer;
@@ -106,7 +113,20 @@ class ClipScheduler {
         const outputTimeScale = soundTouchParams ? soundTouchParams.speedRatio : bufferTimeScale * realtimeRate;
         const remainingDuration =
           (clip.duration - (clipOffset * bufferTimeScale - clip.offset)) / outputTimeScale;
-        if (remainingDuration <= 0) continue;
+        if (
+          remainingDuration <= 0 ||
+          !Number.isFinite(remainingDuration) ||
+          !Number.isFinite(clipOffset) ||
+          !Number.isFinite(scheduleAt)
+        ) {
+          console.warn("[WebAudio] scheduling clip skipped: invalid timing", {
+            clipId: clip.id,
+            clipOffset,
+            scheduleAt,
+            remainingDuration,
+          });
+          continue;
+        }
 
         let effectNode: AudioNode | undefined;
         const source = audioEngine.ctx.createBufferSource();
@@ -134,10 +154,20 @@ class ClipScheduler {
         }
 
         gainNode.connect(trackInput);
+        console.log("[WebAudio] scheduling clip", {
+          clipId: clip.id,
+          trackId: track.id,
+          scheduleAt,
+          clipOffset,
+          remainingDuration,
+        });
         source.start(scheduleAt, clipOffset, remainingDuration);
+        console.log("[WebAudio] source started", { clipId: clip.id });
         this.scheduled.push({ node: source, effectNode, gainNode, clipId: clip.id, clipGain: clip.gain });
+        scheduledCount++;
       }
     }
+    console.log("[WebAudio] output signal/meter", { scheduledCount });
   }
 
   /**

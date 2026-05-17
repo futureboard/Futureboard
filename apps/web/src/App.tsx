@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { TransportBar } from "./components/TransportBar";
 import { CommandPalette } from "./components/ui/CommandPalette";
@@ -6,7 +6,6 @@ import { ContextMenu } from "./components/ui/ContextMenu";
 import { WindowHost } from "./components/windows/WindowHost";
 import { audioEngine } from "./engine/AudioEngine";
 import { audioAssetManager } from "./engine/AudioAssetManager";
-import { mixer } from "./engine/Mixer";
 import { transport } from "./engine/Transport";
 import { metronomeScheduler } from "./engine/MetronomeScheduler";
 import { activeAudioEngine } from "./engine/activeAudioEngine";
@@ -24,6 +23,9 @@ import { midiDeviceService } from "./engine/MidiDeviceService";
 import { ToastContainer } from "./components/ui/Toast";
 import { PerfMonitor } from "./components/PerfMonitor";
 import { useRecentProjectsStore } from "./store/recentProjectsStore";
+import type { DawProject, InsertDevice } from "./types/daw";
+import { useSettingsStore } from "./store/settingsStore";
+import { useWindowStore } from "./store/windowStore";
 import "./App.css";
 
 // Wire engine modules to app-layer state — runs once at module load time.
@@ -46,9 +48,59 @@ metronomeScheduler.setConfigGetter(() => {
   };
 });
 
+// Route metronome beat sync through the active engine so it tracks the native
+// Rust transport position instead of the WebAudio transport clock.
+metronomeScheduler.setProjectTimeGetter(() => activeAudioEngine.projectTime);
+
+function eachInsert(project: DawProject, visit: (trackId: string, insert: InsertDevice) => void): void {
+  for (const track of project.tracks) {
+    for (const insert of track.inserts ?? []) {
+      visit(track.id, insert);
+    }
+  }
+}
+
+function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): void {
+  const previousByKey = new Map<string, { trackId: string; insert: InsertDevice }>();
+  eachInsert(previous, (trackId, insert) => {
+    previousByKey.set(`${trackId}:${insert.id}`, { trackId, insert });
+  });
+
+  eachInsert(project, (trackId, insert) => {
+    const key = `${trackId}:${insert.id}`;
+    const prev = previousByKey.get(key)?.insert;
+    if (!prev) {
+      activeAudioEngine.addInsertDevice(trackId, insert);
+      return;
+    }
+
+    if (prev.enabled !== insert.enabled) {
+      activeAudioEngine.setInsertEnabled(trackId, insert.id, insert.enabled);
+    }
+
+    const prevParams = prev.params ?? {};
+    const nextParams = insert.params ?? {};
+    for (const [param, value] of Object.entries(nextParams)) {
+      if (prevParams[param] !== value) {
+        activeAudioEngine.setInsertParam(trackId, insert.id, param, value);
+      }
+    }
+  });
+
+  for (const [key, { trackId, insert }] of previousByKey) {
+    const stillExists = project.tracks.some((track) =>
+      key.startsWith(`${track.id}:`) && (track.inserts ?? []).some((next) => next.id === insert.id),
+    );
+    if (!stillExists) {
+      activeAudioEngine.removeInsertDevice(trackId, insert.id);
+    }
+  }
+}
+
 export default function App() {
   const { setWaveformStatus, loadLocal, project } = useProjectStore();
   const [perfVisible, setPerfVisible] = useState(false);
+  const startupHandledRef = useRef(false);
   useKeyboardShortcuts();
 
   useEffect(() => {
@@ -94,7 +146,12 @@ export default function App() {
 
   // Load saved project metadata from localStorage on mount, then mark as saved.
   useEffect(() => {
-    loadLocal();
+    const startupBehavior = useSettingsStore.getState().startupBehavior;
+    if (startupBehavior === "newProject") {
+      useProjectStore.getState().createNewProject();
+    } else {
+      loadLocal();
+    }
     useUIStore.getState().setSaveStatus("saved");
     // Register the loaded project as a recent entry
     const { project: loaded } = useProjectStore.getState();
@@ -103,6 +160,21 @@ export default function App() {
       name: loaded.name,
       source: "browser",
     });
+    if (startupBehavior === "wizard" && !startupHandledRef.current) {
+      startupHandledRef.current = true;
+      const windows = useWindowStore.getState();
+      if (!windows.isWindowOpen("projectWizard")) {
+        windows.openDialog({
+          contentType: "projectWizard",
+          title: "New Project",
+          modal: true,
+          width: 520,
+          height: platform.kind === "electron" ? 620 : 540,
+          resizable: false,
+          closable: true,
+        });
+      }
+    }
   }, [loadLocal]);
 
   // Mark status bar "unsaved" whenever the project data actually changes.
@@ -126,6 +198,7 @@ export default function App() {
     return useProjectStore.subscribe((state, prev) => {
       if (state.project !== prev.project) {
         activeAudioEngine.syncProject(state.project);
+        syncInsertDeltasToEngine(state.project, prev.project);
       }
     });
   }, []);
@@ -156,6 +229,7 @@ export default function App() {
     if (import.meta.env.DEV) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (window as any).__futureboardAudioDebug = {
+        ...(window as any).__futureboardAudioDebug,
         testTsPitch: async (semitones = 12) => {
           const _semitones = semitones;
           const sine = new Float32Array(44100).map((_, i) => Math.sin(i * 0.01));
@@ -195,13 +269,7 @@ export default function App() {
 
   // Sync insert plugin chain into the audio engine whenever tracks or inserts change
   useEffect(() => {
-    if (activeAudioEngine.isNative) return;
-    const bpm = project.bpm ?? 120;
-    for (const track of project.tracks) {
-      if (track.inserts && track.inserts.length > 0) {
-        mixer.syncTrackInserts(track.id, track.inserts, bpm);
-      }
-    }
+    void activeAudioEngine.syncTrackInserts();
   }, [project.tracks, project.bpm]);
 
   // After project files are known, validate asset availability and hydrate cached peaks.

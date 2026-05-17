@@ -30,13 +30,30 @@ class MetronomeScheduler {
   private nextNoteTime: number = 0;
   private currentBeat: number = 0;
   private configGetter: (() => MetronomeConfig) | null = null;
+  /**
+   * Optional override for the canonical project-time source.
+   * When the native Rust engine is active, inject `() => activeAudioEngine.projectTime`
+   * so the beat grid stays in sync with the native transport position instead of
+   * reading the WebAudio Transport (which is paused in native mode).
+   */
+  private projectTimeGetter: (() => number) | null = null;
 
   setConfigGetter(fn: () => MetronomeConfig): void {
     this.configGetter = fn;
   }
 
+  /** Override the default `transport.projectTime` source. */
+  setProjectTimeGetter(fn: () => number): void {
+    this.projectTimeGetter = fn;
+  }
+
   private getConfig(): MetronomeConfig {
     return this.configGetter?.() ?? DEFAULT_CONFIG;
+  }
+
+  private getProjectTime(): number {
+    if (this.projectTimeGetter) return this.projectTimeGetter();
+    return transport.projectTime;
   }
 
   start() {
@@ -61,7 +78,7 @@ class MetronomeScheduler {
   private sync() {
     const { bpm } = this.getConfig();
     const spb = secondsPerBeat(bpm);
-    const pTime = transport.projectTime;
+    const pTime = this.getProjectTime();
 
     // Find the next beat boundary on or after the playhead time
     this.currentBeat = Math.ceil(pTime / spb);

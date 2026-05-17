@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from "react";
-import { mixer, type StereoLevel } from "../engine/Mixer";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 
-// Attack is fast (85% toward target per frame), release is slow (10% per frame).
-const ATTACK = 0.85;
-const RELEASE = 0.10;
+export type StereoLevel = { l: number; r: number };
+
+// Attack should feel instant; release decays quickly enough for DAW meters.
+const ATTACK = 1.0;
+const RELEASE = 0.26;
 
 function smooth(current: number, target: number): number {
   const coeff = target > current ? ATTACK : RELEASE;
@@ -19,19 +21,24 @@ function rmsToMeter(rms: number): number {
 export function useVuStereoLevels(trackId: string | "master"): StereoLevel {
   const [levels, setLevels] = useState<StereoLevel>({ l: 0, r: 0 });
   const smoothedRef = useRef<StereoLevel>({ l: 0, r: 0 });
+  const targetRef = useRef<StereoLevel>({ l: 0, r: 0 });
 
   useEffect(() => {
     let rafId: number;
+    const unsubscribe = activeAudioEngine.subscribeMeters((id, raw) => {
+      if (id !== trackId) return;
+      targetRef.current = {
+        l: rmsToMeter(raw.l),
+        r: rmsToMeter(raw.r),
+      };
+    });
 
     function tick() {
-      const raw =
-        trackId === "master" ? mixer.getMasterLevel() : mixer.getLevel(trackId);
-      const targetL = rmsToMeter(raw.l);
-      const targetR = rmsToMeter(raw.r);
+      const target = targetRef.current;
 
       const cur = smoothedRef.current;
-      const newL = smooth(cur.l, targetL);
-      const newR = smooth(cur.r, targetR);
+      const newL = smooth(cur.l, target.l);
+      const newR = smooth(cur.r, target.r);
       smoothedRef.current = { l: newL, r: newR };
 
       // Skip React re-render if the visual change is sub-pixel (< 0.002 on 0–1 scale).
@@ -45,7 +52,10 @@ export function useVuStereoLevels(trackId: string | "master"): StereoLevel {
     }
 
     rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      unsubscribe();
+      cancelAnimationFrame(rafId);
+    };
   }, [trackId]);
 
   return levels;

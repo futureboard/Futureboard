@@ -50,7 +50,15 @@ class Transport {
     );
   }
 
-  async play() {
+  /**
+   * Start playback.
+   *
+   * @param options.skipProviders  Storage providers whose files should NOT be
+   *   loaded into the WebAudio buffer cache.  Pass `["project-folder"]` when
+   *   the native Rust engine is active so it handles those files and we avoid
+   *   double audio.
+   */
+  async play(options?: { skipProviders?: Array<DawFile["storageProvider"]> }) {
     if (this._state === "playing") return;
     await audioEngine.resume();
     await audioEngine.ensureSoundTouchWorklet().catch((error) => {
@@ -58,13 +66,15 @@ class Transport {
     });
     this.transportStartAudioTime = audioEngine.currentTime;
     this.transportStartProjectTime = this._playheadTime;
-    await this.ensurePlayableBuffers();
+    await this.ensurePlayableBuffers(options?.skipProviders);
     this._state = "playing";
     metronomeScheduler.start();
     clipScheduler.schedule(this.getTracks());
   }
 
-  private async ensurePlayableBuffers(): Promise<void> {
+  private async ensurePlayableBuffers(
+    skipProviders?: Array<DawFile["storageProvider"]>,
+  ): Promise<void> {
     const files = new Map(this.getFiles().map((file) => [file.id, file]));
     const neededFileIds = new Set<string>();
     const playheadTime = this._playheadTime;
@@ -80,6 +90,8 @@ class Transport {
       if (audioEngine.getBuffer(fileId)) continue;
       const file = files.get(fileId);
       if (!file) continue;
+      // Skip files owned by the native engine to prevent double audio.
+      if (skipProviders && skipProviders.includes(file.storageProvider)) continue;
       await audioEngine.restoreBuffer(file, (fid, peaks) => {
         this.peaksCallback?.(fid, peaks);
       });

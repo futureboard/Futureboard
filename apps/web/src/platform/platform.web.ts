@@ -76,6 +76,9 @@ const fileSystem: FileSystemAdapter = {
   async statAudioFile(_path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null> {
     return null;
   },
+  getNativePathForFile(_file: File): string | null {
+    return null;
+  },
   async revealInFileManager(_path: string): Promise<void> {
     throw new Error("revealInFileManager is not supported on web");
   },

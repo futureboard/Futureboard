@@ -3,6 +3,7 @@ import { useUIStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
 import { buildSelectionState, getSelectionSummary } from "../store/selectionSelectors";
 import { activeAudioEngine } from "../engine/activeAudioEngine";
+import { useAudioBackendStore } from "../store/audioBackendStore";
 import { C } from "../theme";
 import { formatBarBeat } from "../utils/musicalTime";
 import { pxPerBeat } from "../utils/musicalGrid";
@@ -69,6 +70,7 @@ export function StatusBar() {
   const saveStatus            = useUIStore((s) => s.saveStatus);
 
   const project       = useProjectStore((s) => s.project);
+  const backendState  = useAudioBackendStore();
   const peakCache     = useProjectStore((s) => s.peakCache);
   const bpm           = project.bpm;
   const timeSignature = project.timeSignature;
@@ -135,6 +137,11 @@ export function StatusBar() {
   const peakBytes = [...peakCache.values()].reduce((sum, peaks) => sum + peaks.peaks.byteLength, 0);
   const missingAssets = project.files.filter((file) => file.storageProvider === "missing").length;
   const audioDebug = [
+    backendState.active ? engineLabel(backendState.active) : "Audio initializing",
+    backendState.runtime,
+    backendState.contextState && backendState.contextState !== "uninitialized" ? backendState.contextState : null,
+    backendState.fallbackReason ? `fallback: ${backendState.fallbackReason}` : null,
+    backendState.error ? `error: ${backendState.error}` : null,
     sourceBytes > 0 ? `${formatBytes(sourceBytes)} source` : null,
     audioStats.decodedBytes > 0 ? `${formatBytes(audioStats.decodedBytes)} decoded` : null,
     peakBytes > 0 ? `peaks ${formatBytes(peakBytes)}` : null,
@@ -209,6 +216,15 @@ export function StatusBar() {
       </div>
     </div>
   );
+}
+
+function engineLabel(active: string): string {
+  switch (active) {
+    case "sphere-native": return "Sphere Native";
+    case "rust-wasm": return "Rust WASM";
+    case "web-audio": return "WebAudio";
+    default: return active;
+  }
 }
 
 function formatBytes(bytes: number): string {

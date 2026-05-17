@@ -13,6 +13,7 @@
 import type {
   AudioEngineAdapter,
   AudioEngineStatus,
+  AudioSelfTestResult,
   MeterCallback,
   TransportCallback,
 } from "../AudioEngineAdapter";
@@ -21,6 +22,7 @@ import type {
   EngineProjectSnapshot,
   EngineTrackSnapshot,
   EngineClipSnapshot,
+  EngineAssetSnapshot,
   MeterSnapshot,
   StereoMeterLevel,
 } from "./types";
@@ -34,9 +36,39 @@ function getSphere(): any | null {
 }
 
 // ── Meters polling ────────────────────────────────────────────────────────────
-const METER_POLL_MS = 50; // ~20 fps
+const METER_POLL_MS = 16; // ~60 fps for responsive VU lights
+const TRANSPORT_POLL_MS = 33; // ~30 fps is enough for UI transport sync
 
 // ── Snapshot builders ─────────────────────────────────────────────────────────
+
+/**
+ * Returns true when `p` looks like a real filesystem path rather than an
+ * opaque storage key (IndexedDB keys start with "audio:", blobs with "blob:").
+ * Accepts both Windows (`C:\…` / `C:/…`) and Unix (`/…`) absolute paths.
+ */
+function looksLikeFsPath(p: string): boolean {
+  if (!p || p.length < 3) return false;
+  if (p.startsWith("audio:") || p.startsWith("blob:") || p.startsWith("data:")) return false;
+  return p.includes("/") || p.includes("\\") || /^[A-Za-z]:/.test(p);
+}
+
+const PROJECT_AUDIO_DIR = "Media/Audio";
+
+function projectAudioRelativePathFromName(name?: string | null): string | null {
+  const clean = name?.trim();
+  if (!clean) return null;
+  const basename = clean.replace(/\\/g, "/").split("/").filter(Boolean).pop();
+  return basename ? `${PROJECT_AUDIO_DIR}/${basename}` : null;
+}
+
+function inferFolderFileRelativePath(
+  file?: { relativePath?: string; storageProvider?: string; name?: string; originalFileName?: string } | null,
+): string | null {
+  if (!file) return null;
+  if (file.relativePath) return file.relativePath;
+  if (file.storageProvider !== "project-folder") return null;
+  return projectAudioRelativePathFromName(file.name) ?? projectAudioRelativePathFromName(file.originalFileName);
+}
 
 function buildTrackSnapshot(track: DawTrack): EngineTrackSnapshot {
   return {
@@ -58,35 +90,92 @@ function buildTrackSnapshot(track: DawTrack): EngineTrackSnapshot {
   };
 }
 
+/**
+ * Resolve an absolute filesystem path for a clip's audio file so that the
+ * Rust native engine can read it via fs::read.
+ *
+ * Resolution order:
+ *   0. Project asset manifest: clip.assetId → assets.relativePath + projectRoot
+ *      (set for all Electron folder-project imports via Auto Import)
+ *   1. DawFile.relativePath, or legacy folder-project file name inferred as
+ *      Media/Audio/<filename>, plus runtime projectRoot
+ *   2. DawFile.cacheKey / storageKey that looks like an absolute FS path
+ *      — covers file-handle (native picker), drag-drop (Electron File.path),
+ *        and project-folder reloaded from localStorage (cacheKey = absPath)
+ *   3. null — pure IndexedDB / OPFS sources are unreachable from Rust
+ *
+ * Note: older .mochiproj files may have storageProvider="project-folder" but
+ * no relativePath/assets.  For those files we infer Media/Audio/<file.name>
+ * and let the trusted Electron side validate the path exists.
+ */
+function resolveClipAsset(project: DawProject | null, clip: DawClip) {
+  if (!project) return null;
+  const assetId = clip.assetId ?? clip.fileId;
+  return (project.assets ?? []).find((a) => a.id === assetId)
+    ?? (project.assets ?? []).find((a) => a.id === clip.fileId)
+    ?? null;
+}
+
+function resolveClipFile(project: DawProject | null, clip: DawClip) {
+  if (!project) return null;
+  return project.files.find((f) => f.id === clip.assetId)
+    ?? project.files.find((f) => f.id === clip.fileId)
+    ?? null;
+}
+
 function resolveMediaPath(project: DawProject | null, clip: DawClip): string | null {
   if (!project) return null;
-  const file = project.files.find((f) => f.id === clip.fileId);
-  if (!file) return null;
 
-  // Folder-based Electron project: absolutePath = projectRoot + relativePath.
-  // `relativePath` is set by the folder-import flow (e.g. "Media/Audio/kick.wav").
-  // The native Rust engine opens this via fs::read — it needs a real filesystem path.
-  if (file.relativePath) {
-    const root = platform.folderProject.getProjectRoot();
-    if (root) {
-      // Forward-slash join; Rust fs::read accepts both / and \ on Windows.
-      return `${root}/${file.relativePath}`.replace(/\\/g, "/");
+  // ── 0. Project asset manifest (preferred for Auto-Import clips) ───────────
+  if (clip.assetId || clip.fileId) {
+    const asset = resolveClipAsset(project, clip);
+    if (asset && asset.relativePath && !asset.missing) {
+      const root = platform.folderProject.getProjectRoot();
+      if (root) {
+        return `${root}/${asset.relativePath}`.replace(/\\/g, "/");
+      }
+      // projectRoot not in memory; fall through to DawFile cacheKey below.
+      // The DawFile (same id) will have cacheKey = absolutePath from saveLocal.
     }
   }
 
-  // IndexedDB / OPFS / blob-URL sources: the Rust process cannot reach these.
-  // Return null — the clip will be silently skipped in the native engine
-  // (audio still plays through the WebAudio fallback path if needed).
+  const file = resolveClipFile(project, clip);
+  if (!file) return null;
+
+  // ── 1. Folder project: relativePath + runtime projectRoot ─────────────────
+  const inferredRelativePath = inferFolderFileRelativePath(file);
+  if (inferredRelativePath) {
+    const root = platform.folderProject.getProjectRoot();
+    if (root) {
+      return `${root}/${inferredRelativePath}`.replace(/\\/g, "/");
+    }
+    // projectRoot not in memory — fall through to cacheKey.
+  }
+
+  // ── 2. Any storage provider whose cacheKey / storageKey is a real FS path ──
+  if (file.cacheKey && looksLikeFsPath(file.cacheKey)) {
+    return file.cacheKey.replace(/\\/g, "/");
+  }
+  if (file.storageKey && looksLikeFsPath(file.storageKey)) {
+    return file.storageKey.replace(/\\/g, "/");
+  }
+
+  // ── 3. IndexedDB / OPFS / blob — unreachable from the Rust process ────────
   return null;
 }
 
 function buildClipSnapshot(project: DawProject | null, clip: DawClip, bpm: number): EngineClipSnapshot {
   // Convert timeline seconds → beats for the native engine.
   const bps = bpm / 60;
+  const asset = resolveClipAsset(project, clip);
+  const file = resolveClipFile(project, clip);
+  const assetId = clip.assetId ?? file?.id ?? clip.fileId;
+  const relativePath = asset?.relativePath ?? inferFolderFileRelativePath(file);
   return {
     id:            clip.id,
     trackId:       clip.trackId,
-    assetId:       clip.fileId,
+    assetId,
+    relativePath,
     mediaPath:     resolveMediaPath(project, clip),
     startBeat:     clip.startTime  * bps,
     durationBeats: clip.duration   * bps,
@@ -105,11 +194,92 @@ function buildClipSnapshot(project: DawProject | null, clip: DawClip, bpm: numbe
   };
 }
 
-function buildProjectSnapshot(project: DawProject): EngineProjectSnapshot {
+function buildAssetSnapshot(project: DawProject): EngineAssetSnapshot[] {
+  const assets: EngineAssetSnapshot[] = (project.assets ?? []).map((asset) => {
+    const file = project.files.find((f) => f.id === asset.id);
+    return {
+      id: asset.id,
+      type: asset.type,
+      name: asset.name,
+      relativePath: asset.relativePath || inferFolderFileRelativePath(file) || "",
+      missing: asset.missing,
+    };
+  });
+  const existingIds = new Set(assets.map((asset) => asset.id));
+  for (const file of project.files) {
+    const relativePath = inferFolderFileRelativePath(file);
+    if (!relativePath || existingIds.has(file.id)) continue;
+    assets.push({
+      id: file.id,
+      type: "audio",
+      name: file.name,
+      relativePath,
+      missing: false,
+    });
+  }
+  return assets;
+}
+
+function buildFileSnapshot(project: DawProject): NonNullable<EngineProjectSnapshot["files"]> {
+  return project.files.map((file) => ({
+    id: file.id,
+    name: file.name,
+    originalFileName: file.originalFileName,
+    storageProvider: file.storageProvider,
+    relativePath: inferFolderFileRelativePath(file),
+    cacheKey: file.cacheKey ?? null,
+    storageKey: file.storageKey ?? null,
+  }));
+}
+
+/**
+ * Build the project snapshot asynchronously, validating each clip's media path
+ * exists on disk and emitting per-clip `[NativeSnapshot]` debug logs.
+ *
+ * Clips whose path cannot be resolved or does not exist are marked mediaPath=null
+ * (the Rust engine skips them gracefully rather than crashing).
+ */
+async function buildProjectSnapshotAsync(project: DawProject): Promise<EngineProjectSnapshot> {
   const allClips = project.tracks.flatMap((t) => t.clips);
+  const projectRoot = platform.folderProject.getProjectRoot();
+  const assets = buildAssetSnapshot(project);
+
+  const assetCount = assets.length;
+  console.log(`[NativeSnapshot] projectRoot = ${projectRoot ?? "null (project loaded from cache or no folder project)"}`);
+  console.log(`[NativeSnapshot] assets = ${assetCount} (project.assets), files = ${project.files.length}, clips = ${allClips.length}`);
+
+  const clips: EngineClipSnapshot[] = [];
+  for (const c of allClips) {
+    const snap = buildClipSnapshot(project, c, project.bpm);
+    if (snap.mediaPath) {
+      const stat = await platform.fileSystem.statAudioFile(snap.mediaPath).catch(() => null);
+      const exists = stat !== null;
+      console.log(
+        `[NativeSnapshot] clip=${c.id} assetId=${snap.assetId} relativePath=${snap.relativePath ?? ""} mediaPath="${snap.mediaPath}" exists=${exists}`,
+      );
+      if (!exists) {
+        console.warn(
+          `[NativeSnapshot] ⚠ clip ${c.id} — file not found on disk, marking mediaPath=null`,
+        );
+        snap.mediaPath = null;
+      }
+    } else {
+      const file = project.files.find((f) => f.id === c.fileId);
+      const inferredRelativePath = inferFolderFileRelativePath(file);
+      console.warn(
+        `[NativeSnapshot] clip=${c.id} assetId=${snap.assetId} — no mediaPath resolved ` +
+        `(storageProvider=${file?.storageProvider ?? "?"} ` +
+        `cacheKey="${file?.cacheKey ?? ""}" ` +
+        `storageKey="${file?.storageKey ?? ""}" ` +
+        `relativePath="${inferredRelativePath ?? file?.relativePath ?? ""}")`,
+      );
+    }
+    clips.push(snap);
+  }
+
   return {
     projectId:     project.id,
-    projectRoot:   platform.folderProject.getProjectRoot(),
+    projectRoot,
     bpm:           project.bpm,
     timeSignature: [
       project.timeSignature?.numerator   ?? 4,
@@ -117,7 +287,9 @@ function buildProjectSnapshot(project: DawProject): EngineProjectSnapshot {
     ],
     sampleRate:    project.sampleRate ?? 44100,
     tracks:        project.tracks.map(buildTrackSnapshot),
-    clips:         allClips.map((c) => buildClipSnapshot(project, c, project.bpm)),
+    clips,
+    assets,
+    files:         buildFileSnapshot(project),
     routing: {
       masterOutputDevice: null,
       sampleRate:         project.sampleRate ?? 44100,
@@ -134,7 +306,11 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   private _transportCallbacks   = new Set<TransportCallback>();
   private _meterPollId:         ReturnType<typeof setInterval> | null = null;
   private _transportPollId:     ReturnType<typeof setInterval> | null = null;
+  private _meterPollInFlight    = false;
+  private _transportPollInFlight = false;
   private _lastTransport        = { playing: false, positionSeconds: 0 };
+  private _lastProjectSignature: string | null = null;
+  private _meterFallbackProject: DawProject | null = null;
   // Debounce timer for syncProject — rapid edits batch into one Rust rebuild.
   private _syncTimer:           ReturnType<typeof setTimeout> | null = null;
 
@@ -186,16 +362,68 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
     return this._status;
   }
 
+  async runSelfTest(): Promise<AudioSelfTestResult> {
+    const sphere = getSphere();
+    if (!sphere) {
+      return { ok: false, backend: "sphere-native", error: "SphereAudio preload bridge is unavailable" };
+    }
+    try {
+      await sphere.setTestTone(true, 440);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      await sphere.setTestTone(false, 440);
+      const status = await sphere.getStatus();
+      return {
+        ok: true,
+        backend: "sphere-native",
+        contextState: status.running ? "running" : "stopped",
+        device: status.outputDevice ?? "default output",
+      };
+    } catch (error) {
+      try {
+        await sphere.setTestTone(false, 440);
+      } catch {
+        // ignore cleanup errors
+      }
+      return {
+        ok: false,
+        backend: "sphere-native",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   // ── Project sync ───────────────────────────────────────────────────────────
 
   async loadProject(project: DawProject): Promise<void> {
     const sphere = getSphere();
     if (!sphere) return;
-    const snapshot = buildProjectSnapshot(project);
+    // buildProjectSnapshotAsync validates each path on disk and emits
+    // [NativeSnapshot] per-clip logs so failures are visible in DevTools.
+    const snapshot = await buildProjectSnapshotAsync(project);
+    const trackCount = snapshot.tracks.length;
+    const clipCount  = snapshot.clips.length;
+    const pathCount  = snapshot.clips.filter((c) => c.mediaPath).length;
+    console.log(
+      `[SphereNativeAdapter] loadProject("${project.name ?? project.id}") → ` +
+      `${trackCount} tracks, ${clipCount} clips (${pathCount} with validated media paths) → IPC`,
+    );
+    if (clipCount > 0 && pathCount === 0) {
+      console.warn(
+        "[SphereNativeAdapter] ⚠ All clips have null mediaPath — Rust engine will play silence! " +
+        "Check [NativeSnapshot] logs above for per-clip resolution details.",
+      );
+    }
     await sphere.loadProject(snapshot);
+    this._lastProjectSignature = projectGraphSignature(project);
+    this._meterFallbackProject = project;
+    console.log("[SphereNativeAdapter] loadProject() → IPC call complete");
   }
 
   syncProject(project: DawProject): void {
+    const signature = projectGraphSignature(project);
+    if (signature === this._lastProjectSignature) {
+      return;
+    }
     // Debounce: batch rapid edits (clip drags, fader moves) into one Rust rebuild.
     // 120 ms keeps the engine in sync without decoding audio files on every frame.
     if (this._syncTimer !== null) clearTimeout(this._syncTimer);
@@ -203,10 +431,20 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
       this._syncTimer = null;
       const sphere = getSphere();
       if (!sphere) return;
-      const snapshot = buildProjectSnapshot(project);
-      sphere.loadProject(snapshot).catch((e: unknown) =>
-        console.warn("[NativeSphere] syncProject error:", e),
-      );
+      // Use async builder so paths are validated and logged consistently.
+      buildProjectSnapshotAsync(project)
+        .then((snapshot) => {
+          const clipCount = snapshot.clips.filter((c) => c.mediaPath).length;
+          console.log(
+            `[SphereNativeAdapter] syncProject (debounced) → ${snapshot.clips.length} clips (${clipCount} with paths) → IPC`,
+          );
+          this._lastProjectSignature = signature;
+          this._meterFallbackProject = project;
+          return sphere.loadProject(snapshot);
+        })
+        .catch((e: unknown) =>
+          console.warn("[SphereNativeAdapter] syncProject error:", e),
+        );
     }, 120);
   }
 
@@ -214,33 +452,52 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
 
   async play(positionSeconds?: number): Promise<void> {
     const sphere = getSphere();
-    if (!sphere) return;
+    if (!sphere) {
+      console.error("[SphereNativeAdapter] play(): sphere bridge absent — no audio output!");
+      return;
+    }
+    console.log(
+      `[SphereNativeAdapter] play() → IPC setTransportState({ playing: true, positionSeconds: ${positionSeconds ?? "undefined"} })`,
+    );
     await sphere.setTransportState({ playing: true, positionSeconds });
+    console.log("[SphereNativeAdapter] play() → IPC call complete");
   }
 
   pause(): void {
     const sphere = getSphere();
-    if (!sphere) return;
+    if (!sphere) {
+      console.error("[SphereNativeAdapter] pause(): sphere bridge absent");
+      return;
+    }
+    console.log("[SphereNativeAdapter] pause() → IPC setTransportState({ playing: false })");
     sphere
       .setTransportState({ playing: false })
-      .catch((e: unknown) => console.warn("[NativeSphere] pause error:", e));
+      .catch((e: unknown) => console.warn("[SphereNativeAdapter] pause error:", e));
   }
 
   stop(): void {
     const sphere = getSphere();
-    if (!sphere) return;
+    if (!sphere) {
+      console.error("[SphereNativeAdapter] stop(): sphere bridge absent");
+      return;
+    }
+    console.log("[SphereNativeAdapter] stop() → IPC setTransportState({ playing: false, positionSeconds: 0 })");
     sphere
       .setTransportState({ playing: false, positionSeconds: 0 })
-      .catch((e: unknown) => console.warn("[NativeSphere] stop error:", e));
+      .catch((e: unknown) => console.warn("[SphereNativeAdapter] stop error:", e));
     this._notifyTransport({ playing: false, positionSeconds: 0 });
   }
 
   seekSeconds(seconds: number): void {
     const sphere = getSphere();
-    if (!sphere) return;
+    if (!sphere) {
+      console.error("[SphereNativeAdapter] seekSeconds(): sphere bridge absent");
+      return;
+    }
+    console.log(`[SphereNativeAdapter] seekSeconds(${seconds}) → IPC setTransportState`);
     sphere
       .setTransportState({ positionSeconds: seconds })
-      .catch((e: unknown) => console.warn("[NativeSphere] seek error:", e));
+      .catch((e: unknown) => console.warn("[SphereNativeAdapter] seek error:", e));
   }
 
   setBpm(bpm: number): void {
@@ -262,19 +519,11 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   // ── Track management ───────────────────────────────────────────────────────
 
   createTrack(track: DawTrack): void {
-    const sphere = getSphere();
-    if (!sphere) return;
-    sphere
-      .updateTrackParam(track.id, "__create__", buildTrackSnapshot(track))
-      .catch((e: unknown) => console.warn("[NativeSphere] createTrack error:", e));
+    console.log(`[NativeSphere] createTrack(${track.id}) deferred to next project snapshot`);
   }
 
   removeTrack(trackId: TrackId): void {
-    const sphere = getSphere();
-    if (!sphere) return;
-    sphere
-      .updateTrackParam(trackId, "__remove__", true)
-      .catch((e: unknown) => console.warn("[NativeSphere] removeTrack error:", e));
+    console.log(`[NativeSphere] removeTrack(${trackId}) deferred to next project snapshot`);
   }
 
   // ── Clip management ────────────────────────────────────────────────────────
@@ -342,19 +591,11 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   // ── Insert devices ─────────────────────────────────────────────────────────
 
   addInsertDevice(trackId: TrackId, device: InsertDevice): void {
-    const sphere = getSphere();
-    if (!sphere) return;
-    sphere
-      .updateInsertParam(trackId, device.id, "__create__", device)
-      .catch((e: unknown) => console.warn("[NativeSphere] addInsertDevice error:", e));
+    console.log(`[NativeSphere] addInsertDevice(${trackId}, ${device.id}) deferred to next project snapshot`);
   }
 
   removeInsertDevice(trackId: TrackId, deviceId: string): void {
-    const sphere = getSphere();
-    if (!sphere) return;
-    sphere
-      .updateInsertParam(trackId, deviceId, "__remove__", true)
-      .catch((e: unknown) => console.warn("[NativeSphere] removeInsertDevice error:", e));
+    console.log(`[NativeSphere] removeInsertDevice(${trackId}, ${deviceId}) deferred to next project snapshot`);
   }
 
   setInsertEnabled(trackId: TrackId, deviceId: string, enabled: boolean): void {
@@ -373,6 +614,16 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   ): void {
     const sphere = getSphere();
     if (!sphere) return;
+    if (param.startsWith("__")) {
+      console.warn(`[NativeSphere] blocked invalid insert param: "${param}"`);
+      return;
+    }
+    if (typeof value === "string") {
+      console.log(
+        `[NativeSphere] setInsertParam(${trackId}, ${deviceId}, ${param}) string value deferred to project snapshot`,
+      );
+      return;
+    }
     sphere
       .updateInsertParam(trackId, deviceId, param, value)
       .catch((e: unknown) => console.warn("[NativeSphere] setInsertParam error:", e));
@@ -407,32 +658,50 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   private _startPolling(): void {
     this._stopPolling();
 
-    // Meter poll — ~20 fps
+    // Meter poll — ~60 fps. Guard against overlapping IPC calls so slow
+    // machines do not build a backlog that makes the VU feel delayed.
     this._meterPollId = setInterval(() => {
       if (this._meterCallbacks.size === 0) return;
+      if (this._meterPollInFlight) return;
       const sphere = getSphere();
       if (!sphere) return;
+      this._meterPollInFlight = true;
       sphere
         .getMeters()
         .then((snap: MeterSnapshot) => {
+          let emittedTrackCount = 0;
           for (const [trackId, level] of Object.entries(snap.tracks)) {
             const sl: { left: number; right: number } = level as StereoMeterLevel;
             for (const cb of this._meterCallbacks) {
               cb(trackId, { l: sl.left, r: sl.right });
+            }
+            emittedTrackCount += 1;
+          }
+          if (emittedTrackCount === 0) {
+            const fallbackTracks = this._activeFallbackTrackIds();
+            for (const trackId of fallbackTracks) {
+              for (const cb of this._meterCallbacks) {
+                cb(trackId, { l: snap.master.left, r: snap.master.right });
+              }
             }
           }
           for (const cb of this._meterCallbacks) {
             cb("master", { l: snap.master.left, r: snap.master.right });
           }
         })
-        .catch(() => {/* native engine may be busy — ignore */});
+        .catch(() => {/* native engine may be busy — ignore */})
+        .finally(() => {
+          this._meterPollInFlight = false;
+        });
     }, METER_POLL_MS);
 
-    // Transport poll — ~20 fps
+    // Transport poll — ~30 fps
     this._transportPollId = setInterval(() => {
       if (this._transportCallbacks.size === 0) return;
+      if (this._transportPollInFlight) return;
       const sphere = getSphere();
       if (!sphere) return;
+      this._transportPollInFlight = true;
       sphere
         .getTransportState()
         .then((state: { playing: boolean; positionSeconds: number }) => {
@@ -444,8 +713,11 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
             this._notifyTransport(state);
           }
         })
-        .catch(() => {});
-    }, METER_POLL_MS);
+        .catch(() => {})
+        .finally(() => {
+          this._transportPollInFlight = false;
+        });
+    }, TRANSPORT_POLL_MS);
   }
 
   private _stopPolling(): void {
@@ -460,4 +732,68 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
       cb(state);
     }
   }
+
+  private _activeFallbackTrackIds(): string[] {
+    const project = this._meterFallbackProject;
+    if (!project || !this._lastTransport.playing) return [];
+    const position = this._lastTransport.positionSeconds;
+    const active = new Set<string>();
+    for (const track of project.tracks) {
+      if (track.muted || (project.tracks.some((t) => t.solo) && !track.solo)) continue;
+      for (const clip of track.clips) {
+        const start = clip.startTime ?? 0;
+        const end = start + (clip.duration ?? 0);
+        if (position >= start && position < end && !clip.muted) {
+          active.add(track.id);
+          break;
+        }
+      }
+    }
+    return [...active];
+  }
+}
+
+function projectGraphSignature(project: DawProject): string {
+  return JSON.stringify({
+    id: project.id,
+    bpm: project.bpm,
+    sampleRate: project.sampleRate,
+    assets: (project.assets ?? []).map((asset) => ({
+      id: asset.id,
+      relativePath: asset.relativePath,
+      missing: asset.missing,
+    })),
+    files: project.files.map((file) => ({
+      id: file.id,
+      name: file.name,
+      originalFileName: file.originalFileName,
+      storageProvider: file.storageProvider,
+      relativePath: inferFolderFileRelativePath(file),
+      cacheKey: file.cacheKey,
+      storageKey: file.storageKey,
+    })),
+    tracks: project.tracks.map((track) => ({
+      id: track.id,
+      type: track.type,
+      clips: track.clips.map((clip) => ({
+        id: clip.id,
+        fileId: clip.fileId,
+        assetId: clip.assetId,
+        startTime: clip.startTime,
+        offset: clip.offset,
+        duration: clip.duration,
+        gain: clip.gain,
+        muted: clip.muted,
+        fadeIn: clip.fadeIn,
+        fadeOut: clip.fadeOut,
+        audioProcess: clip.audioProcess,
+      })),
+      inserts: (track.inserts ?? []).map((insert) => ({
+        id: insert.id,
+        type: insert.type,
+        enabled: insert.enabled,
+        order: insert.order,
+      })),
+    })),
+  });
 }

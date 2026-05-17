@@ -17,8 +17,6 @@ import { audioEngine } from "../engine/AudioEngine";
 import { DawSelect } from "./ui/DawSelect";
 import { NumberInput } from "./ui/NumberInput";
 import type { DawSelectOption } from "./ui/DawSelect";
-import { clipScheduler } from "../engine/ClipScheduler";
-import { transport } from "../engine/Transport";
 import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { useDeviceStore } from "../store/deviceStore";
 import { useAudioSettingsStore } from "../store/audioSettingsStore";
@@ -177,7 +175,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                     display={`${Math.round(clip.gain * 100)}%`}
                     onChange={(v) => {
                       history().execute(new UpdateClipCommand(clip.id, { gain: v }, "Set Clip Gain"));
-                      if (!activeAudioEngine.isNative) clipScheduler.updateClipGain(clip.id, v);
+                      void activeAudioEngine.updateClipGain(clip.id, v);
                     }}
                   />
                 )}
@@ -189,7 +187,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                     onChange={(e) => {
                       const muted = e.target.checked;
                       history().execute(new UpdateClipCommand(clip.id, { muted }, muted ? "Mute Clip" : "Unmute Clip"));
-                      if (!activeAudioEngine.isNative) clipScheduler.updateClipMute(clip.id, muted);
+                      void activeAudioEngine.updateClipMute(clip.id, muted);
                     }}
                   />
                 </div>
@@ -760,11 +758,7 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
           ariaLabel="Track delay milliseconds"
           onChange={(value) => {
             updateTrackAdvanced(trackId, { delayMs: value || 0 });
-            if (activeAudioEngine.isNative) {
-              activeAudioEngine.syncProject(useProjectStore.getState().project);
-            } else {
-              transport.rescheduleIfPlaying();
-            }
+            void activeAudioEngine.rescheduleIfPlaying();
           }}
         />
         <span className="shrink-0 text-[9px] text-daw-faint">ms</span>
@@ -1090,11 +1084,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
       setProcessStatus("realtime");
       setProcessorUsed(null);
     }
-    if (activeAudioEngine.isNative) {
-      activeAudioEngine.syncProject(useProjectStore.getState().project);
-    } else {
-      transport.rescheduleIfPlaying();
-    }
+    void activeAudioEngine.rescheduleIfPlaying();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clip.fileId, proc.speedRatio, proc.pitchSemitones, proc.preservePitch, proc.mode, proc.quality]);
 

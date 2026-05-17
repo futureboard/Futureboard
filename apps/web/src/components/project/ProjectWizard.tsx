@@ -197,7 +197,7 @@ export function ProjectWizard({ windowId }: Props) {
           setIsCreating(false);
           return;
         }
-        useProjectStore.setState({ project: newProject });
+        useProjectStore.getState().loadProject(newProject);
         await platform.projectStorage.saveProject(newProject);
         useRecentProjectsStore.getState().addRecentProject({
           id: newProject.id,
@@ -213,7 +213,7 @@ export function ProjectWizard({ windowId }: Props) {
         return;
       }
     } else {
-      useProjectStore.setState({ project: newProject });
+      useProjectStore.getState().loadProject(newProject);
       useRecentProjectsStore.getState().addRecentProject({
         id: newProject.id,
         name: newProject.name,

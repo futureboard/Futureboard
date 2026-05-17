@@ -60,6 +60,7 @@ export const IpcChannels = {
   SphereAudioLoadProject:      "daw:sphere:loadProject",
   SphereAudioUpdateClip:       "daw:sphere:updateClip",
   SphereAudioGetMeters:        "daw:sphere:getMeters",
+  SphereAudioGetDebugInfo:     "daw:sphere:getDebugInfo",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];

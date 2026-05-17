@@ -61,6 +61,7 @@ export interface DawBridgeFs {
   pickAudioFiles(): Promise<DawBridgePickedAudioFile[]>;
   readAudioFile(path: string): Promise<DawBridgePickedAudioFile | null>;
   statAudioFile(path: string): Promise<DawBridgeAudioFileStat | null>;
+  getPathForFile(file: File): string;
   revealInFileManager(path: string): Promise<void>;
 }
 
@@ -175,6 +176,17 @@ export type DawBridgeSphereMeterSnapshot = {
   timestamp: number;
 };
 
+export type DawBridgeSphereDebugInfo = {
+  projectId:       string | null;
+  loadedTracks:    number;
+  loadedClips:     number;
+  readyClips:      number;
+  isPlaying:       boolean;
+  positionSeconds: number;
+  hasSolo:         boolean;
+  clipSummaries:   string[];
+};
+
 /**
  * SphereDirectAudioEngine preload bridge.
  * Present only in the Electron client.  Renderer code must check for its
@@ -197,6 +209,7 @@ export interface DawBridgeSphereAudio {
   loadProject(snapshot: unknown):                                            Promise<void>;
   updateClip(clipId: string, patch: unknown):                                Promise<void>;
   getMeters():                                                               Promise<DawBridgeSphereMeterSnapshot>;
+  getDebugInfo():                                                            Promise<DawBridgeSphereDebugInfo>;
 }
 
 export interface DawElectronBridge {

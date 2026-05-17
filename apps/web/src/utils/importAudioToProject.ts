@@ -4,7 +4,7 @@ import { useProjectStore } from "../store/projectStore";
 import { useHistoryStore } from "../store/historyStore";
 import { AddTrackCommand, AddClipCommand } from "../commands";
 import { getTrackColor } from "../theme";
-import type { DawClip, DawFile, DawTrack } from "../types/daw";
+import type { DawClip, DawFile, DawProjectAsset, DawTrack } from "../types/daw";
 import { useUIStore } from "../store/uiStore";
 import { showToast } from "../components/ui/Toast";
 
@@ -55,7 +55,8 @@ async function readWavMetadata(file: File): Promise<Pick<DawFile, "duration" | "
 
 export async function decodeAndAddAudioFile(file: File): Promise<DawFile | null> {
   if (!isImportableAudioFile(file)) return null;
-  const { addFile, setPeaks, setWaveformStatus, setWaveformProgress } = useProjectStore.getState();
+  const store = useProjectStore.getState();
+  const { addFile, setPeaks, setWaveformStatus, setWaveformProgress } = store;
   const fileId = crypto.randomUUID();
   const isLarge = file.size > 200 * 1024 * 1024;
   const isHuge = file.size > 750 * 1024 * 1024;
@@ -102,6 +103,32 @@ export async function decodeAndAddAudioFile(file: File): Promise<DawFile | null>
     };
 
     addFile(dawFile);
+
+    // ── Register project asset manifest for folder-project imports ─────────
+    // `saveImportedAudioAsset` already copied the file to Media/Audio/ when
+    // the project is in folder mode.  Register it so:
+    //   • The Browser panel survives project reopen.
+    //   • clip.assetId → asset.relativePath → mediaPath for native playback.
+    if (dawFile.storageProvider === "project-folder" && dawFile.relativePath) {
+      const now = new Date().toISOString();
+      const asset: DawProjectAsset = {
+        id: fileId,          // same UUID — DawFile and DawProjectAsset share it
+        type: "audio",
+        name: dawFile.name,
+        originalName: file.name,
+        relativePath: dawFile.relativePath,
+        size: dawFile.size,
+        durationSeconds: audioBuffer.duration,
+        sampleRate: audioBuffer.sampleRate,
+        channels: audioBuffer.numberOfChannels,
+        mimeType: file.type || "audio/wav",
+        createdAt: now,
+        updatedAt: now,
+      };
+      // addAsset is idempotent — safe to call even if already present.
+      useProjectStore.getState().addAsset(asset);
+    }
+
     return dawFile;
   } catch (err) {
     console.error("Failed to import", file.name, err);
@@ -149,7 +176,7 @@ export async function importAudioFileToTimelineProgressive(
   showToast("Generating waveform...");
 
   try {
-    await audioAssetManager.saveImportedAudioAsset(fileId, file);
+    const savedManifest = await audioAssetManager.saveImportedAudioAsset(fileId, file);
     const audioBuffer = await audioEngine.loadBuffer(
       placeholder,
       await file.arrayBuffer(),
@@ -161,12 +188,44 @@ export async function importAudioFileToTimelineProgressive(
       duration: audioBuffer.duration,
       sampleRate: audioBuffer.sampleRate,
       channels: audioBuffer.numberOfChannels,
+      storageProvider: savedManifest.storageProvider,
+      cacheKey: savedManifest.cacheKey,
+      storageKey: savedManifest.storageKey,
+      relativePath: savedManifest.relativePath,
     };
     useProjectStore.getState().updateFile(fileId, updates);
     for (const track of useProjectStore.getState().project.tracks) {
       for (const clip of track.clips) {
         if (clip.fileId === fileId && Math.abs(clip.duration - placeholder.duration) < 0.001) {
           useProjectStore.getState().updateClip(clip.id, { duration: audioBuffer.duration });
+        }
+      }
+    }
+
+    // Register project asset after successful folder-project copy.
+    if (savedManifest.storageProvider === "project-folder" && savedManifest.relativePath) {
+      const now = new Date().toISOString();
+      const asset: DawProjectAsset = {
+        id: fileId,
+        type: "audio",
+        name: file.name,
+        originalName: file.name,
+        relativePath: savedManifest.relativePath,
+        size: file.size,
+        durationSeconds: audioBuffer.duration,
+        sampleRate: audioBuffer.sampleRate,
+        channels: audioBuffer.numberOfChannels,
+        mimeType: file.type || "audio/wav",
+        createdAt: now,
+        updatedAt: now,
+      };
+      useProjectStore.getState().addAsset(asset);
+      // Backfill assetId on any clips already created from this file.
+      for (const track of useProjectStore.getState().project.tracks) {
+        for (const clip of track.clips) {
+          if (clip.fileId === fileId && !clip.assetId) {
+            useProjectStore.getState().updateClip(clip.id, { assetId: fileId });
+          }
         }
       }
     }
@@ -181,10 +240,10 @@ export async function importAudioFileToTimelineProgressive(
 export function addFileToTimeline(dawFile: DawFile, startTime: number, targetTrackId?: string) {
   const { project } = useProjectStore.getState();
   const history = useHistoryStore.getState();
-  
+
   const clipId = crypto.randomUUID();
   let trackId = targetTrackId;
-  
+
   if (!trackId) {
     trackId = crypto.randomUUID();
     const trackColor = getTrackColor(project.tracks.length);
@@ -204,10 +263,15 @@ export function addFileToTimeline(dawFile: DawFile, startTime: number, targetTra
     history.execute(new AddTrackCommand(track));
   }
 
+  // If the file is backed by a project asset, set assetId on the clip so the
+  // native engine can resolve mediaPath via the asset manifest or DawFile map.
+  const assetId = dawFile.id;
+
   const clip: DawClip = {
     id: clipId,
     name: dawFile.name.replace(/\.[^.]+$/, ""),
     fileId: dawFile.id,
+    assetId,          // set when backed by a DawProjectAsset (folder project)
     trackId,
     startTime,
     offset: 0,

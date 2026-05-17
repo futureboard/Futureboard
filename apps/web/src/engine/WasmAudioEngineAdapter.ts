@@ -27,6 +27,11 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
   private _bpm = 120;
   private _playing = false;
   private _positionSeconds = 0;
+  private _connectOutput: boolean;
+
+  constructor(options: { connectOutput?: boolean } = {}) {
+    this._connectOutput = options.connectOutput ?? true;
+  }
 
   async init(): Promise<void> {
     if (this._initialized) return;
@@ -69,7 +74,9 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
         });
       });
 
-      this._worklet.connect(this._ctx.destination);
+      if (this._connectOutput) {
+        this._worklet.connect(this._ctx.destination);
+      }
       this._initialized = true;
       this._status = "running";
     } catch (e) {

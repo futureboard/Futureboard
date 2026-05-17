@@ -10,7 +10,10 @@ import {
 import { platform } from "../platform";
 import { useProjectStore } from "../store/projectStore";
 
-type ElectronBackedFile = File & { __futureboardPath?: string };
+// Electron exposes `__futureboardPath` (set by preload) on files picked via the
+// native dialog, AND `path` (Electron File extension) on files dropped from the
+// OS file manager.  Both are absolute filesystem paths.
+type ElectronBackedFile = File & { __futureboardPath?: string; path?: string };
 
 export type AudioAssetResolution =
   | { status: "available"; provider: NonNullable<DawFile["storageProvider"]> }
@@ -22,8 +25,18 @@ export type ImportedAudioAsset = Pick<
 >;
 
 class AudioAssetManager {
+  private nativePathForFile(file: File): string | undefined {
+    const f = file as ElectronBackedFile;
+    const electronPath = f.path && f.path.length > 3 ? f.path : undefined;
+    const bridgedPath = platform.fileSystem.getNativePathForFile(file) ?? undefined;
+    return f.__futureboardPath ?? electronPath ?? bridgedPath;
+  }
+
   createAssetManifest(fileId: FileId, file: File): ImportedAudioAsset {
-    const nativePath = (file as ElectronBackedFile).__futureboardPath;
+    // Prefer the preload-injected path (picked via native dialog), then
+    // Electron's File.path / webUtils.getPathForFile (drag-and-drop from OS).
+    // Both are absolute filesystem paths. Ignore empty strings / null.
+    const nativePath = this.nativePathForFile(file);
     const storageKey = nativePath ?? `audio:${fileId}`;
     return {
       size: file.size,
@@ -37,26 +50,6 @@ class AudioAssetManager {
   }
 
   async saveImportedAudioAsset(fileId: FileId, file: File): Promise<ImportedAudioAsset> {
-    const nativePath = (file as ElectronBackedFile).__futureboardPath;
-    const projectRoot = platform.folderProject.getProjectRoot();
-
-    // Folder project mode: copy the source file into Media/Audio/
-    if (projectRoot && nativePath && platform.folderProject.isSupported) {
-      const result = await platform.folderProject.importAudio(nativePath);
-      if (result) {
-        return {
-          size: file.size,
-          lastModified: file.lastModified,
-          originalFileName: file.name,
-          storageProvider: "project-folder",
-          storageKey: result.absolutePath,
-          cacheKey: result.absolutePath,
-          relativePath: result.relativePath,
-          waveformCacheKeys: WAVEFORM_PEAK_LEVELS.map((level) => buildCacheKey(fileId, level)),
-        };
-      }
-    }
-
     const manifest = this.createAssetManifest(fileId, file);
     if (manifest.storageProvider === "indexeddb") {
       await audioStorage.save(fileId, file);
@@ -124,6 +117,42 @@ class AudioAssetManager {
         store.setWaveformStatus(file.id, "idle");
       }
     }
+
+    // Update the project asset manifest with missing flags so the Browser
+    // panel and native snapshot can show/skip missing assets.
+    await this.validateProjectAssetManifest(project);
+  }
+
+  /**
+   * For every entry in `project.assets`, check whether the file exists on disk
+   * (Electron only) and update the `missing` flag in the store.
+   * Runs in the background after project load — does not block UI.
+   */
+  async validateProjectAssetManifest(project: DawProject): Promise<void> {
+    const assets = project.assets ?? [];
+    if (assets.length === 0) return;
+    const projectRoot = platform.folderProject.getProjectRoot();
+    const store = useProjectStore.getState();
+
+    for (const asset of assets) {
+      if (!asset.relativePath) continue;
+      let missing = false;
+      try {
+        const absPath = projectRoot
+          ? `${projectRoot}/${asset.relativePath}`.replace(/\\/g, "/")
+          : null;
+        if (absPath) {
+          const stat = await platform.fileSystem.statAudioFile(absPath).catch(() => null);
+          missing = stat === null;
+        }
+        // If no projectRoot, we can't validate — leave as-is.
+      } catch {
+        missing = true;
+      }
+      if (missing !== (asset.missing ?? false)) {
+        store.updateAsset(asset.id, { missing });
+      }
+    }
   }
 
   async relinkMissingAsset(fileId: FileId, file: File): Promise<DawFile | null> {
@@ -159,6 +188,20 @@ class AudioAssetManager {
     };
 
     store.updateFile(fileId, updates);
+
+    // Also update the DawProjectAsset entry so the Browser panel clears the
+    // missing badge and the native snapshot can resolve the new mediaPath.
+    if (manifest.storageProvider === "project-folder" && manifest.relativePath) {
+      store.updateAsset(fileId, {
+        relativePath: manifest.relativePath,
+        missing: false,
+        updatedAt: new Date().toISOString(),
+      });
+    } else if (manifest.storageProvider === "file-handle" || manifest.storageProvider === "indexeddb") {
+      // Relinked to a non-project-folder location — just clear the missing flag.
+      store.updateAsset(fileId, { missing: false });
+    }
+
     return { ...existing, ...updates };
   }
 }

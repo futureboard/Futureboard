@@ -34,8 +34,8 @@ use napi_derive::napi;
 
 use engine::EngineInner;
 use types::{
-    EngineProjectSnapshot, JsAudioDeviceInfo, JsDeviceOpenConfig, JsMeterSnapshot,
-    JsSphereAudioStatus,
+    EngineProjectSnapshot, JsAudioDeviceInfo, JsDeviceOpenConfig, JsEngineDebugInfo,
+    JsMeterSnapshot, JsSphereAudioStatus,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -255,6 +255,20 @@ impl SphereDirectAudioEngine {
     pub fn update_clip(&self, clip_id: String, _patch_json: String) -> napi::Result<()> {
         eprintln!("[SphereAudio] updateClip '{clip_id}' — not yet implemented in MVP");
         Ok(())
+    }
+
+    // ── Debug info ───────────────────────────────────────────────────────────
+
+    /// Return a debug snapshot of the engine's current runtime state.
+    ///
+    /// Useful for verifying that the project was loaded and clips are ready:
+    /// ```ts
+    /// const info = engine.getDebugInfo();
+    /// console.log(info.loadedClips, info.readyClips, info.clipSummaries);
+    /// ```
+    #[napi]
+    pub fn get_debug_info(&self) -> JsEngineDebugInfo {
+        self.inner.get_debug_info()
     }
 
     // ── Meters ───────────────────────────────────────────────────────────────

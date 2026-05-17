@@ -74,6 +74,7 @@ class Mixer {
       this.masterSplitter.connect(this.masterMerger, 0, 0);
       this.masterSplitter.connect(this.masterMerger, 1, 1);
       this.masterMerger.connect(audioEngine.destination);
+      console.log("[WebAudio] master connected");
     }
     return this.masterGain;
   }

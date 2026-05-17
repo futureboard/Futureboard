@@ -55,17 +55,29 @@ impl RuntimeProject {
 
         for clip in &snapshot.clips {
             let Some(path) = clip.media_path.as_deref().filter(|p| !p.trim().is_empty()) else {
+                eprintln!(
+                    "[SphereAudio] clip '{}' (track={}) — no mediaPath, skipping",
+                    clip.id, clip.track_id
+                );
                 skipped_no_path += 1;
                 continue;
             };
 
             let source = match decoded_by_path.get(path) {
                 Some(existing) => {
+                    eprintln!(
+                        "[SphereAudio] clip '{}' — cache hit: '{path}' ({} frames)",
+                        clip.id, existing.frames
+                    );
                     loaded_from_cache += 1;
                     Arc::clone(existing)
                 }
                 None => match load_audio_file(path) {
                     Ok(buffer) => {
+                        eprintln!(
+                            "[SphereAudio] clip '{}' — decoded: '{path}' {} frames @ {}Hz {} ch",
+                            clip.id, buffer.frames, buffer.sample_rate, buffer.channels
+                        );
                         loaded_fresh += 1;
                         let buffer = Arc::new(buffer);
                         decoded_by_path.insert(path.to_string(), Arc::clone(&buffer));
@@ -73,7 +85,7 @@ impl RuntimeProject {
                     }
                     Err(e) => {
                         skipped_decode_err += 1;
-                        eprintln!("[SphereAudio] Skipping clip '{}' ({path}): {e}", clip.id);
+                        eprintln!("[SphereAudio] clip '{}' — decode FAILED '{path}': {e}", clip.id);
                         continue;
                     }
                 },
@@ -122,6 +134,17 @@ impl RuntimeProject {
             clips,
             has_solo,
         }
+    }
+
+    #[inline]
+    pub fn active_clip_count_at_sample(&self, project_sample: u64) -> usize {
+        self.clips
+            .iter()
+            .filter(|clip| {
+                project_sample >= clip.start_sample
+                    && project_sample < clip.start_sample.saturating_add(clip.duration_samples)
+            })
+            .count()
     }
 
     #[inline]

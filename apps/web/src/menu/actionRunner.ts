@@ -15,6 +15,7 @@ import { audioAssetManager } from "../engine/AudioAssetManager";
 import { midiEditorBridge } from "./midiEditorBridge";
 import { audioDeviceService } from "../engine/AudioDeviceService";
 import { midiDeviceService } from "../engine/MidiDeviceService";
+import { showToast } from "../components/ui/Toast";
 import { buildSelectionState, getActiveSelectionContext } from "../store/selectionSelectors";
 import {
   AddTrackCommand,
@@ -438,6 +439,18 @@ export function runAction(actionId: string) {
 
     case "audio:enable-input":
       void audioDeviceService.requestAudioPermission();
+      break;
+
+    case "audio.runSelfTest":
+    case "audio:run-self-test":
+      void activeAudioEngine.runSelfTest().then((result) => {
+        showToast(
+          result.ok
+            ? `Audio self-test OK: ${result.backend}`
+            : `Audio self-test failed: ${result.error ?? result.backend}`,
+          !result.ok,
+        );
+      });
       break;
 
     // ── MIDI device actions ────────────────────────────────────────────────

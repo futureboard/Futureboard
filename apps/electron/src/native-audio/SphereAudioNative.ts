@@ -72,6 +72,17 @@ interface NativeDeviceOpenConfig {
   bufferSize?:     number;
 }
 
+interface NativeDebugInfo {
+  projectId:      string | null;
+  loadedTracks:   number;
+  loadedClips:    number;
+  readyClips:     number;
+  isPlaying:      boolean;
+  positionSeconds: number;
+  hasSolo:        boolean;
+  clipSummaries:  string[];
+}
+
 /** Shape of the `SphereDirectAudioEngine` napi class instance. */
 interface NativeEngine {
   getVersion(): string;
@@ -92,6 +103,7 @@ interface NativeEngine {
   updateInsertParam(trackId: string, insertId: string, paramId: string, value: number): void;
   updateClip(clipId: string, patchJson: string): void;
   getMeters(): NativeMeterSnapshot;
+  getDebugInfo(): NativeDebugInfo;
 }
 
 /** Addon module as loaded by require(). */
@@ -392,6 +404,18 @@ export class SphereAudioNative {
       master:    { left: m.masterPeakL, right: m.masterPeakR },
       timestamp: Date.now(),
     };
+  }
+
+  // ── Debug info ────────────────────────────────────────────────────────────
+
+  getDebugInfo(): NativeDebugInfo {
+    if (!this._engine) {
+      return {
+        projectId: null, loadedTracks: 0, loadedClips: 0, readyClips: 0,
+        isPlaying: false, positionSeconds: 0, hasSolo: false, clipSummaries: [],
+      };
+    }
+    return this._engine.getDebugInfo();
   }
 }
 

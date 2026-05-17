@@ -60,6 +60,8 @@ export interface FileSystemAdapter {
   readAudioFile(path: string): Promise<File | null>;
   /** Probe a native audio path without reading full bytes. Electron only; web returns null. */
   statAudioFile(path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null>;
+  /** Return the OS path for an Electron-backed File object. Web returns null. */
+  getNativePathForFile(file: File): string | null;
   /** Reveal a file in the OS file manager. No-op or throws on web. */
   revealInFileManager(path: string): Promise<void>;
 }

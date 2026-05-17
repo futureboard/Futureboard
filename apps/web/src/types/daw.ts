@@ -21,6 +21,36 @@ export type ProjectMarker = {
   color?: string;
 };
 
+/**
+ * Persistent asset entry stored in `project.assets`.
+ *
+ * - Available in Electron folder-project mode after `importAudioToProject`.
+ * - `id` matches the corresponding `DawFile.id` so the two can be joined.
+ * - `relativePath` is relative to the project folder root, e.g. "Media/Audio/kick.wav".
+ * - `missing` is set to true at load time when the file cannot be found on disk.
+ */
+export type DawProjectAsset = {
+  id: string;
+  type: "audio" | "midi" | "video";
+  /** Displayed name (may differ from the original file name after collision rename). */
+  name: string;
+  /** Original file name before any collision renaming. */
+  originalName?: string;
+  /** Path relative to the project folder root, e.g. "Media/Audio/kick.wav". */
+  relativePath: string;
+  size?: number;
+  hash?: string;
+  durationSeconds?: number;
+  sampleRate?: number;
+  channels?: number;
+  mimeType?: string;
+  /** ISO 8601 timestamp. */
+  createdAt?: string;
+  updatedAt?: string;
+  /** Populated at load time when the file at relativePath is not found on disk. */
+  missing?: boolean;
+};
+
 export type DawProject = {
   id: ProjectId;
   name: string;
@@ -30,6 +60,12 @@ export type DawProject = {
   timeSignature: TimeSignature;
   tracks: DawTrack[];
   files: DawFile[];
+  /**
+   * Persistent asset manifest for Electron folder projects.
+   * Each entry corresponds to a file inside the project package (Media/Audio/, etc.).
+   * `DawProjectAsset.id === DawFile.id` — they share the same UUID.
+   */
+  assets?: DawProjectAsset[];
   masterTrackId?: TrackId;
   loop?: ProjectLoop;
   markers?: ProjectMarker[];
@@ -216,6 +252,12 @@ export type DawClip = {
   name: string;
   type?: ClipType;  // defaults to "audio" for backwards-compat
   fileId: FileId;
+  /**
+   * References `DawProjectAsset.id` for clips backed by a project-package asset.
+   * Same value as `fileId` when the clip was created via Auto Import to Project.
+   * Undefined for legacy clips or clips backed by IndexedDB / blob storage.
+   */
+  assetId?: string;
   notes?: MidiNote[];
   trackId: TrackId;
   startTime: number;

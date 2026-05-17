@@ -1,7 +1,7 @@
 // Ultra-lean sandboxed preload. Avoid heavy imports and any work beyond
 // declaring + freezing the bridge object. Everything here runs on the
 // renderer's hot startup path.
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import {
   IpcChannels,
   type ExternalWindowConfig,
@@ -30,6 +30,8 @@ const fsBridge = Object.freeze({
     invoke(IpcChannels.FsReadAudioFile, filePath),
   statAudioFile: (filePath: string) =>
     invoke(IpcChannels.FsStatAudioFile, filePath),
+  getPathForFile: (file: File): string =>
+    webUtils.getPathForFile(file),
   revealInFileManager: (filePath: string): Promise<void> =>
     invoke(IpcChannels.FsRevealInFileManager, filePath),
 });
@@ -117,6 +119,7 @@ const sphereAudioBridge = Object.freeze({
   loadProject:        (snapshot: unknown)                           => invoke(IpcChannels.SphereAudioLoadProject, snapshot),
   updateClip:         (clipId: string, patch: unknown)              => invoke(IpcChannels.SphereAudioUpdateClip, clipId, patch),
   getMeters:          ()                                            => invoke(IpcChannels.SphereAudioGetMeters),
+  getDebugInfo:       ()                                            => invoke(IpcChannels.SphereAudioGetDebugInfo),
 });
 
 const dawElectron = Object.freeze({

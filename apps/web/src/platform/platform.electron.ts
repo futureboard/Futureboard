@@ -1,5 +1,5 @@
 import "./dawBridge.types";
-import type { DawProject } from "../types/daw";
+import type { DawFile, DawProject, DawProjectAsset } from "../types/daw";
 import type { DawElectronBridge } from "./dawBridge.types";
 import type {
   DialogAdapter,
@@ -52,6 +52,14 @@ const fileSystem: FileSystemAdapter = {
   async statAudioFile(path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null> {
     return bridge().fs.statAudioFile(path);
   },
+  getNativePathForFile(file: File): string | null {
+    try {
+      const p = bridge().fs.getPathForFile(file);
+      return p && p.length > 3 ? p : null;
+    } catch {
+      return null;
+    }
+  },
   async revealInFileManager(path: string): Promise<void> {
     await bridge().fs.revealInFileManager(path);
   },
@@ -92,6 +100,39 @@ function rootFromFilePath(filePath: string): string {
   return filePath.substring(0, lastSlash);
 }
 
+const PROJECT_AUDIO_DIR = "Media/Audio";
+
+function projectAudioRelativePathFromName(name?: string | null): string | undefined {
+  const clean = name?.trim();
+  if (!clean) return undefined;
+  const basename = clean.replace(/\\/g, "/").split("/").filter(Boolean).pop();
+  return basename ? `${PROJECT_AUDIO_DIR}/${basename}` : undefined;
+}
+
+function inferFolderRelativePath(file: Partial<DawFile>): string | undefined {
+  if (file.relativePath) return file.relativePath;
+  if (file.storageProvider !== "project-folder") return undefined;
+  return projectAudioRelativePathFromName(file.name) ?? projectAudioRelativePathFromName(file.originalFileName);
+}
+
+function assetFromFolderFile(file: DawFile): DawProjectAsset | null {
+  const relativePath = inferFolderRelativePath(file);
+  if (!relativePath) return null;
+  return {
+    id: file.id,
+    type: "audio",
+    name: file.name,
+    originalName: file.originalFileName,
+    relativePath,
+    size: file.size,
+    hash: file.hash,
+    durationSeconds: file.duration,
+    sampleRate: file.sampleRate,
+    channels: file.channels,
+    mimeType: file.mimeType,
+  };
+}
+
 function serializeProject(project: DawProject): object {
   return {
     ...project,
@@ -117,12 +158,9 @@ function serializeProject(project: DawProject): object {
 
 function serializeFolderProject(project: DawProject): object {
   const now = Date.now();
-  return {
-    schemaVersion: 1,
-    createdAt: folderProjectCreatedAt ?? now,
-    updatedAt: now,
-    ...project,
-    files: project.files.map((file) => ({
+  const files = project.files.map((file) => {
+    const isProjectFolder = file.storageProvider === "project-folder";
+    return {
       id: file.id,
       name: file.name,
       mimeType: file.mimeType,
@@ -133,11 +171,47 @@ function serializeFolderProject(project: DawProject): object {
       duration: file.duration,
       sampleRate: file.sampleRate,
       channels: file.channels,
-      storageProvider: "project-folder" as const,
-      relativePath: file.relativePath,
+      storageProvider: file.storageProvider,
+      relativePath: isProjectFolder ? inferFolderRelativePath(file) : file.relativePath,
       waveformCacheKeys: file.waveformCacheKeys,
-      // cacheKey and storageKey are absolute paths — do not persist them
-    })),
+      // External file-handle paths are intentionally persisted until the user
+      // explicitly copies the asset into Media/Audio from the menu.
+      cacheKey: isProjectFolder ? undefined : file.cacheKey,
+      storageKey: isProjectFolder ? undefined : file.storageKey,
+    };
+  });
+  const explicitAssets = (project.assets ?? []).map((a) => {
+    const file = project.files.find((f) => f.id === a.id);
+    return {
+      id: a.id,
+      type: a.type,
+      name: a.name,
+      originalName: a.originalName,
+      relativePath: a.relativePath || (file?.storageProvider === "project-folder" ? inferFolderRelativePath(file) : undefined),
+      size: a.size,
+      hash: a.hash,
+      durationSeconds: a.durationSeconds,
+      sampleRate: a.sampleRate,
+      channels: a.channels,
+      mimeType: a.mimeType,
+      createdAt: a.createdAt,
+      updatedAt: a.updatedAt,
+      // missing is runtime-only; will be re-evaluated on open
+    };
+  });
+  const assetIds = new Set(explicitAssets.map((asset) => asset.id));
+  const inferredAssets = project.files
+    .filter((file) => file.storageProvider === "project-folder")
+    .map((file) => assetFromFolderFile(file))
+    .filter((asset): asset is DawProjectAsset => asset !== null && !assetIds.has(asset.id));
+  return {
+    schemaVersion: 1,
+    createdAt: folderProjectCreatedAt ?? now,
+    updatedAt: now,
+    ...project,
+    files,
+    // Persist the asset manifest — relativePaths only, no absolute paths
+    assets: [...explicitAssets, ...inferredAssets],
   };
 }
 
@@ -155,22 +229,43 @@ function resolveOpenedProject(
   lastProjectPath = filePath;
   if (parsed.createdAt != null) folderProjectCreatedAt = parsed.createdAt;
 
-  return {
-    ...parsed,
-    files: (parsed.files ?? []).map((file) => {
-      if (file.relativePath) {
-        const absPath = joinProjectPath(root, file.relativePath);
-        return {
-          ...file,
-          storageProvider: "project-folder" as const,
-          cacheKey: absPath,
-          storageKey: absPath,
-          localObjectUrl: undefined,
-        };
-      }
-      return file;
-    }),
-  };
+  // Restore absolute cacheKey / storageKey from relativePath + root for each file.
+  const files = (parsed.files ?? []).map((file) => {
+    const relativePath = inferFolderRelativePath(file);
+    if (file.storageProvider === "project-folder" && relativePath) {
+      const absPath = joinProjectPath(root, relativePath);
+      return {
+        ...file,
+        storageProvider: "project-folder" as const,
+        relativePath,
+        cacheKey: absPath,
+        storageKey: absPath,
+        localObjectUrl: undefined,
+      };
+    }
+    return file;
+  });
+
+  // Assets: preserve explicit manifest, then synthesize audio assets for older
+  // folder projects that only persisted files[] + fileId.
+  const assets = (parsed.assets ?? []).map((asset) => {
+    const file = files.find((f) => f.id === asset.id);
+    return {
+      ...asset,
+      relativePath: asset.relativePath || (file?.storageProvider === "project-folder" ? inferFolderRelativePath(file) : undefined) || "",
+    };
+  });
+  const assetIds = new Set(assets.map((asset) => asset.id));
+  for (const file of files) {
+    if (assetIds.has(file.id)) continue;
+    const asset = assetFromFolderFile(file);
+    if (asset) {
+      assets.push(asset);
+      assetIds.add(asset.id);
+    }
+  }
+
+  return { ...parsed, files, assets };
 }
 
 const projectStorage: ProjectStorageAdapter = {

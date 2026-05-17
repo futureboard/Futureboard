@@ -152,3 +152,26 @@ pub struct EngineStatus {
     pub last_error: Option<String>,
     pub loaded_project_id: Option<String>,
 }
+
+/// Debug state snapshot returned by `getDebugInfo()`.
+/// Exposes the internal runtime graph so JS can verify the engine is loaded.
+#[napi(object)]
+#[derive(Debug, Default)]
+pub struct JsEngineDebugInfo {
+    /// Project ID from the last loaded snapshot.
+    pub project_id: Option<String>,
+    /// Number of tracks in the current runtime graph.
+    pub loaded_tracks: u32,
+    /// Number of clips in the current runtime graph (only clips with resolved paths).
+    pub loaded_clips: u32,
+    /// Number of clips whose audio buffer has frames > 0 (successfully decoded).
+    pub ready_clips: u32,
+    /// Whether the transport is currently playing.
+    pub is_playing: bool,
+    /// Current transport position in seconds.
+    pub position_seconds: f64,
+    /// Whether any track has solo enabled.
+    pub has_solo: bool,
+    /// Human-readable summary of each loaded clip (id, trackId, startSec, durationSec, frames).
+    pub clip_summaries: Vec<String>,
+}

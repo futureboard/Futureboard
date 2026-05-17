@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { mixer } from "../../engine/Mixer";
+import { activeAudioEngine } from "../../engine/activeAudioEngine";
 
 /** Stereo VU bar meter rendered entirely on canvas. Zero React re-renders during playback. */
 export function CanvasVUMeter({
@@ -26,10 +26,16 @@ export function CanvasVUMeter({
     // Peak-hold state (no React state — purely imperative)
     let peakL = 0, peakR = 0;
     let holdFramesL = 0, holdFramesR = 0;
-    const HOLD_FRAMES = 40;
-    const DECAY = 0.90;
+    const HOLD_FRAMES = 12;
+    const DECAY = 0.82;
 
     let rafId = 0;
+    const target = { l: 0, r: 0 };
+    const unsubscribe = activeAudioEngine.subscribeMeters((id, level) => {
+      if (id !== trackId) return;
+      target.l = rmsToMeter(level.l);
+      target.r = rmsToMeter(level.r);
+    });
 
     const barW = Math.max(1, Math.floor((width - 2) / 2)); // L and R bar pixel width
 
@@ -37,7 +43,7 @@ export function CanvasVUMeter({
       const ctx = canvas.getContext("2d");
       if (!ctx) { rafId = requestAnimationFrame(draw); return; }
 
-      const { l, r } = mixer.getLevel(trackId);
+      const { l, r } = target;
 
       // Peak hold with decay
       if (l >= peakL) { peakL = l; holdFramesL = HOLD_FRAMES; }
@@ -57,7 +63,10 @@ export function CanvasVUMeter({
     };
 
     rafId = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      unsubscribe();
+      cancelAnimationFrame(rafId);
+    };
   // Re-run only if trackId or dimensions change — color comes from fixed palette
   }, [trackId, width, height]);
 
@@ -71,6 +80,12 @@ export function CanvasVUMeter({
 }
 
 // ── drawing helper ─────────────────────────────────────────────────────────────
+
+function rmsToMeter(rms: number): number {
+  if (rms < 0.000001) return 0;
+  const db = 20 * Math.log10(rms);
+  return Math.max(0, Math.min(1, (db + 60) / 60));
+}
 
 function drawBar(
   ctx: CanvasRenderingContext2D,

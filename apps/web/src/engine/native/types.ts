@@ -120,6 +120,7 @@ export type EngineClipSnapshot = {
   id:           string;
   trackId:      string;
   assetId:      string;
+  relativePath?: string | null;
   /**
    * Absolute path to the media file.
    * Only populated in Electron folder-project mode.
@@ -132,6 +133,14 @@ export type EngineClipSnapshot = {
   gain:          number;
   fades:         EngineFadeSnapshot | null;
   audioProcess:  EngineClipAudioProcess | null;
+};
+
+export type EngineAssetSnapshot = {
+  id: string;
+  type: string;
+  name: string;
+  relativePath: string;
+  missing?: boolean;
 };
 
 export type EngineRoutingSnapshot = {
@@ -148,6 +157,16 @@ export type EngineProjectSnapshot = {
   sampleRate:    number;
   tracks:        EngineTrackSnapshot[];
   clips:         EngineClipSnapshot[];
+  assets?:       EngineAssetSnapshot[];
+  files?:        Array<{
+    id: string;
+    name: string;
+    originalFileName?: string;
+    storageProvider?: string;
+    relativePath?: string | null;
+    cacheKey?: string | null;
+    storageKey?: string | null;
+  }>;
   routing:       EngineRoutingSnapshot;
 };
 

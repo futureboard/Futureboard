@@ -21,11 +21,19 @@ import { webAudioEngineAdapter } from "../WebAudioEngineAdapter";
 import { NativeSphereAudioEngineAdapter } from "./NativeSphereAudioEngineAdapter";
 import { detectAudioEngineBackends } from "./detection";
 import { showToast } from "../../components/ui/Toast";
+import type { AudioBackendRequest, AudioBackendState } from "../../store/audioBackendStore";
 
 export type AdapterSelection = {
   adapter:  AudioEngineAdapter;
-  backend:  "web-audio" | "native-sphere-direct";
+  backend:  "web-audio" | "sphere-native";
   fallback: boolean;
+  fallbackReason?: string;
+  available: AudioBackendState["available"];
+};
+
+type FactoryOptions = {
+  requested?: AudioBackendRequest;
+  disableFallback?: boolean;
 };
 
 /**
@@ -34,12 +42,28 @@ export type AdapterSelection = {
  */
 export async function createAudioEngineAdapter(
   preferredEngine: PreferredEngine,
+  options: FactoryOptions = {},
 ): Promise<AdapterSelection> {
+  const hasWebAudio =
+    typeof AudioContext !== "undefined" ||
+    typeof (window as unknown as Record<string, unknown>)["webkitAudioContext"] !== "undefined";
+  const availability: AudioBackendState["available"] = {
+    webAudio: hasWebAudio,
+    rustWasm: false,
+    sphereNative: false,
+  };
+
   // ── Web browser: always WebAudio ──────────────────────────────────────────
   if (!window.dawElectron) {
+    if (options.requested === "force-native") {
+      throw new Error("SphereAudio native backend is not available in the web browser runtime");
+    }
+    if (!hasWebAudio) {
+      throw new Error("WebAudio is not available in this browser");
+    }
     const adapter = webAudioEngineAdapter;
     await adapter.init();
-    return { adapter, backend: "web-audio", fallback: false };
+    return { adapter, backend: "web-audio", fallback: false, available: availability };
   }
 
   // ── Electron: check preference ────────────────────────────────────────────
@@ -50,19 +74,30 @@ export async function createAudioEngineAdapter(
   if (wantNative) {
     const backends = await detectAudioEngineBackends();
     const nativeStatus = backends.find((b) => b.backend === "native-sphere-direct");
+    availability.sphereNative = nativeStatus?.available === true;
 
     if (nativeStatus?.available) {
       try {
         const adapter = new NativeSphereAudioEngineAdapter();
         await adapter.init();
         console.log("[EngineFactory] Using SphereDirectAudioEngine (native)");
-        return { adapter, backend: "native-sphere-direct", fallback: false };
+        return { adapter, backend: "sphere-native", fallback: false, available: availability };
       } catch (e) {
         console.error("[EngineFactory] Native engine init failed:", e);
         showToast("Native audio engine failed", true);
-        if (preferredEngine === "native-sphere-direct") throw e;
+        if (
+          preferredEngine === "native-sphere-direct" ||
+          options.requested === "force-native" ||
+          options.disableFallback
+        ) {
+          throw e;
+        }
       }
-    } else if (preferredEngine === "native-sphere-direct") {
+    } else if (
+      preferredEngine === "native-sphere-direct" ||
+      options.requested === "force-native" ||
+      options.disableFallback
+    ) {
       const reason = nativeStatus?.reason ?? "unknown reason";
       console.warn(`[EngineFactory] Native engine requested but unavailable (${reason}).`);
       showToast(`Native audio engine unavailable: ${reason}`, true);
@@ -74,8 +109,10 @@ export async function createAudioEngineAdapter(
   const adapter = webAudioEngineAdapter;
   await adapter.init();
   const isFallback = wantNative;
+  const fallbackReason = isFallback ? "SphereAudio unavailable, using WebAudio fallback" : undefined;
   console.log(
     `[EngineFactory] Using WebAudioEngineAdapter${isFallback ? " (fallback)" : ""}`,
   );
-  return { adapter, backend: "web-audio", fallback: isFallback };
+  if (fallbackReason) showToast(fallbackReason, true);
+  return { adapter, backend: "web-audio", fallback: isFallback, fallbackReason, available: availability };
 }

@@ -21,12 +21,19 @@ class AudioEngine {
   private soundTouchWorkletPromise: Promise<void> | null = null;
 
   get ctx(): AudioContext {
-    if (!this._ctx) this._ctx = new AudioContext();
+    if (!this._ctx) {
+      this._ctx = new AudioContext();
+      console.log(`[WebAudio] AudioContext state: ${this._ctx.state}`);
+    }
     return this._ctx;
   }
 
   async resume() {
-    if (this.ctx.state === "suspended") await this.ctx.resume();
+    console.log(`[WebAudio] AudioContext state: ${this.ctx.state}`);
+    if (this.ctx.state === "suspended") {
+      await this.ctx.resume();
+      console.log(`[WebAudio] resumed: ${this.ctx.state}`);
+    }
   }
 
   async ensureSoundTouchWorklet(): Promise<void> {

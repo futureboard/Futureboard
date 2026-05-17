@@ -28,8 +28,8 @@ use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
 use crate::runtime::RuntimeProject;
 use crate::types::{
-    EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDeviceOpenConfig, JsMeterSnapshot,
-    JsSphereAudioStatus,
+    EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDeviceOpenConfig, JsEngineDebugInfo,
+    JsMeterSnapshot, JsSphereAudioStatus,
 };
 
 // ── Version ───────────────────────────────────────────────────────────────────
@@ -409,6 +409,28 @@ impl EngineInner {
 
     pub fn load_project(&self, snapshot: EngineProjectSnapshot) -> Result<(), SphereAudioError> {
         let output_sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
+
+        // Log how many clips have paths before building runtime.
+        let clips_with_path = snapshot
+            .clips
+            .iter()
+            .filter(|c| c.media_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false))
+            .count();
+        eprintln!(
+            "[SphereAudio] load_project: id='{}' tracks={} snapshot_clips={} clips_with_path={}",
+            snapshot.project_id,
+            snapshot.tracks.len(),
+            snapshot.clips.len(),
+            clips_with_path,
+        );
+
+        if clips_with_path == 0 && !snapshot.clips.is_empty() {
+            eprintln!(
+                "[SphereAudio] ⚠ WARNING: all {} clips have null/empty mediaPath — no audio will play!",
+                snapshot.clips.len()
+            );
+        }
+
         let runtime = {
             let mut audio_cache = self.audio_cache.lock();
             let project = RuntimeProject::build(&snapshot, output_sample_rate, &mut audio_cache);
@@ -425,6 +447,13 @@ impl EngineInner {
 
             project
         };
+
+        eprintln!(
+            "[SphereAudio] RuntimeProject built: {} runtime clips from {} snapshot clips (sr={})",
+            runtime.clips.len(),
+            snapshot.clips.len(),
+            output_sample_rate,
+        );
 
         // Build initial track states from snapshot.
         let mut tracks = self.tracks.lock();
@@ -445,16 +474,49 @@ impl EngineInner {
 
         if self.cmd_tx.lock().is_some() {
             self.send_command(EngineCommand::LoadProject(runtime))?;
+            eprintln!("[SphereAudio] LoadProject command sent to audio callback");
+        } else {
+            eprintln!("[SphereAudio] ⚠ WARNING: no audio stream open — LoadProject not sent to callback (will apply on next openDevice)");
         }
 
-        eprintln!(
-            "[SphereAudio] Project loaded: id={} tracks={} clips={}",
-            snapshot.project_id,
-            snapshot.tracks.len(),
-            snapshot.clips.len()
-        );
-
         Ok(())
+    }
+
+    // ── Debug info ─────────────────────────────────────────────────────────
+
+    pub fn get_debug_info(&self) -> JsEngineDebugInfo {
+        let runtime = self.runtime.lock();
+        let project = self.project.lock();
+        let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
+        let position_samples = self.shared.position_samples.load(Ordering::Relaxed);
+
+        let ready_clips = runtime.clips.iter().filter(|c| c.source.frames > 0).count() as u32;
+        let clip_summaries: Vec<String> = runtime
+            .clips
+            .iter()
+            .map(|c| {
+                format!(
+                    "id={} track={} start={:.3}s dur={:.3}s frames={} gain={:.2}",
+                    c.id,
+                    c.track_id,
+                    c.start_sample as f64 / sample_rate as f64,
+                    c.duration_samples as f64 / sample_rate as f64,
+                    c.source.frames,
+                    c.gain,
+                )
+            })
+            .collect();
+
+        JsEngineDebugInfo {
+            project_id: project.as_ref().map(|p| p.project_id.clone()),
+            loaded_tracks: runtime.tracks.len() as u32,
+            loaded_clips: runtime.clips.len() as u32,
+            ready_clips,
+            is_playing: self.shared.playing.load(Ordering::Relaxed),
+            position_seconds: position_samples as f64 / sample_rate as f64,
+            has_solo: runtime.has_solo,
+            clip_summaries,
+        }
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
@@ -473,7 +535,7 @@ impl EngineInner {
 // ── Audio callback builder ────────────────────────────────────────────────────
 
 const TEST_TONE_AMPLITUDE: f32 = 0.125; // −18 dBFS  (safe default test level)
-const PEAK_DECAY: f32 = 0.998; // per audio block
+const PEAK_DECAY: f32 = 0.94; // per audio block, responsive UI peak decay
 
 fn output_stream_candidates(
     device: &cpal::Device,
@@ -689,6 +751,12 @@ where
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         EngineCommand::LoadProject(next_runtime) => {
+                            eprintln!(
+                                "[SphereAudio callback] LoadProject: {} tracks, {} clips (sr={})",
+                                next_runtime.tracks.len(),
+                                next_runtime.clips.len(),
+                                output_sample_rate,
+                            );
                             runtime = next_runtime;
                             runtime.sample_rate = output_sample_rate;
                         }
@@ -699,16 +767,30 @@ where
                             osc_r.set_frequency(frequency as f64);
                         }
                         EngineCommand::StartTransport => {
+                            let pos = shared.position_samples.load(Ordering::Relaxed);
+                            let active_clips = runtime.active_clip_count_at_sample(pos);
+                            eprintln!(
+                                "[SphereAudio callback] StartTransport: position={}sa ({:.3}s), active_clip_count={}, scheduled_clip_count={}",
+                                pos,
+                                pos as f64 / output_sample_rate as f64,
+                                active_clips,
+                                runtime.clips.len(),
+                            );
                             playing_local = true;
                             shared.playing.store(true, Ordering::Relaxed);
                         }
                         EngineCommand::StopTransport => {
+                            eprintln!("[SphereAudio callback] StopTransport");
                             playing_local = false;
                             shared.playing.store(false, Ordering::Relaxed);
                         }
                         EngineCommand::Seek { position_seconds } => {
                             let sr_local = shared.sample_rate.load(Ordering::Relaxed) as f64;
                             let pos = (position_seconds * sr_local) as u64;
+                            eprintln!(
+                                "[SphereAudio callback] Seek → {:.3}s ({}sa)",
+                                position_seconds, pos
+                            );
                             shared.position_samples.store(pos, Ordering::Relaxed);
                         }
                         EngineCommand::SetMasterVolume { value } => {
@@ -723,13 +805,18 @@ where
                             runtime.update_track_pan(&track_id, value);
                         }
                         EngineCommand::SetTrackMute { track_id, muted } => {
+                            eprintln!("[SphereAudio callback] SetTrackMute track={track_id} muted={muted}");
                             runtime.update_track_mute(&track_id, muted);
                         }
                         EngineCommand::SetTrackSolo { track_id, solo } => {
                             runtime.update_track_solo(&track_id, solo);
                         }
-                        EngineCommand::SetInsertParam { .. } => {
-                            // Insert DSP is not part of the native MVP yet.
+                        EngineCommand::SetInsertParam { track_id, insert_id, param_id, value } => {
+                            eprintln!(
+                                "[SphereAudio callback] SetInsertParam track={track_id} insert={insert_id} {param_id}={value}"
+                            );
+                            // Insert DSP pass-through — params received but not yet applied.
+                            // Audio continues to flow through the insert chain unaffected.
                         }
                     }
                 }

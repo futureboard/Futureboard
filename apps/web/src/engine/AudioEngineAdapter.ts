@@ -10,6 +10,14 @@ import type { StereoLevel } from "./Mixer";
 
 export type AudioEngineStatus = "uninitialized" | "running" | "suspended" | "closed" | "error";
 
+export type AudioSelfTestResult = {
+  ok: boolean;
+  backend: string;
+  contextState?: string;
+  device?: string;
+  error?: string;
+};
+
 export type MeterCallback = (trackId: TrackId | "master", level: StereoLevel) => void;
 
 export type TransportCallback = (state: {
@@ -22,6 +30,7 @@ export interface AudioEngineAdapter {
   init(): Promise<void>;
   dispose(): void;
   getStatus(): AudioEngineStatus;
+  runSelfTest?(): Promise<AudioSelfTestResult>;
 
   // ── Project sync ───────────────────────────────────────────────────────────
   loadProject(project: DawProject): Promise<void>;

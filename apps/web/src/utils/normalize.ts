@@ -2,7 +2,7 @@
  * Normalization helpers — fill in default values for older project state
  * so UI and engine code never crash on missing fields.
  */
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint, AudioClipProcess, TrackRouting, TrackInputRouting, TrackOutputRouting, TrackAdvanced } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, DawProjectAsset, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint, AudioClipProcess, TrackRouting, TrackInputRouting, TrackOutputRouting, TrackAdvanced } from "../types/daw";
 
 export function normalizeLoop(raw: Partial<ProjectLoop> | undefined): ProjectLoop | undefined {
   if (!raw) return undefined;
@@ -226,6 +226,7 @@ export function normalizeClip(raw: Partial<DawClip>): DawClip {
     name: raw.name ?? "Clip",
     type: clipType,
     fileId: raw.fileId ?? "",
+    assetId: raw.assetId ?? (clipType === "audio" ? raw.fileId : undefined),
     trackId: raw.trackId ?? "",
     startTime: raw.startTime ?? 0,
     offset: raw.offset ?? 0,
@@ -243,6 +244,25 @@ export function normalizeClip(raw: Partial<DawClip>): DawClip {
   };
 }
 
+export function normalizeAsset(raw: Partial<DawProjectAsset>): DawProjectAsset {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    type: raw.type ?? "audio",
+    name: raw.name ?? "Unknown",
+    originalName: raw.originalName,
+    relativePath: raw.relativePath ?? "",
+    size: raw.size,
+    hash: raw.hash,
+    durationSeconds: raw.durationSeconds,
+    sampleRate: raw.sampleRate,
+    channels: raw.channels,
+    mimeType: raw.mimeType,
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+    missing: raw.missing,
+  };
+}
+
 export function normalizeProject(raw: Partial<DawProject>): DawProject {
   return {
     id: raw.id ?? crypto.randomUUID(),
@@ -253,6 +273,7 @@ export function normalizeProject(raw: Partial<DawProject>): DawProject {
     timeSignature: raw.timeSignature ?? { numerator: 4, denominator: 4 },
     tracks: (raw.tracks ?? []).map((t) => normalizeTrack(t as Partial<DawTrack>)),
     files: raw.files ?? [],
+    assets: (raw.assets ?? []).map((a) => normalizeAsset(a as Partial<DawProjectAsset>)),
     masterTrackId: raw.masterTrackId,
     loop: normalizeLoop(raw.loop as Partial<ProjectLoop> | undefined),
     markers: (raw.markers ?? []).map((m) => normalizeMarker(m as Partial<ProjectMarker>)),

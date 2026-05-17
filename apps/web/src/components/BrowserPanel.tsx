@@ -1,16 +1,27 @@
-import { ChevronRight, FileAudio2, FlaskConical, FolderOpen, Layers, Link2, Search, Upload } from "lucide-react";
+import { AlertTriangle, ChevronRight, FileAudio2, FlaskConical, FolderOpen, FolderSearch, Layers, Link2, Search, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { BROWSER_WIDTH } from "../theme";
-import type { DawFile } from "../types/daw";
+import type { DawFile, DawProjectAsset } from "../types/daw";
 import { decodeAndAddAudioFile } from "../utils/importAudioToProject";
 import { audioAssetManager } from "../engine/AudioAssetManager";
 import { platform } from "../platform";
 
+const EMPTY_ASSETS: DawProjectAsset[] = [];
+
 function fileBadge(file: DawFile) {
   if (file.mimeType.includes("mpeg") || file.name.toLowerCase().endsWith(".mp3")) return "MP3";
   if (file.mimeType.includes("wav") || file.name.toLowerCase().endsWith(".wav")) return "WAV";
+  return "Audio";
+}
+
+function assetBadge(asset: DawProjectAsset) {
+  const name = asset.name.toLowerCase();
+  if (asset.mimeType?.includes("mpeg") || name.endsWith(".mp3")) return "MP3";
+  if (asset.mimeType?.includes("wav") || name.endsWith(".wav")) return "WAV";
+  if (name.endsWith(".flac")) return "FLAC";
+  if (name.endsWith(".aiff") || name.endsWith(".aif")) return "AIFF";
   return "Audio";
 }
 
@@ -66,7 +77,108 @@ function ComingSoonRow({ label }: { label: string }) {
   );
 }
 
-// ─── File row ─────────────────────────────────────────────────────────────────
+// ─── Project asset row (folder-project mode) ──────────────────────────────────
+
+function AssetRow({ asset }: { asset: DawProjectAsset }) {
+  const selectedBrowserFileId = useUIStore((s) => s.selectedBrowserFileId);
+  const setSelectedBrowserFileId = useUIStore((s) => s.setSelectedBrowserFileId);
+  const status = useProjectStore((s) => s.waveformStatus.get(asset.id));
+  const selected = selectedBrowserFileId === asset.id;
+  const missing = asset.missing || status === "missing";
+
+  const statusLabel = missing
+    ? "Missing"
+    : status === "loading" ? "Loading…"
+    : "Ready";
+
+  const projectRoot = platform.folderProject.getProjectRoot();
+  const absPath = projectRoot
+    ? `${projectRoot}/${asset.relativePath}`.replace(/\\/g, "/")
+    : null;
+
+  return (
+    <div
+      draggable={!missing}
+      role="button"
+      tabIndex={0}
+      onClick={() => setSelectedBrowserFileId(selected ? null : asset.id)}
+      onDragStart={(e) => {
+        if (missing) return;
+        e.dataTransfer.setData("application/x-mochi-file-id", asset.id);
+        e.dataTransfer.effectAllowed = "copy";
+        setSelectedBrowserFileId(asset.id);
+      }}
+      className="group flex w-full items-center gap-2 border-b border-daw-border px-3 py-1.5 text-left transition-colors hover:bg-white/[0.035] cursor-pointer"
+      style={{
+        background: selected ? "rgba(86,199,201,0.08)" : "transparent",
+        opacity: missing ? 0.7 : 1,
+      }}
+    >
+      {missing ? (
+        <AlertTriangle size={11} className="shrink-0 text-red-400" />
+      ) : (
+        <FileAudio2
+          size={11}
+          className="shrink-0"
+          style={{ color: selected ? "#56c7c9" : undefined }}
+        />
+      )}
+      <span
+        className="min-w-0 flex-1 truncate text-[11px]"
+        style={{ color: missing ? "rgba(240,122,114,0.9)" : selected ? "#a8d8d9" : undefined }}
+        title={asset.relativePath}
+      >
+        {asset.name}
+      </span>
+      <span className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px] text-daw-faint">
+        {assetBadge(asset)}
+      </span>
+      <span
+        className="shrink-0 rounded border border-daw-border bg-daw-bg px-1 py-0.5 text-[8px]"
+        style={{ color: missing ? "rgba(240,122,114,0.85)" : "rgba(154,166,178,0.8)" }}
+      >
+        {statusLabel}
+      </span>
+      {/* Reveal in file manager */}
+      {!missing && absPath && platform.capabilities.osFilePaths && (
+        <button
+          type="button"
+          title="Reveal in file manager"
+          className="hidden h-5 w-5 shrink-0 items-center justify-center rounded border border-daw-border bg-daw-bg text-daw-faint transition-colors hover:border-daw-accent hover:text-daw-text group-hover:flex"
+          onClick={async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            await platform.fileSystem.revealInFileManager(absPath).catch(console.warn);
+          }}
+        >
+          <FolderSearch size={10} />
+        </button>
+      )}
+      {/* Relink missing asset */}
+      {missing && (
+        <button
+          type="button"
+          title="Relink missing audio"
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-daw-border bg-daw-bg text-daw-faint transition-colors hover:border-daw-accent hover:text-daw-text"
+          onClick={async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const files = await platform.fileSystem.pickAudioFiles();
+            const picked = files[0];
+            if (!picked) return;
+            await audioAssetManager.relinkMissingAsset(asset.id, picked).catch((error) => {
+              console.warn("[BrowserPanel] relink failed:", error);
+            });
+          }}
+        >
+          <Link2 size={10} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── Legacy file row (IndexedDB / non-folder mode) ────────────────────────────
 
 function FileRow({ file }: { file: DawFile }) {
   const selectedBrowserFileId = useUIStore((s) => s.selectedBrowserFileId);
@@ -143,12 +255,32 @@ function FileRow({ file }: { file: DawFile }) {
 
 export function BrowserPanel({ onImport, width }: { onImport?: () => void; width?: number }) {
   const files = useProjectStore((s) => s.project.files);
+  const assets = useProjectStore((s) => s.project.assets ?? EMPTY_ASSETS);
   const [query, setQuery] = useState("");
 
-  const filteredFiles = useMemo(() => {
+  // In Electron folder-project mode we show the persistent asset manifest.
+  // In web / non-folder mode we show the legacy DawFile list.
+  const isFolderProject = platform.kind === "electron" && platform.folderProject.isSupported;
+  const hasAssets = isFolderProject && assets.length > 0;
+
+  const filteredAssets = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files;
-  }, [files, query]);
+    return q ? assets.filter((a) => a.name.toLowerCase().includes(q)) : assets;
+  }, [assets, query]);
+
+  // Legacy files that don't have a matching asset entry (IndexedDB / file-handle)
+  const legacyFiles = useMemo(() => {
+    if (!isFolderProject) return files;
+    const assetIds = new Set(assets.map((a) => a.id));
+    return files.filter((f) => !assetIds.has(f.id));
+  }, [files, assets, isFolderProject]);
+
+  const filteredLegacyFiles = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? legacyFiles.filter((f) => f.name.toLowerCase().includes(q)) : legacyFiles;
+  }, [legacyFiles, query]);
+
+  const totalImports = hasAssets ? assets.length : files.length;
 
   return (
     <aside
@@ -199,25 +331,38 @@ export function BrowserPanel({ onImport, width }: { onImport?: () => void; width
       {/* sections */}
       <div className="min-h-0 flex-1 overflow-y-auto">
 
-        {/* IMPORTS */}
-        <Section label="Imports" icon={FolderOpen} count={files.length}>
-          {filteredFiles.length > 0 ? (
-            filteredFiles.map((f) => <FileRow key={f.id} file={f} />)
-          ) : files.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 px-4 py-5 text-center">
-              <FileAudio2 size={20} className="text-daw-faint opacity-30" />
-              <p className="text-[10px] leading-relaxed text-daw-faint">
-                No audio imported yet
-              </p>
-              <button
-                onClick={onImport}
-                className="mt-1 h-7 rounded-md bg-daw-accent px-3 text-[10px] font-semibold text-daw-ink transition-colors hover:bg-daw-accent-h"
-              >
-                Import Audio
-              </button>
-            </div>
+        {/* IMPORTS — project assets (folder-project) or legacy files */}
+        <Section label="Imports" icon={FolderOpen} count={totalImports}>
+          {hasAssets ? (
+            /* Folder-project asset manifest */
+            filteredAssets.length > 0 ? (
+              filteredAssets.map((a) => <AssetRow key={a.id} asset={a} />)
+            ) : assets.length === 0 ? (
+              <EmptyImportsPlaceholder onImport={onImport} />
+            ) : (
+              <p className="px-4 py-2 text-[10px] text-daw-faint">No results for "{query}"</p>
+            )
           ) : (
-            <p className="px-4 py-2 text-[10px] text-daw-faint">No results for "{query}"</p>
+            /* Legacy / web mode: DawFile list */
+            filteredLegacyFiles.length > 0 ? (
+              filteredLegacyFiles.map((f) => <FileRow key={f.id} file={f} />)
+            ) : files.length === 0 ? (
+              <EmptyImportsPlaceholder onImport={onImport} />
+            ) : (
+              <p className="px-4 py-2 text-[10px] text-daw-faint">No results for "{query}"</p>
+            )
+          )}
+
+          {/* Show legacy non-asset files underneath asset rows in folder mode */}
+          {hasAssets && filteredLegacyFiles.length > 0 && (
+            <>
+              <div className="flex h-7 items-center gap-2 px-3 text-daw-faint">
+                <div className="h-px flex-1 bg-daw-border" />
+                <span className="text-[9px] font-medium">Session files</span>
+                <div className="h-px flex-1 bg-daw-border" />
+              </div>
+              {filteredLegacyFiles.map((f) => <FileRow key={f.id} file={f} />)}
+            </>
           )}
         </Section>
 
@@ -268,5 +413,22 @@ export function BrowserPanel({ onImport, width }: { onImport?: () => void; width
 
       </div>
     </aside>
+  );
+}
+
+function EmptyImportsPlaceholder({ onImport }: { onImport?: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-2 px-4 py-5 text-center">
+      <FileAudio2 size={20} className="text-daw-faint opacity-30" />
+      <p className="text-[10px] leading-relaxed text-daw-faint">
+        No audio imported yet
+      </p>
+      <button
+        onClick={onImport}
+        className="mt-1 h-7 rounded-md bg-daw-accent px-3 text-[10px] font-semibold text-daw-ink transition-colors hover:bg-daw-accent-h"
+      >
+        Import Audio
+      </button>
+    </div>
   );
 }

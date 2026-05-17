@@ -17,6 +17,7 @@ import {
   invalidateBackendDetection,
 } from "../../engine/native/detection";
 import { activeAudioEngine } from "../../engine/activeAudioEngine";
+import { useAudioBackendStore } from "../../store/audioBackendStore";
 import type { AudioEngineBackendStatus } from "../../engine/native/types";
 import type { DawBridgeSphereDeviceInfo } from "../../platform/dawBridge.types";
 
@@ -390,6 +391,46 @@ function NativeEngineStatusCard({
   );
 }
 
+function RuntimeAudioStateCard() {
+  const backend = useAudioBackendStore();
+  const availability = [
+    `WebAudio ${backend.available.webAudio ? "yes" : "no"}`,
+    `Rust WASM ${backend.available.rustWasm ? "yes" : "no"}`,
+    `Sphere ${backend.available.sphereNative ? "yes" : "no"}`,
+  ].join(" · ");
+  const engine =
+    backend.active === "sphere-native"
+      ? "Sphere Native"
+      : backend.active === "web-audio"
+      ? (backend.available.rustWasm ? "WebAudio + Rust WASM" : "WebAudio")
+      : "Not initialized";
+
+  return (
+    <div className="mb-3 rounded border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.025)] px-3 py-2.5">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+        <span className="text-[10px] text-daw-faint">Runtime</span>
+        <span className="text-[10px] text-daw-text">{backend.runtime}</span>
+        <span className="text-[10px] text-daw-faint">Audio Engine</span>
+        <span className="text-[10px] text-daw-text">{engine}</span>
+        <span className="text-[10px] text-daw-faint">Requested</span>
+        <span className="text-[10px] text-daw-text">{backend.requested}</span>
+        <span className="text-[10px] text-daw-faint">Status</span>
+        <span className="text-[10px] text-daw-text">
+          {backend.healthy ? (backend.contextState ?? "ready") : (backend.error ?? "not healthy")}
+        </span>
+        <span className="text-[10px] text-daw-faint">Availability</span>
+        <span className="text-[10px] text-daw-text truncate" title={availability}>{availability}</span>
+        {backend.fallbackReason && (
+          <>
+            <span className="text-[10px] text-daw-faint">Fallback</span>
+            <span className="text-[10px] text-yellow-400/80">{backend.fallbackReason}</span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── AudioTab ──────────────────────────────────────────────────────────────────
 
 function AudioTab({
@@ -567,6 +608,8 @@ function AudioTab({
           options={engineOptions}
         />
       </SettingsRow>
+
+      <RuntimeAudioStateCard />
 
       {/* Native engine status — shown in Electron or as placeholder in Web */}
       <NativeEngineStatusCard status={nativeStatus} onRefresh={onRefreshNativeStatus} />

@@ -43,7 +43,6 @@ import { useUIStore } from "../store/uiStore";
 import { DawSelect } from "./ui/DawSelect";
 import { NumberInput } from "./ui/NumberInput";
 import { formatBarBeatTick } from "../utils/musicalTime";
-import logoApp from "../assets/logo.png";
 import { ProjectDropdown } from "./project/ProjectDropdown";
 import { platform } from "../platform";
 
@@ -713,20 +712,6 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       <div className="flex w-full min-w-0 items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="app-no-drag flex min-w-0 shrink items-center gap-0.5">
-
-            {/* App logo */}
-            {/*<div className="flex shrink-0 items-center p-1">
-              <div
-                aria-hidden="true"
-                className="h-4 w-4 shrink-0 select-none bg-contain bg-center bg-no-repeat"
-                style={{
-                  backgroundImage: `url(${logoApp})`,
-                  WebkitUserDrag: "none",
-                  userSelect: "none",
-                  pointerEvents: "none",
-                } as React.CSSProperties}
-              />
-            </div>*/}
 
             {/* Menu buttons — overflow-hidden clips anything that doesn't fit */}
             <div

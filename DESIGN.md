@@ -13,7 +13,6 @@ Futureboard Studio should feel like:
 - a modern DAW
 - a desktop editor
 - a professional creative tool
-- Zed-like in clarity and density
 - Ableton-like in compact device/workflow thinking
 - dark, calm, technical, and fast
 
@@ -51,6 +50,7 @@ cyan accent
 ```
 
 Use contrast carefully:
+
 - strong contrast for active tools, playhead, selected clips, focused controls
 - low contrast for inactive panels, secondary labels, grid lines, dividers
 
@@ -142,7 +142,7 @@ cards/pills: 6-10px
 Borders should be subtle:
 
 ```css
-border: 1px solid rgba(255,255,255,0.08);
+border: 1px solid rgba(255, 255, 255, 0.08);
 ```
 
 Use shadows for dialogs, command palette, dropdowns, context menus, and floating plugin windows.
@@ -159,12 +159,14 @@ Use `DialogWindow` whenever possible.
 Dialogs must look like compact native DAW/editor windows.
 
 They must NOT look like:
+
 - Bootstrap modals
 - web admin forms
 - generic Tailwind modals
 - mobile sheets
 
 Dialog shell rules:
+
 - rounded corners
 - subtle border
 - soft floating shadow
@@ -175,6 +177,7 @@ Dialog shell rules:
 - consistent footer actions
 
 Backdrop rules:
+
 - floating dialogs: no backdrop
 - blocking dialogs: transparent interaction blocker if needed
 - dangerous confirmations: subtle backdrop allowed
@@ -190,6 +193,7 @@ Native controls must be styled.
 Inputs, selects, toggles, sliders, and buttons must match Futureboard DAW style.
 
 Inputs:
+
 - dark surface
 - subtle border
 - compact height
@@ -198,16 +202,19 @@ Inputs:
 - tabular numeric values
 
 Selects:
+
 - native `<select>` is acceptable only if styled
 - if native popup looks broken, use custom `DawSelect`
 - never leave white OS/browser dropdowns in main UI
 
 Toggles:
+
 - compact, not giant mobile switches
 - dark inactive track
 - cyan/blue active state
 
 Buttons:
+
 - compact
 - muted by default
 - accent only when primary/active
@@ -220,6 +227,7 @@ Buttons:
 Menus should feel like desktop app menus.
 
 Rules:
+
 - dark surface
 - subtle border
 - soft shadow
@@ -231,7 +239,8 @@ Rules:
 - separators subtle
 
 Command Palette:
-- Zed/CmdK style
+
+- CmdK style
 - search-first
 - command label + category path + shortcut
 - keyboard navigation
@@ -249,6 +258,7 @@ Do not duplicate command definitions.
 The timeline must feel musical and readable.
 
 Rules:
+
 - grid is musical, not a static table
 - bar lines strongest
 - beat lines medium
@@ -260,12 +270,14 @@ Rules:
 - clip positions use the same beat math as grid
 
 Rendering:
+
 - use canvas for grid, waveform, playhead overlays where possible
 - do not create thousands of DOM grid lines
 - render only visible viewport
 - support 128/256/500 tracks with virtualization
 
 Zoom:
+
 - smooth
 - anchored to mouse or viewport center
 - does not jump to start
@@ -279,6 +291,7 @@ Zoom:
 TrackHeader must remain compact and performant.
 
 Required:
+
 - track icon/type
 - name
 - channel number
@@ -290,6 +303,7 @@ Required:
 - dB readout if space allows
 
 Performance:
+
 - virtualize vertical track rows
 - meter updates must not rerender every TrackHeader
 - use canvas/gradient/imperative VU meter
@@ -302,6 +316,7 @@ Performance:
 MixerStrip must scale to 128/256/500 channels.
 
 Rules:
+
 - horizontal virtualization
 - master strip pinned
 - visible strips + overscan only
@@ -312,6 +327,7 @@ Rules:
 - pan/gain/mute/solo must remain usable
 
 VU meters:
+
 - never use div-per-segment spam
 - use canvas or single-div gradient
 - batch meter rendering when possible
@@ -323,6 +339,7 @@ VU meters:
 Inspector should feel like a DAW property panel.
 
 Rules:
+
 - fixed usable width
 - no horizontal overflow
 - long file names truncate
@@ -333,6 +350,7 @@ Rules:
 - vertical scroll only when content exceeds height
 
 Audio Inspector must include:
+
 - gain
 - mute
 - fades
@@ -350,6 +368,7 @@ Inspector controls must affect actual playback/state. No fake UI.
 Audio Editor must be usable, not cramped.
 
 Rules:
+
 - waveform/editor area `min-w-0 flex-1`
 - inspector fixed width around 300-340px
 - no horizontal overflow
@@ -368,12 +387,14 @@ If editing gain, pitch, or speed requires pressing Spacebar to refresh, that is 
 Built-in plugins must look like stock DAW devices.
 
 Plugin UI must NOT look like:
+
 - raw HTML mockup
 - huge web graph panel
 - default form controls
 - random plugin skin unrelated to Futureboard
 
 Plugin UI rules:
+
 - constrained max width
 - balanced graph/control layout
 - compact header
@@ -394,6 +415,7 @@ Effect Editor can be wide, but plugin UI should not stretch stupidly wide.
 Plugins should use Core + Editor separation.
 
 Core:
+
 - no React imports
 - metadata
 - default params
@@ -402,11 +424,13 @@ Core:
 - DSP hooks/helpers
 
 Editor:
+
 - React UI
 - parameter controls
 - graph/editor interaction
 
 Registry:
+
 - built-in plugins are registered by plugin id
 - Effect Editor loads editor from registry
 - InsertDevice stores pluginId + params
@@ -419,6 +443,7 @@ Registry:
 Keyboard Shortcuts belongs inside Settings/Preferences.
 
 Rules:
+
 - command registry is source of truth
 - no hardcoded duplicate shortcut table
 - search/filter
@@ -436,6 +461,7 @@ Must not be a Bootstrap table.
 Settings must look like a native editor preferences window.
 
 Rules:
+
 - compact sidebar
 - subtle selected state
 - row-based settings layout
@@ -445,6 +471,7 @@ Rules:
 - no web dashboard cards
 
 Settings must separate:
+
 - App Preferences
 - Project Settings
 - Runtime Audio State
@@ -460,6 +487,7 @@ Do not mix all settings into one random object.
 New Project must follow Add Track dialog style.
 
 Rules:
+
 - no Bootstrap form layout
 - template selector as compact DAW cards/pills
 - compact project parameters grid
@@ -474,6 +502,7 @@ If it looks like a web registration form, it is wrong.
 ## 20. Selection and Marquee
 
 Terminology:
+
 - Marquee / Rectangle Select = select only
 - Snip / Split = cut/split clips
 - Snap = grid alignment
@@ -481,9 +510,11 @@ Terminology:
 Do not confuse these.
 
 Ctrl/Cmd click:
+
 - toggle selection
 
 Ctrl/Cmd drag for selection:
+
 - draw rectangle
 - select objects covered/intersecting
 - do not split
@@ -500,6 +531,7 @@ Split commands are separate.
 Speed/Pitch must be honest.
 
 Controls:
+
 - Speed
 - Pitch
 - Preserve Pitch
@@ -508,6 +540,7 @@ Controls:
 - Status
 
 Rules:
+
 - do not claim Polyphonic if it uses Granular secretly
 - status must show Rust/WASM, TypeScript fallback, cached, processing, failed
 - pitch/speed changes must update Rust backend when Rust is active
@@ -515,6 +548,7 @@ Rules:
 - waveform visual duration must match effective audio duration
 
 Gain:
+
 - inspector gain must affect playback
 - use GainNode when possible
 - gain should not invalidate processed pitch cache
@@ -526,6 +560,7 @@ Gain:
 Waveforms should be cache-driven.
 
 Rules:
+
 - decode once
 - generate peak cache
 - use multi-resolution peaks if possible
@@ -537,10 +572,12 @@ Rules:
 Waveform visual width must reflect effective clip duration.
 
 Speed:
+
 - 2.0x = half width
 - 0.5x = double width
 
 Pitch preserve:
+
 - pitch change alone should not change visual width
 
 ---
@@ -550,11 +587,13 @@ Pitch preserve:
 Futureboard must scale.
 
 Targets:
+
 - 128 tracks: smooth
 - 256 tracks: usable
 - 500 tracks: should not freeze
 
 Rules:
+
 - virtualize track headers/lanes
 - virtualize mixer strips
 - canvas for grid/waveform/overlays/meters where appropriate
@@ -564,12 +603,14 @@ Rules:
 - no giant arrays created every animation frame
 
 Realtime visuals:
+
 - playhead via canvas/ref
 - VU meters via canvas/ref
 - waveform via canvas
 - grid via canvas
 
 React:
+
 - controls, panels, menus, inspectors, dialogs
 - not per-frame render surfaces
 
@@ -580,6 +621,7 @@ React:
 Futureboard is client-first.
 
 Browser:
+
 - CSR
 - WebAudio
 - AudioWorklet
@@ -588,15 +630,18 @@ Browser:
 - IndexedDB/OPFS cache
 
 Electron:
+
 - local filesystem
 - native dialogs
 - temp/cache folders
 - optional native service bridge
 
 Native:
+
 - future SphereEngine/Skia final boss
 
 Server:
+
 - serve/compile/static host
 - optional OAuth/cloud sync
 - optional 2GB user storage
@@ -609,6 +654,7 @@ Server:
 Storage should be provider-based.
 
 Providers:
+
 - local browser storage
 - local filesystem via Electron
 - Futureboard Cloud
@@ -629,10 +675,12 @@ Do not hardcode local paths as the only project truth.
 Use a consistent icon system.
 
 Preferred:
+
 - lucide-react
 - Tabler icons if already used
 
 Rules:
+
 - do not mix random icon styles
 - icon stroke widths should feel consistent
 - icons must not disappear due to wrong library/import

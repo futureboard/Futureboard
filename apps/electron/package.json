@@ -39,7 +39,9 @@
     "executableName": "Futureboard Studio",
     "copyright": "Copyright © ${author}",
     "publish": {
-      "provider": "github"
+      "provider": "github",
+      "owner": "arizkami",
+      "repo": "Futureboard"
     },
     "afterPack": "scripts/after-pack.cjs",
     "asar": true,

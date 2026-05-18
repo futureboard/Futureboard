@@ -18,9 +18,11 @@ import {
   Search,
   SlidersHorizontal,
   Upload,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useProjectStore } from "../store/projectStore";
+import { useSettingsStore } from "../store/settingsStore";
 import { useUIStore } from "../store/uiStore";
 import { BROWSER_WIDTH } from "../theme";
 import type { DawFile, DawProjectAsset } from "../types/daw";
@@ -174,21 +176,30 @@ function Section({
     <div>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 px-2 text-left transition-colors hover:bg-white/[0.02]"
-        style={{ height: 26 }}
+        className="flex w-full items-center gap-1.5 px-2 text-left transition-colors"
+        style={{
+          height: 22,
+          background: "rgba(255,255,255,0.016)",
+          borderBottom: `1px solid rgba(58,69,84,${open ? "0.6" : "0.45"})`,
+          borderTop: "1px solid rgba(58,69,84,0.35)",
+        }}
       >
         <ChevronRight
-          size={9}
+          size={8}
           className="shrink-0 transition-transform"
           style={{
-            color: "rgba(107,120,136,0.7)",
+            color: open ? "rgba(95,206,208,0.55)" : "rgba(95,108,124,0.5)",
             transform: open ? "rotate(90deg)" : "none",
           }}
         />
-        <Icon size={10} className="shrink-0" style={{ color: "rgba(107,120,136,0.7)" }} />
+        <Icon
+          size={9}
+          className="shrink-0"
+          style={{ color: open ? "rgba(95,206,208,0.5)" : "rgba(95,108,124,0.45)" }}
+        />
         <span
-          className="flex-1 text-[9px] font-semibold uppercase tracking-widest"
-          style={{ color: "rgba(107,120,136,0.75)", letterSpacing: "0.1em" }}
+          className="flex-1 text-[8.5px] font-bold uppercase"
+          style={{ color: "rgba(107,120,136,0.65)", letterSpacing: "0.1em" }}
         >
           {label}
         </span>
@@ -201,15 +212,15 @@ function Section({
 // ─── SectionDivider ───────────────────────────────────────────────────────────
 
 function SectionDivider() {
-  return <div className="mx-2 my-0.5 border-t" style={{ borderColor: "rgba(58,69,84,0.55)" }} />;
+  return <div className="border-t" style={{ borderColor: "rgba(58,69,84,0.4)" }} />;
 }
 
 // ─── EmptyRow ────────────────────────────────────────────────────────────────
 
 function EmptyRow({ label }: { label: string }) {
   return (
-    <div className="flex h-8 items-center justify-center px-4">
-      <span className="text-[10px]" style={{ color: "rgba(107,120,136,0.55)" }}>
+    <div className="flex h-7 items-center justify-center px-4">
+      <span className="text-[9px]" style={{ color: "rgba(107,120,136,0.45)" }}>
         {label}
       </span>
     </div>
@@ -252,14 +263,16 @@ function AssetRow({ asset }: { asset: DawProjectAsset }) {
         e.dataTransfer.effectAllowed = "copy";
         setSelectedBrowserFileId(asset.id);
       }}
-      className="group flex w-full cursor-pointer items-center gap-1.5 border-b px-3 py-1.5 text-left transition-colors"
+      className="group flex w-full cursor-pointer items-center gap-1.5 border-b px-3 text-left transition-colors"
       style={{
-        borderColor: "rgba(58,69,84,0.45)",
-        background: selected ? "rgba(95,206,208,0.07)" : "transparent",
+        height: 26,
+        borderColor: "rgba(58,69,84,0.38)",
+        background: selected ? "rgba(95,206,208,0.065)" : "transparent",
         opacity: missing ? 0.72 : 1,
+        boxShadow: selected ? "inset 2px 0 0 #5FCED0" : "none",
       }}
       onMouseEnter={(e) => {
-        if (!selected) (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.028)";
+        if (!selected) (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.022)";
       }}
       onMouseLeave={(e) => {
         if (!selected) (e.currentTarget as HTMLElement).style.background = "transparent";
@@ -384,13 +397,15 @@ function FileRow({ file }: { file: DawFile }) {
         e.dataTransfer.effectAllowed = "copy";
         setSelectedBrowserFileId(file.id);
       }}
-      className="group flex w-full cursor-pointer items-center gap-1.5 border-b px-3 py-1.5 text-left transition-colors"
+      className="group flex w-full cursor-pointer items-center gap-1.5 border-b px-3 text-left transition-colors"
       style={{
-        borderColor: "rgba(58,69,84,0.45)",
-        background: selected ? "rgba(95,206,208,0.07)" : "transparent",
+        height: 26,
+        borderColor: "rgba(58,69,84,0.38)",
+        background: selected ? "rgba(95,206,208,0.065)" : "transparent",
+        boxShadow: selected ? "inset 2px 0 0 #5FCED0" : "none",
       }}
       onMouseEnter={(e) => {
-        if (!selected) (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.028)";
+        if (!selected) (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.022)";
       }}
       onMouseLeave={(e) => {
         if (!selected) (e.currentTarget as HTMLElement).style.background = "transparent";
@@ -466,13 +481,15 @@ export function NativePlaceRow({
     <button
       type="button"
       onClick={() => onOpen({ path: root.path, name: root.name })}
-      className="flex w-full items-center gap-2 border-b px-3 py-1.5 text-left transition-colors"
+      className="flex w-full items-center gap-2 border-b px-3 text-left transition-colors"
       style={{
-        borderColor: "rgba(58,69,84,0.45)",
-        background: selected ? "rgba(95,206,208,0.07)" : "transparent",
+        height: 26,
+        borderColor: "rgba(58,69,84,0.38)",
+        background: selected ? "rgba(95,206,208,0.065)" : "transparent",
+        boxShadow: selected ? "inset 2px 0 0 #5FCED0" : "none",
       }}
       onMouseEnter={(e) => {
-        if (!selected) (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.028)";
+        if (!selected) (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.022)";
       }}
       onMouseLeave={(e) => {
         if (!selected) (e.currentTarget as HTMLElement).style.background = "transparent";
@@ -519,8 +536,8 @@ export function NativeFileRow({
       role="button"
       tabIndex={0}
       onDoubleClick={() => (isFolder ? onOpenFolder(entry) : onImport(entry))}
-      className="group flex w-full items-center gap-1.5 border-b px-3 py-1.5 text-left transition-colors hover:bg-white/[0.03]"
-      style={{ borderColor: "rgba(58,69,84,0.45)" }}
+      className="group flex w-full items-center gap-1.5 border-b px-3 text-left transition-colors hover:bg-white/[0.025]"
+      style={{ height: 26, borderColor: "rgba(58,69,84,0.38)" }}
       title={entry.path}
     >
       <button
@@ -678,19 +695,20 @@ function NativeTreeNode({
         onDoubleClick={() => {
           if (isAudio) onImport(audioEntry);
         }}
-        className="group flex w-full items-center gap-1 border-b text-left transition-colors"
+        className="group relative flex w-full items-center gap-1 border-b text-left transition-colors"
         style={{
-          height: 28,
-          paddingLeft: 6 + depth * 14,
-          borderColor: "rgba(58,69,84,0.35)",
+          height: 26,
+          paddingLeft: (selected ? 8 : 6) + depth * 14,
+          borderColor: "rgba(58,69,84,0.3)",
           background: selected
-            ? "rgba(95,206,208,0.07)"
+            ? "rgba(95,206,208,0.065)"
             : "transparent",
           cursor: isAudio ? "default" : "pointer",
+          boxShadow: selected ? "inset 2px 0 0 #5FCED0" : "none",
         }}
         onMouseEnter={(e) => {
           if (!selected)
-            (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.025)";
+            (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.022)";
         }}
         onMouseLeave={(e) => {
           if (!selected)
@@ -847,6 +865,7 @@ export function BrowserPanel({
 }) {
   const files = useProjectStore((s) => s.project.files);
   const assets = useProjectStore((s) => s.project.assets ?? EMPTY_ASSETS);
+  const extraFolders = useSettingsStore((s) => s.extraFolders);
 
   const [query, setQuery] = useState("");
   const [nativeRoots, setNativeRoots] = useState<BrowserRootEntry[]>([]);
@@ -865,6 +884,18 @@ export function BrowserPanel({
   const isElectron = platform.kind === "electron";
   const hasAssets = isFolderProject && assets.length > 0;
   const projectRoot = isFolderProject ? platform.folderProject.getProjectRoot() : null;
+  const extraFolderRoots = useMemo<BrowserRootEntry[]>(
+    () =>
+      extraFolders
+        .filter((folder) => folder.enabled)
+        .map((folder) => ({
+          id: `extra:${folder.path}`,
+          name: folder.name,
+          path: folder.path,
+          kind: "folder",
+        })),
+    [extraFolders],
+  );
 
   // ── Preview helpers ──────────────────────────────────────────────────────────
 
@@ -887,8 +918,11 @@ export function BrowserPanel({
       .then(() => platform.fileSystem.browserRoots())
       .then((roots) => {
         if (cancelled) return;
-        setNativeRoots(roots);
-        const preferred = roots.find((r) => r.id === "factory") ?? roots[0] ?? null;
+        const byPath = new Map<string, BrowserRootEntry>();
+        for (const root of [...roots, ...extraFolderRoots]) byPath.set(root.path, root);
+        const nextRoots = [...byPath.values()];
+        setNativeRoots(nextRoots);
+        const preferred = nextRoots.find((r) => r.id === "factory") ?? nextRoots[0] ?? null;
         if (preferred) {
           setNativePath({ path: preferred.path, name: preferred.name });
           setExpandedPaths(new Set([preferred.path]));
@@ -910,7 +944,7 @@ export function BrowserPanel({
       cancelled = true;
       stopPreview();
     };
-  }, [isElectron]);
+  }, [isElectron, extraFolderRoots]);
 
   // ── Index status polling ─────────────────────────────────────────────────────
 
@@ -961,6 +995,7 @@ export function BrowserPanel({
   const factoryRoots = nativeRoots.filter(
     (r) => r.kind === "factory" || r.kind === "factory-folder",
   );
+  const extraRoots = nativeRoots.filter((r) => r.id.startsWith("extra:"));
   const driveRoots = nativeRoots.filter((r) => r.kind === "drive");
 
   // Project section virtual entries (shown when folder project is open)
@@ -1088,55 +1123,84 @@ export function BrowserPanel({
     >
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div
-        className="flex h-7 shrink-0 items-center justify-between border-b px-3"
-        style={{ borderColor: "rgba(58,69,84,0.6)", background: "rgba(26,32,42,0.5)" }}
+        className="flex h-8 shrink-0 items-center justify-between border-b px-3"
+        style={{
+          borderColor: "rgba(58,69,84,0.65)",
+          background: "rgba(17,21,28,0.75)",
+          boxShadow: "0 1px 0 rgba(0,0,0,0.18)",
+        }}
       >
-        <span
-          className="text-[9px] font-semibold uppercase tracking-widest"
-          style={{ color: "rgba(107,120,136,0.65)", letterSpacing: "0.12em" }}
-        >
-          Browser
-        </span>
-        {!isElectron && (
-          <button
-            onClick={onImport}
-            title="Import audio [Ctrl+I]"
-            className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/[0.06]"
-            style={{ color: "rgba(107,120,136,0.7)" }}
+        <div className="flex items-center gap-2">
+          <div className="h-3 w-[2px] rounded-full" style={{ background: "rgba(95,206,208,0.45)" }} />
+          <span
+            className="text-[9px] font-bold uppercase"
+            style={{ color: "rgba(154,167,184,0.7)", letterSpacing: "0.13em" }}
           >
-            <Upload size={11} />
-          </button>
-        )}
-        {previewPath && (
-          <button
-            type="button"
-            title="Stop preview"
-            onClick={stopPreview}
-            className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/[0.06]"
-            style={{ color: "#5FCED0" }}
-          >
-            <Pause size={10} />
-          </button>
-        )}
+            Browser
+          </span>
+        </div>
+        <div className="flex items-center gap-0.5">
+          {previewPath && (
+            <button
+              type="button"
+              title="Stop preview"
+              onClick={stopPreview}
+              className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/[0.06]"
+              style={{ color: "#5FCED0" }}
+            >
+              <Pause size={10} />
+            </button>
+          )}
+          {!isElectron && (
+            <button
+              onClick={onImport}
+              title="Import audio [Ctrl+I]"
+              className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/[0.06]"
+              style={{ color: "rgba(107,120,136,0.7)" }}
+            >
+              <Upload size={10} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ── Search ─────────────────────────────────────────────────────────── */}
       <div
-        className="border-b px-2 py-1"
-        style={{ borderColor: "rgba(58,69,84,0.5)" }}
+        className="border-b px-2"
+        style={{
+          borderColor: "rgba(58,69,84,0.5)",
+          paddingTop: 5,
+          paddingBottom: 5,
+          background: "rgba(17,21,28,0.4)",
+        }}
       >
         <label
-          className="flex h-6 items-center gap-2 rounded border px-2 transition-colors focus-within:border-daw-accent"
-          style={{ borderColor: "rgba(58,69,84,0.55)", background: "rgba(17,21,27,0.6)" }}
+          className="flex h-[22px] items-center gap-1.5 rounded px-2 transition-colors focus-within:ring-1"
+          style={{
+            borderColor: "rgba(58,69,84,0.6)",
+            background: "rgba(10,13,18,0.7)",
+            border: "1px solid rgba(58,69,84,0.55)",
+            outlineColor: "#5FCED0",
+          }}
         >
-          <Search size={9} style={{ color: "rgba(107,120,136,0.6)" }} />
+          <Search size={8} style={{ color: "rgba(95,108,124,0.6)", flexShrink: 0 }} />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search…"
-            className="min-w-0 flex-1 bg-transparent text-[11px] text-daw-text outline-none"
+            placeholder="Filter…"
+            className="min-w-0 flex-1 bg-transparent text-[10.5px] text-daw-text outline-none placeholder:text-[rgba(95,108,124,0.5)]"
             style={{ caretColor: "#5FCED0" }}
           />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              className="flex shrink-0 items-center justify-center"
+              style={{ color: "rgba(95,108,124,0.5)" }}
+            >
+              <X size={8} />
+            </button>
+          )}
         </label>
       </div>
 
@@ -1160,6 +1224,25 @@ export function BrowserPanel({
                 <Section label="Library" icon={Disc3}>
                   <div role="tree">
                     {factoryRoots.map((root) => (
+                      <NativeTreeNode
+                        key={root.id}
+                        entry={root}
+                        depth={0}
+                        {...treeProps}
+                      />
+                    ))}
+                  </div>
+                </Section>
+                <SectionDivider />
+              </>
+            )}
+
+            {/* Extra folders — user-pinned browser roots from Preferences */}
+            {extraRoots.length > 0 && (
+              <>
+                <Section label="Extra Folders" icon={FolderSearch}>
+                  <div role="tree">
+                    {extraRoots.map((root) => (
                       <NativeTreeNode
                         key={root.id}
                         entry={root}
@@ -1226,21 +1309,21 @@ export function BrowserPanel({
             )}
 
             {/* No roots yet */}
-            {factoryRoots.length === 0 && driveRoots.length === 0 && !nativeError && (
+            {factoryRoots.length === 0 && extraRoots.length === 0 && driveRoots.length === 0 && !nativeError && (
               <EmptyRow label="Loading…" />
             )}
 
             {/* Status bar */}
             <div
-              className="sticky bottom-0 flex h-6 items-center gap-2 border-t px-3"
+              className="sticky bottom-0 flex h-5 items-center gap-2 border-t px-2"
               style={{
-                borderColor: "rgba(58,69,84,0.45)",
-                background: "rgba(17,21,27,0.85)",
+                borderColor: "rgba(58,69,84,0.4)",
+                background: "rgba(10,13,18,0.88)",
               }}
             >
               <span
-                className="min-w-0 flex-1 truncate text-[9px] tabular-nums"
-                style={{ color: "rgba(107,120,136,0.5)" }}
+                className="min-w-0 flex-1 truncate text-[8.5px] tabular-nums"
+                style={{ color: "rgba(95,108,124,0.45)" }}
                 title={nativePath?.path}
               >
                 {nativePath?.path ?? ""}
@@ -1295,11 +1378,9 @@ export function BrowserPanel({
 
             {/* Samples placeholder */}
             <Section label="Samples" icon={FlaskConical} defaultOpen={false}>
-              <div
-                className="flex h-7 items-center justify-center px-4"
-                style={{ borderBottom: "1px solid rgba(58,69,84,0.3)" }}
-              >
-                <span className="text-[9px]" style={{ color: "rgba(107,120,136,0.45)" }}>
+              <div className="mx-2 my-2 flex items-center justify-center rounded px-3 py-3"
+                style={{ border: "1px dashed rgba(58,69,84,0.45)", background: "rgba(255,255,255,0.008)" }}>
+                <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
                   Sample library — coming soon
                 </span>
               </div>
@@ -1307,11 +1388,11 @@ export function BrowserPanel({
                 (name) => (
                   <div
                     key={name}
-                    className="flex items-center gap-1.5 border-b px-3 py-1.5 opacity-25"
-                    style={{ borderColor: "rgba(58,69,84,0.35)" }}
+                    className="flex items-center gap-1.5 border-b px-3 opacity-20"
+                    style={{ height: 26, borderColor: "rgba(58,69,84,0.3)" }}
                   >
-                    <FileAudio2 size={10} style={{ color: "rgba(107,120,136,0.7)" }} />
-                    <span className="min-w-0 flex-1 truncate text-[11px]" style={{ color: "rgba(154,167,184,0.8)" }}>
+                    <FileAudio2 size={9} style={{ color: "rgba(107,120,136,0.7)" }} />
+                    <span className="min-w-0 flex-1 truncate text-[10.5px]" style={{ color: "rgba(154,167,184,0.8)" }}>
                       {name}
                     </span>
                     <FormatBadge name={name} />
@@ -1324,11 +1405,9 @@ export function BrowserPanel({
 
             {/* Loops placeholder */}
             <Section label="Loops" icon={Layers} defaultOpen={false}>
-              <div
-                className="flex h-7 items-center justify-center px-4"
-                style={{ borderBottom: "1px solid rgba(58,69,84,0.3)" }}
-              >
-                <span className="text-[9px]" style={{ color: "rgba(107,120,136,0.45)" }}>
+              <div className="mx-2 my-2 flex items-center justify-center rounded px-3 py-3"
+                style={{ border: "1px dashed rgba(58,69,84,0.45)", background: "rgba(255,255,255,0.008)" }}>
+                <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
                   Loop library — coming soon
                 </span>
               </div>
@@ -1336,11 +1415,11 @@ export function BrowserPanel({
                 (name) => (
                   <div
                     key={name}
-                    className="flex items-center gap-1.5 border-b px-3 py-1.5 opacity-25"
-                    style={{ borderColor: "rgba(58,69,84,0.35)" }}
+                    className="flex items-center gap-1.5 border-b px-3 opacity-20"
+                    style={{ height: 26, borderColor: "rgba(58,69,84,0.3)" }}
                   >
-                    <FileAudio2 size={10} style={{ color: "rgba(107,120,136,0.7)" }} />
-                    <span className="min-w-0 flex-1 truncate text-[11px]" style={{ color: "rgba(154,167,184,0.8)" }}>
+                    <FileAudio2 size={9} style={{ color: "rgba(107,120,136,0.7)" }} />
+                    <span className="min-w-0 flex-1 truncate text-[10.5px]" style={{ color: "rgba(154,167,184,0.8)" }}>
                       {name}
                     </span>
                     <FormatBadge name={name} />
@@ -1359,18 +1438,22 @@ export function BrowserPanel({
 
 function EmptyImportsPlaceholder({ onImport }: { onImport?: () => void }) {
   return (
-    <div className="flex flex-col items-center gap-2 px-4 py-6 text-center">
-      <FileAudio2 size={20} style={{ color: "rgba(107,120,136,0.3)" }} />
-      <p className="text-[10px] leading-relaxed" style={{ color: "rgba(107,120,136,0.55)" }}>
-        No audio imported yet
+    <div className="mx-2 my-2 flex flex-col items-center gap-2 rounded px-3 py-5 text-center"
+      style={{ border: "1px dashed rgba(58,69,84,0.55)", background: "rgba(255,255,255,0.012)" }}>
+      <FileAudio2 size={14} style={{ color: "rgba(95,108,124,0.4)" }} />
+      <p className="text-[9.5px] leading-relaxed" style={{ color: "rgba(107,120,136,0.5)" }}>
+        No audio imported
       </p>
-      <button
-        onClick={onImport}
-        className="mt-1 h-7 rounded-md px-3 text-[10px] font-semibold transition-colors hover:bg-daw-accent-h"
-        style={{ background: "#5FCED0", color: "#0f1419" }}
-      >
-        Import Audio
-      </button>
+      {onImport && (
+        <button
+          onClick={onImport}
+          className="flex h-6 items-center gap-1.5 rounded px-2.5 text-[9px] font-semibold transition-colors hover:bg-white/[0.06]"
+          style={{ border: "1px solid rgba(95,206,208,0.35)", color: "rgba(95,206,208,0.75)", background: "rgba(95,206,208,0.06)" }}
+        >
+          <Upload size={8} />
+          Import Audio
+        </button>
+      )}
     </div>
   );
 }

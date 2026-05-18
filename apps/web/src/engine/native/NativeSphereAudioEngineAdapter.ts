@@ -17,7 +17,7 @@ import type {
   MeterCallback,
   TransportCallback,
 } from "../AudioEngineAdapter";
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId } from "../../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId, TrackPreviewMode } from "../../types/daw";
 import type {
   EngineProjectSnapshot,
   EngineTrackSnapshot,
@@ -80,6 +80,7 @@ function buildTrackSnapshot(track: DawTrack): EngineTrackSnapshot {
     muted:         track.muted ?? false,
     solo:          track.solo  ?? false,
     armed:         track.armed ?? false,
+    previewMode:   track.monitor?.previewMode ?? "stereo",
     outputTrackId: track.output ?? null,
     inserts: (track.inserts ?? []).map((ins) => ({
       id:      ins.id,
@@ -588,6 +589,10 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
 
   setTrackPhaseInvert(trackId: TrackId, inverted: boolean): void {
     this._paramUpdate(trackId, "phaseInvert", inverted);
+  }
+
+  setTrackPreviewMode(trackId: TrackId, mode: TrackPreviewMode): void {
+    this._paramUpdate(trackId, "previewMode", mode);
   }
 
   setTrackOutput(trackId: TrackId, output: string): void {

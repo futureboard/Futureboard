@@ -4,7 +4,7 @@
  *
  * Future: swap this for a WASM or native DSP adapter without touching UI code.
  */
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId, TrackPreviewMode } from "../types/daw";
 import type { AudioEngineAdapter, AudioEngineStatus, AudioSelfTestResult, MeterCallback, TransportCallback } from "./AudioEngineAdapter";
 import type { StereoLevel } from "./Mixer";
 import { audioEngine } from "./AudioEngine";
@@ -126,6 +126,7 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
       mixer.setMute(track.id, track.muted ?? false);
       mixer.setSolo(track.id, track.solo ?? false);
       mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
+      mixer.setPreviewMode(track.id, track.monitor?.previewMode ?? "stereo");
       const outId = track.routing?.outputId;
       if (outId && outId !== "master") mixer.setTrackOutput(track.id, outId);
     }
@@ -138,6 +139,7 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
       mixer.setVolume(track.id, track.volume);
       mixer.setPan(track.id, track.pan);
       mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
+      mixer.setPreviewMode(track.id, track.monitor?.previewMode ?? "stereo");
     }
   }
 
@@ -182,6 +184,7 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
     if (!this._trackIds.includes(track.id)) this._trackIds.push(track.id);
     mixer.getOrCreateTrack(track.id, track.volume, track.pan);
     mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
+    mixer.setPreviewMode(track.id, track.monitor?.previewMode ?? "stereo");
     const outId = track.routing?.outputId;
     if (outId && outId !== "master") mixer.setTrackOutput(track.id, outId);
   }
@@ -231,6 +234,10 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
 
   setTrackPhaseInvert(trackId: TrackId, inverted: boolean): void {
     mixer.setPhaseInvert(trackId, inverted);
+  }
+
+  setTrackPreviewMode(trackId: TrackId, mode: TrackPreviewMode): void {
+    mixer.setPreviewMode(trackId, mode);
   }
 
   setTrackOutput(trackId: TrackId, output: string): void {

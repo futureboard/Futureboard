@@ -15,6 +15,14 @@ export type AudioSampleRate = "device-default" | 44100 | 48000 | 96000;
 /** Top-level engine kind visible in the UI (derived from runtime, not user-selectable). */
 export type AudioEngineKind = "daux" | "wasm";
 
+export type ExtraFolderSetting = {
+  id: string;
+  name: string;
+  path: string;
+  enabled: boolean;
+  addedAt: number;
+};
+
 export type AppSettings = {
   startupBehavior: StartupBehavior;
   autoSave: boolean;
@@ -25,6 +33,8 @@ export type AppSettings = {
   dauxBackend?: DauxBackend;
   /** Audio engine sample rate (Electron / DAUx only). */
   audioSampleRate: AudioSampleRate;
+  /** Extra user folders shown in Browser/Library and indexed by Electron. */
+  extraFolders: ExtraFolderSetting[];
   compactUI: boolean;
   enableDevTools: boolean;
 };
@@ -37,16 +47,41 @@ const DEFAULTS: AppSettings = {
   preferredBufferSize: 256,
   dauxBackend: undefined,   // resolved at runtime per-platform
   audioSampleRate: "device-default",
+  extraFolders: [],
   compactUI: false,
   enableDevTools: false,
 };
+
+function normalizeExtraFolders(raw: unknown): ExtraFolderSetting[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: ExtraFolderSetting[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Partial<ExtraFolderSetting>;
+    const path = typeof obj.path === "string" ? obj.path.trim() : "";
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    const name = typeof obj.name === "string" && obj.name.trim()
+      ? obj.name.trim()
+      : path.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? path;
+    out.push({
+      id: typeof obj.id === "string" && obj.id ? obj.id : `extra:${path}`,
+      name,
+      path,
+      enabled: obj.enabled !== false,
+      addedAt: typeof obj.addedAt === "number" ? obj.addedAt : Date.now(),
+    });
+  }
+  return out;
+}
 
 function loadFromStorage(): AppSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return { ...DEFAULTS, ...parsed };
+    return { ...DEFAULTS, ...parsed, extraFolders: normalizeExtraFolders(parsed.extraFolders) };
   } catch {
     return { ...DEFAULTS };
   }
@@ -78,6 +113,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
         preferredBufferSize:patch.preferredBufferSize ?? s.preferredBufferSize,
         dauxBackend:        patch.dauxBackend        ?? s.dauxBackend,
         audioSampleRate:    patch.audioSampleRate    ?? s.audioSampleRate,
+        extraFolders:       patch.extraFolders       ? normalizeExtraFolders(patch.extraFolders) : s.extraFolders,
         compactUI:          patch.compactUI          ?? s.compactUI,
         enableDevTools:     patch.enableDevTools     ?? s.enableDevTools,
       };

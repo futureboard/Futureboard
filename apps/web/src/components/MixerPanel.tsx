@@ -15,13 +15,13 @@ import { forwardRef, useRef, useState, useEffect, type ButtonHTMLAttributes } fr
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
-import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrackSoloCommand } from "../commands";
+import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrackSoloCommand, SetTrackPreviewModeCommand } from "../commands";
 import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { Knob } from "./ui/Knob";
 import { MixerFader } from "./ui/MixerFader";
 import { useVuStereoLevels } from "../hooks/useVuLevel";
 import { effectiveTrackMeterMode } from "../utils/meterMode";
-import type { DawFile, DawProject, DawTrack, InsertDevice, TrackSend } from "../types/daw";
+import type { DawFile, DawProject, DawTrack, InsertDevice, TrackPreviewMode, TrackSend } from "../types/daw";
 import { buildTrackContextMenu } from "../menu/trackContextMenu";
 import { getSendTargets } from "../utils/routingHelpers";
 import { AddTrackSendCommand, RemoveTrackSendCommand } from "../commands";
@@ -242,6 +242,54 @@ function EmptySlotRow({ accent, hint }: { accent: string; hint: string }) {
   );
 }
 
+const PREVIEW_OPTIONS: Array<{ mode: TrackPreviewMode; label: string }> = [
+  { mode: "stereo", label: "Stereo" },
+  { mode: "mono", label: "Mono" },
+  { mode: "mid", label: "Mid" },
+  { mode: "side", label: "Side" },
+];
+
+function PreviewModeMenu({
+  mode, accent, onChange,
+}: {
+  mode: TrackPreviewMode;
+  accent: string;
+  onChange?: (mode: TrackPreviewMode) => void;
+}) {
+  const active = mode !== "stereo";
+  const shortLabel = mode === "stereo" ? "M/S" : mode.toUpperCase();
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title="Stereo Preview Mode"
+          className="h-[20px] min-w-[34px] rounded-[4px] border px-1.5 text-[9px] font-bold tracking-wide transition-colors"
+          style={{
+            background: active ? `${accent}22` : "rgba(255,255,255,0.03)",
+            borderColor: active ? `${accent}88` : "rgba(255,255,255,0.09)",
+            color: active ? accent : "rgba(220,232,240,0.52)",
+          }}
+        >
+          {shortLabel}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="center" sideOffset={4}>
+        <DropdownMenuLabel>Preview Mode</DropdownMenuLabel>
+        {PREVIEW_OPTIONS.map((option) => (
+          <DropdownMenuItem
+            key={option.mode}
+            onSelect={() => onChange?.(option.mode)}
+            className={mode === option.mode ? "text-daw-accent" : undefined}
+          >
+            {option.label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function SendRow({ send, trackId, project }: { send: TrackSend; trackId: string; project: DawProject }) {
   const targetTrack = project.tracks.find((t) => t.id === send.targetTrackId);
   const displayName = targetTrack?.name ?? send.name;
@@ -302,12 +350,19 @@ type StripProps = {
   color: string;
   volume: number;
   pan?: number;
+  channelIndex?: number;
   onVolume: (v: number) => void;
   onPan?: (v: number) => void;
   muted?: boolean;
   solo?: boolean;
+  armed?: boolean;
+  monitorMode?: DawTrack["monitorMode"];
+  previewMode?: TrackPreviewMode;
   onMute?: () => void;
   onSolo?: () => void;
+  onArm?: () => void;
+  onMonitor?: () => void;
+  onPreviewMode?: (mode: TrackPreviewMode) => void;
   onVolumeEnd?: (v: number) => void;
   onPanEnd?: (v: number) => void;
   fixedWidth?: number;
@@ -317,9 +372,10 @@ type StripProps = {
 };
 
 function ChannelStrip({
-  track, project, label, color, volume, pan = 0,
+  track, project, label, color, volume, pan = 0, channelIndex,
   onVolume, onPan, onVolumeEnd, onPanEnd,
-  muted, solo, onMute, onSolo,
+  muted, solo, armed, monitorMode, previewMode = "stereo",
+  onMute, onSolo, onArm, onMonitor, onPreviewMode,
   fixedWidth, level, onResizeDragStart,
   files, selected, onClick,
 }: StripProps & { selected?: boolean; onClick?: () => void }) {
@@ -330,6 +386,8 @@ function ChannelStrip({
     isMaster ? "stereo" : track ? effectiveTrackMeterMode(track, files) : "stereo";
   const inserts: InsertDevice[] = track?.inserts ?? [];
   const sends: TrackSend[] = track?.sends ?? [];
+  const previewActive = previewMode !== "stereo";
+  const canMonitor = track?.type === "audio" || track?.type === "midi" || track?.type === "instrument";
 
   const style: React.CSSProperties = fixedWidth !== undefined
     ? { width: fixedWidth, minWidth: fixedWidth, flexShrink: 0 }
@@ -367,6 +425,34 @@ function ChannelStrip({
         className="h-[1.5px] w-full shrink-0"
         style={{ background: `linear-gradient(90deg, transparent 0%, ${accent} 28%, ${accent} 72%, transparent 100%)`, opacity: 0.75 }}
       />
+
+      <div className="shrink-0 border-b border-white/[0.045] px-2 py-1.5">
+        <div className="flex items-center gap-1.5">
+          <div className="h-7 w-[3px] shrink-0 rounded-full" style={{ background: accent }} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1">
+              <span className="truncate text-[10.5px] font-semibold text-white/80" title={label}>{label}</span>
+              {previewActive && (
+                <span
+                  className="rounded-[3px] border px-1 py-[1px] text-[7.5px] font-bold leading-none"
+                  style={{ borderColor: `${accent}66`, color: accent, background: `${accent}18` }}
+                >
+                  {previewMode.toUpperCase()}
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 flex items-center gap-1 text-[8px] uppercase tracking-[0.08em] text-white/28">
+              <span>{isMaster ? "MST" : track?.type ?? "audio"}</span>
+              <span>CH {isMaster ? "M" : String(channelIndex ?? 1).padStart(2, "0")}</span>
+            </div>
+          </div>
+        </div>
+        {import.meta.env.DEV && track && (
+          <div className="mt-1 truncate text-[7.5px] tabular-nums text-white/20">
+            {track.id} / meter:{track.id}
+          </div>
+        )}
+      </div>
 
       {/* ── INSERTS (full only) ── */}
       {showFull && (
@@ -425,12 +511,77 @@ function ChannelStrip({
           solo={solo}
           isMaster={isMaster}
           color={accent}
+          showTrackButtons={false}
           onChange={onVolume}
           onCommit={onVolumeEnd}
           onMute={onMute}
           onSolo={onSolo}
         />
       </div>
+
+      {!isMaster && (
+        <div className="shrink-0 border-t border-white/[0.045] px-1.5 py-1">
+          <div className="grid grid-cols-4 gap-1">
+            <button
+              type="button"
+              title="Mute"
+              onClick={onMute}
+              className="h-[20px] rounded-[4px] border text-[9px] font-bold"
+              style={{
+                background: muted ? "#f0c35b" : "rgba(255,255,255,0.03)",
+                borderColor: muted ? "#f0c35b" : "rgba(255,255,255,0.09)",
+                color: muted ? "#0d1015" : "rgba(220,232,240,0.52)",
+              }}
+            >
+              M
+            </button>
+            <button
+              type="button"
+              title="Solo"
+              onClick={onSolo}
+              className="h-[20px] rounded-[4px] border text-[9px] font-bold"
+              style={{
+                background: solo ? "#7ccf86" : "rgba(255,255,255,0.03)",
+                borderColor: solo ? "#7ccf86" : "rgba(255,255,255,0.09)",
+                color: solo ? "#0d1015" : "rgba(220,232,240,0.52)",
+              }}
+            >
+              S
+            </button>
+            <button
+              type="button"
+              title="Record Arm"
+              onClick={onArm}
+              disabled={!canMonitor}
+              className="h-[20px] rounded-[4px] border text-[9px] font-bold disabled:opacity-35"
+              style={{
+                background: armed ? "#ef6b6b" : "rgba(255,255,255,0.03)",
+                borderColor: armed ? "#ef6b6b" : "rgba(255,255,255,0.09)",
+                color: armed ? "#0d1015" : "rgba(220,232,240,0.52)",
+              }}
+            >
+              R
+            </button>
+            <button
+              type="button"
+              title="Input Monitor"
+              onClick={onMonitor}
+              disabled={!canMonitor}
+              className="h-[20px] rounded-[4px] border text-[9px] font-bold disabled:opacity-35"
+              style={{
+                background: monitorMode === "in" ? `${accent}22` : "rgba(255,255,255,0.03)",
+                borderColor: monitorMode === "in" ? `${accent}88` : "rgba(255,255,255,0.09)",
+                color: monitorMode === "in" ? accent : "rgba(220,232,240,0.52)",
+              }}
+            >
+              I
+            </button>
+          </div>
+          <div className="mt-1 flex items-center justify-center">
+            <PreviewModeMenu mode={previewMode} accent={accent} onChange={onPreviewMode} />
+          </div>
+        </div>
+      )}
 
       {/* ── Name footer ── */}
       <div
@@ -464,7 +615,7 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
   const project = useProjectStore((s) => s.project);
   const tracks = project.tracks;
   const files = project.files;
-  const { setTrackVolume, setTrackPan } = useProjectStore();
+  const { setTrackVolume, setTrackPan, setTrackArmed, setTrackMonitorMode } = useProjectStore();
   const {
     masterVolume, setMasterVolume,
     mixerChannelWidth, setMixerChannelWidth,
@@ -634,10 +785,14 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
             project={project}
             label={t.name}
             color={t.color}
+            channelIndex={tracks.findIndex((track) => track.id === t.id) + 1}
             volume={t.volume}
             pan={t.pan}
             muted={t.muted}
             solo={t.solo}
+            armed={t.armed}
+            monitorMode={t.monitorMode ?? "off"}
+            previewMode={t.monitor?.previewMode ?? "stereo"}
             level={stripLevel}
             fixedWidth={fixedWidth}
             files={files}
@@ -647,6 +802,13 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
             onPanEnd={(v) => { useHistoryStore.getState().push(new SetTrackPanCommand(t.id, v, t.pan)); }}
             onMute={() => { useHistoryStore.getState().execute(new SetTrackMuteCommand(t.id, !t.muted)); }}
             onSolo={() => { useHistoryStore.getState().execute(new SetTrackSoloCommand(t.id, !t.solo)); }}
+            onArm={() => { setTrackArmed(t.id, !t.armed); }}
+            onMonitor={() => { setTrackMonitorMode(t.id, (t.monitorMode ?? "off") === "in" ? "off" : "in"); }}
+            onPreviewMode={(mode) => {
+              useHistoryStore.getState().execute(
+                new SetTrackPreviewModeCommand(t.id, mode, t.monitor?.previewMode ?? "stereo"),
+              );
+            }}
             onResizeDragStart={onStripResizeDragStart}
             selected={selectedMixerTrackId === t.id}
             onClick={() => {

@@ -159,6 +159,18 @@ interface NativeEngine {
   getDauxStatus(): NativeDauxStatus;
 }
 
+function encodeTrackParamValue(paramId: string, value: unknown): number {
+  if (paramId === "previewMode") {
+    switch (value) {
+      case "mono": return 1;
+      case "mid": return 2;
+      case "side": return 3;
+      default: return 0;
+    }
+  }
+  return Number(value);
+}
+
 /** Addon module as loaded by require(). */
 interface SphereAudioAddon {
   SphereDirectAudioEngine: new () => NativeEngine;
@@ -431,7 +443,7 @@ export class SphereAudioNative {
 
   updateTrackParam(trackId: string, paramId: string, value: unknown): void {
     if (!this._engine) throw new Error("[SphereAudio] Engine not available");
-    this._engine.updateTrackParam(trackId, paramId, Number(value));
+    this._engine.updateTrackParam(trackId, paramId, encodeTrackParamValue(paramId, value));
   }
 
   updateInsertParam(trackId: string, insertId: string, paramId: string, value: unknown): void {

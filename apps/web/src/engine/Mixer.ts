@@ -1,4 +1,4 @@
-import type { InsertDevice, TrackId } from "../types/daw";
+import type { InsertDevice, TrackId, TrackPreviewMode } from "../types/daw";
 import { audioEngine } from "./AudioEngine";
 import { getDspFactory } from "./plugins/dspRegistry";
 import type { InsertAudioNode } from "./plugins/types";
@@ -22,6 +22,12 @@ type TrackNodes = {
   insertOutput: GainNode;
   phaseNode:   GainNode;      // gain = 1 (normal) or -1 (phase inverted)
   panner:      StereoPannerNode;
+  previewSplitter: ChannelSplitterNode;
+  previewMerger:   ChannelMergerNode;
+  previewLToL: GainNode;
+  previewLToR: GainNode;
+  previewRToL: GainNode;
+  previewRToR: GainNode;
   splitter:    ChannelSplitterNode;
   merger:      ChannelMergerNode;
   analyserL:   AnalyserNode;
@@ -33,6 +39,7 @@ type TrackNodes = {
   muted:       boolean;
   solo:        boolean;
   volume:      number;
+  previewMode: TrackPreviewMode;
   insertNodes: Map<string, InsertAudioNode>;
   insertChain: InsertAudioNode[];
 };
@@ -90,6 +97,12 @@ class Mixer {
       const insertOutput = ctx.createGain();
       const phaseNode    = ctx.createGain();      // value = 1 or -1
       const panner       = ctx.createStereoPanner();
+      const previewSplitter = ctx.createChannelSplitter(2);
+      const previewMerger   = ctx.createChannelMerger(2);
+      const previewLToL = ctx.createGain();
+      const previewLToR = ctx.createGain();
+      const previewRToL = ctx.createGain();
+      const previewRToR = ctx.createGain();
       const splitter     = ctx.createChannelSplitter(2);
       const merger       = ctx.createChannelMerger(2);
       const analyserL    = ctx.createAnalyser();
@@ -103,13 +116,26 @@ class Mixer {
       gain.gain.value      = volume;
       panner.pan.value     = pan;
       phaseNode.gain.value = 1; // normal polarity
+      previewLToL.gain.value = 1;
+      previewLToR.gain.value = 0;
+      previewRToL.gain.value = 0;
+      previewRToR.gain.value = 1;
 
       // gain → insertInput → [insert chain] → insertOutput → phaseNode → panner → split → analysers → merger → master
       gain.connect(insertInput);
       insertInput.connect(insertOutput);
       insertOutput.connect(phaseNode);
       phaseNode.connect(panner);
-      panner.connect(splitter);
+      panner.connect(previewSplitter);
+      previewSplitter.connect(previewLToL, 0);
+      previewSplitter.connect(previewLToR, 0);
+      previewSplitter.connect(previewRToL, 1);
+      previewSplitter.connect(previewRToR, 1);
+      previewLToL.connect(previewMerger, 0, 0);
+      previewRToL.connect(previewMerger, 0, 0);
+      previewLToR.connect(previewMerger, 0, 1);
+      previewRToR.connect(previewMerger, 0, 1);
+      previewMerger.connect(splitter);
       splitter.connect(analyserL, 0);
       splitter.connect(analyserR, 1);
       splitter.connect(merger, 0, 0);
@@ -123,6 +149,12 @@ class Mixer {
         insertOutput,
         phaseNode,
         panner,
+        previewSplitter,
+        previewMerger,
+        previewLToL,
+        previewLToR,
+        previewRToL,
+        previewRToR,
         splitter,
         merger,
         analyserL,
@@ -134,6 +166,7 @@ class Mixer {
         muted: false,
         solo: false,
         volume,
+        previewMode: "stereo",
         insertNodes: new Map(),
         insertChain: [],
       });
@@ -282,6 +315,32 @@ class Mixer {
     nodes.phaseNode.gain.setTargetAtTime(target, audioEngine.currentTime, 0.005);
   }
 
+  setPreviewMode(trackId: TrackId, mode: TrackPreviewMode) {
+    const nodes = this.tracks.get(trackId);
+    if (!nodes) return;
+    nodes.previewMode = mode;
+    const now = audioEngine.currentTime;
+    let lToL = 1;
+    let lToR = 0;
+    let rToL = 0;
+    let rToR = 1;
+    if (mode === "mono" || mode === "mid") {
+      lToL = 0.5;
+      lToR = 0.5;
+      rToL = 0.5;
+      rToR = 0.5;
+    } else if (mode === "side") {
+      lToL = 0.5;
+      lToR = 0.5;
+      rToL = -0.5;
+      rToR = -0.5;
+    }
+    nodes.previewLToL.gain.setTargetAtTime(lToL, now, 0.005);
+    nodes.previewLToR.gain.setTargetAtTime(lToR, now, 0.005);
+    nodes.previewRToL.gain.setTargetAtTime(rToL, now, 0.005);
+    nodes.previewRToR.gain.setTargetAtTime(rToR, now, 0.005);
+  }
+
   removeTrack(trackId: TrackId) {
     const nodes = this.tracks.get(trackId);
     if (nodes) {
@@ -296,6 +355,12 @@ class Mixer {
       nodes.insertOutput.disconnect();
       nodes.phaseNode.disconnect();
       nodes.panner.disconnect();
+      nodes.previewSplitter.disconnect();
+      nodes.previewMerger.disconnect();
+      nodes.previewLToL.disconnect();
+      nodes.previewLToR.disconnect();
+      nodes.previewRToL.disconnect();
+      nodes.previewRToR.disconnect();
       nodes.splitter.disconnect();
       nodes.analyserL.disconnect();
       nodes.analyserR.disconnect();

@@ -19,6 +19,8 @@ pub enum EngineCommand {
     SetTrackMute { track_id: String, muted: bool },
     /// Solo or unsolo a track.
     SetTrackSolo { track_id: String, solo: bool },
+    /// Set non-destructive stereo/mono/mid/side monitoring preview.
+    SetTrackPreviewMode { track_id: String, value: f32 },
     /// Set a plugin/insert parameter.
     SetInsertParam {
         track_id: String,

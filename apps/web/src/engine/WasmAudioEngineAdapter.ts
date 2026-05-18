@@ -1,6 +1,6 @@
 
 import type { AudioEngineAdapter, AudioEngineStatus, MeterCallback, TransportCallback } from "./AudioEngineAdapter";
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId, TrackPreviewMode } from "../types/daw";
 
 // Vite resolves new URL(..., import.meta.url) as a static asset URL for both
 // dev and production builds. The .wasm file is served with the correct MIME type.
@@ -242,6 +242,8 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   setTrackPhaseInvert(_trackId: TrackId, _inverted: boolean): void {}
+
+  setTrackPreviewMode(_trackId: TrackId, _mode: TrackPreviewMode): void {}
 
   setTrackOutput(_trackId: TrackId, _output: string): void {}
 

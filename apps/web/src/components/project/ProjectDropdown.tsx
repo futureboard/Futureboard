@@ -226,8 +226,8 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
       contentType: "projectWizard",
       title: "New Project",
       modal: true,
-      width: 520,
-      height: platform.kind === "electron" ? 620 : 540,
+      width: 780,
+      height: platform.kind === "electron" ? 560 : 510,
       resizable: false,
       closable: true,
     });

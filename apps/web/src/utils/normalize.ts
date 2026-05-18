@@ -2,7 +2,7 @@
  * Normalization helpers — fill in default values for older project state
  * so UI and engine code never crash on missing fields.
  */
-import type { DawProject, DawTrack, DawClip, DawProjectAsset, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint, AudioClipProcess, TrackRouting, TrackInputRouting, TrackOutputRouting, TrackAdvanced } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, DawProjectAsset, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint, AudioClipProcess, TrackRouting, TrackInputRouting, TrackOutputRouting, TrackAdvanced, TrackMonitorSettings, TrackPreviewMode } from "../types/daw";
 
 export function normalizeLoop(raw: Partial<ProjectLoop> | undefined): ProjectLoop | undefined {
   if (!raw) return undefined;
@@ -165,6 +165,15 @@ export function normalizeAdvanced(raw: Partial<TrackAdvanced> | undefined): Trac
   };
 }
 
+const VALID_PREVIEW_MODES = new Set<TrackPreviewMode>(["stereo", "mono", "mid", "side"]);
+
+export function normalizeMonitor(raw: Partial<TrackMonitorSettings> | undefined): TrackMonitorSettings {
+  const mode = raw?.previewMode;
+  return {
+    previewMode: mode && VALID_PREVIEW_MODES.has(mode) ? mode : "stereo",
+  };
+}
+
 export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
   const type = raw.type ?? "audio";
   const inserts = (raw.inserts ?? []).map((ins, i) =>
@@ -188,6 +197,7 @@ export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
     routing: normalizeRouting(raw.routing as Partial<TrackRouting> | undefined, type),
     advanced: normalizeAdvanced(raw.advanced as Partial<TrackAdvanced> | undefined),
     monitorMode: raw.monitorMode ?? "off",
+    monitor: normalizeMonitor(raw.monitor as Partial<TrackMonitorSettings> | undefined),
     channelMode: raw.channelMode ?? (raw.channelCount === 1 ? "mono" : "stereo"),
     height: raw.height,
     collapsed: raw.collapsed ?? false,

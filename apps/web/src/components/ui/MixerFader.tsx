@@ -101,6 +101,7 @@ export type MixerFaderProps = {
   solo?: boolean;
   isMaster?: boolean;
   color?: string;
+  showTrackButtons?: boolean;
   onChange:  (v: number) => void;
   onCommit?: (v: number) => void;
   onMute?:   () => void;
@@ -117,6 +118,7 @@ export function MixerFader({
   muted,
   solo,
   isMaster = false,
+  showTrackButtons = true,
   onChange,
   onCommit,
   onMute,
@@ -316,7 +318,7 @@ export function MixerFader({
             master
           </span>
         </div>
-      ) : (
+      ) : showTrackButtons ? (
         <div className="flex shrink-0 gap-1 px-1 py-1.5">
           <button
             type="button"
@@ -345,7 +347,7 @@ export function MixerFader({
             S
           </button>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

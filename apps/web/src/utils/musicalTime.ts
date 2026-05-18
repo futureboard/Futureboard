@@ -125,6 +125,24 @@ export function preserveCenterBeatOnZoom(
   return Math.max(0, centerBeat * newPxPerBeat - viewportWidth / 2);
 }
 
+/**
+ * After a zoom change, compute the new scrollLeft that keeps an arbitrary
+ * anchor beat fixed at `anchorOffsetPx` pixels from the left of the viewport.
+ *
+ * Use this to anchor zoom to the playhead (or any other time-position):
+ *   anchorPx      = anchorTime * oldPxPerSecond - scrollLeft  (position within viewport)
+ *   anchorOffsetPx = anchorPx clamped to [0, viewportWidth]
+ */
+export function preserveAnchorBeatOnZoom(
+  anchorTimePx: number,      // absolute content-x of the anchor at the old zoom
+  anchorOffsetPx: number,    // screen-x offset within viewport where anchor should stay
+  newPxPerSecond: number,
+  oldPxPerSecond: number,
+): number {
+  const anchorTimeSec = anchorTimePx / oldPxPerSecond;
+  return Math.max(0, anchorTimeSec * newPxPerSecond - anchorOffsetPx);
+}
+
 /** Returns the [startBeat, endBeat] range that is currently visible. */
 export function getVisibleBeatRange(
   scrollLeft: number,
@@ -161,17 +179,20 @@ export function beatsPerBar(timeSig: TimeSignature): number {
 // Build ascending list of valid musical grid intervals (in quarter-note beats)
 function buildIntervalList(bpb: number): number[] {
   const result: number[] = [];
-  for (const sub of [1 / 16, 1 / 8, 1 / 4, 1 / 2, 1, 2]) {
+  // Sub-beat subdivisions: 1/32, 1/16, 1/8, 1/4, 1/2 (include those finer than one bar)
+  for (const sub of [1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2, 1, 2]) {
     if (sub < bpb) result.push(sub);
   }
-  for (const mult of [1, 2, 4, 8, 16, 32]) {
+  // Bar-level multiples
+  for (const mult of [1, 2, 4, 8, 16, 32, 64]) {
     result.push(bpb * mult);
   }
   return result;
 }
 
-// Minimum pixel gap between major grid lines before stepping up to next interval
-const MIN_LABEL_GAP_PX = 72;
+// Minimum pixel gap between ruler labels before stepping up to the next interval.
+// Larger value = fewer, more spaced-out labels = cleaner ruler at every zoom level.
+const MIN_LABEL_GAP_PX = 100;
 
 export function getGridIntervalBeats(pixelsPerBeat: number, timeSig: TimeSignature): number {
   const bpb = beatsPerBar(timeSig);

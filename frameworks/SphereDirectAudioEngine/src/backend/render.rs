@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::command::EngineCommand;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::engine::{SharedState, PEAK_DECAY, TEST_TONE_AMPLITUDE};
-use crate::runtime::RuntimeProject;
+use crate::runtime::{RuntimePreviewMode, RuntimeProject};
 
 // Re-export helpers so wasapi_exclusive.rs can use them through render.
 pub use crate::engine::render_project_sample;
@@ -121,6 +121,9 @@ pub fn drain_commands(
             }
             EngineCommand::SetTrackSolo { track_id, solo } => {
                 runtime.update_track_solo(&track_id, solo);
+            }
+            EngineCommand::SetTrackPreviewMode { track_id, value } => {
+                runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
             }
             EngineCommand::SetInsertParam { track_id, insert_id, param_id, value } => {
                 runtime.update_insert_param(&track_id, &insert_id, &param_id, value);

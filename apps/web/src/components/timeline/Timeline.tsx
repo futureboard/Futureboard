@@ -10,13 +10,16 @@ import { useUIStore, type ArrangementTool, type MarqueeSelectionState } from "..
 import { useProjectStore } from "../../store/projectStore";
 import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { secondsPerBeat, snapTime, timelineXToTime } from "../../utils/musicalTime";
+import { activeAudioEngine } from "../../engine/activeAudioEngine";
 import { addFileToTimeline, importNativeAudioPathToTimeline } from "../../utils/importAudioToProject";
 import { audioImportQueue } from "../../engine/AudioImportQueue";
 import { TIMELINE_Z } from "../../utils/timelineZ";
 import { HEADER_WIDTH } from "../../theme";
 
-const MIN_PPS = 10;
-const MAX_PPS = 800;
+// Zoom range: 4 px/s lets you see ~250 bars in a typical viewport at 120 BPM.
+// 4000 px/s lets you inspect individual samples with 1/32-note subdivisions visible.
+const MIN_PPS = 4;
+const MAX_PPS = 4000;
 const NATIVE_AUDIO_DRAG_TYPE = "application/x-futureboard-native-audio-path";
 
 export function Timeline() {
@@ -289,13 +292,18 @@ export function Timeline() {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
 
-      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      // Use a slightly smaller factor for smoother, more controlled zooming.
+      const factor = e.deltaY < 0 ? 1.10 : 1 / 1.10;
       const oldPPS = ppsRef.current;
       const newPPS = Math.min(MAX_PPS, Math.max(MIN_PPS, oldPPS * factor));
+      if (newPPS === oldPPS) return;
 
-      // Anchor zoom to cursor: keep the time under the pointer fixed.
-      // offsetX is viewport-relative; subtract HEADER_WIDTH to get content-space x.
-      const contentX = Math.max(0, e.offsetX - HEADER_WIDTH);
+      // Anchor zoom to the cursor position.
+      // Use clientX relative to the scroll container's bounding rect rather than
+      // offsetX (which would be relative to whichever child element is under the
+      // cursor, giving incorrect results when hovering over clips or track headers).
+      const rect = el.getBoundingClientRect();
+      const contentX = Math.max(0, e.clientX - rect.left - HEADER_WIDTH);
       const timeAtCursor = (el.scrollLeft + contentX) / oldPPS;
 
       setPixelsPerSecond(newPPS);
@@ -310,17 +318,31 @@ export function Timeline() {
   }, [setPixelsPerSecond]);
 
   // ── zoom buttons ─────────────────────────────────────────────────────────────
+  // Anchor priority: playhead (if visible) > viewport center.
   const zoom = (f: number) => {
     const oldPPS = pixelsPerSecond;
     const newPPS = Math.min(MAX_PPS, Math.max(MIN_PPS, oldPPS * f));
+    if (newPPS === oldPPS) return;
+
     const el = scrollRef.current;
     if (!el) { setPixelsPerSecond(newPPS); return; }
-    // Anchor zoom to the center of the visible content area (excluding sticky header).
-    const contentW = el.clientWidth - HEADER_WIDTH;
-    const timeAtCenter = (el.scrollLeft + contentW / 2) / oldPPS;
+
+    const contentW   = el.clientWidth - HEADER_WIDTH;
+    const scrollLeft = el.scrollLeft;
+
+    // Playhead content-space position at the current zoom
+    const playheadSec  = activeAudioEngine.projectTime;
+    const playheadAbsX = playheadSec * oldPPS;               // absolute content x
+    const playheadViewX = playheadAbsX - scrollLeft;         // x within viewport
+
+    // Use playhead as anchor if it is currently visible inside the content area
+    const playheadVisible = playheadViewX >= 0 && playheadViewX <= contentW;
+    const anchorAbsX   = playheadVisible ? playheadAbsX  : scrollLeft + contentW / 2;
+    const anchorOffsetX = playheadVisible ? playheadViewX : contentW / 2;
+
     setPixelsPerSecond(newPPS);
     requestAnimationFrame(() => {
-      el.scrollLeft = Math.max(0, timeAtCenter * newPPS - contentW / 2);
+      el.scrollLeft = Math.max(0, (anchorAbsX / oldPPS) * newPPS - anchorOffsetX);
     });
   };
 
@@ -405,8 +427,10 @@ export function Timeline() {
         >
           <ZoomOut size={12} />
         </button>
-        <span className="min-w-12 text-center text-[9px] tabular-nums text-daw-dim">
-          {Math.round(pixelsPerBeat)} px/bt
+        <span className="min-w-[52px] text-center text-[9px] tabular-nums text-daw-dim">
+          {pixelsPerBeat >= 10
+            ? `${Math.round(pixelsPerBeat)} px/bt`
+            : `${pixelsPerBeat.toFixed(1)} px/bt`}
         </span>
         <button
           onClick={() => zoom(1.33)}

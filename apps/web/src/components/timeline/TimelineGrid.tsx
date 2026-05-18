@@ -1,15 +1,17 @@
 import { useEffect, useRef } from "react";
 import { useUIStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
-import { C, HEADER_WIDTH } from "../../theme";
-import { getArrangementGridLines, type GridLineLevel } from "../../utils/musicalGrid";
+import { HEADER_WIDTH } from "../../theme";
+import { getArrangementGridLines, pxPerBeat, type GridLineLevel } from "../../utils/musicalGrid";
+import { beatsPerBar } from "../../utils/musicalTime";
 import type { TimeSignature } from "../../utils/musicalTime";
 
-// White-on-dark grid hierarchy: sub (faintest) → beat (medium) → bar (strongest).
-const GRID_COLOR: Record<GridLineLevel, string> = {
-  bar:  "rgba(255,255,255,0.26)",
-  beat: C.gridMajor,   // rgba(255,255,255,0.095)
-  sub:  C.gridMinor,   // rgba(255,255,255,0.045)
+// ── Color hierarchy: sub (ghost) → beat (medium) → bar (anchor) ───────────────
+// Values chosen to be clearly readable on a dark surface without feeling harsh.
+const GRID_ALPHA: Record<GridLineLevel, number> = {
+  bar:  0.14,   // strongest — anchors the eye to bar boundaries
+  beat: 0.062,  // medium — readable when zoomed in, invisible when far out
+  sub:  0.026,  // ghost — only visible when zoomed close
 };
 
 export function TimelineGrid() {
@@ -41,14 +43,48 @@ export function TimelineGrid() {
       if (!ctx) return;
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, W, H);
-      ctx.lineWidth = 1;
 
+      const ppb  = pxPerBeat(pixelsPerSecond, bpm);
+      const bpb  = beatsPerBar(timeSig);
+      const barW = bpb * ppb;
+
+      // ── Pass 1: alternating bar shading ──────────────────────────────────────
+      // Every other bar gets a very subtle fill.  Computed directly from geometry
+      // so there's no dependency on the grid-line array (handles partial bars at
+      // the left viewport edge correctly).
+      if (barW >= 2) {
+        const startBeat  = scrollX / ppb;
+        const firstBar   = Math.floor(startBeat / bpb);
+        ctx.fillStyle    = "rgba(255,255,255,0.022)";
+        // Only shade even-indexed bars (0-based) so the pattern is stable
+        for (let bar = firstBar; bar * barW - scrollX < W + barW; bar++) {
+          if (bar % 2 === 0) {
+            const bx = Math.round(bar * barW - scrollX);
+            ctx.fillRect(bx, 0, Math.round(barW), H);
+          }
+        }
+      }
+
+      // ── Pass 2: grid lines ────────────────────────────────────────────────────
       const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W);
+
+      // Draw sub and beat lines first (thin, faint), then bar lines on top.
+      // Two sub-passes lets bar lines paint over beat/sub lines cleanly at their x.
       for (const line of lines) {
-        // line.x is already Math.round()'d — add 0.5 for crisp 1 px lines.
+        if (line.level === "bar") continue;
         const cx = line.x + 0.5;
-        ctx.strokeStyle = GRID_COLOR[line.level];
-        ctx.lineWidth = line.level === "bar" ? 1.5 : 1;
+        ctx.strokeStyle = `rgba(255,255,255,${GRID_ALPHA[line.level]})`;
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx, 0);
+        ctx.lineTo(cx, H);
+        ctx.stroke();
+      }
+      for (const line of lines) {
+        if (line.level !== "bar") continue;
+        const cx = line.x + 0.5;
+        ctx.strokeStyle = `rgba(255,255,255,${GRID_ALPHA.bar})`;
+        ctx.lineWidth   = 1;
         ctx.beginPath();
         ctx.moveTo(cx, 0);
         ctx.lineTo(cx, H);

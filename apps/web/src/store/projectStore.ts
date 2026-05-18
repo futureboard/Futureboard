@@ -15,6 +15,8 @@ import type {
   TimeSignature,
   TrackAdvanced,
   TrackId,
+  TrackMonitorMode,
+  TrackPreviewMode,
   TrackRouting,
   TrackSend,
   WaveformPeaks,
@@ -72,6 +74,8 @@ type ProjectStore = {
   setTrackMute: (trackId: TrackId, muted: boolean) => void;
   setTrackSolo: (trackId: TrackId, solo: boolean) => void;
   setTrackArmed: (trackId: TrackId, armed: boolean) => void;
+  setTrackMonitorMode: (trackId: TrackId, mode: TrackMonitorMode) => void;
+  setTrackPreviewMode: (trackId: TrackId, mode: TrackPreviewMode) => void;
   setTrackColor: (trackId: TrackId, color: string) => void;
   setTrackOutput: (trackId: TrackId, output: string) => void;
   setTrackHeight: (trackId: TrackId, height: number | undefined) => void;
@@ -242,6 +246,27 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   setTrackArmed: (trackId, armed) => {
     set((s) => ({
       project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, armed } : t) },
+    }));
+    markDirty();
+  },
+
+  setTrackMonitorMode: (trackId, mode) => {
+    set((s) => ({
+      project: { ...s.project, tracks: s.project.tracks.map((t) => t.id === trackId ? { ...t, monitorMode: mode } : t) },
+    }));
+    markDirty();
+  },
+
+  setTrackPreviewMode: (trackId, mode) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId
+            ? { ...t, monitor: { ...(t.monitor ?? { previewMode: "stereo" }), previewMode: mode } }
+            : t
+        ),
+      },
     }));
     markDirty();
   },

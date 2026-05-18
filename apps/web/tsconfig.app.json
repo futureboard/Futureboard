@@ -21,5 +21,10 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    "../../packages/shared/src/**/*.ts",
+    "../../plugins/**/*.ts",
+    "../../plugins/**/*.tsx"
+  ]
 }

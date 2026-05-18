@@ -96,6 +96,7 @@ export type EngineTrackSnapshot = {
   muted:         boolean;
   solo:          boolean;
   armed:         boolean;
+  previewMode:   string;
   outputTrackId: string | null;
   inserts:       EngineInsertSnapshot[];
   sends:         EngineSendSnapshot[];

@@ -72,6 +72,12 @@ export type DawProject = {
 };
 
 export type TrackType = "audio" | "midi" | "instrument" | "plugin" | "bus" | "return" | "group" | "master";
+export type TrackMonitorMode = "off" | "auto" | "in";
+export type TrackPreviewMode = "stereo" | "mono" | "mid" | "side";
+
+export type TrackMonitorSettings = {
+  previewMode: TrackPreviewMode;
+};
 
 export type TrackInputType =
   | "none"
@@ -204,7 +210,9 @@ export type DawTrack = {
   /** Advanced per-track processing parameters. */
   advanced?: TrackAdvanced;
   /** Monitor input mode for audio/instrument tracks. */
-  monitorMode?: "off" | "auto" | "in";
+  monitorMode?: TrackMonitorMode;
+  /** Non-destructive monitoring preview. Does not alter clips/export. */
+  monitor?: TrackMonitorSettings;
   /** Channel mode override. */
   channelMode?: "mono" | "stereo";
   /** Display height in pixels (overrides TRACK_HEIGHT default). */

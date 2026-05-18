@@ -1,4 +1,4 @@
-import type { DawTrack } from "../types/daw";
+import type { DawTrack, TrackPreviewMode } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
 import { createTrackVolumeTarget, createTrackPanTarget } from "../utils/automationTargets";
 import { useUIStore } from "../store/uiStore";
@@ -26,7 +26,10 @@ import {
   RenameTrackCommand,
   SetTrackColorCommand,
   SetTrackMuteCommand,
+  SetTrackPanCommand,
+  SetTrackPreviewModeCommand,
   SetTrackSoloCommand,
+  SetTrackVolumeCommand,
   SplitClipCommand,
 } from "../commands";
 
@@ -317,7 +320,38 @@ export function runAction(actionId: string) {
       break;
     }
 
+    case "track:preview:stereo":
+    case "track:preview:mono":
+    case "track:preview:mid":
+    case "track:preview:side": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const track = projectStore.project.tracks.find((t) => t.id === selectedTrackId);
+      if (!track) break;
+      const mode = actionId.slice("track:preview:".length) as TrackPreviewMode;
+      history.execute(new SetTrackPreviewModeCommand(selectedTrackId, mode, track.monitor?.previewMode ?? "stereo"));
+      break;
+    }
+
+    case "track:reset-fader": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const track = projectStore.project.tracks.find((t) => t.id === selectedTrackId);
+      if (track && track.volume !== 1) history.execute(new SetTrackVolumeCommand(selectedTrackId, 1, track.volume));
+      break;
+    }
+
+    case "track:reset-pan": {
+      const { selectedTrackId } = uiStore;
+      if (!selectedTrackId) break;
+      const track = projectStore.project.tracks.find((t) => t.id === selectedTrackId);
+      if (track && track.pan !== 0) history.execute(new SetTrackPanCommand(selectedTrackId, 0, track.pan));
+      break;
+    }
+
     // stubs — not yet implemented
+    case "track:add-insert":
+    case "track:add-send":
     case "track:change-color":
     case "track:freeze":
     case "track:flatten":
@@ -501,8 +535,8 @@ export function runAction(actionId: string) {
           contentType: "projectWizard",
           title: "New Project",
           modal: true,
-          width: 520,
-          height: platform.kind === "electron" ? 620 : 540,
+          width: 780,
+          height: platform.kind === "electron" ? 560 : 510,
           resizable: false,
           closable: true,
         });

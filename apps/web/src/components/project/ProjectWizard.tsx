@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import {
-  FileText, Mic2, Music, SlidersHorizontal, Square, FolderOpen, Plus, Loader,
+  FileText, Mic2, Music, SlidersHorizontal, Square, FolderOpen, Plus, Loader, Check,
 } from "lucide-react";
 import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
@@ -37,26 +37,84 @@ const TEMPLATE_PRESETS: Record<Template, Partial<WizardState>> = {
   scoring:      { audioTrackCount: 0, midiTrackCount: 8, timeSignatureNumerator: 4 },
 };
 
-const TEMPLATES: { id: Template; label: string; icon: React.ElementType; detail: string }[] = [
-  { id: "empty",       label: "Empty",      icon: Square,           detail: "Blank canvas"   },
-  { id: "recording",   label: "Recording",  icon: Mic2,             detail: "4 audio tracks" },
-  { id: "beat-making", label: "Beat Making",icon: Music,            detail: "4 MIDI tracks"  },
-  { id: "mixing",      label: "Mixing",     icon: SlidersHorizontal,detail: "8 audio tracks" },
-  { id: "scoring",     label: "Scoring",    icon: FileText,         detail: "8 MIDI tracks"  },
+type TemplateInfo = {
+  id: Template;
+  label: string;
+  icon: React.ElementType;
+  detail: string;
+  accentBg: string;
+  iconColor: string;
+  borderActive: string;
+  barColor: string;
+};
+
+const TEMPLATES: TemplateInfo[] = [
+  {
+    id: "empty",
+    label: "Empty",
+    icon: Square,
+    detail: "Blank canvas",
+    accentBg: "rgba(255,255,255,0.04)",
+    iconColor: "#8a95a3",
+    borderActive: "rgba(255,255,255,0.12)",
+    barColor: "#8a95a3",
+  },
+  {
+    id: "recording",
+    label: "Recording",
+    icon: Mic2,
+    detail: "4 audio tracks",
+    accentBg: "rgba(239,107,107,0.06)",
+    iconColor: "#ef9090",
+    borderActive: "rgba(239,107,107,0.32)",
+    barColor: "#ef9090",
+  },
+  {
+    id: "beat-making",
+    label: "Beat Making",
+    icon: Music,
+    detail: "4 MIDI tracks",
+    accentBg: "rgba(167,107,239,0.06)",
+    iconColor: "#c490ef",
+    borderActive: "rgba(167,107,239,0.32)",
+    barColor: "#c490ef",
+  },
+  {
+    id: "mixing",
+    label: "Mixing",
+    icon: SlidersHorizontal,
+    detail: "8 audio tracks",
+    accentBg: "rgba(86,199,201,0.06)",
+    iconColor: "#56c7c9",
+    borderActive: "rgba(86,199,201,0.4)",
+    barColor: "#56c7c9",
+  },
+  {
+    id: "scoring",
+    label: "Scoring",
+    icon: FileText,
+    detail: "8 MIDI tracks",
+    accentBg: "rgba(128,209,138,0.06)",
+    iconColor: "#80d18a",
+    borderActive: "rgba(128,209,138,0.32)",
+    barColor: "#80d18a",
+  },
 ];
 
 const SAMPLE_RATES = [44100, 48000, 88200, 96000] as const;
-const SR_LABEL: Record<number, string> = { 44100: "44.1k", 48000: "48k", 88200: "88.2k", 96000: "96k" };
+const SR_LABEL: Record<number, string> = {
+  44100: "44.1k",
+  48000: "48k",
+  88200: "88.2k",
+  96000: "96k",
+};
 
-// ─── Shared sub-components ────────────────────────────────────────────────────
+// ─── Sub-components ──────────────────────────────────────────────────────────
 
-function OptionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div>
-      <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wide text-daw-faint">
-        {label}
-      </div>
-      <div className="flex items-center gap-1.5">{children}</div>
+    <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-daw-faint">
+      {children}
     </div>
   );
 }
@@ -65,19 +123,19 @@ function Stepper({
   value, min, max, onChange,
 }: { value: number; min: number; max: number; onChange: (v: number) => void }) {
   return (
-    <>
+    <div className="flex items-center gap-1">
       <button
         type="button"
         onClick={() => onChange(Math.max(min, value - 1))}
-        className="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.07] bg-[#13161c] text-[12px] font-semibold text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-white/[0.08] bg-white/[0.03] text-[14px] font-light text-daw-dim transition-colors hover:bg-white/[0.07] hover:text-daw-text select-none"
       >
-        <span className="select-none leading-none">−</span>
+        −
       </button>
       <NumberInput
         min={min}
         max={max}
         value={value}
-        className="!h-7 min-w-0 flex-1"
+        className="!h-7 w-14 shrink-0"
         align="center"
         ariaLabel="Numeric value"
         onChange={(next) => onChange(Math.max(min, Math.min(max, next || min)))}
@@ -85,11 +143,11 @@ function Stepper({
       <button
         type="button"
         onClick={() => onChange(Math.min(max, value + 1))}
-        className="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.07] bg-[#13161c] text-[12px] font-semibold text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-white/[0.08] bg-white/[0.03] text-[14px] font-light text-daw-dim transition-colors hover:bg-white/[0.07] hover:text-daw-text select-none"
       >
-        <span className="select-none leading-none">+</span>
+        +
       </button>
-    </>
+    </div>
   );
 }
 
@@ -112,6 +170,7 @@ export function ProjectWizard({ windowId }: Props) {
     location: "",
   });
   const [isCreating, setIsCreating] = useState(false);
+  const [nameTouched, setNameTouched] = useState(false);
 
   const set = (patch: Partial<WizardState>) => setState((s) => ({ ...s, ...patch }));
 
@@ -129,7 +188,7 @@ export function ProjectWizard({ windowId }: Props) {
     const ws = useWindowStore.getState();
     const projectName = state.name.trim() || "Untitled Project";
 
-    // Validate Electron: location is required
+    // Electron: location required
     if (isElectron && !state.location) {
       await platform.folderProject.browseLocation().then((loc) => {
         if (loc) set({ location: loc });
@@ -185,7 +244,6 @@ export function ProjectWizard({ windowId }: Props) {
       files: [],
     };
 
-    // Electron: create folder structure first, then save initial project file
     if (isElectron) {
       setIsCreating(true);
       try {
@@ -230,204 +288,385 @@ export function ProjectWizard({ windowId }: Props) {
     ws.closeWindow(windowId);
   };
 
+  const nameEmpty = nameTouched && state.name.trim() === "";
+  const canCreate = !isCreating && state.name.trim() !== "" && (!isElectron || !!state.location);
+
   const totalTracks = state.audioTrackCount + state.midiTrackCount;
   const templateLabel = TEMPLATES.find((t) => t.id === state.template)?.label ?? state.template;
 
   return (
-    <div className="flex flex-col">
+    <div className="flex h-full flex-col" style={{ minHeight: 0 }}>
 
-      {/* ── Project name ── */}
-      <div className="px-3 py-2.5">
-        <label
-          className="flex h-8 items-center gap-2.5 rounded-lg border bg-[#13161c] px-3 transition-colors focus-within:border-daw-accent/50"
-          style={{ borderColor: "rgba(255,255,255,0.07)" }}
-        >
-          <FolderOpen size={13} className="shrink-0 text-daw-faint" />
-          <input
-            ref={nameRef}
-            // eslint-disable-next-line jsx-a11y/no-autofocus
-            autoFocus
-            value={state.name}
-            onChange={(e) => set({ name: e.target.value })}
-            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void handleCreate(); } }}
-            placeholder="Project name"
-            className="min-w-0 flex-1 bg-transparent text-[12px] font-medium text-daw-text outline-none placeholder:text-daw-faint"
-          />
-        </label>
+      {/* ── Subtitle ── */}
+      <div
+        className="shrink-0 px-4 py-2"
+        style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}
+      >
+        <p className="text-[11px] text-daw-faint leading-tight">
+          Set up your project settings before creating your session.
+        </p>
       </div>
 
-      {/* ── Project location (Electron only) ── */}
-      {isElectron && (
-        <div className="border-t border-white/[0.05] px-3 py-2.5">
-          <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wide text-daw-faint">
-            Location
+      {/* ── Two-column body ── */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+
+        {/* ── Left: identity + templates ── */}
+        <div
+          className="flex shrink-0 flex-col overflow-y-auto"
+          style={{ width: 268, borderRight: "1px solid rgba(255,255,255,0.05)" }}
+        >
+          {/* Project Name */}
+          <div className="px-4 pt-4 pb-3.5">
+            <FieldLabel>Project Name</FieldLabel>
+            <input
+              ref={nameRef}
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+              value={state.name}
+              onChange={(e) => { setNameTouched(true); set({ name: e.target.value }); }}
+              onBlur={() => setNameTouched(true)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void handleCreate(); } }}
+              placeholder="Untitled Project"
+              className="w-full rounded-md border bg-[#0c1016] px-3 text-[13px] font-medium text-daw-text outline-none transition-colors placeholder:text-daw-faint focus:border-daw-accent/50"
+              style={{
+                height: 34,
+                borderColor: nameEmpty
+                  ? "rgba(239,107,107,0.45)"
+                  : "rgba(255,255,255,0.08)",
+              }}
+            />
+            {nameEmpty && (
+              <p className="mt-1 text-[10px]" style={{ color: "#ef9090" }}>
+                Project name is required.
+              </p>
+            )}
           </div>
-          <div className="flex items-center gap-1.5">
+
+          {/* Save Location — Electron only */}
+          {isElectron && (
             <div
-              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border bg-[#13161c] px-2.5 py-1.5"
-              style={{ borderColor: state.location ? "rgba(255,255,255,0.07)" : "rgba(255,100,100,0.2)" }}
+              className="px-4 pb-3.5"
+              style={{ borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: 12 }}
             >
-              <FolderOpen size={12} className="shrink-0 text-daw-faint" />
-              <span className="min-w-0 flex-1 truncate text-[11px] text-daw-dim" title={state.location || undefined}>
+              <FieldLabel>Save Location</FieldLabel>
+              <div className="flex items-center gap-1.5">
+                <div
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md border bg-[#0c1016] px-2.5"
+                  style={{
+                    height: 30,
+                    borderColor: state.location
+                      ? "rgba(255,255,255,0.07)"
+                      : "rgba(255,255,255,0.05)",
+                  }}
+                >
+                  <FolderOpen size={11} className="shrink-0 text-daw-faint" />
+                  <span
+                    className="min-w-0 flex-1 truncate text-[11px]"
+                    style={{ color: state.location ? "#8a95a3" : "#3e4a57" }}
+                    title={state.location || undefined}
+                  >
+                    {state.location
+                      ? state.location.split(/[/\\]/).slice(-2).join("/")
+                      : "No location selected"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { void handleBrowseLocation(); }}
+                  className="h-[30px] shrink-0 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 text-[11px] font-medium text-daw-dim transition-colors hover:bg-white/[0.07] hover:text-daw-text"
+                >
+                  Browse…
+                </button>
+              </div>
+              <p className="mt-1.5 text-[10px] text-daw-faint leading-snug">
                 {state.location
-                  ? `${state.location}/${state.name.trim() || "Untitled Project"}/`
-                  : <span className="text-daw-faint">No location selected</span>}
-              </span>
+                  ? `Project folder will be created at the selected path.`
+                  : `Choose where the project folder will be saved.`}
+              </p>
             </div>
-            <button
-              type="button"
-              onClick={() => { void handleBrowseLocation(); }}
-              className="h-7 shrink-0 rounded-md border border-white/[0.07] bg-[#13161c] px-2.5 text-[11px] font-medium text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
-            >
-              Browse…
-            </button>
+          )}
+
+          {/* Template picker */}
+          <div
+            className="flex-1 px-4 pb-4"
+            style={{ borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: 12 }}
+          >
+            <FieldLabel>Template</FieldLabel>
+            <div className="flex flex-col gap-1">
+              {TEMPLATES.map(({ id, label, icon: Icon, detail, accentBg, iconColor, borderActive}) => {
+                const active = state.template === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => applyTemplate(id)}
+                    className="flex items-center gap-3 rounded-md px-3 text-left transition-all"
+                    style={{
+                      height: 42,
+                      background: active ? accentBg : "transparent",
+                      border: `1px solid ${active ? borderActive : "transparent"}`
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!active) {
+                        (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.03)";
+                        (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.07)";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!active) {
+                        (e.currentTarget as HTMLElement).style.background = "transparent";
+                        (e.currentTarget as HTMLElement).style.borderColor = "transparent";
+                      }
+                    }}
+                  >
+                    <div
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+                      style={{
+                        background: active ? `${iconColor}1a` : "rgba(255,255,255,0.04)",
+                        color: active ? iconColor : "#4a5568",
+                      }}
+                    >
+                      <Icon size={13} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className="text-[11px] font-semibold leading-tight"
+                        style={{ color: active ? "#e7edf5" : "#8a95a3" }}
+                      >
+                        {label}
+                      </div>
+                      <div
+                        className="mt-0.5 text-[10px] leading-tight"
+                        style={{ color: active ? "#566372" : "#334155" }}
+                      >
+                        {detail}
+                      </div>
+                    </div>
+                    {active && (
+                      <Check size={11} className="shrink-0" style={{ color: iconColor }} />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
-      )}
 
-      {/* ── Template cards ── */}
-      <div className="border-t border-white/[0.05] px-3 py-2.5">
-        <div className="mb-2 text-[9px] font-semibold uppercase tracking-wide text-daw-faint">Template</div>
-        <div className="grid grid-cols-5 gap-1.5">
-          {TEMPLATES.map(({ id, label, icon: Icon, detail }) => {
-            const active = state.template === id;
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => applyTemplate(id)}
-                className={[
-                  "flex flex-col items-center gap-1.5 rounded-lg border py-2.5 px-1 text-center transition-all",
-                  active
-                    ? "border-daw-accent/50 bg-daw-accent/[0.07]"
-                    : "border-white/[0.06] bg-[#1f242c] hover:border-white/[0.1] hover:bg-[#232830]",
-                ].join(" ")}
+        {/* ── Right: session settings ── */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto px-5 py-4">
+          <div
+            className="mb-4 text-[10px] font-semibold uppercase tracking-wider text-daw-faint"
+          >
+            Session Settings
+          </div>
+
+          {/* Tempo + Time Signature */}
+          <div className="mb-5 grid grid-cols-2 gap-4">
+            {/* Tempo */}
+            <div>
+              <FieldLabel>Tempo</FieldLabel>
+              <div className="flex items-center gap-2">
+                <Stepper
+                  value={state.bpm}
+                  min={20}
+                  max={300}
+                  onChange={(v) => set({ bpm: v })}
+                />
+                <span className="text-[10px] text-daw-faint tabular-nums">BPM</span>
+              </div>
+            </div>
+
+            {/* Time Signature */}
+            <div>
+              <FieldLabel>Time Signature</FieldLabel>
+              <div className="flex items-center gap-1.5">
+                <NumberInput
+                  min={1}
+                  max={16}
+                  value={state.timeSignatureNumerator}
+                  className="!h-7 w-11 shrink-0"
+                  align="center"
+                  ariaLabel="Numerator"
+                  onChange={(value) =>
+                    set({ timeSignatureNumerator: Math.max(1, Math.min(16, value)) })
+                  }
+                />
+                <span className="shrink-0 text-[13px] font-light text-daw-faint select-none">
+                  /
+                </span>
+                <div className="flex gap-0.5">
+                  {([2, 4, 8, 16] as const).map((d) => {
+                    const sel = state.timeSignatureDenominator === d;
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => set({ timeSignatureDenominator: d })}
+                        className="h-7 w-8 rounded border text-[11px] font-semibold transition-colors"
+                        style={{
+                          borderColor: sel
+                            ? "rgba(86,199,201,0.5)"
+                            : "rgba(255,255,255,0.07)",
+                          background: sel
+                            ? "rgba(86,199,201,0.13)"
+                            : "rgba(255,255,255,0.03)",
+                          color: sel ? "#e7edf5" : "#566372",
+                        }}
+                      >
+                        {d}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Sample Rate */}
+          <div className="mb-5">
+            <FieldLabel>Sample Rate</FieldLabel>
+            <div className="flex gap-1">
+              {SAMPLE_RATES.map((sr) => {
+                const sel = state.sampleRate === sr;
+                return (
+                  <button
+                    key={sr}
+                    type="button"
+                    onClick={() => set({ sampleRate: sr })}
+                    className="h-8 flex-1 rounded border text-[11px] font-semibold tabular-nums transition-colors"
+                    style={{
+                      borderColor: sel
+                        ? "rgba(86,199,201,0.5)"
+                        : "rgba(255,255,255,0.07)",
+                      background: sel
+                        ? "rgba(86,199,201,0.13)"
+                        : "rgba(255,255,255,0.03)",
+                      color: sel ? "#e7edf5" : "#566372",
+                    }}
+                  >
+                    {SR_LABEL[sr]} Hz
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Starter Tracks */}
+          <div>
+            <FieldLabel>Starter Tracks</FieldLabel>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <div className="mb-1.5 text-[10px] text-daw-faint">Audio</div>
+                <Stepper
+                  value={state.audioTrackCount}
+                  min={0}
+                  max={32}
+                  onChange={(v) => set({ audioTrackCount: v })}
+                />
+              </div>
+              <div>
+                <div className="mb-1.5 text-[10px] text-daw-faint">MIDI</div>
+                <Stepper
+                  value={state.midiTrackCount}
+                  min={0}
+                  max={32}
+                  onChange={(v) => set({ midiTrackCount: v })}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Web storage note */}
+          {!isElectron && (
+            <div
+              className="mt-auto pt-4"
+            >
+              <div
+                className="flex items-center gap-2 rounded-md px-3 py-2"
+                style={{
+                  background: "rgba(255,255,255,0.025)",
+                  border: "1px solid rgba(255,255,255,0.05)",
+                }}
               >
                 <div
-                  className="flex h-7 w-7 items-center justify-center rounded-lg border"
-                  style={
-                    active
-                      ? { background: "rgba(86,199,201,0.12)", borderColor: "rgba(86,199,201,0.3)", color: "#56C7C9" }
-                      : { background: "#13161c", borderColor: "rgba(255,255,255,0.07)", color: "#566372" }
-                  }
-                >
-                  <Icon size={13} />
-                </div>
-                <div>
-                  <div className={`text-[10px] font-semibold leading-tight ${active ? "text-daw-text" : "text-daw-dim"}`}>
-                    {label}
-                  </div>
-                  <div className="mt-0.5 text-[9px] leading-tight text-daw-faint opacity-70">
-                    {detail}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
+                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                  style={{ background: "rgba(86,199,201,0.5)" }}
+                />
+                <span className="text-[10px] text-daw-faint">
+                  Project will be saved in browser storage.
+                </span>
+              </div>
+            </div>
+          )}
         </div>
-      </div>
-
-      {/* ── BPM + Time Signature ── */}
-      <div className="grid grid-cols-2 gap-2.5 border-t border-white/[0.05] px-3 py-2.5">
-        <OptionGroup label="BPM">
-          <Stepper value={state.bpm} min={40} max={320} onChange={(v) => set({ bpm: v })} />
-        </OptionGroup>
-
-        <OptionGroup label="Time Signature">
-          <NumberInput
-            min={1}
-            max={16}
-            value={state.timeSignatureNumerator}
-            className="!h-7 w-12 shrink-0"
-            align="center"
-            ariaLabel="Time signature numerator"
-            onChange={(value) => set({ timeSignatureNumerator: Math.max(1, Math.min(16, value)) })}
-          />
-          <span className="shrink-0 text-[14px] font-light text-daw-faint select-none">/</span>
-          {([2, 4, 8, 16] as const).map((d) => (
-            <button
-              key={d}
-              type="button"
-              onClick={() => set({ timeSignatureDenominator: d })}
-              className={[
-                "h-7 flex-1 rounded-md border px-1 text-[11px] font-semibold transition-colors",
-                state.timeSignatureDenominator === d
-                  ? "border-daw-accent/50 bg-daw-accent/[0.14] text-daw-text"
-                  : "border-white/[0.07] bg-[#13161c] text-daw-faint hover:bg-white/[0.05] hover:text-daw-text",
-              ].join(" ")}
-            >
-              {d}
-            </button>
-          ))}
-        </OptionGroup>
-      </div>
-
-      {/* ── Sample Rate ── */}
-      <div className="border-t border-white/[0.05] px-3 py-2.5">
-        <OptionGroup label="Sample Rate">
-          {SAMPLE_RATES.map((sr) => (
-            <button
-              key={sr}
-              type="button"
-              onClick={() => set({ sampleRate: sr })}
-              className={[
-                "h-7 flex-1 rounded-md border px-2 text-[11px] font-semibold tabular-nums transition-colors",
-                state.sampleRate === sr
-                  ? "border-daw-accent/50 bg-daw-accent/[0.14] text-daw-text"
-                  : "border-white/[0.07] bg-[#13161c] text-daw-faint hover:bg-white/[0.05] hover:text-daw-text",
-              ].join(" ")}
-            >
-              {SR_LABEL[sr]}
-            </button>
-          ))}
-        </OptionGroup>
-      </div>
-
-      {/* ── Starter tracks ── */}
-      <div className="grid grid-cols-2 gap-2.5 border-t border-white/[0.05] px-3 py-2.5">
-        <OptionGroup label="Audio Tracks">
-          <Stepper value={state.audioTrackCount} min={0} max={32} onChange={(v) => set({ audioTrackCount: v })} />
-        </OptionGroup>
-
-        <OptionGroup label="MIDI Tracks">
-          <Stepper value={state.midiTrackCount} min={0} max={32} onChange={(v) => set({ midiTrackCount: v })} />
-        </OptionGroup>
       </div>
 
       {/* ── Summary strip ── */}
-      <div className="border-t border-white/[0.05] px-3 py-2">
+      <div
+        className="flex shrink-0 items-center gap-2.5 px-4"
+        style={{
+          height: 34,
+          borderTop: "1px solid rgba(255,255,255,0.06)",
+          background: "rgba(255,255,255,0.018)",
+        }}
+      >
+        <div
+          className="h-1.5 w-1.5 shrink-0 rounded-full"
+          style={{ background: "rgba(86,199,201,0.55)" }}
+        />
         <span className="text-[10px] tabular-nums text-daw-faint">
           {state.bpm} BPM
-          {" · "}
+          <span className="mx-1.5 opacity-30">·</span>
           {state.timeSignatureNumerator}/{state.timeSignatureDenominator}
-          {" · "}
+          <span className="mx-1.5 opacity-30">·</span>
           {SR_LABEL[state.sampleRate]} Hz
-          {" · "}
+          <span className="mx-1.5 opacity-30">·</span>
           {templateLabel}
-          {totalTracks > 0 && ` · ${totalTracks} track${totalTracks !== 1 ? "s" : ""}`}
+          {totalTracks > 0 && (
+            <>
+              <span className="mx-1.5 opacity-30">·</span>
+              {totalTracks} track{totalTracks !== 1 ? "s" : ""}
+            </>
+          )}
         </span>
       </div>
 
       {/* ── Footer ── */}
-      <div className="flex items-center justify-end gap-2 border-t border-white/[0.05] px-3 py-2.5">
+      <div
+        className="flex shrink-0 items-center justify-end gap-2 px-4"
+        style={{
+          height: 50,
+          borderTop: "1px solid rgba(255,255,255,0.08)",
+          background: "rgba(0,0,0,0.18)",
+        }}
+      >
         <button
           type="button"
           disabled={isCreating}
           onClick={() => useWindowStore.getState().closeWindow(windowId)}
-          className="h-7 rounded-md border border-white/[0.07] bg-transparent px-3 text-[11px] font-medium text-daw-faint transition-colors hover:bg-white/[0.05] hover:text-daw-text disabled:opacity-40"
+          className="h-8 rounded-md border border-white/[0.08] bg-transparent px-4 text-[12px] font-medium text-daw-faint transition-colors hover:bg-white/[0.05] hover:text-daw-text disabled:opacity-40"
         >
           Cancel
         </button>
         <button
           type="button"
-          disabled={isCreating || (isElectron && !state.location)}
+          disabled={!canCreate}
           onClick={() => { void handleCreate(); }}
-          className="flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-semibold text-[#0d1117] transition-colors disabled:opacity-40"
-          style={{ background: "rgba(86,199,201,0.85)" }}
-          onMouseEnter={(e) => { if (!isCreating) (e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,1)"; }}
-          onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,0.85)")}
+          className="flex h-8 items-center gap-1.5 rounded-md px-4 text-[12px] font-semibold transition-all disabled:opacity-40"
+          style={{
+            background: canCreate ? "rgba(86,199,201,0.88)" : "rgba(86,199,201,0.5)",
+            color: canCreate ? "#0a0e14" : "#1a2530",
+          }}
+          onMouseEnter={(e) => {
+            if (canCreate) (e.currentTarget as HTMLElement).style.background = "rgba(86,199,201,1)";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLElement).style.background = canCreate
+              ? "rgba(86,199,201,0.88)"
+              : "rgba(86,199,201,0.5)";
+          }}
         >
-          {isCreating ? <Loader size={12} className="animate-spin" /> : <Plus size={12} />}
+          {isCreating ? <Loader size={12} className="animate-spin" /> : <Plus size={13} />}
           {isCreating ? "Creating…" : "Create Project"}
         </button>
       </div>

@@ -94,24 +94,51 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
       style={{ width: width ?? INSPECTOR_WIDTH, minWidth: width ?? INSPECTOR_WIDTH }}
     >
       {/* Panel header */}
-      <div className="flex h-6 shrink-0 items-center justify-between border-b border-daw-border bg-daw-surface px-3">
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-daw-faint">
-          Inspector
-        </span>
+      <div
+        className="flex h-8 shrink-0 items-center justify-between border-b px-3"
+        style={{
+          borderColor: "rgba(58,69,84,0.65)",
+          background: "rgba(17,21,28,0.75)",
+          boxShadow: "0 1px 0 rgba(0,0,0,0.18)",
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <div className="h-3 w-[2px] rounded-full" style={{ background: "rgba(95,206,208,0.45)" }} />
+          <span
+            className="text-[9px] font-bold uppercase"
+            style={{ color: "rgba(154,167,184,0.7)", letterSpacing: "0.13em" }}
+          >
+            Inspector
+          </span>
+          {mode !== "empty" && (
+            <span
+              className="rounded px-1 py-px text-[8px] font-medium uppercase"
+              style={{
+                color: "rgba(107,120,136,0.55)",
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(58,69,84,0.5)",
+                letterSpacing: "0.06em",
+              }}
+            >
+              {mode === "master" ? "Master" : mode === "clip" ? "Clip" : mode === "multi-clip" ? "Multi" : "Track"}
+            </span>
+          )}
+        </div>
         <button
           onClick={toggleInspector}
-          className="flex h-5 w-5 items-center justify-center rounded text-daw-faint transition-colors hover:bg-daw-surface-high hover:text-daw-text"
+          className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/[0.06]"
+          style={{ color: "rgba(95,108,124,0.6)" }}
         >
-          <X size={12} />
+          <X size={11} />
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {mode === "empty" && (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
-            <Sliders size={18} className="text-daw-faint opacity-30" />
-            <p className="text-[11px] leading-relaxed text-daw-faint">
-              Select a track or clip to view settings
+            <Sliders size={14} style={{ color: "rgba(95,108,124,0.3)" }} />
+            <p className="text-[9.5px] leading-relaxed" style={{ color: "rgba(95,108,124,0.45)" }}>
+              Select a track or clip
             </p>
           </div>
         )}
@@ -119,14 +146,14 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
         {mode === "master" && (
           <>
             <div className="flex items-stretch border-b border-daw-border">
-              <div className="w-[3px] shrink-0" style={{ background: "#48d1cc" }} />
-              <div className="flex-1 px-3 py-3">
-                <span className="truncate text-[13px] font-semibold text-daw-text">
+              <div className="w-[2px] shrink-0" style={{ background: "#48d1cc" }} />
+              <div className="flex-1 px-3 py-2.5">
+                <span className="truncate text-[12px] font-semibold text-daw-text">
                   Master
                 </span>
-                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-daw-faint">
-                  <Activity size={9} />
-                  <span>Main Output</span>
+                <div className="mt-1 flex items-center gap-1.5" style={{ color: "rgba(107,120,136,0.65)" }}>
+                  <Activity size={8} />
+                  <span className="text-[9px] font-medium">Main Output</span>
                 </div>
               </div>
             </div>
@@ -150,8 +177,8 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
 
         {mode === "multi-clip" && (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
-            <Layers size={18} className="text-daw-faint opacity-30" />
-            <p className="text-[11px] leading-relaxed text-daw-faint">
+            <Layers size={14} style={{ color: "rgba(95,108,124,0.3)" }} />
+            <p className="text-[9.5px] leading-relaxed" style={{ color: "rgba(95,108,124,0.45)" }}>
               {selectedClipIds.length} clips selected
             </p>
           </div>
@@ -162,20 +189,20 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
           return (
             <>
               <div className="flex items-stretch border-b border-daw-border">
-                <div className="w-[3px] shrink-0" style={{ background: "#f3c969" }} />
-                <div className="flex-1 px-3 py-3">
+                <div className="w-[2px] shrink-0" style={{ background: "#f3c969" }} />
+                <div className="flex-1 px-3 py-2.5">
                   <input
                     defaultValue={clip.name}
                     onBlur={(e) => {
                       const newName = e.target.value;
                       if (newName !== clip.name) history().execute(new UpdateClipCommand(clip.id, { name: newName }, "Rename Clip"));
                     }}
-                    className="w-full bg-transparent text-[13px] font-semibold text-daw-text outline-none placeholder:text-white/20"
+                    className="w-full bg-transparent text-[12px] font-semibold text-daw-text outline-none placeholder:text-white/20"
                     placeholder="Clip Name"
                   />
-                  <div className="mt-1 flex items-center gap-1.5 text-[10px] text-daw-faint">
-                    {isAudio ? <Scissors size={9} /> : <Music size={9} />}
-                    <span>{isAudio ? "Audio Clip" : "MIDI Clip"}</span>
+                  <div className="mt-1 flex items-center gap-1.5" style={{ color: "rgba(107,120,136,0.65)" }}>
+                    {isAudio ? <Scissors size={8} /> : <Music size={8} />}
+                    <span className="text-[9px] font-medium">{isAudio ? "Audio Clip" : "MIDI Clip"}</span>
                   </div>
                 </div>
               </div>
@@ -195,17 +222,31 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                     }}
                   />
                 )}
-                <div className="flex items-center justify-between border-b border-daw-border px-3 py-2">
-                  <span className="text-[9px] font-semibold uppercase tracking-widest text-daw-faint">Mute</span>
-                  <input
-                    type="checkbox"
-                    checked={clip.muted ?? false}
-                    onChange={(e) => {
-                      const muted = e.target.checked;
+                <div className="flex items-center justify-between border-b border-daw-border px-3" style={{ height: 28 }}>
+                  <span
+                    className="text-[8.5px] font-bold uppercase"
+                    style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
+                  >
+                    Mute
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={clip.muted ?? false}
+                    onClick={() => {
+                      const muted = !(clip.muted ?? false);
                       history().execute(new UpdateClipCommand(clip.id, { muted }, muted ? "Mute Clip" : "Unmute Clip"));
                       void activeAudioEngine.updateClipMute(clip.id, muted);
                     }}
-                  />
+                    className="flex h-[22px] w-8 items-center justify-center rounded text-[9px] font-bold transition-colors"
+                    style={{
+                      background: (clip.muted ?? false) ? "#f3c969" : "rgba(255,255,255,0.028)",
+                      border: `1px solid ${(clip.muted ?? false) ? "#f3c969" : "rgba(255,255,255,0.07)"}`,
+                      color: (clip.muted ?? false) ? "#101216" : "rgba(180,192,204,0.55)",
+                    }}
+                  >
+                    M
+                  </button>
                 </div>
               </div>
 
@@ -248,19 +289,31 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
               )}
 
               <SectionLabel label="Timing" />
-              <div className="flex flex-col gap-2 px-3 pb-3">
-                <div className="flex justify-between text-[10px] text-daw-dim">
-                  <span>Start Time</span>
-                  <span className="tabular-nums">{clip.startTime.toFixed(3)}s</span>
-                </div>
-                <div className="flex justify-between text-[10px] text-daw-dim">
-                  <span>Duration</span>
-                  <span className="tabular-nums">{clip.duration.toFixed(3)}s</span>
-                </div>
-                <div className="flex justify-between text-[10px] text-daw-dim">
-                  <span>Offset</span>
-                  <span className="tabular-nums">{clip.offset.toFixed(3)}s</span>
-                </div>
+              <div className="flex flex-col border-b border-daw-border">
+                {[
+                  { label: "Start", value: `${clip.startTime.toFixed(3)}s` },
+                  { label: "Dur", value: `${clip.duration.toFixed(3)}s` },
+                  { label: "Offset", value: `${clip.offset.toFixed(3)}s` },
+                ].map(({ label, value }) => (
+                  <div
+                    key={label}
+                    className="flex items-center justify-between border-b border-daw-border px-3"
+                    style={{ height: 26 }}
+                  >
+                    <span
+                      className="text-[8.5px] font-bold uppercase"
+                      style={{ color: "rgba(107,120,136,0.55)", letterSpacing: "0.09em" }}
+                    >
+                      {label}
+                    </span>
+                    <span
+                      className="text-[9px] tabular-nums"
+                      style={{ color: "rgba(154,167,184,0.7)", fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {value}
+                    </span>
+                  </div>
+                ))}
               </div>
 
               {isAudio && (
@@ -274,19 +327,26 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
           <>
             {/* Track identity */}
             <div className="flex items-stretch border-b border-daw-border">
-              <div className="w-[3px] shrink-0" style={{ background: track.color }} />
-              <div className="flex-1 px-3 py-3">
+              <div className="w-[2px] shrink-0" style={{ background: track.color }} />
+              <div className="flex-1 px-3 py-2.5">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate text-[13px] font-semibold text-daw-text">
+                  <span className="truncate text-[12px] font-semibold text-daw-text">
                     {track.name}
                   </span>
-                  <span className="shrink-0 text-[9px] tabular-nums text-daw-faint">
+                  <span
+                    className="shrink-0 rounded px-1 text-[8px] tabular-nums"
+                    style={{
+                      color: "rgba(107,120,136,0.5)",
+                      background: "rgba(255,255,255,0.04)",
+                      border: "1px solid rgba(58,69,84,0.45)",
+                    }}
+                  >
                     {String(trackIndex + 1).padStart(2, "0")}
                   </span>
                 </div>
-                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-daw-faint">
-                  <TypeIcon size={9} />
-                  <span>{TYPE_LABELS[track.type]} Track</span>
+                <div className="mt-1 flex items-center gap-1.5" style={{ color: "rgba(107,120,136,0.65)" }}>
+                  <TypeIcon size={8} />
+                  <span className="text-[9px] font-medium">{TYPE_LABELS[track.type]}</span>
                 </div>
               </div>
             </div>
@@ -313,7 +373,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
               />
             </div>
             {/* Mute / Solo / Arm / Delete row */}
-            <div className="flex items-center gap-1.5 border-b border-daw-border px-3 py-2">
+            <div className="flex items-center gap-1.5 border-b border-daw-border px-3" style={{ height: 32 }}>
               <InspectorTrackBtn
                 label="M"
                 title="Mute"
@@ -364,7 +424,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
               return (
                 <>
                   <SectionLabel label="Sends" />
-                  <div className="flex flex-col gap-0.5 px-3 pb-3">
+                  <div className="flex flex-col gap-0.5 px-3 py-2 border-b border-daw-border">
                     {sends.map((send) => {
                       const target = project.tracks.find((t) => t.id === send.targetTrackId);
                       const enabled = send.enabled !== false;
@@ -399,7 +459,17 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                       );
                     })}
                     {sends.length === 0 && (
-                      <p className="py-0.5 text-[10px] text-daw-faint">No sends — add from Mixer</p>
+                      <div
+                        className="flex h-7 items-center justify-center rounded"
+                        style={{
+                          border: "1px dashed rgba(58,69,84,0.5)",
+                          background: "rgba(255,255,255,0.01)",
+                        }}
+                      >
+                        <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
+                          No sends — add from Mixer
+                        </span>
+                      </div>
                     )}
                   </div>
                 </>
@@ -416,21 +486,39 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
 
             {/* Clips */}
             <SectionLabel label="Clips" count={track.clips.length} />
-            <div className="px-3 pb-3">
+            <div className="px-3 py-2">
               {track.clips.length === 0 ? (
-                <p className="py-1 text-[10px] text-daw-faint">No clips on this track</p>
+                <div
+                  className="flex h-7 items-center justify-center rounded"
+                  style={{
+                    border: "1px dashed rgba(58,69,84,0.5)",
+                    background: "rgba(255,255,255,0.01)",
+                  }}
+                >
+                  <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
+                    No clips — add in timeline
+                  </span>
+                </div>
               ) : (
                 <div className="flex flex-col gap-0.5">
                   {track.clips.map((c) => (
                     <div
                       key={c.id}
-                      className="flex items-center gap-2 rounded-md border border-daw-border bg-daw-bg px-2.5 py-1.5"
+                      className="flex items-center gap-1.5 rounded px-2"
+                      style={{
+                        height: 24,
+                        border: "1px solid rgba(58,69,84,0.4)",
+                        background: "rgba(255,255,255,0.018)",
+                      }}
                     >
-                      <Volume2 size={9} className="shrink-0 text-daw-faint" />
-                      <span className="min-w-0 flex-1 truncate text-[10px] text-daw-dim">
+                      <Volume2 size={8} className="shrink-0" style={{ color: "rgba(95,108,124,0.5)" }} />
+                      <span className="min-w-0 flex-1 truncate text-[9.5px]" style={{ color: "rgba(154,167,184,0.7)" }}>
                         {c.name}
                       </span>
-                      <span className="shrink-0 text-[9px] tabular-nums text-daw-faint">
+                      <span
+                        className="shrink-0 text-[8.5px] tabular-nums"
+                        style={{ color: "rgba(107,120,136,0.5)", fontVariantNumeric: "tabular-nums" }}
+                      >
                         {formatBeatLength(c.duration, project.bpm, timeSig)}
                       </span>
                     </div>
@@ -452,28 +540,43 @@ function InspectorInsertsList({ trackId }: { trackId: string }) {
 
   if (inserts.length === 0) {
     return (
-      <div className="px-3 pb-3">
-        <p className="py-0.5 text-[10px] text-daw-faint">No inserts — add from Mixer or Effect Editor</p>
+      <div className="px-3 py-2">
+        <div
+          className="flex h-7 items-center justify-center rounded"
+          style={{
+            border: "1px dashed rgba(58,69,84,0.5)",
+            background: "rgba(255,255,255,0.01)",
+          }}
+        >
+          <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
+            No inserts — add from Mixer
+          </span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-0.5 px-3 pb-3">
+    <div className="flex flex-col gap-0.5 px-3 py-2 border-b border-daw-border">
       {inserts.map((ins) => (
         <div
           key={ins.id}
-          className="group flex items-center gap-1.5 rounded border px-2 py-[3px]"
+          className="group flex items-center gap-1.5 rounded px-2"
           style={{
-            borderColor: ins.enabled ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.06)",
-            background: "rgba(255,255,255,0.025)",
+            height: 24,
+            border: `1px solid ${ins.enabled ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.04)"}`,
+            background: ins.enabled ? "rgba(255,255,255,0.022)" : "rgba(255,255,255,0.01)",
           }}
         >
-          <Sliders size={9} className="shrink-0 text-daw-faint" />
+          {/* Bypass dot */}
+          <div
+            className="h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ background: ins.enabled ? "rgba(114,215,215,0.7)" : "rgba(107,120,136,0.25)" }}
+          />
           <button
             onClick={() => toggleInsertDevice(trackId, ins.id)}
-            className="min-w-0 flex-1 truncate text-left text-[10px]"
-            style={{ color: ins.enabled ? "rgba(220,232,240,0.78)" : "rgba(180,192,204,0.4)" }}
+            className="min-w-0 flex-1 truncate text-left text-[9.5px]"
+            style={{ color: ins.enabled ? "rgba(200,212,224,0.75)" : "rgba(154,167,184,0.35)" }}
             title={ins.enabled ? "Bypass device" : "Enable device"}
           >
             {ins.name}
@@ -481,9 +584,10 @@ function InspectorInsertsList({ trackId }: { trackId: string }) {
           <button
             onClick={() => removeInsertDevice(trackId, ins.id)}
             title="Remove device"
-            className="opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100 text-daw-faint"
+            className="opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+            style={{ color: "rgba(107,120,136,0.5)" }}
           >
-            <X size={9} />
+            <X size={8} />
           </button>
         </div>
       ))}
@@ -663,11 +767,11 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
   return (
     <>
       <SectionLabel label="Routing" />
-      <div className="flex flex-col gap-1.5 px-3 pb-3">
+      <div className="flex flex-col gap-1.5 px-3 py-2 border-b border-daw-border">
         {/* IN row */}
         <div className="flex items-center gap-2">
-          <PhoneIncoming size={9} className="shrink-0 text-daw-faint" />
-          <span className="w-8 shrink-0 text-[9px] text-daw-faint">IN</span>
+          <PhoneIncoming size={9} className="shrink-0" style={{ color: "rgba(107,120,136,0.5)" }} />
+          <span className="w-8 shrink-0 text-[9px]" style={{ color: "rgba(107,120,136,0.55)" }}>IN</span>
           {isMaster ? (
             <div
               className="flex h-6 flex-1 cursor-not-allowed items-center rounded px-2 text-[10px] text-daw-faint"
@@ -722,8 +826,8 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
 
         {/* OUT row */}
         <div className="flex items-center gap-2">
-          <PhoneOutgoing size={9} className="shrink-0 text-daw-faint" />
-          <span className="w-8 shrink-0 text-[9px] text-daw-faint">OUT</span>
+          <PhoneOutgoing size={9} className="shrink-0" style={{ color: "rgba(107,120,136,0.5)" }} />
+          <span className="w-8 shrink-0 text-[9px]" style={{ color: "rgba(107,120,136,0.55)" }}>OUT</span>
           <DawSelect
             className="min-w-0 flex-1"
             value={outOptions.some((o) => o.value === outValue) ? outValue : "master"}
@@ -751,11 +855,12 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
   };
 
   // Shared row wrapper keeps all rows the same height/padding.
-  const row = "flex h-8 items-center gap-2 border-b border-daw-border px-3";
-  const lbl = "w-14 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint";
-  // Small "wired" / "planned" pill shown at the right of each row.
-  const tagWired   = "text-[8px] text-green-400/70 tabular-nums shrink-0";
-  const tagPlanned = "text-[8px] text-daw-faint/50 shrink-0";
+  const row = "flex h-[26px] items-center gap-2 border-b border-daw-border px-3";
+  // Label and tag styles applied via style prop for color since tokens vary
+  const lblCls = "w-14 shrink-0 text-[8.5px] font-bold uppercase tracking-wide";
+  const lblStyle: React.CSSProperties = { color: "rgba(107,120,136,0.6)" };
+  const tagWiredStyle: React.CSSProperties = { color: "rgba(128,209,138,0.65)", fontSize: "7.5px", flexShrink: 0, fontVariantNumeric: "tabular-nums" };
+  const tagPlannedStyle: React.CSSProperties = { color: "rgba(107,120,136,0.4)", fontSize: "7.5px", flexShrink: 0 };
 
   const handlePhaseToggle = () => {
     const next = !adv.phaseInvert;
@@ -769,7 +874,7 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
 
       {/* Latency — stored, not applied to engine yet */}
       <div className={row}>
-        <span className={lbl}>Latency</span>
+        <span className={lblCls} style={lblStyle}>Latency</span>
         <NumberInput
           className="min-w-0 flex-1"
           min={-500}
@@ -779,13 +884,13 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
           ariaLabel="Track latency milliseconds"
           onChange={(value) => updateTrackAdvanced(trackId, { latencyMs: value || 0 })}
         />
-        <span className="shrink-0 text-[9px] text-daw-faint">ms</span>
-        <span className={tagPlanned} title="Stored but not applied to the audio engine yet">not applied</span>
+        <span className="shrink-0 text-[9px]" style={{ color: "rgba(107,120,136,0.5)" }}>ms</span>
+        <span style={tagPlannedStyle} title="Stored but not applied to the audio engine yet">not applied</span>
       </div>
 
       {/* Delay — wired into ClipScheduler */}
       <div className={row}>
-        <span className={lbl}>Delay</span>
+        <span className={lblCls} style={lblStyle}>Delay</span>
         <NumberInput
           className="min-w-0 flex-1"
           min={0}
@@ -798,13 +903,13 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
             void activeAudioEngine.rescheduleIfPlaying();
           }}
         />
-        <span className="shrink-0 text-[9px] text-daw-faint">ms</span>
-        <span className={tagWired} title="Applied — shifts clip start later on next play">applied</span>
+        <span className="shrink-0 text-[9px]" style={{ color: "rgba(107,120,136,0.5)" }}>ms</span>
+        <span style={tagWiredStyle} title="Applied — shifts clip start later on next play">applied</span>
       </div>
 
       {/* Semitone — stored, planned */}
       <div className={row}>
-        <span className={lbl}>Semitone</span>
+        <span className={lblCls} style={lblStyle}>Semitone</span>
         <NumberInput
           className="min-w-0 flex-1"
           min={-48}
@@ -814,25 +919,25 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
           ariaLabel="Track semitone offset"
           onChange={(value) => updateTrackAdvanced(trackId, { semitone: value || 0 })}
         />
-        <span className="shrink-0 text-[9px] text-daw-faint">st</span>
-        <span className={tagPlanned} title="Stored — per-clip pitch transpose is available in the Clip inspector">planned</span>
+        <span className="shrink-0 text-[9px]" style={{ color: "rgba(107,120,136,0.5)" }}>st</span>
+        <span style={tagPlannedStyle} title="Stored — per-clip pitch transpose is available in the Clip inspector">planned</span>
       </div>
 
       {/* Phase — routed through the active audio backend */}
       <div className={row}>
-        <span className={lbl}>Phase</span>
+        <span className={lblCls} style={lblStyle}>Phase</span>
         <div className="flex-1" />
-        <span className={adv.phaseInvert ? tagWired : tagPlanned}>
+        <span style={adv.phaseInvert ? tagWiredStyle : tagPlannedStyle}>
           {adv.phaseInvert ? "inverted" : "normal"}
         </span>
         <button
           type="button"
           title={adv.phaseInvert ? "Phase inverted — click to restore" : "Invert phase (×−1 on output GainNode)"}
           onClick={handlePhaseToggle}
-          className="flex h-6 w-8 items-center justify-center rounded border text-[9px] font-bold transition-colors"
+          className="flex h-5 w-8 items-center justify-center rounded border text-[9px] font-bold transition-colors"
           style={adv.phaseInvert
             ? { borderColor: "#a99cff", background: "rgba(169,156,255,0.18)", color: "#a99cff" }
-            : { borderColor: "rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.02)", color: "rgba(200,212,224,0.5)" }}
+            : { borderColor: "rgba(255,255,255,0.07)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.45)" }}
         >
           Ø
         </button>
@@ -840,7 +945,7 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
 
       {/* M/S — stored, planned (graph rewrite needed) */}
       <div className={row}>
-        <span className={lbl}>M·S</span>
+        <span className={lblCls} style={lblStyle}>M·S</span>
         <DawSelect
           value={adv.midSideMode}
           onChange={(v) => updateTrackAdvanced(trackId, { midSideMode: v as typeof adv.midSideMode })}
@@ -852,12 +957,12 @@ function TrackAdvancedSection({ trackId }: { trackId: string }) {
             { value: "difference", label: "Diff (planned)" },
           ]}
         />
-        <span className={tagPlanned} title="Stored — mid/side matrix requires a graph rewrite">planned</span>
+        <span style={tagPlannedStyle} title="Stored — mid/side matrix requires a graph rewrite">planned</span>
       </div>
 
       {/* Monitor mode */}
       <div className={row} style={{ borderBottom: "none" }}>
-        <span className={lbl}>Monitor</span>
+        <span className={lblCls} style={lblStyle}>Monitor</span>
         <DawSelect
           value={track.monitorMode ?? "off"}
           onChange={(v) => {
@@ -979,15 +1084,23 @@ function MidiMonitorSection({ track }: { track: DawTrack }) {
 function DimRow({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <div
-      className="flex cursor-not-allowed items-center gap-2.5 border-b border-daw-border px-3 py-2"
+      className="flex cursor-not-allowed items-center gap-2 border-b border-daw-border px-3"
+      style={{ height: 26 }}
       title={title}
     >
-      <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+      <span
+        className="w-9 shrink-0 text-[8.5px] font-bold uppercase"
+        style={{ color: "rgba(107,120,136,0.5)", letterSpacing: "0.09em" }}
+      >
         {label}
       </span>
       <div
-        className="flex h-5 flex-1 items-center rounded px-2 text-[9px] text-daw-faint"
-        style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}
+        className="flex h-5 flex-1 items-center rounded px-2 text-[9px]"
+        style={{
+          background: "rgba(255,255,255,0.018)",
+          border: "1px solid rgba(255,255,255,0.045)",
+          color: "rgba(154,167,184,0.45)",
+        }}
       >
         {value}
       </div>
@@ -997,12 +1110,32 @@ function DimRow({ label, value, title }: { label: string; value: string; title?:
 
 function SectionLabel({ label, count }: { label: string; count?: number }) {
   return (
-    <div className="flex items-center gap-1.5 px-3 pb-1.5 pt-3">
-      <span className="text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+    <div
+      className="flex items-center gap-2 px-3"
+      style={{
+        height: 24,
+        background: "rgba(255,255,255,0.014)",
+        borderTop: "1px solid rgba(58,69,84,0.38)",
+        borderBottom: "1px solid rgba(58,69,84,0.38)",
+      }}
+    >
+      <span
+        className="text-[8.5px] font-bold uppercase"
+        style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.1em" }}
+      >
         {label}
       </span>
       {count !== undefined && (
-        <span className="text-[9px] text-daw-faint opacity-50">{count}</span>
+        <span
+          className="rounded px-1 text-[8px] tabular-nums"
+          style={{
+            color: "rgba(107,120,136,0.45)",
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(58,69,84,0.4)",
+          }}
+        >
+          {count}
+        </span>
       )}
     </div>
   );
@@ -1027,11 +1160,12 @@ function InspectorTrackBtn({
       title={title}
       aria-pressed={active}
       onClick={onClick}
-      className="flex h-6 w-6 shrink-0 items-center justify-center rounded border text-[10px] font-bold transition-colors"
+      className="flex h-[22px] w-8 shrink-0 items-center justify-center rounded text-[9px] font-bold transition-colors"
       style={{
-        background: active ? activeColor : "rgba(255,255,255,0.035)",
-        borderColor: active ? activeColor : "rgba(255,255,255,0.08)",
-        color: active ? "#101216" : "rgba(200,212,224,0.62)",
+        background: active ? activeColor : "rgba(255,255,255,0.028)",
+        border: `1px solid ${active ? activeColor : "rgba(255,255,255,0.07)"}`,
+        color: active ? "#101216" : "rgba(180,192,204,0.55)",
+        letterSpacing: "0.04em",
       }}
     >
       {label}
@@ -1135,8 +1269,11 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
       <SectionLabel label="Speed & Pitch" />
       <div className="flex flex-col gap-0 border-b border-daw-border">
         {/* Speed */}
-        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
-          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3" style={{ height: 28 }}>
+          <span
+            className="w-9 shrink-0 text-[8.5px] font-bold uppercase"
+            style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
+          >
             SPEED
           </span>
           <input
@@ -1162,8 +1299,11 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
         </div>
 
         {/* Pitch semitones */}
-        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
-          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3" style={{ height: 28 }}>
+          <span
+            className="w-9 shrink-0 text-[8.5px] font-bold uppercase"
+            style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
+          >
             PITCH
           </span>
           <input
@@ -1189,8 +1329,11 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
         </div>
 
         {/* Preserve pitch toggle */}
-        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
-          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3" style={{ height: 28 }}>
+          <span
+            className="w-9 shrink-0 text-[8.5px] font-bold uppercase"
+            style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
+          >
             PRES
           </span>
           <span className="flex-1 text-[10px] text-daw-dim">Preserve Pitch</span>
@@ -1208,8 +1351,11 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
         </div>
 
         {/* Mode */}
-        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
-          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3" style={{ height: 28 }}>
+          <span
+            className="w-9 shrink-0 text-[8.5px] font-bold uppercase"
+            style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
+          >
             MODE
           </span>
           <DawSelect
@@ -1227,8 +1373,11 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
         </div>
 
         {/* Quality */}
-        <div className="flex items-center gap-2.5 px-3 py-2">
-          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+        <div className="flex items-center gap-2.5 px-3" style={{ height: 28 }}>
+          <span
+            className="w-9 shrink-0 text-[8.5px] font-bold uppercase"
+            style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
+          >
             QUAL
           </span>
           <DawSelect
@@ -1316,8 +1465,14 @@ function FaderRow({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
-      <span className="w-6 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+    <div
+      className="flex items-center gap-2 border-b border-daw-border px-3"
+      style={{ height: 28 }}
+    >
+      <span
+        className="w-7 shrink-0 text-[8.5px] font-bold uppercase"
+        style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
+      >
         {label}
       </span>
       <input
@@ -1328,9 +1483,12 @@ function FaderRow({
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className="flex-1 cursor-ew-resize appearance-none"
-        style={{ accentColor: color, height: "3px" }}
+        style={{ accentColor: color, height: "2px" }}
       />
-      <span className="w-9 shrink-0 text-right text-[9px] tabular-nums text-daw-dim">
+      <span
+        className="w-10 shrink-0 text-right text-[9px] tabular-nums"
+        style={{ color: "rgba(180,192,204,0.65)", fontVariantNumeric: "tabular-nums" }}
+      >
         {display}
       </span>
     </div>

@@ -50,50 +50,80 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
       if (!ctx) return;
       ctx.scale(dpr, dpr);
 
+      // Background
       ctx.fillStyle = C.surface;
       ctx.fillRect(0, 0, W, RULER_HEIGHT);
 
+      // Subtle bottom separator line
+      ctx.strokeStyle = "rgba(255,255,255,0.06)";
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, RULER_HEIGHT - 0.5);
+      ctx.lineTo(W, RULER_HEIGHT - 0.5);
+      ctx.stroke();
+
       const spb = secondsPerBeat(bpm);
 
-      ctx.font = "11px Inter Variable, ui-sans-serif, system-ui, sans-serif";
+      // Tick geometry: proportional to ruler height for any RULER_HEIGHT value
+      const tickSub  = Math.round(RULER_HEIGHT * 0.18); // ~5 px at 28px
+      const tickBeat = Math.round(RULER_HEIGHT * 0.46); // ~13 px at 28px
+      // bar uses full height
+
       ctx.textBaseline = "middle";
 
-      // Single pass over all grid lines, tagged by level.
-      // Tick heights: sub = 4 px bottom, beat = 9 px bottom, bar = full height.
       const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W);
+
+      // Draw sub and beat ticks first, bar ticks on top
       for (const line of lines) {
-        const { x, level, showLabel, beat } = line;
-        // x is already Math.round()'d by getArrangementGridLines.
-        // Add 0.5 so 1 px lines land on pixel boundaries (no anti-alias blur).
+        if (line.level === "bar") continue;
+        const { x, level } = line;
         const cx = x + 0.5;
 
         if (level === "sub") {
-          ctx.strokeStyle = C.surfaceHigh;
+          ctx.strokeStyle = "rgba(255,255,255,0.10)";
           ctx.lineWidth   = 1;
           ctx.beginPath();
-          ctx.moveTo(cx, RULER_HEIGHT - 4);
-          ctx.lineTo(cx, RULER_HEIGHT);
-          ctx.stroke();
-        } else if (level === "beat") {
-          ctx.strokeStyle = C.border;
-          ctx.lineWidth   = 1;
-          ctx.beginPath();
-          ctx.moveTo(cx, RULER_HEIGHT - 10);
-          ctx.lineTo(cx, RULER_HEIGHT);
+          ctx.moveTo(cx, RULER_HEIGHT - tickSub);
+          ctx.lineTo(cx, RULER_HEIGHT - 1);
           ctx.stroke();
         } else {
-          // bar — full height, brighter tick
-          ctx.strokeStyle = "rgba(255,255,255,0.38)";
-          ctx.lineWidth   = 1.5;
+          // beat
+          ctx.strokeStyle = "rgba(255,255,255,0.18)";
+          ctx.lineWidth   = 1;
           ctx.beginPath();
-          ctx.moveTo(cx, 0);
-          ctx.lineTo(cx, RULER_HEIGHT);
+          ctx.moveTo(cx, RULER_HEIGHT - tickBeat);
+          ctx.lineTo(cx, RULER_HEIGHT - 1);
           ctx.stroke();
         }
+      }
 
-        if (showLabel) {
-          ctx.fillStyle = level === "bar" ? C.text : C.dim;
-          ctx.fillText(formatBarBeat(beat * spb, bpm, timeSig), x + 4, RULER_HEIGHT / 2);
+      for (const line of lines) {
+        if (line.level !== "bar") continue;
+        const cx = line.x + 0.5;
+        ctx.strokeStyle = "rgba(255,255,255,0.28)";
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx, 1);
+        ctx.lineTo(cx, RULER_HEIGHT - 1);
+        ctx.stroke();
+      }
+
+      // Labels — separate pass so text is always on top of ticks
+      for (const line of lines) {
+        const { x, level, showLabel, beat } = line;
+        if (!showLabel) continue;
+
+        const label = formatBarBeat(beat * spb, bpm, timeSig);
+
+        if (level === "bar") {
+          ctx.font      = "bold 10px Inter Variable, ui-sans-serif, system-ui, sans-serif";
+          ctx.fillStyle = "rgba(200,212,224,0.88)";
+          ctx.fillText(label, x + 4, RULER_HEIGHT / 2);
+        } else {
+          // beat / sub labels — dimmer, no bold
+          ctx.font      = "10px Inter Variable, ui-sans-serif, system-ui, sans-serif";
+          ctx.fillStyle = "rgba(107,120,136,0.7)";
+          ctx.fillText(label, x + 3, RULER_HEIGHT / 2);
         }
       }
     };

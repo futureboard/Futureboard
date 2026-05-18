@@ -5,7 +5,7 @@
  * swapped for a WASM AudioWorklet or a native DSP service without touching
  * UI code.
  */
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackId, TrackPreviewMode } from "../types/daw";
 import type { StereoLevel } from "./Mixer";
 
 export type AudioEngineStatus = "uninitialized" | "running" | "suspended" | "closed" | "error";
@@ -62,6 +62,7 @@ export interface AudioEngineAdapter {
   setTrackMute(trackId: TrackId, muted: boolean): void;
   setTrackSolo(trackId: TrackId, solo: boolean): void;
   setTrackPhaseInvert(trackId: TrackId, inverted: boolean): void;
+  setTrackPreviewMode(trackId: TrackId, mode: TrackPreviewMode): void;
   setTrackOutput(trackId: TrackId, output: string): void;
   setMasterVolume(volume: number): void;
 

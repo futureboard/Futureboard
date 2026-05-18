@@ -21,6 +21,7 @@ pub struct RuntimeTrack {
     pub pan: f32,
     pub muted: bool,
     pub solo: bool,
+    pub preview_mode: RuntimePreviewMode,
     pub output_track_id: Option<String>,
     pub inserts: Vec<RuntimeInsert>,
     pub sends: Vec<RuntimeSend>,
@@ -29,6 +30,36 @@ pub struct RuntimeTrack {
     pub meter_peak_r: f32,
     pub meter_sum_sq_l: f32,
     pub meter_sum_sq_r: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimePreviewMode {
+    Stereo,
+    Mono,
+    Mid,
+    Side,
+}
+
+impl RuntimePreviewMode {
+    #[inline]
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "mono" => Self::Mono,
+            "mid" => Self::Mid,
+            "side" => Self::Side,
+            _ => Self::Stereo,
+        }
+    }
+
+    #[inline]
+    pub fn from_code(value: f32) -> Self {
+        match value as i32 {
+            1 => Self::Mono,
+            2 => Self::Mid,
+            3 => Self::Side,
+            _ => Self::Stereo,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -317,6 +348,7 @@ impl RuntimeProject {
                 pan: t.pan.clamp(-1.0, 1.0),
                 muted: t.muted,
                 solo: t.solo,
+                preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
                 inserts: t
                     .inserts
@@ -433,6 +465,13 @@ impl RuntimeProject {
         if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             track.solo = solo;
             self.has_solo = self.tracks.iter().any(|t| t.solo);
+        }
+    }
+
+    #[inline]
+    pub fn update_track_preview_mode(&mut self, track_id: &str, mode: RuntimePreviewMode) {
+        if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            track.preview_mode = mode;
         }
     }
 

@@ -15,8 +15,9 @@ import type {
   StartupBehavior,
   DauxBackend,
   AudioSampleRate,
+  ExtraFolderSetting,
 } from "../../store/settingsStore";
-import { RefreshCw, AlertCircle } from "lucide-react";
+import { RefreshCw, AlertCircle, FolderOpen, FolderPlus, Trash2 } from "lucide-react";
 import { activeAudioEngine } from "../../engine/activeAudioEngine";
 import { useAudioBackendStore } from "../../store/audioBackendStore";
 import type {
@@ -24,7 +25,7 @@ import type {
   DawBridgeDauxStatus,
 } from "../../platform/dawBridge.types";
 
-type SettingsTab = "general" | "audio" | "midi" | "project" | "appearance" | "advanced" | "shortcuts";
+type SettingsTab = "general" | "audio" | "midi" | "project" | "library" | "appearance" | "advanced" | "shortcuts";
 
 type ProjectDraft = {
   name: string;
@@ -39,7 +40,7 @@ type Props = { windowId: string; initialTab?: SettingsTab };
 // ── Shared control classes ────────────────────────────────────────────────────
 
 const inputCls =
-  "w-full bg-[#151a21] border border-[rgba(255,255,255,0.08)] rounded px-2 h-[28px] text-[12px] text-daw-text focus:outline-none focus:border-[rgba(114,215,215,0.5)] transition-colors";
+  "w-full bg-[#111821] border border-white/[0.08] rounded-[5px] px-2 h-[27px] text-[12px] text-daw-text focus:outline-none focus:border-[rgba(114,215,215,0.48)] focus:bg-[#151c25] transition-colors";
 
 // ── Reusable setting row ──────────────────────────────────────────────────────
 
@@ -53,14 +54,14 @@ function SettingsRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-4 min-h-[50px] border-b border-[rgba(255,255,255,0.05)] last:border-0 py-2">
+    <div className="grid min-h-[46px] grid-cols-[minmax(0,1fr)_minmax(150px,240px)] items-center gap-4 border-b border-white/[0.045] py-[7px] last:border-0">
       <div className="flex-1 min-w-0">
-        <div className="text-[12px] text-daw-text leading-none">{label}</div>
+        <div className="text-[11.5px] font-medium text-daw-text leading-none">{label}</div>
         {description && (
-          <div className="text-[11px] text-daw-text-muted mt-1 leading-snug">{description}</div>
+          <div className="text-[10.5px] text-daw-text-muted mt-1 leading-snug">{description}</div>
         )}
       </div>
-      <div className="flex-shrink-0">{children}</div>
+      <div className="flex min-w-0 justify-end">{children}</div>
     </div>
   );
 }
@@ -78,7 +79,7 @@ function SettingsToggle({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-[17px] w-[30px] items-center rounded-full transition-colors focus:outline-none ${
+      className={`relative inline-flex h-[17px] w-[30px] items-center rounded-full transition-colors focus:outline-none focus:ring-1 focus:ring-[rgba(114,215,215,0.35)] ${
         checked
           ? "bg-[rgba(114,215,215,0.7)]"
           : "bg-[#1e2530] border border-[rgba(255,255,255,0.1)]"
@@ -120,7 +121,7 @@ function SettingsSelect<T extends string | number>({
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[10px] text-[rgba(255,255,255,0.3)] uppercase tracking-[0.12em] font-medium mb-0 mt-5 first:mt-0 pb-1.5 border-b border-[rgba(255,255,255,0.05)]">
+    <div className="mt-4 border-b border-white/[0.055] pb-1.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/34 first:mt-1">
       {children}
     </div>
   );
@@ -801,6 +802,140 @@ function AppearanceTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: 
   );
 }
 
+function basenameFromPath(path: string): string {
+  return path.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? path;
+}
+
+function ExtraFoldersTab({
+  draft,
+  setDraft,
+}: {
+  draft: AppSettings;
+  setDraft: (p: Partial<AppSettings>) => void;
+}) {
+  const [indexingPath, setIndexingPath] = useState<string | null>(null);
+  const isElectron = platform.kind === "electron";
+
+  const updateFolders = (folders: ExtraFolderSetting[]) => setDraft({ extraFolders: folders });
+
+  const addFolder = async () => {
+    if (!isElectron) return;
+    const path = await platform.folderProject.browseLocation();
+    if (!path) return;
+    const existing = draft.extraFolders.find((folder) => folder.path === path);
+    if (existing) {
+      updateFolders(
+        draft.extraFolders.map((folder) =>
+          folder.path === path ? { ...folder, enabled: true } : folder
+        ),
+      );
+      return;
+    }
+    updateFolders([
+      ...draft.extraFolders,
+      {
+        id: crypto.randomUUID(),
+        name: basenameFromPath(path),
+        path,
+        enabled: true,
+        addedAt: Date.now(),
+      },
+    ]);
+  };
+
+  const toggleFolder = (id: string, enabled: boolean) => {
+    updateFolders(draft.extraFolders.map((folder) => folder.id === id ? { ...folder, enabled } : folder));
+  };
+
+  const removeFolder = (id: string) => {
+    updateFolders(draft.extraFolders.filter((folder) => folder.id !== id));
+  };
+
+  const indexFolder = async (path: string) => {
+    if (!isElectron) return;
+    setIndexingPath(path);
+    try {
+      await platform.fileSystem.browserIndexStart(path);
+    } finally {
+      setIndexingPath(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col">
+      <SectionHeader>Browser Library</SectionHeader>
+      <SettingsRow
+        label="Extra Folders"
+        description="Pinned folders for the Browser panel and background audio indexing."
+      >
+        <button
+          type="button"
+          disabled={!isElectron}
+          onClick={() => { void addFolder(); }}
+          className="inline-flex h-[27px] items-center gap-1.5 rounded-[5px] border border-[rgba(114,215,215,0.28)] bg-[rgba(114,215,215,0.08)] px-2.5 text-[11px] font-medium text-[rgba(114,215,215,0.88)] transition-colors hover:bg-[rgba(114,215,215,0.13)] disabled:cursor-not-allowed disabled:border-white/[0.08] disabled:bg-white/[0.025] disabled:text-white/30"
+        >
+          <FolderPlus size={12} />
+          Add Folder
+        </button>
+      </SettingsRow>
+
+      <div className="mt-2 overflow-hidden rounded-[7px] border border-white/[0.06] bg-black/[0.12]">
+        {draft.extraFolders.length === 0 ? (
+          <div className="flex h-[70px] items-center justify-center px-3 text-[10.5px] text-white/30">
+            {isElectron ? "No extra folders added." : "Extra folders are available in the Electron app."}
+          </div>
+        ) : (
+          draft.extraFolders.map((folder) => (
+            <div
+              key={folder.id}
+              className="grid min-h-[42px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-white/[0.045] px-2.5 py-1.5 last:border-0"
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <FolderOpen size={13} className="shrink-0 text-[rgba(114,215,215,0.56)]" />
+                <div className="min-w-0">
+                  <div className="truncate text-[11px] font-medium text-white/76">{folder.name}</div>
+                  <div className="truncate text-[9.5px] text-white/30" title={folder.path}>{folder.path}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <SettingsToggle
+                  checked={folder.enabled}
+                  onChange={(enabled) => toggleFolder(folder.id, enabled)}
+                />
+                <button
+                  type="button"
+                  title="Index folder"
+                  disabled={!folder.enabled || indexingPath === folder.path}
+                  onClick={() => { void indexFolder(folder.path); }}
+                  className="flex h-[24px] w-[24px] items-center justify-center rounded-[5px] border border-white/[0.08] text-white/40 transition-colors hover:bg-white/[0.055] hover:text-white/70 disabled:opacity-35"
+                >
+                  <RefreshCw size={11} className={indexingPath === folder.path ? "animate-spin" : ""} />
+                </button>
+                <button
+                  type="button"
+                  title="Remove folder"
+                  onClick={() => removeFolder(folder.id)}
+                  className="flex h-[24px] w-[24px] items-center justify-center rounded-[5px] border border-white/[0.08] text-white/32 transition-colors hover:border-red-400/25 hover:bg-red-500/[0.08] hover:text-red-300/80"
+                >
+                  <Trash2 size={11} />
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <SectionHeader>Indexing</SectionHeader>
+      <SettingsRow
+        label="Index On Open"
+        description="Enabled folders are shown in Browser and can be indexed from their row or tree."
+      >
+        <span className="text-[10.5px] text-white/34">Manual per folder</span>
+      </SettingsRow>
+    </div>
+  );
+}
+
 function AdvancedTab({ draft, setDraft, onReset }: { draft: AppSettings; setDraft: (p: Partial<AppSettings>) => void; onReset: () => void }) {
   return (
     <div className="flex flex-col">
@@ -861,6 +996,7 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     preferredBufferSize: store.preferredBufferSize,
     dauxBackend:         store.dauxBackend,
     audioSampleRate:     store.audioSampleRate,
+    extraFolders:        store.extraFolders,
     compactUI:           store.compactUI,
     enableDevTools:      store.enableDevTools,
   });
@@ -1003,27 +1139,28 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     { id: "audio",     label: "Audio"     },
     { id: "midi",      label: "MIDI"      },
     { id: "project",   label: "Project"   },
+    { id: "library",   label: "Library"   },
     { id: "shortcuts", label: "Shortcuts" },
     { id: "appearance",label: "Appearance"},
     { id: "advanced",  label: "Advanced"  },
   ];
 
   return (
-    <div className="flex h-full w-full bg-[#0f1319] overflow-hidden shadow-2xl border border-[rgba(255,255,255,0.07)] select-none">
+    <div className="flex h-full w-full overflow-hidden border border-white/[0.07] bg-[#0e1319] shadow-2xl select-none">
       {/* Sidebar */}
-      <div className="w-[160px] flex-shrink-0 bg-[#0c0f14] border-r border-[rgba(255,255,255,0.06)] flex flex-col pt-2 pb-2">
+      <div className="flex w-[166px] flex-shrink-0 flex-col border-r border-white/[0.06] bg-[#0a0e13] px-1.5 py-2">
         {tabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`relative flex items-center h-[32px] px-4 text-left text-[12px] font-medium transition-colors ${
+            className={`relative mb-[2px] flex h-[29px] items-center rounded-[5px] px-3 text-left text-[11.5px] font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-[rgba(114,215,215,0.28)] ${
               activeTab === tab.id
-                ? "text-[rgba(114,215,215,0.95)] bg-[rgba(114,215,215,0.07)]"
-                : "text-[rgba(255,255,255,0.4)] hover:text-[rgba(255,255,255,0.7)] hover:bg-[rgba(255,255,255,0.04)]"
+                ? "text-[rgba(190,245,245,0.92)] bg-[rgba(114,215,215,0.10)]"
+                : "text-white/42 hover:text-white/70 hover:bg-white/[0.045]"
             }`}
           >
             {activeTab === tab.id && (
-              <span className="absolute left-0 top-[4px] bottom-[4px] w-[2px] bg-[rgba(114,215,215,0.85)] rounded-r" />
+              <span className="absolute left-0 top-[6px] bottom-[6px] w-[2px] rounded-r bg-[rgba(114,215,215,0.85)]" />
             )}
             {tab.label}
           </button>
@@ -1033,14 +1170,14 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
       {/* Content area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
-        <div className="h-[32px] flex items-center px-5 flex-shrink-0 border-b border-[rgba(255,255,255,0.05)]">
-          <span className="text-[11px] font-medium text-[rgba(255,255,255,0.45)] uppercase tracking-[0.1em]">
+        <div className="h-[34px] flex items-center px-5 flex-shrink-0 border-b border-white/[0.055] bg-white/[0.012]">
+          <span className="text-[10px] font-semibold text-white/42 uppercase tracking-[0.14em]">
             {activeTab === "shortcuts" ? "Keyboard Shortcuts" : activeTab}
           </span>
         </div>
 
         {/* Tab body */}
-        <div className="flex-1 overflow-y-auto px-5 pb-4 pt-1">
+        <div className="flex-1 overflow-y-auto px-5 pb-4 pt-1.5">
           {applyError && (
             <div className="mt-3 rounded border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] leading-snug text-red-300">
               {applyError}
@@ -1061,6 +1198,9 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
           {activeTab === "project" && (
             <ProjectTab projectDraft={projectDraft} setProjectDraft={patchProject} />
           )}
+          {activeTab === "library" && (
+            <ExtraFoldersTab draft={appDraft} setDraft={patchApp} />
+          )}
           {activeTab === "shortcuts" && <KeyboardShortcutsPanel />}
           {activeTab === "appearance" && (
             <AppearanceTab draft={appDraft} setDraft={patchApp} />
@@ -1075,16 +1215,16 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="h-[42px] flex items-center gap-2 px-4 border-t border-[rgba(255,255,255,0.06)] flex-shrink-0">
+        <div className="h-[42px] flex items-center gap-2 px-4 border-t border-white/[0.06] bg-[#0b1016] flex-shrink-0">
           <div className="flex-1" />
           <button
-            className="px-3 h-[26px] text-[11px] text-[rgba(255,255,255,0.5)] hover:text-[rgba(255,255,255,0.8)] hover:bg-[rgba(255,255,255,0.06)] rounded transition-colors"
+            className="px-3 h-[26px] rounded-[5px] text-[11px] text-white/50 transition-colors hover:bg-white/[0.055] hover:text-white/78"
             onClick={handleCancel}
           >
             Cancel
           </button>
           <button
-            className={`px-3 h-[26px] text-[11px] text-[rgba(255,255,255,0.5)] bg-[rgba(255,255,255,0.04)] border border-[rgba(255,255,255,0.08)] rounded transition-colors ${
+            className={`px-3 h-[26px] text-[11px] text-white/55 bg-white/[0.04] border border-white/[0.08] rounded-[5px] transition-colors ${
               applying ? "opacity-50 cursor-wait" : "hover:text-[rgba(255,255,255,0.8)] hover:bg-[rgba(255,255,255,0.08)]"
             }`}
             disabled={applying}
@@ -1093,7 +1233,7 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
             {applying ? "Applying…" : "Apply"}
           </button>
           <button
-            className={`px-3 h-[26px] text-[11px] bg-[rgba(114,215,215,0.15)] text-[rgba(114,215,215,0.9)] border border-[rgba(114,215,215,0.25)] rounded font-medium transition-colors ${
+            className={`px-3 h-[26px] text-[11px] bg-[rgba(114,215,215,0.14)] text-[rgba(114,215,215,0.9)] border border-[rgba(114,215,215,0.28)] rounded-[5px] font-medium transition-colors ${
               applying ? "opacity-50 cursor-wait" : "hover:bg-[rgba(114,215,215,0.22)]"
             }`}
             disabled={applying}

@@ -4,7 +4,7 @@ import type {
   MeterCallback,
   TransportCallback,
 } from "./AudioEngineAdapter";
-import type { DawProject, DawTrack, InsertDevice, TrackId } from "../types/daw";
+import type { DawProject, DawTrack, InsertDevice, TrackId, TrackPreviewMode } from "../types/daw";
 import { createAudioEngineAdapter, type AdapterSelection } from "./native/createAudioEngineAdapter";
 import type { PreferredEngine } from "../store/settingsStore";
 import { useSettingsStore } from "../store/settingsStore";
@@ -187,6 +187,10 @@ class ActiveAudioEngine {
 
   setTrackPhaseInvert(trackId: TrackId, inverted: boolean): void {
     this._adapter?.setTrackPhaseInvert(trackId, inverted);
+  }
+
+  setTrackPreviewMode(trackId: TrackId, mode: TrackPreviewMode): void {
+    this._adapter?.setTrackPreviewMode(trackId, mode);
   }
 
   setMasterVolume(volume: number): void {

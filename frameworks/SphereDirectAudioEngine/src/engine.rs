@@ -32,7 +32,7 @@ use crate::device;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
-use crate::runtime::{RuntimeInsert, RuntimeProject, RuntimeTrack};
+use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsSphereAudioStatus,
@@ -499,6 +499,10 @@ impl EngineInner {
                 track_id: track_id.into(),
                 solo: value != 0.0,
             }),
+            "previewMode" => self.send_command(EngineCommand::SetTrackPreviewMode {
+                track_id: track_id.into(),
+                value: value as f32,
+            }),
             other => {
                 // Unknown param — log but don't error (UI might send future params)
                 eprintln!("[SphereAudio] Unknown track param: '{other}' (track={track_id})");
@@ -954,11 +958,13 @@ pub fn render_project_sample(
         let output_track_id = runtime.tracks[track_index].output_track_id.clone();
         let sends = runtime.tracks[track_index].sends.clone();
         let (track_l, track_r) = apply_track_chain(l, r, &mut runtime.tracks[track_index]);
+        let (track_l, track_r) = apply_preview_mode(track_l, track_r, runtime.tracks[track_index].preview_mode);
         runtime.accumulate_track_meter(track_index, track_l, track_r);
 
         if let Some(target_id) = output_track_id.as_deref().filter(|id| !is_master_output(id)) {
             if let Some(target_index) = runtime.tracks.iter().position(|t| t.id == target_id) {
                 let (bus_l, bus_r) = apply_track_chain(track_l, track_r, &mut runtime.tracks[target_index]);
+                let (bus_l, bus_r) = apply_preview_mode(bus_l, bus_r, runtime.tracks[target_index].preview_mode);
                 runtime.accumulate_track_meter(target_index, bus_l, bus_r);
                 out_l += bus_l;
                 out_r += bus_r;
@@ -991,6 +997,7 @@ pub fn render_project_sample(
                 track_r * send.level,
                 &mut runtime.tracks[return_track_index],
             );
+            let (send_l, send_r) = apply_preview_mode(send_l, send_r, runtime.tracks[return_track_index].preview_mode);
             runtime.accumulate_track_meter(return_track_index, send_l, send_r);
             out_l += send_l;
             out_r += send_r;
@@ -1017,6 +1024,21 @@ pub fn apply_track_chain(mut l: f32, mut r: f32, track: &mut RuntimeTrack) -> (f
     }
     let (pan_l, pan_r) = pan_gains(track.pan);
     (l * track.volume * pan_l, r * track.volume * pan_r)
+}
+
+#[inline]
+pub fn apply_preview_mode(l: f32, r: f32, mode: RuntimePreviewMode) -> (f32, f32) {
+    match mode {
+        RuntimePreviewMode::Stereo => (l, r),
+        RuntimePreviewMode::Mono | RuntimePreviewMode::Mid => {
+            let m = (l + r) * 0.5;
+            (m, m)
+        }
+        RuntimePreviewMode::Side => {
+            let s = (l - r) * 0.5;
+            (s, s)
+        }
+    }
 }
 
 #[inline]
@@ -1297,6 +1319,9 @@ where
                         }
                         EngineCommand::SetTrackSolo { track_id, solo } => {
                             runtime.update_track_solo(&track_id, solo);
+                        }
+                        EngineCommand::SetTrackPreviewMode { track_id, value } => {
+                            runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
                         }
                         EngineCommand::SetInsertParam { track_id, insert_id, param_id, value } => {
                             runtime.update_insert_param(&track_id, &insert_id, &param_id, value);

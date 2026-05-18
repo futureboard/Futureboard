@@ -6,7 +6,7 @@
  * they do not go through historyStore again (no recursion).
  */
 
-import type { DawClip, DawTrack, MidiNote, TrackSend } from "../types/daw";
+import type { DawClip, DawTrack, MidiNote, TrackPreviewMode, TrackSend } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
 import { activeAudioEngine } from "../engine/activeAudioEngine";
 import type { DawCommand } from "./types";
@@ -218,6 +218,28 @@ export class SetTrackSoloCommand implements DawCommand {
   undo() {
     store().setTrackSolo(this.trackId, !this.newSolo);
     activeAudioEngine.setTrackSolo(this.trackId, !this.newSolo);
+  }
+}
+
+export class SetTrackPreviewModeCommand implements DawCommand {
+  readonly label: string;
+  private trackId: string;
+  private newMode: TrackPreviewMode;
+  private oldMode: TrackPreviewMode;
+
+  constructor(trackId: string, newMode: TrackPreviewMode, oldMode: TrackPreviewMode = "stereo") {
+    this.trackId = trackId;
+    this.newMode = newMode;
+    this.oldMode = oldMode;
+    this.label = `Set Preview Mode: ${newMode}`;
+  }
+  execute() {
+    store().setTrackPreviewMode(this.trackId, this.newMode);
+    activeAudioEngine.setTrackPreviewMode(this.trackId, this.newMode);
+  }
+  undo() {
+    store().setTrackPreviewMode(this.trackId, this.oldMode);
+    activeAudioEngine.setTrackPreviewMode(this.trackId, this.oldMode);
   }
 }
 

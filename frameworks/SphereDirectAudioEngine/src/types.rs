@@ -152,10 +152,16 @@ pub struct EngineTrackSnapshot {
     pub muted: bool,
     pub solo: bool,
     pub armed: bool,
+    #[serde(default = "default_preview_mode")]
+    pub preview_mode: String,
     pub output_track_id: Option<String>,
     pub inserts: Vec<EngineInsertSnapshot>,
     #[serde(default)]
     pub sends: Vec<EngineSendSnapshot>,
+}
+
+fn default_preview_mode() -> String {
+    "stereo".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

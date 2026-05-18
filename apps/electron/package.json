@@ -1,7 +1,11 @@
 {
   "name": "futureboard-studio",
   "version": "2026.05.19",
-  "author": "Arizkami",
+  "author": {
+    "name": "Arizkami",
+    "email": "arizkami@futureboard.studio"
+  },
+  "homepage": "https://github.com/arizkami/Futureboard",
   "main": "dist/main.js",
   "dependencies": {
     "electron-updater": "^6.8.3"
@@ -16,7 +20,7 @@
     "wait-on": "^9.0.10"
   },
   "build": {
-    "appId": "org.mochilinux.studio",
+    "appId": "org.futureboard.studio",
     "productName": "Futureboard Studio",
     "executableName": "Futureboard Studio",
     "copyright": "Copyright © ${author}",
@@ -101,6 +105,7 @@
       "identity": null
     },
     "linux": {
+      "maintainer": "Arizkami <arizkami@futureboard.studio>",
       "target": [
         {
           "target": "AppImage",

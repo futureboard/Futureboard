@@ -99,7 +99,7 @@ if (!app.requestSingleInstanceLock()) {
 
 // Stable per-process model on Windows so the taskbar groups our windows
 // under the right icon/identity.
-if (isWin) app.setAppUserModelId("org.mochilinux.studio");
+if (isWin) app.setAppUserModelId("org.futureboard.studio");
 
 // Resolve the preload path once at module-load time so window creation
 // doesn't pay the cost on every `new BrowserWindow`.

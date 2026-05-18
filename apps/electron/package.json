@@ -1,6 +1,6 @@
 {
   "name": "futureboard-studio",
-  "version": "2026.05.18",
+  "version": "2026.05.19",
   "author": "Arizkami",
   "main": "dist/main.js",
   "dependencies": {

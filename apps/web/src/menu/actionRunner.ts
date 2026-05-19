@@ -4,7 +4,6 @@ import { createTrackVolumeTarget, createTrackPanTarget } from "../utils/automati
 import { useUIStore } from "../store/uiStore";
 import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
-import { meterStore } from "../store/meterStore";
 import { useHistoryStore } from "../store/historyStore";
 import { useRecentProjectsStore } from "../store/recentProjectsStore";
 import { useWindowStore } from "../store/windowStore";
@@ -38,40 +37,6 @@ import {
   SetTrackVolumeCommand,
   SplitClipCommand,
 } from "../commands";
-
-function syncNativeMixerFromStores() {
-  const bridge = window.dawElectron?.floatingWindow;
-  if (!bridge?.updateMixer) return;
-
-  const project = useProjectStore.getState().project;
-  const masterVolume = useUIStore.getState().masterVolume;
-  const meters = meterStore.getState();
-
-  void bridge.updateMixer({
-    tracks: project.tracks
-      .filter((track) => track.type !== "master")
-      .map((track) => {
-        const meter = meters.tracks[track.id];
-        return {
-          id: track.id,
-          name: track.name,
-          color: track.color,
-          volume: track.volume,
-          pan: track.pan,
-          mute: track.muted,
-          solo: track.solo,
-          armed: track.armed,
-          meterL: meter?.peakL ?? 0,
-          meterR: meter?.peakR ?? 0,
-        };
-      }),
-    master: {
-      volume: masterVolume,
-      meterL: meters.master.peakL,
-      meterR: meters.master.peakR,
-    },
-  });
-}
 
 export function runAction(actionId: string) {
   const uiStore = useUIStore.getState();
@@ -884,18 +849,26 @@ export function runAction(actionId: string) {
 
     case "floatingwindow:mixer":
       void (async () => {
-        const opened = await window.dawElectron?.floatingWindow?.open({
+        useProjectStore.getState().saveLocal();
+        const opened = await window.dawElectron?.windows?.openExternal({
           id: "mixer",
-          kind: "Mixer",
+          contentType: "mixer",
           title: "Mixer - Futureboard",
+          width: 1180,
+          height: 420,
+          minWidth: 760,
+          minHeight: 320,
           alwaysOnTop: false,
+          frame: true,
+          transparent: false,
+          resizable: true,
         });
         if (!opened) {
           uiStore.setPanelLayout("mixer", { dock: "float" });
-          showToast("Native mixer unavailable; opened internal mixer.", true);
+          showToast("External mixer unavailable; opened internal mixer.", true);
           return;
         }
-        syncNativeMixerFromStores();
+        uiStore.setPanelLayout("mixer", { visible: false });
       })();
       break;
 

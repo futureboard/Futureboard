@@ -13,6 +13,7 @@ import {
 import path from "node:path";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   IpcChannels,
@@ -32,6 +33,7 @@ import {
   type FolderImportAudioResult,
   type BrowseFolderResult,
   type GpuFeatureStatus,
+  type ExternalWindowConfig,
   type FloatingWindowOpenRequest,
   type FloatingWindowMixerUpdateRequest,
 } from "./ipc/channels.js";
@@ -49,6 +51,7 @@ const PACKAGED_APP_URL = "miko://app/index.html";
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
 const closeAllowed = new WeakSet<BrowserWindow>();
+const externalWindows = new Map<string, BrowserWindow>();
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -1021,6 +1024,68 @@ function isValidString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function externalRouteForContent(contentType: string): string {
+  switch (contentType) {
+    case "mixer":
+      return "/external/mixer";
+    default:
+      return "/";
+  }
+}
+
+function rendererRouteUrl(route: string): string {
+  const hashRoute = `#${route.startsWith("/") ? route : `/${route}`}`;
+  if (app.isPackaged) {
+    return `miko://app/index.html${hashRoute}`;
+  }
+  return `${DEV_SERVER_URL.replace(/\/$/, "")}/${hashRoute}`;
+}
+
+function openExternalRendererWindow(config: ExternalWindowConfig): string | null {
+  const id = config.id && config.id.trim().length > 0 ? config.id : randomUUID();
+  const existing = externalWindows.get(id);
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore();
+    existing.focus();
+    return id;
+  }
+
+  const win = new BrowserWindow({
+    width: Math.max(config.minWidth ?? 320, config.width),
+    height: Math.max(config.minHeight ?? 240, config.height),
+    minWidth: config.minWidth,
+    minHeight: config.minHeight,
+    title: config.title,
+    icon: windowIconPath(),
+    frame: config.frame ?? true,
+    transparent: config.transparent ?? false,
+    resizable: config.resizable ?? true,
+    alwaysOnTop: config.alwaysOnTop ?? false,
+    backgroundColor: "#0b0f14",
+    show: false,
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+      spellcheck: false,
+      enableWebSQL: false,
+      webgl: true,
+      devTools: !app.isPackaged,
+    },
+  });
+
+  externalWindows.set(id, win);
+  win.once("ready-to-show", () => win.show());
+  win.on("closed", () => externalWindows.delete(id));
+
+  const route = externalRouteForContent(config.contentType);
+  void win.loadURL(rendererRouteUrl(route));
+
+  return id;
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle(
     IpcChannels.FsPickAudioFiles,
@@ -1270,6 +1335,27 @@ function registerIpcHandlers(): void {
     if (!win) return;
     closeAllowed.add(win);
     win.close();
+  });
+
+  ipcMain.handle(IpcChannels.WindowsOpenExternal, (_event, config: unknown): string | null => {
+    const c = config as ExternalWindowConfig;
+    if (!c || !isValidString(c.title) || !isValidString(c.contentType)) return null;
+    return openExternalRendererWindow(c);
+  });
+
+  ipcMain.handle(IpcChannels.WindowsCloseExternal, (_event, id: unknown): void => {
+    if (!isValidString(id)) return;
+    const win = externalWindows.get(id);
+    if (!win || win.isDestroyed()) return;
+    win.close();
+  });
+
+  ipcMain.handle(IpcChannels.WindowsFocusExternal, (_event, id: unknown): void => {
+    if (!isValidString(id)) return;
+    const win = externalWindows.get(id);
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.focus();
   });
 
   // ── Waveform peak cache ────────────────────────────────────────────────────

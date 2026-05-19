@@ -644,7 +644,15 @@ function ChannelStrip({
 
 // ─── Mixer Panel ──────────────────────────────────────────────────────────────
 
-export function MixerPanel({ height, embedded = false }: { height?: number; embedded?: boolean }) {
+export function MixerPanel({
+  height,
+  embedded = false,
+  externalWindow = false,
+}: {
+  height?: number;
+  embedded?: boolean;
+  externalWindow?: boolean;
+}) {
   const project = useProjectStore((s) => s.project);
   const tracks = project.tracks;
   const files = project.files;
@@ -719,7 +727,13 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
         "flex flex-col overflow-hidden bg-[#111418]",
         embedded ? "min-h-0 flex-1" : "shrink-0 border-t border-daw-border",
       ].join(" ")}
-      style={embedded ? undefined : { height: mixerHeight, minHeight: mixerHeight }}
+      style={
+        externalWindow
+          ? { height: "100%", minHeight: 0 }
+          : embedded
+            ? undefined
+            : { height: mixerHeight, minHeight: mixerHeight }
+      }
       onPointerMove={onStripResizeDrag}
       onPointerUp={onStripResizeDragEnd}
     >
@@ -744,6 +758,41 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
         </span>
 
         <div className="flex-1" />
+
+        {!externalWindow && (
+          <button
+            onClick={() => {
+              void (async () => {
+                useProjectStore.getState().saveLocal();
+                const opened = await window.dawElectron?.windows?.openExternal({
+                  id: "mixer",
+                  contentType: "mixer",
+                  title: "Mixer - Futureboard",
+                  width: 1180,
+                  height: 420,
+                  minWidth: 760,
+                  minHeight: 320,
+                  alwaysOnTop: false,
+                  frame: true,
+                  transparent: false,
+                  resizable: true,
+                });
+                if (!opened) {
+                  setPanelLayout("mixer", { dock: "float" });
+                  showToast("External mixer unavailable; opened internal mixer.", true);
+                  return;
+                }
+                setPanelLayout("mixer", { visible: false });
+              })();
+            }}
+            className="flex h-5 shrink-0 items-center gap-1 rounded border border-daw-accent/30 bg-daw-accent/10 px-1.5 text-[9px] font-semibold text-daw-accent transition-colors hover:border-daw-accent/55 hover:bg-daw-accent/15"
+            title="Open External Window"
+          >
+            <ExternalLink size={9} />
+            <span className="hidden min-[1100px]:inline">Open External Window</span>
+            <span className="min-[1100px]:hidden">External</span>
+          </button>
+        )}
 
         {/* fixed / flex toggle */}
         <button
@@ -780,32 +829,6 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
               <Plus size={9} />
             </button>
           </div>
-        )}
-
-        {window.dawElectron?.floatingWindow && (
-          <button
-            onClick={() => {
-              void (async () => {
-                const opened = await window.dawElectron?.floatingWindow?.open({
-                  id: "mixer",
-                  kind: "Mixer",
-                  title: "Mixer - Futureboard",
-                  alwaysOnTop: false,
-                });
-                if (!opened) {
-                  setPanelLayout("mixer", { dock: "float" });
-                  showToast("Native mixer unavailable; opened internal mixer.", true);
-                  return;
-                }
-                syncNativeMixer(project, masterVolume);
-              })();
-            }}
-            className="flex h-5 items-center gap-1 rounded border border-white/[0.07] bg-white/[0.03] px-1.5 text-[9px] font-semibold text-daw-faint transition-colors hover:border-daw-accent/40 hover:bg-daw-accent/10 hover:text-daw-accent"
-            title="Open Mixer in native window"
-          >
-            <ExternalLink size={9} />
-            Native
-          </button>
         )}
 
         {!embedded && (

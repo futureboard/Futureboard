@@ -29,6 +29,7 @@
     "nanoid": "^5.1.11",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
+    "react-router-dom": "^7.15.1",
     "tailwindcss": "^4.3.0",
     "zustand": "^5.0.13"
   },

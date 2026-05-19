@@ -175,6 +175,25 @@ export interface DawBridgeWindow {
   forceClose(): Promise<void>;
 }
 
+export interface DawBridgeExternalWindows {
+  openExternal(config: {
+    id?: string;
+    title: string;
+    contentType: string;
+    payload?: Record<string, unknown>;
+    width: number;
+    height: number;
+    minWidth?: number;
+    minHeight?: number;
+    alwaysOnTop?: boolean;
+    frame?: boolean;
+    transparent?: boolean;
+    resizable?: boolean;
+  }): Promise<string | null>;
+  closeExternal(id: string): Promise<void>;
+  focusExternal(id: string): Promise<void>;
+}
+
 // ── SphereDirectAudioEngine bridge ────────────────────────────────────────────
 
 export type DawBridgeSphereDeviceOpenConfig = {
@@ -355,6 +374,7 @@ export interface DawElectronBridge {
   project: DawBridgeProject;
   dialog: DawBridgeDialog;
   window: DawBridgeWindow;
+  windows: DawBridgeExternalWindows;
   sys: DawBridgeSys;
 
   /** SphereDirectAudioEngine native backend. Present only in Electron client. */

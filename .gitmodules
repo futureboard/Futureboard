@@ -2,3 +2,9 @@
 	path = frameworks/SphereEngine
 	url = https://github.com/arizkami/SphereEngine
     update = none
+[submodule "packages/shared/tabler-icons"]
+	path = packages/shared/tabler-icons
+	url = https://github.com/tabler/tabler-icons.git
+[submodule "packages/shared/lucide"]
+	path = packages/shared/lucide
+	url = https://github.com/lucide-icons/lucide

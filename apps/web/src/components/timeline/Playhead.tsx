@@ -5,6 +5,7 @@ import { useUIStore } from "../../store/uiStore";
 import { C } from "../../theme";
 import { TIMELINE_CONTENT_LEFT, timeToContentX } from "../../utils/musicalTime";
 import { TIMELINE_Z } from "../../utils/timelineZ";
+import { TimelineGpuPlayheadRenderer } from "./timelineGpuPlayheadRenderer";
 
 /**
  * Renders the playhead inside a clip container that starts at the timeline
@@ -23,13 +24,17 @@ const LINE_W = 2;
 const HEAD_W = 12;
 
 export function Playhead() {
-  const lineRef  = useRef<HTMLDivElement>(null);
-  const headRef  = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const gpuRef = useRef<TimelineGpuPlayheadRenderer | null>(null);
   const rafRef   = useRef<number>(0);
   const lastStore = useRef(0);
   const setPlayheadTime = useTransportStore((s) => s.setPlayheadTime);
 
   useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas) gpuRef.current = TimelineGpuPlayheadRenderer.create(canvas);
+
     const tick = () => {
       const { pixelsPerSecond: pps, scrollX, loopEnabled, loopStart, loopEnd } =
         useUIStore.getState();
@@ -44,11 +49,27 @@ export function Playhead() {
       // Content-area x — wrapper already begins at TIMELINE_CONTENT_LEFT,
       // so the line/marker never paint over the sticky track-header lane.
       const x = timeToContentX(t, pps, scrollX);
+      const wrap = wrapRef.current;
+      const canvas = canvasRef.current;
+      if (wrap && canvas) {
+        const width = wrap.clientWidth || 1;
+        const height = wrap.clientHeight || 1;
+        const dpr = window.devicePixelRatio || 1;
 
-      // Line: 2-px wide, centred on the canvas grid pixel column.
-      if (lineRef.current) lineRef.current.style.transform = `translateX(${x - LINE_W / 2}px)`;
-      // Triangle: 12-px wide, centred on the same column as the line.
-      if (headRef.current) headRef.current.style.transform = `translateX(${x - HEAD_W / 2}px)`;
+        if (gpuRef.current) {
+          try {
+            gpuRef.current.resize(width, height, dpr);
+            gpuRef.current.render(x);
+          } catch (error) {
+            console.warn("[TimelineGPU] Playhead render failed; falling back to Canvas2D:", error);
+            gpuRef.current.dispose();
+            gpuRef.current = null;
+          }
+        }
+        if (!gpuRef.current) {
+          drawCanvasPlayhead(canvas, width, height, dpr, x);
+        }
+      }
 
       const now = performance.now();
       if (now - lastStore.current > 100) {
@@ -59,7 +80,11 @@ export function Playhead() {
     };
 
     rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      gpuRef.current?.dispose();
+      gpuRef.current = null;
+    };
   }, [setPlayheadTime]);
 
   return (
@@ -67,26 +92,43 @@ export function Playhead() {
     // the line and marker can never visually paint across the sticky
     // track-header lane on the left.  Single z-index for both children.
     <div
+      ref={wrapRef}
       className="pointer-events-none absolute top-0 bottom-0 right-0 overflow-hidden"
       style={{ left: TIMELINE_CONTENT_LEFT, zIndex: TIMELINE_Z.playhead }}
       aria-hidden
     >
-      {/* Triangle marker — sits inside the ruler area */}
-      <div
-        ref={headRef}
-        className="absolute left-0 top-0 pointer-events-none will-change-transform"
-      >
-        <svg width={HEAD_W} height={12} viewBox="0 0 12 12" className="block drop-shadow">
-          <polygon points="0,0 12,0 6,12" fill={C.accent} />
-        </svg>
-      </div>
-
-      {/* Vertical line — spans ruler top through all track rows */}
-      <div
-        ref={lineRef}
-        className="absolute left-0 top-0 bottom-0 pointer-events-none will-change-transform"
-        style={{ width: LINE_W, background: C.playhead + "cc" }}
-      />
+      <canvas ref={canvasRef} className="block h-full w-full" />
     </div>
   );
+}
+
+function drawCanvasPlayhead(
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+  dpr: number,
+  x: number,
+): void {
+  const ratio = Math.max(1, Math.min(2, dpr || 1));
+  const bw = Math.ceil(width * ratio);
+  const bh = Math.ceil(height * ratio);
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw;
+    canvas.height = bh;
+  }
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
+  if (!ctx) return;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = C.playhead + "cc";
+  ctx.fillRect(Math.round(x) - LINE_W / 2, 0, LINE_W, height);
+  ctx.fillStyle = C.accent;
+  ctx.beginPath();
+  ctx.moveTo(Math.round(x) - HEAD_W / 2, 0);
+  ctx.lineTo(Math.round(x) + HEAD_W / 2, 0);
+  ctx.lineTo(Math.round(x), 12);
+  ctx.closePath();
+  ctx.fill();
 }

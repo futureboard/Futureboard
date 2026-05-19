@@ -121,6 +121,7 @@ if (GPU_MODE === "software") {
   app.commandLine.appendSwitch("enable-gpu-rasterization");
   app.commandLine.appendSwitch("enable-zero-copy");
   app.commandLine.appendSwitch("enable-accelerated-2d-canvas");
+  app.commandLine.appendSwitch("enable-webgl");
   app.disableDomainBlockingFor3DAPIs();
   console.log("[GPU] Force hardware mode (FUTUREBOARD_GPU_MODE=force)");
 } else {

@@ -18,7 +18,10 @@ export function pickBestLevel(
   const fileLevels = peakMeta.get(fileId);
   if (!fileLevels || fileLevels.size === 0) return undefined;
 
-  const idealSpp = Math.max(1, Math.round(sampleRate / pixelsPerSecond));
+  const dpr = typeof window === "undefined"
+    ? 1
+    : Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const idealSpp = Math.max(1, Math.round(sampleRate / (pixelsPerSecond * dpr)));
 
   const sorted = [...fileLevels.keys()].sort((a, b) => a - b); // fine → coarse
   let best = sorted[0]; // finest as fallback

@@ -16,6 +16,8 @@ import { readPeakChunk } from "../../engine/peakChunkStore";
  * even when the viewport straddles a tile boundary.
  */
 const TILE_SIZE = 2048;
+const MAX_PEAKS_PER_COLUMN = 16;
+const DENSE_WAVEFORM_THRESHOLD = 6;
 const WAVEFORM_CONTEXT_OPTIONS: CanvasRenderingContext2DSettings = {
   alpha: false,
   desynchronized: true,
@@ -61,6 +63,7 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
   const tile1Ref = useRef<HTMLCanvasElement>(null);
   const scrollXRef = useRef(useUIStore.getState().scrollX);
   const rafRef = useRef<number | null>(null);
+  const drawVersionRef = useRef(0);
 
   // Mirror all props into a ref so imperative draw callbacks never close over stale values.
   const propsRef = useRef(props);
@@ -156,6 +159,8 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
 
     const mid = cssH / 2;
     const amp = cssH * 0.45;
+    const peaksPerColumn = Math.max(1, (peakIdxEnd - peakIdxStart + 1) / Math.max(1, cssW));
+    const dense = peaksPerColumn > DENSE_WAVEFORM_THRESHOLD;
 
     ctx.fillStyle = p.color ?? "rgba(255,255,255,0.7)";
     const baseAlpha = p.muted ? 0.4 : p.selected ? 1 : 0.9;
@@ -171,7 +176,11 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
 
       let lo = 0;
       let hi = 0;
-      for (let pk = p0; pk <= p1; pk++) {
+      const peakSpan = p1 - p0 + 1;
+      const stride = peakSpan > MAX_PEAKS_PER_COLUMN
+        ? Math.ceil(peakSpan / MAX_PEAKS_PER_COLUMN)
+        : 1;
+      for (let pk = p0; pk <= p1; pk += stride) {
         const ci    = Math.floor(pk / CHUNK_PEAKS);
         const chunk = chunks.get(ci);
         if (!chunk) continue;
@@ -190,16 +199,20 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
       const y2 = mid - lo * amp;
       const barH = Math.max(1, y2 - y1);
 
-      // Subtle horizontal smear makes dense/scrolling waveforms feel less
-      // stroboscopic while keeping the real peak envelope centered and sharp.
-      ctx.globalAlpha = baseAlpha * 0.14;
-      ctx.fillRect(x - 2, y1, 1, barH);
-      ctx.globalAlpha = baseAlpha * 0.22;
-      ctx.fillRect(x - 1, y1, 1, barH);
+      if (!dense) {
+        // Subtle horizontal smear makes close-up waveforms feel less
+        // stroboscopic while keeping the real peak envelope centered and sharp.
+        ctx.globalAlpha = baseAlpha * 0.14;
+        ctx.fillRect(x - 2, y1, 1, barH);
+        ctx.globalAlpha = baseAlpha * 0.22;
+        ctx.fillRect(x - 1, y1, 1, barH);
+      }
       ctx.globalAlpha = baseAlpha;
       ctx.fillRect(x, y1, 1, barH);
-      ctx.globalAlpha = baseAlpha * 0.16;
-      ctx.fillRect(x + 1, y1, 1, barH);
+      if (!dense) {
+        ctx.globalAlpha = baseAlpha * 0.16;
+        ctx.fillRect(x + 1, y1, 1, barH);
+      }
     }
 
     ctx.globalAlpha = 1;
@@ -271,9 +284,15 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
 
   // Throttle to one redraw per animation frame.
   const scheduleDraw = (): void => {
+    drawVersionRef.current++;
+    const version = drawVersionRef.current;
     if (rafRef.current !== null) return;
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null;
+      if (version !== drawVersionRef.current) {
+        scheduleDraw();
+        return;
+      }
       drawCanvas();
     });
   };
@@ -298,7 +317,7 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
 
   // ── Redraw when React props change ──────────────────────────────────────────
   useLayoutEffect(() => {
-    drawCanvas();
+    scheduleDraw();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileId, levelMeta, width, height, color, muted, selected, clipOffset, clipDuration, sampleRate, sourceDuration, status, clipStartPx]);
 

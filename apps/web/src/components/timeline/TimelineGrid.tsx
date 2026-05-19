@@ -5,6 +5,7 @@ import { HEADER_WIDTH } from "../../theme";
 import { getArrangementGridLines, pxPerBeat, type GridLineLevel } from "../../utils/musicalGrid";
 import { beatsPerBar } from "../../utils/musicalTime";
 import type { TimeSignature } from "../../utils/musicalTime";
+import { TimelineGpuGridRenderer } from "./timelineGpuGridRenderer";
 
 // ── Color hierarchy: sub (ghost) → beat (medium) → bar (anchor) ───────────────
 // Values chosen to be clearly readable on a dark surface without feeling harsh.
@@ -17,9 +18,19 @@ const GRID_ALPHA: Record<GridLineLevel, number> = {
 export function TimelineGrid() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef   = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number | null>(null);
+  const drawRef = useRef<(() => void) | null>(null);
+  const rendererRef = useRef<TimelineGpuGridRenderer | null>(null);
+  const stateRef = useRef({
+    pixelsPerSecond: 0,
+    scrollX: 0,
+    bpm: 120,
+    timeSig: { numerator: 4, denominator: 4 } as TimeSignature,
+  });
   const { pixelsPerSecond, scrollX } = useUIStore();
   const { bpm, timeSignature } = useProjectStore((s) => s.project);
   const timeSig: TimeSignature = timeSignature ?? { numerator: 4, denominator: 4 };
+  stateRef.current = { pixelsPerSecond, scrollX, bpm, timeSig };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -27,26 +38,41 @@ export function TimelineGrid() {
     if (!canvas || !wrap) return;
 
     let ro: ResizeObserver | null = null;
+    rendererRef.current = TimelineGpuGridRenderer.create(canvas);
 
     const draw = () => {
       if (!canvas || !wrap) return;
       const W   = wrap.offsetWidth  || 2000;
       const H   = wrap.offsetHeight || 1000;
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const { pixelsPerSecond, scrollX, bpm, timeSig } = stateRef.current;
+
+      const ppb  = pxPerBeat(pixelsPerSecond, bpm);
+      const bpb  = beatsPerBar(timeSig);
+      const barW = bpb * ppb;
+      const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W);
+
+      if (rendererRef.current) {
+        try {
+          rendererRef.current.resize(W, H, dpr);
+          rendererRef.current.render(lines, scrollX, ppb, bpb);
+          return;
+        } catch (error) {
+          console.warn("[TimelineGPU] WebGL grid render failed; falling back to Canvas2D:", error);
+          rendererRef.current.dispose();
+          rendererRef.current = null;
+        }
+      }
 
       canvas.width        = W * dpr;
       canvas.height       = H * dpr;
       canvas.style.width  = `${W}px`;
       canvas.style.height = `${H}px`;
 
-      const ctx = canvas.getContext("2d");
+      const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
       if (!ctx) return;
-      ctx.scale(dpr, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
-
-      const ppb  = pxPerBeat(pixelsPerSecond, bpm);
-      const bpb  = beatsPerBar(timeSig);
-      const barW = bpb * ppb;
 
       // ── Pass 1: alternating bar shading ──────────────────────────────────────
       // Every other bar gets a very subtle fill.  Computed directly from geometry
@@ -66,8 +92,6 @@ export function TimelineGrid() {
       }
 
       // ── Pass 2: grid lines ────────────────────────────────────────────────────
-      const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W);
-
       // Draw sub and beat lines first (thin, faint), then bar lines on top.
       // Two sub-passes lets bar lines paint over beat/sub lines cleanly at their x.
       for (const line of lines) {
@@ -91,12 +115,35 @@ export function TimelineGrid() {
         ctx.stroke();
       }
     };
+    drawRef.current = draw;
 
-    draw();
-    ro = new ResizeObserver(() => draw());
+    const scheduleDraw = () => {
+      if (rafRef.current !== null) return;
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        draw();
+      });
+    };
+
+    scheduleDraw();
+    ro = new ResizeObserver(() => scheduleDraw());
     ro.observe(wrap);
 
-    return () => ro?.disconnect();
+    return () => {
+      ro?.disconnect();
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
+      drawRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (rafRef.current !== null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      drawRef.current?.();
+    });
   }, [bpm, timeSig, pixelsPerSecond, scrollX]);
 
   return (

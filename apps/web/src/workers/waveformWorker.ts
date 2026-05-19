@@ -28,7 +28,7 @@ type WavInfo = {
 const CHUNK_BYTES = 1024 * 1024;
 
 // Coarser levels derived from the fine 256 spp scan, posted coarsest-first.
-const DERIVED_SPP = [32768, 8192, 4096, 2048, 1024, 512] as const;
+const DERIVED_SPP = [32768, 16384, 8192, 4096, 2048, 1024, 512] as const;
 
 function post(message: WorkerOutput, transfer?: Transferable[]) {
   self.postMessage(message, transfer ? { transfer } : undefined);

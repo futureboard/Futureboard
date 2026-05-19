@@ -6,6 +6,7 @@ import { writePeakChunk } from "./peakChunkStore";
 
 /** Finest peak level requested from the worker; coarser levels are derived in-worker. */
 export const PEAK_FINE_SPP = 256;
+const DERIVED_PEAK_LEVELS = [32768, 16384, 8192, 4096, 2048, 1024, 512] as const;
 import { platform } from "../platform";
 import { useProjectStore } from "../store/projectStore";
 import { addFileToTimeline, batchAddFilesToTimeline, isImportableAudioFile, readWavMetadata } from "../utils/importAudioToProject";
@@ -420,6 +421,50 @@ class AudioImportQueue {
     }).catch((e) => console.warn("[PeakMeta] waveformCache.set failed:", e));
   }
 
+  private deriveCoarserPeakLevel(fine: WaveformPeaks, targetSpp: number): WaveformPeaks {
+    const ratio = Math.max(1, Math.round(targetSpp / fine.samplesPerPeak));
+    const src = fine.peaks as Int16Array;
+    const srcPeakCount = fine.peakCount ?? Math.floor(src.length / (fine.channelCount * 2));
+    const peakCount = Math.ceil(srcPeakCount / ratio);
+    const result = new Int16Array(peakCount * fine.channelCount * 2);
+
+    for (let i = 0; i < peakCount; i++) {
+      for (let ch = 0; ch < fine.channelCount; ch++) {
+        let lo = 32767;
+        let hi = -32768;
+        for (let j = 0; j < ratio; j++) {
+          const k = i * ratio + j;
+          if (k >= srcPeakCount) break;
+          const base = (k * fine.channelCount + ch) * 2;
+          if (src[base] < lo) lo = src[base];
+          if (src[base + 1] > hi) hi = src[base + 1];
+        }
+        const out = (i * fine.channelCount + ch) * 2;
+        result[out] = lo === 32767 ? 0 : lo;
+        result[out + 1] = hi === -32768 ? 0 : hi;
+      }
+    }
+
+    return {
+      fileId: fine.fileId,
+      samplesPerPeak: targetSpp,
+      channelCount: fine.channelCount,
+      peakCount,
+      peaks: result,
+      sampleRate: fine.sampleRate,
+      duration: fine.duration,
+      version: fine.version,
+    };
+  }
+
+  private storeDerivedPeakLevels(fileId: FileId, fine: WaveformPeaks, duration: number): void {
+    for (const targetSpp of DERIVED_PEAK_LEVELS) {
+      const derived = this.deriveCoarserPeakLevel(fine, targetSpp);
+      this.storePeakChunks(derived);
+      this.registerPeakMeta(fileId, derived, duration);
+    }
+  }
+
   private async runPeakWorker(fileId: FileId, source: QueueSource, manifest: ImportedAudioAsset, duration: number): Promise<void> {
     const nativePath = manifest.cacheKey ?? manifest.storageKey ?? source.sourcePath;
     const nativePeaks = nativePath
@@ -442,6 +487,7 @@ class AudioImportQueue {
         channels: peaks.channelCount,
       });
       this.updateClipsForFile(fileId, peaks.duration ?? duration);
+      this.storeDerivedPeakLevels(fileId, peaks, duration);
       this.storePeakChunks(peaks);
       this.registerPeakMeta(fileId, peaks, duration);
       this.setJobState(fileId, "ready");

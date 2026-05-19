@@ -27,22 +27,38 @@ type WavInfo = {
 
 const CHUNK_BYTES = 1024 * 1024;
 
+// Coarser levels derived from the fine 256 spp scan, posted coarsest-first.
+const DERIVED_SPP = [32768, 8192, 4096, 2048, 1024, 512] as const;
+
 function post(message: WorkerOutput, transfer?: Transferable[]) {
   self.postMessage(message, transfer ? { transfer } : undefined);
 }
 
 self.onmessage = async (e: MessageEvent<WorkerInput>) => {
-  const { fileId, source, channelData, sampleRate, duration, samplesPerPeakList } = e.data;
+  const { fileId, source, channelData, sampleRate, duration } = e.data;
 
   try {
     if (source) {
-      await generateWavPeaks(fileId, source, samplesPerPeakList[0] ?? 8192);
+      // Single WAV scan at finest resolution, then derive coarser levels (no extra I/O).
+      const fine = await generateWavPeaks(fileId, source);
+
+      // Post coarsest first → quick visual feedback, finest last → full detail.
+      for (const targetSpp of DERIVED_SPP) {
+        const derived = deriveCoarserLevel(fine, targetSpp);
+        post({ type: "peaks", fileId, peaks: derived }, [derived.peaks.buffer]);
+      }
+      post({ type: "peaks", fileId, peaks: fine }, [(fine.peaks as Int16Array).buffer]);
       post({ type: "completed", fileId });
       return;
     }
 
     if (channelData) {
-      generateFloatPeaks(fileId, channelData, sampleRate ?? 48000, duration ?? 0, samplesPerPeakList);
+      const fine = generateFloatPeaks(fileId, channelData, sampleRate ?? 48000, duration ?? 0);
+      for (const targetSpp of DERIVED_SPP) {
+        const derived = deriveCoarserLevel(fine, targetSpp);
+        post({ type: "peaks", fileId, peaks: derived }, [derived.peaks.buffer]);
+      }
+      post({ type: "peaks", fileId, peaks: fine }, [(fine.peaks as Int16Array).buffer]);
       post({ type: "completed", fileId });
       return;
     }
@@ -53,7 +69,51 @@ self.onmessage = async (e: MessageEvent<WorkerInput>) => {
   }
 };
 
-async function generateWavPeaks(fileId: FileId, source: Blob, samplesPerPeak: number): Promise<void> {
+// ── Derive a coarser peak level by downsampling ─────────────────────────────
+
+function deriveCoarserLevel(fine: WaveformPeaks, targetSpp: number): WaveformPeaks {
+  const ratio = Math.max(1, Math.round(targetSpp / fine.samplesPerPeak));
+  const srcPeaks = fine.peaks as Int16Array;
+  const srcPeakCount = fine.peakCount ?? Math.floor(srcPeaks.length / (fine.channelCount * 2));
+  const peakCount = Math.ceil(srcPeakCount / ratio);
+  const result = new Int16Array(peakCount * fine.channelCount * 2);
+
+  for (let i = 0; i < peakCount; i++) {
+    for (let ch = 0; ch < fine.channelCount; ch++) {
+      let lo = 32767;
+      let hi = -32768;
+      for (let j = 0; j < ratio; j++) {
+        const k = i * ratio + j;
+        if (k >= srcPeakCount) break;
+        const base = (k * fine.channelCount + ch) * 2;
+        if (srcPeaks[base]     < lo) lo = srcPeaks[base];
+        if (srcPeaks[base + 1] > hi) hi = srcPeaks[base + 1];
+      }
+      const out = (i * fine.channelCount + ch) * 2;
+      result[out]     = lo === 32767  ? 0 : lo;
+      result[out + 1] = hi === -32768 ? 0 : hi;
+    }
+  }
+
+  return {
+    fileId: fine.fileId,
+    samplesPerPeak: targetSpp,
+    channelCount: fine.channelCount,
+    peakCount,
+    peaks: result,
+    sampleRate: fine.sampleRate,
+    duration: fine.duration,
+    version: fine.version,
+  };
+}
+
+// ── WAV peak generation (returns, does not post) ────────────────────────────
+
+async function generateWavPeaks(
+  fileId: FileId,
+  source: Blob,
+): Promise<WaveformPeaks> {
+  const samplesPerPeak = 256;
   const info = await readWavInfo(source);
   if (info.audioFormat !== 1 || ![16, 24, 32].includes(info.bitsPerSample)) {
     throw new Error("Only PCM WAV peak generation is supported without decode");
@@ -102,30 +162,22 @@ async function generateWavPeaks(fileId: FileId, source: Blob, samplesPerPeak: nu
     }
 
     byteOffset = nextOffset;
-    post({
-      type: "progress",
-      fileId,
-      samplesPerPeak,
-      progress: Math.min(0.98, (byteOffset - info.dataOffset) / info.dataBytes),
-    });
+    const localProgress = Math.min(0.98, (byteOffset - info.dataOffset) / info.dataBytes);
+    post({ type: "progress", fileId, samplesPerPeak, progress: localProgress });
   }
 
   if (currentPeak < peakCount) writePeak(peaks, currentPeak, info.channels, min, max);
 
-  post({
-    type: "peaks",
+  return {
     fileId,
-    peaks: {
-      fileId,
-      samplesPerPeak,
-      channelCount: info.channels,
-      peakCount,
-      peaks,
-      sampleRate: info.sampleRate,
-      duration: info.duration,
-      version: 2,
-    },
-  }, [peaks.buffer]);
+    samplesPerPeak,
+    channelCount: info.channels,
+    peakCount,
+    peaks,
+    sampleRate: info.sampleRate,
+    duration: info.duration,
+    version: 2,
+  };
 }
 
 async function readWavInfo(source: Blob): Promise<WavInfo> {
@@ -212,60 +264,48 @@ function clampInt16(value: number): number {
   return Math.max(-32768, Math.min(32767, Math.round(value * 32767)));
 }
 
+// ── Float peak generation (pre-decoded channel data) ────────────────────────
+
 function generateFloatPeaks(
   fileId: FileId,
   channelData: Float32Array[],
   sampleRate: number,
   duration: number,
-  samplesPerPeakList: number[],
-): void {
+): WaveformPeaks {
+  const samplesPerPeak = 256;
   const channelCount = channelData.length;
   const length = channelData[0]?.length ?? 0;
-  const totalLevels = Math.max(1, samplesPerPeakList.length);
+  const peakCount = Math.ceil(length / samplesPerPeak);
+  const peaks = new Int16Array(peakCount * channelCount * 2);
 
-  for (let levelIndex = 0; levelIndex < samplesPerPeakList.length; levelIndex++) {
-    const samplesPerPeak = samplesPerPeakList[levelIndex];
-    const peakCount = Math.ceil(length / samplesPerPeak);
-    const peaks = new Int16Array(peakCount * channelCount * 2);
-
-    for (let ch = 0; ch < channelCount; ch++) {
-      const data = channelData[ch];
-      for (let i = 0; i < peakCount; i++) {
-        let lo = 0;
-        let hi = 0;
-        const start = i * samplesPerPeak;
-        const end = Math.min(start + samplesPerPeak, length);
-        for (let s = start; s < end; s++) {
-          const v = data[s];
-          if (v < lo) lo = v;
-          if (v > hi) hi = v;
-        }
-        const base = (i * channelCount + ch) * 2;
-        peaks[base] = clampInt16(lo);
-        peaks[base + 1] = clampInt16(hi);
+  for (let ch = 0; ch < channelCount; ch++) {
+    const data = channelData[ch];
+    for (let i = 0; i < peakCount; i++) {
+      let lo = 0;
+      let hi = 0;
+      const start = i * samplesPerPeak;
+      const end = Math.min(start + samplesPerPeak, length);
+      for (let s = start; s < end; s++) {
+        const v = data[s];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
       }
-
-      post({
-        type: "progress",
-        fileId,
-        samplesPerPeak,
-        progress: (levelIndex + ((ch + 1) / channelCount)) / totalLevels,
-      });
+      const base = (i * channelCount + ch) * 2;
+      peaks[base] = clampInt16(lo);
+      peaks[base + 1] = clampInt16(hi);
     }
 
-    post({
-      type: "peaks",
-      fileId,
-      peaks: {
-        fileId,
-        samplesPerPeak,
-        channelCount,
-        peakCount,
-        peaks,
-        sampleRate,
-        duration,
-        version: 2,
-      },
-    }, [peaks.buffer]);
+    post({ type: "progress", fileId, samplesPerPeak, progress: (ch + 1) / channelCount });
   }
+
+  return {
+    fileId,
+    samplesPerPeak,
+    channelCount,
+    peakCount,
+    peaks,
+    sampleRate,
+    duration,
+    version: 2,
+  };
 }

@@ -123,6 +123,19 @@ pub struct JsMeterSnapshot {
     pub master_rms_r: f64,
 }
 
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsWavPeakResult {
+    pub file_id: String,
+    pub sample_rate: u32,
+    pub channel_count: u32,
+    pub duration: f64,
+    pub samples_per_peak: u32,
+    pub peak_count: u32,
+    /// Interleaved Int16 min/max pairs per peak/channel, widened for N-API.
+    pub peaks: Vec<i32>,
+}
+
 // ── Internal (non-napi) serializable types ────────────────────────────────────
 // These live purely on the Rust side and are used for project snapshots
 // passed as JSON strings from the JS side.

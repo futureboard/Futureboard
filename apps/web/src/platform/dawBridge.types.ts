@@ -149,16 +149,31 @@ export interface DawBridgeProject {
   importAudioToFolder(projectRoot: string, sourcePath: string): Promise<DawBridgeFolderImportResult | null>;
 }
 
+export type DawBridgeGpuMode = "auto" | "force" | "software";
+
 export type DawBridgeGpuFeatureStatus = {
   hardwareAccelerationEnabled: boolean;
+  gpuMode: DawBridgeGpuMode;
   features: Record<string, string>;
   gpuDescription: string | null;
   electronVersion: string;
   chromeVersion: string;
 };
 
+/** Settings persisted to futureboard-settings.json (Electron only). */
+export type DawBridgeElectronSettings = {
+  graphicRenderingMode: "auto" | "software";
+};
+
 export interface DawBridgeSys {
   getGpuInfo(): Promise<DawBridgeGpuFeatureStatus>;
+  readElectronSettings(): Promise<DawBridgeElectronSettings>;
+  writeElectronSettings(settings: DawBridgeElectronSettings): Promise<void>;
+}
+
+export interface DawBridgePeakChunk {
+  read(fileId: string, spp: number, chunkIndex: number, projectRoot: string): Promise<ArrayBuffer | null>;
+  write(fileId: string, spp: number, chunkIndex: number, data: ArrayBuffer, projectRoot: string): Promise<void>;
 }
 
 export interface DawBridgeDialog {
@@ -377,6 +392,8 @@ export interface DawElectronBridge {
   windows: DawBridgeExternalWindows;
   sys: DawBridgeSys;
 
+  /** Binary peak chunk files (Project/Cache/Peaks/). Present only in Electron client. */
+  peakChunk?: DawBridgePeakChunk;
   /** SphereDirectAudioEngine native backend. Present only in Electron client. */
   sphereAudio: DawBridgeSphereAudio;
   /** Native floating window runtime (Rust/egui binary). Present only in Electron client. */

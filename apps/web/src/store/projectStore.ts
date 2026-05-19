@@ -19,12 +19,22 @@ import type {
   TrackPreviewMode,
   TrackRouting,
   TrackSend,
-  WaveformPeaks,
   WaveformStatus,
 } from "../types/daw";
 import { normalizeProject, normalizeTrack } from "../utils/normalize";
 
 const STORAGE_KEY = "mochi-daw-project";
+
+/** Lightweight peak-level metadata stored in Zustand — NO peak data. */
+export type PeakLevelMeta = {
+  spp: number;
+  peakCount: number;
+  channelCount: number;
+  sampleRate: number;
+  duration: number;
+};
+
+type PeakMetaMap = Map<FileId, Map<number, PeakLevelMeta>>;
 
 function defaultProject(): DawProject {
   return normalizeProject({
@@ -46,13 +56,13 @@ function markDirty() {
   }
 }
 
-type PeakCache = Map<FileId, WaveformPeaks>;
 type WaveformStatusMap = Map<FileId, WaveformStatus>;
 type WaveformProgressMap = Map<FileId, number>;
 
 type ProjectStore = {
   project: DawProject;
-  peakCache: PeakCache;
+  /** Peak level metadata per file — keyed by spp. Contains NO peak data. */
+  peakMeta: PeakMetaMap;
   waveformStatus: WaveformStatusMap;
   waveformProgress: WaveformProgressMap;
 
@@ -123,8 +133,9 @@ type ProjectStore = {
   updateAsset: (assetId: string, updates: Partial<DawProjectAsset>) => void;
   removeAsset: (assetId: string) => void;
 
-  // ── Waveform cache (non-dirty) ─────────────────────────────────────────────
-  setPeaks: (fileId: FileId, peaks: WaveformPeaks) => void;
+  // ── Waveform metadata (non-dirty — actual peak data lives in peakChunkCache) ─
+  /** Register metadata for one peak resolution level. Peak data is NOT stored here. */
+  setPeakMeta: (fileId: FileId, meta: PeakLevelMeta) => void;
   setWaveformStatus: (fileId: FileId, status: WaveformStatus) => void;
   setWaveformProgress: (fileId: FileId, progress: number) => void;
 
@@ -147,23 +158,23 @@ type ProjectStore = {
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: defaultProject(),
-  peakCache: new Map(),
+  peakMeta: new Map(),
   waveformStatus: new Map(),
   waveformProgress: new Map(),
 
   // ── Project-level ──────────────────────────────────────────────────────────
 
   createNewProject: (overrides) => {
-    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
+    set({ project: defaultProject(), peakMeta: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
     if (overrides) set((s) => ({ project: { ...s.project, ...overrides } }));
   },
 
   loadProject: (project) => {
-    set({ project: normalizeProject(project as Partial<DawProject>), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
+    set({ project: normalizeProject(project as Partial<DawProject>), peakMeta: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
   },
 
   resetProject: () => {
-    set({ project: defaultProject(), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
+    set({ project: defaultProject(), peakMeta: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
   },
 
   setProjectName: (name) => {
@@ -907,17 +918,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     markDirty();
   },
 
-  // ── Waveform cache ─────────────────────────────────────────────────────────
+  // ── Waveform metadata ──────────────────────────────────────────────────────
 
-  setPeaks: (fileId, peaks) =>
+  setPeakMeta: (fileId, meta) =>
     set((s) => {
-      const next = new Map(s.peakCache);
-      next.set(fileId, peaks);
+      const nextMeta = new Map(s.peakMeta);
+      const fileLevels = new Map(nextMeta.get(fileId) ?? []);
+      fileLevels.set(meta.spp, meta);
+      nextMeta.set(fileId, fileLevels);
       const status = new Map(s.waveformStatus);
       status.set(fileId, "ready");
       const progress = new Map(s.waveformProgress);
       progress.set(fileId, 1);
-      return { peakCache: next, waveformStatus: status, waveformProgress: progress };
+      return { peakMeta: nextMeta, waveformStatus: status, waveformProgress: progress };
     }),
 
   setWaveformStatus: (fileId, status) =>
@@ -984,7 +997,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!raw) return;
     try {
       const project = JSON.parse(raw) as DawProject;
-      set({ project: normalizeProject(project as Partial<DawProject>), peakCache: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
+      set({ project: normalizeProject(project as Partial<DawProject>), peakMeta: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
     } catch {
       // corrupt — ignore
     }

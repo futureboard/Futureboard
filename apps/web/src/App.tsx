@@ -17,6 +17,7 @@ import { buildDecodedCacheKey } from "./audio/audioCacheKeys";
 import { useMetronomeStore } from "./store/metronomeStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
+import { audioImportQueue, IMPORT_LIMITS } from "./engine/AudioImportQueue";
 import { runAction } from "./menu/actionRunner";
 import { platform } from "./platform";
 import { audioDeviceService } from "./engine/AudioDeviceService";
@@ -26,6 +27,8 @@ import { PerfMonitor } from "./components/PerfMonitor";
 import type { DawProject, InsertDevice } from "./types/daw";
 import { useSettingsStore } from "./store/settingsStore";
 import { useWindowStore } from "./store/windowStore";
+import { useBackgroundTaskStore } from "./store/backgroundTaskStore";
+import { useDragWorkflowStore } from "./store/dragWorkflowStore";
 import { rememberSavedProject } from "./utils/projectLifecycle";
 import "./App.css";
 
@@ -33,7 +36,10 @@ import "./App.css";
 // Engine modules stay store-free; this adapter is the only crossing point.
 transport.setTrackGetter(() => useProjectStore.getState().project.tracks);
 transport.setFileGetter(() => useProjectStore.getState().project.files);
-transport.setPeaksCallback((fileId, peaks) => useProjectStore.getState().setPeaks(fileId, peaks));
+transport.setPeaksCallback((fileId, peaks) => {
+  audioImportQueue.storePeakChunks(peaks);
+  audioImportQueue.registerPeakMeta(fileId, peaks, peaks.duration ?? 0);
+});
 
 metronomeScheduler.setConfigGetter(() => {
   const { project } = useProjectStore.getState();
@@ -142,17 +148,26 @@ export default function App() {
 
   const handleSaveProject = async () => {
     useUIStore.getState().setSaveStatus("saving");
+    const taskId = useBackgroundTaskStore.getState().addTask({
+      kind: "project-save",
+      title: "Saving project",
+      detail: "Writing project file",
+      status: "running",
+    });
     try {
       const result = await platform.projectStorage.saveProject(useProjectStore.getState().project);
       if (!result) {
         useUIStore.getState().setSaveStatus("unsaved");
+        useBackgroundTaskStore.getState().completeTask(taskId, { detail: "Save cancelled" });
         return;
       }
       rememberSavedProject(useProjectStore.getState().project, result);
       useUIStore.getState().setSaveStatus("saved");
+      useBackgroundTaskStore.getState().completeTask(taskId, { detail: "Project saved" });
     } catch (e) {
       console.warn("[App] save project:", e);
       useUIStore.getState().setSaveStatus("error");
+      useBackgroundTaskStore.getState().failTask(taskId, e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -187,6 +202,7 @@ export default function App() {
   useEffect(() => {
     return useProjectStore.subscribe((state, prev) => {
       if (state.project !== prev.project) {
+        useDragWorkflowStore.getState().markProjectMutationDuringDrag();
         useUIStore.getState().setSaveStatus("unsaved");
       }
     });
@@ -199,11 +215,58 @@ export default function App() {
 
   // Keep the active backend synced with edits.  Electron routes these snapshots
   // to Rust; browser keeps using the WebAudio adapter.
+  // During mass import the subscription fires hundreds of times; debounce syncProject
+  // so the native engine receives one snapshot after the burst settles.
   useEffect(() => {
+    let syncTimer: ReturnType<typeof setTimeout> | null = null;
+    let syncTaskId: string | null = null;
+
+    const ensureSyncTask = (detail: string) => {
+      if (!syncTaskId || !useBackgroundTaskStore.getState().tasks[syncTaskId]) {
+        syncTaskId = useBackgroundTaskStore.getState().addTask({
+          kind: "native-sync",
+          title: "Native sync",
+          detail,
+          status: "queued",
+        });
+      } else {
+        useBackgroundTaskStore.getState().updateTask(syncTaskId, { detail, status: "queued" });
+      }
+      return syncTaskId;
+    };
+
+    const runSync = (nextProject: DawProject) => {
+      const taskId = ensureSyncTask("Applying project snapshot");
+      useBackgroundTaskStore.getState().updateTask(taskId, { status: "running" });
+      useDragWorkflowStore.getState().markNativeSyncDuringDrag();
+      try {
+        activeAudioEngine.syncProject(nextProject);
+        useBackgroundTaskStore.getState().completeTask(taskId, { detail: "Native engine synced" });
+      } catch (error) {
+        useBackgroundTaskStore.getState().failTask(taskId, error instanceof Error ? error.message : String(error));
+      } finally {
+        syncTaskId = null;
+      }
+    };
+
     return useProjectStore.subscribe((state, prev) => {
       if (state.project !== prev.project) {
-        activeAudioEngine.syncProject(state.project);
         syncInsertDeltasToEngine(state.project, prev.project);
+
+        if (audioImportQueue.isImporting) {
+          ensureSyncTask("Waiting for import burst");
+          if (syncTimer) clearTimeout(syncTimer);
+          syncTimer = setTimeout(() => {
+            syncTimer = null;
+            runSync(useProjectStore.getState().project);
+          }, IMPORT_LIMITS.nativeSyncDebounceMs);
+        } else {
+          if (syncTimer) {
+            clearTimeout(syncTimer);
+            syncTimer = null;
+          }
+          runSync(state.project);
+        }
       }
     });
   }, []);
@@ -267,6 +330,8 @@ export default function App() {
           return result;
         },
         cacheStats: () => audioCacheManager.getStats?.(),
+        dumpQueue: () => audioImportQueue.dumpQueue(),
+        importQueue: () => audioImportQueue.getDebugStats(),
       };
       console.debug("[Debug] window.__futureboardAudioDebug installed");
     }

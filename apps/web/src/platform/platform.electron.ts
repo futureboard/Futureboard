@@ -15,6 +15,7 @@ import type {
   WindowAdapter,
 } from "./platform.types";
 import { setElectronWaveformCacheProjectRoot } from "../engine/waveformCache";
+import { setPeakChunkProjectRoot } from "../engine/peakChunkStore";
 
 function bridge(): DawElectronBridge {
   const b = typeof window !== "undefined" ? window.dawElectron : undefined;
@@ -236,6 +237,7 @@ function serializeFolderProject(project: DawProject): object {
 function setProjectRootInternal(root: string | null): void {
   currentProjectRoot = root;
   setElectronWaveformCacheProjectRoot(root);
+  setPeakChunkProjectRoot(root);
 }
 
 function resolveOpenedProject(

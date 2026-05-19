@@ -1,16 +1,25 @@
 import type { DawFile, DawProjectAsset, FileId, WaveformPeaks } from "../types/daw";
 import { audioAssetManager, type ImportedAudioAsset } from "./AudioAssetManager";
-import { waveformCache, buildCacheKey, entryPeaksAsInt16, SAMPLES_PER_PEAK, WAVEFORM_CACHE_VERSION } from "./waveformCache";
+import { waveformCache, buildCacheKey, WAVEFORM_CACHE_VERSION } from "./waveformCache";
+import { putChunk, getPeakCacheStats, CHUNK_PEAKS } from "./peakChunkCache";
+import { writePeakChunk } from "./peakChunkStore";
+
+/** Finest peak level requested from the worker; coarser levels are derived in-worker. */
+export const PEAK_FINE_SPP = 256;
 import { platform } from "../platform";
 import { useProjectStore } from "../store/projectStore";
 import { addFileToTimeline, batchAddFilesToTimeline, isImportableAudioFile, readWavMetadata } from "../utils/importAudioToProject";
 import { showToast } from "../components/ui/Toast";
+import { useBackgroundTaskStore } from "../store/backgroundTaskStore";
 
 export const IMPORT_LIMITS = {
-  copyConcurrency: 2,
+  copyConcurrency: 1,
   metadataConcurrency: 2,
   peakConcurrency: 1,
-  decodeConcurrency: 1,
+  /** Never decode during import — decodes happen lazily on playback demand. */
+  decodeConcurrency: 0,
+  nativeSyncDebounceMs: 300,
+  saveDebounceMs: 1500,
 };
 
 export type AudioImportQueueState =
@@ -49,6 +58,9 @@ type TimelineTarget = {
 
 type EnqueueOptions = TimelineTarget & {
   fileId?: FileId;
+  importTaskId?: string;
+  peakTaskId?: string;
+  batchTotal?: number;
 };
 
 type Listener = () => void;
@@ -63,6 +75,7 @@ class AudioImportQueue {
   private jobs = new Map<string, AudioImportJob>();
   private sources = new Map<string, QueueSource>();
   private targets = new Map<string, TimelineTarget>();
+  private taskGroups = new Map<string, { importTaskId: string; peakTaskId: string; total: number }>();
   private queue: string[] = [];
   private activeCopies = 0;
   private activePeaks = 0;
@@ -89,21 +102,48 @@ class AudioImportQueue {
     return this.jobs.get(fileId);
   }
 
-  getDebugStats() {
-    let peakBytes = 0;
-    for (const peaks of useProjectStore.getState().peakCache.values()) {
-      peakBytes += peaks.peaks.byteLength;
+  get isImporting(): boolean {
+    return this.activeCopies > 0 || this.activePeaks > 0 || this.queue.length > 0 || this.deferredPeakJobs.length > 0;
+  }
+
+  dumpQueue(): void {
+    const jobs = this.getJobs();
+    const byState: Record<string, number> = {};
+    for (const j of jobs) byState[j.state] = (byState[j.state] ?? 0) + 1;
+    console.group("[ImportQueue] dumpQueue");
+    console.log("active copies:", this.activeCopies, "/ limit:", IMPORT_LIMITS.copyConcurrency);
+    console.log("active peaks:", this.activePeaks, "/ limit:", IMPORT_LIMITS.peakConcurrency);
+    console.log("pending queue:", this.queue.length);
+    console.log("deferred peaks:", this.deferredPeakJobs.length);
+    console.log("jobs by state:", byState);
+    console.log("total jobs:", jobs.length);
+    console.log("source total MB:", (this.sourceTotalBytes / 1024 / 1024).toFixed(1));
+    for (const j of jobs) {
+      console.log(`  [${j.state.padEnd(16)}] ${j.fileName}`);
     }
+    console.groupEnd();
+  }
+
+  getDebugStats() {
     let decodedBytes = 0;
     for (const buffer of this.decodedBuffers.values()) {
       decodedBytes += buffer.length * buffer.numberOfChannels * 4;
     }
+    const chunkStats = getPeakCacheStats();
     return {
       sourceTotalMB: this.sourceTotalBytes / 1024 / 1024,
       decodedBuffersCount: this.decodedBuffers.size,
       decodedBuffersMB: decodedBytes / 1024 / 1024,
-      peakCacheMB: peakBytes / 1024 / 1024,
+      decodedBufferBytes: decodedBytes,
+      peakCacheBytes: chunkStats.cacheBytes,
+      loadedChunks: chunkStats.loadedChunks,
+      evictions: chunkStats.evictions,
+      canvasPixels: chunkStats.canvasPixels,
       importQueueLength: this.queue.length,
+      importQueuePending: this.queue.length,
+      importQueueActive: this.activeCopies,
+      peakQueuePending: this.deferredPeakJobs.length,
+      peakQueueActive: this.activePeaks,
       activeJobs: this.activeCopies + this.activePeaks + this.activeDecodes,
     };
   }
@@ -111,6 +151,7 @@ class AudioImportQueue {
   enqueueFile(file: File, options: EnqueueOptions): DawFile | null {
     if (!isImportableAudioFile(file)) return null;
     const sourcePath = platform.fileSystem.getNativePathForFile(file) ?? undefined;
+    const taskOptions = this.ensureTaskOptions(options, 1, file.name);
     return this.enqueueSource({
       file,
       sourcePath,
@@ -118,26 +159,30 @@ class AudioImportQueue {
       size: file.size,
       lastModified: file.lastModified,
       mimeType: file.type,
-    }, options);
+    }, taskOptions);
   }
 
   async enqueueNativePath(path: string, options: EnqueueOptions): Promise<DawFile | null> {
     const stat = await platform.fileSystem.statAudioFile(path).catch(() => null);
     if (!stat) return null;
+    const taskOptions = this.ensureTaskOptions(options, 1, stat.name);
     return this.enqueueSource({
       sourcePath: path,
       name: stat.name,
       size: stat.size,
       lastModified: stat.lastModified,
       mimeType: stat.mimeType,
-    }, options);
+    }, taskOptions);
   }
 
   enqueueFiles(files: File[], options: TimelineTarget): DawFile[] {
+    const audioFiles = files.filter(isImportableAudioFile);
+    if (audioFiles.length === 0) return [];
+    const taskOptions = this.createBatchTasks(audioFiles.length);
     const imported: DawFile[] = [];
-    for (const file of files) {
+    for (const file of audioFiles) {
       // Skip timeline placement here — handled in batch below
-      const placeholder = this.enqueueFile(file, {});
+      const placeholder = this.enqueueFile(file, taskOptions);
       if (!placeholder) continue;
       imported.push(placeholder);
     }
@@ -149,7 +194,6 @@ class AudioImportQueue {
         batchAddFilesToTimeline(imported, options.startTime, options.trackId);
       }
     }
-    if (imported.length > 1) showToast(`Importing ${imported.length} files...`);
     return imported;
   }
 
@@ -203,6 +247,12 @@ class AudioImportQueue {
     });
     this.sources.set(fileId, source);
     this.targets.set(fileId, options);
+    const taskOptions = this.ensureTaskOptions(options, 1, source.name);
+    this.taskGroups.set(fileId, {
+      importTaskId: taskOptions.importTaskId,
+      peakTaskId: taskOptions.peakTaskId,
+      total: taskOptions.batchTotal,
+    });
     this.queue.push(fileId);
     this.sourceTotalBytes += source.size;
     this.emit();
@@ -231,9 +281,11 @@ class AudioImportQueue {
     const source = this.sources.get(fileId);
     if (!source) return;
     this.setJobState(fileId, "copying");
+    this.updateImportTask(fileId, "running", `Copying ${source.name}`);
     const savedManifest = await audioAssetManager.saveImportedAudioAsset(fileId, source);
 
     this.setJobState(fileId, "indexing");
+    this.updateImportTask(fileId, "running", `Scanning ${source.name}`);
     const meta = await this.readMetadata(source, savedManifest);
     const current = useProjectStore.getState().project.files.find((f) => f.id === fileId);
     const duration = meta?.duration ?? current?.duration ?? 1;
@@ -251,15 +303,17 @@ class AudioImportQueue {
     useProjectStore.getState().updateFile(fileId, updates);
     this.updateClipsForFile(fileId, duration);
     this.registerAsset(fileId, source, savedManifest, meta);
+    this.advanceParentTask(fileId, "import", source.name);
 
     const cached = await audioAssetManager.loadCachedWaveform({ ...(current ?? {}), id: fileId, ...updates } as DawFile);
     if (cached) {
-      useProjectStore.getState().setPeaks(fileId, cached);
+      // loadCachedWaveform already put chunks into LRU and called setPeakMeta
       this.setJobState(fileId, "ready");
+      this.advanceParentTask(fileId, "peak", source.name);
       return;
     }
 
-    await this.queuePeakJob(fileId, source, savedManifest, meta?.duration ?? duration);
+    this.queuePeakJob(fileId, source, savedManifest, meta?.duration ?? duration);
   }
 
   private async readMetadata(source: QueueSource, manifest: ImportedAudioAsset) {
@@ -298,23 +352,24 @@ class AudioImportQueue {
     }
   }
 
-  private queuePeakJob(fileId: FileId, source: QueueSource, manifest: ImportedAudioAsset, duration: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const start = () => {
-        this.activePeaks++;
-        this.setJobState(fileId, "generating-peaks");
-        useProjectStore.getState().setWaveformStatus(fileId, "generating-peaks");
-        this.runPeakWorker(fileId, source, manifest, duration)
-          .then(resolve)
-          .catch(reject)
-          .finally(() => {
-            this.activePeaks--;
-            this.pumpDeferredPeakJobs();
-          });
-      };
-      this.deferredPeakJobs.push(start);
-      this.pumpDeferredPeakJobs();
-    });
+  private queuePeakJob(fileId: FileId, source: QueueSource, manifest: ImportedAudioAsset, duration: number): void {
+    const start = () => {
+      this.activePeaks++;
+      this.setJobState(fileId, "generating-peaks");
+      this.updatePeakTask(fileId, "running", `Generating ${source.name}`);
+      useProjectStore.getState().setWaveformStatus(fileId, "generating-peaks");
+      this.runPeakWorker(fileId, source, manifest, duration)
+        .then(() => this.advanceParentTask(fileId, "peak", source.name))
+        .catch((error) => this.failJob(fileId, error))
+        .finally(() => {
+          this.activePeaks--;
+          this.pumpDeferredPeakJobs();
+          this.emit();
+        });
+    };
+    this.updatePeakTask(fileId, "queued", `Queued ${source.name}`);
+    this.deferredPeakJobs.push(start);
+    this.pumpDeferredPeakJobs();
   }
 
   private deferredPeakJobs: Array<() => void> = [];
@@ -326,19 +381,51 @@ class AudioImportQueue {
     }
   }
 
-  private async runPeakWorker(fileId: FileId, source: QueueSource, manifest: ImportedAudioAsset, duration: number): Promise<void> {
-    const peakSource = source.file ?? null;
-    if (!peakSource) {
-      const nativePath = manifest.cacheKey ?? manifest.storageKey ?? source.sourcePath;
-      const nativePeaks = nativePath
-        ? await platform.fileSystem.generateWavPeaks(nativePath, fileId, SAMPLES_PER_PEAK)
-        : null;
-      if (!nativePeaks) {
-        useProjectStore.getState().setWaveformStatus(fileId, "idle");
-        this.setJobState(fileId, "ready");
-        return;
-      }
+  /** Split WaveformPeaks into CHUNK_PEAKS-sized chunks, fill LRU, and fire-and-forget disk writes. */
+  storePeakChunks(peaks: WaveformPeaks): void {
+    const src = peaks.peaks as Int16Array;
+    const totalPeaks = peaks.peakCount ?? Math.floor(src.length / (peaks.channelCount * 2));
+    const chunkCount = Math.ceil(totalPeaks / CHUNK_PEAKS);
+    for (let i = 0; i < chunkCount; i++) {
+      const start = i * CHUNK_PEAKS * peaks.channelCount * 2;
+      const end   = Math.min(start + CHUNK_PEAKS * peaks.channelCount * 2, src.length);
+      const chunk = new Int16Array(src.buffer, src.byteOffset + start * 2, end - start);
+      const copy  = new Int16Array(chunk); // own buffer — src may be transferred
+      putChunk(peaks.fileId ?? "", peaks.samplesPerPeak, i, copy);
+      void writePeakChunk(peaks.fileId ?? "", peaks.samplesPerPeak, i, copy);
+    }
+  }
 
+  /** Write metadata-only waveformCache entry (peaks stripped) and update store. */
+  registerPeakMeta(fileId: FileId, peaks: WaveformPeaks, duration: number): void {
+    const totalPeaks = peaks.peakCount ?? 0;
+    useProjectStore.getState().setPeakMeta(fileId, {
+      spp:          peaks.samplesPerPeak,
+      peakCount:    totalPeaks,
+      channelCount: peaks.channelCount,
+      sampleRate:   peaks.sampleRate  ?? 48000,
+      duration:     peaks.duration    ?? duration,
+    });
+    // Persist metadata (empty peaks array) for cache-hit detection on next project open.
+    void waveformCache.set(buildCacheKey(fileId, peaks.samplesPerPeak), {
+      version:       WAVEFORM_CACHE_VERSION,
+      fileId,
+      sampleRate:    peaks.sampleRate  ?? 48000,
+      channelCount:  peaks.channelCount,
+      duration:      peaks.duration    ?? duration,
+      samplesPerPeak: peaks.samplesPerPeak,
+      peakCount:     totalPeaks,
+      createdAt:     Date.now(),
+      peaks:         new Int16Array(0), // no data — live in chunk files
+    }).catch((e) => console.warn("[PeakMeta] waveformCache.set failed:", e));
+  }
+
+  private async runPeakWorker(fileId: FileId, source: QueueSource, manifest: ImportedAudioAsset, duration: number): Promise<void> {
+    const nativePath = manifest.cacheKey ?? manifest.storageKey ?? source.sourcePath;
+    const nativePeaks = nativePath
+      ? await platform.fileSystem.generateWavPeaks(nativePath, fileId, PEAK_FINE_SPP)
+      : null;
+    if (nativePeaks) {
       const peaks: WaveformPeaks = {
         fileId,
         samplesPerPeak: nativePeaks.samplesPerPeak,
@@ -355,18 +442,15 @@ class AudioImportQueue {
         channels: peaks.channelCount,
       });
       this.updateClipsForFile(fileId, peaks.duration ?? duration);
-      useProjectStore.getState().setPeaks(fileId, peaks);
-      await waveformCache.set(buildCacheKey(fileId, peaks.samplesPerPeak), {
-        version: WAVEFORM_CACHE_VERSION,
-        fileId,
-        sampleRate: peaks.sampleRate ?? 48000,
-        channelCount: peaks.channelCount,
-        duration: peaks.duration ?? duration,
-        samplesPerPeak: peaks.samplesPerPeak,
-        peakCount: peaks.peakCount ?? 0,
-        createdAt: Date.now(),
-        peaks: peaks.peaks,
-      }).catch((error) => console.warn("[WaveformCache] set failed:", error));
+      this.storePeakChunks(peaks);
+      this.registerPeakMeta(fileId, peaks, duration);
+      this.setJobState(fileId, "ready");
+      return;
+    }
+
+    const peakSource = source.file ?? null;
+    if (!peakSource) {
+      useProjectStore.getState().setWaveformStatus(fileId, "idle");
       this.setJobState(fileId, "ready");
       return;
     }
@@ -385,28 +469,8 @@ class AudioImportQueue {
             channels: e.data.peaks.channelCount,
           });
           this.updateClipsForFile(fileId, e.data.peaks.duration ?? duration);
-          useProjectStore.getState().setPeaks(fileId, e.data.peaks);
-          waveformCache.set(buildCacheKey(fileId, e.data.peaks.samplesPerPeak), {
-            version: WAVEFORM_CACHE_VERSION,
-            fileId,
-            sampleRate: e.data.peaks.sampleRate ?? 48000,
-            channelCount: e.data.peaks.channelCount,
-            duration: e.data.peaks.duration ?? duration,
-            samplesPerPeak: e.data.peaks.samplesPerPeak,
-            peakCount: e.data.peaks.peakCount ?? 0,
-            createdAt: Date.now(),
-            peaks: entryPeaksAsInt16({
-              version: WAVEFORM_CACHE_VERSION,
-              fileId,
-              sampleRate: e.data.peaks.sampleRate ?? 48000,
-              channelCount: e.data.peaks.channelCount,
-              duration: e.data.peaks.duration ?? duration,
-              samplesPerPeak: e.data.peaks.samplesPerPeak,
-              peakCount: e.data.peaks.peakCount ?? 0,
-              createdAt: Date.now(),
-              peaks: e.data.peaks.peaks,
-            }),
-          }).catch((error) => console.warn("[WaveformCache] set failed:", error));
+          this.storePeakChunks(e.data.peaks);
+          this.registerPeakMeta(fileId, e.data.peaks, duration);
           return;
         }
         if (e.data.type === "completed") {
@@ -432,7 +496,8 @@ class AudioImportQueue {
         source: peakSource,
         sampleRate: undefined,
         duration,
-        samplesPerPeakList: [SAMPLES_PER_PEAK],
+        // Worker derives all coarser levels from this fine scan; posts coarsest first.
+        samplesPerPeakList: [PEAK_FINE_SPP],
       });
     });
   }
@@ -486,19 +551,109 @@ class AudioImportQueue {
 
   private failJob(fileId: FileId, error: unknown): void {
     const job = this.jobs.get(fileId);
+    const message = error instanceof Error ? error.message : String(error);
     if (job) {
       job.state = "failed";
-      job.error = error instanceof Error ? error.message : String(error);
+      job.error = message;
       job.updatedAt = Date.now();
     }
     useProjectStore.getState().setWaveformStatus(fileId, "error");
-    showToast(`Could not import "${job?.fileName ?? "audio"}"`, true);
+    const group = this.taskGroups.get(fileId);
+    if (group) {
+      const failedInPeak = job?.state === "generating-peaks";
+      const parentId = failedInPeak ? group.peakTaskId : group.importTaskId;
+      useBackgroundTaskStore.getState().addTask({
+        kind: failedInPeak ? "peak-generation" : "import",
+        title: job?.fileName ?? (failedInPeak ? "Waveform failed" : "Audio import failed"),
+        detail: message,
+        status: "failed",
+        error: message,
+        parentId,
+      });
+      if (failedInPeak) this.advanceParentTask(fileId, "peak", job?.fileName ?? "audio", true);
+      else {
+        this.advanceParentTask(fileId, "import", job?.fileName ?? "audio", true);
+        this.advanceParentTask(fileId, "peak", job?.fileName ?? "audio", true);
+      }
+    }
+    if (!group || group.total === 1) showToast(`Could not import "${job?.fileName ?? "audio"}"`, true);
     this.emit();
+  }
+
+  private createBatchTasks(total: number, fileName?: string): BatchTaskOptions {
+    const tasks = useBackgroundTaskStore.getState();
+    const importTitle = total === 1 && fileName ? `Importing ${fileName}` : `Importing ${total} audio files`;
+    const peakTitle = total === 1 && fileName ? `Generating waveform for ${fileName}` : "Generating waveform peaks";
+    const importTaskId = tasks.addTask({
+      kind: "import",
+      title: importTitle,
+      detail: total === 1 && fileName ? `Queued ${fileName}` : `Queued ${total} files`,
+      status: "queued",
+      progress: { current: 0, total },
+      cancellable: false,
+    });
+    const peakTaskId = tasks.addTask({
+      kind: "peak-generation",
+      title: peakTitle,
+      detail: "Waiting for import",
+      status: "queued",
+      progress: { current: 0, total },
+      cancellable: false,
+    });
+    return { importTaskId, peakTaskId, batchTotal: total };
+  }
+
+  private ensureTaskOptions(options: EnqueueOptions, total: number, fileName?: string): EnqueueOptions & BatchTaskOptions {
+    if (options.importTaskId && options.peakTaskId && options.batchTotal) {
+      return options as EnqueueOptions & BatchTaskOptions;
+    }
+    return { ...options, ...this.createBatchTasks(total, fileName) };
+  }
+
+  private updateImportTask(fileId: FileId, status: "queued" | "running", detail: string): void {
+    const group = this.taskGroups.get(fileId);
+    if (!group) return;
+    useBackgroundTaskStore.getState().updateTask(group.importTaskId, { status, detail });
+  }
+
+  private updatePeakTask(fileId: FileId, status: "queued" | "running", detail: string): void {
+    const group = this.taskGroups.get(fileId);
+    if (!group) return;
+    useBackgroundTaskStore.getState().updateTask(group.peakTaskId, { status, detail });
+  }
+
+  private advanceParentTask(fileId: FileId, kind: "import" | "peak", fileName: string, failed = false): void {
+    const group = this.taskGroups.get(fileId);
+    if (!group) return;
+    const taskId = kind === "import" ? group.importTaskId : group.peakTaskId;
+    const task = useBackgroundTaskStore.getState().tasks[taskId];
+    if (!task) return;
+    const current = Math.min(group.total, taskProgressCurrent(taskId) + 1);
+    const detail = failed ? `Failed ${fileName}` : kind === "import" ? `Imported ${fileName}` : `Generated ${fileName}`;
+    useBackgroundTaskStore.getState().updateTask(taskId, {
+      status: current >= group.total ? "complete" : "running",
+      detail,
+      progress: { current, total: group.total },
+    });
+    if (current >= group.total) {
+      const failedCount = Object.values(useBackgroundTaskStore.getState().tasks).filter((t) => t.parentId === taskId && t.status === "failed").length;
+      if (failedCount > 0) {
+        showToast(`${failedCount} files failed to ${kind === "import" ? "import" : "generate waveforms"}`, true);
+      } else {
+        showToast(kind === "import" ? `Imported ${group.total} audio file${group.total === 1 ? "" : "s"}` : `Generated waveforms for ${group.total} clip${group.total === 1 ? "" : "s"}`);
+      }
+    }
   }
 
   private emit(): void {
     for (const listener of this.listeners) listener();
   }
+}
+
+type BatchTaskOptions = Required<Pick<EnqueueOptions, "importTaskId" | "peakTaskId" | "batchTotal">>;
+
+function taskProgressCurrent(taskId: string): number {
+  return useBackgroundTaskStore.getState().tasks[taskId]?.progress?.current ?? 0;
 }
 
 function mimeFromName(name: string): string {

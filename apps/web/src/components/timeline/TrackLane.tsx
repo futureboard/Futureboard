@@ -4,15 +4,12 @@ import { AudioClip } from "./AudioClip";
 import { MidiClip } from "./MidiClip";
 import { HEADER_WIDTH, TRACK_HEIGHT } from "../../theme";
 import { useUIStore } from "../../store/uiStore";
-import { snapTime, secondsPerBeat, timelineXToTime } from "../../utils/musicalTime";
+import { snapTime, secondsPerBeat } from "../../utils/musicalTime";
 import { useProjectStore } from "../../store/projectStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { AddClipCommand } from "../../commands";
 import { isPrimaryModifier } from "../../hooks/useModifierKeys";
-import { addFileToTimeline, importAudioFileToTimelineProgressive, importNativeAudioPathToTimeline, isImportableAudioFile } from "../../utils/importAudioToProject";
-import { audioImportQueue } from "../../engine/AudioImportQueue";
 import { showToast } from "../ui/Toast";
-import { useState } from "react";
 
 type Props = {
   track: DawTrack;
@@ -23,7 +20,6 @@ type Props = {
 
 // Overscan: render clips this many seconds beyond the visible edge on each side.
 const OVERSCAN_SECONDS = 4;
-const NATIVE_AUDIO_DRAG_TYPE = "application/x-futureboard-native-audio-path";
 
 export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
   const selectedTrackId       = useUIStore((s) => s.selectedTrackId);
@@ -36,10 +32,9 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
   const viewportWidth = typeof window !== "undefined" ? window.innerWidth - HEADER_WIDTH : 1200;
   const visibleStart  = Math.max(0, scrollX / pixelsPerSecond - OVERSCAN_SECONDS);
   const visibleEnd    = scrollX / pixelsPerSecond + viewportWidth / pixelsPerSecond + OVERSCAN_SECONDS;
-  const [isDragOver, setIsDragOver] = useState(false);
 
   const selected = selectedTrackId === track.id;
-  const dropTarget = draggingClipTargetIdx === trackIndex || isDragOver;
+  const dropTarget = draggingClipTargetIdx === trackIndex;
   const even = trackIndex % 2 === 0;
 
   const bg = selected
@@ -144,71 +139,6 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
   return (
     <div
       onPointerDown={handlePointerDown}
-      onDragEnter={(e) => {
-        if (![...e.dataTransfer.types].includes("Files") && !e.dataTransfer.types.includes("application/x-mochi-file-id") && !e.dataTransfer.types.includes(NATIVE_AUDIO_DRAG_TYPE)) return;
-        setIsDragOver(true);
-      }}
-      onDragLeave={() => {
-        setIsDragOver(false);
-      }}
-      onDragOver={(e) => {
-        if (![...e.dataTransfer.types].includes("Files") && !e.dataTransfer.types.includes("application/x-mochi-file-id") && !e.dataTransfer.types.includes(NATIVE_AUDIO_DRAG_TYPE)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = "copy";
-      }}
-      onDrop={async (e) => {
-        const hasFiles = [...e.dataTransfer.types].includes("Files");
-        const hasMochiFile = e.dataTransfer.types.includes("application/x-mochi-file-id");
-        const hasNativeAudio = e.dataTransfer.types.includes(NATIVE_AUDIO_DRAG_TYPE);
-        if (!hasFiles && !hasMochiFile && !hasNativeAudio) return;
-
-        e.preventDefault();
-        e.stopPropagation();
-        setIsDragOver(false);
-
-        const { pixelsPerSecond, snapToGrid } = useUIStore.getState();
-        const { project } = useProjectStore.getState();
-
-        // Use the outer scroll container rect so coordinate math matches Timeline.tsx
-        const scrollEl = (e.currentTarget as HTMLElement).closest<HTMLElement>("[data-timeline-scroll]");
-        const scrollLeft = scrollEl?.scrollLeft ?? 0;
-        const rect = scrollEl?.getBoundingClientRect() ?? e.currentTarget.getBoundingClientRect();
-        const dropX = e.clientX - rect.left;
-        let time = Math.max(0, timelineXToTime(dropX, pixelsPerSecond, scrollLeft));
-
-        if (snapToGrid) {
-          const spb = secondsPerBeat(project.bpm);
-          time = snapTime(time, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
-        }
-
-        if (import.meta.env.DEV) {
-          console.log("[DropDebug] TrackLane drop", { dropX, scrollLeft, time, trackId: track.id });
-        }
-
-        if (hasMochiFile) {
-          const fileId = e.dataTransfer.getData("application/x-mochi-file-id");
-          const dawFile = project.files.find(f => f.id === fileId);
-          if (dawFile) addFileToTimeline(dawFile, time, track.id);
-          return;
-        }
-
-        if (hasNativeAudio) {
-          const filePath = e.dataTransfer.getData(NATIVE_AUDIO_DRAG_TYPE);
-          await importNativeAudioPathToTimeline(filePath, time, track.id);
-          return;
-        }
-
-        const list = e.dataTransfer.files;
-        if (!list?.length) return;
-        const audioFiles = Array.from(list).filter(isImportableAudioFile);
-        if (audioFiles.length === 0) return;
-        if (audioFiles.length === 1) {
-          void importAudioFileToTimelineProgressive(audioFiles[0], time, track.id);
-        } else {
-          audioImportQueue.enqueueFiles(audioFiles, { startTime: time, trackId: track.id });
-        }
-      }}
       className="relative min-w-0 flex-1 overflow-hidden border-b border-daw-border transition-colors"
       style={{
         height: TRACK_HEIGHT,

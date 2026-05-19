@@ -12,6 +12,7 @@ import {
 } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,7 @@ import {
   type FolderImportAudioResult,
   type BrowseFolderResult,
   type GpuFeatureStatus,
+  type ElectronPersistedSettings,
   type ExternalWindowConfig,
   type FloatingWindowOpenRequest,
   type FloatingWindowMixerUpdateRequest,
@@ -71,12 +73,58 @@ protocol.registerSchemesAsPrivileged([
 // the renderer responsive for a DAW workload (precise timers, GPU video
 // decode disabled, larger disk cache for code/preload V8 caching, etc.).
 
-// Hardware acceleration: enabled by default for DAW-quality canvas performance.
-// Set FUTUREBOARD_SW_RENDER=1 to opt into software rendering (e.g. on machines
-// with broken GPU drivers that cause Chromium GPU process crashes).
-if (process.env.FUTUREBOARD_SW_RENDER === "1") {
+// ── GPU mode ──────────────────────────────────────────────────────────────
+// FUTUREBOARD_GPU_MODE=auto (default) | force | software
+//
+//   auto     — let Chromium/Electron decide; no extra flags, no disabling.
+//   force    — bypass blocklist, enable rasterization + zero-copy + 2D canvas.
+//   software — disable GPU entirely (safe mode for broken drivers).
+//
+// Software rendering must be an explicit opt-in, not the packaged default.
+
+type GpuMode = "auto" | "force" | "software";
+
+function electronSettingsFilePath(): string {
+  return path.join(app.getPath("userData"), "futureboard-settings.json");
+}
+
+function readPersistedGpuMode(): GpuMode | null {
+  try {
+    const raw = readFileSync(electronSettingsFilePath(), "utf-8");
+    const parsed = JSON.parse(raw) as Partial<ElectronPersistedSettings>;
+    if (parsed.graphicRenderingMode === "auto") return "auto";
+    if (parsed.graphicRenderingMode === "software") return "software";
+  } catch {
+    // file absent or malformed — silent fallback
+  }
+  return null;
+}
+
+function resolveGpuMode(): GpuMode {
+  // Env var takes priority (dev/CI overrides)
+  const envRaw = process.env.FUTUREBOARD_GPU_MODE?.toLowerCase().trim();
+  if (envRaw === "force" || envRaw === "software" || envRaw === "auto") return envRaw as GpuMode;
+  // Fall back to persisted settings.json
+  const persisted = readPersistedGpuMode();
+  if (persisted) return persisted;
+  return "auto";
+}
+
+const GPU_MODE: GpuMode = resolveGpuMode();
+
+if (GPU_MODE === "software") {
   app.disableHardwareAcceleration();
-  console.log("[GPU] Hardware acceleration disabled via FUTUREBOARD_SW_RENDER=1");
+  app.commandLine.appendSwitch("disable-gpu");
+  console.log("[GPU] Software rendering mode (FUTUREBOARD_GPU_MODE=software)");
+} else if (GPU_MODE === "force") {
+  app.commandLine.appendSwitch("ignore-gpu-blocklist");
+  app.commandLine.appendSwitch("enable-gpu-rasterization");
+  app.commandLine.appendSwitch("enable-zero-copy");
+  app.commandLine.appendSwitch("enable-accelerated-2d-canvas");
+  app.disableDomainBlockingFor3DAPIs();
+  console.log("[GPU] Force hardware mode (FUTUREBOARD_GPU_MODE=force)");
+} else {
+  console.log("[GPU] Auto mode — GPU acceleration left to Electron defaults");
 }
 
 // Larger HTTP/disk cache so renderer JS, fonts, and assets get cached after
@@ -413,7 +461,7 @@ function createWindow(showOnReady = true): BrowserWindow {
         }
       : undefined,
     frame: false,
-    backgroundColor: "#00000000",
+    backgroundColor: "#171B22",
     hasShadow: true,
     show: false,
     paintWhenInitiallyHidden: true,
@@ -1086,6 +1134,18 @@ function openExternalRendererWindow(config: ExternalWindowConfig): string | null
   return id;
 }
 
+function closeAuxiliaryWindows(): void {
+  for (const win of externalWindows.values()) {
+    if (!win.isDestroyed()) win.close();
+  }
+  externalWindows.clear();
+  try {
+    getFloatingWindowManager().stop();
+  } catch (error) {
+    console.warn("[Window] failed to stop floating window runtime:", error);
+  }
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle(
     IpcChannels.FsPickAudioFiles,
@@ -1147,14 +1207,20 @@ function registerIpcHandlers(): void {
     IpcChannels.FsGenerateWavPeaks,
     async (_event, filePath: unknown, fileId: unknown, samplesPerPeak: unknown): Promise<WavPeakResult | null> => {
       if (!isValidString(filePath) || !isValidString(fileId)) return null;
+      const spp = typeof samplesPerPeak === "number" && Number.isFinite(samplesPerPeak) ? samplesPerPeak : 8192;
       try {
-        return await generateWavPeaksFromPath(
-          filePath,
-          fileId,
-          typeof samplesPerPeak === "number" && Number.isFinite(samplesPerPeak) ? samplesPerPeak : 8192,
-        );
+        const { sphereAudioNative } = await import("./native-audio/SphereAudioNative.js");
+        if (sphereAudioNative.initialize()) {
+          const native = sphereAudioNative.generateWavPeaks(filePath, fileId, spp);
+          if (native) return native;
+        }
       } catch (err) {
-        console.error("[WaveformPeaks] generate failed:", err);
+        console.warn("[WaveformPeaks] Rust generate failed; falling back to TS scanner:", err);
+      }
+      try {
+        return await generateWavPeaksFromPath(filePath, fileId, spp);
+      } catch (err) {
+        console.error("[WaveformPeaks] fallback generate failed:", err);
         return null;
       }
     },
@@ -1333,6 +1399,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.WindowForceClose, (event): void => {
     const win = senderWindow(event);
     if (!win) return;
+    closeAuxiliaryWindows();
     closeAllowed.add(win);
     win.close();
   });
@@ -1440,7 +1507,82 @@ function registerIpcHandlers(): void {
     },
   );
 
+  // ── Binary peak chunk storage ─────────────────────────────────────────────
+  // Files live at: <projectRoot>/Cache/Peaks/<fileId>/<spp>/chunk_<n>.bin
+
+  function peakChunkFilePath(projectRoot: string, fileId: string, spp: number, chunkIndex: number): string {
+    const safeId = fileId.replace(/[^a-zA-Z0-9_\-]/g, "_");
+    return path.join(path.normalize(projectRoot), "Cache", "Peaks", safeId, String(spp), `chunk_${chunkIndex}.bin`);
+  }
+
+  ipcMain.handle(
+    IpcChannels.PeakChunkRead,
+    async (_event, fileId: unknown, spp: unknown, chunkIndex: unknown, projectRoot: unknown): Promise<ArrayBuffer | null> => {
+      if (!isValidString(fileId) || typeof spp !== "number" || typeof chunkIndex !== "number" || !isValidString(projectRoot)) return null;
+      try {
+        const buf = await fs.readFile(peakChunkFilePath(projectRoot, fileId, spp, chunkIndex));
+        return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+      } catch {
+        return null;
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.PeakChunkWrite,
+    async (_event, fileId: unknown, spp: unknown, chunkIndex: unknown, data: unknown, projectRoot: unknown): Promise<void> => {
+      if (!isValidString(fileId) || typeof spp !== "number" || typeof chunkIndex !== "number" || !isValidString(projectRoot)) return;
+      const buf = data instanceof ArrayBuffer ? Buffer.from(data) : data instanceof Uint8Array ? Buffer.from(data) : null;
+      if (!buf) return;
+      try {
+        const filePath = peakChunkFilePath(projectRoot, fileId, spp, chunkIndex);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, buf);
+      } catch (e) {
+        console.warn("[PeakChunk] write failed:", e);
+      }
+    },
+  );
+
   // ── System / diagnostics ────────────────────────────────────────────────────
+
+  async function readElectronSettings(): Promise<ElectronPersistedSettings> {
+    try {
+      const raw = await fs.readFile(electronSettingsFilePath(), "utf-8");
+      const parsed = JSON.parse(raw) as Partial<ElectronPersistedSettings>;
+      return {
+        graphicRenderingMode:
+          parsed.graphicRenderingMode === "software" ? "software" : "auto",
+      };
+    } catch {
+      return { graphicRenderingMode: "auto" };
+    }
+  }
+
+  async function writeElectronSettings(settings: ElectronPersistedSettings): Promise<void> {
+    const p = electronSettingsFilePath();
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    const tmp = `${p}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(settings, null, 2), "utf-8");
+    await fs.rename(tmp, p);
+  }
+
+  ipcMain.handle(
+    IpcChannels.SysReadElectronSettings,
+    async (): Promise<ElectronPersistedSettings> => readElectronSettings(),
+  );
+
+  ipcMain.handle(
+    IpcChannels.SysWriteElectronSettings,
+    async (_event, settings: unknown): Promise<void> => {
+      if (typeof settings !== "object" || settings === null) return;
+      const s = settings as Partial<ElectronPersistedSettings>;
+      await writeElectronSettings({
+        graphicRenderingMode:
+          s.graphicRenderingMode === "software" ? "software" : "auto",
+      });
+    },
+  );
 
   ipcMain.handle(
     IpcChannels.SysGetGpuInfo,
@@ -1451,7 +1593,8 @@ function registerIpcHandlers(): void {
         features = app.getGPUFeatureStatus() as unknown as Record<string, string>;
       } catch { /* ignore */ }
       return {
-        hardwareAccelerationEnabled: process.env.FUTUREBOARD_SW_RENDER !== "1",
+        hardwareAccelerationEnabled: app.isHardwareAccelerationEnabled(),
+        gpuMode: GPU_MODE,
         features,
         gpuDescription,
         electronVersion: process.versions.electron ?? "unknown",
@@ -1632,26 +1775,35 @@ app.whenReady().then(async () => {
   installApplicationMenu();
 
   // Log GPU diagnostics so we can verify hardware acceleration is active.
-  try {
-    const gpuFeatures = app.getGPUFeatureStatus();
-    console.log("[GPU] Feature status:", JSON.stringify(gpuFeatures, null, 2));
-    app.getGPUInfo("basic").then((info) => {
-      const gpuInfo = info as Record<string, unknown>;
-      const gpuList = Array.isArray(gpuInfo.gpuDevice)
-        ? (gpuInfo.gpuDevice as Array<{ description?: string; vendorId?: number; deviceId?: number }>)
-        : [];
-      const primary = gpuList[0];
-      console.log(
-        "[GPU] Primary device:",
-        primary
-          ? `${primary.description ?? "unknown"} (vendor=${primary.vendorId?.toString(16) ?? "?"} device=${primary.deviceId?.toString(16) ?? "?"})`
-          : "none reported",
-      );
-      console.log("[GPU] HW acceleration enabled:", process.env.FUTUREBOARD_SW_RENDER !== "1");
-    }).catch((e) => console.warn("[GPU] getGPUInfo failed:", e));
-  } catch (e) {
-    console.warn("[GPU] getGPUFeatureStatus failed:", e);
+  function logGpuStatus(): void {
+    try {
+      const hwEnabled = app.isHardwareAccelerationEnabled();
+      const gpuFeatures = app.getGPUFeatureStatus();
+      console.log(`[GPU] mode=${GPU_MODE} hw_acceleration=${hwEnabled}`);
+      console.log("[GPU] Feature status:", JSON.stringify(gpuFeatures, null, 2));
+      app.getGPUInfo("basic").then((info) => {
+        const gpuInfo = info as Record<string, unknown>;
+        const gpuList = Array.isArray(gpuInfo.gpuDevice)
+          ? (gpuInfo.gpuDevice as Array<{ description?: string; vendorId?: number; deviceId?: number }>)
+          : [];
+        const primary = gpuList[0];
+        console.log(
+          "[GPU] Primary device:",
+          primary
+            ? `${primary.description ?? "unknown"} (vendor=${primary.vendorId?.toString(16) ?? "?"} device=${primary.deviceId?.toString(16) ?? "?"})`
+            : "none reported",
+        );
+      }).catch((e) => console.warn("[GPU] getGPUInfo failed:", e));
+    } catch (e) {
+      console.warn("[GPU] getGPUFeatureStatus failed:", e);
+    }
   }
+
+  logGpuStatus();
+  app.on("gpu-info-update", () => {
+    console.log("[GPU] gpu-info-update fired — re-logging status");
+    logGpuStatus();
+  });
 
   registerMikoProtocol();
 

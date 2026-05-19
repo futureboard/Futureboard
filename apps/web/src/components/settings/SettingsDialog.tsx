@@ -16,6 +16,7 @@ import type {
   DauxBackend,
   AudioSampleRate,
   ExtraFolderSetting,
+  GraphicRenderingMode,
 } from "../../store/settingsStore";
 import { RefreshCw, AlertCircle, FolderOpen, FolderPlus, Trash2 } from "lucide-react";
 import { activeAudioEngine } from "../../engine/activeAudioEngine";
@@ -829,6 +830,10 @@ function ProjectTab({ projectDraft, setProjectDraft }: { projectDraft: ProjectDr
 }
 
 function AppearanceTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: Partial<AppSettings>) => void }) {
+  const isElectron = platform.kind === "electron";
+  const storedGraphicMode = useSettingsStore((s) => s.graphicRenderingMode);
+  const graphicModeDirty = draft.graphicRenderingMode !== storedGraphicMode;
+
   return (
     <div className="flex flex-col">
       <SectionHeader>Theme</SectionHeader>
@@ -840,6 +845,35 @@ function AppearanceTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: 
       <SettingsRow label="Theme Style">
         <div className="text-[11px] text-daw-text-muted">Dark Mode (Default)</div>
       </SettingsRow>
+
+      {isElectron && (
+        <>
+          <SectionHeader>Graphics</SectionHeader>
+          <SettingsRow
+            label="Graphic Rendering Mode"
+            description="GPU Rendering uses hardware acceleration for canvas and UI. Software Rendering is safer on machines with unstable GPU drivers."
+          >
+            <div className="flex flex-col items-end gap-1.5">
+              <SettingsSelect<GraphicRenderingMode>
+                value={draft.graphicRenderingMode}
+                onChange={(v) => setDraft({ graphicRenderingMode: v })}
+                options={[
+                  { value: "auto",     label: "GPU Rendering" },
+                  { value: "software", label: "Software Rendering" },
+                ]}
+              />
+              <span className={`flex items-center gap-1 text-[9.5px] transition-colors ${
+                graphicModeDirty
+                  ? "text-[#e2b866]/90"
+                  : "text-white/30"
+              }`}>
+                <span>⚠</span>
+                Restart Required
+              </span>
+            </div>
+          </SettingsRow>
+        </>
+      )}
     </div>
   );
 }
@@ -1031,16 +1065,17 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
   });
 
   const [appDraft, setAppDraft] = useState<AppSettings>({
-    startupBehavior:     store.startupBehavior,
-    autoSave:            store.autoSave,
-    autoSaveIntervalMin: store.autoSaveIntervalMin,
-    preferredEngine:     store.preferredEngine,
-    preferredBufferSize: store.preferredBufferSize,
-    dauxBackend:         store.dauxBackend,
-    audioSampleRate:     store.audioSampleRate,
-    extraFolders:        store.extraFolders,
-    compactUI:           store.compactUI,
-    enableDevTools:      store.enableDevTools,
+    startupBehavior:      store.startupBehavior,
+    autoSave:             store.autoSave,
+    autoSaveIntervalMin:  store.autoSaveIntervalMin,
+    preferredEngine:      store.preferredEngine,
+    preferredBufferSize:  store.preferredBufferSize,
+    dauxBackend:          store.dauxBackend,
+    audioSampleRate:      store.audioSampleRate,
+    extraFolders:         store.extraFolders,
+    compactUI:            store.compactUI,
+    enableDevTools:       store.enableDevTools,
+    graphicRenderingMode: store.graphicRenderingMode,
   });
 
   const patchProject = (p: Partial<ProjectDraft>) => setProjectDraft((s) => ({ ...s, ...p }));
@@ -1088,6 +1123,13 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     store.applySettings(effectiveAppDraft);
     if (effectiveAppDraft.preferredEngine !== appDraft.preferredEngine) {
       setAppDraft(effectiveAppDraft);
+    }
+
+    // Persist graphicRenderingMode to settings.json so Electron reads it on next startup.
+    if (isElectron) {
+      void window.dawElectron?.sys.writeElectronSettings({
+        graphicRenderingMode: effectiveAppDraft.graphicRenderingMode,
+      });
     }
 
     useProjectStore.setState((s) => ({

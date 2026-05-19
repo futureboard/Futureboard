@@ -11,10 +11,11 @@ import { useProjectStore } from "../../store/projectStore";
 import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { secondsPerBeat, snapTime, timelineXToTime } from "../../utils/musicalTime";
 import { activeAudioEngine } from "../../engine/activeAudioEngine";
-import { addFileToTimeline, importNativeAudioPathToTimeline } from "../../utils/importAudioToProject";
+import { addFileToTimeline, importNativeAudioPathToTimeline, isImportableAudioFile } from "../../utils/importAudioToProject";
 import { audioImportQueue } from "../../engine/AudioImportQueue";
 import { TIMELINE_Z } from "../../utils/timelineZ";
-import { HEADER_WIDTH } from "../../theme";
+import { useDragWorkflowStore, type DragPreviewState } from "../../store/dragWorkflowStore";
+import { HEADER_WIDTH, TRACK_HEIGHT } from "../../theme";
 
 // Zoom range: 4 px/s lets you see ~250 bars in a typical viewport at 120 BPM.
 // 4000 px/s lets you inspect individual samples with 1/32-note subdivisions visible.
@@ -22,10 +23,22 @@ const MIN_PPS = 4;
 const MAX_PPS = 4000;
 const NATIVE_AUDIO_DRAG_TYPE = "application/x-futureboard-native-audio-path";
 
+type DragGeometry = {
+  rect: DOMRect;
+  scrollLeft: number;
+  scrollTop: number;
+  pxPerSecond: number;
+  bpm: number;
+  trackCount: number;
+};
+
 export function Timeline() {
   const [addTrackOpen, setAddTrackOpen] = useState(false);
-  const [dropHighlight, setDropHighlight] = useState(false);
   const fileDragDepth = useRef(0);
+  const dragGeometry = useRef<DragGeometry | null>(null);
+  const dragRaf = useRef<number | null>(null);
+  const lastDragEvent = useRef<React.DragEvent | null>(null);
+  const dragPreview = useDragWorkflowStore((s) => s.preview);
   const { pixelsPerSecond, setPixelsPerSecond, setScrollX, setScrollY, setTrackAreaHeight, snapToGrid, toggleSnapToGrid, currentTool, marqueeSelection, setMarqueeSelection } = useUIStore();
 
   const TOOL_CURSOR: Record<ArrangementTool, string> = {
@@ -46,17 +59,83 @@ export function Timeline() {
     return types.includes("Files") || types.includes("application/x-mochi-file-id") || types.includes(NATIVE_AUDIO_DRAG_TYPE);
   };
 
+  const cacheDragGeometry = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    dragGeometry.current = {
+      rect: el.getBoundingClientRect(),
+      scrollLeft: el.scrollLeft,
+      scrollTop: el.scrollTop,
+      pxPerSecond: useUIStore.getState().pixelsPerSecond,
+      bpm: useProjectStore.getState().project.bpm,
+      trackCount: useProjectStore.getState().project.tracks.length,
+    };
+  }, []);
+
+  const cancelDragPreviewFrame = useCallback(() => {
+    if (dragRaf.current !== null) {
+      cancelAnimationFrame(dragRaf.current);
+      dragRaf.current = null;
+    }
+    lastDragEvent.current = null;
+  }, []);
+
   const resetDragState = useCallback(() => {
     fileDragDepth.current = 0;
-    setDropHighlight(false);
-  }, []);
+    cancelDragPreviewFrame();
+    dragGeometry.current = null;
+    useDragWorkflowStore.getState().endDrag();
+  }, [cancelDragPreviewFrame]);
+
+  const computeDragPreview = useCallback((e: React.DragEvent): DragPreviewState | null => {
+    const geometry = dragGeometry.current;
+    if (!geometry) return null;
+    const fileCount = e.dataTransfer.files?.length || (e.dataTransfer.types.includes(NATIVE_AUDIO_DRAG_TYPE) || e.dataTransfer.types.includes("application/x-mochi-file-id") ? 1 : 0);
+    const contentX = e.clientX - geometry.rect.left;
+    const time = Math.max(0, timelineXToTime(contentX, geometry.pxPerSecond, geometry.scrollLeft));
+    const spb = secondsPerBeat(geometry.bpm);
+    const targetBeat = time / spb;
+    const snappedTime = snapToGrid
+      ? snapTime(time, geometry.bpm, useProjectStore.getState().project.timeSignature ?? { numerator: 4, denominator: 4 }, geometry.pxPerSecond * spb)
+      : time;
+    const y = e.clientY - geometry.rect.top + geometry.scrollTop;
+    const targetTrackIndex = Math.max(0, Math.min(Math.max(0, geometry.trackCount - 1), Math.floor(y / TRACK_HEIGHT)));
+    return {
+      isDraggingFiles: true,
+      fileCount,
+      targetTrackIndex,
+      targetBeat,
+      snappedBeat: snappedTime / spb,
+      willCreateTracks: fileCount > 1 ? fileCount : 0,
+      clientX: e.clientX,
+      clientY: e.clientY,
+    };
+  }, [snapToGrid]);
+
+  const scheduleDragPreviewUpdate = useCallback((e: React.DragEvent) => {
+    useDragWorkflowStore.getState().recordDragOverEvent();
+    lastDragEvent.current = e;
+    if (dragRaf.current !== null) return;
+    dragRaf.current = requestAnimationFrame(() => {
+      dragRaf.current = null;
+      const latest = lastDragEvent.current;
+      if (!latest) return;
+      const start = performance.now();
+      const preview = computeDragPreview(latest);
+      if (preview) useDragWorkflowStore.getState().updatePreview(preview, performance.now() - start);
+    });
+  }, [computeDragPreview]);
 
   const onTimelineDragEnter = (e: React.DragEvent) => {
     if (!isFileDrag(e)) return;
     e.preventDefault();
     e.stopPropagation();
     fileDragDepth.current += 1;
-    setDropHighlight(true);
+    if (fileDragDepth.current === 1) {
+      cacheDragGeometry();
+      useDragWorkflowStore.getState().beginDrag();
+    }
+    scheduleDragPreviewUpdate(e);
   };
 
   const onTimelineDragLeave = (e: React.DragEvent) => {
@@ -67,7 +146,7 @@ export function Timeline() {
     const next = e.relatedTarget as Node | null;
     if (next && e.currentTarget.contains(next)) return;
     fileDragDepth.current = Math.max(0, fileDragDepth.current - 1);
-    if (fileDragDepth.current === 0) setDropHighlight(false);
+    if (fileDragDepth.current === 0) resetDragState();
   };
 
   const onTimelineDragOver = (e: React.DragEvent) => {
@@ -75,7 +154,7 @@ export function Timeline() {
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = "copy";
-    if (!dropHighlight) setDropHighlight(true);
+    scheduleDragPreviewUpdate(e);
   };
 
   const onTimelineDrop = async (e: React.DragEvent) => {
@@ -94,19 +173,27 @@ export function Timeline() {
     const nativeAudioPath = hasNativeAudio ? e.dataTransfer.getData(NATIVE_AUDIO_DRAG_TYPE) : "";
     const fileList: File[] = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
     const clientX = e.clientX;
+    const clientY = e.clientY;
+    const geometry = dragGeometry.current;
 
     // Reset overlay state immediately — import is async and must never leave the overlay stuck.
     resetDragState();
 
     try {
       let time = 0;
-      if (scrollRef.current) {
+      let targetTrackId: string | undefined;
+      const currentTracks = useProjectStore.getState().project.tracks;
+      if (geometry) {
+        time = timelineXToTime(clientX - geometry.rect.left, geometry.pxPerSecond, geometry.scrollLeft);
+        const targetTrackIndex = Math.max(0, Math.min(Math.max(0, currentTracks.length - 1), Math.floor((clientY - geometry.rect.top + geometry.scrollTop) / TRACK_HEIGHT)));
+        targetTrackId = currentTracks[targetTrackIndex]?.id;
+      } else if (scrollRef.current) {
         const rect = scrollRef.current.getBoundingClientRect();
-        // The scroll container's left edge IS the outer timeline content origin
-        // (it spans full width including the sticky header lane), so
-        // timelineXToTime — which subtracts TIMELINE_CONTENT_LEFT internally —
-        // applies the same origin used by the playhead, ruler, and grid.
         time = timelineXToTime(clientX - rect.left, pixelsPerSecond, scrollRef.current.scrollLeft);
+        const targetTrackIndex = Math.max(0, Math.min(Math.max(0, currentTracks.length - 1), Math.floor((clientY - rect.top + scrollRef.current.scrollTop) / TRACK_HEIGHT)));
+        targetTrackId = currentTracks[targetTrackIndex]?.id;
+      }
+      if (geometry || scrollRef.current) {
         if (snapToGrid) {
           const spb = secondsPerBeat(bpm);
           time = snapTime(time, bpm, useProjectStore.getState().project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
@@ -120,12 +207,14 @@ export function Timeline() {
       }
 
       if (nativeAudioPath) {
-        await importNativeAudioPathToTimeline(nativeAudioPath, time);
+        await importNativeAudioPathToTimeline(nativeAudioPath, time, targetTrackId);
         return;
       }
 
       if (!fileList.length) return;
-      audioImportQueue.enqueueFiles(fileList, { startTime: time });
+      const audioFiles = fileList.filter(isImportableAudioFile);
+      if (!audioFiles.length) return;
+      audioImportQueue.enqueueFiles(audioFiles, { startTime: time, trackId: audioFiles.length === 1 ? targetTrackId : undefined });
     } finally {
       resetDragState();
     }
@@ -282,6 +371,44 @@ export function Timeline() {
   // Keep a stable ref so the wheel handler never goes stale
   const ppsRef = useRef(pixelsPerSecond);
   ppsRef.current = pixelsPerSecond;
+  const zoomRafRef = useRef<number | null>(null);
+  const zoomTargetRef = useRef(pixelsPerSecond);
+  const zoomAnchorRef = useRef<{ time: number; contentX: number } | null>(null);
+
+  const animateZoomTo = useCallback((targetPps: number, anchorTime: number, contentX: number) => {
+    const el = scrollRef.current;
+    if (!el) {
+      setPixelsPerSecond(targetPps);
+      ppsRef.current = targetPps;
+      return;
+    }
+
+    zoomTargetRef.current = Math.min(MAX_PPS, Math.max(MIN_PPS, targetPps));
+    zoomAnchorRef.current = { time: anchorTime, contentX };
+    if (zoomRafRef.current !== null) return;
+
+    const tick = () => {
+      const target = zoomTargetRef.current;
+      const current = ppsRef.current;
+      const delta = target - current;
+      const next = Math.abs(delta) < 0.08 ? target : current + delta * 0.28;
+      const anchor = zoomAnchorRef.current;
+
+      ppsRef.current = next;
+      setPixelsPerSecond(next);
+      if (anchor) {
+        el.scrollLeft = Math.max(0, anchor.time * next - anchor.contentX);
+      }
+
+      if (next === target) {
+        zoomRafRef.current = null;
+        return;
+      }
+      zoomRafRef.current = requestAnimationFrame(tick);
+    };
+
+    zoomRafRef.current = requestAnimationFrame(tick);
+  }, [setPixelsPerSecond]);
 
   // ── Ctrl/Cmd + wheel zoom (page zoom is blocked at App root) ─────────────────
   useEffect(() => {
@@ -293,10 +420,11 @@ export function Timeline() {
       e.preventDefault();
 
       // Use a slightly smaller factor for smoother, more controlled zooming.
-      const factor = e.deltaY < 0 ? 1.10 : 1 / 1.10;
+      const factor = Math.pow(1.0018, -e.deltaY);
       const oldPPS = ppsRef.current;
-      const newPPS = Math.min(MAX_PPS, Math.max(MIN_PPS, oldPPS * factor));
-      if (newPPS === oldPPS) return;
+      const targetBase = zoomRafRef.current === null ? oldPPS : zoomTargetRef.current;
+      const newPPS = Math.min(MAX_PPS, Math.max(MIN_PPS, targetBase * factor));
+      if (newPPS === targetBase) return;
 
       // Anchor zoom to the cursor position.
       // Use clientX relative to the scroll container's bounding rect rather than
@@ -306,16 +434,18 @@ export function Timeline() {
       const contentX = Math.max(0, e.clientX - rect.left - HEADER_WIDTH);
       const timeAtCursor = (el.scrollLeft + contentX) / oldPPS;
 
-      setPixelsPerSecond(newPPS);
-
-      requestAnimationFrame(() => {
-        el.scrollLeft = Math.max(0, timeAtCursor * newPPS - contentX);
-      });
+      animateZoomTo(newPPS, timeAtCursor, contentX);
     };
 
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [setPixelsPerSecond]);
+  }, [animateZoomTo]);
+
+  useEffect(() => {
+    return () => {
+      if (zoomRafRef.current !== null) cancelAnimationFrame(zoomRafRef.current);
+    };
+  }, []);
 
   // ── zoom buttons ─────────────────────────────────────────────────────────────
   // Anchor priority: playhead (if visible) > viewport center.
@@ -340,10 +470,7 @@ export function Timeline() {
     const anchorAbsX   = playheadVisible ? playheadAbsX  : scrollLeft + contentW / 2;
     const anchorOffsetX = playheadVisible ? playheadViewX : contentW / 2;
 
-    setPixelsPerSecond(newPPS);
-    requestAnimationFrame(() => {
-      el.scrollLeft = Math.max(0, (anchorAbsX / oldPPS) * newPPS - anchorOffsetX);
-    });
+    animateZoomTo(newPPS, anchorAbsX / oldPPS, anchorOffsetX);
   };
 
   const pixelsPerBeat = pixelsPerSecond * secondsPerBeat(bpm);
@@ -366,18 +493,6 @@ export function Timeline() {
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
     >
-      {dropHighlight && (
-        <div
-          className="pointer-events-none absolute inset-0 flex items-center justify-center border-2 border-dashed border-daw-accent/80 bg-daw-accent/[0.07]"
-          style={{ zIndex: TIMELINE_Z.modal }}
-          aria-hidden
-        >
-          <span className="rounded-md border border-daw-accent/40 bg-daw-surface/90 px-3 py-2 text-[11px] font-semibold text-daw-accent shadow-lg">
-            Drop audio to create new tracks
-          </span>
-        </div>
-      )}
-
       {marqueeSelection && <MarqueeSelectionOverlay state={marqueeSelection} containerRect={timelineRef.current?.getBoundingClientRect() || null} />}
 
       <TimelineRuler
@@ -403,11 +518,21 @@ export function Timeline() {
           onScroll={(e) => {
             setScrollX(e.currentTarget.scrollLeft);
             setScrollY(e.currentTarget.scrollTop);
+            if (dragGeometry.current) cacheDragGeometry();
           }}
         >
           <TrackList timelineWidth={timelineWidth} />
         </div>
       </div>
+
+      {dragPreview?.isDraggingFiles && (
+        <DragPreviewOverlay
+          preview={dragPreview}
+          timelineRect={timelineRef.current?.getBoundingClientRect() ?? null}
+          pixelsPerSecond={pixelsPerSecond}
+          trackColors={tracks.map((track) => track.color)}
+        />
+      )}
 
       {/* Playhead spans the full height of this container (ruler + all track rows).
           Positioned relative to the outer Timeline div so the triangle marker
@@ -440,6 +565,70 @@ export function Timeline() {
         >
           <ZoomIn size={12} />
         </button>
+      </div>
+    </div>
+  );
+}
+
+function DragPreviewOverlay({
+  preview,
+  timelineRect,
+  pixelsPerSecond,
+  trackColors,
+}: {
+  preview: DragPreviewState;
+  timelineRect: DOMRect | null;
+  pixelsPerSecond: number;
+  trackColors: string[];
+}) {
+  if (!timelineRect) return null;
+  const rowCount = Math.min(5, Math.max(1, preview.fileCount));
+  const extra = Math.max(0, preview.fileCount - rowCount);
+  const color = trackColors[preview.targetTrackIndex] ?? "#5FCED0";
+  const left = preview.clientX - timelineRect.left;
+  const top = preview.clientY - timelineRect.top;
+  const width = Math.max(72, Math.min(220, pixelsPerSecond * 1.2));
+
+  return (
+    <div className="pointer-events-none absolute inset-0" style={{ zIndex: TIMELINE_Z.modal }} aria-hidden>
+      <div
+        className="absolute left-0 right-0 border-y"
+        style={{
+          top: 30 + preview.targetTrackIndex * TRACK_HEIGHT,
+          height: TRACK_HEIGHT,
+          borderColor: `${color}88`,
+          background: `${color}14`,
+        }}
+      />
+      <div
+        className="absolute top-[30px] bottom-0 w-px"
+        style={{
+          left,
+          background: color,
+          boxShadow: `0 0 12px ${color}`,
+        }}
+      />
+      <div className="absolute" style={{ left: Math.max(HEADER_WIDTH + 8, left), top: Math.max(34, top - 14) }}>
+        {Array.from({ length: rowCount }).map((_, index) => (
+          <div
+            key={index}
+            className="mb-1 rounded border px-2 py-1 text-[10px] font-semibold text-daw-text shadow-lg"
+            style={{
+              width,
+              height: 24,
+              borderColor: `${color}88`,
+              background: "rgba(17,21,27,0.86)",
+              transform: `translateY(${index * 2}px)`,
+            }}
+          >
+            Audio clip preview
+          </div>
+        ))}
+        {extra > 0 && (
+          <div className="rounded border border-white/10 bg-daw-surface/90 px-2 py-1 text-[10px] text-daw-dim shadow-lg">
+            +{extra} more
+          </div>
+        )}
       </div>
     </div>
   );

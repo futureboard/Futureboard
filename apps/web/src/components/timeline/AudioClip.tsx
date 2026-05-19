@@ -15,6 +15,7 @@ import {
 import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { WaveformCanvas } from "./WaveformCanvas";
 import { TRACK_HEIGHT } from "../../theme";
+import { pickBestLevel } from "../../engine/waveformPeakSelector";
 import { formatBeatLength, secondsPerBeat, snapTime } from "../../utils/musicalTime";
 import { showToast } from "../ui/Toast";
 
@@ -53,11 +54,11 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   const pixelsPerSecond = useUIStore(s => s.pixelsPerSecond);
   const selectedClipIds = useUIStore(s => s.selectedClipIds);
   const currentTool     = useUIStore(s => s.currentTool);
-  const { peakCache, waveformStatus, waveformProgress, moveClip, moveClipToTrack, project } = useProjectStore();
-  const peaks = peakCache.get(clip.fileId);
+  const { peakMeta, waveformStatus, waveformProgress, moveClip, moveClipToTrack, project } = useProjectStore();
+  const levelMeta = pickBestLevel(peakMeta, clip.fileId, pixelsPerSecond);
   const sourceFile = project.files.find((f) => f.id === clip.fileId);
   const status = waveformStatus.get(clip.fileId)
-    ?? (peaks && peaks.peaks.length > 0 ? "ready" : sourceFile ? "loading" : "error");
+    ?? (levelMeta ? "ready" : sourceFile ? "loading" : "error");
   const progress = waveformProgress.get(clip.fileId) ?? 0;
 
   const dragStartX    = useRef(0);
@@ -455,6 +456,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   };
 
   const clipCursor = dragging ? "grabbing" : TOOL_CURSOR[currentTool] ?? "grab";
+  const statusLabel = getClipStatusLabel(status, progress);
 
   return (
     <div
@@ -493,6 +495,11 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
         <span className="truncate text-[9px] -mt-[2px] font-bold leading-none text-black/80">
           {clip.name}
         </span>
+        {statusLabel && (
+          <span className="shrink-0 rounded bg-black/20 px-1 text-[8px] font-semibold leading-[12px] text-black/65">
+            {statusLabel}
+          </span>
+        )}
         <span className="ml-auto shrink-0 text-[9px] tabular-nums text-black/60">
           {formatBeatLength(effectiveDuration, project.bpm, project.timeSignature)}
         </span>
@@ -509,18 +516,20 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
         <div className="pointer-events-none absolute inset-y-0 left-0 w-1.5 bg-white/20" />
         <div className="pointer-events-none absolute inset-y-0 right-0 w-1.5 bg-black/20" />
         <WaveformCanvas
-          peaks={peaks}
+          fileId={clip.fileId}
+          levelMeta={levelMeta}
           width={width}
           height={waveH}
           color={hex2rgba(color, 0.95)}
-          sourceDuration={sourceFile?.duration ?? peaks?.duration}
-          sampleRate={sourceFile?.sampleRate ?? peaks?.sampleRate}
+          sourceDuration={sourceFile?.duration ?? levelMeta?.duration}
+          sampleRate={sourceFile?.sampleRate ?? levelMeta?.sampleRate}
           clipOffset={clip.offset}
           clipDuration={effectiveDuration}
           muted={!!clip.muted || track.muted}
           selected={selected}
           status={status}
           progress={progress}
+          clipStartPx={left}
         />
       </div>
 
@@ -551,4 +560,22 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       )}
     </div>
   );
+}
+
+function getClipStatusLabel(status: string, progress: number): string {
+  switch (status) {
+    case "pending":
+    case "copying":
+    case "indexing":
+      return "Importing...";
+    case "generating-peaks":
+      return progress > 0 ? `Waveform ${Math.round(progress * 100)}%` : "Waveform pending";
+    case "loading":
+      return "Loading peaks";
+    case "error":
+    case "missing":
+      return "Failed";
+    default:
+      return "";
+  }
 }

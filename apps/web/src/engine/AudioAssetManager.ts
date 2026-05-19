@@ -1,14 +1,16 @@
-import type { DawFile, DawProject, FileId, WaveformPeaks } from "../types/daw";
+import type { DawFile, DawProject, FileId } from "../types/daw";
 import { audioStorage } from "./AudioStorage";
 import { audioEngine } from "./AudioEngine";
 import {
   buildCacheKey,
-  entryPeaksAsInt16,
   waveformCache,
   WAVEFORM_PEAK_LEVELS,
 } from "./waveformCache";
 import { platform } from "../platform";
 import { useProjectStore } from "../store/projectStore";
+import { putChunk } from "./peakChunkCache";
+import { readPeakChunk } from "./peakChunkStore";
+import { audioImportQueue } from "./AudioImportQueue";
 
 // Electron exposes `__futureboardPath` (set by preload) on files picked via the
 // native dialog, AND `path` (Electron File extension) on files dropped from the
@@ -115,27 +117,39 @@ class AudioAssetManager {
     return { status: "missing" };
   }
 
-  async loadCachedWaveform(file: DawFile): Promise<WaveformPeaks | null> {
+  /**
+   * Check whether disk-backed peak chunks exist for this file, load metadata
+   * into Zustand, and pre-warm chunk 0 into the LRU for immediate display.
+   * Returns true when a valid cache entry was found.
+   */
+  async loadCachedWaveform(file: DawFile): Promise<boolean> {
     const cacheKeys = (file.waveformCacheKeys?.length
       ? file.waveformCacheKeys
       : [...WAVEFORM_PEAK_LEVELS].reverse().map((level) => buildCacheKey(file.id, level)));
 
     for (const key of cacheKeys) {
-      const cached = await waveformCache.get(key).catch(() => null);
-      if (!cached) continue;
-      return {
-        fileId: file.id,
-        samplesPerPeak: cached.samplesPerPeak,
-        channelCount: cached.channelCount,
-        peakCount: cached.peakCount,
-        peaks: entryPeaksAsInt16(cached),
-        sampleRate: cached.sampleRate,
-        duration: cached.duration,
-        version: cached.version,
-      };
+      const entry = await waveformCache.get(key).catch(() => null);
+      if (!entry) continue;
+
+      // Verify chunk 0 actually exists on disk (metadata without chunks = stale).
+      const chunk0 = await readPeakChunk(file.id, entry.samplesPerPeak, 0);
+      if (!chunk0) continue;
+
+      // Warm only chunk 0 into LRU for immediate render. Long files may have
+      // many peak chunks; WaveformCanvas requests visible chunks on demand.
+      putChunk(file.id, entry.samplesPerPeak, 0, chunk0);
+
+      useProjectStore.getState().setPeakMeta(file.id, {
+        spp:          entry.samplesPerPeak,
+        peakCount:    entry.peakCount,
+        channelCount: entry.channelCount,
+        sampleRate:   entry.sampleRate,
+        duration:     entry.duration,
+      });
+      return true;
     }
 
-    return null;
+    return false;
   }
 
   async restoreProjectAssets(project: DawProject): Promise<void> {
@@ -143,15 +157,12 @@ class AudioAssetManager {
     for (const file of project.files) {
       store.setWaveformStatus(file.id, "loading");
 
-      const cachedPeaks = await this.loadCachedWaveform(file);
-      if (cachedPeaks) {
-        store.setPeaks(file.id, cachedPeaks);
-      }
+      const hasCached = await this.loadCachedWaveform(file);
 
       const resolution = await this.resolveAudioAsset(file);
       if (resolution.status === "missing") {
         store.setWaveformStatus(file.id, "missing");
-      } else if (!cachedPeaks) {
+      } else if (!hasCached) {
         store.setWaveformStatus(file.id, "idle");
       }
     }
@@ -210,7 +221,7 @@ class AudioAssetManager {
         ...manifest,
       },
       await file.arrayBuffer(),
-      (fid, peaks) => useProjectStore.getState().setPeaks(fid, peaks),
+      (fid, peaks) => { audioImportQueue.storePeakChunks(peaks); audioImportQueue.registerPeakMeta(fid, peaks, peaks.duration ?? 0); },
       (fid, progress) => useProjectStore.getState().setWaveformProgress(fid, progress),
       (fid) => useProjectStore.getState().setWaveformStatus(fid, "error"),
     );

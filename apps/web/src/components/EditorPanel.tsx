@@ -8,6 +8,7 @@ import { WaveformCanvas } from "./timeline/WaveformCanvas";
 import type { DawClip, DawTrack } from "../types/daw";
 import { clipType } from "../types/daw";
 import { MidiEditorPanel } from "./MidiEditorPanel";
+import { pickBestLevel } from "../engine/waveformPeakSelector";
 
 export function EditorPanel() {
   const { selectedClipIds } = useUIStore();
@@ -44,13 +45,14 @@ export function EditorPanel() {
 
 function AudioEditor({ clip, track }: { clip: DawClip; track: DawTrack | null | undefined }) {
   const history = useHistoryStore.getState;
-  const peakCache = useProjectStore((s) => s.peakCache);
+  const peakMeta       = useProjectStore((s) => s.peakMeta);
   const waveformStatus = useProjectStore((s) => s.waveformStatus);
-  const files = useProjectStore((s) => s.project.files);
+  const files          = useProjectStore((s) => s.project.files);
+  const pixelsPerSecond = useUIStore((s) => s.pixelsPerSecond);
 
-  const file = files.find((f) => f.id === clip.fileId);
-  const peaks = peakCache.get(clip.fileId);
-  const status = waveformStatus.get(clip.fileId) ?? "idle";
+  const file     = files.find((f) => f.id === clip.fileId);
+  const levelMeta = pickBestLevel(peakMeta, clip.fileId, pixelsPerSecond);
+  const status   = waveformStatus.get(clip.fileId) ?? "idle";
   const trackColor = track?.color ?? "#56c7c9";
 
   const waveRef = useRef<HTMLDivElement>(null);
@@ -94,15 +96,16 @@ function AudioEditor({ clip, track }: { clip: DawClip; track: DawTrack | null | 
           >
             {waveDims.w > 0 && waveDims.h > 0 && (
               <WaveformCanvas
-                peaks={peaks}
+                fileId={clip.fileId}
+                levelMeta={levelMeta}
                 width={waveDims.w}
                 height={waveDims.h}
                 clipOffset={clip.offset}
                 clipDuration={clip.duration}
                 color={trackColor}
                 status={status}
-                sourceDuration={file?.duration}
-                sampleRate={file?.sampleRate}
+                sourceDuration={file?.duration ?? levelMeta?.duration}
+                sampleRate={file?.sampleRate ?? levelMeta?.sampleRate}
               />
             )}
           </div>

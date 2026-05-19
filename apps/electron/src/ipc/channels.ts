@@ -39,8 +39,14 @@ export const IpcChannels = {
   WaveformCacheDelete: "daw:waveformCache:delete",
   WaveformCacheClear: "daw:waveformCache:clear",
 
+  // Binary peak chunk files — Project/Cache/Peaks/<fileId>/<spp>/chunk_<n>.bin
+  PeakChunkRead:  "daw:peakChunk:read",
+  PeakChunkWrite: "daw:peakChunk:write",
+
   // System / diagnostics (Electron only)
   SysGetGpuInfo: "daw:sys:getGpuInfo",
+  SysReadElectronSettings:  "daw:sys:readElectronSettings",
+  SysWriteElectronSettings: "daw:sys:writeElectronSettings",
 
   // Folder-based project operations (Electron only)
   ProjectFolderBrowseLocation: "daw:project:folderBrowseLocation",
@@ -208,12 +214,21 @@ export type BrowseFolderResult = {
   folderPath?: string;
 };
 
+export type GpuMode = "auto" | "force" | "software";
+
 export type GpuFeatureStatus = {
   hardwareAccelerationEnabled: boolean;
+  gpuMode: GpuMode;
   features: Record<string, string>;
   gpuDescription: string | null;
   electronVersion: string;
   chromeVersion: string;
+};
+
+/** Settings persisted to disk (userData/futureboard-settings.json).
+ *  Read synchronously at startup for pre-ready configuration (GPU mode). */
+export type ElectronPersistedSettings = {
+  graphicRenderingMode: "auto" | "software";
 };
 
 export type FloatingWindowKind = "Mixer" | "Midi" | "Analyzer" | "PluginEditorPlaceholder";

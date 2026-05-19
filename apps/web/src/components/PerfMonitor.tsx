@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { platform } from "../platform";
 import { audioImportQueue } from "../engine/AudioImportQueue";
+import { useProjectStore } from "../store/projectStore";
+import { useDragWorkflowStore } from "../store/dragWorkflowStore";
+import { backgroundTaskStats } from "../store/backgroundTaskStore";
 
 type GpuInfo = {
   hardwareAccelerationEnabled: boolean;
@@ -17,7 +20,13 @@ type Stats = {
   webgl: string;
   webgpu: string;
   audioImport: ReturnType<typeof audioImportQueue.getDebugStats>;
+  drag: ReturnType<typeof getDragStats>;
+  backgroundTasks: ReturnType<typeof backgroundTaskStats>;
 };
+
+function getDragStats() {
+  return useDragWorkflowStore.getState().stats;
+}
 
 function getWebGLStatus(): string {
   try {
@@ -53,6 +62,8 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
     webgl: "...",
     webgpu: "...",
     audioImport: audioImportQueue.getDebugStats(),
+    drag: getDragStats(),
+    backgroundTasks: backgroundTaskStats(),
   });
 
   const frameTimesRef = useRef<number[]>([]);
@@ -68,14 +79,12 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
       return;
     }
 
-    // Fetch GPU info once on mount
     if (platform.kind === "electron") {
       bridge().sys.getGpuInfo().then((info) => {
         setStats((s) => ({ ...s, gpuInfo: info }));
       }).catch(() => {});
     }
 
-    getWebGLStatus();
     setStats((s) => ({ ...s, webgl: getWebGLStatus() }));
     getWebGPUStatus().then((v) => setStats((s) => ({ ...s, webgpu: v })));
 
@@ -95,6 +104,8 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
         fps,
         frameMs: Math.round(avgMs * 10) / 10,
         audioImport: audioImportQueue.getDebugStats(),
+        drag: getDragStats(),
+        backgroundTasks: backgroundTaskStats(),
       }));
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -107,17 +118,27 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
 
   if (!visible) return null;
 
-  const { fps, frameMs, gpuInfo, webgl, webgpu, audioImport } = stats;
-  const hwAccel = gpuInfo?.hardwareAccelerationEnabled ?? (platform.kind !== "electron" ? true : null);
+  const { fps, frameMs, gpuInfo, webgl, webgpu, audioImport, drag, backgroundTasks } = stats;
+  const { peakMeta, project } = useProjectStore.getState();
+  const visibleTrackCount = project.tracks.length;
+  const hwAccel  = gpuInfo?.hardwareAccelerationEnabled ?? (platform.kind !== "electron" ? true : null);
   const canvasOop = gpuInfo?.features?.["canvas_oop_rasterization"] ?? null;
+
+  // Count loaded peak levels across all files
+  let totalLevelCount = 0;
+  for (const fileLevels of peakMeta.values()) totalLevelCount += fileLevels.size;
+
+  const peakCacheMB  = audioImport.peakCacheBytes / 1024 / 1024;
+  const decodedMB    = audioImport.decodedBufferBytes / 1024 / 1024;
+  const canvasMpx    = audioImport.canvasPixels / 1_000_000;
 
   return (
     <div
-      className="pointer-events-none fixed bottom-8 right-4 z-[9999] min-w-[240px] rounded border border-white/10 bg-black/80 p-2 font-mono text-[10px] text-white/80 shadow-xl backdrop-blur-sm"
+      className="pointer-events-none fixed bottom-8 right-4 z-[9999] min-w-[260px] rounded border border-white/10 bg-black/80 p-2 font-mono text-[10px] text-white/80 shadow-xl backdrop-blur-sm"
     >
       <div className="mb-1 text-[9px] font-semibold uppercase tracking-widest text-white/40">Perf Monitor</div>
 
-      <Row label="FPS" value={`${fps}`} ok={fps >= 55} warn={fps >= 30} />
+      <Row label="FPS"   value={`${fps}`}        ok={fps >= 55}      warn={fps >= 30} />
       <Row label="Frame" value={`${frameMs} ms`} ok={frameMs <= 16.7} warn={frameMs <= 33} />
 
       <Divider />
@@ -137,29 +158,54 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
             warn={canvasOop === null}
           />
           <Row label="Electron" value={gpuInfo?.electronVersion ?? "..."} />
-          <Row label="Chrome" value={gpuInfo?.chromeVersion ?? "..."} />
+          <Row label="Chrome"   value={gpuInfo?.chromeVersion   ?? "..."} />
           <Divider />
         </>
       )}
 
-      <Row
-        label="WebGL2"
-        value={webgl}
-        ok={webgl.startsWith("OK")}
-        warn={false}
-      />
-      <Row
-        label="WebGPU"
-        value={webgpu}
-        ok={webgpu.startsWith("OK")}
-        warn={false}
-      />
+      <Row label="WebGL2" value={webgl}  ok={webgl.startsWith("OK")}  warn={false} />
+      <Row label="WebGPU" value={webgpu} ok={webgpu.startsWith("OK")} warn={false} />
 
       <Divider />
-      <Row label="Import Q" value={`${audioImport.importQueueLength} queued / ${audioImport.activeJobs} active`} />
-      <Row label="Sources" value={`${audioImport.sourceTotalMB.toFixed(1)} MB`} />
-      <Row label="Decoded" value={`${audioImport.decodedBuffersCount} / ${audioImport.decodedBuffersMB.toFixed(1)} MB`} />
-      <Row label="Peaks" value={`${audioImport.peakCacheMB.toFixed(1)} MB`} />
+
+      <Row label="Drag events" value={`${drag.dragOverEventsPerSecond}/s`} ok={drag.dragOverEventsPerSecond < 120} warn={drag.dragOverEventsPerSecond < 240} />
+      <Row label="Drag frames" value={`${drag.dragPreviewFramesPerSecond}/s · ${drag.dragPreviewUpdateMs.toFixed(2)} ms`} ok={drag.dragPreviewUpdateMs < 4} warn={drag.dragPreviewUpdateMs < 10} />
+      <Row label="Drag mut" value={`${drag.projectMutationsDuringDrag} project / ${drag.nativeSyncDuringDrag} native`} ok={drag.projectMutationsDuringDrag === 0 && drag.nativeSyncDuringDrag === 0} warn={false} />
+      <Divider />
+
+      <Row label="Import Q" value={`${audioImport.importQueuePending} queued / ${audioImport.importQueueActive} active`} ok={audioImport.importQueueActive === 0} warn={audioImport.importQueueActive > 0} />
+      <Row label="Peak Q" value={`${audioImport.peakQueuePending} queued / ${audioImport.peakQueueActive} active`} ok={audioImport.peakQueueActive === 0} warn={audioImport.peakQueueActive > 0} />
+      <Row label="BG tasks" value={`${backgroundTasks.active} active / ${backgroundTasks.failed} failed`} ok={backgroundTasks.active === 0 && backgroundTasks.failed === 0} warn={backgroundTasks.failed === 0} />
+      <Row label="Sources"  value={`${audioImport.sourceTotalMB.toFixed(1)} MB`} />
+
+      <Divider />
+
+      <Row
+        label="Peak cache"
+        value={`${peakCacheMB.toFixed(1)} MB · ${audioImport.loadedChunks} chunks`}
+        ok={peakCacheMB < 64}
+        warn={peakCacheMB < 100}
+      />
+      <Row
+        label="Evictions"
+        value={`${audioImport.evictions}`}
+        ok={audioImport.evictions === 0}
+        warn={audioImport.evictions > 0}
+      />
+      <Row
+        label="Decoded buf"
+        value={`${decodedMB.toFixed(1)} MB`}
+        ok={audioImport.decodedBuffersCount === 0}
+        warn={audioImport.decodedBuffersCount > 0}
+      />
+      <Row
+        label="Canvas px"
+        value={`${canvasMpx.toFixed(1)} Mpx`}
+        ok={canvasMpx < 50}
+        warn={canvasMpx < 200}
+      />
+      <Row label="Peak lvls" value={`${totalLevelCount} levels / ${project.files.length} files`} />
+      <Row label="Tracks"    value={`${visibleTrackCount}`} />
 
       <div className="mt-1.5 text-[9px] text-white/30">Ctrl+Shift+P to toggle</div>
     </div>

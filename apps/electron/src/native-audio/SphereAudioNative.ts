@@ -134,6 +134,21 @@ interface NativeDauxStatus {
   mmcssActive:        boolean;
 }
 
+interface NativeWavPeakResult {
+  fileId?: string;
+  file_id?: string;
+  sampleRate?: number;
+  sample_rate?: number;
+  channelCount?: number;
+  channel_count?: number;
+  duration: number;
+  samplesPerPeak?: number;
+  samples_per_peak?: number;
+  peakCount?: number;
+  peak_count?: number;
+  peaks: number[];
+}
+
 /** Shape of the `SphereDirectAudioEngine` napi class instance. */
 interface NativeEngine {
   getVersion(): string;
@@ -165,6 +180,7 @@ interface NativeEngine {
   startRecording(config: NativeStartRecordingConfig): void;
   stopRecording(): NativeRecordingResult[];
   getRecordingStatus(): NativeRecordingStatus;
+  generateWavPeaks(filePath: string, fileId: string, samplesPerPeak: number): NativeWavPeakResult;
 }
 
 interface NativeRecordingTrackConfig {
@@ -612,6 +628,28 @@ export class SphereAudioNative {
   getRecordingStatus(): SphereRecordingStatus {
     if (!this._engine) return { active: false, durationSeconds: 0, trackCount: 0 };
     return this._engine.getRecordingStatus();
+  }
+
+  generateWavPeaks(filePath: string, fileId: string, samplesPerPeak: number): {
+    fileId: string;
+    sampleRate: number;
+    channelCount: number;
+    duration: number;
+    samplesPerPeak: number;
+    peakCount: number;
+    peaks: number[];
+  } | null {
+    if (!this._engine) return null;
+    const result = this._engine.generateWavPeaks(filePath, fileId, samplesPerPeak);
+    return {
+      fileId: result.fileId ?? result.file_id ?? fileId,
+      sampleRate: result.sampleRate ?? result.sample_rate ?? 48000,
+      channelCount: result.channelCount ?? result.channel_count ?? 1,
+      duration: result.duration,
+      samplesPerPeak: result.samplesPerPeak ?? result.samples_per_peak ?? samplesPerPeak,
+      peakCount: result.peakCount ?? result.peak_count ?? 0,
+      peaks: result.peaks,
+    };
   }
 }
 

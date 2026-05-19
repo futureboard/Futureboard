@@ -16,12 +16,29 @@ export type MeterState = {
 
 type MeterListener = (snapshot: TrackMeterSnapshot) => void;
 
+type MeterBroadcastMessage = {
+  sourceId: string;
+  snapshot: TrackMeterSnapshot;
+};
+
 class MeterStore {
   private state: MeterState = {
     tracks: {},
     master: zeroTrack("master"),
   };
   private listeners = new Map<string, Set<MeterListener>>();
+  private readonly sourceId = crypto.randomUUID();
+  private channel: BroadcastChannel | null = null;
+
+  constructor() {
+    if (typeof BroadcastChannel === "undefined") return;
+    this.channel = new BroadcastChannel("futureboard-meter-store");
+    this.channel.onmessage = (event: MessageEvent<MeterBroadcastMessage>) => {
+      const data = event.data;
+      if (!data || data.sourceId === this.sourceId || !data.snapshot) return;
+      this.applySnapshot(data.snapshot, false);
+    };
+  }
 
   getSnapshot(trackId: string): TrackMeterSnapshot {
     return trackId === "master" ? this.state.master : this.state.tracks[trackId] ?? zeroTrack(trackId);
@@ -55,8 +72,7 @@ class MeterStore {
       rmsR: level.rmsR,
       updatedAt: performance.now(),
     };
-    this.state.tracks = { ...this.state.tracks, [trackId]: snapshot };
-    this.emit(trackId, snapshot);
+    this.applySnapshot(snapshot, true);
   }
 
   updateMaster(level: { l: number; r: number; rmsL?: number; rmsR?: number }): void {
@@ -68,15 +84,33 @@ class MeterStore {
       rmsR: level.rmsR,
       updatedAt: performance.now(),
     };
-    this.state.master = snapshot;
-    this.emit("master", snapshot);
+    this.applySnapshot(snapshot, true);
   }
 
   clearTrack(trackId: string): void {
     const next = { ...this.state.tracks };
     delete next[trackId];
     this.state.tracks = next;
-    this.emit(trackId, zeroTrack(trackId));
+    const snapshot = zeroTrack(trackId);
+    this.emit(trackId, snapshot);
+    this.broadcast(snapshot);
+  }
+
+  private applySnapshot(snapshot: TrackMeterSnapshot, shouldBroadcast: boolean): void {
+    if (snapshot.trackId === "master") {
+      this.state.master = snapshot;
+    } else {
+      this.state.tracks = { ...this.state.tracks, [snapshot.trackId]: snapshot };
+    }
+    this.emit(snapshot.trackId, snapshot);
+    if (shouldBroadcast) this.broadcast(snapshot);
+  }
+
+  private broadcast(snapshot: TrackMeterSnapshot): void {
+    this.channel?.postMessage({
+      sourceId: this.sourceId,
+      snapshot,
+    } satisfies MeterBroadcastMessage);
   }
 
   private emit(trackId: string, snapshot: TrackMeterSnapshot): void {

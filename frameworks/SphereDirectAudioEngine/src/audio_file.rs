@@ -8,7 +8,7 @@
 //! finished `AudioFileBuffer` through an `Arc` — no allocation at runtime.
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use symphonia::core::audio::SampleBuffer;
@@ -53,6 +53,112 @@ pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
 
         other => Err(format!("unsupported native audio format '{other}'")),
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct WavPeakResult {
+    pub sample_rate: u32,
+    pub channel_count: u32,
+    pub duration: f64,
+    pub samples_per_peak: u32,
+    pub peak_count: u32,
+    pub peaks: Vec<i32>,
+}
+
+pub fn generate_wav_peaks_from_path(
+    path: &str,
+    samples_per_peak: u32,
+) -> Result<WavPeakResult, String> {
+    let p = Path::new(path);
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "wav" && ext != "wave" {
+        return Err("Rust peak generation currently supports PCM WAV only".to_string());
+    }
+
+    let mut file = File::open(p).map_err(|e| format!("Cannot open '{}': {e}", p.display()))?;
+    let (fmt, data_start, data_len) = read_wav_header(&mut file)?;
+    if fmt.audio_format != 1 || !matches!(fmt.bits_per_sample, 16 | 24 | 32) {
+        return Err(format!(
+            "unsupported WAV format for peak scan: format={} bits={}",
+            fmt.audio_format, fmt.bits_per_sample
+        ));
+    }
+
+    let bytes_per_sample = (fmt.bits_per_sample / 8) as usize;
+    let bytes_per_frame = fmt.channels * bytes_per_sample;
+    if bytes_per_frame == 0 || data_len < bytes_per_frame as u64 {
+        return Err("empty WAV data".to_string());
+    }
+
+    let frames = (data_len / bytes_per_frame as u64) as usize;
+    let spp = samples_per_peak.max(1) as usize;
+    let peak_count = frames.div_ceil(spp);
+    let mut peaks = vec![0i32; peak_count * fmt.channels * 2];
+    let mut min = vec![1.0f32; fmt.channels];
+    let mut max = vec![-1.0f32; fmt.channels];
+
+    file.seek(SeekFrom::Start(data_start))
+        .map_err(|e| format!("seek failed: {e}"))?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut remaining = data_len;
+    let mut frame_index = 0usize;
+    let mut current_peak = 0usize;
+
+    while remaining > 0 {
+        let wanted = buffer.len().min(remaining as usize);
+        let aligned = if remaining as usize <= buffer.len() {
+            wanted
+        } else {
+            (wanted / bytes_per_frame).max(1) * bytes_per_frame
+        };
+        let read = file
+            .read(&mut buffer[..aligned])
+            .map_err(|e| format!("read failed: {e}"))?;
+        if read == 0 {
+            break;
+        }
+
+        let frame_count = read / bytes_per_frame;
+        for frame in 0..frame_count {
+            let frame_byte = frame * bytes_per_frame;
+            for ch in 0..fmt.channels {
+                let sample_byte = frame_byte + ch * bytes_per_sample;
+                let value = read_wav_pcm_sample(&buffer, sample_byte, fmt.bits_per_sample)?;
+                if value < min[ch] {
+                    min[ch] = value;
+                }
+                if value > max[ch] {
+                    max[ch] = value;
+                }
+            }
+
+            frame_index += 1;
+            if frame_index % spp == 0 {
+                write_i16_peak_i32(&mut peaks, current_peak, fmt.channels, &min, &max);
+                current_peak += 1;
+                reset_peak_min_max(&mut min, &mut max);
+            }
+        }
+
+        remaining = remaining.saturating_sub((frame_count * bytes_per_frame) as u64);
+    }
+
+    if current_peak < peak_count {
+        write_i16_peak_i32(&mut peaks, current_peak, fmt.channels, &min, &max);
+    }
+
+    Ok(WavPeakResult {
+        sample_rate: fmt.sample_rate,
+        channel_count: fmt.channels as u32,
+        duration: frames as f64 / fmt.sample_rate as f64,
+        samples_per_peak: spp as u32,
+        peak_count: peak_count as u32,
+        peaks,
+    })
 }
 
 // ── Symphonia decoder ──────────────────────────────────────────────────────────
@@ -256,6 +362,74 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
     })
 }
 
+fn read_wav_header(file: &mut File) -> Result<(WavFmt, u64, u64), String> {
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header)
+        .map_err(|e| format!("read WAV header failed: {e}"))?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE file".to_string());
+    }
+
+    let mut fmt: Option<WavFmt> = None;
+    let mut data_range: Option<(u64, u64)> = None;
+    let mut cursor = 12u64;
+
+    loop {
+        let mut chunk_header = [0u8; 8];
+        match file.read_exact(&mut chunk_header) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("read WAV chunk header failed: {e}")),
+        }
+        let id = &chunk_header[0..4];
+        let len = u32::from_le_bytes([
+            chunk_header[4],
+            chunk_header[5],
+            chunk_header[6],
+            chunk_header[7],
+        ]) as u64;
+        let body = cursor + 8;
+
+        match id {
+            b"fmt " => {
+                let mut buf = vec![0u8; len as usize];
+                file.read_exact(&mut buf)
+                    .map_err(|e| format!("read fmt chunk failed: {e}"))?;
+                if buf.len() < 16 {
+                    return Err("invalid fmt chunk".to_string());
+                }
+                fmt = Some(WavFmt {
+                    audio_format: u16::from_le_bytes([buf[0], buf[1]]),
+                    channels: u16::from_le_bytes([buf[2], buf[3]]) as usize,
+                    sample_rate: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+                    bits_per_sample: u16::from_le_bytes([buf[14], buf[15]]),
+                });
+            }
+            b"data" => {
+                data_range = Some((body, len));
+                break;
+            }
+            _ => {
+                file.seek(SeekFrom::Current(len as i64))
+                    .map_err(|e| format!("skip WAV chunk failed: {e}"))?;
+            }
+        }
+
+        if len % 2 == 1 {
+            file.seek(SeekFrom::Current(1))
+                .map_err(|e| format!("skip WAV padding failed: {e}"))?;
+        }
+        cursor = body + len + (len % 2);
+    }
+
+    let fmt = fmt.ok_or_else(|| "missing fmt chunk".to_string())?;
+    let (data_start, data_len) = data_range.ok_or_else(|| "missing data chunk".to_string())?;
+    if fmt.channels == 0 || fmt.sample_rate == 0 {
+        return Err("invalid channel count or sample rate".to_string());
+    }
+    Ok((fmt, data_start, data_len))
+}
+
 // ── Byte-level helpers ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -300,4 +474,38 @@ fn read_i32_le(bytes: &[u8], offset: usize) -> Result<i32, String> {
         .get(offset..offset + 4)
         .ok_or_else(|| "unexpected EOF reading i32".to_string())?;
     Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn read_wav_pcm_sample(bytes: &[u8], offset: usize, bits_per_sample: u16) -> Result<f32, String> {
+    match bits_per_sample {
+        16 => Ok(read_i16_le(bytes, offset)? as f32 / 32_768.0),
+        24 => Ok(read_i24_le(bytes, offset)? as f32 / 8_388_608.0),
+        32 => Ok(read_i32_le(bytes, offset)? as f32 / 2_147_483_648.0),
+        bits => Err(format!("unsupported WAV bit depth: {bits}")),
+    }
+}
+
+fn reset_peak_min_max(min: &mut [f32], max: &mut [f32]) {
+    for i in 0..min.len() {
+        min[i] = 1.0;
+        max[i] = -1.0;
+    }
+}
+
+fn write_i16_peak_i32(
+    peaks: &mut [i32],
+    peak_index: usize,
+    channels: usize,
+    min: &[f32],
+    max: &[f32],
+) {
+    for ch in 0..channels {
+        let base = (peak_index * channels + ch) * 2;
+        peaks[base] = clamp_i16_as_i32(min[ch]);
+        peaks[base + 1] = clamp_i16_as_i32(max[ch]);
+    }
+}
+
+fn clamp_i16_as_i32(value: f32) -> i32 {
+    (value.clamp(-1.0, 1.0) * 32767.0).round().clamp(-32768.0, 32767.0) as i32
 }

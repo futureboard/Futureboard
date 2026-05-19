@@ -22,6 +22,7 @@ import {
   type BrowserIndexStatus,
   type BrowserRootEntry,
   type GpuFeatureStatus,
+  type ElectronPersistedSettings,
   type SphereDeviceOpenConfig,
   type SphereTransportState,
   type SphereDauxConfig,
@@ -95,6 +96,13 @@ const windowBridge = Object.freeze({
   forceClose: (): Promise<void> => invoke(IpcChannels.WindowForceClose),
 });
 
+const peakChunkBridge = Object.freeze({
+  read: (fileId: string, spp: number, chunkIndex: number, projectRoot: string): Promise<ArrayBuffer | null> =>
+    invoke(IpcChannels.PeakChunkRead, fileId, spp, chunkIndex, projectRoot),
+  write: (fileId: string, spp: number, chunkIndex: number, data: ArrayBuffer, projectRoot: string): Promise<void> =>
+    invoke(IpcChannels.PeakChunkWrite, fileId, spp, chunkIndex, data, projectRoot),
+});
+
 const waveformCacheBridge = Object.freeze({
   get: (key: string, projectRoot?: string): Promise<WaveformCacheEntryIpc | null> =>
     invoke(IpcChannels.WaveformCacheGet, key, projectRoot),
@@ -118,6 +126,10 @@ const windowsBridge = Object.freeze({
 const sysBridge = Object.freeze({
   getGpuInfo: (): Promise<GpuFeatureStatus> =>
     invoke(IpcChannels.SysGetGpuInfo),
+  readElectronSettings: (): Promise<ElectronPersistedSettings> =>
+    invoke(IpcChannels.SysReadElectronSettings),
+  writeElectronSettings: (settings: ElectronPersistedSettings): Promise<void> =>
+    invoke(IpcChannels.SysWriteElectronSettings, settings),
 });
 
 const floatingWindowBridge = Object.freeze({
@@ -175,6 +187,7 @@ const dawElectron = Object.freeze({
   dialog: dialogBridge,
   window: windowBridge,
   windows: windowsBridge,
+  peakChunk: peakChunkBridge,
   waveformCache: waveformCacheBridge,
   sys: sysBridge,
   /** SphereDirectAudioEngine native backend bridge. Presence indicates Electron client. */

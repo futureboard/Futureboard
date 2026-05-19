@@ -23,6 +23,8 @@ export type ExtraFolderSetting = {
   addedAt: number;
 };
 
+export type GraphicRenderingMode = "auto" | "software";
+
 export type AppSettings = {
   startupBehavior: StartupBehavior;
   autoSave: boolean;
@@ -37,6 +39,8 @@ export type AppSettings = {
   extraFolders: ExtraFolderSetting[];
   compactUI: boolean;
   enableDevTools: boolean;
+  /** GPU vs software rendering (Electron only). Requires restart. Persisted to settings.json. */
+  graphicRenderingMode: GraphicRenderingMode;
 };
 
 const DEFAULTS: AppSettings = {
@@ -50,6 +54,7 @@ const DEFAULTS: AppSettings = {
   extraFolders: [],
   compactUI: false,
   enableDevTools: false,
+  graphicRenderingMode: "auto",
 };
 
 function normalizeExtraFolders(raw: unknown): ExtraFolderSetting[] {
@@ -106,16 +111,17 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   applySettings(patch) {
     set((s) => {
       const next: AppSettings = {
-        startupBehavior:    patch.startupBehavior    ?? s.startupBehavior,
-        autoSave:           patch.autoSave           ?? s.autoSave,
-        autoSaveIntervalMin:patch.autoSaveIntervalMin ?? s.autoSaveIntervalMin,
-        preferredEngine:    patch.preferredEngine    ?? s.preferredEngine,
-        preferredBufferSize:patch.preferredBufferSize ?? s.preferredBufferSize,
-        dauxBackend:        patch.dauxBackend        ?? s.dauxBackend,
-        audioSampleRate:    patch.audioSampleRate    ?? s.audioSampleRate,
-        extraFolders:       patch.extraFolders       ? normalizeExtraFolders(patch.extraFolders) : s.extraFolders,
-        compactUI:          patch.compactUI          ?? s.compactUI,
-        enableDevTools:     patch.enableDevTools     ?? s.enableDevTools,
+        startupBehavior:      patch.startupBehavior      ?? s.startupBehavior,
+        autoSave:             patch.autoSave             ?? s.autoSave,
+        autoSaveIntervalMin:  patch.autoSaveIntervalMin  ?? s.autoSaveIntervalMin,
+        preferredEngine:      patch.preferredEngine      ?? s.preferredEngine,
+        preferredBufferSize:  patch.preferredBufferSize  ?? s.preferredBufferSize,
+        dauxBackend:          patch.dauxBackend          ?? s.dauxBackend,
+        audioSampleRate:      patch.audioSampleRate      ?? s.audioSampleRate,
+        extraFolders:         patch.extraFolders         ? normalizeExtraFolders(patch.extraFolders) : s.extraFolders,
+        compactUI:            patch.compactUI            ?? s.compactUI,
+        enableDevTools:       patch.enableDevTools       ?? s.enableDevTools,
+        graphicRenderingMode: patch.graphicRenderingMode ?? s.graphicRenderingMode,
       };
       saveToStorage(next);
       return next;

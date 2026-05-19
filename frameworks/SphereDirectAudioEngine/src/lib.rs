@@ -38,7 +38,7 @@ use engine::EngineInner;
 use types::{
     EngineProjectSnapshot, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig, JsDauxStatus,
     JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
-    JsRecordingStatus, JsStartRecordingConfig, JsSphereAudioStatus,
+    JsRecordingStatus, JsStartRecordingConfig, JsSphereAudioStatus, JsWavPeakResult,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -346,6 +346,29 @@ impl SphereDirectAudioEngine {
     #[napi]
     pub fn get_meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()
+    }
+
+    /// Generate Int16 min/max waveform peaks for a PCM WAV file by streaming
+    /// the source from disk. This is used by Electron import/background jobs so
+    /// renderer drag/drop never decodes or scans long files.
+    #[napi]
+    pub fn generate_wav_peaks(
+        &self,
+        file_path: String,
+        file_id: String,
+        samples_per_peak: u32,
+    ) -> napi::Result<JsWavPeakResult> {
+        let result = audio_file::generate_wav_peaks_from_path(&file_path, samples_per_peak)
+            .map_err(|e| napi::Error::from_reason(format!("Waveform peak generation failed: {e}")))?;
+        Ok(JsWavPeakResult {
+            file_id,
+            sample_rate: result.sample_rate,
+            channel_count: result.channel_count,
+            duration: result.duration,
+            samples_per_peak: result.samples_per_peak,
+            peak_count: result.peak_count,
+            peaks: result.peaks,
+        })
     }
 
     // ── Recording ────────────────────────────────────────────────────────────

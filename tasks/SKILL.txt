@@ -1,136 +1,153 @@
-# SKILL.txt — Futureboard Studio Agent Skill
+# SKILL.md — Futureboard Studio / Sphere Agent Skill
 
-Purpose:
-This skill teaches Claude Code, Codex, and other coding agents how to work with the Futureboard Studio / Mochi DAW task backlog.
+## Purpose
 
-Use this skill when:
-- The user asks to implement a task from `tasks/`
-- The user asks to continue DAW development
-- The user mentions a numbered task file such as `006-DawSystem.txt`
-- The user asks to fix a bug in the DAW prototype
-- The user asks to wire UI/state/menu/audio/plugin/window systems
-- The user asks for an incremental patch from a long task spec
+This skill teaches Claude Code, Codex, and other coding agents how to work safely inside the Futureboard Studio / Mochi DAW codebase.
+
+Futureboard Studio is a DAW built around a modern hybrid stack:
+
+- React / Electron for the current product UI
+- Rust for safe native integration, audio infrastructure, and N-API modules
+- C++ for low-level native SDK integration where required
+- WebAudio / WASM as web-compatible fallback paths
+- Native services for long-term realtime audio, plugin hosting, and heavy processing
 
 This skill is for controlled implementation.
+
 It is not permission to rewrite the entire repository.
 
-============================================================
-0. Core Behavior
-============================================================
+---
+
+## When To Use This Skill
+
+Use this skill when the user asks to:
+
+- continue Futureboard Studio / Mochi DAW development
+- implement a task from `tasks/`
+- work from a numbered task file such as `006-DawSystem.txt`
+- fix a DAW UI, state, timeline, mixer, audio, plugin, window, or platform bug
+- wire menu, state, project, transport, routing, audio, plugin, or window systems
+- implement an incremental patch from a long task spec
+- work on `SpherePluginHost`
+- work on `PluginHost.node`
+- work with `external/vst3sdk`
+- build VST3 / CLAP / AU plugin host infrastructure
+- bridge native systems into Electron
+- create safe Rust/C++ native module boundaries
+
+---
+
+## 0. Prime Directive
 
 Always work from the smallest safe scope.
 
 Before changing code:
-1. Identify the requested task file.
-2. Read the task file.
-3. Identify the exact requested section/phase.
-4. Inspect the current implementation.
-5. Create a short plan.
-6. Patch only the requested scope.
+
+1. Read the relevant user request.
+2. Read only the relevant task file or section.
+3. Inspect the current implementation.
+4. Identify the smallest safe patch.
+5. List the likely files to change.
+6. Implement only the requested scope.
 7. Run the relevant build/check command.
-8. Report what changed and what remains.
+8. Report what changed, what was validated, and what remains.
 
 Never implement an entire long task file unless the user explicitly requests it.
 
-============================================================
-1. Main Task Files
-============================================================
+Never rewrite the whole app unless the user explicitly requests a rewrite.
 
-Task index:
+---
 
-`tasks/README.txt`
-- Index and usage guide for all task prompts.
+## 1. Project Identity
 
-`tasks/webapp/001-Plugins.txt`
-- Built-in plugin UI
-- PluginShell
-- Insert device chain
-- Effect Editor integration
-- Horizontal plugin UI only
-- `track.inserts` as source of truth
+Project names:
 
-`tasks/webapp/002-WaveformCache.txt`
-- Web IndexedDB waveform cache
-- Electron cache folder
-- Waveform cache adapter
-- Cache keys/versioning
-- Avoid regenerating peaks
+- Futureboard Studio
+- Mochi DAW
+- Sphere Engine / Sphere UI direction
+- SpherePluginHost
+- SphereDirectAudioEngine
 
-`tasks/webapp/003-LinkMenuBar.txt`
-- Link implemented actions to Menu Bar
-- Command registry
-- Shortcuts
-- Command palette
-- Enabled/checked state
+Development style:
 
-`tasks/webapp/004-WindowingSystem.txt`
-- Internal floating windows
-- Dialog windows
-- Electron external windows
-- Project Wizard
-- Unsaved Changes dialog
+- spec-driven
+- human-directed
+- agent-assisted
+- incremental
+- performance-sensitive
+- realtime-aware
+- UI-first where applicable
+- native-capable but not native-chaotic
 
-`tasks/webapp/005-ProjectDropdown.txt`
-- Zed-like Project Dropdown in Transport Bar
-- Recent Projects
-- Open More Project
-- Dirty guard
+The current React/Electron prototype is valuable.
 
-`tasks/webapp/006-DawSystem.txt`
-- DAW system/state foundation
-- WebAudio first
-- project state
-- timeline/transport
-- mixer/routing
-- inserts/devices
-- selectors
-- command system
-- dirty/save state
+Treat the current app as the living product spec.
 
-`tasks/webapp/007-TouchScreenSupport.txt`
-- Touch screen support
-- Pen/stylus support
-- Pointer events
-- Long press context menus
-- Touch hit targets
+Do not casually throw it away.
 
-`tasks/bridge/999-AudioEngine.txt`
-- Long-term Rust DSP core
-- WASM runtime
-- AudioWorklet
-- Electron native `.exe` DSP service
-- IPC protocol
-- Native audio service roadmap
+---
 
-`tasks/native/000-ReWriteAll.txt`
-- Native UI rewrite roadmap
-- UI first
-- Do not rewrite audio engine here
-- React prototype remains living spec
+## 2. Repository Mindset
 
-============================================================
-2. Agent File Conventions
-============================================================
+Expected high-level structure may include:
+
+```txt
+external/
+  vst3sdk/
+
+frameworks/
+  SpherePluginHost/
+  SphereDirectAudioEngine/
+  SphereWebAudioCore/
+
+apps/
+  web/
+  electron/
+
+tasks/
+  webapp/
+  native/
+  audio/
+  plugin/
+```
+
+Do not assume the exact structure.
+
+Inspect the repo first.
+
+If the repository differs from this document, follow the repository.
+
+---
+
+## 3. Agent File Conventions
 
 Claude Code:
+
 - Read `CLAUDE.md` for project guidance.
 - If task instructions reference `tasks/*.txt`, read only the relevant file/section.
-- Project memory may use `CLAUDE.md`; keep it concise and link to task files instead of duplicating huge specs.
+- Keep project memory concise.
+- Link to task files instead of duplicating huge specs.
 
 Codex:
+
 - Read `AGENTS.md` for project guidance.
 - If task instructions reference `tasks/*.txt`, read only the relevant file/section.
-- Do not assume every task file should be loaded at once.
+- Do not load every task file at once.
 
 Both:
-- `README.txt` is the index.
-- Long files are reference specs, not one-shot prompts.
-- The user may say “ทำ 006 section 3” or “continue 001 plugin chain”.
-- Respect that scope exactly.
 
-============================================================
-3. Standard Agent Prompt Pattern
-============================================================
+- `README.txt` or `README.md` is the index if present.
+- Long task files are reference specs, not one-shot prompts.
+- The user may say:
+  - `ทำ 006 section 3`
+  - `continue 001 plugin chain`
+  - `fix Tracklane waveform renderer`
+  - `ทำ SpherePluginHost phase 1`
+- Respect that exact scope.
+
+---
+
+## 4. Standard Implementation Pattern
 
 When given a task, follow this pattern:
 
@@ -143,28 +160,36 @@ When given a task, follow this pattern:
 7. Summarize:
    - changed files
    - behavior added/fixed
-   - tests/build result
-   - TODOs left intentionally
+   - validation result
+   - intentional TODOs
 
 Example user instruction:
-“Read `tasks/webapp/006-DawSystem.txt`. Implement only section 3 and 4.”
+
+```txt
+Read tasks/webapp/006-DawSystem.txt.
+Implement only section 3 and 4.
+```
 
 Correct behavior:
-- Only implement Time/Musical Math and Timeline Coordinate System.
-- Do not implement WebAudio engine.
-- Do not rewrite UI.
+
+- Implement only Time/Musical Math and Timeline Coordinate System.
+- Do not implement the whole WebAudio engine.
+- Do not rewrite the UI.
 - Build and stop.
 
 Incorrect behavior:
-- Implement all of `006-DawSystem.txt`.
-- Rewrite project store, audio engine, UI, and commands in one patch.
-- Change unrelated styles.
 
-============================================================
-4. Hard Rules
-============================================================
+- Implement all of `006-DawSystem.txt`.
+- Rewrite project store, audio engine, UI, commands, and theme in one patch.
+- Change unrelated styles.
+- Add random dependencies.
+
+---
+
+## 5. Hard Rules
 
 Do:
+
 - Make small patches.
 - Preserve existing working behavior.
 - Use existing stores/actions/selectors where possible.
@@ -172,119 +197,543 @@ Do:
 - Add safe placeholders for future-heavy features.
 - Disable unimplemented UI actions.
 - Keep TypeScript clean.
-- Run build after implementation.
-- Keep Web/Electron boundaries clean.
+- Keep Rust warnings low.
+- Keep C++ boundaries explicit.
+- Run build/check after implementation.
+- Keep Web/Electron/native boundaries clean.
 - Use platform adapters instead of direct Electron/Node calls in React.
-- Keep current React/Electron app as living spec.
+- Treat current React/Electron app as the living spec.
 
 Do not:
+
 - Rewrite the entire app unless explicitly requested.
-- Rewrite audio engine when doing UI task.
-- Implement native DSP when doing UI task.
-- Implement VST/CLAP hosting unless specifically requested.
+- Rewrite audio engine when doing a UI task.
+- Implement native DSP when doing a UI task.
+- Implement VST/CLAP/AU hosting unless specifically requested.
 - Add random dependencies.
 - Add fake-success actions.
 - Duplicate project state in multiple stores.
 - Put heavy audio buffers into React persisted state.
-- Parse JSON or allocate heavily in realtime audio paths.
+- Parse JSON in realtime audio paths.
+- Allocate heavily in realtime audio paths.
+- Log from realtime audio callbacks.
+- Block realtime threads.
 - Break mouse/keyboard workflow while adding touch support.
-- Replace existing design system without permission.
+- Replace the design system without permission.
+- Move all processing into WebUI.
+- Route realtime audio through Node/Electron.
 
-============================================================
-5. Build and Check Commands
-============================================================
+---
 
-Prefer these commands when relevant:
+## 6. Build and Check Commands
+
+Prefer these commands when relevant.
 
 Frontend:
-- `bun run build`
-- `bun run typecheck` if available
-- `bun run lint` if available
+
+```bash
+bun run build
+bun run typecheck
+bun run lint
+```
 
 Electron:
-- `bun run build`
-- `bunx electron-builder --dir` if packaging/checking Electron shell
+
+```bash
+bun run build
+bunx electron-builder --dir
+```
 
 Rust:
-- `cargo check`
-- `cargo test`
-- `cargo build`
 
-Audio/native tasks:
-- Keep WebAudio fallback working.
-- Rust/WASM/native service must be optional until stable.
+```bash
+cargo check
+cargo test
+cargo build
+cargo build --release
+```
+
+Native plugin host:
+
+```bash
+cargo check -p sphere_plugin_host
+cargo build -p sphere_plugin_host
+cargo build -p sphere_plugin_host --release
+```
+
+C++ / CMake if present:
+
+```bash
+cmake --build build
+cmake --build build --config Release
+```
 
 If a command does not exist:
+
 - Do not invent success.
 - Say it was unavailable.
 - Run the closest safe command.
 
-============================================================
-6. TypeScript Safety
-============================================================
+Never claim success if build/check was not run or failed.
 
-Avoid syntax that may break strict/erasable TypeScript settings.
+---
+
+## 7. TypeScript Rules
+
+Avoid syntax that may break strict or erasable TypeScript settings.
 
 Avoid:
-- TypeScript parameter properties if the repo rejects them.
-- Huge `any` usage.
-- Unchecked optional fields.
-- Mutating state directly.
-- Adding duplicate types in random files.
+
+- TypeScript parameter properties if the repo rejects them
+- huge `any` usage
+- unchecked optional fields
+- mutating state directly
+- duplicate types in random files
+- direct Electron imports inside React UI
+- direct `fs` or `child_process` usage inside React UI
 
 Prefer:
+
 - explicit interfaces/types
-- small helpers
+- narrow type guards
 - normalized defaults
 - selectors
 - immutable updates
-- narrow type guards
+- small helpers
+- adapter interfaces
+- stable event payloads
+- debounced/throttled high-frequency UI updates
 
-============================================================
-7. UI Rules
-============================================================
+---
+
+## 8. Rust Rules
+
+Rust is used for safe native boundaries, host state, N-API modules, audio infrastructure, and future service glue.
+
+Do:
+
+- keep unsafe code isolated
+- document every unsafe FFI assumption
+- wrap raw pointers in explicit handles
+- use `Result<T, E>` across fallible APIs
+- use `thiserror` or project-native error patterns
+- avoid panics across FFI
+- avoid blocking inside audio callbacks
+- avoid allocations on realtime paths
+- keep N-API functions thin
+- move heavy native logic outside JS-visible wrappers
+
+Do not:
+
+- expose raw C++ pointers directly to JS
+- let panics cross FFI
+- use global mutable state casually
+- hold locks in realtime audio paths
+- perform filesystem scanning on the audio thread
+- serialize large buffers through JSON
+- use Node as part of realtime processing
+
+---
+
+## 9. C++ Rules
+
+C++ is allowed where required for native SDK integration.
+
+Current likely use cases:
+
+- VST3SDK integration
+- plugin scanning/loading
+- plugin editor view handling
+- native window handles
+- ABI bridge for Rust
+- low-level OS-specific audio/plugin APIs
+
+Do:
+
+- keep C++ behind a small C ABI or explicit bridge layer
+- isolate VST3SDK headers from Rust
+- avoid leaking SDK types into N-API
+- own plugin lifecycle clearly
+- make destroy/free functions explicit
+- handle plugin crashes defensively where possible
+- keep platform-specific window code separated
+
+Do not:
+
+- spread VST3SDK types through the whole app
+- expose C++ exceptions across C ABI
+- expose plugin pointers to JavaScript
+- allocate/log/block in realtime process functions
+- make React depend on C++ headers
+- merge UI window code into audio processing code
+
+---
+
+## 10. SpherePluginHost Rules
+
+`SpherePluginHost` is the native plugin host layer.
+
+Preferred direction:
+
+```txt
+Electron / React
+  -> preload IPC / native API
+    -> PluginHost.node
+      -> Rust N-API wrapper
+        -> C ABI
+          -> C++ VST3 Host Core
+            -> external/vst3sdk
+              -> VST3 plugins
+```
+
+Allowed:
+
+- `external/vst3sdk`
+- Rust wrapper
+- C++ VST3 host core
+- N-API module output as `PluginHost.node`
+- later separate process: `FutureBoardPluginHost.exe`
+
+Do not use JUCE unless the user explicitly asks.
+
+Do not force JUCE into the project indirectly.
+
+Do not build the first version as a giant universal host.
+
+Start with VST3 scanner and metadata.
+
+---
+
+## 11. PluginHost.node Rules
+
+`PluginHost.node` is a control bridge, not the realtime audio engine.
+
+Good uses:
+
+- initialize plugin host
+- scan plugin folders
+- list discovered plugins
+- load/unload plugin instances
+- query parameters
+- set parameter values
+- save/load plugin state
+- open/close native plugin editor windows
+- report plugin metadata
+- communicate with a separate plugin host process later
+
+Bad uses:
+
+- realtime audio processing through Node
+- sending audio buffers through JSON
+- large waveform/audio transfer
+- blocking filesystem scan during playback
+- loading untrusted plugins directly in the UI process without a future isolation plan
+
+Preferred first API surface:
+
+```ts
+initPluginHost(): void
+shutdownPluginHost(): void
+
+scanVst3(paths: string[]): Promise<PluginInfo[]>
+
+loadPlugin(options: LoadPluginOptions): string
+unloadPlugin(instanceId: string): void
+
+getParameters(instanceId: string): ParameterInfo[]
+setParameter(instanceId: string, parameterId: number, normalizedValue: number): void
+
+saveState(instanceId: string): Uint8Array
+loadState(instanceId: string, state: Uint8Array): void
+
+openEditor(instanceId: string, parentWindowHandle?: bigint): void
+closeEditor(instanceId: string): void
+```
+
+The first implementation may return JSON strings internally between C++ and Rust if that keeps the bridge simple.
+
+Do not keep JSON in realtime paths.
+
+---
+
+## 12. VST3 Host Rules
+
+VST3 support may use `external/vst3sdk`.
+
+That does not mean the whole app is a VST3SDK app.
+
+Keep VST3SDK usage contained.
+
+Recommended phases:
+
+### Phase 1 — Scanner
+
+Implement:
+
+```txt
+scanVst3(paths) -> PluginInfo[]
+```
+
+Goal:
+
+- discover `.vst3`
+- read factory metadata
+- return name/vendor/category/class id/path
+- cache scan results if existing project patterns support it
+
+Do not:
+
+- process audio
+- open editor
+- build full graph
+- implement automation
+
+### Phase 2 — Load/Unload
+
+Implement:
+
+```txt
+loadPlugin(path/classId)
+unloadPlugin(instanceId)
+```
+
+Goal:
+
+- instantiate component/controller
+- initialize basic lifecycle
+- return stable instance handle
+
+Do not:
+
+- route realtime audio through JS
+- expose raw pointers
+
+### Phase 3 — Parameters
+
+Implement:
+
+```txt
+getParameters(instanceId)
+setParameter(instanceId, paramId, normalizedValue)
+```
+
+Goal:
+
+- query parameter metadata
+- set normalized values
+- sync to UI/store
+- prepare automation model later
+
+### Phase 4 — State
+
+Implement:
+
+```txt
+saveState(instanceId)
+loadState(instanceId, state)
+```
+
+Goal:
+
+- project save/load support
+- preset-like binary state handling
+
+Do not:
+
+- store state as huge JSON
+- mutate unrelated project model
+
+### Phase 5 — Audio Process
+
+Implement native-only processing path.
+
+Preferred path:
+
+```txt
+SphereDirectAudioEngine
+  -> native plugin graph
+    -> SpherePluginHost C++ core
+      -> VST3 process
+```
+
+Do not:
+
+```txt
+AudioEngine -> Node -> PluginHost.node -> VST3
+```
+
+### Phase 6 — Editor Window
+
+Implement native editor windows carefully.
+
+Preferred first approach:
+
+- external native plugin editor window
+- not embedded inside React
+- safe focus/resize handling
+- platform-specific window code isolated
+
+Embedding into Electron can come later.
+
+---
+
+## 13. Plugin Crash Isolation
+
+A `.node` module runs in the Electron process.
+
+If the plugin crashes, the app may crash.
+
+Short-term:
+
+- acceptable for scanner/load experiments
+- keep operations minimal
+- fail safely when possible
+
+Long-term preferred architecture:
+
+```txt
+Electron Renderer
+  -> Electron Main / Preload
+    -> PluginHost.node client
+      -> IPC
+        -> FutureBoardPluginHost.exe
+          -> VST3/CLAP/AU plugins
+```
+
+The separate process should eventually provide:
+
+- crash isolation
+- plugin sandboxing where possible
+- recovery after plugin failure
+- safer scanning
+- editor process isolation if needed
+
+Do not claim plugin hosting is production-safe until isolation exists.
+
+---
+
+## 14. Realtime Audio Rules
+
+Realtime audio paths must avoid:
+
+- allocations
+- locks
+- blocking IO
+- filesystem access
+- JSON parsing
+- logging
+- panics/exceptions
+- Node/Electron calls
+- IPC roundtrips
+- dynamic plugin scanning
+- unbounded queues
+- waiting on UI thread
+
+Allowed in realtime paths:
+
+- preallocated buffers
+- lock-free queues if already designed safely
+- atomic parameter values
+- fixed-size event queues
+- native DSP calls
+- native plugin process calls after proper setup
+
+React/Electron can control audio.
+
+React/Electron must not become the audio path.
+
+---
+
+## 15. Audio Engine Rules
+
+Current:
+
+- WebAudio prototype remains fallback.
+
+Near-term:
+
+- WebAudio adapter should be clean and replaceable.
+- UI talks to `AudioEngineAdapter`.
+- Native audio engine can be optional until stable.
+
+Long-term:
+
+- Rust DSP core
+- WASM AudioWorklet for Web
+- Native `.exe` DSP service for Electron
+- SphereDirectAudioEngine
+- Native plugin graph
+
+Rules:
+
+- UI does not call `AudioContext` directly.
+- React does not import native/Electron internals directly.
+- Native service IPC must be safe.
+- Do not send huge binary audio data over JSON.
+- Keep high-frequency transport/meter updates isolated from full React rerenders.
+
+---
+
+## 16. UI Rules
 
 The UI style is:
+
 - dark native DAW
 - compact
 - Zed-ish / pro audio workstation feel
 - 11–13px UI text
 - subtle borders
-- no generic SaaS cards
-- no huge toy controls
-- no random neon
-- no copied plugin branding
+- clean density
+- professional, not toy-like
+
+Avoid:
+
+- generic SaaS cards
+- huge controls
+- random neon
+- copied plugin branding
+- disconnected mock UI
+- fake plugin galleries as the main system
 
 Use existing:
+
 - theme tokens
-- DawIcon registry
+- icon registry
+- DawIcon registry if present
 - current layout direction
 - compact density
 
 Plugin UI:
-- Must be horizontal.
-- Must fit the bottom Effect Editor.
-- Must connect to `track.inserts`.
-- Must not be gallery-only mock UI.
+
+- horizontal
+- fits bottom Effect Editor
+- connects to `track.inserts`
+- device params live in insert device params
+- plugin selector must eventually connect to scanner/registry
 
 Mixer:
-- Professional console feeling.
-- Fader, meter, dB scale, M/S/A sync with store.
-- Do not keep separate fake mixer state.
+
+- professional console feel
+- fader, meter, dB scale, M/S/A sync with store
+- no separate fake mixer state
 
 Timeline:
-- One coordinate system.
-- Ruler, grid, clips, loop region, playhead must align.
-- Z-index layer contract must be clear.
 
-============================================================
-8. State Rules
-============================================================
+- one coordinate system
+- ruler/grid/clips/loop/playhead must align
+- clear z-index/layer contract
+- waveform rendering must not destroy scroll performance
+
+---
+
+## 17. State Rules
 
 Single source of truth for project data:
+
 - project store / project state
 
-Important state ownership:
+Important ownership:
+
 - tracks live in project state
 - clips live in track/project state
 - MIDI notes live in MIDI clip state
@@ -292,90 +741,91 @@ Important state ownership:
 - inserts live in `track.inserts`
 - device params live in insert device params
 - routing lives in track routing/sends
+- plugin instances must map cleanly to insert IDs
+- plugin scan registry is not the same as project state
 - transient meters should not cause full project rerenders
 - transport high-frequency movement should be isolated/throttled
 
 Never:
-- create local-only fake state for things that must persist
+
+- create local-only fake state for persistent DAW data
 - create a second insert chain outside `track.inserts`
 - create a second mixer model outside track mixer state
-- create a disconnected plugin gallery as the main system
+- create a disconnected plugin gallery as the real plugin system
+- persist huge audio buffers in React state
 
-============================================================
-9. Audio Engine Rules
-============================================================
+---
 
-Current:
-- WebAudio prototype remains fallback.
-
-Near-term:
-- WebAudio adapter should be clean and replaceable.
-
-Long-term:
-- Rust DSP core
-- WASM AudioWorklet for Web
-- Native `.exe` DSP service for Electron
-- Future SphereEngine native integration
-
-Rules:
-- UI talks to `AudioEngineAdapter`.
-- UI does not call AudioContext directly.
-- React does not import native/Electron internals directly.
-- Native service IPC must be safe.
-- Do not send huge binary audio data over JSON.
-- Realtime audio path must avoid allocation, blocking, IO, JSON parsing, and logging.
-
-============================================================
-10. Platform Boundary Rules
-============================================================
+## 18. Platform Boundary Rules
 
 Web:
+
 - no Node APIs
 - safe fallbacks
-- IndexedDB/OPFS for larger browser storage where appropriate
+- browser storage via IndexedDB/OPFS where appropriate
+- WebAudio/WASM fallback only
 
 Electron:
+
 - renderer uses preload IPC
 - main handles filesystem/dialog/process
 - no direct `fs`, `child_process`, or Electron imports inside React UI
+- native modules are loaded only in approved boundary layers
 
 Native service:
+
 - spawned by Electron main
 - renderer talks through preload
 - service crash must not crash UI
 - fallback to WebAudio/WASM if unavailable
+- do not make service mandatory until stable
 
-============================================================
-11. Window/Dialog Rules
-============================================================
+---
+
+## 19. Window/Dialog Rules
 
 Window system supports:
+
 - internal floating windows
 - internal dialogs
 - Electron external windows later
+- native plugin editor windows later
 
 Project Wizard and Unsaved Changes dialog are critical flows.
 
-Unsaved dialog:
+Unsaved dialog must support:
+
 - Save
 - Don’t Save
 - Cancel
-- Cancel must abort destructive action
-- Escape should behave like Cancel
-- Do not lose project changes without explicit Don’t Save
 
-============================================================
-12. Touch/Pen Rules
-============================================================
+Rules:
+
+- Cancel must abort destructive action.
+- Escape should behave like Cancel.
+- Do not lose project changes without explicit Don’t Save.
+
+Plugin editor windows:
+
+- first implementation may be external/native
+- must not block the audio engine
+- focus/keyboard handling must be handled carefully
+- platform-specific handles must stay outside React state
+
+---
+
+## 20. Touch/Pen Rules
 
 Use Pointer Events.
 
 Support:
+
 - mouse
 - touch
 - pen/stylus
 
 Use:
+
 - pointer capture
 - touch-action control on DAW surfaces
 - invisible touch hit targets
@@ -383,107 +833,224 @@ Use:
 - no global text-input breakage
 
 Do not:
-- make the whole desktop UI huge
+
+- make the desktop UI huge
 - break mouse/keyboard workflow
-- turn app into mobile layout
+- turn the app into a mobile layout
+- break precise timeline editing
 
-============================================================
-13. Native Rewrite Rules
-============================================================
+---
 
-Native rewrite task is UI-first.
+## 21. Native Rewrite Rules
+
+Native rewrite task is UI-first unless otherwise requested.
 
 Do:
+
 - use current React app as living spec
 - build native UI shell in small stages
 - keep audio engine separate
 - port behavior gradually
 - share project model concepts
+- keep React app working while experimenting
 
 Do not:
+
 - delete React app
-- rewrite DSP in native UI task
+- rewrite DSP in a native UI task
 - implement all native phases at once
 - break current app while experimenting
+- claim native rewrite is complete from a shell only
 
-============================================================
-14. How to Use Long Task Files
-============================================================
+---
+
+## 22. How To Use Long Task Files
 
 Long task files are reference specs.
 
 Correct:
-“Read `006-DawSystem.txt`, implement only section 3.”
+
+```txt
+Read 006-DawSystem.txt.
+Implement only section 3.
+```
 
 Incorrect:
-“Implement all of `006-DawSystem.txt`.”
+
+```txt
+Implement all of 006-DawSystem.txt.
+```
 
 When a file is huge:
+
 - search within it
 - read the requested section
 - ignore unrelated sections
 - ask for clarification only if the requested section is ambiguous
+- otherwise implement the first safe subset and report what remains
 
-============================================================
-15. Reporting Format
-============================================================
+---
+
+## 23. Dependency Rules
+
+Do not add dependencies casually.
+
+Before adding a dependency, check:
+
+- Is there already a project utility for this?
+- Does the dependency work in Web and Electron?
+- Does it break packaging?
+- Does it add native build complexity?
+- Is it compatible with Bun/Vite/Electron?
+- Is it safe for realtime or native boundaries?
+- Does it pull in JUCE or other unwanted frameworks indirectly?
+
+For plugin host work:
+
+- VST3SDK under `external/vst3sdk` is acceptable when requested.
+- JUCE is not acceptable unless explicitly requested.
+- CLAP SDK may be acceptable only when explicitly requested.
+- Audio plugin hosting must remain modular by format.
+
+---
+
+## 24. Scanner / Registry Rules
+
+Plugin scanner and plugin registry are separate from loaded plugin instances.
+
+Scanner:
+
+- discovers plugins
+- reads metadata
+- can cache results
+- must survive bad plugins where possible
+- should support rescanning
+- should avoid blocking the UI
+
+Registry:
+
+- stores known plugin metadata
+- may be persisted outside project state
+- can be used by plugin selector UI
+- should not store live instance pointers
+
+Project inserts:
+
+- store selected plugin/device identity
+- store plugin state
+- store parameter values/automation
+- map to live instances only when project is loaded
+
+---
+
+## 25. Reporting Format
 
 After implementation, report:
 
+```txt
 Summary:
 - what changed
 
 Files changed:
-- list key files
+- key files
 
 Validation:
-- build/check command run
+- command run
 - result
 
 Notes:
 - intentional TODOs
 - unsupported features kept disabled
 - next recommended section
+```
 
-Do not paste enormous diffs into chat unless asked.
-
-============================================================
-16. Failure Handling
-============================================================
+Do not paste enormous diffs unless asked.
 
 If build fails:
+
 - show the error summary
-- fix if within scope
-- if not within scope, stop and explain
+- fix it if within scope
+- if not within scope, stop and explain clearly
 
 If task scope is too large:
+
 - implement the first safe subset
-- build
+- build/check
 - clearly say what remains
 
 If an API is missing:
+
 - add safe skeleton only if needed
 - otherwise leave TODO and disabled UI
 
-Never claim success if build/check was not run or failed.
+Never claim success if validation failed or was not run.
 
-============================================================
-17. Project Identity
-============================================================
+---
 
-Project:
-- Futureboard Studio / Mochi DAW
+## 26. Good First Slices
 
-Development style:
-- spec-driven vibe coding
-- human-directed
-- agent-assisted
-- prompt-governed
+For DAW UI:
 
-Current goal:
-- discover and stabilize DAW behavior in React/Electron
-- later move audio to Rust/WASM/native service
-- later rewrite UI natively with SphereEngine/SphereUI direction
+1. fix exact bug
+2. isolate state
+3. align coordinate math
+4. reduce rerenders
+5. build/check
 
-The current prototype is valuable.
-Treat it as the product spec.
+For waveform performance:
+
+1. identify scroll/zoom path
+2. avoid re-decoding on drag/scroll
+3. chunk/canvas cache
+4. reduce React rerender pressure
+5. validate with large track count
+
+For SpherePluginHost:
+
+1. create crate/module skeleton
+2. wire build output as `PluginHost.node`
+3. add C ABI header
+4. add C++ VST3 scanner shell
+5. implement `scanVst3`
+6. return metadata to Electron
+7. stop before audio processing
+
+For plugin editor:
+
+1. external native window first
+2. no React embedding first
+3. no audio processing changes
+4. isolate platform handle logic
+5. validate focus/close lifecycle
+
+---
+
+## 27. Anti-Patterns
+
+Avoid these:
+
+```txt
+"Implemented full DAW engine"
+"Rewrote the whole timeline"
+"Moved audio processing into React"
+"Added plugin hosting while fixing CSS"
+"Added fake local mixer state"
+"Scanner works but build was not run"
+"VST3 host implemented with no crash/isolation note"
+"Realtime path sends JSON to Node"
+"Plugin editor embedded into React with raw HWND in state"
+```
+
+These are bad signs.
+
+Stop and reduce scope.
+
+---
+
+## 28. Final Rule
+
+Futureboard Studio is allowed to be ambitious.
+
+Agent patches must be boring, scoped, buildable, and reversible.
+
+Build the monster one safe organ at a time.

@@ -1,7 +1,13 @@
 Before implementing task specs, read `tasks/SKILL.txt`.
-Use it as the operating guide for all files in `tasks/`.
 
-and read documentation for Native App Framework `frameworks/SphereEngine/website/spheredoc/docs`
+## PluginHost
+
+if want edit/create PluginHostWrapper ??
+
+- frameworks/SpherePluginHost
+- external/vst3sdk
+- external/clap
+  **Support**: AU, LV2 and Linux/MacOS
 
 ## Dialog / Window UI Consistency Rules
 

@@ -23,6 +23,10 @@ import {
   type BrowserRootEntry,
   type GpuFeatureStatus,
   type ElectronPersistedSettings,
+  type AudioPluginHostStatus,
+  type AudioPluginRegistryEntry,
+  type AudioPluginScanProgressEvent,
+  type AudioPluginScanResult,
   type SphereDeviceOpenConfig,
   type SphereTransportState,
   type SphereDauxConfig,
@@ -144,6 +148,24 @@ const sysBridge = Object.freeze({
     invoke(IpcChannels.SysGetDefaultProjectsPath),
 });
 
+const pluginHostBridge = Object.freeze({
+  getStatus: (): Promise<AudioPluginHostStatus> =>
+    invoke(IpcChannels.PluginHostGetStatus),
+  listPlugins: (): Promise<AudioPluginRegistryEntry[]> =>
+    invoke(IpcChannels.PluginHostListPlugins),
+  scanVst3: (paths?: string[]): Promise<AudioPluginScanResult> =>
+    invoke(IpcChannels.PluginHostScanVst3, paths),
+  onScanProgress: (callback: (event: AudioPluginScanProgressEvent) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: unknown) => {
+      callback(payload as AudioPluginScanProgressEvent);
+    };
+    ipcRenderer.on(IpcChannels.PluginHostScanProgress, listener);
+    return () => ipcRenderer.removeListener(IpcChannels.PluginHostScanProgress, listener);
+  },
+  revealPreset: (pluginId: string): Promise<void> =>
+    invoke(IpcChannels.PluginHostRevealPreset, pluginId),
+});
+
 const floatingWindowBridge = Object.freeze({
   open:  (req: FloatingWindowOpenRequest): Promise<boolean> => invoke(IpcChannels.FloatingWindowOpen, req),
   close: (id: string): Promise<void>                        => invoke(IpcChannels.FloatingWindowClose, id),
@@ -202,6 +224,7 @@ const dawElectron = Object.freeze({
   peakChunk: peakChunkBridge,
   waveformCache: waveformCacheBridge,
   sys: sysBridge,
+  pluginHost: pluginHostBridge,
   /** SphereDirectAudioEngine native backend bridge. Presence indicates Electron client. */
   sphereAudio: sphereAudioBridge,
   /** Native floating window runtime (Rust/egui binary). */

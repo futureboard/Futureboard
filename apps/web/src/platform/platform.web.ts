@@ -4,6 +4,7 @@ import type {
   FileSystemAdapter,
   FolderProjectAdapter,
   MessageBoxOptions,
+  PluginHostAdapter,
   Platform,
   PlatformCapabilities,
   ProjectStorageAdapter,
@@ -26,6 +27,33 @@ const capabilities: PlatformCapabilities = {
   webAudio: typeof window !== "undefined" && "AudioContext" in window,
   cloudSync: false,
   osFilePaths: false,
+};
+
+const pluginHost: PluginHostAdapter = {
+  isSupported: false,
+  async getStatus() {
+    return {
+      available: false,
+      backend: "web",
+      message: "Native audio plug-in scanning is available only in the Electron client.",
+      dbPath: "",
+      presetRoot: "",
+      defaultScanPaths: [],
+    };
+  },
+  async listPlugins() {
+    return [];
+  },
+  async scanVst3() {
+    const status = await pluginHost.getStatus();
+    return { status, plugins: [], scannedPaths: [], generatedPresets: 0, failed: [] };
+  },
+  onScanProgress() {
+    return () => { /* no-op on web */ };
+  },
+  async revealPreset() {
+    throw new Error("Native audio plug-in presets are not available on web");
+  },
 };
 
 /**
@@ -208,4 +236,5 @@ export const webPlatform: Platform = {
   dialog,
   window: windowAdapter,
   folderProject,
+  pluginHost,
 };

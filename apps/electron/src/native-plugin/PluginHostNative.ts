@@ -1,0 +1,564 @@
+import { app } from "electron";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
+import { createHash } from "node:crypto";
+import { fork, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import type {
+  AudioPluginHostStatus,
+  AudioPluginRegistryEntry,
+  AudioPluginScanProgressEvent,
+  AudioPluginScanResult,
+} from "../ipc/channels.js";
+
+const _dirname = path.dirname(fileURLToPath(import.meta.url));
+const req = createRequire(import.meta.url);
+
+type NativePluginInfo = {
+  id?: string;
+  name?: string;
+  vendor?: string;
+  category?: string;
+  format?: string;
+  path?: string;
+  classId?: string | null;
+  class_id?: string | null;
+  version?: string | null;
+  sdkMetadataLoaded?: boolean;
+  sdk_metadata_loaded?: boolean;
+};
+
+type PluginHostAddon = {
+  initPluginHost?: () => { available?: boolean; backend?: string; message?: string };
+  scanVst3?: (paths: string[]) => NativePluginInfo[];
+  getBackendVersion?: () => string;
+};
+
+type SqliteStatement = {
+  run: (...args: unknown[]) => unknown;
+  all: (...args: unknown[]) => unknown[];
+  get: (...args: unknown[]) => unknown;
+};
+
+type SqliteDatabase = {
+  exec: (sql: string) => unknown;
+  prepare: (sql: string) => SqliteStatement;
+};
+
+let addon: PluginHostAddon | null | undefined;
+let addonLoadError: string | null = null;
+let db: SqliteDatabase | null | undefined;
+
+function workspaceRoot(): string {
+  return path.resolve(_dirname, "..", "..", "..", "..");
+}
+
+function candidateAddonPaths(): string[] {
+  const candidates: string[] = [];
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, "PluginHost.node"));
+  }
+  const root = workspaceRoot();
+  const hostRoot = path.join(root, "frameworks", "SpherePluginHost");
+  candidates.push(path.join(hostRoot, "PluginHost.node"));
+  candidates.push(path.join(hostRoot, "target", "release", "PluginHost.node"));
+  candidates.push(path.join(hostRoot, "target", "release", "PluginHost.dll"));
+  candidates.push(path.join(hostRoot, "target", "debug", "PluginHost.node"));
+  candidates.push(path.join(hostRoot, "target", "debug", "PluginHost.dll"));
+  candidates.push(path.resolve(_dirname, "..", "..", "resources", "PluginHost.node"));
+  return candidates;
+}
+
+function loadAddon(): PluginHostAddon | null {
+  if (addon !== undefined) return addon;
+  for (const candidate of candidateAddonPaths()) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      addon = req(candidate) as PluginHostAddon;
+      console.log(`[PluginHost] Loaded native addon from: ${candidate}`);
+      return addon;
+    } catch (error) {
+      addonLoadError = String(error);
+      console.warn(`[PluginHost] Failed to load addon from ${candidate}:`, error);
+    }
+  }
+  addon = null;
+  if (!addonLoadError) {
+    addonLoadError = `PluginHost addon not found. Searched:\n${candidateAddonPaths().map((p) => `  ${p}`).join("\n")}`;
+  }
+  console.warn(`[PluginHost] ${addonLoadError}`);
+  return null;
+}
+
+function pluginDbPath(): string {
+  return path.join(app.getPath("userData"), "audio-plugin-registry.sqlite");
+}
+
+function presetRootPath(): string {
+  return path.join(app.getPath("documents"), "Futureboard Studio", "Audio Plug-ins");
+}
+
+function presetSubfolders(): string[] {
+  return [
+    path.join(presetRootPath(), "Effects"),
+    path.join(presetRootPath(), "Instruments"),
+  ];
+}
+
+function getDb(): SqliteDatabase | null {
+  if (db !== undefined) return db;
+  try {
+    fs.mkdirSync(app.getPath("userData"), { recursive: true });
+    const sqlite = req("node:sqlite") as { DatabaseSync?: new (location: string) => SqliteDatabase };
+    if (!sqlite.DatabaseSync) throw new Error("node:sqlite DatabaseSync is unavailable");
+    db = new sqlite.DatabaseSync(pluginDbPath());
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS audio_plugins (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        vendor TEXT NOT NULL,
+        format TEXT NOT NULL,
+        category TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        path TEXT NOT NULL,
+        class_id TEXT,
+        version TEXT,
+        sdk_metadata_loaded INTEGER NOT NULL,
+        preset_path TEXT NOT NULL,
+        scanned_at INTEGER NOT NULL,
+        metadata_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_audio_plugins_kind ON audio_plugins(kind);
+      CREATE INDEX IF NOT EXISTS idx_audio_plugins_path ON audio_plugins(path);
+      CREATE INDEX IF NOT EXISTS idx_audio_plugins_name ON audio_plugins(name);
+    `);
+  } catch (error) {
+    console.warn("[PluginHost] SQLite registry unavailable:", error);
+    db = null;
+  }
+  return db;
+}
+
+function defaultScanPaths(): string[] {
+  const paths = new Set<string>();
+  if (process.platform === "win32") {
+    const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
+    const programFilesX86 = process.env["ProgramFiles(x86)"];
+    const localAppData = process.env.LOCALAPPDATA;
+    paths.add(path.join(programFiles, "Common Files", "VST3"));
+    paths.add(path.join(programFiles, "VSTPlugins"));
+    paths.add(path.join(programFiles, "Steinberg", "VSTPlugins"));
+    if (programFilesX86) paths.add(path.join(programFilesX86, "Common Files", "VST3"));
+    if (programFilesX86) paths.add(path.join(programFilesX86, "VSTPlugins"));
+    if (programFilesX86) paths.add(path.join(programFilesX86, "Steinberg", "VSTPlugins"));
+    if (localAppData) paths.add(path.join(localAppData, "Programs", "Common", "VST3"));
+  } else if (process.platform === "darwin") {
+    paths.add("/Library/Audio/Plug-Ins/VST3");
+    paths.add(path.join(app.getPath("home"), "Library", "Audio", "Plug-Ins", "VST3"));
+  } else {
+    paths.add("/usr/lib/vst3");
+    paths.add("/usr/local/lib/vst3");
+    paths.add(path.join(app.getPath("home"), ".vst3"));
+  }
+  return [...paths].filter((p) => fs.existsSync(p));
+}
+
+function stableId(input: string): string {
+  return `vst3:${createHash("sha1").update(input).digest("hex").slice(0, 24)}`;
+}
+
+function safeFileName(value: string): string {
+  return value
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120) || "Unknown Plug-in";
+}
+
+function classifyPlugin(category: string, name: string): "effect" | "instrument" {
+  const haystack = `${category} ${name}`.toLowerCase();
+  if (/\b(instrument|synth|synthesizer|sampler|rompler|drum|piano|organ|bass|generator)\b/.test(haystack)) {
+    return "instrument";
+  }
+  return "effect";
+}
+
+function rowFromDb(row: Record<string, unknown>): AudioPluginRegistryEntry {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    vendor: String(row.vendor),
+    format: String(row.format) as "VST3",
+    category: String(row.category),
+    kind: row.kind === "instrument" ? "instrument" : "effect",
+    path: String(row.path),
+    classId: typeof row.class_id === "string" ? row.class_id : undefined,
+    version: typeof row.version === "string" ? row.version : undefined,
+    sdkMetadataLoaded: Number(row.sdk_metadata_loaded) === 1,
+    presetPath: String(row.preset_path),
+    scannedAt: Number(row.scanned_at),
+  };
+}
+
+function normalizeNativePlugin(plugin: NativePluginInfo, scannedAt: number): AudioPluginRegistryEntry | null {
+  if (!plugin.path) return null;
+  const name = plugin.name?.trim() || path.basename(plugin.path, path.extname(plugin.path)) || "Unknown Plug-in";
+  const vendor = plugin.vendor?.trim() || "Unknown Vendor";
+  const category = plugin.category?.trim() || "Uncategorized";
+  const classId = plugin.classId ?? plugin.class_id ?? undefined;
+  const kind = classifyPlugin(category, name);
+  const id = plugin.id || stableId(`${plugin.path}:${classId ?? name}`);
+  const presetDir = path.join(presetRootPath(), kind === "instrument" ? "Instruments" : "Effects");
+  const presetName = `${safeFileName(name)}.pst`;
+  return {
+    id,
+    name,
+    vendor,
+    format: (plugin.format || "VST3") as "VST3",
+    category,
+    kind,
+    path: plugin.path,
+    classId,
+    version: plugin.version ?? undefined,
+    sdkMetadataLoaded: Boolean(plugin.sdkMetadataLoaded ?? plugin.sdk_metadata_loaded),
+    presetPath: path.join(presetDir, presetName),
+    scannedAt,
+  };
+}
+
+function buildPresetBinary(plugin: AudioPluginRegistryEntry, pluginState: Buffer): Buffer {
+  const metadata = {
+    presetFormat: "Mochi preset: Futureboard",
+    version: 1,
+    createdAt: plugin.scannedAt,
+    pluginMetadata: {
+      id: plugin.id,
+      name: plugin.name,
+      vendor: plugin.vendor,
+      format: plugin.format,
+      category: plugin.category,
+      kind: plugin.kind,
+      path: plugin.path,
+      classId: plugin.classId,
+      version: plugin.version,
+      sdkMetadataLoaded: plugin.sdkMetadataLoaded,
+    },
+    pluginState: {
+      encoding: "binary",
+      byteLength: pluginState.byteLength,
+      source: pluginState.byteLength > 0 ? "native-plugin-state" : "pending-native-instantiation",
+    },
+  };
+  const meta = Buffer.from(JSON.stringify(metadata), "utf8");
+  const header = Buffer.alloc(24);
+  header.write("FBPST", 0, "ascii");
+  header.writeUInt8(0, 5);
+  header.writeUInt16LE(1, 6);
+  header.writeUInt32LE(meta.byteLength, 8);
+  header.writeUInt32LE(pluginState.byteLength, 12);
+  header.writeUInt32LE(0, 16);
+  header.writeUInt32LE(0, 20);
+  return Buffer.concat([header, meta, pluginState]);
+}
+
+async function writePreset(plugin: AudioPluginRegistryEntry): Promise<void> {
+  await fsp.mkdir(path.dirname(plugin.presetPath), { recursive: true });
+  const tmp = `${plugin.presetPath}.tmp`;
+  await fsp.writeFile(tmp, buildPresetBinary(plugin, Buffer.alloc(0)));
+  await fsp.rename(tmp, plugin.presetPath);
+}
+
+function resolveUniquePresetPath(plugin: AudioPluginRegistryEntry, occupied: Set<string>): AudioPluginRegistryEntry {
+  const parsed = path.parse(plugin.presetPath);
+  let candidate = plugin.presetPath;
+  let index = 2;
+  while (occupied.has(candidate.toLowerCase())) {
+    candidate = path.join(parsed.dir, `${parsed.name} (${index})${parsed.ext}`);
+    index += 1;
+  }
+  occupied.add(candidate.toLowerCase());
+  return { ...plugin, presetPath: candidate };
+}
+
+function registryDisplayKey(plugin: AudioPluginRegistryEntry): string {
+  return [
+    plugin.vendor,
+    plugin.name,
+    plugin.format,
+    plugin.category,
+    plugin.kind,
+  ].map((part) => part.trim().toLowerCase()).join("|");
+}
+
+function upsertPlugin(plugin: AudioPluginRegistryEntry): void {
+  const registry = getDb();
+  if (!registry) return;
+  registry.prepare(`
+    INSERT INTO audio_plugins (
+      id, name, vendor, format, category, kind, path, class_id, version,
+      sdk_metadata_loaded, preset_path, scanned_at, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      vendor = excluded.vendor,
+      format = excluded.format,
+      category = excluded.category,
+      kind = excluded.kind,
+      path = excluded.path,
+      class_id = excluded.class_id,
+      version = excluded.version,
+      sdk_metadata_loaded = excluded.sdk_metadata_loaded,
+      preset_path = excluded.preset_path,
+      scanned_at = excluded.scanned_at,
+      metadata_json = excluded.metadata_json
+  `).run(
+    plugin.id,
+    plugin.name,
+    plugin.vendor,
+    plugin.format,
+    plugin.category,
+    plugin.kind,
+    plugin.path,
+    plugin.classId ?? null,
+    plugin.version ?? null,
+    plugin.sdkMetadataLoaded ? 1 : 0,
+    plugin.presetPath,
+    plugin.scannedAt,
+    JSON.stringify(plugin),
+  );
+}
+
+function clearPluginRegistry(): void {
+  const registry = getDb();
+  if (!registry) return;
+  registry.prepare("DELETE FROM audio_plugins").run();
+}
+
+function delayImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function isVst3Bundle(pluginPath: string): boolean {
+  return path.extname(pluginPath).toLowerCase() === ".vst3";
+}
+
+async function discoverVst3Bundles(root: string, onFolder?: (folderPath: string, discovered: number) => void): Promise<string[]> {
+  const found: string[] = [];
+  const queue = [root];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+    if (isVst3Bundle(current)) {
+      found.push(current);
+      continue;
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = await fsp.readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const child = path.join(current, entry.name);
+      if (isVst3Bundle(child) && (entry.isDirectory() || entry.isFile())) {
+        found.push(child);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        queue.push(child);
+      }
+    }
+
+    onFolder?.(current, found.length);
+    await delayImmediate();
+  }
+  return found;
+}
+
+type ScanProgressCallback = (event: AudioPluginScanProgressEvent) => void;
+
+function scannerWorkerPath(): string {
+  return path.join(_dirname, "plugin-scanner-worker.js");
+}
+
+function scanBundleInWorker(bundlePath: string, timeoutMs = 45000): Promise<NativePluginInfo[]> {
+  return new Promise((resolve, reject) => {
+    const requestId = stableId(`${bundlePath}:${Date.now()}`);
+    let settled = false;
+    let child: ChildProcess | null = null;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child?.kill();
+      } catch {
+        // ignore worker cleanup failures
+      }
+      callback();
+    };
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(`Timed out scanning ${bundlePath}`)));
+    }, timeoutMs);
+
+    try {
+      child = fork(scannerWorkerPath(), [], {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      });
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+
+    child.stderr?.on("data", (chunk) => {
+      const text = String(chunk).trim();
+      if (text) console.warn(`[PluginHost scanner] ${text}`);
+    });
+    child.on("message", (message: unknown) => {
+      const response = message as { id?: string; ok?: boolean; plugins?: NativePluginInfo[]; error?: string };
+      if (response.id !== requestId) return;
+      if (response.ok) {
+        finish(() => resolve(Array.isArray(response.plugins) ? response.plugins : []));
+      } else {
+        finish(() => reject(new Error(response.error || `Failed scanning ${bundlePath}`)));
+      }
+    });
+    child.on("error", (error) => {
+      finish(() => reject(error));
+    });
+    child.on("exit", (code, signal) => {
+      if (!settled) {
+        finish(() => reject(new Error(`Scanner exited before response (code=${code ?? "null"} signal=${signal ?? "null"})`)));
+      }
+    });
+    child.send({ id: requestId, path: bundlePath });
+  });
+}
+
+export class PluginHostNative {
+  async ensurePresetFolders(): Promise<void> {
+    await Promise.all(presetSubfolders().map((folder) => fsp.mkdir(folder, { recursive: true })));
+  }
+
+  getStatus(): AudioPluginHostStatus {
+    try {
+      for (const folder of presetSubfolders()) {
+        fs.mkdirSync(folder, { recursive: true });
+      }
+    } catch (error) {
+      console.warn("[PluginHost] Failed to ensure preset folders:", error);
+    }
+    const native = loadAddon();
+    let backend = "missing";
+    let message = addonLoadError ?? "PluginHost native addon is unavailable.";
+    if (native) {
+      try {
+        const status = native.initPluginHost?.();
+        backend = status?.backend ?? native.getBackendVersion?.() ?? "PluginHost";
+        message = status?.message ?? "PluginHost native scanner is ready.";
+      } catch (error) {
+        backend = "load-error";
+        message = String(error);
+      }
+    }
+    return {
+      available: Boolean(native?.scanVst3),
+      backend,
+      message,
+      dbPath: pluginDbPath(),
+      presetRoot: presetRootPath(),
+      defaultScanPaths: defaultScanPaths(),
+    };
+  }
+
+  listPlugins(): AudioPluginRegistryEntry[] {
+    const registry = getDb();
+    if (!registry) return [];
+    return registry
+      .prepare("SELECT * FROM audio_plugins ORDER BY kind ASC, vendor ASC, name ASC")
+      .all()
+      .map((row) => rowFromDb(row as Record<string, unknown>));
+  }
+
+  async scanVst3(paths?: string[], onProgress?: ScanProgressCallback): Promise<AudioPluginScanResult> {
+    const status = this.getStatus();
+    const native = loadAddon();
+    const scanPaths = (paths?.length ? paths : status.defaultScanPaths)
+      .map((p) => path.normalize(p))
+      .filter((p, index, arr) => arr.indexOf(p) === index && fs.existsSync(p));
+    const failed: AudioPluginScanResult["failed"] = [];
+    const plugins: AudioPluginRegistryEntry[] = [];
+    onProgress?.({ type: "started", status, scannedPaths: scanPaths });
+    if (!native?.scanVst3) {
+      const result = { status, plugins: this.listPlugins(), scannedPaths: scanPaths, generatedPresets: 0, failed };
+      onProgress?.({ type: "complete", result });
+      return result;
+    }
+
+    const scannedAt = Date.now();
+    let generatedPresets = 0;
+    const occupiedPresetPaths = new Set<string>();
+    const seenDisplayKeys = new Set<string>();
+    clearPluginRegistry();
+    for (const root of scanPaths) {
+      let bundles: string[];
+      try {
+        bundles = await discoverVst3Bundles(root, (folderPath, discovered) => {
+          onProgress?.({ type: "folder", path: folderPath, discovered });
+        });
+      } catch (error) {
+        failed.push({ path: root, error: String(error) });
+        onProgress?.({ type: "failed", path: root, error: String(error) });
+        continue;
+      }
+
+      for (const bundlePath of bundles) {
+        try {
+          const nativePlugins = await scanBundleInWorker(bundlePath);
+          for (const nativePlugin of nativePlugins) {
+            const normalizedPlugin = normalizeNativePlugin(nativePlugin, scannedAt);
+            if (!normalizedPlugin) continue;
+            const displayKey = registryDisplayKey(normalizedPlugin);
+            if (seenDisplayKeys.has(displayKey)) continue;
+            seenDisplayKeys.add(displayKey);
+            const plugin = resolveUniquePresetPath(normalizedPlugin, occupiedPresetPaths);
+            await writePreset(plugin);
+            generatedPresets += 1;
+            upsertPlugin(plugin);
+            plugins.push(plugin);
+            onProgress?.({ type: "plugin", plugin, generatedPresets });
+          }
+        } catch (error) {
+          failed.push({ path: bundlePath, error: String(error) });
+          onProgress?.({ type: "failed", path: bundlePath, error: String(error) });
+        }
+        await delayImmediate();
+      }
+    }
+
+    const result = {
+      status: this.getStatus(),
+      plugins: this.listPlugins(),
+      scannedPaths: scanPaths,
+      generatedPresets,
+      failed,
+    };
+    onProgress?.({ type: "complete", result });
+    return result;
+  }
+
+  presetPathForPlugin(pluginId: string): string | null {
+    const registry = getDb();
+    if (!registry) return null;
+    const row = registry.prepare("SELECT preset_path FROM audio_plugins WHERE id = ?").get(pluginId) as Record<string, unknown> | undefined;
+    return typeof row?.preset_path === "string" ? row.preset_path : null;
+  }
+}
+
+export const pluginHostNative = new PluginHostNative();

@@ -6,6 +6,7 @@ export type AppWindowContentType =
   | "projectWizard"
   | "unsavedChanges"
   | "preferences"
+  | "pluginManager"
   | "plugin"
   | "mixer"
   | "editor"

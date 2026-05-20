@@ -86,3 +86,17 @@ export function openSettingsWindow(initialTab: SettingsTab = "general"): Promise
     payload: { initialTab },
   });
 }
+
+export function openPluginManagerWindow(): Promise<string | null> {
+  return openExternalCapableDialog({
+    contentType: "pluginManager",
+    title: "Audio Plug-in Manager",
+    width: 980,
+    height: 640,
+    minWidth: 860,
+    minHeight: 520,
+    resizable: true,
+    maximizable: false,
+    closable: true,
+  });
+}

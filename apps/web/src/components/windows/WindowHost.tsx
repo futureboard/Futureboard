@@ -5,6 +5,7 @@ import { DialogWindow } from "./DialogWindow";
 import { ProjectWizard } from "../project/ProjectWizard";
 import { UnsavedChangesDialog } from "./UnsavedChangesDialog";
 import { SettingsDialog } from "../settings/SettingsDialog";
+import { AudioPluginManager } from "../plugins/AudioPluginManager";
 
 export function WindowHost() {
   const { windows, closeWindow, focusWindow, updateWindowBounds } = useWindowStore();
@@ -63,6 +64,8 @@ function WindowContent({ contentType, id, payload }: ContentProps) {
           initialTab={(payload?.initialTab as "general" | "audio" | "midi" | "project" | "shortcuts" | "appearance" | "advanced") ?? "general"}
         />
       );
+    case "pluginManager":
+      return <AudioPluginManager windowId={id} />;
     default:
       return (
         <div className="flex items-center justify-center h-full text-[11px] text-daw-text-muted">

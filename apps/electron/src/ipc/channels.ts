@@ -49,6 +49,13 @@ export const IpcChannels = {
   SysWriteElectronSettings: "daw:sys:writeElectronSettings",
   SysGetDefaultProjectsPath: "daw:sys:getDefaultProjectsPath",
 
+  // Native audio plug-in registry (Electron only)
+  PluginHostGetStatus: "daw:pluginHost:getStatus",
+  PluginHostListPlugins: "daw:pluginHost:listPlugins",
+  PluginHostScanVst3: "daw:pluginHost:scanVst3",
+  PluginHostScanProgress: "daw:pluginHost:scanProgress",
+  PluginHostRevealPreset: "daw:pluginHost:revealPreset",
+
   // Folder-based project operations (Electron only)
   ProjectFolderBrowseLocation: "daw:project:folderBrowseLocation",
   ProjectFolderCreate: "daw:project:folderCreate",
@@ -225,6 +232,66 @@ export type GpuFeatureStatus = {
   electronVersion: string;
   chromeVersion: string;
 };
+
+export type AudioPluginKind = "effect" | "instrument";
+
+export type AudioPluginRegistryEntry = {
+  id: string;
+  name: string;
+  vendor: string;
+  format: "VST3" | (string & {});
+  category: string;
+  kind: AudioPluginKind;
+  path: string;
+  classId?: string;
+  version?: string;
+  sdkMetadataLoaded: boolean;
+  presetPath: string;
+  scannedAt: number;
+};
+
+export type AudioPluginHostStatus = {
+  available: boolean;
+  backend: string;
+  message: string;
+  dbPath: string;
+  presetRoot: string;
+  defaultScanPaths: string[];
+};
+
+export type AudioPluginScanResult = {
+  status: AudioPluginHostStatus;
+  plugins: AudioPluginRegistryEntry[];
+  scannedPaths: string[];
+  generatedPresets: number;
+  failed: Array<{ path: string; error: string }>;
+};
+
+export type AudioPluginScanProgressEvent =
+  | {
+      type: "started";
+      status: AudioPluginHostStatus;
+      scannedPaths: string[];
+    }
+  | {
+      type: "plugin";
+      plugin: AudioPluginRegistryEntry;
+      generatedPresets: number;
+    }
+  | {
+      type: "folder";
+      path: string;
+      discovered: number;
+    }
+  | {
+      type: "failed";
+      path: string;
+      error: string;
+    }
+  | {
+      type: "complete";
+      result: AudioPluginScanResult;
+    };
 
 /** Settings persisted to disk (userData/futureboard-settings.json).
  *  Read synchronously at startup for pre-ready configuration (GPU mode). */

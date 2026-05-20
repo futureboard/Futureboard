@@ -11,4 +11,3 @@
 [submodule "external/vst3sdk"]
 	path = external/vst3sdk
 	url = https://github.com/steinbergmedia/vst3sdk
-	update = none

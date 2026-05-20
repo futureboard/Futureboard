@@ -7,6 +7,7 @@ import type {
   FolderImportAudioResult,
   FolderProjectAdapter,
   MessageBoxOptions,
+  PluginHostAdapter,
   Platform,
   PlatformCapabilities,
   ProjectStorageAdapter,
@@ -35,7 +36,7 @@ const capabilities: PlatformCapabilities = {
   nativeDialogs: true,
   nativeWindowControls: true,
   nativeAudioEngine: true,
-  nativePlugins: false,
+  nativePlugins: true,
   webAudio: typeof window !== "undefined" && "AudioContext" in window,
   cloudSync: false,
   osFilePaths: true,
@@ -442,6 +443,51 @@ const windowAdapter: WindowAdapter = {
   },
 };
 
+const pluginHost: PluginHostAdapter = {
+  isSupported: true,
+  getStatus() {
+    const host = bridge().pluginHost;
+    if (!host) return Promise.resolve({
+      available: false,
+      backend: "missing-preload",
+      message: "PluginHost preload bridge is unavailable.",
+      dbPath: "",
+      presetRoot: "",
+      defaultScanPaths: [],
+    });
+    return host.getStatus();
+  },
+  listPlugins() {
+    return bridge().pluginHost?.listPlugins() ?? Promise.resolve([]);
+  },
+  scanVst3(paths?: string[]) {
+    const host = bridge().pluginHost;
+    if (!host) {
+      return Promise.resolve({
+        status: {
+          available: false,
+          backend: "missing-preload",
+          message: "PluginHost preload bridge is unavailable.",
+          dbPath: "",
+          presetRoot: "",
+          defaultScanPaths: [],
+        },
+        plugins: [],
+        scannedPaths: paths ?? [],
+        generatedPresets: 0,
+        failed: [],
+      });
+    }
+    return host.scanVst3(paths);
+  },
+  onScanProgress(callback) {
+    return bridge().pluginHost?.onScanProgress(callback) ?? (() => { /* no-op */ });
+  },
+  async revealPreset(pluginId: string) {
+    await bridge().pluginHost?.revealPreset(pluginId);
+  },
+};
+
 export const electronPlatform: Platform = {
   kind: "electron",
   capabilities,
@@ -450,4 +496,5 @@ export const electronPlatform: Platform = {
   dialog,
   window: windowAdapter,
   folderProject,
+  pluginHost,
 };

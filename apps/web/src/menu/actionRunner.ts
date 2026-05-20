@@ -23,7 +23,7 @@ import {
   rememberSavedProject,
   saveCurrentProjectAndRemember,
 } from "../utils/projectLifecycle";
-import { openProjectWizardWindow, openSettingsWindow } from "../utils/dialogWindows";
+import { openPluginManagerWindow, openProjectWizardWindow, openSettingsWindow } from "../utils/dialogWindows";
 import {
   AddTrackCommand,
   DeleteTrackCommand,
@@ -956,7 +956,12 @@ export function runAction(actionId: string) {
 
     // ── Plugin stubs ───────────────────────────────────────────────────────
     case "plugins:scan":
+      break;
+
     case "plugins:manager":
+      void openPluginManagerWindow();
+      break;
+
     case "plugins:format-vst3":
     case "plugins:format-clap":
     case "plugins:format-daux":

@@ -1,6 +1,25 @@
 [package]
-name = "SpherePluginHost"
+name = "sphere-plugin-host"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "SpherePluginHost — N-API control bridge and native plugin host shell for Futureboard Studio"
+
+[lib]
+name = "PluginHost"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+napi        = { version = "2", features = ["napi4"] }
+napi-derive = "2"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+[build-dependencies]
+cc = "1"
+napi-build = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

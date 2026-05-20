@@ -159,6 +159,75 @@ export interface DialogAdapter {
   showErrorBox(title: string, message: string): Promise<void>;
 }
 
+export type AudioPluginKind = "effect" | "instrument";
+
+export type AudioPluginRegistryEntry = {
+  id: string;
+  name: string;
+  vendor: string;
+  format: "VST3" | (string & {});
+  category: string;
+  kind: AudioPluginKind;
+  path: string;
+  classId?: string;
+  version?: string;
+  sdkMetadataLoaded: boolean;
+  presetPath: string;
+  scannedAt: number;
+};
+
+export type AudioPluginHostStatus = {
+  available: boolean;
+  backend: string;
+  message: string;
+  dbPath: string;
+  presetRoot: string;
+  defaultScanPaths: string[];
+};
+
+export type AudioPluginScanResult = {
+  status: AudioPluginHostStatus;
+  plugins: AudioPluginRegistryEntry[];
+  scannedPaths: string[];
+  generatedPresets: number;
+  failed: Array<{ path: string; error: string }>;
+};
+
+export type AudioPluginScanProgressEvent =
+  | {
+      type: "started";
+      status: AudioPluginHostStatus;
+      scannedPaths: string[];
+    }
+  | {
+      type: "plugin";
+      plugin: AudioPluginRegistryEntry;
+      generatedPresets: number;
+    }
+  | {
+      type: "folder";
+      path: string;
+      discovered: number;
+    }
+  | {
+      type: "failed";
+      path: string;
+      error: string;
+    }
+  | {
+      type: "complete";
+      result: AudioPluginScanResult;
+    };
+
+export interface PluginHostAdapter {
+  isSupported: boolean;
+  getStatus(): Promise<AudioPluginHostStatus>;
+  listPlugins(): Promise<AudioPluginRegistryEntry[]>;
+  scanVst3(paths?: string[]): Promise<AudioPluginScanResult>;
+  onScanProgress(callback: (event: AudioPluginScanProgressEvent) => void): () => void;
+  revealPreset(pluginId: string): Promise<void>;
+}
+
 export interface WindowAdapter {
   minimize(): void;
   toggleMaximize(): void;
@@ -174,4 +243,5 @@ export interface Platform {
   dialog: DialogAdapter;
   window: WindowAdapter;
   folderProject: FolderProjectAdapter;
+  pluginHost: PluginHostAdapter;
 }

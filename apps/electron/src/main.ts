@@ -35,6 +35,10 @@ import {
   type BrowseFolderResult,
   type GpuFeatureStatus,
   type ElectronPersistedSettings,
+  type AudioPluginHostStatus,
+  type AudioPluginRegistryEntry,
+  type AudioPluginScanProgressEvent,
+  type AudioPluginScanResult,
   type ExternalWindowConfig,
   type FloatingWindowOpenRequest,
   type FloatingWindowMixerUpdateRequest,
@@ -42,6 +46,7 @@ import {
 import { APP_MENUS, type AppMenuGroup, type AppMenuItem } from "./generated/menuItems.js";
 import { initAutoUpdater } from "./updater.js";
 import { getFloatingWindowManager } from "./floating-window-manager.js";
+import { pluginHostNative } from "./native-plugin/PluginHostNative.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -1098,6 +1103,8 @@ function externalRouteForContent(contentType: string): string {
       return "/projectwizard";
     case "preferences":
       return "/settings";
+    case "pluginManager":
+      return "/plugin-manager";
     default:
       return "/";
   }
@@ -1670,6 +1677,43 @@ function registerIpcHandlers(): void {
     },
   );
 
+  // ── Native audio plug-in registry ──────────────────────────────────────────
+
+  ipcMain.handle(
+    IpcChannels.PluginHostGetStatus,
+    async (): Promise<AudioPluginHostStatus> => pluginHostNative.getStatus(),
+  );
+
+  ipcMain.handle(
+    IpcChannels.PluginHostListPlugins,
+    async (): Promise<AudioPluginRegistryEntry[]> => pluginHostNative.listPlugins(),
+  );
+
+  ipcMain.handle(
+    IpcChannels.PluginHostScanVst3,
+    async (event, scanPaths: unknown): Promise<AudioPluginScanResult> => {
+      const paths = Array.isArray(scanPaths)
+        ? scanPaths.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+        : undefined;
+      const sendProgress = (payload: AudioPluginScanProgressEvent) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send(IpcChannels.PluginHostScanProgress, payload);
+        }
+      };
+      return pluginHostNative.scanVst3(paths, sendProgress);
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.PluginHostRevealPreset,
+    async (_event, pluginId: unknown): Promise<void> => {
+      if (!isValidString(pluginId)) return;
+      const presetPath = pluginHostNative.presetPathForPlugin(pluginId);
+      if (!presetPath) return;
+      await shell.showItemInFolder(presetPath);
+    },
+  );
+
   // ── Folder-based project operations ────────────────────────────────────────
 
   ipcMain.handle(
@@ -1894,6 +1938,12 @@ app.whenReady().then(async () => {
   });
 
   registerMikoProtocol();
+
+  try {
+    await pluginHostNative.ensurePresetFolders();
+  } catch (error) {
+    console.warn("[PluginHost] failed to create preset folders:", error);
+  }
 
   // Register SphereDirectAudioEngine IPC handlers and try to start the native engine.
   const { registerSphereAudioHandlers } = await import("./native-audio/ipc-handlers.js");

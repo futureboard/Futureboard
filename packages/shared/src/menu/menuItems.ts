@@ -1044,10 +1044,9 @@ export const APP_MENUS: AppMenuGroup[] = [
       },
       {
         id: "audio.plugin_manager",
-        label: "Plugin Manager...",
+        label: "Audio Plug-in Manager...",
         icon: "blocks",
         action: "plugins:manager",
-        enabled: false,
       },
       {
         id: "audio.supported_plugin_formats",

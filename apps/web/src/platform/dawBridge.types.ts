@@ -173,6 +173,74 @@ export interface DawBridgeSys {
   getDefaultProjectsPath(): Promise<string>;
 }
 
+export type DawBridgeAudioPluginKind = "effect" | "instrument";
+
+export type DawBridgeAudioPluginRegistryEntry = {
+  id: string;
+  name: string;
+  vendor: string;
+  format: "VST3" | (string & {});
+  category: string;
+  kind: DawBridgeAudioPluginKind;
+  path: string;
+  classId?: string;
+  version?: string;
+  sdkMetadataLoaded: boolean;
+  presetPath: string;
+  scannedAt: number;
+};
+
+export type DawBridgeAudioPluginHostStatus = {
+  available: boolean;
+  backend: string;
+  message: string;
+  dbPath: string;
+  presetRoot: string;
+  defaultScanPaths: string[];
+};
+
+export type DawBridgeAudioPluginScanResult = {
+  status: DawBridgeAudioPluginHostStatus;
+  plugins: DawBridgeAudioPluginRegistryEntry[];
+  scannedPaths: string[];
+  generatedPresets: number;
+  failed: Array<{ path: string; error: string }>;
+};
+
+export type DawBridgeAudioPluginScanProgressEvent =
+  | {
+      type: "started";
+      status: DawBridgeAudioPluginHostStatus;
+      scannedPaths: string[];
+    }
+  | {
+      type: "plugin";
+      plugin: DawBridgeAudioPluginRegistryEntry;
+      generatedPresets: number;
+    }
+  | {
+      type: "folder";
+      path: string;
+      discovered: number;
+    }
+  | {
+      type: "failed";
+      path: string;
+      error: string;
+    }
+  | {
+      type: "complete";
+      result: DawBridgeAudioPluginScanResult;
+    };
+
+export interface DawBridgePluginHost {
+  getStatus(): Promise<DawBridgeAudioPluginHostStatus>;
+  listPlugins(): Promise<DawBridgeAudioPluginRegistryEntry[]>;
+  scanVst3(paths?: string[]): Promise<DawBridgeAudioPluginScanResult>;
+  onScanProgress(callback: (event: DawBridgeAudioPluginScanProgressEvent) => void): () => void;
+  revealPreset(pluginId: string): Promise<void>;
+}
+
 export interface DawBridgePeakChunk {
   read(fileId: string, spp: number, chunkIndex: number, projectRoot: string): Promise<ArrayBuffer | null>;
   write(fileId: string, spp: number, chunkIndex: number, data: ArrayBuffer, projectRoot: string): Promise<void>;
@@ -394,6 +462,7 @@ export interface DawElectronBridge {
   window: DawBridgeWindow;
   windows: DawBridgeExternalWindows;
   sys: DawBridgeSys;
+  pluginHost?: DawBridgePluginHost;
 
   /** Binary peak chunk files (Project/Cache/Peaks/). Present only in Electron client. */
   peakChunk?: DawBridgePeakChunk;

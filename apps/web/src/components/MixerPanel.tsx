@@ -27,6 +27,7 @@ import { getSendTargets } from "../utils/routingHelpers";
 import { AddTrackSendCommand, RemoveTrackSendCommand } from "../commands";
 import { BUILT_IN_PLUGINS, type BuiltInPlugin } from "../plugins/registry";
 import { showToast } from "./ui/Toast";
+import { platform } from "../platform";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -235,18 +236,36 @@ function InsertRow({
 }: { insert: InsertDevice; accent: string; trackId: string }) {
   const enabled = insert.enabled;
   const { toggleInsertDevice, removeInsertDevice } = useProjectStore();
+  const openEditor = () => {
+    if (!platform.pluginHost.isSupported) return;
+    void platform.pluginHost.openEditorWindow({
+      windowId: `plugin-editor:${trackId}:${insert.id}`,
+      title: insert.name || "Plugin Editor",
+      subtitle: `${insert.type} • ${trackId}`,
+      width: 560,
+      height: 380,
+    });
+  };
   return (
     <div
       className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px] transition-colors hover:bg-white/[0.04]"
       style={{ borderColor: enabled ? accent : "rgba(255,255,255,0.12)" }}
     >
       <button
-        title={enabled ? "Bypass device" : "Enable device"}
-        onClick={() => toggleInsertDevice(trackId, insert.id)}
+        title="Open plugin editor"
+        onDoubleClick={openEditor}
+        onClick={openEditor}
         className="flex-1 truncate text-left text-[10px]"
         style={{ color: enabled ? "rgba(255,255,255,0.72)" : "rgba(255,255,255,0.3)" }}
       >
         {insert.name}
+      </button>
+      <button
+        title={enabled ? "Bypass device" : "Enable device"}
+        onClick={() => toggleInsertDevice(trackId, insert.id)}
+        className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70"
+      >
+        <Minus size={8} />
       </button>
       <button
         title="Remove device"

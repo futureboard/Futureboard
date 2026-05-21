@@ -54,6 +54,15 @@ const pluginHost: PluginHostAdapter = {
   async revealPreset() {
     throw new Error("Native audio plug-in presets are not available on web");
   },
+  async openEditorWindow() {
+    return null;
+  },
+  async openEditorForPath() {
+    return null;
+  },
+  async closeEditorWindow() {
+    // no-op on web
+  },
 };
 
 /**

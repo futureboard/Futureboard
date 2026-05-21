@@ -1714,6 +1714,43 @@ function registerIpcHandlers(): void {
     },
   );
 
+  ipcMain.handle(
+    IpcChannels.PluginHostOpenEditorWindow,
+    async (_event, options: unknown): Promise<number | null> => {
+      const value = options as {
+        windowId?: unknown;
+        title?: unknown;
+        subtitle?: unknown;
+        width?: unknown;
+        height?: unknown;
+      };
+      if (!isValidString(value?.windowId) || !isValidString(value?.title)) return null;
+      return pluginHostNative.openPluginEditorWindow({
+        windowId: value.windowId,
+        title: value.title,
+        subtitle: typeof value.subtitle === "string" ? value.subtitle : undefined,
+        width: typeof value.width === "number" ? value.width : undefined,
+        height: typeof value.height === "number" ? value.height : undefined,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.PluginHostOpenEditorForPath,
+    async (_event, pluginPath: unknown): Promise<number | null> => {
+      if (!isValidString(pluginPath)) return null;
+      return pluginHostNative.openPluginEditorForPath(pluginPath);
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.PluginHostCloseEditorWindow,
+    async (_event, handle: unknown): Promise<void> => {
+      if (typeof handle !== "number") return;
+      pluginHostNative.closePluginEditorWindow(handle);
+    },
+  );
+
   // ── Folder-based project operations ────────────────────────────────────────
 
   ipcMain.handle(

@@ -486,6 +486,15 @@ const pluginHost: PluginHostAdapter = {
   async revealPreset(pluginId: string) {
     await bridge().pluginHost?.revealPreset(pluginId);
   },
+  openEditorWindow(options) {
+    return bridge().pluginHost?.openEditorWindow(options) ?? Promise.resolve(null);
+  },
+  openEditorForPath(pluginPath: string) {
+    return bridge().pluginHost?.openEditorForPath(pluginPath) ?? Promise.resolve(null);
+  },
+  async closeEditorWindow(handle: number) {
+    await bridge().pluginHost?.closeEditorWindow(handle);
+  },
 };
 
 export const electronPlatform: Platform = {

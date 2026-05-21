@@ -27,6 +27,7 @@ import {
   type AudioPluginRegistryEntry,
   type AudioPluginScanProgressEvent,
   type AudioPluginScanResult,
+  type PluginEditorWindowOpenOptions,
   type SphereDeviceOpenConfig,
   type SphereTransportState,
   type SphereDauxConfig,
@@ -164,6 +165,12 @@ const pluginHostBridge = Object.freeze({
   },
   revealPreset: (pluginId: string): Promise<void> =>
     invoke(IpcChannels.PluginHostRevealPreset, pluginId),
+  openEditorWindow: (options: PluginEditorWindowOpenOptions): Promise<number | null> =>
+    invoke(IpcChannels.PluginHostOpenEditorWindow, options),
+  openEditorForPath: (pluginPath: string): Promise<number | null> =>
+    invoke(IpcChannels.PluginHostOpenEditorForPath, pluginPath),
+  closeEditorWindow: (handle: number): Promise<void> =>
+    invoke(IpcChannels.PluginHostCloseEditorWindow, handle),
 });
 
 const floatingWindowBridge = Object.freeze({

@@ -12,6 +12,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        backend_root.join("src/plugin_editor_window.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         backend_root
             .join("include/sphere_plugin_host_vst3.h")
             .display()
@@ -29,6 +33,7 @@ fn main() {
         .include(clap_helpers_root.join("include"))
         .define("SMTG_OS_WINDOWS", Some("1"))
         .file(backend_root.join("src/vst3_scanner.cpp"))
+        .file(backend_root.join("src/plugin_editor_window.cpp"))
         .file(sdk_root.join("pluginterfaces/base/coreiids.cpp"))
         .file(sdk_root.join("pluginterfaces/base/funknown.cpp"))
         .file(sdk_root.join("pluginterfaces/base/ustring.cpp"))
@@ -42,6 +47,8 @@ fn main() {
     if cfg!(target_os = "windows") {
         build.file(sdk_root.join("public.sdk/source/vst/hosting/module_win32.cpp"));
         println!("cargo:rustc-link-lib=ole32");
+        println!("cargo:rustc-link-lib=user32");
+        println!("cargo:rustc-link-lib=gdi32");
     } else if cfg!(target_os = "linux") {
         println!("cargo:rustc-link-lib=dl");
     }

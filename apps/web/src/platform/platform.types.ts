@@ -219,6 +219,14 @@ export type AudioPluginScanProgressEvent =
       result: AudioPluginScanResult;
     };
 
+export type PluginEditorWindowOpenOptions = {
+  windowId: string;
+  title: string;
+  subtitle?: string;
+  width?: number;
+  height?: number;
+};
+
 export interface PluginHostAdapter {
   isSupported: boolean;
   getStatus(): Promise<AudioPluginHostStatus>;
@@ -226,6 +234,9 @@ export interface PluginHostAdapter {
   scanVst3(paths?: string[]): Promise<AudioPluginScanResult>;
   onScanProgress(callback: (event: AudioPluginScanProgressEvent) => void): () => void;
   revealPreset(pluginId: string): Promise<void>;
+  openEditorWindow(options: PluginEditorWindowOpenOptions): Promise<number | null>;
+  openEditorForPath(pluginPath: string): Promise<number | null>;
+  closeEditorWindow(handle: number): Promise<void>;
 }
 
 export interface WindowAdapter {

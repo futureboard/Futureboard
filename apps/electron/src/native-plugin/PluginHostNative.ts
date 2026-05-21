@@ -30,11 +30,22 @@ type NativePluginInfo = {
   sdk_metadata_loaded?: boolean;
 };
 
+type PluginEditorWindowOptions = {
+  windowId: string;
+  title: string;
+  subtitle?: string;
+  width?: number;
+  height?: number;
+};
+
 type PluginHostAddon = {
   initPluginHost?: () => { available?: boolean; backend?: string; message?: string };
   scanVst3?: (paths: string[]) => NativePluginInfo[];
   scanClap?: (paths: string[]) => NativePluginInfo[];
   scanAudioPlugins?: (paths: string[]) => NativePluginInfo[];
+  openPluginEditorWindow?: (options: PluginEditorWindowOptions) => number;
+  openPluginEditorForPath?: (pluginPath: string) => number;
+  closePluginEditorWindow?: (handle: number) => void;
   getBackendVersion?: () => string;
 };
 
@@ -566,6 +577,23 @@ export class PluginHostNative {
     };
     onProgress?.({ type: "complete", result });
     return result;
+  }
+
+  openPluginEditorWindow(options: PluginEditorWindowOptions): number | null {
+    const native = loadAddon();
+    if (!native?.openPluginEditorWindow) return null;
+    return native.openPluginEditorWindow(options);
+  }
+
+  openPluginEditorForPath(pluginPath: string): number | null {
+    const native = loadAddon();
+    if (!native?.openPluginEditorForPath) return null;
+    return native.openPluginEditorForPath(pluginPath);
+  }
+
+  closePluginEditorWindow(handle: number): void {
+    const native = loadAddon();
+    native?.closePluginEditorWindow?.(handle);
   }
 
   presetPathForPlugin(pluginId: string): string | null {

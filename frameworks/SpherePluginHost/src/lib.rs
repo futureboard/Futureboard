@@ -1,9 +1,14 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(non_snake_case)]
 
+mod editor_window;
 mod scanner;
 mod types;
 
+pub use editor_window::{
+    close_plugin_editor_window, open_plugin_editor_for_path, open_plugin_editor_window,
+    PluginEditorWindowOptions,
+};
 use napi_derive::napi;
 use scanner::{scan_audio_plugin_paths, scan_clap_paths, scan_vst3_paths};
 use types::{HostStatus, PluginInfo};

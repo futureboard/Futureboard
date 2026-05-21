@@ -55,6 +55,9 @@ export const IpcChannels = {
   PluginHostScanVst3: "daw:pluginHost:scanVst3",
   PluginHostScanProgress: "daw:pluginHost:scanProgress",
   PluginHostRevealPreset: "daw:pluginHost:revealPreset",
+  PluginHostOpenEditorWindow: "daw:pluginHost:openEditorWindow",
+  PluginHostOpenEditorForPath: "daw:pluginHost:openEditorForPath",
+  PluginHostCloseEditorWindow: "daw:pluginHost:closeEditorWindow",
 
   // Folder-based project operations (Electron only)
   ProjectFolderBrowseLocation: "daw:project:folderBrowseLocation",
@@ -257,6 +260,14 @@ export type AudioPluginHostStatus = {
   dbPath: string;
   presetRoot: string;
   defaultScanPaths: string[];
+};
+
+export type PluginEditorWindowOpenOptions = {
+  windowId: string;
+  title: string;
+  subtitle?: string;
+  width?: number;
+  height?: number;
 };
 
 export type AudioPluginScanResult = {

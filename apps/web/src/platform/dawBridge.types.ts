@@ -233,12 +233,23 @@ export type DawBridgeAudioPluginScanProgressEvent =
       result: DawBridgeAudioPluginScanResult;
     };
 
+export type DawBridgePluginEditorWindowOpenOptions = {
+  windowId: string;
+  title: string;
+  subtitle?: string;
+  width?: number;
+  height?: number;
+};
+
 export interface DawBridgePluginHost {
   getStatus(): Promise<DawBridgeAudioPluginHostStatus>;
   listPlugins(): Promise<DawBridgeAudioPluginRegistryEntry[]>;
   scanVst3(paths?: string[]): Promise<DawBridgeAudioPluginScanResult>;
   onScanProgress(callback: (event: DawBridgeAudioPluginScanProgressEvent) => void): () => void;
   revealPreset(pluginId: string): Promise<void>;
+  openEditorWindow(options: DawBridgePluginEditorWindowOpenOptions): Promise<number | null>;
+  openEditorForPath(pluginPath: string): Promise<number | null>;
+  closeEditorWindow(handle: number): Promise<void>;
 }
 
 export interface DawBridgePeakChunk {

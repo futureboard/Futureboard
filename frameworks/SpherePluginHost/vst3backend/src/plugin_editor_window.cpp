@@ -49,6 +49,14 @@ namespace {
 std::atomic<unsigned long long> g_next_handle{1};
 std::mutex g_windows_mutex;
 
+SpherePluginHostString make_string_local(std::string value) {
+  auto* data = new (std::nothrow) char[value.size() + 1];
+  if (!data) return {nullptr, 0};
+  std::memcpy(data, value.data(), value.size());
+  data[value.size()] = '\0';
+  return {data, static_cast<unsigned long long>(value.size())};
+}
+
 #ifdef _WIN32
 constexpr COLORREF kTitlebarDark = RGB(14, 19, 25);
 constexpr UINT_PTR kRedrawTimer = 1;
@@ -159,13 +167,6 @@ std::string escape_json_local(const std::string& value) {
   return out;
 }
 
-SpherePluginHostString make_string_local(std::string value) {
-  auto* data = new (std::nothrow) char[value.size() + 1];
-  if (!data) return {nullptr, 0};
-  std::memcpy(data, value.data(), value.size());
-  data[value.size()] = '\0';
-  return {data, static_cast<unsigned long long>(value.size())};
-}
 
 Steinberg::tresult PLUGIN_API MinimalComponentHandler::performEdit(
     Steinberg::Vst::ParamID id,

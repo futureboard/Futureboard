@@ -64,8 +64,8 @@ jobs:
 
       - name: Initialize audio plugin SDK submodules without docs
         run: |
-          git submodule sync -- external/vst3sdk external/clap external/clap-helpers packages/shared/tabler-icons
-          git submodule update --init --force --depth=1 --checkout -- external/clap external/clap-helpers packages/shared/tabler-icons
+          git submodule sync -- external/vst3sdk external/clap external/clap-helpers external/yoga packages/shared/tabler-icons
+          git submodule update --init --force --depth=1 --checkout -- external/clap external/clap-helpers external/yoga packages/shared/tabler-icons
           git submodule update --init --force --checkout -- external/vst3sdk
           git -C external/vst3sdk submodule update --init --force --checkout -- base cmake pluginterfaces public.sdk tutorials vstgui4
 

@@ -141,6 +141,9 @@ type ProjectStore = {
   removeTrackSend: (trackId: TrackId, sendId: string) => void;
   updateTrackSend: (trackId: TrackId, sendId: string, updates: Partial<TrackSend>) => void;
 
+  // ── Instrument slot ────────────────────────────────────────────────────────
+  setInstrumentSlot: (trackId: TrackId, slot: InsertDevice | null) => void;
+
   // ── Insert devices ─────────────────────────────────────────────────────────
   addInsertDevice: (trackId: TrackId, device: InsertDevice) => void;
   addInsertToTarget: (target: InsertTarget, device: InsertDevice) => InsertTargetResult | null;
@@ -208,16 +211,30 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   // ── Project-level ──────────────────────────────────────────────────────────
 
   createNewProject: (overrides) => {
+    console.log("[ProjectStore] createNewProject: initializing blank project");
     set({ project: defaultProject(), peakMeta: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
     if (overrides) set((s) => ({ project: { ...s.project, ...overrides } }));
+    // Mark clean immediately — starter state is not a user edit.
+    useUIStore.getState().setSaveStatus("saved");
+    // Sync to localStorage so external windows (Add Track, Mixer) see the new project.
+    get().saveLocal();
+    console.log("[ProjectStore] createNewProject: baseline set, dirty=false");
   },
 
   loadProject: (project) => {
+    console.log("[ProjectStore] loadProject:", project.name);
     set({ project: normalizeProject(project as Partial<DawProject>), peakMeta: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
+    // Mark clean — loading is not a user edit.
+    // saveLocal() is intentionally NOT called here to avoid a storage-event race condition
+    // in the Electron external-window flow. Callers (loadOpenedProject, ProjectWizard) do it.
+    useUIStore.getState().setSaveStatus("saved");
+    console.log("[ProjectStore] loadProject: project initialized, dirty=false");
   },
 
   resetProject: () => {
     set({ project: defaultProject(), peakMeta: new Map(), waveformStatus: new Map(), waveformProgress: new Map() });
+    useUIStore.getState().setSaveStatus("saved");
+    get().saveLocal();
   },
 
   setProjectName: (name) => {
@@ -447,6 +464,20 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           t.id === trackId
             ? { ...t, sends: (t.sends ?? []).map((send) => send.id === sendId ? { ...send, ...updates } : send) }
             : t
+        ),
+      },
+    }));
+    markDirty();
+  },
+
+  // ── Instrument slot ────────────────────────────────────────────────────────
+
+  setInstrumentSlot: (trackId, slot) => {
+    set((s) => ({
+      project: {
+        ...s.project,
+        tracks: s.project.tracks.map((t) =>
+          t.id === trackId ? { ...t, instrumentSlot: slot ?? undefined } : t
         ),
       },
     }));

@@ -88,6 +88,14 @@ const TRACK_TYPES: TrackTypeConfig[] = [
     ready: true,
   },
   {
+    type: "instrument",
+    label: "Instrument Track",
+    description: "MIDI clips routed to an instrument plugin",
+    detail: "VST3 · CLAP · Piano Roll",
+    icon: Cpu,
+    ready: true,
+  },
+  {
     type: "midi",
     label: "MIDI Track",
     description: "Sequence instruments with notes",
@@ -143,7 +151,7 @@ const TRACK_TYPES: TrackTypeConfig[] = [
 type InputValue = string;
 
 function defaultInputForType(type: TrackType): InputValue {
-  if (type === "midi") return "midi-all";
+  if (type === "midi" || type === "instrument") return "midi-all";
   if (type === "audio") return "ch:stereo";
   return "none";
 }
@@ -186,6 +194,14 @@ function buildSummary(
     const chLabel = midiChannel === "all" ? "all channels" : `Ch ${midiChannel}`;
     return `Add ${n}MIDI track${plural} — ${inLabel}, ${chLabel}`;
   }
+  if (cfg.type === "instrument") {
+    const inLabel =
+      inputValue === "midi-all" ? "All MIDI Inputs"
+      : inputValue === "none" ? "No Input"
+      : inputValue.startsWith("midi:") ? (midiInputs.find((d) => `midi:${d.id}` === inputValue)?.name ?? "MIDI Device")
+      : inputValue;
+    return `Add ${n}instrument track${plural} — ${inLabel} → instrument plugin → ${outLabel}`;
+  }
   if (cfg.type === "master") return "Add master output track";
   if (cfg.type === "bus")    return `Add ${n}bus track${plural} → ${outLabel}`;
   if (cfg.type === "return") return `Add ${n}return track${plural} → ${outLabel}`;
@@ -224,7 +240,7 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
   const [nativePlugins,    setNativePlugins]    = useState<AudioPluginRegistryEntry[]>([]);
   const [selectedPlugin,   setSelectedPlugin]   = useState<AudioPluginRegistryEntry | null>(null);
   const [pluginQuery,      setPluginQuery]      = useState("");
-  const [pluginKindFilter, setPluginKindFilter] = useState<"all" | "instrument" | "effect">("instrument");
+  const [pluginKindFilter, setPluginKindFilter] = useState<"all" | "instrument" | "effect">("all");
 
   // ── Init & keyboard ──────────────────────────────────────────────────────────
   useEffect(() => { window.setTimeout(() => inputRef.current?.select(), 0); }, []);
@@ -235,9 +251,9 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // ── Load plugins when plugin type active ────────────────────────────────────
+  // ── Load plugins when plugin/instrument type active ─────────────────────────
   useEffect(() => {
-    if (selectedType.type !== "plugin" || !platform.pluginHost.isSupported) return;
+    if ((selectedType.type !== "plugin" && selectedType.type !== "instrument") || !platform.pluginHost.isSupported) return;
     let cancelled = false;
     void platform.pluginHost.listPlugins().then((plugins) => {
       if (!cancelled) setNativePlugins(plugins);
@@ -255,7 +271,14 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
     setMonitorMode("off");
     setMidiChannel("all");
     setArmTrack(false);
-    if (cfg.type !== "plugin") { setSelectedPlugin(null); setPluginQuery(""); }
+    // Clear plugin selection when leaving plugin/instrument types
+    if (cfg.type !== "plugin" && cfg.type !== "instrument") {
+      setSelectedPlugin(null);
+      setPluginQuery("");
+    }
+    // Reset kind filter per type: instrument always shows instruments, plugin shows all
+    if (cfg.type === "instrument") setPluginKindFilter("instrument");
+    else if (cfg.type === "plugin") setPluginKindFilter("all");
   };
 
   // ── Input select options: channel-based (mirrors InspectorPanel) ─────────────
@@ -368,8 +391,13 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
 
     if (firstId) setSelectedTrackId(firstId);
 
-    // Pre-load selected plugin as first insert on plugin tracks
-    if (selectedPlugin) {
+    // Instrument tracks: load selected plugin as the instrument slot
+    if (isInstrument && selectedPlugin) {
+      useProjectStore.getState().setInstrumentSlot(firstId!, nativePluginToInsert(selectedPlugin));
+    }
+
+    // Plugin tracks: load selected plugin as the first insert
+    if (isPlugin && selectedPlugin) {
       useProjectStore.getState().addInsertToTarget(
         { type: "track", trackId: firstId! },
         nativePluginToInsert(selectedPlugin),
@@ -382,22 +410,28 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
 
   // ── Derived UI values ────────────────────────────────────────────────────────
   const selectedColor = TRACK_COLORS[colorIndex % TRACK_COLORS.length]!;
-  const isAudio  = selectedType.type === "audio";
-  const isMidi   = selectedType.type === "midi";
-  const isMaster = selectedType.type === "master";
-  const isPlugin = selectedType.type === "plugin";
-  const showChannels = !isMidi && !isMaster;
+  const isAudio      = selectedType.type === "audio";
+  const isMidi       = selectedType.type === "midi";
+  const isInstrument = selectedType.type === "instrument";
+  const isMaster     = selectedType.type === "master";
+  const isPlugin     = selectedType.type === "plugin";
+  const showChannels = !isMidi && !isMaster && !isInstrument;
   const showOutput   = !isMidi && !isMaster;
 
   // Permission prompts only shown in web — Electron auto-initialises devices.
   const isWeb = platform.kind === "web";
-  const needsMidiPerm   = isWeb && isMidi && midiPermission !== "granted" && midiPermission !== "unsupported";
-  const midiUnsupported = isMidi && midiPermission === "unsupported";
+  const needsMidi       = isMidi || isInstrument;
+  const needsMidiPerm   = isWeb && needsMidi && midiPermission !== "granted" && midiPermission !== "unsupported";
+  const midiUnsupported = needsMidi && midiPermission === "unsupported";
 
   const summary = isPlugin
     ? selectedPlugin
       ? `Add plugin track with ${selectedPlugin.name} (${selectedPlugin.vendor})`
       : `Add empty plugin track — pick a plugin above`
+    : isInstrument
+    ? selectedPlugin
+      ? `Add instrument track with ${selectedPlugin.name} (${selectedPlugin.vendor})`
+      : buildSummary(selectedType, trackCount, channelCount, inputValue, outputId, midiChannel, monitorMode, tracks, midiInputs)
     : buildSummary(
         selectedType, trackCount, channelCount, inputValue, outputId,
         midiChannel, monitorMode, tracks, midiInputs,
@@ -518,18 +552,18 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
           </label>
         </div>
 
-        {/* ── Plugin picker (plugin tracks only) ── */}
-        {isPlugin && (
+        {/* ── Plugin picker (plugin / instrument tracks) ── */}
+        {(isPlugin || isInstrument) && (
           <div className="flex flex-col gap-1.5 border-t border-white/[0.05] px-3 py-2.5">
-            <RoutingRow label="Plugin">
+            <RoutingRow label={isInstrument ? "Instrument" : "Plugin"}>
               <PluginPicker
                 plugins={nativePlugins}
                 selected={selectedPlugin}
                 onSelect={setSelectedPlugin}
                 query={pluginQuery}
                 onQueryChange={setPluginQuery}
-                kindFilter={pluginKindFilter}
-                onKindFilterChange={setPluginKindFilter}
+                kindFilter={isInstrument ? "instrument" : pluginKindFilter}
+                onKindFilterChange={isInstrument ? undefined : setPluginKindFilter}
               />
             </RoutingRow>
           </div>
@@ -610,6 +644,30 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
                     options={audioInputOptions}
                   />
                 </RoutingRow>
+              </>
+            )}
+
+            {/* Instrument MIDI routing */}
+            {isInstrument && (
+              <>
+                {midiUnsupported ? (
+                  <p className="text-[9px] text-daw-faint opacity-60">MIDI is unavailable in this browser</p>
+                ) : (
+                  <RoutingRow label="MIDI In">
+                    <div className="flex flex-1 items-center gap-2">
+                      <div className="flex-1">
+                        <DawSelect value={inputValue} onChange={setInputValue} options={midiInputOptions} />
+                      </div>
+                      {needsMidiPerm && (
+                        <button type="button" onClick={() => midiDeviceService.requestMidiAccess()}
+                          className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[9px] text-yellow-400/80 transition-colors hover:text-yellow-300"
+                          style={{ border: "1px solid rgba(234,179,8,0.2)" }} title="Grant MIDI access">
+                          <AlertCircle size={8} />Enable
+                        </button>
+                      )}
+                    </div>
+                  </RoutingRow>
+                )}
               </>
             )}
 
@@ -888,7 +946,7 @@ function PluginPicker({
   query: string;
   onQueryChange: (q: string) => void;
   kindFilter: "all" | "instrument" | "effect";
-  onKindFilterChange: (f: "all" | "instrument" | "effect") => void;
+  onKindFilterChange?: (f: "all" | "instrument" | "effect") => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -979,7 +1037,7 @@ function PluginPicker({
           </div>
 
           <div className="mt-1.5 flex items-center gap-1">
-            {(["all", "instrument", "effect"] as const).map((k) => (
+            {onKindFilterChange && (["all", "instrument", "effect"] as const).map((k) => (
               <button
                 key={k}
                 type="button"

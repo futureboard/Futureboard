@@ -1,7 +1,3 @@
-[submodule "frameworks/SphereEngine"]
-	path = frameworks/SphereEngine
-	url = https://github.com/arizkami/SphereEngine
-    update = none
 [submodule "packages/shared/tabler-icons"]
 	path = packages/shared/tabler-icons
 	url = https://github.com/tabler/tabler-icons.git

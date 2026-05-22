@@ -265,23 +265,26 @@ export default function App() {
     };
   }, [loadLocal]);
 
-  // Mark status bar "unsaved" whenever the project data actually changes.
-  // Using subscribe (not a hook) so this never causes a re-render of App.
+  // Notify drag workflow when project data changes. Individual store mutations
+  // call markDirty() directly, so we do NOT set "unsaved" here — that would
+  // incorrectly fire during project loading and cause a false dirty state.
   useEffect(() => {
     return useProjectStore.subscribe((state, prev) => {
       if (state.project !== prev.project) {
         useDragWorkflowStore.getState().markProjectMutationDuringDrag();
-        useUIStore.getState().setSaveStatus("unsaved");
       }
     });
   }, []);
 
-  // Reload project when an external Electron window (e.g. Add Track) writes to localStorage.
-  // The storage event only fires in OTHER windows, so this correctly picks up cross-window saves.
+  // Reload project when an external Electron window (Add Track, Mixer, etc.) writes to
+  // localStorage. The storage event only fires in OTHER windows.
+  // These cross-window edits are real user changes not yet saved to disk → mark unsaved.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === "mochi-daw-project" && e.newValue) {
+        console.log("[App] storage event: syncing project from external window, marking unsaved");
         loadLocal();
+        useUIStore.getState().setSaveStatus("unsaved");
       }
     };
     window.addEventListener("storage", onStorage);

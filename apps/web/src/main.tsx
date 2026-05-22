@@ -8,6 +8,7 @@ import { ExternalProjectWizardWindow } from "./routes/ExternalProjectWizardWindo
 import { ExternalSettingsWindow } from "./routes/ExternalSettingsWindow";
 import { ExternalPluginManagerWindow } from "./routes/ExternalPluginManagerWindow";
 import { ExternalAddTrackWindow } from "./routes/ExternalAddTrackWindow";
+import { ExternalPianoRollWindow } from "./routes/ExternalPianoRollWindow";
 // Supports weights 100-900
 import "@fontsource-variable/inter/opsz.css";
 
@@ -16,6 +17,7 @@ createRoot(document.getElementById("root")!).render(
     <HashRouter>
       <Routes>
         <Route path="/external/mixer" element={<ExternalMixerWindow />} />
+        <Route path="/external/piano-roll" element={<ExternalPianoRollWindow />} />
         <Route path="/projectwizard" element={<ExternalProjectWizardWindow />} />
         <Route path="/settings" element={<ExternalSettingsWindow />} />
         <Route path="/plugin-manager" element={<ExternalPluginManagerWindow />} />

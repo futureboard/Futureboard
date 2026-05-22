@@ -1,0 +1,12 @@
+[package]
+name = "futureboard_native"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "futureboard_native"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2.2"
+sphere_ui_components = { path = "../../../crates/SphereUIComponents" }

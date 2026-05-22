@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown, Copy, Magnet, MousePointer2, Pencil, Trash2 } from "lucide-react";
+import { ChevronDown, Copy, ExternalLink, Magnet, MousePointer2, Pencil, Trash2 } from "lucide-react";
 import type { DawClip, DawTrack, MidiNote } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
 import { useHistoryStore } from "../store/historyStore";
@@ -120,9 +120,11 @@ type DragState =
 export function MidiEditorPanel({
   clip,
   track,
+  onOpenInWindow,
 }: {
   clip: DawClip;
   track: DawTrack | null | undefined;
+  onOpenInWindow?: () => void;
 }) {
   const { bpm, timeSignature } = useProjectStore((s) => s.project);
   const spb         = 60 / bpm;                    // seconds per beat
@@ -727,6 +729,19 @@ export function MidiEditorPanel({
             setPpb((p) => Math.min(400, p * 1.4));
           }} className="flex h-5 w-5 items-center justify-center rounded hover:bg-white/[0.07]">+</button>
         </div>
+
+        {onOpenInWindow && (
+          <>
+            <div className="mx-1 h-4 w-px bg-white/10" />
+            <button
+              onClick={onOpenInWindow}
+              title="Open in separate window"
+              className="flex h-6 w-6 items-center justify-center rounded text-daw-dim transition-colors hover:bg-white/[0.07] hover:text-daw-text"
+            >
+              <ExternalLink size={11} />
+            </button>
+          </>
+        )}
       </div>
 
       {/* ── Body ── */}

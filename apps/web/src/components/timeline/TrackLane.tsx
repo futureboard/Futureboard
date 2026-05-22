@@ -158,8 +158,8 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
         };
         useHistoryStore.getState().execute(new AddClipCommand(track.id, newClip));
         useUIStore.getState().setSelectedClipIds([newClip.id]);
-      } else {
-        // MIDI / placeholder clip — one bar duration
+      } else if (track.type === "midi" || track.type === "instrument") {
+        // MIDI clip — one bar duration
         const spb = secondsPerBeat(project.bpm);
         const barDuration = spb * (project.timeSignature?.numerator ?? 4);
         const newClip: DawClip = {
@@ -175,6 +175,11 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
         };
         useHistoryStore.getState().execute(new AddClipCommand(track.id, newClip));
         useUIStore.getState().setSelectedClipIds([newClip.id]);
+      } else {
+        // Bus, Return, Group, Master, Plugin — clips not supported
+        showToast(`${track.type} tracks don't support clips`, true);
+        selectTrack();
+        return;
       }
       selectTrack();
       return;

@@ -201,6 +201,8 @@ export type DawTrack = {
   solo: boolean;
   armed: boolean;
   clips: DawClip[];
+  /** Primary instrument plugin slot (instrument tracks only). Signal path: MIDI → instrumentSlot → inserts → fader. */
+  instrumentSlot?: InsertDevice | null;
   inserts?: InsertDevice[];
   sends?: TrackSend[];
   /** Output routing target: "master" or a bus/group track ID. Defaults to "master". */

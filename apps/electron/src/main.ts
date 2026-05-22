@@ -1099,6 +1099,8 @@ function externalRouteForContent(contentType: string): string {
   switch (contentType) {
     case "mixer":
       return "/external/mixer";
+    case "pianoRoll":
+      return "/external/piano-roll";
     case "projectWizard":
       return "/projectwizard";
     case "preferences":
@@ -1116,6 +1118,9 @@ function rendererRouteUrl(route: string, payload?: Record<string, unknown>): str
   const params = new URLSearchParams();
   if (payload?.initialTab && typeof payload.initialTab === "string") {
     params.set("tab", payload.initialTab);
+  }
+  if (payload?.clipId && typeof payload.clipId === "string") {
+    params.set("clipId", payload.clipId);
   }
   const suffix = params.size > 0 ? `?${params.toString()}` : "";
   const hashRoute = `#${route.startsWith("/") ? route : `/${route}`}${suffix}`;

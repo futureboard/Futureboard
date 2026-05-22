@@ -179,6 +179,9 @@ export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
   const inserts = (raw.inserts ?? []).map((ins, i) =>
     normalizeInsertDevice(ins as Partial<InsertDevice>, i)
   );
+  const instrumentSlot = raw.instrumentSlot
+    ? normalizeInsertDevice(raw.instrumentSlot as Partial<InsertDevice>, 0)
+    : undefined;
   return {
     id: raw.id ?? crypto.randomUUID(),
     name: raw.name ?? "Track",
@@ -191,6 +194,7 @@ export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
     solo: raw.solo ?? false,
     armed: raw.armed ?? false,
     clips: (raw.clips ?? []).map((c) => normalizeClip(c as Partial<DawClip>)),
+    instrumentSlot,
     inserts,
     sends: (raw.sends ?? []).map((s) => normalizeSend(s as Partial<TrackSend>)),
     output: raw.output ?? "master",

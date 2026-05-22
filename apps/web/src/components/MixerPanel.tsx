@@ -410,6 +410,7 @@ function InsertRow({
   insert, accent, target, trackId, insertIndex,
 }: { insert: InsertDevice; accent: string; target: InsertTarget; trackId: string; insertIndex: number }) {
   const enabled = insert.enabled;
+  const isNative = insert.type === "native-plugin";
   const { toggleInsertDevice, removeInsertFromTarget } = useProjectStore();
   const openEditor = () => {
     void openNativeInsertEditor(trackId, insert, insertIndex);
@@ -424,14 +425,23 @@ function InsertRow({
       style={{ borderColor: enabled ? accent : "rgba(255,255,255,0.12)" }}
     >
       <button
-        title="Open plugin editor"
-        onDoubleClick={openEditor}
-        onClick={openEditor}
+        title={isNative ? "Open plugin editor" : insert.name}
+        onDoubleClick={isNative ? openEditor : undefined}
+        onClick={isNative ? openEditor : undefined}
         className="flex-1 truncate text-left text-[10px]"
         style={{ color: enabled ? "rgba(255,255,255,0.72)" : "rgba(255,255,255,0.3)" }}
       >
         {insert.name}
       </button>
+      {isNative && (
+        <button
+          title="Open Plugin Window"
+          onClick={openEditor}
+          className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70"
+        >
+          <ExternalLink size={8} />
+        </button>
+      )}
       <button
         title={enabled ? "Bypass device" : "Enable device"}
         onClick={() => toggleInsertDevice(trackId, insert.id)}
@@ -447,6 +457,118 @@ function InsertRow({
         <X size={8} />
       </button>
     </div>
+  );
+}
+
+function InstrumentSlotRow({
+  insert, accent, trackId,
+}: { insert: InsertDevice; accent: string; trackId: string }) {
+  const { setInstrumentSlot } = useProjectStore();
+  const enabled = insert.enabled;
+  const openEditor = () => {
+    void openNativeInsertEditor(trackId, insert, -1);
+  };
+  const removeSlot = () => {
+    void closeNativeInsertEditor(trackId, insert.id);
+    setInstrumentSlot(trackId, null);
+  };
+  return (
+    <div
+      className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px] transition-colors hover:bg-white/[0.04]"
+      style={{ borderColor: enabled ? accent : "rgba(255,255,255,0.12)" }}
+    >
+      <button
+        title="Open instrument editor"
+        onClick={openEditor}
+        className="flex-1 truncate text-left text-[10px] font-medium"
+        style={{ color: enabled ? "rgba(255,255,255,0.82)" : "rgba(255,255,255,0.3)" }}
+      >
+        {insert.name}
+      </button>
+      <button
+        title="Open Plugin Window"
+        onClick={openEditor}
+        className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70"
+      >
+        <ExternalLink size={8} />
+      </button>
+      <button
+        title="Remove instrument"
+        onClick={removeSlot}
+        className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70"
+      >
+        <X size={8} />
+      </button>
+    </div>
+  );
+}
+
+function InstrumentSlotAddMenu({ accent, trackId }: { accent: string; trackId: string }) {
+  const { setInstrumentSlot } = useProjectStore();
+  const [query, setQuery] = useState("");
+  const [nativePlugins, setNativePlugins] = useState<AudioPluginRegistryEntry[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!platform.pluginHost.isSupported) return;
+    void platform.pluginHost.listPlugins().then((plugins) => {
+      if (!cancelled) setNativePlugins(plugins.filter((p) => p.kind === "instrument"));
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const visiblePlugins = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return nativePlugins
+      .filter((p) => !q || `${p.name} ${p.vendor}`.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [nativePlugins, query]);
+
+  const add = (plugin: AudioPluginRegistryEntry) => {
+    setInstrumentSlot(trackId, nativePluginToInsert(plugin));
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <SectionAddButton accent={accent} title="Set instrument" disabled={!platform.pluginHost.isSupported} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" sideOffset={6} collisionPadding={12}
+        className="flex flex-col overflow-hidden p-1.5"
+        style={{ width: "320px", maxHeight: "min(400px, calc(100vh - 24px))" }}
+      >
+        <div className="shrink-0 px-1 pb-1">
+          <DropdownMenuLabel className="px-0 text-[11px]">Set Instrument</DropdownMenuLabel>
+          <input value={query} onChange={(e) => setQuery(e.currentTarget.value)}
+            placeholder="Search instruments…"
+            className="mt-1 h-7 w-full rounded border px-2 text-[11px] outline-none"
+            style={{ background: semanticColors.surface.sunken, borderColor: semanticColors.border.subtle, color: semanticColors.text.primary }}
+          />
+        </div>
+        <DropdownMenuSeparator />
+        <div className="min-h-0 max-h-[300px] flex-1 overflow-y-auto py-0.5">
+          {visiblePlugins.length === 0 ? (
+            <div className="px-2 py-3 text-center text-[11px]" style={{ color: semanticColors.text.faint }}>
+              {nativePlugins.length === 0 ? "No instrument plugins found. Scan in Preferences → Plugins." : "No matches."}
+            </div>
+          ) : visiblePlugins.map((plugin) => (
+            <button key={plugin.id} type="button" onClick={() => add(plugin)}
+              className="flex min-h-[36px] w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors"
+              style={{ color: semanticColors.text.secondary }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = semanticColors.surface.hover; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+            >
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: "rgba(169,156,255,0.7)" }} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium leading-4" style={{ color: semanticColors.text.primary }}>{plugin.name}</span>
+                <span className="block truncate text-[10px] leading-3" style={{ color: semanticColors.text.faint }}>{plugin.vendor}</span>
+              </span>
+              <span className="shrink-0 text-[9px] font-semibold" style={{ color: semanticColors.accent.primary }}>{plugin.format}</span>
+            </button>
+          ))}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -682,6 +804,22 @@ function ChannelStrip({
           </div>
         )}
       </div>
+
+      {/* ── INSTRUMENT SLOT (full only, instrument tracks) ── */}
+      {showFull && track?.type === "instrument" && (
+        <div className="shrink-0 border-b border-white/[0.045]">
+          <SectionHeader
+            label="Instrument"
+            accent={accent}
+            menu={!track.instrumentSlot ? <InstrumentSlotAddMenu accent={accent} trackId={track.id} /> : undefined}
+          />
+          {track.instrumentSlot ? (
+            <InstrumentSlotRow insert={track.instrumentSlot} accent={accent} trackId={track.id} />
+          ) : (
+            <EmptySlotRow accent={accent} hint="Click + to add an instrument plugin" />
+          )}
+        </div>
+      )}
 
       {/* ── INSERTS (full only) ── */}
       {showFull && (

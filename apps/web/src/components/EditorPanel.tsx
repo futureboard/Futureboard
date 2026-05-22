@@ -39,7 +39,20 @@ export function EditorPanel() {
     );
   }
 
-  if (clipType(clip) === "midi") return <MidiEditorPanel clip={clip} track={track} />;
+  const openPianoRollWindow = () => {
+    useProjectStore.getState().saveLocal();
+    void window.dawElectron?.windows?.openExternal?.({
+      contentType: "pianoRoll",
+      title: `Piano Roll – ${clip.name}`,
+      payload: { clipId: clip.id },
+      width: 1100,
+      height: 680,
+      minWidth: 700,
+      minHeight: 420,
+    });
+  };
+
+  if (clipType(clip) === "midi") return <MidiEditorPanel clip={clip} track={track} onOpenInWindow={openPianoRollWindow} />;
   return <AudioEditor clip={clip} track={track} />;
 }
 

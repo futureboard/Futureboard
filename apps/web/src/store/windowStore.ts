@@ -10,6 +10,7 @@ export type AppWindowContentType =
   | "addTrack"
   | "plugin"
   | "mixer"
+  | "pianoRoll"
   | "editor"
   | "effectEditor"
   | "about"

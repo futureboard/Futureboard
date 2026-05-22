@@ -118,6 +118,10 @@ export async function loadOpenedProject(project: DawProject): Promise<void> {
   clearProjectSelectionState();
   useUIStore.getState().setSaveStatus("saved");
   rememberSavedProject(project);
+  // Sync to localStorage so external windows (Add Track, Mixer, Piano Roll) opened after
+  // this point load THIS project, not a stale one from a previous session.
+  useProjectStore.getState().saveLocal();
+  console.log("[projectLifecycle] loadOpenedProject: project ready, baseline set, dirty=false");
 
   // Re-apply pre-warmed metadata immediately (loadProject reset the store).
   const store = useProjectStore.getState();

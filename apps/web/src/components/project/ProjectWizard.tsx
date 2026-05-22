@@ -291,6 +291,9 @@ export function ProjectWizard({ windowId, external = false }: Props) {
     uiStore.setSelectedClipIds([]);
     uiStore.setSelectedTrackId(null);
     uiStore.setSaveStatus("saved");
+    // Sync to localStorage so any external window opened after this sees the new project.
+    useProjectStore.getState().saveLocal();
+    console.log("[ProjectWizard] project created and clean, localStorage synced");
 
     if (external && platform.kind === "electron") {
       platform.window.close();

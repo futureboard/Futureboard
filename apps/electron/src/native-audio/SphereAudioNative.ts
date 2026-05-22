@@ -326,7 +326,7 @@ function candidatePaths(): string[] {
   // 2. Dev build — dist/native-audio/ → go up 4 levels to workspace root.
   //    _dirname = …/apps/electron/dist/native-audio  (compiled output)
   const wsRoot = path.resolve(_dirname, "..", "..", "..", "..");
-  const engineRoot = path.join(wsRoot, "frameworks", "SphereDirectAudioEngine");
+  const engineRoot = path.join(wsRoot, "crates", "SphereDirectAudioEngine");
 
   // 2a. After `napi build` — .node placed in engine crate root
   candidates.push(path.join(engineRoot, nodeAddonName));

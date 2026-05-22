@@ -20,7 +20,7 @@ pub fn icon_button(
         .justify_center()
         .rounded_md()
         .text_color(color)
-        .hover(|style| style.bg(Colors::surface_raised()));
+        .hover(|style| style.bg(Colors::surface_hover()));
 
     if let Some(path) = icon_path {
         button = button.child(

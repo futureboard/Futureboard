@@ -8,7 +8,7 @@ pub fn setup(cx: &mut App) {
 
     let options = studio_window_options();
     cx.open_window(options, |_window, cx| {
-        cx.new(|_cx| StudioLayout)
+        cx.new(|_cx| StudioLayout::new())
     })
     .expect("failed to open studio window");
 }

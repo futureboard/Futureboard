@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const electronRoot = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(electronRoot, "..", "..");
-const hostRoot = path.join(workspaceRoot, "frameworks", "SpherePluginHost");
+const hostRoot = path.join(workspaceRoot, "crates", "SpherePluginHost");
 const debug = process.argv.includes("--debug");
 const cargoArgs = ["build", ...(debug ? [] : ["--release"] )];
 

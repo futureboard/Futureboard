@@ -33,7 +33,7 @@ const NODE_ADDON_NAME = "DAUx.node";
 
 const electronRoot  = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(electronRoot, "..", "..");
-const engineRoot    = path.join(workspaceRoot, "frameworks", "SphereDirectAudioEngine");
+const engineRoot    = path.join(workspaceRoot, "crates", "SphereDirectAudioEngine");
 const profile       = isDebug ? "debug" : "release";
 const sourcePath    = path.join(engineRoot, "target", profile, addonSourceName());
 

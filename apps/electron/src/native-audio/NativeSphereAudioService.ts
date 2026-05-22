@@ -40,8 +40,8 @@ function candidatePaths(appDir: string): string[] {
     path.join(appDir, "..", "native", ENGINE_BINARY_NAME),
     path.join(appDir, "..", "..", "native", ENGINE_BINARY_NAME),
     // Dev: built output of crates/SphereDirectAudioEngine
-    path.join(appDir, "..", "..", "..", "frameworks", "SphereDirectAudioEngine", "target", "release", ENGINE_BINARY_NAME),
-    path.join(appDir, "..", "..", "..", "frameworks", "SphereDirectAudioEngine", "target", "debug", ENGINE_BINARY_NAME),
+    path.join(appDir, "..", "..", "..", "crates", "SphereDirectAudioEngine", "target", "release", ENGINE_BINARY_NAME),
+    path.join(appDir, "..", "..", "..", "crates", "SphereDirectAudioEngine", "target", "debug", ENGINE_BINARY_NAME),
   ];
 }
 

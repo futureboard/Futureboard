@@ -85,7 +85,7 @@ function candidateAddonPaths(): string[] {
     candidates.push(path.join(process.resourcesPath, "PluginHost.node"));
   }
   const root = workspaceRoot();
-  const hostRoot = path.join(root, "frameworks", "SpherePluginHost");
+  const hostRoot = path.join(root, "crates", "SpherePluginHost");
   candidates.push(path.join(hostRoot, "PluginHost.node"));
   candidates.push(path.join(hostRoot, "target", "release", "PluginHost.node"));
   candidates.push(path.join(hostRoot, "target", "release", "PluginHost.dll"));

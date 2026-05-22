@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(webRoot, "..", "..");
-const coreRoot = path.join(workspaceRoot, "frameworks", "SphereWebAudioCore");
+const coreRoot = path.join(workspaceRoot, "crates", "SphereWebAudioCore");
 const outDir = path.join(webRoot, "src", "engine", "wasm-pkg");
 const generatedJs = path.join(outDir, "futureboard_core.js");
 const generatedWasm = path.join(outDir, "futureboard_core_bg.wasm");

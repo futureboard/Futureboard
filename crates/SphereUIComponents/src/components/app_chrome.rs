@@ -19,7 +19,7 @@ fn menu_area() -> impl IntoElement {
                 .px(px(7.0))
                 .py(px(2.0))
                 .rounded_md()
-                .text_color(Colors::text_dim())
+                .text_color(Colors::text_muted())
                 .text_size(px(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(*label)
@@ -42,13 +42,13 @@ fn project_title() -> impl IntoElement {
         )
         .child(
             div()
-                .text_color(Colors::text_dim())
+                .text_color(Colors::text_muted())
                 .text_xs()
                 .child("·"),
         )
         .child(
             div()
-                .text_color(Colors::text_dim())
+                .text_color(Colors::text_muted())
                 .text_xs()
                 .child("Saved"),
         )
@@ -129,7 +129,7 @@ fn transport_controls() -> impl IntoElement {
                 .gap_1()
                 .child(
                     div()
-                        .text_color(Colors::text_dim())
+                        .text_color(Colors::text_muted())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_xs()
                         .child("BPM"),
@@ -168,7 +168,7 @@ fn utility_buttons() -> impl IntoElement {
                 px(24.0),
                 px(24.0),
                 px(12.0),
-                Colors::text_dim(),
+                Colors::text_muted(),
             )
         )
         .child(
@@ -178,7 +178,7 @@ fn utility_buttons() -> impl IntoElement {
                 px(24.0),
                 px(24.0),
                 px(12.0),
-                Colors::text_dim(),
+                Colors::text_muted(),
             )
         )
 }
@@ -205,7 +205,7 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
                 px(32.0),
                 px(32.0),
                 px(16.0),
-                Colors::text_dim(),
+                Colors::text_muted(),
             )
             .window_control_area(WindowControlArea::Min)
             .occlude(),
@@ -218,7 +218,7 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
                 px(32.0),
                 px(32.0),
                 px(16.0),
-                Colors::text_dim(),
+                Colors::text_muted(),
             )
             .window_control_area(WindowControlArea::Max)
             .occlude(),
@@ -231,7 +231,7 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
                 px(32.0),
                 px(32.0),
                 px(16.0),
-                Colors::text_dim(),
+                Colors::text_muted(),
             )
             .window_control_area(WindowControlArea::Close)
             .occlude(),

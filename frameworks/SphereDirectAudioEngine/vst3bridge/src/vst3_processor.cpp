@@ -1,5 +1,6 @@
 #include "sphere_daux_vst3_processor.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -43,6 +44,9 @@ void set_last_error(std::string value) {
 constexpr const wchar_t* kDauxEditorWindowClass = L"FutureboardDauxVst3EditorWindow";
 constexpr const wchar_t* kDauxEditorChildClass = L"FutureboardDauxVst3EditorAttach";
 constexpr COLORREF kDauxTitlebarDark = RGB(14, 19, 25);
+constexpr int kDauxFallbackReloadId = 4101;
+constexpr int kDauxFallbackGenericId = 4102;
+constexpr int kDauxFallbackCloseId = 4103;
 
 // Posted to the HWND's own thread when destroy is requested cross-thread.
 constexpr UINT WM_DAUX_DESTROY = WM_APP + 50;
@@ -62,6 +66,17 @@ void set_daux_dark_titlebar(HWND hwnd) {
   DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE pre-20H1
   DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
   DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &kDauxTitlebarDark, sizeof(kDauxTitlebarDark));
+}
+
+void paint_dark_child(HWND hwnd) {
+  HDC dc = GetDC(hwnd);
+  if (!dc) return;
+  RECT rc{};
+  GetClientRect(hwnd, &rc);
+  HBRUSH brush = CreateSolidBrush(RGB(11, 15, 20));
+  FillRect(dc, &rc, brush);
+  DeleteObject(brush);
+  ReleaseDC(hwnd, dc);
 }
 
 void register_editor_window_classes() {
@@ -285,8 +300,15 @@ struct SphereDauxVst3Processor {
   Steinberg::IPtr<Steinberg::IPlugView> editor_view;
   HWND editor_hwnd{nullptr};
   HWND editor_attach_hwnd{nullptr};
+  HWND editor_fallback_label_hwnd{nullptr};
+  HWND editor_fallback_reload_hwnd{nullptr};
+  HWND editor_fallback_generic_hwnd{nullptr};
+  HWND editor_fallback_close_hwnd{nullptr};
   unsigned long long editor_handle{0};
   std::string editor_window_id;
+  std::string editor_title;
+  int editor_requested_width{0};
+  int editor_requested_height{0};
   bool editor_attached{false};
   // Guards window proc access; set to false before destroy so pending messages
   // received after GWLP_USERDATA is zeroed still find a valid flag.
@@ -464,9 +486,6 @@ struct SphereDauxVst3Processor {
 
 #ifdef _WIN32
   void close_editor_window();
-  // Detach IPlugView + destroy child HWND; keep parent shell alive.
-  // Use this for user-close and programmatic-close so the parent HWND
-  // (and its stable editor_handle) survive for the next open.
   void close_editor_view_only(const char* reason);
 #endif
 };
@@ -502,6 +521,23 @@ void detach_editor_view(SphereDauxVst3Processor* processor) {
   processor->editor_attached = false;
 }
 
+void destroy_fallback_controls(SphereDauxVst3Processor* processor) {
+  if (!processor) return;
+  HWND controls[] = {
+      processor->editor_fallback_label_hwnd,
+      processor->editor_fallback_reload_hwnd,
+      processor->editor_fallback_generic_hwnd,
+      processor->editor_fallback_close_hwnd,
+  };
+  for (HWND control : controls) {
+    if (control && IsWindow(control)) DestroyWindow(control);
+  }
+  processor->editor_fallback_label_hwnd = nullptr;
+  processor->editor_fallback_reload_hwnd = nullptr;
+  processor->editor_fallback_generic_hwnd = nullptr;
+  processor->editor_fallback_close_hwnd = nullptr;
+}
+
 void resize_editor_view(SphereDauxVst3Processor* processor) {
   if (!processor || !processor->editor_view || !processor->editor_attach_hwnd) return;
   RECT rc{};
@@ -512,8 +548,89 @@ void resize_editor_view(SphereDauxVst3Processor* processor) {
       static_cast<Steinberg::int32>(rc.right),
       static_cast<Steinberg::int32>(rc.bottom),
   };
-  processor->editor_view->onSize(&view_rect);
+  const auto resize_res = processor->editor_view->onSize(&view_rect);
+  static std::atomic<unsigned int> resize_log_count{0};
+  const unsigned int count = resize_log_count.fetch_add(1);
+  if (count < 12 || count % 50 == 0) {
+    std::fprintf(stderr,
+                 "[SphereVST3] IPlugView::onSize() result=%d handle=%llu rect=%d,%d,%d,%d count=%u\n",
+                 (int)resize_res,
+                 processor->editor_handle,
+                 (int)view_rect.left,
+                 (int)view_rect.top,
+                 (int)view_rect.right,
+                 (int)view_rect.bottom,
+                 count + 1);
+  }
 }
+
+void layout_attach_or_fallback(SphereDauxVst3Processor* processor, HWND hwnd) {
+  if (!processor || !hwnd) return;
+  RECT rc{};
+  GetClientRect(hwnd, &rc);
+  const int w = rc.right - rc.left;
+  const int h = rc.bottom - rc.top;
+  if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+    MoveWindow(processor->editor_attach_hwnd, 0, 0, w, h, TRUE);
+    resize_editor_view(processor);
+  }
+  if (processor->editor_fallback_label_hwnd && IsWindow(processor->editor_fallback_label_hwnd)) {
+    const int panel_w = 360;
+    const int x = std::max(16, (w - panel_w) / 2);
+    const int y = std::max(18, (h - 96) / 2);
+    MoveWindow(processor->editor_fallback_label_hwnd, x, y, panel_w, 24, TRUE);
+    MoveWindow(processor->editor_fallback_reload_hwnd, x, y + 42, 104, 28, TRUE);
+    MoveWindow(processor->editor_fallback_generic_hwnd, x + 116, y + 42, 124, 28, TRUE);
+    MoveWindow(processor->editor_fallback_close_hwnd, x + 252, y + 42, 82, 28, TRUE);
+  }
+}
+
+void show_attach_failed_state(SphereDauxVst3Processor* processor, const char* reason) {
+  if (!processor || !processor->editor_hwnd) return;
+  if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+    paint_dark_child(processor->editor_attach_hwnd);
+    DestroyWindow(processor->editor_attach_hwnd);
+  }
+  processor->editor_attach_hwnd = nullptr;
+  processor->editor_view = nullptr;
+  processor->editor_attached = false;
+  destroy_fallback_controls(processor);
+
+  processor->editor_fallback_label_hwnd = CreateWindowExW(
+      0, L"STATIC", L"Editor failed to attach",
+      WS_CHILD | WS_VISIBLE | SS_CENTER,
+      0, 0, 1, 1, processor->editor_hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+  processor->editor_fallback_reload_hwnd = CreateWindowExW(
+      0, L"BUTTON", L"Reload Editor",
+      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+      0, 0, 1, 1, processor->editor_hwnd,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDauxFallbackReloadId)),
+      GetModuleHandleW(nullptr), nullptr);
+  processor->editor_fallback_generic_hwnd = CreateWindowExW(
+      0, L"BUTTON", L"Generic Params",
+      WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_PUSHBUTTON,
+      0, 0, 1, 1, processor->editor_hwnd,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDauxFallbackGenericId)),
+      GetModuleHandleW(nullptr), nullptr);
+  processor->editor_fallback_close_hwnd = CreateWindowExW(
+      0, L"BUTTON", L"Close",
+      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+      0, 0, 1, 1, processor->editor_hwnd,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDauxFallbackCloseId)),
+      GetModuleHandleW(nullptr), nullptr);
+  layout_attach_or_fallback(processor, processor->editor_hwnd);
+  std::fprintf(stderr,
+               "[SphereVST3] editor attach failed state shown handle=%llu reason=%s\n",
+               processor->editor_handle,
+               reason ? reason : "unknown");
+}
+
+extern "C" unsigned long long sphere_daux_vst3_open_editor(
+    SphereDauxVst3Processor* processor,
+    const char*              window_id,
+    const char*              title,
+    int                      width,
+    int                      height);
 
 LRESULT CALLBACK daux_editor_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
   auto* processor =
@@ -526,27 +643,53 @@ LRESULT CALLBACK daux_editor_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
       return TRUE;
     }
     case WM_SIZE:
-      if (processor && processor->editor_attach_hwnd) {
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        MoveWindow(processor->editor_attach_hwnd, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
-        resize_editor_view(processor);
-      }
+      if (processor) layout_attach_or_fallback(processor, hwnd);
       return 0;
     case WM_SETFOCUS:
       if (processor && processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
       return 0;
+    case WM_CTLCOLORSTATIC: {
+      SetTextColor(reinterpret_cast<HDC>(wparam), RGB(231, 237, 245));
+      SetBkColor(reinterpret_cast<HDC>(wparam), RGB(11, 15, 20));
+      static HBRUSH dark_brush = CreateSolidBrush(RGB(11, 15, 20));
+      return reinterpret_cast<LRESULT>(dark_brush);
+    }
+    case WM_ERASEBKGND: {
+      RECT rc{};
+      GetClientRect(hwnd, &rc);
+      HBRUSH brush = CreateSolidBrush(RGB(11, 15, 20));
+      FillRect(reinterpret_cast<HDC>(wparam), &rc, brush);
+      DeleteObject(brush);
+      return 1;
+    }
+    case WM_COMMAND:
+      if (processor) {
+        const int command_id = LOWORD(wparam);
+        if (command_id == kDauxFallbackCloseId || command_id == kDauxFallbackGenericId) {
+          processor->close_editor_window();
+          return 0;
+        }
+        if (command_id == kDauxFallbackReloadId) {
+          const std::string window_id = processor->editor_window_id;
+          const std::string title = processor->editor_title;
+          const int requested_width = processor->editor_requested_width;
+          const int requested_height = processor->editor_requested_height;
+          processor->close_editor_window();
+          sphere_daux_vst3_open_editor(
+              processor,
+              window_id.c_str(),
+              title.empty() ? "Plugin Editor" : title.c_str(),
+              requested_width,
+              requested_height);
+          return 0;
+        }
+      }
+      break;
     case WM_CLOSE:
-      // User pressed the window's X button — hide the shell, but detach the
-      // view and destroy the child HWND so stale content cannot reappear.
+      // User pressed the window's X button: destroy the editor shell/view only.
       // Processor and controller stay alive; only insert removal may destroy them.
       if (processor) {
-        processor->close_editor_view_only("user-close");
-        ShowWindow(hwnd, SW_HIDE);
-        std::fprintf(stderr,
-                     "[SphereVST3] editor hidden (user close) handle=%llu windowId=%s\n",
-                     processor->editor_handle,
-                     processor->editor_window_id.c_str());
+        processor->close_editor_window();
         return 0;
       }
       break;
@@ -564,10 +707,12 @@ LRESULT CALLBACK daux_editor_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
         if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
           DestroyWindow(processor->editor_attach_hwnd);
         }
+        destroy_fallback_controls(processor);
         processor->editor_attach_hwnd = nullptr;
         processor->editor_hwnd = nullptr;
         processor->editor_handle = 0;
         processor->editor_window_id.clear();
+        processor->editor_title.clear();
       }
       return 0;
     default:
@@ -584,7 +729,7 @@ void register_editor_parent_class() {
     wc.lpfnWndProc = daux_editor_window_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     wc.lpszClassName = kDauxEditorWindowClass;
     RegisterClassExW(&wc);
   });
@@ -602,10 +747,14 @@ void SphereDauxVst3Processor::close_editor_window() {
   if (child && IsWindow(child)) {
     DestroyWindow(child);
   }
+  destroy_fallback_controls(this);
   editor_attach_hwnd = nullptr;
   editor_hwnd = nullptr;
   editor_handle = 0;
   editor_window_id.clear();
+  editor_title.clear();
+  editor_requested_width = 0;
+  editor_requested_height = 0;
   if (hwnd && IsWindow(hwnd)) {
     // Use PostMessage so the destroy is executed on the HWND's owning thread
     // (Electron main thread) rather than potentially a foreign thread.
@@ -633,6 +782,7 @@ void SphereDauxVst3Processor::close_editor_view_only(const char* reason) {
   if (editor_attach_hwnd && IsWindow(editor_attach_hwnd)) {
     DestroyWindow(editor_attach_hwnd);
   }
+  destroy_fallback_controls(this);
   editor_attach_hwnd = nullptr;
   std::fprintf(stderr,
                "[SphereVST3] close_editor_view_only handle=%llu reason=%s "
@@ -984,7 +1134,14 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
     const char*              title,
     int                      width,
     int                      height) {
-  if (!processor || !processor->controller) return 0;
+  if (!processor || !processor->controller) {
+    std::fprintf(stderr,
+                 "[SphereVST3] editor open failed processor=%p controller=%p exists=%d\n",
+                 static_cast<void*>(processor),
+                 processor ? static_cast<void*>(processor->controller.get()) : nullptr,
+                 processor && processor->controller ? 1 : 0);
+    return 0;
+  }
 #ifndef _WIN32
   (void)window_id;
   (void)title;
@@ -994,6 +1151,16 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   return 0;
 #else
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
+    ShowWindow(processor->editor_hwnd, SW_SHOWNORMAL);
+    UpdateWindow(processor->editor_hwnd);
+    SetForegroundWindow(processor->editor_hwnd);
+    if (processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
+    std::fprintf(stderr,
+                 "[SphereVST3] editor already open; focused existing shell handle=%llu windowId=%s\n",
+                 processor->editor_handle,
+                 processor->editor_window_id.c_str());
+    return processor->editor_handle;
+
     // Parent shell still alive (was hidden after user-close or programmatic-close).
     // Always create a FRESH child HWND + fresh IPlugView — never reuse the stale
     // child HWND.  After IPlugView::removed() the child HWND has no vendor content;
@@ -1095,8 +1262,29 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   register_editor_window_classes();
   register_editor_parent_class();
 
+  processor->editor_window_id = window_id ? window_id : "";
+  processor->editor_title = title && *title ? title : "Plugin Editor";
+  processor->editor_requested_width = width;
+  processor->editor_requested_height = height;
+  const std::string plugin_instance_id = processor->editor_window_id;
+  const auto identity_colon = plugin_instance_id.find_last_of(':');
+  const char* identity =
+      identity_colon == std::string::npos ? plugin_instance_id.c_str()
+                                          : plugin_instance_id.c_str() + identity_colon + 1;
+  std::fprintf(stderr,
+               "[SphereVST3] editor open request pluginInstanceId=%s windowId=%s controller=%p exists=%d\n",
+               identity,
+               processor->editor_window_id.c_str(),
+               static_cast<void*>(processor->controller.get()),
+               processor->controller ? 1 : 0);
+
   processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
       processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
+  std::fprintf(stderr,
+               "[SphereVST3] IPlugView createView pluginInstanceId=%s ptr=%p exists=%d\n",
+               identity,
+               static_cast<void*>(processor->editor_view.get()),
+               processor->editor_view ? 1 : 0);
   if (!processor->editor_view) {
     set_last_error("controller did not create editor view");
     return 0;
@@ -1111,7 +1299,16 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   Steinberg::ViewRect preferred{};
   int editor_width = width > 0 ? width : 820;
   int editor_height = height > 0 ? height : 560;
-  if (processor->editor_view->getSize(&preferred) == Steinberg::kResultTrue) {
+  const auto get_size_result = processor->editor_view->getSize(&preferred);
+  std::fprintf(stderr,
+               "[SphereVST3] IPlugView::getSize() result=%d rect=%d,%d,%d,%d pluginInstanceId=%s\n",
+               (int)get_size_result,
+               (int)preferred.left,
+               (int)preferred.top,
+               (int)preferred.right,
+               (int)preferred.bottom,
+               identity);
+  if (get_size_result == Steinberg::kResultTrue) {
     const int preferred_width = preferred.right - preferred.left;
     const int preferred_height = preferred.bottom - preferred.top;
     if (preferred_width > 0) editor_width = preferred_width;
@@ -1166,14 +1363,28 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   processor->editor_hwnd = hwnd;
   processor->editor_attach_hwnd = child;
   processor->editor_handle = g_next_editor_handle.fetch_add(1);
-  processor->editor_window_id = window_id ? window_id : "";
+  std::fprintf(stderr,
+               "[SphereVST3] editor HWNDs pluginInstanceId=%s handle=%llu mainHWND=0x%p childHWND=0x%p\n",
+               identity,
+               processor->editor_handle,
+               static_cast<void*>(hwnd),
+               static_cast<void*>(child));
 
   const auto attach_result =
       processor->editor_view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
+  std::fprintf(stderr,
+               "[SphereVST3] IPlugView::attached(child HWND) result=%d handle=%llu childHWND=0x%p pluginInstanceId=%s\n",
+               (int)attach_result,
+               processor->editor_handle,
+               static_cast<void*>(child),
+               identity);
   if (attach_result != Steinberg::kResultTrue && attach_result != Steinberg::kResultOk) {
-    processor->close_editor_window();
     set_last_error("IPlugView::attached(HWND) failed for DAUx VST3 editor");
-    return 0;
+    show_attach_failed_state(processor, "attached-failed");
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    UpdateWindow(hwnd);
+    SetForegroundWindow(hwnd);
+    return processor->editor_handle;
   }
 
   processor->editor_attached = true;
@@ -1194,15 +1405,16 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
 extern "C" void sphere_daux_vst3_close_editor(SphereDauxVst3Processor* processor) {
   if (!processor) return;
 #ifdef _WIN32
-  // Detach IPlugView, destroy child HWND, hide parent shell.
+  // Detach IPlugView and destroy the native editor shell.
   // Processor and controller are kept alive — only insert removal may destroy them.
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
-    processor->close_editor_view_only("programmatic-close");
-    ShowWindow(processor->editor_hwnd, SW_HIDE);
+    const unsigned long long handle = processor->editor_handle;
+    const std::string window_id = processor->editor_window_id;
+    processor->close_editor_window();
     std::fprintf(stderr,
                  "[SphereVST3] editor closed (programmatic) handle=%llu windowId=%s\n",
-                 processor->editor_handle,
-                 processor->editor_window_id.c_str());
+                 handle,
+                 window_id.c_str());
   }
 #endif
 }

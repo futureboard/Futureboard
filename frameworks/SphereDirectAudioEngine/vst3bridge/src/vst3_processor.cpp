@@ -29,6 +29,7 @@
 #include "public.sdk/source/vst/hosting/hostclasses.h"
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/utility/uid.h"
+#include "sphere_daux_editor_bridge.h"
 
 namespace {
 
@@ -254,6 +255,21 @@ struct ComponentHandlerImpl final : Steinberg::Vst::IComponentHandler {
       Steinberg::Vst::ParamValue value) override;
 };
 
+// ── Platform editor function forward declarations ─────────────────────────────
+// Implementations live in editor_mac.mm (macOS) and editor_linux.cpp (Linux).
+
+#if defined(__APPLE__)
+unsigned long long open_editor_mac(SphereDauxVst3Processor*, const char*, const char*, int, int);
+void  close_editor_mac(SphereDauxVst3Processor*);
+int   focus_editor_mac(SphereDauxVst3Processor*);
+void  shutdown_editor_mac(SphereDauxVst3Processor*);
+#elif defined(__linux__)
+unsigned long long open_editor_linux(SphereDauxVst3Processor*, const char*, const char*, int, int);
+void  close_editor_linux(SphereDauxVst3Processor*);
+int   focus_editor_linux(SphereDauxVst3Processor*);
+void  shutdown_editor_linux(SphereDauxVst3Processor*);
+#endif
+
 // ── Main processor struct ─────────────────────────────────────────────────────
 
 struct SphereDauxVst3Processor {
@@ -296,7 +312,7 @@ struct SphereDauxVst3Processor {
   SimpleParamChanges   param_changes_obj;  // reused per process call
   ComponentHandlerImpl component_handler;  // installed on IEditController
 
-#ifdef _WIN32
+#if defined(_WIN32)
   Steinberg::IPtr<Steinberg::IPlugView> editor_view;
   HWND editor_hwnd{nullptr};
   HWND editor_attach_hwnd{nullptr};
@@ -312,6 +328,22 @@ struct SphereDauxVst3Processor {
   bool editor_attached{false};
   // Guards window proc access; set to false before destroy so pending messages
   // received after GWLP_USERDATA is zeroed still find a valid flag.
+  std::atomic<bool> processor_valid{true};
+#elif defined(__APPLE__) || defined(__linux__)
+  // Platform editor state (macOS / Linux).
+  // ObjC and GTK4 types are hidden behind void* to keep this C++ TU clean.
+  // editor_mac.mm / editor_linux.cpp access these exclusively via the
+  // sphere_daux_editor_bridge.h C API.
+  Steinberg::IPtr<Steinberg::IPlugView> editor_view;
+  void* editor_native_window{nullptr};    // NSWindow* (mac) / GtkWidget* (linux)
+  void* editor_native_embed{nullptr};     // NSView* (mac only — the IPlugView parent)
+  void* editor_native_delegate{nullptr};  // DauxEditorWindowDelegate* (mac only)
+  unsigned long long editor_handle{0};
+  std::string editor_window_id;
+  std::string editor_title;
+  int editor_requested_width{0};
+  int editor_requested_height{0};
+  bool editor_attached{false};
   std::atomic<bool> processor_valid{true};
 #endif
 
@@ -446,8 +478,12 @@ struct SphereDauxVst3Processor {
   }
 
   void shutdown() {
-#ifdef _WIN32
+#if defined(_WIN32)
     close_editor_window();
+#elif defined(__APPLE__)
+    shutdown_editor_mac(this);
+#elif defined(__linux__)
+    shutdown_editor_linux(this);
 #endif
     if (processor && processing) processor->setProcessing(false);
     processing = false;
@@ -489,6 +525,144 @@ struct SphereDauxVst3Processor {
   void close_editor_view_only(const char* reason);
 #endif
 };
+
+// ── Bridge implementations for platform editor TUs ────────────────────────────
+// These give editor_mac.mm and editor_linux.cpp access to the TU-private
+// globals (g_last_error, g_next_editor_handle) and the IPlugView members
+// of SphereDauxVst3Processor without exposing the full struct definition.
+
+extern "C" void sphere_daux_editor_set_error(const char* msg) {
+  set_last_error(msg ? msg : "");
+}
+
+extern "C" unsigned long long sphere_daux_editor_next_handle(void) {
+  return g_next_editor_handle.fetch_add(1);
+}
+
+#if defined(__APPLE__) || defined(__linux__)
+
+extern "C" int sphere_daux_editor_create_view(
+    SphereDauxVst3Processor* proc,
+    const char*              platform_type,
+    int*                     out_width,
+    int*                     out_height) {
+  if (!proc || !proc->controller) return 0;
+  proc->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
+      proc->controller->createView(Steinberg::Vst::ViewType::kEditor));
+  if (!proc->editor_view) {
+    std::fprintf(stderr,
+                 "[SphereVST3] createView FAILED for platform='%s'\n",
+                 platform_type);
+    return 0;
+  }
+  if (proc->editor_view->isPlatformTypeSupported(platform_type) !=
+      Steinberg::kResultTrue) {
+    std::fprintf(stderr,
+                 "[SphereVST3] platform type '%s' not supported by plugin\n",
+                 platform_type);
+    proc->editor_view = nullptr;
+    return 0;
+  }
+  Steinberg::ViewRect rect{};
+  if (proc->editor_view->getSize(&rect) == Steinberg::kResultTrue) {
+    const int w = rect.right - rect.left;
+    const int h = rect.bottom - rect.top;
+    if (w > 0 && out_width)  *out_width  = w;
+    if (h > 0 && out_height) *out_height = h;
+  }
+  return 1;
+}
+
+extern "C" int sphere_daux_editor_attach_view(
+    SphereDauxVst3Processor* proc,
+    void*                    native_handle,
+    const char*              platform_type) {
+  if (!proc || !proc->editor_view) return 0;
+  const auto res = proc->editor_view->attached(native_handle, platform_type);
+  std::fprintf(stderr,
+               "[SphereVST3] IPlugView::attached('%s') result=%d\n",
+               platform_type, (int)res);
+  if (res != Steinberg::kResultTrue && res != Steinberg::kResultOk) {
+    proc->editor_view    = nullptr;
+    proc->editor_attached = false;
+    return 0;
+  }
+  proc->editor_attached = true;
+  return 1;
+}
+
+extern "C" void sphere_daux_editor_notify_resize(
+    SphereDauxVst3Processor* proc, int width, int height) {
+  if (!proc || !proc->editor_view) return;
+  Steinberg::ViewRect rect{0, 0,
+      static_cast<Steinberg::int32>(width),
+      static_cast<Steinberg::int32>(height)};
+  proc->editor_view->onSize(&rect);
+}
+
+extern "C" void sphere_daux_editor_detach_view(SphereDauxVst3Processor* proc) {
+  if (!proc) return;
+  if (proc->editor_view && proc->editor_attached) {
+    const auto res = proc->editor_view->removed();
+    std::fprintf(stderr,
+                 "[SphereVST3] IPlugView::removed() result=%d handle=%llu\n",
+                 (int)res, proc->editor_handle);
+  }
+  proc->editor_view     = nullptr;
+  proc->editor_attached = false;
+}
+
+extern "C" void sphere_daux_editor_store_native(
+    SphereDauxVst3Processor* proc,
+    void*                    native_window,
+    void*                    native_embed,
+    void*                    native_delegate,
+    unsigned long long       handle,
+    const char*              window_id,
+    const char*              title,
+    int                      requested_width,
+    int                      requested_height) {
+  if (!proc) return;
+  proc->editor_native_window    = native_window;
+  proc->editor_native_embed     = native_embed;
+  proc->editor_native_delegate  = native_delegate;
+  proc->editor_handle           = handle;
+  proc->editor_window_id        = window_id ? window_id : "";
+  proc->editor_title            = title     ? title     : "";
+  proc->editor_requested_width  = requested_width;
+  proc->editor_requested_height = requested_height;
+}
+
+extern "C" void sphere_daux_editor_clear_native(SphereDauxVst3Processor* proc) {
+  if (!proc) return;
+  proc->editor_native_window    = nullptr;
+  proc->editor_native_embed     = nullptr;
+  proc->editor_native_delegate  = nullptr;
+  proc->editor_handle           = 0;
+  proc->editor_window_id.clear();
+  proc->editor_title.clear();
+  proc->editor_requested_width  = 0;
+  proc->editor_requested_height = 0;
+}
+
+extern "C" void* sphere_daux_editor_get_native_window(SphereDauxVst3Processor* p)
+  { return p ? p->editor_native_window   : nullptr; }
+extern "C" void* sphere_daux_editor_get_native_embed(SphereDauxVst3Processor* p)
+  { return p ? p->editor_native_embed    : nullptr; }
+extern "C" void* sphere_daux_editor_get_native_delegate(SphereDauxVst3Processor* p)
+  { return p ? p->editor_native_delegate : nullptr; }
+extern "C" unsigned long long sphere_daux_editor_get_handle(SphereDauxVst3Processor* p)
+  { return p ? p->editor_handle : 0; }
+extern "C" const char* sphere_daux_editor_get_window_id(SphereDauxVst3Processor* p)
+  { return p ? p->editor_window_id.c_str() : ""; }
+extern "C" const char* sphere_daux_editor_get_title(SphereDauxVst3Processor* p)
+  { return p ? p->editor_title.c_str() : ""; }
+extern "C" int sphere_daux_editor_get_requested_width(SphereDauxVst3Processor* p)
+  { return p ? p->editor_requested_width  : 0; }
+extern "C" int sphere_daux_editor_get_requested_height(SphereDauxVst3Processor* p)
+  { return p ? p->editor_requested_height : 0; }
+
+#endif // __APPLE__ || __linux__
 
 // ── ComponentHandlerImpl::performEdit (needs full SphereDauxVst3Processor) ───
 
@@ -953,7 +1127,7 @@ extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor* processor) {
   std::fprintf(stderr,
                "[SphereVST3] destroying processor handle=0x%p\n",
                static_cast<void*>(processor));
-#ifdef _WIN32
+#if defined(_WIN32)
   // Mark invalid BEFORE zeroing GWLP_USERDATA so the window proc can check
   // this flag even if it races between the zero and a pending message.
   processor->processor_valid.store(false, std::memory_order_seq_cst);
@@ -962,6 +1136,8 @@ extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor* processor) {
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
     SetWindowLongPtrW(processor->editor_hwnd, GWLP_USERDATA, 0);
   }
+#elif defined(__APPLE__) || defined(__linux__)
+  processor->processor_valid.store(false, std::memory_order_seq_cst);
 #endif
   processor->shutdown();
   delete processor;
@@ -1142,12 +1318,16 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
                  processor && processor->controller ? 1 : 0);
     return 0;
   }
-#ifndef _WIN32
+#if defined(__APPLE__)
+  return open_editor_mac(processor, window_id, title, width, height);
+#elif defined(__linux__)
+  return open_editor_linux(processor, window_id, title, width, height);
+#elif !defined(_WIN32)
   (void)window_id;
   (void)title;
   (void)width;
   (void)height;
-  set_last_error("DAUx VST3 editor is currently implemented only on Windows");
+  set_last_error("DAUx VST3 editor: unsupported platform");
   return 0;
 #else
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
@@ -1404,7 +1584,7 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
 
 extern "C" void sphere_daux_vst3_close_editor(SphereDauxVst3Processor* processor) {
   if (!processor) return;
-#ifdef _WIN32
+#if defined(_WIN32)
   // Detach IPlugView and destroy the native editor shell.
   // Processor and controller are kept alive — only insert removal may destroy them.
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
@@ -1416,18 +1596,26 @@ extern "C" void sphere_daux_vst3_close_editor(SphereDauxVst3Processor* processor
                  handle,
                  window_id.c_str());
   }
+#elif defined(__APPLE__)
+  close_editor_mac(processor);
+#elif defined(__linux__)
+  close_editor_linux(processor);
 #endif
 }
 
 extern "C" int sphere_daux_vst3_focus_editor(SphereDauxVst3Processor* processor) {
   if (!processor) return 0;
-#ifdef _WIN32
+#if defined(_WIN32)
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
     ShowWindow(processor->editor_hwnd, SW_SHOWNORMAL);
     SetForegroundWindow(processor->editor_hwnd);
     if (processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
     return 1;
   }
+#elif defined(__APPLE__)
+  return focus_editor_mac(processor);
+#elif defined(__linux__)
+  return focus_editor_linux(processor);
 #endif
   return 0;
 }
@@ -1450,7 +1638,7 @@ extern "C" double sphere_daux_vst3_last_difference_peak(SphereDauxVst3Processor*
 }
 
 extern "C" int sphere_daux_vst3_is_valid(SphereDauxVst3Processor* processor) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
   return (processor && processor->processor_valid.load(std::memory_order_acquire)) ? 1 : 0;
 #else
   return processor ? 1 : 0;

@@ -64,9 +64,27 @@ jobs:
 
       - name: Initialize audio plugin SDK submodules without docs
         run: |
-          git submodule sync -- external/vst3sdk external/clap external/clap-helpers
-          git submodule update --init --force --checkout -- external/vst3sdk external/clap external/clap-helpers
+          git submodule sync -- external/vst3sdk external/clap external/clap-helpers packages/shared/tabler-icons
+          git submodule update --init --force --depth=1 --checkout -- external/clap external/clap-helpers packages/shared/tabler-icons
+          git submodule update --init --force --checkout -- external/vst3sdk
           git -C external/vst3sdk submodule update --init --force --checkout -- base cmake pluginterfaces public.sdk tutorials vstgui4
+
+      - name: Download vswhere.exe and detect Visual Studio (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .bin | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://github.com/microsoft/vswhere/releases/latest/download/vswhere.exe" `
+            -OutFile ".bin\vswhere.exe"
+          Write-Host "vswhere version: $(& '.bin\vswhere.exe' -version)"
+          $install  = & ".bin\vswhere.exe" -latest -property installationPath
+          $instance = & ".bin\vswhere.exe" -latest -property instanceId
+          $version  = & ".bin\vswhere.exe" -latest -property installationVersion
+          if (-not $install) { Write-Error "No Visual Studio installation found"; exit 1 }
+          Write-Host "VS installationPath:    $install"
+          Write-Host "VS instanceId:          $instance"
+          Write-Host "VS installationVersion: $version"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -88,7 +106,10 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential pkg-config libarchive-tools fakeroot rpm libopenjp2-tools libasound2-dev
+          sudo apt-get install -y \
+            build-essential pkg-config libarchive-tools fakeroot rpm \
+            libopenjp2-tools libasound2-dev \
+            libgtk-4-dev libglib2.0-dev
 
       - name: Setup Rust + wasm32 target
         uses: dtolnay/rust-toolchain@stable

@@ -1,3 +1,6 @@
+# Downloaded toolchain binaries (vswhere.exe etc.) — not committed to the repo
+.bin/
+
 # Logs
 logs
 *.log

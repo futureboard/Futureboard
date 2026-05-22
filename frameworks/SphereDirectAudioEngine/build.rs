@@ -7,16 +7,19 @@ fn main() {
     let sdk_root = manifest_dir.join("../../external/vst3sdk");
     let bridge_root = manifest_dir.join("vst3bridge");
 
-    println!(
-        "cargo:rerun-if-changed={}",
-        bridge_root
-            .join("include/sphere_daux_vst3_processor.h")
-            .display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        bridge_root.join("src/vst3_processor.cpp").display()
-    );
+    // Trigger rebuilds when any bridge source or header changes.
+    for name in &[
+        "include/sphere_daux_vst3_processor.h",
+        "include/sphere_daux_editor_bridge.h",
+        "src/vst3_processor.cpp",
+        "src/editor_mac.mm",
+        "src/editor_linux.cpp",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            bridge_root.join(name).display()
+        );
+    }
 
     let mut build = cc::Build::new();
     build
@@ -45,12 +48,32 @@ fn main() {
         println!("cargo:rustc-link-lib=ole32");
     } else if cfg!(target_os = "macos") {
         build.define("SMTG_OS_MACOS", Some("1"));
+        // -fobjc-arc is required by both module_mac.mm and editor_mac.mm
+        // (both use Objective-C ARC memory management).
+        build.flag("-fobjc-arc");
         build.file(sdk_root.join("public.sdk/source/vst/hosting/module_mac.mm"));
+        // editor_mac.mm: NSWindow + NSView IPlugView embedding
+        build.file(bridge_root.join("src/editor_mac.mm"));
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=AppKit");
     } else if cfg!(target_os = "linux") {
         build.define("SMTG_OS_LINUX", Some("1"));
         build.file(sdk_root.join("public.sdk/source/vst/hosting/module_linux.cpp"));
+        // editor_linux.cpp: GTK4 + X11 IPlugView embedding
+        build.file(bridge_root.join("src/editor_linux.cpp"));
+
+        // GTK4 include paths and compile definitions via pkg-config.
+        // The linker flags (--libs) are emitted as cargo:rustc-link-* directives.
+        let gtk4 = pkg_config::probe_library("gtk4")
+            .expect("GTK4 not found — install libgtk-4-dev (Debian/Ubuntu) or gtk4-devel (Fedora)");
+        for path in &gtk4.include_paths {
+            build.include(path);
+        }
+        for (key, val) in &gtk4.defines {
+            build.define(key, val.as_deref());
+        }
+
         println!("cargo:rustc-link-lib=dl");
     }
 

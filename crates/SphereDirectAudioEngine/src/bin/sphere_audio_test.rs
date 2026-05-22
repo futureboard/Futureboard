@@ -6,7 +6,7 @@
 //!   sphere-audio-test status
 //!
 //! Build:
-//!   cd frameworks/SphereDirectAudioEngine
+//!   cd crates/SphereDirectAudioEngine
 //!   cargo build --bin sphere-audio-test
 //!
 //! Run (from workspace root):

@@ -1,5 +1,7 @@
 use gpui::{rgb, rgba, Rgba};
 
+pub const FONT_FAMILY: &str = "Inter";
+
 pub struct Colors;
 
 impl Colors {

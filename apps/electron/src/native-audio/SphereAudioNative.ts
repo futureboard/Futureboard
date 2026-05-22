@@ -7,16 +7,16 @@
  * native addons (napi-rs / N-API).
  *
  * The `.node` addon is built by:
- *   cd frameworks/SphereDirectAudioEngine && cargo build --release
+ *   cd crates/SphereDirectAudioEngine && cargo build --release
  *   # → target/release/sphere_direct_audio_engine.dll  (Windows)
  *   #     copied to apps/electron/resources/sphere_direct_audio_engine.node
  *
  * Lookup order for the .node file:
  *   1. <app.getPath('exe')>/../resources/sphere_direct_audio_engine.node
  *      (packaged Electron app)
- *   2. <__dirname>/../../../../frameworks/SphereDirectAudioEngine/target/release/sphere_direct_audio_engine.dll
+ *   2. <__dirname>/../../../../crates/SphereDirectAudioEngine/target/release/sphere_direct_audio_engine.dll
  *      (dev mode, Windows)
- *   3. <__dirname>/../../../../frameworks/SphereDirectAudioEngine/target/debug/sphere_direct_audio_engine.dll
+ *   3. <__dirname>/../../../../crates/SphereDirectAudioEngine/target/debug/sphere_direct_audio_engine.dll
  *      (dev mode, debug build)
  */
 

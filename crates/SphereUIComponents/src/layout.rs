@@ -1,20 +1,19 @@
 use gpui::{div, Context, IntoElement, ParentElement, Render, Styled, Window};
 use crate::components;
-use crate::theme::Colors;
+use crate::theme::{self, Colors};
 
 pub struct StudioLayout;
 
 impl Render for StudioLayout {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .size_full()
             .bg(Colors::bg_base())
-            // Title bar (custom chrome)
-            .child(components::title_bar())
-            // Transport bar (menus + playback controls)
-            .child(components::transport_bar())
+            .font_family(theme::FONT_FAMILY)
+            // Unified top chrome: menus + project title + transport + window controls
+            .child(components::app_chrome(window))
             // Main content area
             .child(
                 div()

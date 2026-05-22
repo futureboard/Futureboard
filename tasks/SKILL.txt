@@ -95,7 +95,7 @@ Expected high-level structure may include:
 external/
   vst3sdk/
 
-frameworks/
+crates/
   SpherePluginHost/
   SphereDirectAudioEngine/
   SphereWebAudioCore/

@@ -46,7 +46,7 @@ const destPath      = path.join(resourcesDir, NODE_ADDON_NAME);
 if (!fs.existsSync(sourcePath)) {
   console.error(
     `[copy-native-audio] ERROR: Built addon not found at:\n  ${sourcePath}\n` +
-    `  Run: cd frameworks/SphereDirectAudioEngine && cargo build${isDebug ? "" : " --release"}`
+    `  Run: cd crates/SphereDirectAudioEngine && cargo build${isDebug ? "" : " --release"}`
   );
   process.exit(1);
 }

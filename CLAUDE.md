@@ -4,7 +4,7 @@ Before implementing task specs, read `tasks/SKILL.txt`.
 
 if want edit/create PluginHostWrapper ??
 
-- frameworks/SpherePluginHost
+- crates/SpherePluginHost
 - external/vst3sdk
 - external/clap
   **Support**: AU, LV2 and Linux/MacOS
@@ -66,7 +66,7 @@ titlebar: compact 28-34px
 ```
 
 and read DESIGN.md too
-for WebUI WASM DSP vsersion: frameworks/SphereWebAudioCore
+for WebUI WASM DSP vsersion: crates/SphereWebAudioCore
 
 ## Theme Rules
 

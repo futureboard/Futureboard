@@ -39,7 +39,7 @@ function candidatePaths(appDir: string): string[] {
     // Packaged: next to the Electron resources directory
     path.join(appDir, "..", "native", ENGINE_BINARY_NAME),
     path.join(appDir, "..", "..", "native", ENGINE_BINARY_NAME),
-    // Dev: built output of frameworks/SphereDirectAudioEngine
+    // Dev: built output of crates/SphereDirectAudioEngine
     path.join(appDir, "..", "..", "..", "frameworks", "SphereDirectAudioEngine", "target", "release", ENGINE_BINARY_NAME),
     path.join(appDir, "..", "..", "..", "frameworks", "SphereDirectAudioEngine", "target", "debug", ENGINE_BINARY_NAME),
   ];

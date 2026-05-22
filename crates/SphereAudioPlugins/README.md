@@ -1,6 +1,6 @@
 # SphereAudioPlugins
 
-Realtime-safe audio plugin framework used by DAUx (`frameworks/SphereDirectAudioEngine`).
+Realtime-safe audio plugin framework used by DAUx (`crates/SphereDirectAudioEngine`).
 
 ## Goals
 

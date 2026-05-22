@@ -5,7 +5,7 @@
   "workspaces": [
     "apps/*",
     "packages/*",
-    "frameworks/*",
+    "crates/*",
     "plugins/*",
     "extentions/template"
   ],
@@ -14,7 +14,7 @@
     "dev:electron": "concurrently -k -n web,electron \"bun run --cwd apps/web dev\" \"bun run --cwd apps/electron dev\"",
     "dev:server": "bun run --cwd apps/server dev",
     "build:web": "bun run --cwd apps/web build",
-    "build:audio:plugins": "cargo check --manifest-path frameworks/SphereAudioPlugins/Cargo.toml && cargo check --manifest-path extentions/template/Cargo.toml && bun install --cwd extentions/template && bun run --cwd extentions/template typecheck",
+    "build:audio:plugins": "cargo check --manifest-path crates/SphereAudioPlugins/Cargo.toml && cargo check --manifest-path extentions/template/Cargo.toml && bun install --cwd extentions/template && bun run --cwd extentions/template typecheck",
     "build:electron": "bun run build:audio:plugins && bun run --cwd apps/electron build:all",
     "pack:electron": "bun run --cwd apps/electron pack",
     "dist:electron": "bun run --cwd apps/electron dist",

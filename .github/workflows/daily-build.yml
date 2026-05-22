@@ -97,12 +97,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            frameworks/SphereWebAudioCore/target
-            frameworks/SphereAudioPlugins/target
-            frameworks/SphereDirectAudioEngine/target
-            frameworks/SpherePluginHost/target
+            crates/SphereWebAudioCore/target
+            crates/SphereAudioPlugins/target
+            crates/SphereDirectAudioEngine/target
+            crates/SpherePluginHost/target
             extentions/template/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('frameworks/SphereWebAudioCore/Cargo.lock', 'frameworks/SphereAudioPlugins/Cargo.lock', 'frameworks/SphereDirectAudioEngine/Cargo.lock', 'frameworks/SpherePluginHost/Cargo.lock', 'extentions/template/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/SphereWebAudioCore/Cargo.lock', 'crates/SphereAudioPlugins/Cargo.lock', 'crates/SphereDirectAudioEngine/Cargo.lock', 'crates/SpherePluginHost/Cargo.lock', 'extentions/template/Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
@@ -114,7 +114,7 @@ jobs:
 
       - name: Check audio plugin framework
         run: |
-          cargo check --manifest-path frameworks/SphereAudioPlugins/Cargo.toml
+          cargo check --manifest-path crates/SphereAudioPlugins/Cargo.toml
           cargo check --manifest-path extentions/template/Cargo.toml
           bun install --cwd extentions/template
           bun run --cwd extentions/template typecheck

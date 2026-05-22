@@ -96,7 +96,7 @@ apps/
 │  ├─ src/
 │  └─ CMakeLists.txt
 │
-frameworks/
+crates/
 ├─ SphereDirectAudioEngine/
 │  └─ Rust Audio Engine for Electron
 │

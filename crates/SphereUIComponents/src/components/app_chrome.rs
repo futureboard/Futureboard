@@ -1,9 +1,19 @@
-use gpui::{div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, Styled, WindowControlArea};
-use crate::theme::Colors;
+use std::sync::Arc;
+
+use gpui::{
+    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea,
+};
+
 use crate::assets;
 use crate::components::icon_button;
+use crate::menu::MenuManifest;
+use crate::theme::Colors;
 
-const MENU_ITEMS: &[&str] = &["File", "Edit", "View", "Transport", "Window", "Help"];
+/// Click handler for top-level menu buttons. Receives `(menu_id, anchor_x)`
+/// — anchor_x is the click X position which the dropdown overlay uses to
+/// align itself under the clicked label.
+pub type MenuOpenCb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -17,23 +27,49 @@ fn divider() -> impl IntoElement {
 
 // ── Left section ──────────────────────────────────────────────────────────────
 
-fn menu_area() -> impl IntoElement {
+fn menu_area(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
+    // Top-level labels are sourced from the generated menu manifest (which
+    // is itself derived from `packages/shared/src/menu/menuItems.ts`). The
+    // fallback inside `MenuManifest::load` keeps the strip populated even
+    // when the JSON fails to parse, so this function never produces an
+    // empty menu bar.
+    let manifest = MenuManifest::load();
+    let open_id_owned = open_menu_id.map(|s| s.to_string());
+
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(1.0))
         .px(px(4.0))
-        .children(MENU_ITEMS.iter().map(|label| {
+        .children(manifest.menus.iter().enumerate().map(|(i, menu)| {
+            let is_open = open_id_owned.as_deref() == Some(menu.id.as_str());
+            let menu_id = menu.id.clone();
+            let cb = on_open_menu.clone();
+            let (bg, fg) = if is_open {
+                (Colors::surface_hover(), Colors::text_primary())
+            } else {
+                // Transparent background; hover style supplies the bg.
+                (gpui::transparent_black().into(), Colors::text_muted())
+            };
+
             div()
                 .px(px(7.0))
                 .py(px(3.0))
                 .rounded_md()
-                .text_color(Colors::text_muted())
+                .text_color(fg)
                 .text_size(px(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .hover(|s| s.bg(Colors::surface_hover()).text_color(Colors::text_secondary()))
-                .child(*label)
+                .bg(bg)
+                .hover(|s| s.bg(Colors::surface_hover()).text_color(Colors::text_primary()))
+                .id(("top-menu", i))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_mouse_down(gpui::MouseButton::Left, move |event, w, cx| {
+                    let click_x: f32 = event.position.x.into();
+                    cb(&(menu_id.clone(), click_x), w, cx);
+                })
+                .occlude()
+                .child(menu.label.clone())
         }))
 }
 
@@ -326,7 +362,11 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-pub fn app_chrome(window: &gpui::Window) -> impl IntoElement {
+pub fn app_chrome(
+    window: &gpui::Window,
+    open_menu_id: Option<&str>,
+    on_open_menu: MenuOpenCb,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -338,7 +378,7 @@ pub fn app_chrome(window: &gpui::Window) -> impl IntoElement {
         .border_color(Colors::border_subtle())
         .window_control_area(WindowControlArea::Drag)
         // ── Left: menus + project ─────────────────────────────────────────────
-        .child(menu_area())
+        .child(menu_area(open_menu_id, on_open_menu))
         .child(divider())
         .child(project_title())
         // ── Drag region spacer ────────────────────────────────────────────────

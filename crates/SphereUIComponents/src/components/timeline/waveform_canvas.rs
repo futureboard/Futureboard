@@ -53,14 +53,17 @@ pub fn waveform_canvas(
     let total_peaks = lod.peaks.len().max(1);
 
     // ── Bar grid ─────────────────────────────────────────────────────────────
-    // Two visual regimes, controlled by how many peaks the chosen LOD packs into
-    // one screen pixel:
-    //   * dense (zoomed-in or low-spp LOD)  → 2px solid columns, gap 0
-    //   * sparse (zoomed-out)               → 2px columns, 1px gap
+    // Three visual regimes, picked from how many peaks the chosen LOD packs
+    // into one screen pixel:
+    //   * fine    (≥ ~1 peak per px)  → 1 px solid columns, step 1 → crisp
+    //   * medium  (~0.5..1 peak/px)   → 1 px columns, step 2
+    //   * sparse  (zoomed way out)    → 2 px columns, step 3
     // The bar count is capped so a 4k-wide clip can't blow up the layout.
     let peaks_per_pixel = (total_peaks as f32 / clip_width.max(1.0)).max(0.0001);
     let (bar_width, step) = if peaks_per_pixel >= 1.0 {
-        (2.0_f32, 2.0_f32)
+        (1.0_f32, 1.0_f32)
+    } else if peaks_per_pixel >= 0.5 {
+        (1.0_f32, 2.0_f32)
     } else {
         (2.0_f32, 3.0_f32)
     };

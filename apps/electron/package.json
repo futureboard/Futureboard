@@ -167,7 +167,8 @@
   "description": "Futureboard Studio",
   "private": true,
   "scripts": {
-    "build": "node scripts/sync-shared-menu.mjs && tsc -p .",
+    "build": "bun scripts/sync-shared-menu.mjs && tsc -p .",
+    "sync:shared-menu": "bun scripts/sync-shared-menu.mjs",
     "dev": "concurrently -k -n tsc,electron -c blue,magenta \"tsc -p . --watch\" \"wait-on dist/main.js && electron .\"",
     "start": "electron .",
     "build:native:audio": "cd ../../crates/SphereDirectAudioEngine && cargo build --release --lib && node ../../apps/electron/scripts/copy-native-audio.mjs",

@@ -32,9 +32,19 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    /// Clean empty-project Timeline — the real runtime entry point.
     pub fn new() -> Self {
         Self {
             state: TimelineState::default(),
+            last_drag_position: None,
+        }
+    }
+
+    /// Seeded demo Timeline. Use only from explicit dev/demo entry points;
+    /// production startup should always call [`Timeline::new`].
+    pub fn with_demo_content() -> Self {
+        Self {
+            state: TimelineState::demo_project(),
             last_drag_position: None,
         }
     }
@@ -160,13 +170,21 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_zoom_in = cx.listener(|this, _: &(), _window, cx| {
-            this.state.viewport.pixels_per_second = (this.state.viewport.pixels_per_second * 1.33).min(4000.0);
+        // Smooth, continuous zoom factor — small per-click multiplier so the
+        // px/bt label changes feel like a real ramp rather than a jump.
+        // Anchor at the viewport center (no cursor info here) so zoom stays
+        // visually stable when driven from the buttons.
+        let on_zoom_in = cx.listener(|this, _: &(), window, cx| {
+            let viewport_w: f32 = window.bounds().size.width.into();
+            let anchor = ((viewport_w - SIDEBAR_WIDTH - HEADER_WIDTH) * 0.5).max(0.0);
+            this.state.zoom_by(1.10, anchor);
             cx.notify();
         });
 
-        let on_zoom_out = cx.listener(|this, _: &(), _window, cx| {
-            this.state.viewport.pixels_per_second = (this.state.viewport.pixels_per_second * 0.75).max(4.0);
+        let on_zoom_out = cx.listener(|this, _: &(), window, cx| {
+            let viewport_w: f32 = window.bounds().size.width.into();
+            let anchor = ((viewport_w - SIDEBAR_WIDTH - HEADER_WIDTH) * 0.5).max(0.0);
+            this.state.zoom_by(1.0 / 1.10, anchor);
             cx.notify();
         });
 
@@ -358,7 +376,14 @@ impl Render for Timeline {
                             .text_size(px(9.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(Colors::text_muted())
-                            .child(format!("{:.0} px/bt", state.viewport.pixels_per_second * state.seconds_per_beat()))
+                            .child({
+                                let ppb = state.viewport.pixels_per_second * state.seconds_per_beat();
+                                if ppb >= 100.0 {
+                                    format!("{:.0} px/bt", ppb)
+                                } else {
+                                    format!("{:.1} px/bt", ppb)
+                                }
+                            })
                     )
                     // Zoom In Button
                     .child(

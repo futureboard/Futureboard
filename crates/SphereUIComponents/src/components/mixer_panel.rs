@@ -29,20 +29,24 @@ use gpui::{
 
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader, FADER_TRACK_HEIGHT};
-use crate::components::knob::{knob_with_value, value_pill};
-use crate::components::timeline::timeline_state::{volume, TrackState, TrackType};
+use crate::components::knob::{format_pan_label, knob_bipolar};
+use crate::components::timeline::timeline_state::{volume, MasterBusState, TrackState, TrackType};
 use crate::theme::Colors;
 
 // ── Section dimensions ─────────────────────────────────────────────────────
-const STRIP_WIDTH: f32 = 116.0;
-const STRIP_MIN_HEIGHT: f32 = 460.0;
+const STRIP_WIDTH: f32 = 88.0;
+/// Minimum height needed to render every section without overlap.
+/// Below this the channel scroll area shows a vertical scrollbar instead of
+/// clipping. Sections sum: header 46 + inserts 56 + sends 56 + pan 80 +
+/// fader_area (pill 18 + rail 130 + pad 14) + buttons 46 + footer 26.
+const STRIP_MIN_HEIGHT: f32 = 320.0;
 
-const SEC_HEADER_H: f32 = 52.0;
-const SEC_INSERTS_H: f32 = 60.0;
-const SEC_SENDS_H: f32 = 60.0;
-const SEC_PAN_H: f32 = 86.0;
-const SEC_BUTTONS_H: f32 = 50.0;
-const SEC_FOOTER_H: f32 = 30.0;
+const SEC_HEADER_H: f32 = 46.0;
+const SEC_INSERTS_H: f32 = 56.0;
+const SEC_SENDS_H: f32 = 56.0;
+const SEC_PAN_H: f32 = 80.0;
+const SEC_BUTTONS_H: f32 = 46.0;
+const SEC_FOOTER_H: f32 = 26.0;
 
 /// Bundle of mixer interactions hooked up from the layout. Closures land in
 /// the same TimelineState mutation methods used by the TrackHeader so the two
@@ -56,6 +60,7 @@ pub struct MixerCallbacks {
     pub on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     pub on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     pub on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_master_volume_change: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
 }
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
@@ -116,26 +121,26 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(px(4.0))
-        .px(px(8.0))
-        .py(px(4.0))
+        .gap(px(3.0))
+        .px(px(5.0))
+        .py(px(3.0))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(5.0))
-                .child(div().w(px(2.0)).h(px(9.0)).rounded_full().bg(soft_accent))
+                .gap(px(4.0))
+                .child(div().w(px(2.0)).h(px(8.0)).rounded_full().bg(soft_accent))
                 .children(icon_path.map(|path| {
                     svg()
                         .path(path)
-                        .w(px(10.0))
-                        .h(px(10.0))
+                        .w(px(9.0))
+                        .h(px(9.0))
                         .text_color(rgba(0xDCE8F066_u32))
                 }))
                 .child(
                     div()
-                        .text_size(px(8.5))
+                        .text_size(px(7.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgba(0xDCE8F066_u32))
                         .child(label),
@@ -143,8 +148,8 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
         )
         .child(
             div()
-                .w(px(14.0))
-                .h(px(14.0))
+                .w(px(12.0))
+                .h(px(12.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -152,8 +157,8 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
                 .child(
                     svg()
                         .path(assets::ICON_PLUS_PATH)
-                        .w(px(10.0))
-                        .h(px(10.0))
+                        .w(px(9.0))
+                        .h(px(9.0))
                         .text_color(rgba(0xFFFFFF38_u32)),
                 ),
         )
@@ -164,16 +169,17 @@ fn insert_row(name: &str, accent: gpui::Rgba) -> impl IntoElement {
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(5.0))
-        .mx(px(4.0))
+        .gap(px(4.0))
+        .mx(px(3.0))
         .border_l(px(2.0))
         .border_color(accent)
-        .px(px(6.0))
-        .py(px(3.0))
+        .px(px(4.0))
+        .py(px(2.0))
         .child(
             div()
                 .flex_1()
-                .text_size(px(10.0))
+                .min_w(px(0.0))
+                .text_size(px(9.0))
                 .text_color(rgba(0xFFFFFFB8_u32))
                 .child(name.to_string()),
         )
@@ -184,13 +190,13 @@ fn empty_slot() -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .mx(px(6.0))
-        .py(px(3.0))
+        .mx(px(4.0))
+        .py(px(2.0))
         .rounded_sm()
         .border(px(1.0))
         .border_dashed()
         .border_color(rgba(0xFFFFFF0D_u32))
-        .text_size(px(8.5))
+        .text_size(px(8.0))
         .text_color(rgba(0xFFFFFF38_u32))
         .child("empty")
 }
@@ -259,9 +265,9 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
     div()
         .flex()
         .flex_row()
-        .gap(px(3.0))
-        .px(px(6.0))
-        .py(px(4.0))
+        .gap(px(2.0))
+        .px(px(4.0))
+        .py(px(3.0))
         .h(px(SEC_BUTTONS_H))
         .items_center()
         .border_t(px(1.0))
@@ -338,12 +344,12 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(4.0))
         .h(px(SEC_HEADER_H))
-        .px(px(8.0))
+        .px(px(5.0))
         .border_b(px(1.0))
         .border_color(rgba(0xFFFFFF0B_u32))
-        .child(div().w(px(3.0)).h(px(28.0)).rounded_full().bg(track.color))
+        .child(div().w(px(2.0)).h(px(24.0)).rounded_full().bg(track.color))
         .child(
             div()
                 .flex()
@@ -352,7 +358,7 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
                 .min_w(px(0.0))
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(px(10.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgba(0xFFFFFFCC_u32))
                         .child(track.name.clone()),
@@ -362,21 +368,21 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(4.0))
-                        .mt(px(2.0))
+                        .gap(px(3.0))
+                        .mt(px(1.0))
                         .child(
                             div()
-                                .text_size(px(8.0))
+                                .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(rgba(0xFFFFFF47_u32))
                                 .child(type_label),
                         )
                         .child(
                             div()
-                                .text_size(px(8.0))
+                                .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(rgba(0xFFFFFF47_u32))
-                                .child(format!("CH {:02}", index + 1)),
+                                .child(format!("CH{:02}", index + 1)),
                         ),
                 ),
         )
@@ -408,8 +414,8 @@ fn sends_section(track: &TrackState) -> impl IntoElement {
         .child(empty_slot())
 }
 
-fn pan_section(track: &TrackState, callbacks: &MixerCallbacks, is_selected: bool) -> impl IntoElement {
-    let pan_label = format_pan(track.pan);
+fn pan_section(track: &TrackState, callbacks: &MixerCallbacks, _is_selected: bool) -> impl IntoElement {
+    let pan_label: gpui::SharedString = format_pan_label(track.pan).into();
 
     let track_id = track.id.clone();
     let pan_cb = callbacks.on_pan_change.clone();
@@ -426,12 +432,14 @@ fn pan_section(track: &TrackState, callbacks: &MixerCallbacks, is_selected: bool
         .py(px(6.0))
         .border_b(px(1.0))
         .border_color(rgba(0xFFFFFF0B_u32))
-        .child(knob_with_value(
+        .child(knob_bipolar(
             format!("mix-pan-{}", track.id),
             track.pan,
+            -1.0,
+            1.0,
             track.color,
-            pan_label,
-            is_selected,
+            Some(pan_label),
+            0.0,
             on_pan_change,
         ))
         // L / R legend under the pill so the user can read the knob axis.
@@ -474,10 +482,10 @@ fn fader_area(track: &TrackState, callbacks: &MixerCallbacks, is_selected: bool)
         .flex_1()
         .min_h_0()
         .items_center()
-        .px(px(6.0))
-        .pt(px(6.0))
-        .pb(px(8.0))
-        .gap(px(6.0))
+        .px(px(4.0))
+        .pt(px(5.0))
+        .pb(px(6.0))
+        .gap(px(5.0))
         .child(db_value_pill(db_str, is_selected))
         .child(
             div()
@@ -505,7 +513,7 @@ fn fader_area(track: &TrackState, callbacks: &MixerCallbacks, is_selected: bool)
                     div()
                         .flex()
                         .flex_row()
-                        .gap(px(2.0))
+                        .gap(px(1.0))
                         .h_full()
                         .child(meter_bar_col(track.meter_level_l))
                         .child(meter_bar_col(track.meter_level_r)),
@@ -589,9 +597,15 @@ fn channel_strip(
 
 // ─── Master block ───────────────────────────────────────────────────────────
 
-fn master_strip(accent: gpui::Rgba) -> impl IntoElement {
-    let master_norm = volume::db_to_norm(0.0);
-    let db_str = volume::format_db(master_norm);
+fn master_strip(
+    accent: gpui::Rgba,
+    master: &MasterBusState,
+    on_master_vol_change: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+) -> impl IntoElement {
+    let db_str = volume::format_db(master.volume);
+    let on_change = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_master_vol_change(v, w, cx);
+    };
 
     div()
         .flex()
@@ -610,29 +624,29 @@ fn master_strip(accent: gpui::Rgba) -> impl IntoElement {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(4.0))
                 .h(px(SEC_HEADER_H))
-                .px(px(8.0))
+                .px(px(5.0))
                 .border_b(px(1.0))
                 .border_color(rgba(0xFFFFFF0B_u32))
-                .child(div().w(px(3.0)).h(px(28.0)).rounded_full().bg(accent))
+                .child(div().w(px(2.0)).h(px(24.0)).rounded_full().bg(accent))
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .child(
                             div()
-                                .text_size(px(10.5))
+                                .text_size(px(10.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(rgba(0xFFFFFFCC_u32))
                                 .child("Master"),
                         )
                         .child(
                             div()
-                                .text_size(px(8.0))
+                                .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(rgba(0xFFFFFF47_u32))
-                                .child("MST · BUS"),
+                                .child("MST·BUS"),
                         ),
                 ),
         )
@@ -666,7 +680,25 @@ fn master_strip(accent: gpui::Rgba) -> impl IntoElement {
                 .h(px(SEC_PAN_H))
                 .border_b(px(1.0))
                 .border_color(rgba(0xFFFFFF0B_u32))
-                .child(value_pill("STEREO", accent, true))
+                .child({
+                    let mut border = accent;
+                    border.a = 0.55;
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .min_w(px(46.0))
+                        .px(px(6.0))
+                        .h(px(14.0))
+                        .rounded_sm()
+                        .bg(rgba(0x0000004A_u32))
+                        .border(px(1.0))
+                        .border_color(border)
+                        .text_size(px(9.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_secondary())
+                        .child("STEREO")
+                })
                 .child(
                     div()
                         .text_size(px(7.5))
@@ -681,10 +713,10 @@ fn master_strip(accent: gpui::Rgba) -> impl IntoElement {
                 .flex_1()
                 .min_h_0()
                 .items_center()
-                .px(px(6.0))
-                .pt(px(6.0))
-                .pb(px(8.0))
-                .gap(px(6.0))
+                .px(px(4.0))
+                .pt(px(5.0))
+                .pb(px(6.0))
+                .gap(px(5.0))
                 .child(db_value_pill(db_str.clone(), true))
                 .child(
                     div()
@@ -703,19 +735,19 @@ fn master_strip(accent: gpui::Rgba) -> impl IntoElement {
                                 .justify_center()
                                 .child(render_fader(
                                     "mix-fader-master",
-                                    master_norm,
+                                    master.volume,
                                     accent,
-                                    |_v, _w, _cx| {},
+                                    on_change,
                                 )),
                         )
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
-                                .gap(px(2.0))
+                                .gap(px(1.0))
                                 .h_full()
-                                .child(meter_bar_col(0.80))
-                                .child(meter_bar_col(0.78)),
+                                .child(meter_bar_col(master.meter_level_l))
+                                .child(meter_bar_col(master.meter_level_r)),
                         ),
                 ),
         )
@@ -725,7 +757,7 @@ fn master_strip(accent: gpui::Rgba) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .h(px(SEC_BUTTONS_H))
-                .px(px(6.0))
+                .px(px(4.0))
                 .border_t(px(1.0))
                 .border_color(rgba(0xFFFFFF0B_u32))
                 .child(
@@ -739,25 +771,18 @@ fn master_strip(accent: gpui::Rgba) -> impl IntoElement {
         .child(strip_footer("Master"))
 }
 
-fn format_pan(pan: f32) -> String {
-    if pan.abs() < 0.01 {
-        "C".to_string()
-    } else {
-        let p = (pan.abs() * 100.0).round() as i32;
-        let p = p.clamp(1, 100);
-        if pan < 0.0 { format!("L{}", p) } else { format!("R{}", p) }
-    }
-}
 
 // ─── Public: Mixer Panel ─────────────────────────────────────────────────────
 
 pub fn mixer_panel(
     tracks: &[TrackState],
+    master: &MasterBusState,
     selected_track_id: Option<&str>,
     callbacks: MixerCallbacks,
 ) -> impl IntoElement {
     let accent = Colors::accent_primary();
     let track_count = tracks.len();
+    let on_master = callbacks.on_master_volume_change.clone();
 
     let strips: Vec<gpui::AnyElement> = tracks
         .iter()
@@ -794,7 +819,12 @@ pub fn mixer_panel(
                             div()
                                 .flex()
                                 .flex_row()
-                                .items_start()
+                                // No `items_start` here — leaving the default
+                                // stretch alignment lets each strip fill the
+                                // scroll-area height, so the mixer resizes
+                                // with the bottom panel instead of pinning
+                                // at STRIP_MIN_HEIGHT.
+                                .h_full()
                                 .min_h_full()
                                 .children(strips)
                                 // Soft trailing fill so the scroll surface
@@ -817,6 +847,6 @@ pub fn mixer_panel(
                         .bg(rgba(0xFFFFFF1F_u32)),
                 )
                 // Pinned master block
-                .child(master_strip(accent)),
+                .child(master_strip(accent, master, on_master)),
         )
 }

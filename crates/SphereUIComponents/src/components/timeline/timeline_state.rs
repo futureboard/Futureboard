@@ -197,6 +197,13 @@ pub struct GridLine {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct MasterBusState {
+    pub volume: f32,
+    pub meter_level_l: f32,
+    pub meter_level_r: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimelineState {
     pub bpm: f32,
     pub time_signature_num: u32,
@@ -204,6 +211,7 @@ pub struct TimelineState {
     pub viewport: TimelineViewport,
     pub transport: TransportState,
     pub tracks: Vec<TrackState>,
+    pub master: MasterBusState,
     pub selection: TimelineSelection,
     pub active_tool: TimelineTool,
     pub snap_to_grid: bool,
@@ -211,8 +219,48 @@ pub struct TimelineState {
 }
 
 impl Default for TimelineState {
+    /// Clean, empty project. No tracks, no clips, no MIDI — the real runtime
+    /// startup state. Use [`TimelineState::demo_project`] when you explicitly
+    /// want the seeded demo content (development / screenshots).
     fn default() -> Self {
-        // Initial setup matching the Electron Timeline mock
+        Self {
+            bpm: 120.0,
+            time_signature_num: 4,
+            time_signature_den: 4,
+            viewport: TimelineViewport {
+                scroll_x: 0.0,
+                scroll_y: 0.0,
+                pixels_per_second: 150.0,
+                track_area_height: 500.0,
+            },
+            transport: TransportState {
+                playhead_beats: 0.0,
+                loop_enabled: false,
+                loop_start_beats: 0.0,
+                loop_end_beats: 16.0,
+            },
+            tracks: Vec::new(),
+            master: MasterBusState {
+                volume: volume::db_to_norm(0.0),
+                meter_level_l: 0.0,
+                meter_level_r: 0.0,
+            },
+            selection: TimelineSelection {
+                selected_track_id: None,
+                selected_clip_ids: Vec::new(),
+            },
+            active_tool: TimelineTool::Pointer,
+            snap_to_grid: true,
+            grid_division: SnapDivision::Div1_16,
+        }
+    }
+}
+
+impl TimelineState {
+    /// Seeded demo project — three tracks with synthetic audio/MIDI clips.
+    /// Intended for development, screenshots, and the demo seed flag in the
+    /// app entry point; never used by the real runtime default.
+    pub fn demo_project() -> Self {
         let track1 = TrackState {
             id: "track-1".to_string(),
             name: "Audio 1".to_string(),
@@ -348,6 +396,11 @@ impl Default for TimelineState {
                 loop_end_beats: 16.0,
             },
             tracks: vec![track1, track2, track3],
+            master: MasterBusState {
+                volume: volume::db_to_norm(0.0),
+                meter_level_l: 0.0,
+                meter_level_r: 0.0,
+            },
             selection: TimelineSelection {
                 selected_track_id: Some("track-1".to_string()),
                 selected_clip_ids: vec![],
@@ -356,6 +409,12 @@ impl Default for TimelineState {
             snap_to_grid: true,
             grid_division: SnapDivision::Div1_16,
         }
+    }
+
+    /// Mutating variant of [`TimelineState::demo_project`]. Seeds the given
+    /// state with demo content in-place.
+    pub fn seed_demo_content(&mut self) {
+        *self = Self::demo_project();
     }
 }
 
@@ -595,6 +654,10 @@ impl TimelineState {
     // timeline TrackHeader and the bottom-panel Mixer call into these, so the
     // two views can never drift apart.
 
+    pub fn set_master_volume(&mut self, norm: f32) {
+        self.master.volume = norm.clamp(0.0, 1.0);
+    }
+
     pub fn set_track_volume(&mut self, track_id: &str, norm: f32) {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.volume = norm.clamp(0.0, 1.0);
@@ -658,6 +721,25 @@ impl TimelineState {
             }
         }
         None
+    }
+
+    /// Multiplicative zoom around a content-space x anchor. Updates
+    /// `pixels_per_second` and shifts `scroll_x` so the time under `anchor_x`
+    /// (a screen-space x inside the track lane, already net of header) stays
+    /// fixed under the cursor. Smooth — accepts arbitrary positive `factor`.
+    pub fn zoom_by(&mut self, factor: f32, anchor_x: f32) {
+        let factor = factor.max(0.0001);
+        let old_pps = self.viewport.pixels_per_second.max(0.0001);
+        let new_pps = (old_pps * factor).clamp(4.0, 4000.0);
+        if (new_pps - old_pps).abs() < 0.0001 {
+            return;
+        }
+        // Time under anchor before the change.
+        let anchor_time = (anchor_x + self.viewport.scroll_x) / old_pps;
+        self.viewport.pixels_per_second = new_pps;
+        // Re-solve scroll_x so the same anchor_time lands under anchor_x.
+        let new_scroll = (anchor_time * new_pps - anchor_x).max(0.0);
+        self.viewport.scroll_x = new_scroll;
     }
 
     /// Drop a clip onto the timeline. `drop_x` and `drop_y` are in the track

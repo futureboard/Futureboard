@@ -2,7 +2,7 @@ use gpui::{div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, S
 
 use crate::assets;
 use crate::components::fader::db_value_pill;
-use crate::components::knob::value_pill;
+use crate::components::knob::format_pan_label;
 use crate::components::slider::slider;
 use crate::components::timeline::timeline_state::{
     volume, TimelineState, TrackState, TrackType, HEADER_WIDTH, TRACK_HEIGHT,
@@ -323,8 +323,32 @@ pub fn track_header(
                             track.color,
                             on_volume_norm,
                         ))
-                        // Bordered pan pill (same component the mixer knob uses).
-                        .child(value_pill(pan_label(track.pan), track.color, is_selected))
+                        // Pan readout — compact bordered label matching the
+                        // dB pill alongside it.
+                        .child({
+                            let border = if is_selected {
+                                let mut c = track.color;
+                                c.a = 0.55;
+                                c
+                            } else {
+                                rgba(0xFFFFFF1F_u32)
+                            };
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .min_w(px(28.0))
+                                .px(px(5.0))
+                                .h(px(14.0))
+                                .rounded_sm()
+                                .bg(rgba(0x0000004A_u32))
+                                .border(px(1.0))
+                                .border_color(border)
+                                .text_size(px(9.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_secondary())
+                                .child(format_pan_label(track.pan))
+                        })
                         // Compact meter
                         .child(vu_meter_with_levels(track.meter_level_l, track.meter_level_r))
                         // Bordered dB pill
@@ -333,12 +357,3 @@ pub fn track_header(
         )
 }
 
-fn pan_label(pan: f32) -> String {
-    if pan.abs() < 0.01 {
-        "C".to_string()
-    } else {
-        let p = (pan.abs() * 100.0).round() as i32;
-        let p = p.clamp(1, 100);
-        if pan < 0.0 { format!("L{}", p) } else { format!("R{}", p) }
-    }
-}

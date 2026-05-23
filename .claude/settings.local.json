@@ -12,7 +12,9 @@
       "Bash(dir /B)",
       "Bash(Get-ChildItem -Path \"H:\\\\pj\\\\DawProject\\\\apps\\\\web\\\\src\" -Recurse -Directory)",
       "Bash(Select-Object -ExpandProperty FullName)",
-      "Bash(Sort-Object)"
+      "Bash(Sort-Object)",
+      "Read(//c/Users/Administrator/.cargo/registry/cache/**)",
+      "Bash(cargo check *)"
     ]
   }
 }

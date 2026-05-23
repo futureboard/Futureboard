@@ -29,8 +29,8 @@ pub fn title_bar() -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .text_color(Colors::text_dim())
+                .text_color(Colors::text_muted())
                 .text_xs()
-                .child("— □ ✕"),
+                .child("- [] X"),
         )
 }

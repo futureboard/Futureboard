@@ -5,7 +5,7 @@ pub fn right_panel() -> impl IntoElement {
     div()
         .flex()
         .flex_col()
-        .w(px(220.0))
+        .w(px(292.0))
         .h_full()
         .bg(Colors::surface_panel())
         .border_l(px(1.0))

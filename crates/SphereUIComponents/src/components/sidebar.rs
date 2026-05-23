@@ -1,7 +1,14 @@
-use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
+use gpui::{div, px, svg, InteractiveElement, IntoElement, ParentElement, Styled};
 use crate::theme::Colors;
+use crate::assets;
 
 fn browser_item(label: &'static str, is_folder: bool) -> impl IntoElement {
+    let icon_path = if is_folder {
+        assets::ICON_FOLDER_PATH
+    } else {
+        assets::ICON_FILE_PATH
+    };
+
     div()
         .flex()
         .flex_row()
@@ -12,10 +19,11 @@ fn browser_item(label: &'static str, is_folder: bool) -> impl IntoElement {
         .rounded_md()
         .hover(|style| style.bg(Colors::surface_hover()))
         .child(
-            div()
-                .text_color(Colors::accent_primary())
-                .text_xs()
-                .child(if is_folder { "📁" } else { "📄" }),
+            svg()
+                .path(icon_path)
+                .w(px(14.0))
+                .h(px(14.0))
+                .text_color(Colors::accent_primary()),
         )
         .child(
             div()
@@ -29,7 +37,7 @@ pub fn sidebar() -> impl IntoElement {
     div()
         .flex()
         .flex_col()
-        .w(px(200.0))
+        .w(px(272.0))
         .h_full()
         .bg(Colors::surface_panel())
         .border_r(px(1.0))

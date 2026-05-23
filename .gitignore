@@ -29,3 +29,5 @@ apps/electron/release/
 *.njsproj
 *.sln
 *.sw?
+
+.claude/settings.local.json

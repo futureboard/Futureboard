@@ -10,3 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 gpui = "0.2.2"
+# Audio decoding for waveform preview only (not realtime playback).
+hound = "3.5"
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }

@@ -33,7 +33,7 @@ pub fn transport_bar() -> impl IntoElement {
                     div()
                         .text_color(Colors::text_secondary())
                         .text_xs()
-                        .child("⏮  ▶  ■  ⏺"),
+                        .child("<<  >  []  REC"),
                 )
                 .child(
                     div()

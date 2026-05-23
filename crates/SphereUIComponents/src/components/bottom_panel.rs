@@ -1,5 +1,7 @@
-use gpui::{div, px, InteractiveElement, StatefulInteractiveElement, IntoElement, ParentElement, Styled, Window, App};
+use gpui::{div, px, svg, AppContext, Empty, InteractiveElement, StatefulInteractiveElement, IntoElement, ParentElement, Render, Styled, Window, App};
 use crate::theme::Colors;
+use crate::assets;
+use super::mixer_panel::mixer_panel as render_mixer_panel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
@@ -8,149 +10,40 @@ pub enum BottomTab {
     EffectEditor,
 }
 
-// ─── Sub-components for Mixer ────────────────────────────────────────────────
-
-fn mixer_meter() -> impl IntoElement {
-    div()
-        .w(px(6.0))
-        .h(px(100.0))
-        .bg(Colors::surface_input())
-        .rounded_sm()
-        .relative()
-        // Green active signal bar
-        .child(
-            div()
-                .absolute()
-                .bottom(px(0.0))
-                .w_full()
-                .h(px(70.0))
-                .bg(Colors::status_success()),
-        )
-        // Yellow warning peak
-        .child(
-            div()
-                .absolute()
-                .bottom(px(70.0))
-                .w_full()
-                .h(px(15.0))
-                .bg(Colors::status_warning()),
-        )
+/// Persistent state for the resizable bottom panel.
+/// `resize_start_*` are transient — recorded on mouse-down so the on_drag_move
+/// handler can recompute height as a pure function of the current mouse Y.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BottomPanelState {
+    pub height_px: f32,
+    pub min_height_px: f32,
+    pub max_height_px: f32,
+    pub is_resizing: bool,
+    pub resize_start_y: f32,
+    pub resize_start_height: f32,
 }
 
-fn mixer_fader(track_color: gpui::Rgba) -> impl IntoElement {
-    div()
-        .w(px(20.0))
-        .h(px(100.0))
-        .flex()
-        .justify_center()
-        .relative()
-        // Fader track line
-        .child(
-            div()
-                .w(px(2.0))
-                .h_full()
-                .bg(Colors::surface_input()),
-        )
-        // Fader handle (positioned in middle for default level)
-        .child(
-            div()
-                .absolute()
-                .top(px(40.0))
-                .w(px(16.0))
-                .h(px(12.0))
-                .rounded_sm()
-                .bg(Colors::text_primary())
-                .border(px(1.0))
-                .border_color(track_color)
-                .hover(|style| style.bg(Colors::text_secondary())),
-        )
+impl Default for BottomPanelState {
+    fn default() -> Self {
+        Self {
+            height_px: 280.0,
+            min_height_px: 180.0,
+            max_height_px: 720.0,
+            is_resizing: false,
+            resize_start_y: 0.0,
+            resize_start_height: 0.0,
+        }
+    }
 }
 
-fn channel_strip(
-    name: &'static str,
-    track_color: gpui::Rgba,
-    is_master: bool,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .w(px(90.0))
-        .h_full()
-        .border_r(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(if is_master { Colors::surface_raised() } else { Colors::surface_panel() })
-        // Top track accent
-        .child(
-            div()
-                .w_full()
-                .h(px(2.0))
-                .bg(track_color),
-        )
-        // Track Name
-        .child(
-            div()
-                .px(px(6.0))
-                .py(px(4.0))
-                .text_color(Colors::text_primary())
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(name),
-        )
-        // Fader & Meter Area
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(mixer_fader(track_color))
-                .child(mixer_meter()),
-        )
-        // Controls Row: Mute / Solo
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .justify_center()
-                .gap_1()
-                .py(px(4.0))
-                .child(
-                    div()
-                        .px(px(4.0))
-                        .py(px(1.0))
-                        .rounded_sm()
-                        .bg(Colors::surface_raised())
-                        .text_color(Colors::text_muted())
-                        .text_size(px(8.5))
-                        .child("M"),
-                )
-                .child(
-                    div()
-                        .px(px(4.0))
-                        .py(px(1.0))
-                        .rounded_sm()
-                        .bg(Colors::surface_raised())
-                        .text_color(Colors::text_muted())
-                        .text_size(px(8.5))
-                        .child("S"),
-                ),
-        )
-}
+/// Zero-sized marker used as the drag payload for the bottom panel resize handle.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BottomPanelResizeDrag;
 
-fn mixer_panel() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .size_full()
-        .bg(Colors::surface_base())
-        .child(channel_strip("Audio 1", gpui::rgb(0x56C7C9), false))
-        .child(channel_strip("Audio 2", gpui::rgb(0x7EDB9A), false))
-        .child(channel_strip("Synth 3", gpui::rgb(0xF2C96D), false))
-        .child(channel_strip("Vocals", gpui::rgb(0xF27E77), false))
-        .child(div().flex_1()) // spacer
-        .child(channel_strip("Master", gpui::rgb(0x5FCED0), true))
+impl Render for BottomPanelResizeDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
 }
 
 // ─── Sub-components for Editor ───────────────────────────────────────────────
@@ -347,16 +240,21 @@ fn effect_editor_panel() -> impl IntoElement {
 
 fn tab_button(
     label: &'static str,
+    icon_path: &'static str,
     tab: BottomTab,
     active_tab: BottomTab,
     on_click: std::sync::Arc<impl Fn(&BottomTab, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let active = tab == active_tab;
     let on_click_clone = on_click.clone();
+    let text_color = if active { Colors::text_primary() } else { Colors::text_muted() };
+
     let mut btn = div()
         .relative()
         .flex()
+        .flex_row()
         .items_center()
+        .gap(px(6.0))
         .h(px(24.0))
         .px(px(10.0))
         .rounded_md()
@@ -365,12 +263,19 @@ fn tab_button(
         .id(label)
         .on_click(move |_, window, cx| {
             on_click_clone(&tab, window, cx);
-        });
+        })
+        .child(
+            svg()
+                .path(icon_path)
+                .w(px(14.0))
+                .h(px(14.0))
+                .text_color(text_color)
+        )
+        .child(label);
 
     if active {
         btn = btn
             .bg(Colors::surface_hover())
-            .text_color(Colors::text_primary())
             // Accent indicator at the bottom
             .child(
                 div()
@@ -383,7 +288,6 @@ fn tab_button(
             );
     } else {
         btn = btn
-            .text_color(Colors::text_muted())
             .hover(|style| {
                 style
                     .bg(Colors::surface_hover())
@@ -396,17 +300,40 @@ fn tab_button(
 
 pub fn bottom_panel(
     active_tab: BottomTab,
+    panel_state: BottomPanelState,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
+    on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_resize_move: impl Fn(&gpui::DragMoveEvent<BottomPanelResizeDrag>, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let on_tab_click = std::sync::Arc::new(on_tab_click);
     div()
         .flex()
         .flex_col()
-        .h(px(240.0))
+        .h(px(panel_state.height_px))
         .w_full()
         .border_t(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())
+        .relative()
+        // While dragging, listen for move events on the whole panel.
+        .on_drag_move::<BottomPanelResizeDrag>(on_resize_move)
+        // Resize handle — 5px strip pinned to the top edge.
+        .child(
+            div()
+                .absolute()
+                .top(px(-2.0))
+                .left_0()
+                .right_0()
+                .h(px(5.0))
+                .id("bottom-panel-resize-handle")
+                .cursor(gpui::CursorStyle::ResizeUpDown)
+                .hover(|s| s.bg(Colors::accent_soft()))
+                .on_mouse_down(gpui::MouseButton::Left, on_resize_start)
+                .on_drag(
+                    BottomPanelResizeDrag,
+                    |_drag, _offset, _window, cx| cx.new(|_| BottomPanelResizeDrag),
+                ),
+        )
         // Tab Header
         .child(
             div()
@@ -418,9 +345,9 @@ pub fn bottom_panel(
                 .border_b(px(1.0))
                 .border_color(Colors::border_subtle())
                 .bg(gpui::rgb(0x0F1318))
-                .child(tab_button("Mixer", BottomTab::Mixer, active_tab, on_tab_click.clone()))
-                .child(tab_button("Editor", BottomTab::Editor, active_tab, on_tab_click.clone()))
-                .child(tab_button("Effect Editor", BottomTab::EffectEditor, active_tab, on_tab_click)),
+                .child(tab_button("Mixer", assets::ICON_SLIDERS_HORIZONTAL_PATH, BottomTab::Mixer, active_tab, on_tab_click.clone()))
+                .child(tab_button("Editor", assets::ICON_PENCIL_PATH, BottomTab::Editor, active_tab, on_tab_click.clone()))
+                .child(tab_button("Effect Editor", assets::ICON_SPARKLES_PATH, BottomTab::EffectEditor, active_tab, on_tab_click)),
         )
         // Tab Content
         .child(
@@ -428,7 +355,7 @@ pub fn bottom_panel(
                 .flex_1()
                 .min_h_0()
                 .child(match active_tab {
-                    BottomTab::Mixer => mixer_panel().into_any_element(),
+                    BottomTab::Mixer => render_mixer_panel().into_any_element(),
                     BottomTab::Editor => editor_panel().into_any_element(),
                     BottomTab::EffectEditor => effect_editor_panel().into_any_element(),
                 }),

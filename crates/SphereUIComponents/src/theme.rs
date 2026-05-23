@@ -20,6 +20,7 @@ impl Colors {
     pub fn text_primary() -> Rgba { rgb(0xF1F5F9) }
     pub fn text_secondary() -> Rgba { rgb(0xD2DBE6) }
     pub fn text_muted() -> Rgba { rgb(0x9AA7B8) }
+    pub fn text_faint() -> Rgba { rgba(0xFFFFFF47) } // ~28% white — sub-labels
 
     // Accent
     pub fn accent_primary() -> Rgba { rgb(0x5FCED0) }

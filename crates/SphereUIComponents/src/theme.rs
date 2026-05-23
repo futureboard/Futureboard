@@ -1,6 +1,25 @@
 use gpui::{rgb, rgba, Rgba};
 
-pub const FONT_FAMILY: &str = "Inter";
+/// Single font family used across the native app — Inter Variable.
+/// The variable TTF (`InterVariable.ttf`) registers under the family name
+/// "Inter Variable Text" in GPUI's text system.
+pub const FONT_FAMILY: &str = "Inter Variable Text";
+
+/// Alias kept for callsites that want an explicit "display" name. Points at
+/// the same variable family.
+pub const DISPLAY_FONT_FAMILY: &str = FONT_FAMILY;
+
+/// Recommended text sizes. Kept here so individual components don't drift.
+pub mod text {
+    /// Caps-style sublabels — INSERTS / SENDS / TRACK.
+    pub const CAPS: f32 = 8.0;
+    /// Small meta (CH 01, dB scale).
+    pub const META: f32 = 9.0;
+    /// Standard UI label (track name, button label).
+    pub const UI: f32 = 11.0;
+    /// Inspector / title text.
+    pub const TITLE: f32 = 12.0;
+}
 
 pub struct Colors;
 

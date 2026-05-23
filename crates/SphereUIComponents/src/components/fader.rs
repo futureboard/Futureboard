@@ -70,27 +70,42 @@ pub fn db_scale_column() -> gpui::Div {
 }
 
 /// Render the vertical rail + ticks + thumb at `value_norm`.
+///
+/// Geometry contract:
+/// * rail column is 24 px wide; the rail centerline lives at x = 12 px.
+/// * the rail itself is 2 px wide and inset so its center sits on x = 12.
+/// * the thumb is 22 px wide and centered on x = 12 (`left = 1`).
+/// * tick marks straddle x = 12.
 fn fader_rail(thumb_top: f32, accent: gpui::Rgba) -> gpui::Div {
+    let rail_center_x = 12.0_f32;
+    let rail_w = 2.0_f32;
+    let thumb_w = 22.0_f32;
+    let thumb_left = rail_center_x - thumb_w / 2.0;
+    let accent_line_h = 2.0_f32;
+
     let mut col = div()
         .relative()
         .w(px(24.0))
         .h(px(FADER_TRACK_HEIGHT))
-        // Rail
+        // Rail — recessed dark line aligned to the centerline.
         .child(
             div()
                 .absolute()
                 .top(px(FADER_THUMB_HEIGHT / 2.0))
-                .left(px(11.0))
-                .w(px(3.0))
+                .left(px(rail_center_x - rail_w / 2.0))
+                .w(px(rail_w))
                 .h(px(FADER_USABLE))
-                .bg(rgba(0xFFFFFF0F_u32))
+                .bg(rgba(0xFFFFFF14_u32))
+                .border(px(1.0))
+                .border_color(rgba(0x00000038_u32))
                 .rounded_full(),
         );
 
-    // Tick marks
+    // Tick marks centered on the rail centerline.
     for &(db, _) in SCALE_MARKS.iter() {
         let cy = db_to_center_y(db);
-        let (w, left) = if db == 0.0 { (13.0_f32, 6.0_f32) } else { (9.0_f32, 8.0_f32) };
+        let w = if db == 0.0 { 14.0_f32 } else { 9.0_f32 };
+        let left = rail_center_x - w / 2.0;
         col = col.child(
             div()
                 .absolute()
@@ -98,27 +113,31 @@ fn fader_rail(thumb_top: f32, accent: gpui::Rgba) -> gpui::Div {
                 .left(px(left))
                 .h(px(1.0))
                 .w(px(w))
-                .bg(if db == 0.0 { rgba(0xFFFFFF4D_u32) } else { rgba(0xFFFFFF1F_u32) }),
+                .bg(if db == 0.0 {
+                    rgba(0xFFFFFF59_u32)
+                } else {
+                    rgba(0xFFFFFF1F_u32)
+                }),
         );
     }
 
-    // Two-tone thumb: dark body, accent center bar, brighter top edge — reads
-    // clearly as a physical fader cap rather than a flat rectangle.
+    // Thumb — centered on the rail, with a crisp accent line through the cap
+    // anchored on the value position.
     let mut thumb_accent = accent;
-    thumb_accent.a = 0.75;
+    thumb_accent.a = 0.9;
 
     col.child(
         div()
             .absolute()
             .top(px(thumb_top))
-            .left(px(0.0))
-            .w(px(24.0))
+            .left(px(thumb_left))
+            .w(px(thumb_w))
             .h(px(FADER_THUMB_HEIGHT))
             .rounded_sm()
-            .bg(rgba(0x1B2129FF_u32))
+            .bg(rgba(0x1F262FFF_u32))
             .border(px(1.0))
             .border_color(rgba(0xFFFFFF66_u32))
-            // Top highlight band
+            // Top highlight band.
             .child(
                 div()
                     .absolute()
@@ -128,14 +147,14 @@ fn fader_rail(thumb_top: f32, accent: gpui::Rgba) -> gpui::Div {
                     .h(px(1.0))
                     .bg(rgba(0xFFFFFF26_u32)),
             )
-            // Accent line through the cap
+            // Accent stripe through the cap, exactly centered on the thumb.
             .child(
                 div()
                     .absolute()
-                    .top(px(FADER_THUMB_HEIGHT / 2.0 - 0.5))
+                    .top(px((FADER_THUMB_HEIGHT - accent_line_h) / 2.0))
                     .left(px(2.0))
                     .right(px(2.0))
-                    .h(px(1.5))
+                    .h(px(accent_line_h))
                     .bg(thumb_accent),
             ),
     )

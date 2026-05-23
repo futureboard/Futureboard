@@ -2,7 +2,7 @@ use gpui::{div, px, svg, AppContext, Empty, InteractiveElement, StatefulInteract
 use crate::theme::Colors;
 use crate::assets;
 use super::mixer_panel::{mixer_panel as render_mixer_panel, MixerCallbacks};
-use crate::components::timeline::timeline_state::TrackState;
+use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
@@ -261,6 +261,11 @@ fn tab_button(
         .rounded_md()
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::MEDIUM)
+        // Apply text color at the button level too so the label (a plain
+        // string child, not an svg) inherits the right color. Previously
+        // only the icon got `.text_color`, so inactive labels rendered with
+        // the default (black) text color.
+        .text_color(text_color)
         .id(label)
         .on_click(move |_, window, cx| {
             on_click_clone(&tab, window, cx);
@@ -303,6 +308,7 @@ pub fn bottom_panel(
     active_tab: BottomTab,
     panel_state: BottomPanelState,
     tracks: &[TrackState],
+    master: &MasterBusState,
     selected_track_id: Option<&str>,
     mixer_callbacks: MixerCallbacks,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
@@ -353,13 +359,19 @@ pub fn bottom_panel(
                 .child(tab_button("Editor", assets::ICON_PENCIL_PATH, BottomTab::Editor, active_tab, on_tab_click.clone()))
                 .child(tab_button("Effect Editor", assets::ICON_SPARKLES_PATH, BottomTab::EffectEditor, active_tab, on_tab_click)),
         )
-        // Tab Content
+        // Tab Content — must declare itself as a flex container so the
+        // active panel can `size_full` into the remaining space below the
+        // tab header. Without `flex().flex_col()` the panel collapsed to
+        // its content height and left a gap at the bottom.
         .child(
             div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_h_0()
+                .w_full()
                 .child(match active_tab {
-                    BottomTab::Mixer => render_mixer_panel(tracks, selected_track_id, mixer_callbacks)
+                    BottomTab::Mixer => render_mixer_panel(tracks, master, selected_track_id, mixer_callbacks)
                         .into_any_element(),
                     BottomTab::Editor => editor_panel().into_any_element(),
                     BottomTab::EffectEditor => effect_editor_panel().into_any_element(),

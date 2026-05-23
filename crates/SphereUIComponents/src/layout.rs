@@ -1,24 +1,51 @@
 use gpui::{div, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
 
+use std::path::PathBuf;
+
 use crate::components;
+use crate::components::file_browser::FileBrowserState;
 use crate::components::mixer_panel::MixerCallbacks;
 use crate::components::timeline::timeline_state::TrackState;
+use crate::components::timeline::waveform_cache;
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
 use crate::theme::{self, Colors};
+
+/// Flip to `true` to seed the studio with demo tracks/clips at startup.
+/// Production builds must keep this `false` — the real app starts empty.
+const USE_DEMO_PROJECT: bool = false;
+
+/// Top-menu open state. `open_menu_id` is the manifest menu id currently
+/// showing its dropdown; `anchor_x` is the click x position used to align
+/// the dropdown panel underneath the clicked label.
+#[derive(Debug, Clone, Default)]
+pub struct MenuBarUiState {
+    pub open_menu_id: Option<String>,
+    pub anchor_x: f32,
+}
 
 pub struct StudioLayout {
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
     timeline: Entity<components::timeline::Timeline>,
+    file_browser: FileBrowserState,
+    menu_bar: MenuBarUiState,
 }
 
 impl StudioLayout {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let timeline = cx.new(|_| components::timeline::Timeline::new());
+        let timeline = cx.new(|_| {
+            if USE_DEMO_PROJECT {
+                components::timeline::Timeline::with_demo_content()
+            } else {
+                components::timeline::Timeline::new()
+            }
+        });
         Self {
             active_bottom_tab: components::BottomTab::Mixer,
             bottom_panel_state: BottomPanelState::default(),
             timeline,
+            file_browser: FileBrowserState::default(),
+            menu_bar: MenuBarUiState::default(),
         }
     }
 }
@@ -100,6 +127,16 @@ impl StudioLayout {
                 });
             });
 
+        let timeline_master = self.timeline.clone();
+        let on_master_volume_change: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |v: &f32, _w, cx| {
+                let v = *v;
+                timeline_master.update(cx, |t, cx| {
+                    t.state.set_master_volume(v);
+                    cx.notify();
+                });
+            });
+
         MixerCallbacks {
             on_select_track,
             on_volume_change,
@@ -108,6 +145,7 @@ impl StudioLayout {
             on_toggle_solo,
             on_toggle_arm,
             on_toggle_input,
+            on_master_volume_change,
         }
     }
 }
@@ -147,10 +185,11 @@ impl Render for StudioLayout {
         // Pull the live track list and current selection out of the Timeline so
         // the Mixer and Inspector render against the same data the TrackHeader
         // sees. Cloning the Vec is cheap relative to a full render.
-        let (tracks, selected_track_id, selected_clip_id) = {
+        let (tracks, master, selected_track_id, selected_clip_id) = {
             let t = self.timeline.read(cx);
             (
                 t.state.tracks.clone(),
+                t.state.master.clone(),
                 t.state.selection.selected_track_id.clone(),
                 t.state.selection.selected_clip_ids.first().cloned(),
             )
@@ -159,20 +198,141 @@ impl Render for StudioLayout {
         let panel_state = self.bottom_panel_state;
         let mixer_callbacks = self.build_mixer_callbacks();
 
+        // ── File browser callbacks ──────────────────────────────────────
+        let on_browser_navigate: std::sync::Arc<dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
+                let path = path.clone();
+                this.update(cx, |this, cx| {
+                    this.file_browser.navigate_to(path);
+                    cx.notify();
+                });
+            })
+        };
+        let on_browser_select: std::sync::Arc<dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
+                let path = path.clone();
+                this.update(cx, |this, cx| {
+                    this.file_browser.select(path);
+                    cx.notify();
+                });
+            })
+        };
+        let on_browser_up: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_: &(), _w, cx| {
+                this.update(cx, |this, cx| {
+                    this.file_browser.navigate_up();
+                    cx.notify();
+                });
+            })
+        };
+        // Double-click on an audio file imports it onto the timeline using the
+        // existing waveform-cache + import_audio_at path.
+        let on_browser_activate: std::sync::Arc<dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static> = {
+            let timeline = self.timeline.clone();
+            std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
+                let path = path.clone();
+                timeline.update(cx, |t, cx| {
+                    let decoded = waveform_cache::decode_and_cache_file(&path);
+                    let duration = decoded
+                        .as_ref()
+                        .map(|p| p.duration_seconds)
+                        .unwrap_or(0.0);
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "Imported Audio".to_string());
+                    // Drop at scroll origin on whatever lane currently sits at
+                    // y=0; if none, `import_audio_at` makes a new track.
+                    t.state.import_audio_at(
+                        path.to_string_lossy().to_string(),
+                        name,
+                        0.0,
+                        1.0e9_f32,
+                        duration,
+                    );
+                    cx.notify();
+                });
+            })
+        };
+
+        let file_browser = self.file_browser.clone();
+
+        // ── Top-menu callbacks ─────────────────────────────────────────────
+        let on_open_menu: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |(id, anchor_x): &(String, f32), _w, cx| {
+                let id = id.clone();
+                let anchor_x = *anchor_x;
+                this.update(cx, |this, cx| {
+                    // Toggle: clicking the open menu closes it; clicking
+                    // another switches to it.
+                    if this.menu_bar.open_menu_id.as_deref() == Some(id.as_str()) {
+                        this.menu_bar.open_menu_id = None;
+                    } else {
+                        this.menu_bar.open_menu_id = Some(id);
+                        this.menu_bar.anchor_x = anchor_x;
+                    }
+                    cx.notify();
+                });
+            })
+        };
+        let on_close_menu: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_: &(), _w, cx| {
+                this.update(cx, |this, cx| {
+                    this.menu_bar.open_menu_id = None;
+                    cx.notify();
+                });
+            })
+        };
+        let on_menu_command: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> = {
+            std::sync::Arc::new(move |command: &String, _w, _cx| {
+                eprintln!("[menu] command: {}", command);
+            })
+        };
+
+        let open_menu_id = self.menu_bar.open_menu_id.clone();
+        let menu_anchor_x = self.menu_bar.anchor_x;
+        let viewport_width: f32 = window.bounds().size.width.into();
+
+        let dropdown_overlay = open_menu_id.as_ref().and_then(|id| {
+            let manifest = crate::menu::MenuManifest::load();
+            manifest.menus.iter().find(|m| &m.id == id).map(|menu| {
+                components::menu_dropdown::menu_dropdown(
+                    menu,
+                    menu_anchor_x,
+                    viewport_width,
+                    on_menu_command.clone(),
+                    on_close_menu.clone(),
+                )
+            })
+        });
+
         div()
             .flex()
             .flex_col()
             .size_full()
+            .relative()
             .bg(Colors::surface_base())
             .font_family(theme::FONT_FAMILY)
-            .child(components::app_chrome(window))
+            .child(components::app_chrome(window, open_menu_id.as_deref(), on_open_menu))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(components::sidebar())
+                    .child(components::sidebar(
+                        &file_browser,
+                        on_browser_navigate,
+                        on_browser_select,
+                        on_browser_activate,
+                        on_browser_up,
+                    ))
                     .child(self.timeline.clone())
                     .child(crate::components::panel::inspector_panel(
                         &tracks,
@@ -185,6 +345,7 @@ impl Render for StudioLayout {
                 self.active_bottom_tab,
                 panel_state,
                 &tracks,
+                &master,
                 selected_track_id.as_deref(),
                 mixer_callbacks,
                 on_tab_click,
@@ -192,6 +353,9 @@ impl Render for StudioLayout {
                 on_resize_move,
             ))
             .child(components::status_bar())
+            // Dropdown overlay — rendered last so it sits above every other
+            // panel. The dropdown's own backdrop captures click-outside.
+            .children(dropdown_overlay)
     }
 }
 

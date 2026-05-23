@@ -161,19 +161,20 @@ pub fn timeline_ruler(
                         None
                     }
                 )
-                .children(lines.into_iter().map(|line| {
+                // Ticks: every visible grid line, drawn as a 1 px vertical mark
+                // anchored to the bottom of the ruler. Bar lines reach the top;
+                // beat and sub lines are shorter.
+                .children(lines.iter().map(|line| {
                     let tick_h = match line.level {
                         GridLineLevel::Bar => RULER_HEIGHT - 2.0,
                         GridLineLevel::Beat => RULER_HEIGHT * 0.46,
                         GridLineLevel::Sub => RULER_HEIGHT * 0.18,
                     };
-                    
                     let tick_alpha = match line.level {
                         GridLineLevel::Bar => 0.28,
                         GridLineLevel::Beat => 0.18,
                         GridLineLevel::Sub => 0.10,
                     };
-
                     div()
                         .absolute()
                         .left(px(line.x))
@@ -181,31 +182,34 @@ pub fn timeline_ruler(
                         .w(px(1.0))
                         .h(px(tick_h))
                         .bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: tick_alpha })
-                        .children(
-                            if line.show_label {
-                                let label = state.format_bar_beat(line.beat);
-                                let font_weight = match line.level {
-                                    GridLineLevel::Bar => gpui::FontWeight::BOLD,
-                                    _ => gpui::FontWeight::NORMAL,
-                                };
-                                let text_color = match line.level {
-                                    GridLineLevel::Bar => Colors::text_secondary(),
-                                    _ => Colors::text_muted(),
-                                };
-                                Some(
-                                    div()
-                                        .absolute()
-                                        .left(px(4.0))
-                                        .top(px(4.0))
-                                        .text_size(px(9.5))
-                                        .font_weight(font_weight)
-                                        .text_color(text_color)
-                                        .child(label)
-                                )
-                            } else {
-                                None
-                            }
-                        )
                 }))
+                // Labels: emitted as siblings of the ticks (not children of a
+                // 1 px-wide tick div, which previously made labels wrap one
+                // character per line and look like random digits). Each label
+                // gets its own min-width so the text lays out on a single row.
+                .children(
+                    lines
+                        .iter()
+                        .filter(|l| l.show_label)
+                        .map(|line| {
+                            let label = state.format_bar_beat(line.beat);
+                            let (font_weight, text_color) = match line.level {
+                                GridLineLevel::Bar => (
+                                    gpui::FontWeight::BOLD,
+                                    Colors::text_secondary(),
+                                ),
+                                _ => (gpui::FontWeight::NORMAL, Colors::text_muted()),
+                            };
+                            div()
+                                .absolute()
+                                .left(px(line.x + 3.0))
+                                .top(px(4.0))
+                                .min_w(px(40.0))
+                                .text_size(px(10.0))
+                                .font_weight(font_weight)
+                                .text_color(text_color)
+                                .child(label)
+                        }),
+                ),
         )
 }

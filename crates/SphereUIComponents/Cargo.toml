@@ -13,3 +13,8 @@ gpui = "0.2.2"
 # Audio decoding for waveform preview only (not realtime playback).
 hound = "3.5"
 symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
+# Cross-platform user directories for the file browser default location.
+dirs = "5"
+# Menu manifest is shared with Electron/Web via a generated JSON file.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

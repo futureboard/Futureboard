@@ -4794,8 +4794,11 @@ dependencies = [
 name = "sphere_ui_components"
 version = "0.1.0"
 dependencies = [
+ "dirs 5.0.1",
  "gpui",
  "hound",
+ "serde",
+ "serde_json",
  "symphonia",
 ]
 

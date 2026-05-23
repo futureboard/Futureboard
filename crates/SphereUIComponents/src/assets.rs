@@ -1,12 +1,11 @@
 // Embedded fonts — loaded from packages/shared/fonts via include_bytes!
-pub const INTER_REGULAR: &[u8] =
-    include_bytes!("../../../packages/shared/fonts/Inter-Regular.ttf");
-pub const INTER_MEDIUM: &[u8] =
-    include_bytes!("../../../packages/shared/fonts/Inter-Medium.ttf");
-pub const INTER_SEMIBOLD: &[u8] =
-    include_bytes!("../../../packages/shared/fonts/Inter-SemiBold.ttf");
-pub const INTER_BOLD: &[u8] =
-    include_bytes!("../../../packages/shared/fonts/Inter-Bold.ttf");
+//
+// Native uses the Inter Variable TTF as its single text source. The variable
+// font carries every weight (and the `opsz` axis) in one file, so we only
+// embed and register this one binary; `theme::FONT_FAMILY` ("Inter Variable
+// Text") resolves to it.
+pub const INTER_VARIABLE: &[u8] =
+    include_bytes!("../../../packages/shared/fonts/InterVariable.ttf");
 
 pub struct SvgIcon {
     pub name: &'static str,
@@ -53,6 +52,8 @@ pub mod icons {
     pub const MAGNET: &str = include_str!("../../../packages/shared/lucide/icons/magnet.svg");
     pub const GRIP_VERTICAL: &str = include_str!("../../../packages/shared/lucide/icons/grip-vertical.svg");
     pub const FILE: &str = include_str!("../../../packages/shared/lucide/icons/file.svg");
+    pub const CHEVRON_RIGHT: &str = include_str!("../../../packages/shared/lucide/icons/chevron-right.svg");
+    pub const CHECK: &str = include_str!("../../../packages/shared/lucide/icons/check.svg");
 
     // Tabler outline
     pub const AUTOMATION: &str = include_str!("../../../packages/shared/tabler-icons/icons/outline/automation.svg");
@@ -99,18 +100,17 @@ pub const ICON_ROUTE_PATH: &str = "icons/route.svg";
 pub const ICON_MAGNET_PATH: &str = "icons/magnet.svg";
 pub const ICON_GRIP_VERTICAL_PATH: &str = "icons/grip-vertical.svg";
 pub const ICON_FILE_PATH: &str = "icons/file.svg";
+pub const ICON_CHEVRON_RIGHT_PATH: &str = "icons/chevron-right.svg";
+pub const ICON_CHECK_PATH: &str = "icons/check.svg";
 pub const ICON_PLAYHEAD_HANDLE_PATH: &str = "icons/playhead_handle.svg";
 
-/// Registers the embedded Inter fonts with the platform's text system.
+/// Registers the embedded Inter Variable font with the platform's text
+/// system. Native uses a single family — `theme::FONT_FAMILY` resolves to
+/// "Inter Variable Text".
 pub fn register_fonts(cx: &mut gpui::App) {
     use std::borrow::Cow;
     cx.text_system()
-        .add_fonts(vec![
-            Cow::Borrowed(INTER_REGULAR),
-            Cow::Borrowed(INTER_MEDIUM),
-            Cow::Borrowed(INTER_SEMIBOLD),
-            Cow::Borrowed(INTER_BOLD),
-        ])
+        .add_fonts(vec![Cow::Borrowed(INTER_VARIABLE)])
         .expect("failed to load fonts");
 }
 

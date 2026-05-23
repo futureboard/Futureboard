@@ -152,9 +152,9 @@ fn track_inspector(track: &TrackState) -> impl IntoElement {
     let pan = if track.pan.abs() < 0.01 {
         "Center".to_string()
     } else if track.pan < 0.0 {
-        format!("L {}", (track.pan * -50.0).round() as i32)
+        format!("L {}", (track.pan * -100.0).round().clamp(1.0, 100.0) as i32)
     } else {
-        format!("R {}", (track.pan * 50.0).round() as i32)
+        format!("R {}", (track.pan * 100.0).round().clamp(1.0, 100.0) as i32)
     };
 
     div()

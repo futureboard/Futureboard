@@ -58,13 +58,49 @@ pub struct TrackState {
     pub name: String,
     pub track_type: TrackType,
     pub color: gpui::Rgba,
+    /// Normalized fader position in `0.0..=1.0`. `1.0` is the top of the fader
+    /// (≈ +6 dB) and `0.0` is the bottom (≈ -60 dB). See `Volume::norm_to_db`.
     pub volume: f32,
+    /// Pan position in `-1.0..=1.0`. `-1.0` is hard left, `+1.0` is hard right.
     pub pan: f32,
     pub muted: bool,
     pub solo: bool,
     pub armed: bool,
+    /// Whether the track is monitoring its input. UI-only for now (no audio).
+    pub input_monitor: bool,
+    /// Latest peak meter levels in `0.0..=1.0`. Currently a static placeholder
+    /// per track; will be driven by the audio engine when that lands.
+    pub meter_level_l: f32,
+    pub meter_level_r: f32,
     pub clips: Vec<ClipState>,
     pub automation_lanes: Vec<AutomationLaneState>,
+}
+
+/// Volume / dB mapping helpers. Linear in dB between the soft floor and a
+/// little headroom above unity.
+pub mod volume {
+    pub const MIN_DB: f32 = -60.0;
+    pub const MAX_DB: f32 = 6.0;
+
+    pub fn norm_to_db(norm: f32) -> f32 {
+        let n = norm.clamp(0.0, 1.0);
+        MIN_DB + n * (MAX_DB - MIN_DB)
+    }
+
+    pub fn db_to_norm(db: f32) -> f32 {
+        ((db - MIN_DB) / (MAX_DB - MIN_DB)).clamp(0.0, 1.0)
+    }
+
+    pub fn format_db(norm: f32) -> String {
+        let db = norm_to_db(norm);
+        if norm <= 0.001 || db <= MIN_DB + 0.05 {
+            "-∞".to_string()
+        } else if db >= 0.0 {
+            format!("+{:.1}", db)
+        } else {
+            format!("{:.1}", db)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,11 +218,14 @@ impl Default for TimelineState {
             name: "Audio 1".to_string(),
             track_type: TrackType::Audio,
             color: rgb(0x56C7C9), // Teal
-            volume: 0.8,
+            volume: volume::db_to_norm(-3.0),
             pan: 0.0,
             muted: false,
             solo: false,
             armed: false,
+            input_monitor: false,
+            meter_level_l: 0.62,
+            meter_level_r: 0.68,
             clips: vec![
                 ClipState {
                     id: "clip-1".to_string(),
@@ -232,11 +271,14 @@ impl Default for TimelineState {
             name: "Audio 2".to_string(),
             track_type: TrackType::Audio,
             color: rgb(0x7EDB9A), // Green
-            volume: 0.7,
+            volume: volume::db_to_norm(-6.0),
             pan: -0.2,
             muted: false,
             solo: false,
             armed: false,
+            input_monitor: false,
+            meter_level_l: 0.42,
+            meter_level_r: 0.48,
             clips: vec![ClipState {
                 id: "clip-3".to_string(),
                 name: "drums_loop_120.wav".to_string(),
@@ -258,11 +300,14 @@ impl Default for TimelineState {
             name: "Synth 3".to_string(),
             track_type: TrackType::Midi,
             color: rgb(0xF2C96D), // Yellow
-            volume: 0.9,
+            volume: volume::db_to_norm(-1.5),
             pan: 0.3,
             muted: false,
             solo: false,
             armed: false,
+            input_monitor: false,
+            meter_level_l: 0.15,
+            meter_level_r: 0.12,
             clips: vec![ClipState {
                 id: "clip-4".to_string(),
                 name: "synth_lead.mid".to_string(),
@@ -531,15 +576,88 @@ impl TimelineState {
             name,
             track_type: TrackType::Audio,
             color,
-            volume: 0.8,
+            volume: volume::db_to_norm(0.0),
             pan: 0.0,
             muted: false,
             solo: false,
             armed: false,
+            input_monitor: false,
+            meter_level_l: 0.0,
+            meter_level_r: 0.0,
             clips: Vec::new(),
             automation_lanes: Vec::new(),
         });
         id
+    }
+
+    // ── Single-source-of-truth mutations ─────────────────────────────────────
+    // These are the only paths that should mutate per-track UI state. Both the
+    // timeline TrackHeader and the bottom-panel Mixer call into these, so the
+    // two views can never drift apart.
+
+    pub fn set_track_volume(&mut self, track_id: &str, norm: f32) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            t.volume = norm.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn set_track_pan(&mut self, track_id: &str, pan: f32) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            t.pan = pan.clamp(-1.0, 1.0);
+        }
+    }
+
+    pub fn toggle_track_mute(&mut self, track_id: &str) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            t.muted = !t.muted;
+        }
+    }
+
+    pub fn toggle_track_solo(&mut self, track_id: &str) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            t.solo = !t.solo;
+        }
+    }
+
+    pub fn toggle_track_arm(&mut self, track_id: &str) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            t.armed = !t.armed;
+        }
+    }
+
+    pub fn toggle_track_input_monitor(&mut self, track_id: &str) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            t.input_monitor = !t.input_monitor;
+        }
+    }
+
+    pub fn select_track(&mut self, track_id: &str) {
+        self.selection.selected_track_id = Some(track_id.to_string());
+        self.selection.selected_clip_ids.clear();
+    }
+
+    pub fn select_clip(&mut self, clip_id: &str) {
+        self.selection.selected_clip_ids = vec![clip_id.to_string()];
+        if let Some(track) = self
+            .tracks
+            .iter()
+            .find(|t| t.clips.iter().any(|c| c.id == clip_id))
+        {
+            self.selection.selected_track_id = Some(track.id.clone());
+        }
+    }
+
+    pub fn find_track(&self, track_id: &str) -> Option<&TrackState> {
+        self.tracks.iter().find(|t| t.id == track_id)
+    }
+
+    pub fn find_clip(&self, clip_id: &str) -> Option<(&TrackState, &ClipState)> {
+        for t in &self.tracks {
+            if let Some(c) = t.clips.iter().find(|c| c.id == clip_id) {
+                return Some((t, c));
+            }
+        }
+        None
     }
 
     /// Drop a clip onto the timeline. `drop_x` and `drop_y` are in the track

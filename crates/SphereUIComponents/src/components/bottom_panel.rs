@@ -1,7 +1,8 @@
 use gpui::{div, px, svg, AppContext, Empty, InteractiveElement, StatefulInteractiveElement, IntoElement, ParentElement, Render, Styled, Window, App};
 use crate::theme::Colors;
 use crate::assets;
-use super::mixer_panel::mixer_panel as render_mixer_panel;
+use super::mixer_panel::{mixer_panel as render_mixer_panel, MixerCallbacks};
+use crate::components::timeline::timeline_state::TrackState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
@@ -301,6 +302,9 @@ fn tab_button(
 pub fn bottom_panel(
     active_tab: BottomTab,
     panel_state: BottomPanelState,
+    tracks: &[TrackState],
+    selected_track_id: Option<&str>,
+    mixer_callbacks: MixerCallbacks,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
     on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
     on_resize_move: impl Fn(&gpui::DragMoveEvent<BottomPanelResizeDrag>, &mut Window, &mut App) + 'static,
@@ -355,7 +359,8 @@ pub fn bottom_panel(
                 .flex_1()
                 .min_h_0()
                 .child(match active_tab {
-                    BottomTab::Mixer => render_mixer_panel().into_any_element(),
+                    BottomTab::Mixer => render_mixer_panel(tracks, selected_track_id, mixer_callbacks)
+                        .into_any_element(),
                     BottomTab::Editor => editor_panel().into_any_element(),
                     BottomTab::EffectEditor => effect_editor_panel().into_any_element(),
                 }),

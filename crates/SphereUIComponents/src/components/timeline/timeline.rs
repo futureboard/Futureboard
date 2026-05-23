@@ -43,38 +43,32 @@ impl Timeline {
 impl Render for Timeline {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let on_select_track = cx.listener(|this, track_id: &String, _window, cx| {
-            this.state.selection.selected_track_id = Some(track_id.clone());
-            this.state.selection.selected_clip_ids.clear();
+            this.state.select_track(track_id);
             cx.notify();
         });
 
         let on_select_clip = cx.listener(|this, clip_id: &String, _window, cx| {
-            this.state.selection.selected_clip_ids = vec![clip_id.clone()];
-            // Also select the track containing this clip
-            if let Some(track) = this.state.tracks.iter().find(|t| t.clips.iter().any(|c| c.id == *clip_id)) {
-                this.state.selection.selected_track_id = Some(track.id.clone());
-            }
+            this.state.select_clip(clip_id);
             cx.notify();
         });
 
         let on_toggle_mute = cx.listener(|this, track_id: &String, _window, cx| {
-            if let Some(t) = this.state.tracks.iter_mut().find(|t| t.id == *track_id) {
-                t.muted = !t.muted;
-            }
+            this.state.toggle_track_mute(track_id);
             cx.notify();
         });
 
         let on_toggle_solo = cx.listener(|this, track_id: &String, _window, cx| {
-            if let Some(t) = this.state.tracks.iter_mut().find(|t| t.id == *track_id) {
-                t.solo = !t.solo;
-            }
+            this.state.toggle_track_solo(track_id);
             cx.notify();
         });
 
         let on_toggle_arm = cx.listener(|this, track_id: &String, _window, cx| {
-            if let Some(t) = this.state.tracks.iter_mut().find(|t| t.id == *track_id) {
-                t.armed = !t.armed;
-            }
+            this.state.toggle_track_arm(track_id);
+            cx.notify();
+        });
+
+        let on_toggle_input = cx.listener(|this, track_id: &String, _window, cx| {
+            this.state.toggle_track_input_monitor(track_id);
             cx.notify();
         });
 
@@ -87,9 +81,12 @@ impl Render for Timeline {
         });
 
         let on_volume_change = cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
-            if let Some(t) = this.state.tracks.iter_mut().find(|t| t.id == *track_id) {
-                t.volume = *volume;
-            }
+            this.state.set_track_volume(track_id, *volume);
+            cx.notify();
+        });
+
+        let on_pan_change = cx.listener(|this, (track_id, pan): &(String, f32), _window, cx| {
+            this.state.set_track_pan(track_id, *pan);
             cx.notify();
         });
 
@@ -126,26 +123,7 @@ impl Render for Timeline {
         });
 
         let on_add_track = cx.listener(|this, _: &(), _window, cx| {
-            let id = format!("track-{}", this.state.tracks.len() + 1);
-            let name = format!("Audio {}", this.state.tracks.len() + 1);
-            let color = match this.state.tracks.len() % 3 {
-                0 => gpui::rgb(0x56C7C9),
-                1 => gpui::rgb(0x7EDB9A),
-                _ => gpui::rgb(0xF2C96D),
-            };
-            this.state.tracks.push(TrackState {
-                id,
-                name,
-                track_type: TrackType::Audio,
-                color,
-                volume: 0.8,
-                pan: 0.0,
-                muted: false,
-                solo: false,
-                armed: false,
-                clips: vec![],
-                automation_lanes: vec![],
-            });
+            this.state.create_audio_track();
             cx.notify();
         });
 
@@ -198,8 +176,10 @@ impl Render for Timeline {
         let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_mute);
         let on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_solo);
         let on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_arm);
+        let on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_input);
         let on_delete_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_delete_track);
         let on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_volume_change);
+        let _on_pan_change: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_pan_change);
         let on_add_clip: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_add_clip);
         let on_add_track: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_add_track);
         let on_toggle_snap: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_snap);
@@ -208,6 +188,16 @@ impl Render for Timeline {
         let on_select_tool: std::sync::Arc<dyn Fn(&TimelineTool, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_select_tool);
         let on_zoom_in: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_zoom_in);
         let on_zoom_out: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_zoom_out);
+
+        let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
+            on_select_track: on_select_track.clone(),
+            on_toggle_mute: on_toggle_mute.clone(),
+            on_toggle_solo: on_toggle_solo.clone(),
+            on_toggle_arm: on_toggle_arm.clone(),
+            on_toggle_input: on_toggle_input.clone(),
+            on_delete_track: on_delete_track.clone(),
+            on_volume_change: on_volume_change.clone(),
+        };
 
         let state = &self.state;
         let on_zoom_in_btn = on_zoom_in.clone();
@@ -295,13 +285,9 @@ impl Render for Timeline {
                     .child(
                         track_list(
                             state,
+                            header_callbacks.clone(),
                             on_select_track.clone(),
                             on_select_clip.clone(),
-                            on_toggle_mute.clone(),
-                            on_toggle_solo.clone(),
-                            on_toggle_arm.clone(),
-                            on_delete_track.clone(),
-                            on_volume_change.clone(),
                             on_add_clip.clone(),
                         )
                     )

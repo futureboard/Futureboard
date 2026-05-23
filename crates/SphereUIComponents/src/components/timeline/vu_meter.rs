@@ -1,15 +1,19 @@
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 use crate::theme::Colors;
 
+/// Legacy fallback meter, kept so old call sites still link. New code should
+/// use [`vu_meter_with_levels`] and pass the track's real meter state.
 pub fn vu_meter(track_id: &str) -> impl IntoElement {
-    // Generate subtle distinct default activity levels for tracks to make the DAW feel alive
     let (level_l, level_r) = match track_id {
         "track-1" => (0.62, 0.68),
         "track-2" => (0.42, 0.48),
         "track-3" => (0.15, 0.12),
         _ => (0.0, 0.0),
     };
+    vu_meter_with_levels(level_l, level_r)
+}
 
+pub fn vu_meter_with_levels(level_l: f32, level_r: f32) -> impl IntoElement {
     let draw_bar = |level: f32| {
         let total_height = 16.0;
         let green_pct = 0.70;

@@ -1,19 +1,93 @@
-use gpui::{div, px, rgba, svg, IntoElement, ParentElement, Styled, InteractiveElement};
-use crate::theme::Colors;
-use crate::components::timeline::timeline_state::{TrackState, TimelineState, HEADER_WIDTH, TRACK_HEIGHT};
-use crate::components::timeline::vu_meter::vu_meter;
-use crate::assets;
+use gpui::{div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled};
 
-fn volume_to_db(v: f32) -> String {
-    if v <= 0.001 {
-        "-∞ dB".to_string()
+use crate::assets;
+use crate::components::fader::db_value_pill;
+use crate::components::knob::value_pill;
+use crate::components::slider::slider;
+use crate::components::timeline::timeline_state::{
+    volume, TimelineState, TrackState, TrackType, HEADER_WIDTH, TRACK_HEIGHT,
+};
+use crate::components::timeline::vu_meter::vu_meter_with_levels;
+use crate::theme::Colors;
+
+type TrackCallback = std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
+type VolumeCallback = std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
+
+/// Bundle of callbacks the TrackHeader can fire. Keeping them in one struct
+/// keeps the function signature manageable and lets new actions land without
+/// re-threading every call site.
+#[derive(Clone)]
+pub struct TrackHeaderCallbacks {
+    pub on_select_track: TrackCallback,
+    pub on_toggle_mute: TrackCallback,
+    pub on_toggle_solo: TrackCallback,
+    pub on_toggle_arm: TrackCallback,
+    pub on_toggle_input: TrackCallback,
+    pub on_delete_track: TrackCallback,
+    pub on_volume_change: VolumeCallback,
+}
+
+fn type_badge(kind: TrackType, color: gpui::Rgba) -> impl IntoElement {
+    let label = match kind {
+        TrackType::Audio => "AUD",
+        TrackType::Midi => "MID",
+        TrackType::Instrument => "INS",
+        TrackType::Master => "MAS",
+    };
+    let mut bg = color;
+    bg.a = 0.16;
+    div()
+        .px(px(3.0))
+        .py(px(0.5))
+        .rounded_sm()
+        .bg(bg)
+        .text_color(color)
+        .text_size(px(8.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .child(label)
+}
+
+fn pill_button(
+    id: gpui::ElementId,
+    label: &'static str,
+    icon: Option<&'static str>,
+    active: bool,
+    active_bg: gpui::Rgba,
+    active_fg: gpui::Rgba,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let mut btn = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(16.0))
+        .h(px(16.0))
+        .rounded_sm()
+        .cursor(gpui::CursorStyle::PointingHand)
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .id(id)
+        .on_mouse_down(gpui::MouseButton::Left, on_click);
+
+    if active {
+        btn = btn.bg(active_bg).text_color(active_fg);
     } else {
-        let db = 20.0 * v.log10();
-        if db >= 0.0 {
-            format!("+{:.1} dB", db)
-        } else {
-            format!("{:.1} dB", db)
-        }
+        btn = btn
+            .bg(rgba(0xFFFFFF0D_u32))
+            .text_color(Colors::text_secondary())
+            .hover(|s| s.bg(rgba(0xFFFFFF18_u32)));
+    }
+
+    if let Some(path) = icon {
+        btn.child(
+            svg()
+                .path(path)
+                .w(px(10.0))
+                .h(px(10.0))
+                .text_color(if active { active_fg } else { Colors::text_secondary() }),
+        )
+    } else {
+        btn.child(label)
     }
 }
 
@@ -21,41 +95,78 @@ pub fn track_header(
     track: &TrackState,
     index: usize,
     state: &TimelineState,
-    on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_delete_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    callbacks: TrackHeaderCallbacks,
 ) -> impl IntoElement {
     let track_id = track.id.clone();
     let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
-    let header_bg = if is_selected { gpui::rgb(0x252c35) } else { gpui::rgb(0x1c2028) };
-    
-    let on_select = on_select_track.clone();
-    let track_id_select = track_id.clone();
-    
-    let on_mute = on_toggle_mute.clone();
-    let track_id_mute = track_id.clone();
-    
-    let on_solo = on_toggle_solo.clone();
-    let track_id_solo = track_id.clone();
-    
-    let on_arm = on_toggle_arm.clone();
-    let track_id_arm = track_id.clone();
-
-    let on_delete = on_delete_track.clone();
-    let track_id_delete = track_id.clone();
-
-    let on_vol = on_volume_change.clone();
-    let track_id_vol = track_id.clone();
-    let current_volume = track.volume;
+    let header_bg = if is_selected {
+        gpui::rgb(0x252c35)
+    } else {
+        gpui::rgb(0x1c2028)
+    };
 
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         track.id.hash(&mut hasher);
         hasher.finish() as usize
+    };
+
+    // Build click handlers up-front so the closure types stay simple.
+    let select_id = track_id.clone();
+    let on_select_root = {
+        let cb = callbacks.on_select_track.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&select_id, window, cx);
+        }
+    };
+
+    let mute_id = track_id.clone();
+    let on_mute = {
+        let cb = callbacks.on_toggle_mute.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&mute_id, window, cx);
+        }
+    };
+
+    let solo_id = track_id.clone();
+    let on_solo = {
+        let cb = callbacks.on_toggle_solo.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&solo_id, window, cx);
+        }
+    };
+
+    let arm_id = track_id.clone();
+    let on_arm = {
+        let cb = callbacks.on_toggle_arm.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&arm_id, window, cx);
+        }
+    };
+
+    let input_id = track_id.clone();
+    let on_input = {
+        let cb = callbacks.on_toggle_input.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&input_id, window, cx);
+        }
+    };
+
+    let delete_id = track_id.clone();
+    let on_delete = {
+        let cb = callbacks.on_delete_track.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&delete_id, window, cx);
+        }
+    };
+
+    let vol_id = track_id.clone();
+    let on_volume_norm = {
+        let cb = callbacks.on_volume_change.clone();
+        move |new_norm: &f32, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&(vol_id.clone(), *new_norm), window, cx);
+        }
     };
 
     div()
@@ -68,26 +179,18 @@ pub fn track_header(
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .id(("track-header", id_num))
-        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            on_select(&track_id_select, window, cx);
-        })
+        .on_mouse_down(gpui::MouseButton::Left, on_select_root)
+        // Left accent strip — same column as the track lane stripe
+        .child(div().w(px(3.0)).h_full().bg(track.color))
         .child(
-            // Left Color Strip
-            div()
-                .w(px(4.0))
-                .h_full()
-                .bg(track.color)
-        )
-        .child(
-            // Main content area
             div()
                 .flex()
                 .flex_col()
                 .justify_between()
                 .flex_1()
                 .px(px(8.0))
-                .py(px(6.0))
-                // Row 1: Name, Type Badge, Controls
+                .py(px(7.0))
+                // Row 1: name + type badge + per-track buttons
                 .child(
                     div()
                         .flex()
@@ -100,25 +203,25 @@ pub fn track_header(
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(4.0))
+                                .gap(px(6.0))
                                 .child(
                                     svg()
                                         .path(assets::ICON_GRIP_VERTICAL_PATH)
-                                        .w(px(10.0))
-                                        .h(px(10.0))
-                                        .text_color(Colors::text_faint())
+                                        .w(px(9.0))
+                                        .h(px(9.0))
+                                        .text_color(Colors::text_faint()),
                                 )
                                 .child(
-                                    // Name + Badge
                                     div()
                                         .flex()
                                         .flex_col()
+                                        .min_w(px(0.0))
                                         .child(
                                             div()
                                                 .flex()
                                                 .flex_row()
                                                 .items_center()
-                                                .gap(px(3.0))
+                                                .gap(px(4.0))
                                                 .child(
                                                     div()
                                                         .text_size(px(11.0))
@@ -126,231 +229,116 @@ pub fn track_header(
                                                         .text_color(Colors::text_primary())
                                                         .child(track.name.clone()),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .px(px(2.0))
-                                                        .py(px(0.5))
-                                                        .rounded_sm()
-                                                        .bg({
-                                                            let mut c = track.color;
-                                                            c.a = 0.15;
-                                                            c
-                                                        })
-                                                        .text_color(track.color)
-                                                        .text_size(px(8.0))
-                                                        .font_weight(gpui::FontWeight::BOLD)
-                                                        .child(match track.track_type {
-                                                            crate::components::timeline::timeline_state::TrackType::Audio => "AUD",
-                                                            crate::components::timeline::timeline_state::TrackType::Midi => "MID",
-                                                            crate::components::timeline::timeline_state::TrackType::Instrument => "INS",
-                                                            crate::components::timeline::timeline_state::TrackType::Master => "MAS",
-                                                        })
-                                                )
+                                                .child(type_badge(track.track_type, track.color)),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(8.0))
+                                                .text_size(px(8.5))
                                                 .text_color(Colors::text_muted())
-                                                .child(format!("CH {:02} · {} clips", index + 1, track.clips.len())),
-                                        )
-                                )
+                                                .child(format!(
+                                                    "CH {:02} · {} clips",
+                                                    index + 1,
+                                                    track.clips.len()
+                                                )),
+                                        ),
+                                ),
                         )
                         .child(
-                            // M/S/R/Delete Buttons Block
                             div()
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .gap(px(2.0))
-                                .px(px(2.0))
+                                .px(px(3.0))
                                 .py(px(2.0))
                                 .rounded_md()
-                                .bg(gpui::rgba(0x0000003A)) // black/15
+                                .bg(rgba(0x0000003A_u32))
                                 .border(px(1.0))
-                                .border_color(gpui::rgba(0xFFFFFF0F))
-                                // Mute Button
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .rounded_sm()
-                                        .cursor(gpui::CursorStyle::PointingHand)
-                                        .bg(if track.muted { gpui::rgb(0xf3c969) } else { gpui::rgba(0xFFFFFF0D) })
-                                        .text_color(if track.muted { gpui::rgb(0x101216) } else { Colors::text_secondary() })
-                                        .text_size(px(9.0))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .id(("mute-btn", id_num))
-                                        .on_mouse_down(gpui::MouseButton::Left, move |event: &gpui::MouseDownEvent, window, cx| {
-                                            on_mute(&track_id_mute, window, cx);
-                                        })
-                                        .child("M")
-                                )
-                                // Solo Button
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .rounded_sm()
-                                        .cursor(gpui::CursorStyle::PointingHand)
-                                        .bg(if track.solo { gpui::rgb(0x7bd88f) } else { gpui::rgba(0xFFFFFF0D) })
-                                        .text_color(if track.solo { gpui::rgb(0x101216) } else { Colors::text_secondary() })
-                                        .text_size(px(9.0))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .id(("solo-btn", id_num))
-                                        .on_mouse_down(gpui::MouseButton::Left, move |event: &gpui::MouseDownEvent, window, cx| {
-                                            on_solo(&track_id_solo, window, cx);
-                                        })
-                                        .child("S")
-                                )
-                                // Arm Button
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .rounded_sm()
-                                        .cursor(gpui::CursorStyle::PointingHand)
-                                        .bg(if track.armed { gpui::rgb(0xf06a61) } else { gpui::rgba(0xFFFFFF0D) })
-                                        .text_color(if track.armed { gpui::rgb(0x101216) } else { Colors::text_secondary() })
-                                        .text_size(px(9.0))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .id(("arm-btn", id_num))
-                                        .on_mouse_down(gpui::MouseButton::Left, move |event: &gpui::MouseDownEvent, window, cx| {
-                                            on_arm(&track_id_arm, window, cx);
-                                        })
-                                        .child("R")
-                                )
-                                // Delete Button
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .rounded_sm()
-                                        .cursor(gpui::CursorStyle::PointingHand)
-                                        .bg(gpui::rgba(0xFFFFFF0D))
-                                        .text_color(Colors::text_secondary())
-                                        .text_size(px(9.0))
-                                        .id(("del-btn", id_num))
-                                        .on_mouse_down(gpui::MouseButton::Left, move |event: &gpui::MouseDownEvent, window, cx| {
-                                            on_delete(&track_id_delete, window, cx);
-                                        })
-                                        .child(
-                                            svg()
-                                                .path(assets::ICON_X_PATH)
-                                                .w(px(10.0))
-                                                .h(px(10.0))
-                                                .text_color(Colors::text_secondary())
-                                        )
-                                )
-                        )
+                                .border_color(rgba(0xFFFFFF0F_u32))
+                                .child(pill_button(
+                                    ("mute-btn", id_num).into(),
+                                    "M",
+                                    None,
+                                    track.muted,
+                                    gpui::rgb(0xF3C969),
+                                    gpui::rgb(0x101216),
+                                    on_mute,
+                                ))
+                                .child(pill_button(
+                                    ("solo-btn", id_num).into(),
+                                    "S",
+                                    None,
+                                    track.solo,
+                                    gpui::rgb(0x7BD88F),
+                                    gpui::rgb(0x101216),
+                                    on_solo,
+                                ))
+                                .child(pill_button(
+                                    ("arm-btn", id_num).into(),
+                                    "R",
+                                    None,
+                                    track.armed,
+                                    gpui::rgb(0xF06A61),
+                                    gpui::rgb(0x101216),
+                                    on_arm,
+                                ))
+                                .child(pill_button(
+                                    ("input-btn", id_num).into(),
+                                    "I",
+                                    None,
+                                    track.input_monitor,
+                                    Colors::accent_primary(),
+                                    gpui::rgb(0x101216),
+                                    on_input,
+                                ))
+                                .child(pill_button(
+                                    ("del-btn", id_num).into(),
+                                    "",
+                                    Some(assets::ICON_X_PATH),
+                                    false,
+                                    rgba(0xFFFFFF0D_u32),
+                                    Colors::text_secondary(),
+                                    on_delete,
+                                )),
+                        ),
                 )
-                // Row 2: Volume slider, Pan indicator, VU Meter, dB readout
+                // Row 2: volume slider + pan pill + meter + dB pill
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(4.0))
+                        .gap(px(8.0))
                         .w_full()
-                        .px(px(4.0))
-                        .py(px(2.0))
+                        .px(px(8.0))
+                        .py(px(4.0))
                         .rounded_md()
-                        .bg(gpui::rgba(0x0000002A)) // black/10
+                        .bg(rgba(0x0000002A_u32))
                         .border(px(1.0))
-                        .border_color(gpui::rgba(0xFFFFFF09))
-                        // Volume Fader Rail
-                        .child(
-                            div()
-                                .flex_1()
-                                .h(px(6.0))
-                                .bg(gpui::rgba(0xFFFFFF0D))
-                                .rounded_full()
-                                .relative()
-                                .cursor(gpui::CursorStyle::ResizeLeftRight)
-                                .id(("vol-slider", id_num))
-                                // Click changes or cycles volume level
-                                .on_mouse_down(gpui::MouseButton::Left, move |event: &gpui::MouseDownEvent, window, cx| {
-                                    // Cycles volume: 0.0 -> 0.3 -> 0.6 -> 0.9 -> 1.0 -> 0.0
-                                    let next_vol = if current_volume >= 0.95 {
-                                        0.0
-                                    } else if current_volume >= 0.85 {
-                                        1.0
-                                    } else if current_volume >= 0.55 {
-                                        0.9
-                                    } else if current_volume >= 0.25 {
-                                        0.6
-                                    } else {
-                                        0.3
-                                    };
-                                    on_vol(&(track_id_vol.clone(), next_vol), window, cx);
-                                })
-                                // Volume Fill bar
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left_0()
-                                        .top_0()
-                                        .bottom_0()
-                                        .w(px(track.volume * 50.0)) // Fader length factor
-                                        .bg(track.color)
-                                        .rounded_full()
-                                )
-                                // Fader Handle
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left(px(track.volume * 50.0 - 3.0))
-                                        .top(px(-2.0))
-                                        .w(px(6.0))
-                                        .h(px(10.0))
-                                        .rounded_sm()
-                                        .bg(Colors::text_primary())
-                                        .border(px(1.0))
-                                        .border_color(Colors::border_strong())
-                                )
-                        )
-                        // Pan indicator dot/knob representation
-                        .child(
-                            div()
-                                .w(px(12.0))
-                                .h(px(12.0))
-                                .rounded_full()
-                                .bg(Colors::surface_raised())
-                                .border(px(1.0))
-                                .border_color(Colors::border_subtle())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .w(px(3.0))
-                                        .h(px(3.0))
-                                        .rounded_full()
-                                        .bg(track.color)
-                                )
-                        )
-                        // VU Meter
-                        .child(vu_meter(&track.id))
-                        // dB Readout text
-                        .child(
-                            div()
-                                .w(px(36.0))
-                                .text_align(gpui::TextAlign::Right)
-                                .text_size(px(8.5))
-                                .text_color(Colors::text_muted())
-                                .child(volume_to_db(track.volume))
-                        )
-                )
+                        .border_color(rgba(0xFFFFFF09_u32))
+                        // Real horizontal slider
+                        .child(slider(
+                            format!("track-vol-{}", track.id),
+                            track.volume,
+                            track.color,
+                            on_volume_norm,
+                        ))
+                        // Bordered pan pill (same component the mixer knob uses).
+                        .child(value_pill(pan_label(track.pan), track.color, is_selected))
+                        // Compact meter
+                        .child(vu_meter_with_levels(track.meter_level_l, track.meter_level_r))
+                        // Bordered dB pill
+                        .child(db_value_pill(volume::format_db(track.volume), is_selected)),
+                ),
         )
+}
+
+fn pan_label(pan: f32) -> String {
+    if pan.abs() < 0.01 {
+        "C".to_string()
+    } else {
+        let p = (pan.abs() * 100.0).round() as i32;
+        let p = p.clamp(1, 100);
+        if pan < 0.0 { format!("L{}", p) } else { format!("R{}", p) }
+    }
 }

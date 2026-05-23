@@ -2,7 +2,7 @@
 .bin/
 
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -10,24 +10,90 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# Node / package managers
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Build output
+dist/
+dist-ssr/
+build/
+out/
+.next/
+.vite/
+.turbo/
 *.local
+
+# Rust / Cargo
+target/
+**/target/
+Cargo.lock.bak
+
+# Rust analyzer / flycheck
+**/flycheck*/
+**/.rustc_info.json
 
 # Electron build output
 apps/electron/release/
+apps/electron/dist/
+apps/electron/out/
+*.asar
 
+# Native / C++ / Windows build junk
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.d
+*.o
+*.a
+*.so
+*.dylib
+*.app
+*.ninja
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+build-*/
+
+# Audio / large generated test media
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.aiff
+*.aif
+*.m4a
+
+# Keep samples if intentionally committed via allowlist later
+# !assets/samples/**/*.wav
+
+# Agent / local orchestration
+.agent/
+worktrees/
+patches/
+.agent-results/
+.agent-logs/
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
+# Local Claude / agent settings
 .claude/settings.local.json

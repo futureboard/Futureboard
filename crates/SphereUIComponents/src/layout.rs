@@ -21,6 +21,10 @@ const USE_DEMO_PROJECT: bool = false;
 pub struct MenuBarUiState {
     pub open_menu_id: Option<String>,
     pub anchor_x: f32,
+    /// Nested submenu ids open underneath the root dropdown. `path[0]` is
+    /// the submenu open in the root panel, `path[1]` in *that* submenu's
+    /// panel, etc.
+    pub submenu_path: Vec<String>,
 }
 
 pub struct StudioLayout {
@@ -268,14 +272,13 @@ impl Render for StudioLayout {
                 let id = id.clone();
                 let anchor_x = *anchor_x;
                 this.update(cx, |this, cx| {
-                    // Toggle: clicking the open menu closes it; clicking
-                    // another switches to it.
                     if this.menu_bar.open_menu_id.as_deref() == Some(id.as_str()) {
                         this.menu_bar.open_menu_id = None;
                     } else {
                         this.menu_bar.open_menu_id = Some(id);
                         this.menu_bar.anchor_x = anchor_x;
                     }
+                    this.menu_bar.submenu_path.clear();
                     cx.notify();
                 });
             })
@@ -285,6 +288,25 @@ impl Render for StudioLayout {
             std::sync::Arc::new(move |_: &(), _w, cx| {
                 this.update(cx, |this, cx| {
                     this.menu_bar.open_menu_id = None;
+                    this.menu_bar.submenu_path.clear();
+                    cx.notify();
+                });
+            })
+        };
+        let on_toggle_submenu: std::sync::Arc<dyn Fn(&(usize, String), &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |(depth, id): &(usize, String), _w, cx| {
+                let depth = *depth;
+                let id = id.clone();
+                this.update(cx, |this, cx| {
+                    // Truncate the path to this depth, then toggle: if the
+                    // requested id is already open at this depth, close it;
+                    // otherwise open it (closing anything deeper).
+                    let already_open = this.menu_bar.submenu_path.get(depth) == Some(&id);
+                    this.menu_bar.submenu_path.truncate(depth);
+                    if !already_open {
+                        this.menu_bar.submenu_path.push(id);
+                    }
                     cx.notify();
                 });
             })
@@ -297,6 +319,7 @@ impl Render for StudioLayout {
 
         let open_menu_id = self.menu_bar.open_menu_id.clone();
         let menu_anchor_x = self.menu_bar.anchor_x;
+        let submenu_path = self.menu_bar.submenu_path.clone();
         let viewport_width: f32 = window.bounds().size.width.into();
 
         let dropdown_overlay = open_menu_id.as_ref().and_then(|id| {
@@ -306,6 +329,8 @@ impl Render for StudioLayout {
                     menu,
                     menu_anchor_x,
                     viewport_width,
+                    &submenu_path,
+                    on_toggle_submenu.clone(),
                     on_menu_command.clone(),
                     on_close_menu.clone(),
                 )

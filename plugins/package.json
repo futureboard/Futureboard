@@ -1,0 +1,8 @@
+{
+  "name": "@futureboard/plugins",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "*"
+  ]
+}

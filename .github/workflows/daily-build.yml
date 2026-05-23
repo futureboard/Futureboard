@@ -1,0 +1,201 @@
+name: Daily Build
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # 12:00 PM Asia/Bangkok every day
+  workflow_dispatch:
+
+concurrency:
+  group: daily-build
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Read Version
+    runs-on: ubuntu-24.04
+    outputs:
+      app-version: ${{ steps.read.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read app version
+        id: read
+        run: |
+          VERSION=$(node -p "require('./apps/electron/package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "App version: $VERSION"
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            artifact-name: futureboard-win
+            artifact-glob: apps/electron/release/*.exe
+            artifact-glob2: ""
+            updater-yml: apps/electron/release/latest.yml
+          - os: macos-latest
+            platform: mac
+            artifact-name: futureboard-mac
+            artifact-glob: apps/electron/release/*.dmg
+            artifact-glob2: ""
+            updater-yml: apps/electron/release/latest-mac.yml
+          - os: ubuntu-24.04
+            platform: linux
+            artifact-name: futureboard-linux
+            artifact-glob: apps/electron/release/*.AppImage
+            artifact-glob2: apps/electron/release/*.deb
+            updater-yml: apps/electron/release/latest-linux.yml
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize audio plugin SDK submodules without docs
+        run: |
+          git submodule sync -- external/vst3sdk external/clap external/clap-helpers external/yoga packages/shared/tabler-icons
+          git submodule update --init --force --depth=1 --checkout -- external/clap external/clap-helpers external/yoga packages/shared/tabler-icons
+          git submodule update --init --force --checkout -- external/vst3sdk
+          git -C external/vst3sdk submodule update --init --force --checkout -- base cmake pluginterfaces public.sdk tutorials vstgui4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock', 'extentions/template/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential pkg-config libarchive-tools fakeroot rpm libopenjp2-tools libasound2-dev
+
+      - name: Setup Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/SphereWebAudioCore/target
+            crates/SphereAudioPlugins/target
+            crates/SphereDirectAudioEngine/target
+            crates/SpherePluginHost/target
+            extentions/template/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/SphereWebAudioCore/Cargo.lock', 'crates/SphereAudioPlugins/Cargo.lock', 'crates/SphereDirectAudioEngine/Cargo.lock', 'crates/SpherePluginHost/Cargo.lock', 'extentions/template/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build WASM (SphereWebAudioCore)
+        run: bun run --cwd apps/web build:audio:wasm
+
+      - name: Check audio plugin framework
+        run: |
+          cargo check --manifest-path crates/SphereAudioPlugins/Cargo.toml
+          cargo check --manifest-path extentions/template/Cargo.toml
+          bun install --cwd extentions/template
+          bun run --cwd extentions/template typecheck
+
+      - name: Generate .icns app icon (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          src="apps/electron/icons/app.png"
+          iconset="apps/electron/icons/AppIcon.iconset"
+          out="apps/electron/icons/icon.icns"
+          mkdir -p "$iconset"
+          for size in 16 32 128 256 512; do
+            sips -z $size $size "$src" --out "$iconset/icon_${size}x${size}.png"
+            double=$((size * 2))
+            sips -z $double $double "$src" --out "$iconset/icon_${size}x${size}@2x.png"
+          done
+          iconutil --convert icns "$iconset" --output "$out"
+          rm -rf "$iconset"
+          echo "Generated $out"
+
+      - name: Build & package (${{ matrix.platform }})
+        run: bun run dist:electron:${{ matrix.platform }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ matrix.platform == 'win' && secrets.WIN_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'win' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            ${{ matrix.artifact-glob }}
+            ${{ matrix.artifact-glob2 }}
+            ${{ matrix.updater-yml }}
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish Pre-Release
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh dist/
+
+      - name: Delete previous nightly tag + release
+        run: |
+          gh release delete nightly --yes --cleanup-tag || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
+      - name: Publish nightly pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "Nightly v${{ needs.version.outputs.app-version }} #${{ github.run_number }}"
+          body: |
+            **Automated daily build** from `${{ github.ref_name }}`
+            Commit: `${{ github.sha }}`
+            App version: `${{ needs.version.outputs.app-version }}`
+
+            > Pre-release snapshot — may be unstable, not for production use.
+          files: dist/*
+          prerelease: true
+          draft: false
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

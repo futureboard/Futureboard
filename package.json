@@ -1,0 +1,30 @@
+{
+  "name": "mochi-daw",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "crates/*",
+    "plugins/*",
+    "extentions/template"
+  ],
+  "scripts": {
+    "dev:web": "bun run --cwd apps/web dev",
+    "dev:electron": "concurrently -k -n web,electron \"bun run --cwd apps/web dev\" \"bun run --cwd apps/electron dev\"",
+    "dev:server": "bun run --cwd apps/server dev",
+    "build:web": "bun run --cwd apps/web build",
+    "build:audio:plugins": "cargo check --manifest-path crates/SphereAudioPlugins/Cargo.toml && cargo check --manifest-path extentions/template/Cargo.toml && bun install --cwd extentions/template && bun run --cwd extentions/template typecheck",
+    "build:electron": "bun run build:audio:plugins && bun run --cwd apps/electron build:all",
+    "pack:electron": "bun run --cwd apps/electron pack",
+    "dist:electron": "bun run --cwd apps/electron dist",
+    "dist:electron:win": "bun run --cwd apps/electron dist:win",
+    "dist:electron:mac": "bun run --cwd apps/electron dist:mac",
+    "dist:electron:linux": "bun run --cwd apps/electron dist:linux",
+    "check:audio:plugins": "bun run build:audio:plugins",
+    "lint:web": "bun run --cwd apps/web lint"
+  },
+  "dependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

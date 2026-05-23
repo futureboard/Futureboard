@@ -1,0 +1,113 @@
+use gpui::{AssetSource, Result, SharedString};
+use std::borrow::Cow;
+use crate::assets;
+
+pub struct EmbeddedAssets;
+
+impl EmbeddedAssets {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for EmbeddedAssets {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AssetSource for EmbeddedAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        let bytes = match path {
+            assets::ICON_PLAY_PATH => Some(assets::icons::PLAY.as_bytes()),
+            assets::ICON_PAUSE_PATH => Some(assets::icons::PAUSE.as_bytes()),
+            assets::ICON_SQUARE_PATH => Some(assets::icons::SQUARE.as_bytes()),
+            assets::ICON_CIRCLE_PATH => Some(assets::icons::CIRCLE.as_bytes()),
+            assets::ICON_SKIP_BACK_PATH => Some(assets::icons::SKIP_BACK.as_bytes()),
+            assets::ICON_REPEAT_PATH => Some(assets::icons::REPEAT.as_bytes()),
+            assets::ICON_REPEAT2_PATH => Some(assets::icons::REPEAT2.as_bytes()),
+            assets::ICON_TIMER_PATH => Some(assets::icons::TIMER.as_bytes()),
+            assets::ICON_SAVE_PATH => Some(assets::icons::SAVE.as_bytes()),
+            assets::ICON_FOLDER_PATH => Some(assets::icons::FOLDER.as_bytes()),
+            assets::ICON_FOLDER_OPEN_PATH => Some(assets::icons::FOLDER_OPEN.as_bytes()),
+            assets::ICON_SHARE_PATH => Some(assets::icons::SHARE.as_bytes()),
+            assets::ICON_PANEL_BOTTOM_PATH => Some(assets::icons::PANEL_BOTTOM.as_bytes()),
+            assets::ICON_PANEL_RIGHT_PATH => Some(assets::icons::PANEL_RIGHT.as_bytes()),
+            assets::ICON_BUG_PATH => Some(assets::icons::BUG.as_bytes()),
+            assets::ICON_MAXIMIZE_PATH => Some(assets::icons::GENERIC_MAXIMIZE.as_bytes()),
+            assets::ICON_MINIMIZE_PATH => Some(assets::icons::GENERIC_MINIMIZE.as_bytes()),
+            assets::ICON_RESTORE_PATH => Some(assets::icons::GENERIC_RESTORE.as_bytes()),
+            assets::ICON_X_PATH => Some(assets::icons::GENERIC_CLOSE.as_bytes()),
+            assets::ICON_MINUS_PATH => Some(assets::icons::MINUS.as_bytes()),
+            
+            // New ones
+            assets::ICON_MOUSE_POINTER_PATH => Some(assets::icons::MOUSE_POINTER.as_bytes()),
+            assets::ICON_PENCIL_PATH => Some(assets::icons::PENCIL.as_bytes()),
+            assets::ICON_SCISSORS_PATH => Some(assets::icons::SCISSORS.as_bytes()),
+            assets::ICON_LINK_PATH => Some(assets::icons::LINK.as_bytes()),
+            assets::ICON_VOLUME_X_PATH => Some(assets::icons::VOLUME_X.as_bytes()),
+            assets::ICON_CLOCK_PATH => Some(assets::icons::CLOCK.as_bytes()),
+            assets::ICON_AUTOMATION_PATH => Some(assets::icons::AUTOMATION.as_bytes()),
+            assets::ICON_SLIDERS_HORIZONTAL_PATH => Some(assets::icons::SLIDERS_HORIZONTAL.as_bytes()),
+            assets::ICON_SPARKLES_PATH => Some(assets::icons::SPARKLES.as_bytes()),
+            assets::ICON_PLUS_PATH => Some(assets::icons::PLUS.as_bytes()),
+            assets::ICON_PLUG_PATH => Some(assets::icons::PLUG.as_bytes()),
+            assets::ICON_ROUTE_PATH => Some(assets::icons::ROUTE.as_bytes()),
+            assets::ICON_MAGNET_PATH => Some(assets::icons::MAGNET.as_bytes()),
+            assets::ICON_GRIP_VERTICAL_PATH => Some(assets::icons::GRIP_VERTICAL.as_bytes()),
+            assets::ICON_FILE_PATH => Some(assets::icons::FILE.as_bytes()),
+            assets::ICON_PLAYHEAD_HANDLE_PATH => Some(assets::icons::PLAYHEAD_HANDLE.as_bytes()),
+            
+            _ => None,
+        };
+        Ok(bytes.map(Cow::Borrowed))
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let all_paths = [
+            assets::ICON_PLAY_PATH,
+            assets::ICON_PAUSE_PATH,
+            assets::ICON_SQUARE_PATH,
+            assets::ICON_CIRCLE_PATH,
+            assets::ICON_SKIP_BACK_PATH,
+            assets::ICON_REPEAT_PATH,
+            assets::ICON_REPEAT2_PATH,
+            assets::ICON_TIMER_PATH,
+            assets::ICON_SAVE_PATH,
+            assets::ICON_FOLDER_PATH,
+            assets::ICON_FOLDER_OPEN_PATH,
+            assets::ICON_SHARE_PATH,
+            assets::ICON_PANEL_BOTTOM_PATH,
+            assets::ICON_PANEL_RIGHT_PATH,
+            assets::ICON_BUG_PATH,
+            assets::ICON_MAXIMIZE_PATH,
+            assets::ICON_MINIMIZE_PATH,
+            assets::ICON_RESTORE_PATH,
+            assets::ICON_X_PATH,
+            assets::ICON_MINUS_PATH,
+            assets::ICON_MOUSE_POINTER_PATH,
+            assets::ICON_PENCIL_PATH,
+            assets::ICON_SCISSORS_PATH,
+            assets::ICON_LINK_PATH,
+            assets::ICON_VOLUME_X_PATH,
+            assets::ICON_CLOCK_PATH,
+            assets::ICON_AUTOMATION_PATH,
+            assets::ICON_SLIDERS_HORIZONTAL_PATH,
+            assets::ICON_SPARKLES_PATH,
+            assets::ICON_PLUS_PATH,
+            assets::ICON_PLUG_PATH,
+            assets::ICON_ROUTE_PATH,
+            assets::ICON_MAGNET_PATH,
+            assets::ICON_GRIP_VERTICAL_PATH,
+            assets::ICON_FILE_PATH,
+            assets::ICON_PLAYHEAD_HANDLE_PATH,
+        ];
+        let mut list = Vec::new();
+        for p in all_paths {
+            if p.starts_with(path) {
+                list.push(SharedString::from(p));
+            }
+        }
+        Ok(list)
+    }
+}

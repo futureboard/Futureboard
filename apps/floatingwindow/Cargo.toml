@@ -1,0 +1,37 @@
+[package]
+name = "floatingwindow"
+version = "0.1.0"
+edition = "2024"
+
+# ── targets ──────────────────────────────────────────────────────────────────
+[[bin]]
+name = "floatingwindow"
+path = "src/main.rs"
+
+[lib]
+name = "floatingwindow"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+# ── features ─────────────────────────────────────────────────────────────────
+# Build the lib with `--features napi-addon` to produce a proper .node addon.
+# Without this flag, napi_build::setup() is skipped so the binary builds clean.
+[features]
+default = []
+napi-addon = []
+
+# ── runtime dependencies ──────────────────────────────────────────────────────
+[dependencies]
+eframe  = "0.34"
+egui    = "0.34"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+crossbeam-channel   = "0.5"
+napi        = { version = "3", features = ["napi8"] }
+napi-derive = "3"
+
+# ── build dependencies ────────────────────────────────────────────────────────
+[build-dependencies]
+napi-build = "2"

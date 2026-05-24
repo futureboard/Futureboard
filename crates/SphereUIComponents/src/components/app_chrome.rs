@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement, Styled, Window,
-    WindowControlArea,
+    div, px, rgba, svg, App, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
+    Window, WindowControlArea,
 };
 
 use crate::assets;
@@ -19,11 +19,17 @@ pub type ChromeActionCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 #[derive(Clone)]
 pub struct TransportChromeState {
     pub playing: bool,
+    pub recording: bool,
+    pub loop_enabled: bool,
+    pub metronome_enabled: bool,
     pub position_label: String,
     pub bpm_label: String,
     pub time_signature_label: String,
+    pub on_return_to_start: ChromeActionCb,
     pub on_play_toggle: ChromeActionCb,
     pub on_stop: ChromeActionCb,
+    pub on_loop_toggle: ChromeActionCb,
+    pub on_metronome_toggle: ChromeActionCb,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -118,8 +124,26 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     } else {
         Colors::text_muted()
     };
+    let record_color = if state.recording {
+        Colors::status_error()
+    } else {
+        Colors::text_faint()
+    };
+    let loop_color = if state.loop_enabled {
+        Colors::accent_primary()
+    } else {
+        Colors::text_muted()
+    };
+    let metronome_color = if state.metronome_enabled {
+        Colors::accent_primary()
+    } else {
+        Colors::text_muted()
+    };
+    let on_return = state.on_return_to_start.clone();
     let on_play = state.on_play_toggle.clone();
     let on_stop = state.on_stop.clone();
+    let on_loop = state.on_loop_toggle.clone();
+    let on_metronome = state.on_metronome_toggle.clone();
 
     div()
         .flex()
@@ -127,14 +151,21 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         .items_center()
         .gap(px(1.0))
         // Skip back
-        .child(icon_button(
-            Some(assets::ICON_SKIP_BACK_PATH),
-            "<<",
-            px(28.0),
-            px(28.0),
-            px(14.0),
-            Colors::text_muted(),
-        ))
+        .child(
+            icon_button(
+                Some(assets::ICON_SKIP_BACK_PATH),
+                "<<",
+                px(28.0),
+                px(28.0),
+                px(14.0),
+                Colors::text_muted(),
+            )
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_return(&(), window, cx);
+            })
+            .occlude(),
+        )
         // Play
         .child(
             icon_button(
@@ -168,32 +199,49 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
             .occlude(),
         )
         // Record
-        .child(icon_button(
-            Some(assets::ICON_CIRCLE_PATH),
-            "REC",
-            px(28.0),
-            px(28.0),
-            px(14.0),
-            Colors::status_error(),
-        ))
+        .child(
+            icon_button(
+                Some(assets::ICON_CIRCLE_PATH),
+                "REC",
+                px(28.0),
+                px(28.0),
+                px(14.0),
+                record_color,
+            )
+            .opacity(0.38),
+        )
         // Loop
-        .child(icon_button(
-            Some(assets::ICON_REPEAT2_PATH),
-            "LOOP",
-            px(28.0),
-            px(28.0),
-            px(14.0),
-            Colors::text_muted(),
-        ))
+        .child(
+            icon_button(
+                Some(assets::ICON_REPEAT2_PATH),
+                "LOOP",
+                px(28.0),
+                px(28.0),
+                px(14.0),
+                loop_color,
+            )
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_loop(&(), window, cx);
+            })
+            .occlude(),
+        )
         // Metronome
-        .child(icon_button(
-            Some(assets::ICON_TIMER_PATH),
-            "MET",
-            px(28.0),
-            px(28.0),
-            px(14.0),
-            Colors::text_muted(),
-        ))
+        .child(
+            icon_button(
+                Some(assets::ICON_TIMER_PATH),
+                "MET",
+                px(28.0),
+                px(28.0),
+                px(14.0),
+                metronome_color,
+            )
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_metronome(&(), window, cx);
+            })
+            .occlude(),
+        )
         .child(divider())
         // Position display
         .child(
@@ -473,13 +521,41 @@ pub fn app_chrome(
         .bg(Colors::surface_panel())
         .border_b_1()
         .border_color(Colors::border_subtle())
+        // Windows: NCHITTEST callback returns `HTCAPTION` for hitboxes
+        // tagged Drag, letting DefWindowProc start the system move.
         .window_control_area(WindowControlArea::Drag)
+        // Linux (Wayland / X11) and macOS: `start_window_move` is the
+        // implemented drag API there; the WindowControlArea path is a
+        // no-op on those platforms. Safe to attach here because every
+        // interactive child below (menu buttons, transport buttons,
+        // window controls, report-bug) calls `.occlude()`. Occlude is
+        // `HitboxBehavior::BlockMouse`, which breaks the `hit_test`
+        // iteration at that child — the chrome's id is then NOT in
+        // `mouse_hit_test.ids`, so this on_mouse_down does NOT fire
+        // for clicks on those buttons.
+        .on_mouse_down(MouseButton::Left, |_, window, _cx| {
+            window.start_window_move();
+        })
         // ── Left: menus + project ─────────────────────────────────────────────
         .child(menu_area(open_menu_id, on_open_menu))
         .child(divider())
         .child(project_title())
         // ── Drag region spacer ────────────────────────────────────────────────
-        .child(div().flex_1())
+        // Carry both drag mechanisms on the spacer too — Windows reads
+        // the WindowControlArea, Linux/macOS reads the on_mouse_down.
+        // Redundant with the chrome root, but a child hitbox in the
+        // exact same band makes resolution deterministic even if a
+        // future sibling adds an `occlude()` that drifts into the
+        // central spacer.
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .window_control_area(WindowControlArea::Drag)
+                .on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                    window.start_window_move();
+                }),
+        )
         // ── Right: transport controls ─────────────────────────────────────────
         .child(transport_controls(transport))
         .child(divider())

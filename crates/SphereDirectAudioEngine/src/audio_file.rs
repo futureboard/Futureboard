@@ -64,6 +64,158 @@ pub struct AudioFileInfo {
     pub format: AudioFileFormat,
 }
 
+// ── Multi-LOD peak generator ──────────────────────────────────────────────────
+
+/// One min/max pair summarising a contiguous mono span of samples.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioPeak {
+    pub min: f32,
+    pub max: f32,
+}
+
+/// One mip level: every entry summarises `samples_per_peak` consecutive
+/// mono samples. Channels are averaged into mono at decode time so the
+/// LOD ladder is independent of channel count.
+#[derive(Debug, Clone)]
+pub struct AudioPeakLod {
+    pub samples_per_peak: u32,
+    pub peaks: Vec<AudioPeak>,
+}
+
+/// Full peak summary for one decoded source file. Mirrors the shape the
+/// Native UI's `waveform_cache::WaveformPreview` consumed before this
+/// peak system was centralised here; Electron's `generate_wav_peaks`
+/// stays as a single-LOD Int16 surface for back-compat.
+#[derive(Debug, Clone)]
+pub struct AudioPeakFile {
+    pub source_path: PathBuf,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub total_frames: u64,
+    pub duration_seconds: f64,
+    pub format: AudioFileFormat,
+    /// Sorted ascending by `samples_per_peak`. UI picks the coarsest LOD
+    /// whose `samples_per_peak` is still ≤ the zoom's samples-per-pixel.
+    pub lods: Vec<AudioPeakLod>,
+}
+
+/// LOD ladder required by `tasks/native/006-NativeStudio.txt` PART 5.
+/// Power-of-two from 256 to 65536 — keeps zoom transitions one bilinear
+/// step apart at every meaningful zoom level.
+pub const PEAK_LOD_LEVELS: &[u32] = &[256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+
+/// Generate a multi-LOD peak summary for any audio format supported by
+/// [`load_audio_file`] (WAV via inline RIFF parser, MP3 / FLAC / OGG /
+/// AIFF via symphonia). All channels are mono-mixed; the LOD ladder is
+/// always `PEAK_LOD_LEVELS`.
+///
+/// Realtime safety: caller MUST run this on a background thread. Decodes
+/// the entire file into memory via `load_audio_file`, then sweeps it
+/// once and folds every sample into every LOD builder in lock-step. Cost
+/// is O(frames × LODs) but cache-friendly — one pass over the source.
+pub fn generate_audio_peaks(path: impl AsRef<Path>) -> Result<AudioPeakFile, SphereAudioError> {
+    let path = path.as_ref();
+    let info = probe_audio_file(path)?;
+    let path_str = path.to_string_lossy().to_string();
+    let buffer = load_audio_file(&path_str)
+        .map_err(|error| SphereAudioError::NativeError(format!("decode failed: {error}")))?;
+
+    if buffer.frames == 0 || buffer.channels == 0 {
+        return Err(SphereAudioError::NativeError(format!(
+            "peak generation: empty buffer for '{}'",
+            path.display()
+        )));
+    }
+
+    // Build all LODs in one pass. Each builder owns its own min/max
+    // accumulator; folding every sample once keeps the cache hot.
+    let mut builders: Vec<PeakLodBuilder> = PEAK_LOD_LEVELS
+        .iter()
+        .map(|&spp| PeakLodBuilder::with_capacity(spp, buffer.frames as u64))
+        .collect();
+
+    let channels = buffer.channels.max(1);
+    let mut sample_cursor = 0usize;
+    while sample_cursor + channels <= buffer.samples.len() {
+        let mut sum = 0.0f32;
+        for c in 0..channels {
+            sum += buffer.samples[sample_cursor + c];
+        }
+        let mono = (sum / channels as f32).clamp(-1.0, 1.0);
+        for b in &mut builders {
+            b.push(mono);
+        }
+        sample_cursor += channels;
+    }
+
+    let lods: Vec<AudioPeakLod> = builders.into_iter().map(PeakLodBuilder::finalize).collect();
+
+    Ok(AudioPeakFile {
+        source_path: info.path.clone(),
+        sample_rate: info.sample_rate,
+        channels: info.channels,
+        total_frames: info.total_frames.max(buffer.frames as u64),
+        duration_seconds: info.duration_seconds,
+        format: info.format,
+        lods,
+    })
+}
+
+struct PeakLodBuilder {
+    samples_per_peak: u32,
+    min: f32,
+    max: f32,
+    count: u32,
+    peaks: Vec<AudioPeak>,
+}
+
+impl PeakLodBuilder {
+    fn with_capacity(samples_per_peak: u32, total_samples_hint: u64) -> Self {
+        let spp = samples_per_peak.max(1);
+        let cap = (total_samples_hint as usize / spp as usize).saturating_add(1);
+        Self {
+            samples_per_peak: spp,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+            peaks: Vec::with_capacity(cap),
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, v: f32) {
+        if v < self.min {
+            self.min = v;
+        }
+        if v > self.max {
+            self.max = v;
+        }
+        self.count += 1;
+        if self.count >= self.samples_per_peak {
+            self.peaks.push(AudioPeak {
+                min: self.min,
+                max: self.max,
+            });
+            self.min = 0.0;
+            self.max = 0.0;
+            self.count = 0;
+        }
+    }
+
+    fn finalize(mut self) -> AudioPeakLod {
+        if self.count > 0 {
+            self.peaks.push(AudioPeak {
+                min: self.min,
+                max: self.max,
+            });
+        }
+        AudioPeakLod {
+            samples_per_peak: self.samples_per_peak,
+            peaks: self.peaks,
+        }
+    }
+}
+
 pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereAudioError> {
     let path = path.as_ref();
     let format = audio_file_format(path);

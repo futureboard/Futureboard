@@ -809,7 +809,11 @@ impl EngineInner {
                         })
                         .unwrap_or((0, 0.0, 0.0, 0.0));
                     format!(
-                        "track={} insert={} kind={} format={} enabled={} vst3Ready={} processCount={} inPeak={:.4} outPeak={:.4} diffPeak={:.6} path={}",
+                        concat!(
+                            "track={} insert={} kind={} format={} enabled={}",
+                            "vst3Ready={} processCount={}",
+                            "inPeak={:.4} outPeak={:.4} diffPeak={:.6} path={}"
+                        ),
                         track.id,
                         insert.id,
                         insert.kind,

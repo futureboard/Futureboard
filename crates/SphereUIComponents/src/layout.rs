@@ -1,9 +1,14 @@
 use gpui::{
-    div, AppContext, Context, Entity, IntoElement, ParentElement, Render, ScrollHandle, Styled,
-    Timer, Window,
+    div, px, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, ScrollHandle, Styled, Timer, Window,
 };
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::components;
 use crate::components::file_browser::{read_directory, FileBrowserState};
@@ -52,6 +57,26 @@ pub struct StudioLayout {
     audio_last_error: Option<String>,
     audio_stats: Option<DAUx::EngineStats>,
     last_audio_project_signature: Option<String>,
+    last_engine_playhead_beat: f32,
+    last_engine_sync: Instant,
+    /// Owns keyboard focus for the studio surface. Without a focused
+    /// element GPUI never dispatches key events to `capture_key_down`,
+    /// so we focus this handle on first render — that is what makes
+    /// Spacebar, Enter, L, K, R, Home reach `shortcut_command`.
+    focus_handle: FocusHandle,
+    /// Menu/key command IDs we've already logged as unsupported. Keeps
+    /// the unified dispatcher quiet after the first miss per command.
+    logged_unsupported_commands: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TransportCommand {
+    PlayPause,
+    Stop,
+    ReturnToStart,
+    ToggleLoop,
+    ToggleMetronome,
+    Record,
 }
 
 impl StudioLayout {
@@ -143,14 +168,24 @@ impl StudioLayout {
             audio_last_error: None,
             audio_stats: None,
             last_audio_project_signature: None,
+            last_engine_playhead_beat: 0.0,
+            last_engine_sync: Instant::now(),
+            focus_handle: cx.focus_handle(),
+            logged_unsupported_commands: HashSet::new(),
         }
     }
 }
 
 impl StudioLayout {
     fn spawn_audio_poll(cx: &mut Context<Self>) {
+        // 16 ms ≈ 60 Hz — matches a typical display refresh and is fine for
+        // VU + transport-time animation. The engine produces position
+        // snapshots at audio-block boundaries (~5-10 ms at 256-sample
+        // buffers), but the UI never needs to repaint faster than the
+        // display, so we cap polling at the refresh interval and let
+        // `interpolated_playhead_beat` smooth between engine snapshots.
         cx.spawn(async move |this, cx| loop {
-            Timer::after(Duration::from_millis(33)).await;
+            Timer::after(Duration::from_millis(16)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.poll_native_audio(cx) {
                     cx.notify();
@@ -165,12 +200,13 @@ impl StudioLayout {
             return false;
         };
         let stats = engine.stats();
-        let changed = self
+        // State-transition signal — used to notify the root layout even
+        // when the transport is paused (e.g. error appears, stream opens).
+        let state_changed = self
             .audio_stats
             .as_ref()
             .map(|previous| {
                 previous.transport_playing != stats.transport_playing
-                    || (previous.position_seconds - stats.position_seconds).abs() > 0.01
                     || previous.running != stats.running
                     || previous.last_error != stats.last_error
             })
@@ -178,19 +214,90 @@ impl StudioLayout {
         self.audio_running = stats.running;
         self.audio_last_error = stats.last_error.clone();
 
+        let bpm = {
+            let timeline = self.timeline.read(cx);
+            timeline.state.bpm
+        };
+        let engine_beat = (stats.position_seconds * bpm.max(1.0) as f64 / 60.0) as f32;
+        self.last_engine_playhead_beat = engine_beat.max(0.0);
+        self.last_engine_sync = Instant::now();
+        self.apply_engine_meters(cx);
+
         if stats.transport_playing {
-            let position_seconds = stats.position_seconds;
+            let interpolated = self.interpolated_playhead_beat(bpm);
             let _ = self.timeline.update(cx, move |timeline, cx| {
-                let next = timeline.state.seconds_to_beats(position_seconds);
-                if (timeline.state.transport.playhead_beats - next).abs() > 0.001 {
-                    timeline.state.transport.playhead_beats = next.max(0.0);
+                timeline.state.transport.playing = true;
+                // No threshold while playing — even sub-pixel beat motion
+                // matters for the bar:beat:tick readout in the chrome.
+                let next = interpolated.max(0.0);
+                if timeline.state.transport.playhead_beats != next {
+                    timeline.state.transport.playhead_beats = next;
+                    cx.notify();
+                }
+            });
+        } else {
+            let _ = self.timeline.update(cx, |timeline, cx| {
+                if timeline.state.transport.playing {
+                    timeline.state.transport.playing = false;
                     cx.notify();
                 }
             });
         }
 
+        let was_playing = stats.transport_playing;
         self.audio_stats = Some(stats);
-        changed
+        // While playing the root layout must repaint every tick so the
+        // transport chrome (bar:beat:tick, status line) tracks the
+        // playhead. Otherwise we'd be limited to engine-snapshot cadence
+        // and the readout would stutter at ~10-20 Hz.
+        state_changed || was_playing
+    }
+
+    fn interpolated_playhead_beat(&self, bpm: f32) -> f32 {
+        let playing = self
+            .audio_stats
+            .as_ref()
+            .map(|stats| stats.transport_playing)
+            .unwrap_or(false);
+        if !playing {
+            return self.last_engine_playhead_beat;
+        }
+        self.last_engine_playhead_beat
+            + self.last_engine_sync.elapsed().as_secs_f32() * bpm.max(1.0) / 60.0
+    }
+
+    fn apply_engine_meters(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.audio_engine.as_ref() else {
+            return;
+        };
+        let meters = engine.meters();
+        let _ = self.timeline.update(cx, move |timeline, cx| {
+            let mut changed = false;
+            for track_meter in meters.tracks {
+                if let Some(track) = timeline
+                    .state
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == track_meter.track_id)
+                {
+                    let next_l = track_meter.peak_l.clamp(0.0, 1.0) as f32;
+                    let next_r = track_meter.peak_r.clamp(0.0, 1.0) as f32;
+                    changed |= smooth_meter_value(&mut track.meter_level_l, next_l);
+                    changed |= smooth_meter_value(&mut track.meter_level_r, next_r);
+                }
+            }
+            changed |= smooth_meter_value(
+                &mut timeline.state.master.meter_level_l,
+                meters.master_peak_l.clamp(0.0, 1.0) as f32,
+            );
+            changed |= smooth_meter_value(
+                &mut timeline.state.master.meter_level_r,
+                meters.master_peak_r.clamp(0.0, 1.0) as f32,
+            );
+            if changed {
+                cx.notify();
+            }
+        });
     }
 
     fn sync_audio_project(&mut self, cx: &mut Context<Self>, force: bool) -> bool {
@@ -243,10 +350,13 @@ impl StudioLayout {
             return;
         }
 
-        if !self.sync_audio_project(cx, false) {
-            return;
-        }
-
+        // Open the audio device FIRST. The DirectAudioEngine renders clip
+        // ranges in `runtime.sample_rate` units; if we load the project at
+        // the default 44.1 kHz fallback before the cpal/WASAPI stream picks
+        // its real rate (e.g. 48 kHz), every clip's start_sample and
+        // duration_samples land in the wrong reference frame and playback
+        // either drifts in pitch or stops short. Opening the stream up
+        // front lets us hand `sync_audio_project` the real hardware rate.
         if !self.audio_running {
             let Some(engine) = self.audio_engine.as_mut() else {
                 return;
@@ -258,6 +368,18 @@ impl StudioLayout {
                 return;
             }
             self.audio_running = true;
+            // Refresh stats so current_audio_sample_rate() reads the rate
+            // cpal actually negotiated, not the pre-open fallback.
+            if let Some(engine) = self.audio_engine.as_ref() {
+                self.audio_stats = Some(engine.stats());
+            }
+        }
+
+        // Now push the project snapshot. Force a resync so the runtime gets
+        // (re)built at the real sample rate even when the project signature
+        // is unchanged from the cached one stored before the stream opened.
+        if !self.sync_audio_project(cx, true) {
+            return;
         }
 
         let (playhead_beats, bpm) = {
@@ -274,6 +396,30 @@ impl StudioLayout {
             return;
         }
 
+        // Surface what actually made it into the realtime runtime. Silent
+        // playback almost always shows `loaded_clips=0` or `ready_clips=0`
+        // here — typically a missing/unreadable media path.
+        let debug = engine.debug_snapshot();
+        eprintln!(
+            "[playback] starting: sr={} loaded_clips={} ready_clips={} seek_seconds={:.3} bpm={:.1}",
+            self.current_audio_sample_rate(),
+            debug.loaded_clips,
+            debug.ready_clips,
+            seconds,
+            bpm
+        );
+        if debug.loaded_clips == 0 {
+            eprintln!(
+                "[playback] WARNING: no clips in realtime runtime — verify that imported clips \
+                 have a non-empty media path"
+            );
+        } else if debug.ready_clips == 0 {
+            eprintln!(
+                "[playback] WARNING: clips loaded but none decoded — check earlier \
+                 '[SphereAudio] clip ... decode FAILED' lines"
+            );
+        }
+
         if let Err(error) = engine.play() {
             self.audio_last_error = Some(error.to_string());
             eprintln!("[audio] play failed: {error}");
@@ -281,10 +427,14 @@ impl StudioLayout {
         }
 
         self.audio_stats = Some(engine.stats());
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.state.transport.playing = true;
+            cx.notify();
+        });
         self.poll_native_audio(cx);
     }
 
-    fn stop_native_playback(&mut self) {
+    fn stop_native_playback(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.audio_engine.as_ref() else {
             return;
         };
@@ -294,52 +444,204 @@ impl StudioLayout {
             return;
         }
         self.audio_stats = Some(engine.stats());
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.state.transport.playing = false;
+            cx.notify();
+        });
+    }
+
+    fn seek_native_playhead(&mut self, cx: &mut Context<Self>, beat: f32) {
+        let beat = beat.max(0.0);
+        let bpm = {
+            let timeline = self.timeline.read(cx);
+            timeline.state.bpm
+        };
+        if let Some(engine) = self.audio_engine.as_ref() {
+            let seconds = beat as f64 * 60.0 / bpm.max(1.0) as f64;
+            if let Err(error) = engine.seek(seconds) {
+                self.audio_last_error = Some(error.to_string());
+                eprintln!("[audio] seek failed: {error}");
+            }
+        }
+        self.last_engine_playhead_beat = beat;
+        self.last_engine_sync = Instant::now();
+        let _ = self.timeline.update(cx, move |timeline, cx| {
+            timeline.state.transport.playhead_beats = beat;
+            cx.notify();
+        });
+    }
+
+    /// Single entry point for menu items, keyboard shortcuts, and chrome
+    /// buttons. `command_id` matches the Electron/shared menu manifest
+    /// IDs (e.g. `transport:play-pause`). Unknown IDs are logged once
+    /// and then ignored — this is the contract that lets future menu
+    /// entries appear in the chrome without crashing the dispatcher.
+    fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        if let Some(command) = transport_command_from_id(command_id) {
+            self.dispatch_transport_command(command, cx);
+            return;
+        }
+        match command_id {
+            "noop" => {}
+
+            // ── View / zoom ──────────────────────────────────────────────
+            "view:zoom-in" => self.zoom_timeline_by(cx, 1.25),
+            "view:zoom-out" => self.zoom_timeline_by(cx, 0.8),
+            "view:reset-zoom" => self.reset_timeline_zoom(cx),
+
+            // ── Transport extras (shared menu IDs) ───────────────────────
+            "transport:go-to-end" => {
+                let end = self.project_end_beat(cx);
+                self.seek_native_playhead(cx, end);
+            }
+            "transport:rewind" => self.nudge_playhead_bars(cx, -1.0),
+            "transport:fast-forward" => self.nudge_playhead_bars(cx, 1.0),
+
+            other => {
+                if self
+                    .logged_unsupported_commands
+                    .insert(other.to_string())
+                {
+                    eprintln!("[command] unsupported in native: {}", other);
+                }
+            }
+        }
+    }
+
+    fn zoom_timeline_by(&self, cx: &mut Context<Self>, factor: f32) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.state.zoom_by(factor, 0.0);
+            cx.notify();
+        });
+    }
+
+    fn reset_timeline_zoom(&self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            let current = timeline.state.viewport.pixels_per_second.max(0.0001);
+            // 150 px/s matches the Web UI default zoom (see timeline_state.rs:460).
+            let factor = 150.0 / current;
+            timeline.state.zoom_by(factor, 0.0);
+            cx.notify();
+        });
+    }
+
+    fn project_end_beat(&self, cx: &mut Context<Self>) -> f32 {
+        let timeline = self.timeline.read(cx);
+        timeline
+            .state
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .map(|clip| clip.start_beat + clip.duration_beats)
+            .fold(0.0_f32, f32::max)
+    }
+
+    fn nudge_playhead_bars(&mut self, cx: &mut Context<Self>, bars: f32) {
+        let (current_beat, num) = {
+            let timeline = self.timeline.read(cx);
+            (
+                timeline.state.transport.playhead_beats,
+                timeline.state.time_signature_num as f32,
+            )
+        };
+        let target = (current_beat + bars * num.max(1.0)).max(0.0);
+        self.seek_native_playhead(cx, target);
+    }
+
+    fn dispatch_transport_command(&mut self, command: TransportCommand, cx: &mut Context<Self>) {
+        match command {
+            TransportCommand::PlayPause => {
+                let playing = self
+                    .audio_stats
+                    .as_ref()
+                    .map(|stats| stats.transport_playing)
+                    .unwrap_or(false);
+                if playing {
+                    self.stop_native_playback(cx);
+                } else {
+                    self.start_native_playback(cx);
+                }
+            }
+            TransportCommand::Stop => self.stop_native_playback(cx),
+            TransportCommand::ReturnToStart => self.seek_native_playhead(cx, 0.0),
+            TransportCommand::ToggleLoop => {
+                let _ = self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.transport.loop_enabled = !timeline.state.transport.loop_enabled;
+                    cx.notify();
+                });
+            }
+            TransportCommand::ToggleMetronome => {
+                let _ = self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.transport.metronome_enabled =
+                        !timeline.state.transport.metronome_enabled;
+                    cx.notify();
+                });
+            }
+            TransportCommand::Record => {
+                eprintln!("[transport] record is disabled in native Stage 2.1");
+            }
+        }
     }
 
     fn transport_chrome_state(&self, cx: &mut Context<Self>) -> components::TransportChromeState {
-        let timeline = self.timeline.read(cx);
+        let (
+            position_label,
+            bpm_label,
+            time_signature_label,
+            recording,
+            loop_enabled,
+            metronome_enabled,
+        ) = {
+            let timeline = self.timeline.read(cx);
+            (
+                timeline
+                    .state
+                    .format_bar_beat(timeline.state.transport.playhead_beats),
+                format!("{:.0}", timeline.state.bpm),
+                format!(
+                    "{}/{}",
+                    timeline.state.time_signature_num, timeline.state.time_signature_den
+                ),
+                timeline.state.transport.recording,
+                timeline.state.transport.loop_enabled,
+                timeline.state.transport.metronome_enabled,
+            )
+        };
         let playing = self
             .audio_stats
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
-        let this_for_play = cx.entity().clone();
-        let on_play_toggle = Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
-            let _ = this_for_play.update(cx, |this, cx| {
-                let is_playing = this
-                    .audio_stats
-                    .as_ref()
-                    .map(|stats| stats.transport_playing)
-                    .unwrap_or(false);
-                if is_playing {
-                    this.stop_native_playback();
-                } else {
-                    this.start_native_playback(cx);
-                }
-                cx.notify();
-            });
-        });
+        let make_command_handler = |command_id: &'static str| {
+            let this = cx.entity().clone();
+            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| {
+                    this.dispatch_command_id(command_id, cx);
+                    cx.notify();
+                });
+            })
+        };
 
-        let this_for_stop = cx.entity().clone();
-        let on_stop = Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
-            let _ = this_for_stop.update(cx, |this, cx| {
-                this.stop_native_playback();
-                cx.notify();
-            });
-        });
+        let on_return_to_start = make_command_handler("transport:go-to-start");
+        let on_play_toggle = make_command_handler("transport:play-pause");
+        let on_stop = make_command_handler("transport:stop");
+        let on_loop_toggle = make_command_handler("transport:toggle-loop");
+        let on_metronome_toggle = make_command_handler("transport:toggle-metronome");
+        let _on_record = make_command_handler("transport:record");
 
         components::TransportChromeState {
             playing,
-            position_label: timeline
-                .state
-                .format_bar_beat(timeline.state.transport.playhead_beats),
-            bpm_label: format!("{:.0}", timeline.state.bpm),
-            time_signature_label: format!(
-                "{}/{}",
-                timeline.state.time_signature_num, timeline.state.time_signature_den
-            ),
+            recording,
+            loop_enabled,
+            metronome_enabled,
+            position_label,
+            bpm_label,
+            time_signature_label,
+            on_return_to_start,
             on_play_toggle,
             on_stop,
+            on_loop_toggle,
+            on_metronome_toggle,
         }
     }
 
@@ -363,6 +665,32 @@ impl StudioLayout {
             })
             .unwrap_or_else(|| "Audio offline".to_string());
         (left, right)
+    }
+
+    /// Map a keystroke to a shared menu command ID. Keys mirror the
+    /// `transport:*` IDs from `packages/shared/generated/native-menu.json`
+    /// so the keyboard and menu paths fan into the same dispatcher.
+    /// Text-input guarding is N/A here because GPUI delivers key events
+    /// only when nothing focusable consumes them; if/when text inputs
+    /// land in the studio surface, gate this on `event.bubble_phase`.
+    fn shortcut_command_id(event: &KeyDownEvent) -> Option<&'static str> {
+        if event.is_held {
+            return None;
+        }
+        let key = event.keystroke.key.as_str();
+        let mods = event.keystroke.modifiers;
+        if mods.control || mods.alt || mods.platform || mods.function {
+            return None;
+        }
+        match key {
+            "space" => Some("transport:play-pause"),
+            "enter" | "numpad_enter" => Some("transport:stop"),
+            "l" | "L" => Some("transport:toggle-loop"),
+            "k" | "K" => Some("transport:toggle-metronome"),
+            "r" | "R" => Some("transport:record"),
+            "home" => Some("transport:go-to-start"),
+            _ => None,
+        }
     }
 
     /// Run a single-level directory scan on the GPUI background executor,
@@ -449,21 +777,36 @@ impl StudioLayout {
                 .background_executor()
                 .spawn(async move { waveform_cache::decode_and_cache_file(&decode_path) })
                 .await;
-            if let Some(preview) = preview {
-                let _ = timeline.update(cx, move |timeline, cx| {
-                    if let Some(source_duration) =
-                        timeline.state.audio_source_duration_seconds(&path_key)
-                    {
-                        let delta = (preview.duration_seconds - source_duration).abs();
-                        if delta > 0.01 {
-                            eprintln!(
-                                "[waveform] WARNING preview duration differs from DirectAudioEngine metadata: path={} preview_duration_seconds={:.6} metadata_duration_seconds={:.6}",
-                                path_key, preview.duration_seconds, source_duration
-                            );
+            match preview {
+                Some(preview) => {
+                    let _ = timeline.update(cx, move |timeline, cx| {
+                        if let Some(source_duration) =
+                            timeline.state.audio_source_duration_seconds(&path_key)
+                        {
+                            let delta = (preview.duration_seconds - source_duration).abs();
+                            if delta > 0.01 {
+                                eprintln!(
+                                    "[waveform] WARNING preview duration differs from DirectAudioEngine metadata: path={} preview_duration_seconds={:.6} metadata_duration_seconds={:.6}",
+                                    path_key, preview.duration_seconds, source_duration
+                                );
+                            }
                         }
-                    }
-                    cx.notify();
-                });
+                        cx.notify();
+                    });
+                }
+                None => {
+                    // decode_and_cache_file returned None — either the
+                    // extension was rejected (keep
+                    // `is_supported_audio_ext` and waveform_cache's
+                    // match arm aligned) or the file body itself failed
+                    // to decode. Either way the clip will render with
+                    // the placeholder waveform; the realtime engine
+                    // also won't be able to play it.
+                    eprintln!(
+                        "[waveform] decode produced no preview: path={} — clip will use placeholder waveform and likely fail playback",
+                        path_key
+                    );
+                }
             }
         })
         .detach();
@@ -700,6 +1043,24 @@ impl Render for StudioLayout {
             let timeline = self.timeline.clone();
             let layout = cx.entity().clone();
             std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
+                // Filter on extension before mutating timeline state so
+                // double-clicking a non-audio file (e.g. .txt, .png) does
+                // not create a phantom clip with the 8-bar fallback
+                // duration that never resolves to real metadata.
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !is_supported_audio_ext(&ext) {
+                    eprintln!(
+                        "[import] ignoring non-audio activation: ext='{}' path={}",
+                        ext,
+                        path.display()
+                    );
+                    return;
+                }
+
                 let path = path.clone();
                 let path_for_decode = path.clone();
                 let timeline_for_decode = timeline.clone();
@@ -782,8 +1143,13 @@ impl Render for StudioLayout {
         let on_menu_command: std::sync::Arc<
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = {
-            std::sync::Arc::new(move |command: &String, _w, _cx| {
-                eprintln!("[menu] command: {}", command);
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |command: &String, _w, cx| {
+                let command = command.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.dispatch_command_id(&command, cx);
+                    cx.notify();
+                });
             })
         };
 
@@ -810,14 +1176,55 @@ impl Render for StudioLayout {
         });
         let transport_chrome = self.transport_chrome_state(cx);
         let (status_left, status_right) = self.status_text();
+        let shortcut_target = cx.entity().clone();
+
+        // Take initial keyboard focus so transport shortcuts (Space, Enter, L,
+        // K, R, Home) reach `capture_key_down` below. GPUI only delivers key
+        // events to focused elements; without this the root div never sees
+        // keystrokes even though `shortcut_command` is wired.
+        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window);
+        }
+        let focus_holder = self.focus_handle.clone();
 
         div()
+            // NOTE: `track_focus` deliberately lives on the tiny invisible
+            // `focus_holder` child below, NOT on this root. Putting it on
+            // the root makes GPUI insert a full-window Normal hitbox
+            // (see `should_insert_hitbox` — `tracked_focus_handle.is_some()`
+            // triggers it). That hitbox is benign for click dispatch, but
+            // on Windows it lands above the chrome's
+            // `WindowControlArea::Drag` hitbox in the `mouse_hit_test.ids`
+            // vector — which the NCHITTEST callback iterates in
+            // window-control-vector order, not z-order — and the OS sees
+            // a non-caption hit, refusing to start the window move.
+            // Hoisting focus onto a 0×0 child preserves shortcut
+            // delivery without adding the full-window hitbox.
             .flex()
             .flex_col()
             .size_full()
             .relative()
             .bg(Colors::surface_base())
             .font_family(theme::FONT_FAMILY)
+            .capture_key_down(move |event, _window, cx| {
+                if let Some(command_id) = Self::shortcut_command_id(event) {
+                    let _ = shortcut_target.update(cx, |this, cx| {
+                        this.dispatch_command_id(command_id, cx);
+                        cx.notify();
+                    });
+                }
+            })
+            // Invisible focus anchor. 0×0 means no visible footprint and
+            // an effectively unreachable hitbox; `track_focus` only needs
+            // it to register the focus handle. The root's
+            // `capture_key_down` still fires for any key while this
+            // descendant is focused (capture phase: root → focused).
+            .child(
+                div()
+                    .w(px(0.0))
+                    .h(px(0.0))
+                    .track_focus(&focus_holder),
+            )
             .child(components::app_chrome(
                 window,
                 open_menu_id.as_deref(),
@@ -953,6 +1360,31 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
     }
 }
 
+/// Keep in sync with `DAUx::probe_audio_file`,
+/// `waveform_cache::decode_file_uncached`, and
+/// `file_browser::FileBrowserEntry::is_audio` — any divergence between
+/// these lists creates "imports but never plays" or "looks pending
+/// forever" bugs.
+fn is_supported_audio_ext(ext: &str) -> bool {
+    matches!(ext, "wav" | "wave" | "mp3" | "flac" | "ogg" | "oga" | "aiff" | "aif")
+}
+
+/// Resolve a shared menu command ID to a transport action.
+/// Returns `None` for commands the unified dispatcher should log as
+/// unsupported. Keep in lock-step with `apps/web/src/menu/actionRunner.ts`
+/// and `packages/shared/generated/native-menu.json`.
+fn transport_command_from_id(command_id: &str) -> Option<TransportCommand> {
+    match command_id {
+        "transport:play-pause" => Some(TransportCommand::PlayPause),
+        "transport:stop" => Some(TransportCommand::Stop),
+        "transport:go-to-start" => Some(TransportCommand::ReturnToStart),
+        "transport:toggle-loop" => Some(TransportCommand::ToggleLoop),
+        "transport:toggle-metronome" => Some(TransportCommand::ToggleMetronome),
+        "transport:record" => Some(TransportCommand::Record),
+        _ => None,
+    }
+}
+
 fn track_type_name(track_type: TrackType) -> &'static str {
     match track_type {
         TrackType::Audio => "audio",
@@ -973,6 +1405,15 @@ fn volume_norm_to_linear(norm: f32) -> f32 {
     } else {
         10.0_f32.powf(db / 20.0).clamp(0.0, 2.0)
     }
+}
+
+fn smooth_meter_value(current: &mut f32, target: f32) -> bool {
+    let target = target.clamp(0.0, 1.0);
+    let rate = if target > *current { 0.72 } else { 0.18 };
+    let next = (*current + (target - *current) * rate).clamp(0.0, 1.0);
+    let changed = (*current - next).abs() > 0.001;
+    *current = if next < 0.002 { 0.0 } else { next };
+    changed
 }
 
 fn find_clip_summary<'a>(

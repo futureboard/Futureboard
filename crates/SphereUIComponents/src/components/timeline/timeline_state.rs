@@ -139,10 +139,14 @@ pub struct TimelineViewport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransportState {
+    pub playing: bool,
+    pub recording: bool,
+    pub metronome_enabled: bool,
     pub playhead_beats: f32,
     pub loop_enabled: bool,
     pub loop_start_beats: f32,
     pub loop_end_beats: f32,
+    pub last_engine_frame: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -254,10 +258,14 @@ impl Default for TimelineState {
                 track_area_height: 500.0,
             },
             transport: TransportState {
+                playing: false,
+                recording: false,
+                metronome_enabled: false,
                 playhead_beats: 0.0,
                 loop_enabled: false,
                 loop_start_beats: 0.0,
                 loop_end_beats: 16.0,
+                last_engine_frame: 0,
             },
             tracks: Vec::new(),
             master: MasterBusState {
@@ -456,10 +464,14 @@ impl TimelineState {
                 track_area_height: 500.0,
             },
             transport: TransportState {
+                playing: false,
+                recording: false,
+                metronome_enabled: false,
                 playhead_beats: 2.0,
                 loop_enabled: true,
                 loop_start_beats: 0.0,
                 loop_end_beats: 16.0,
+                last_engine_frame: 0,
             },
             tracks: vec![track1, track2, track3],
             master: MasterBusState {

@@ -1,11 +1,38 @@
+//! UI-side façade over the DirectAudioEngine peak generator.
+//!
+//! Peak generation lives in `crates/SphereDirectAudioEngine/src/
+//! audio_file.rs::generate_audio_peaks` — this module is now a thin
+//! adapter that:
+//!   * tracks per-path Pending / Ready / Error status (the UI's render
+//!     code needs the tri-state to draw placeholders cleanly),
+//!   * converts the engine's `AudioPeakFile` into the UI-local
+//!     `WaveformPreview` shape consumed by `waveform_canvas` and
+//!     `pick_lod`,
+//!   * keeps the synthetic demo-clip preview path for clips that have
+//!     no source file (e.g. the dev-flag demo project tracks).
+//!
+//! Realtime / audio rules:
+//!   * decoding happens on `std::thread::spawn` background threads.
+//!   * render / layout only reads the cache via [`get_file_status`] /
+//!     [`get_file_waveform`].
+//!   * the engine path never runs on the audio callback.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+
+use DAUx::{generate_audio_peaks, AudioPeak as EnginePeak, AudioPeakFile, PEAK_LOD_LEVELS};
 
 #[derive(Debug, Clone, Copy)]
 pub struct WaveformPeak {
     pub min: f32,
     pub max: f32,
+}
+
+impl From<EnginePeak> for WaveformPeak {
+    fn from(p: EnginePeak) -> Self {
+        Self { min: p.min, max: p.max }
+    }
 }
 
 /// One mip level of the waveform: every entry summarises `samples_per_peak`
@@ -26,6 +53,25 @@ pub struct WaveformPreview {
     pub lods: Vec<WaveformLod>,
 }
 
+impl From<AudioPeakFile> for WaveformPreview {
+    fn from(peaks: AudioPeakFile) -> Self {
+        Self {
+            sample_rate: peaks.sample_rate,
+            channels: peaks.channels,
+            duration_seconds: peaks.duration_seconds,
+            total_frames: peaks.total_frames,
+            lods: peaks
+                .lods
+                .into_iter()
+                .map(|lod| WaveformLod {
+                    samples_per_peak: lod.samples_per_peak as usize,
+                    peaks: lod.peaks.into_iter().map(WaveformPeak::from).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum WaveformStatus {
     Pending,
@@ -33,10 +79,18 @@ pub enum WaveformStatus {
     Error(String),
 }
 
-/// LOD levels exactly as required: a power-of-two ladder from 256 to 65536.
-/// Anything inside this range is one bilinear interp away from the right level
-/// of detail for the zoom factor.
+/// LOD levels exactly as required by the spec: a power-of-two ladder
+/// from 256 to 65536. Mirrors `DAUx::PEAK_LOD_LEVELS`; kept here in
+/// `usize` form because `pick_lod` and the waveform canvas use it as
+/// a Vec index basis. Asserted equal at runtime initialisation.
 pub const LOD_LEVELS: [usize; 9] = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+
+const _: () = {
+    // Compile-time guard that PEAK_LOD_LEVELS length matches LOD_LEVELS.
+    // Mismatched LOD ladders between engine and UI would silently
+    // truncate or insert empty LODs.
+    assert!(LOD_LEVELS.len() == PEAK_LOD_LEVELS.len());
+};
 
 /// Two caches: synthetic demo clips keyed by id, decoded files keyed by absolute path.
 static CLIP_CACHE: OnceLock<Mutex<HashMap<String, WaveformPreview>>> = OnceLock::new();
@@ -116,21 +170,26 @@ pub fn decode_and_cache_file(path: &Path) -> Option<WaveformPreview> {
     Some(preview)
 }
 
-fn decode_file_uncached(path: &Path) -> Option<WaveformPreview> {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    let preview = match ext.as_str() {
-        "wav" => decode_wav(path),
-        "mp3" | "flac" | "ogg" => decode_via_symphonia(path),
-        _ => None,
-    }?;
-
-    log_decoded(path, &preview);
-    Some(preview)
+fn decode_file_uncached(path: &std::path::Path) -> Option<WaveformPreview> {
+    // The engine handles every format `DAUx::probe_audio_file` accepts;
+    // the UI no longer needs a parallel decoder. If `generate_audio_peaks`
+    // returns Err we surface the message and let the caller record
+    // `WaveformStatus::Error`.
+    match generate_audio_peaks(path) {
+        Ok(peaks) => {
+            let preview: WaveformPreview = peaks.into();
+            log_decoded(path, &preview);
+            Some(preview)
+        }
+        Err(error) => {
+            eprintln!(
+                "[waveform] DAUx::generate_audio_peaks failed: path={} error={}",
+                path.display(),
+                error
+            );
+            None
+        }
+    }
 }
 
 fn log_decoded(path: &Path, p: &WaveformPreview) {
@@ -241,186 +300,9 @@ impl LodSet {
     }
 }
 
-// ── Decoders ──────────────────────────────────────────────────────────────────
-
-fn decode_wav(path: &Path) -> Option<WaveformPreview> {
-    let mut reader = hound::WavReader::open(path).ok()?;
-    let spec = reader.spec();
-    let channels = spec.channels.max(1) as usize;
-    let sample_rate = spec.sample_rate;
-    let total_frames = reader.duration() as u64; // frames per channel
-
-    let mut lods = LodSet::new(total_frames);
-    let mut frames_seen: u64 = 0;
-    let int_scale = if spec.bits_per_sample > 0 {
-        (1u32 << (spec.bits_per_sample.saturating_sub(1))) as f32
-    } else {
-        1.0
-    };
-
-    match spec.sample_format {
-        hound::SampleFormat::Float => {
-            let mut iter = reader.samples::<f32>();
-            loop {
-                let mut sum = 0.0_f32;
-                let mut got = 0usize;
-                for _ in 0..channels {
-                    match iter.next() {
-                        Some(Ok(s)) => {
-                            sum += s;
-                            got += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                if got == 0 {
-                    break;
-                }
-                let mono = (sum / got as f32).clamp(-1.0, 1.0);
-                lods.push(mono);
-                frames_seen += 1;
-            }
-        }
-        hound::SampleFormat::Int => {
-            let mut iter = reader.samples::<i32>();
-            loop {
-                let mut sum = 0.0_f32;
-                let mut got = 0usize;
-                for _ in 0..channels {
-                    match iter.next() {
-                        Some(Ok(s)) => {
-                            sum += s as f32 / int_scale;
-                            got += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                if got == 0 {
-                    break;
-                }
-                let mono = (sum / got as f32).clamp(-1.0, 1.0);
-                lods.push(mono);
-                frames_seen += 1;
-            }
-        }
-    }
-
-    if frames_seen == 0 {
-        return None;
-    }
-
-    let duration_seconds = if sample_rate > 0 {
-        frames_seen as f64 / sample_rate as f64
-    } else {
-        0.0
-    };
-
-    Some(WaveformPreview {
-        sample_rate,
-        channels: channels as u16,
-        duration_seconds,
-        total_frames: frames_seen,
-        lods: lods.finalize(),
-    })
-}
-
-fn decode_via_symphonia(path: &Path) -> Option<WaveformPreview> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .ok()?;
-    let mut format = probed.format;
-    let track = format.default_track()?.clone();
-    let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count() as u16)
-        .unwrap_or(1)
-        .max(1);
-    let total_frames = track.codec_params.n_frames.unwrap_or(0);
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .ok()?;
-
-    let mut lods = LodSet::new(total_frames);
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
-    let mut frames_decoded: u64 = 0;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(_) => break,
-        };
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(_) => break,
-        };
-
-        if sample_buf.is_none() {
-            sample_buf = Some(SampleBuffer::<f32>::new(
-                decoded.capacity() as u64,
-                *decoded.spec(),
-            ));
-        }
-        let buf = sample_buf.as_mut()?;
-        buf.copy_interleaved_ref(decoded);
-
-        let interleaved = buf.samples();
-        let ch_count = channels as usize;
-        let mut i = 0;
-        while i + ch_count <= interleaved.len() {
-            let mut sum = 0.0_f32;
-            for c in 0..ch_count {
-                sum += interleaved[i + c];
-            }
-            let mono = (sum / ch_count as f32).clamp(-1.0, 1.0);
-            lods.push(mono);
-            i += ch_count;
-            frames_decoded += 1;
-        }
-    }
-
-    if frames_decoded == 0 {
-        return None;
-    }
-
-    let metadata_frames = total_frames.max(frames_decoded);
-    let duration_seconds = metadata_frames as f64 / sample_rate as f64;
-
-    Some(WaveformPreview {
-        sample_rate,
-        channels,
-        duration_seconds,
-        total_frames: metadata_frames,
-        lods: lods.finalize(),
-    })
-}
+// Real-audio decoding now lives in DAUx::generate_audio_peaks. The
+// LodSet / LodBuilder above remain only for the synthetic demo-clip
+// preview path that has no source file to feed the engine.
 
 // ── Demo / placeholder previews ───────────────────────────────────────────────
 

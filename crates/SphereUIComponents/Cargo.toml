@@ -10,10 +10,11 @@ path = "src/lib.rs"
 
 [dependencies]
 gpui = "0.2.2"
+# Audio decoding + multi-LOD peak generation moved into DAUx
+# (SphereDirectAudioEngine) per PART 5 — the UI no longer carries its
+# own hound / symphonia decoder. Same engine, same LOD ladder, same
+# format coverage as the realtime path.
 sphere-direct-audio-engine = { path = "../SphereDirectAudioEngine" }
-# Audio decoding for waveform preview only (not realtime playback).
-hound = "3.5"
-symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
 # Cross-platform user directories for the file browser default location.
 dirs = "5"
 # Menu manifest is shared with Electron/Web via a generated JSON file.

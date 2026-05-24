@@ -40,11 +40,14 @@ mod vst3_processor;
 //
 // without reaching into the NAPI-flavored modules. Both this facade and
 // the `SphereDirectAudioEngine` NAPI class wrap the same `EngineInner`.
-pub use crate::audio_file::{probe_audio_file, AudioFileFormat, AudioFileInfo};
+pub use crate::audio_file::{
+    generate_audio_peaks, probe_audio_file, AudioFileFormat, AudioFileInfo, AudioPeak,
+    AudioPeakFile, AudioPeakLod, PEAK_LOD_LEVELS,
+};
 pub use crate::error::SphereAudioError;
 pub use crate::native::{
-    AudioBackend, AudioEngine, EngineConfig, EngineDeviceInfo, EngineStats, DEFAULT_BUFFER_SIZE,
-    DEFAULT_SAMPLE_RATE,
+    AudioBackend, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo, EngineStats,
+    DEFAULT_BUFFER_SIZE, DEFAULT_SAMPLE_RATE,
 };
 
 use std::sync::Arc;

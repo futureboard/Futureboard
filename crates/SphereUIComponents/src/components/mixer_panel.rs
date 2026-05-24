@@ -33,6 +33,7 @@ use crate::components::fader::{
 };
 use crate::components::knob::{format_pan_label, knob_bipolar};
 use crate::components::timeline::timeline_state::{volume, MasterBusState, TrackState, TrackType};
+use crate::components::timeline::vu_meter::vu_meter_vertical;
 use crate::theme::Colors;
 
 // ── Section dimensions ─────────────────────────────────────────────────────
@@ -317,55 +318,6 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
 
 // ─── Meter ──────────────────────────────────────────────────────────────────
 
-fn meter_bar_col(level: f32) -> gpui::Div {
-    let total = FADER_TRACK_HEIGHT;
-    let green_max = 0.80 * total;
-    let yellow_max = 0.95 * total;
-    let fill = (level * total).min(total);
-    let green = fill.min(green_max);
-    let yellow = if fill > green_max {
-        (fill - green_max).min(yellow_max - green_max)
-    } else {
-        0.0
-    };
-    let red = if fill > yellow_max {
-        fill - yellow_max
-    } else {
-        0.0
-    };
-
-    div()
-        .w(px(5.0))
-        .h(px(total))
-        .bg(rgba(0xFFFFFF0A_u32))
-        .rounded_sm()
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .bottom(px(0.0))
-                .w_full()
-                .h(px(green))
-                .bg(rgba(0x85E0A3CC_u32)),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom(px(green))
-                .w_full()
-                .h(px(yellow))
-                .bg(rgba(0xF4CF7ACC_u32)),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom(px(green + yellow))
-                .w_full()
-                .h(px(red))
-                .bg(rgba(0xF4877FCC_u32)),
-        )
-}
-
 // ─── Strip sections ─────────────────────────────────────────────────────────
 
 fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
@@ -553,15 +505,11 @@ fn fader_area(
                             on_vol_change,
                         )),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(1.0))
-                        .h_full()
-                        .child(meter_bar_col(track.meter_level_l))
-                        .child(meter_bar_col(track.meter_level_r)),
-                ),
+                .child(vu_meter_vertical(
+                    track.meter_level_l,
+                    track.meter_level_r,
+                    FADER_TRACK_HEIGHT,
+                )),
         )
 }
 
@@ -785,15 +733,11 @@ fn master_strip(
                                     on_change,
                                 )),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(1.0))
-                                .h_full()
-                                .child(meter_bar_col(master.meter_level_l))
-                                .child(meter_bar_col(master.meter_level_r)),
-                        ),
+                        .child(vu_meter_vertical(
+                            master.meter_level_l,
+                            master.meter_level_r,
+                            FADER_TRACK_HEIGHT,
+                        )),
                 ),
         )
         .child(

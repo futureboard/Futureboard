@@ -15,9 +15,11 @@
 //!     from UI events.
 //!   * The native facade adds no allocations on the audio thread.
 
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::audio_file;
 use crate::backend::BackendKind;
 use crate::device;
 use crate::engine::EngineInner;
@@ -295,6 +297,45 @@ impl AudioEngine {
     pub fn meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()
     }
+
+    /// Multi-LOD peak summary for any audio format supported by the
+    /// engine's decoder. The Native UI's waveform pipeline calls this
+    /// instead of running its own decoder, so the LOD ladder and decode
+    /// quality stay in sync with the realtime engine's view of the file.
+    ///
+    /// Runs the full decode on the caller's thread — invoke from a
+    /// background executor, never from render / layout / audio callback.
+    pub fn generate_peaks(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<audio_file::AudioPeakFile, SphereAudioError> {
+        audio_file::generate_audio_peaks(path)
+    }
+
+    /// Lightweight engine snapshot for diagnostic logs (Rust-side, no NAPI types).
+    /// Use this to verify that clips made it into the realtime runtime — silent
+    /// playback almost always means `loaded_clips == 0` or `ready_clips == 0`.
+    pub fn debug_snapshot(&self) -> EngineDebugSnapshot {
+        let info = self.inner.get_debug_info();
+        EngineDebugSnapshot {
+            loaded_tracks: info.loaded_tracks,
+            loaded_clips: info.loaded_clips,
+            ready_clips: info.ready_clips,
+            is_playing: info.is_playing,
+            position_seconds: info.position_seconds,
+        }
+    }
+}
+
+/// Plain-Rust mirror of the realtime engine's debug snapshot, suitable for
+/// status-bar logs in the native shell.
+#[derive(Debug, Clone, Default)]
+pub struct EngineDebugSnapshot {
+    pub loaded_tracks: u32,
+    pub loaded_clips: u32,
+    pub ready_clips: u32,
+    pub is_playing: bool,
+    pub position_seconds: f64,
 }
 
 // ── EngineInner helper accessor ──────────────────────────────────────────

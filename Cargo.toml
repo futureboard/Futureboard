@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/native",
+    "crates/SphereAudioPlugins",
+    "crates/SphereDirectAudioEngine",
+    "crates/SpherePluginHost",
+    "crates/SphereUIComponents",
+    "crates/SphereWebAudioCore",
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.release.package.futureboard-core]
+opt-level = "s"
+strip = "debuginfo"

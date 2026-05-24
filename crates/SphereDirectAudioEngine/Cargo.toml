@@ -67,10 +67,3 @@ windows = { version = "0.58", features = [
 napi-build = "2"
 cc = "1"
 pkg-config = "0.3"
-
-# ── Release profile (audio engine must be fast) ───────────────────────────────
-[profile.release]
-opt-level = 3
-lto       = true
-codegen-units = 1
-panic     = "abort"

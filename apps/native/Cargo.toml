@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 gpui = "0.2.2"
-sphere_ui_components = { path = "../../../crates/SphereUIComponents" }
+sphere_ui_components = { path = "../../crates/SphereUIComponents" }
 # Native audio engine. The crate also exposes an N-API surface for Electron;
 # we only use its `native` facade from here (no NAPI calls in this binary).
-sphere-direct-audio-engine = { path = "../../../crates/SphereDirectAudioEngine" }
+sphere-direct-audio-engine = { path = "../../crates/SphereDirectAudioEngine" }

@@ -90,11 +90,38 @@ pub fn db_scale_column() -> gpui::Div {
 ///   pair so the thumb tracks the rail at any container height.
 fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
     let value = value_norm.clamp(0.0, 1.0);
-    let thumb_left = RAIL_CENTER_X - THUMB_W / 2.0;
 
-    // Background rail: stretches from thumb_h/2 inset top to thumb_h/2 inset
-    // bottom, so the thumb's travel never visually leaves the rail.
-    let mut col = div().relative().w(px(24.0)).h_full().child(
+    // Thumb position lives in the column's normal flex flow — NOT an absolute
+    // wrapper with `top:0 bottom:0`, because Taffy/GPUI does not stretch an
+    // absolutely-positioned element to its parent's height the way CSS does;
+    // such a wrapper collapses to its content (the 10 px thumb), and the
+    // flex_basis spacers then resolve against 10 px and round to zero, which
+    // pins the thumb at the top of the rail regardless of value.
+    //
+    // Instead the rail column itself is the flex container. The background
+    // rail and tick marks are absolute layers on top; the two spacers and the
+    // thumb are real flex children, so they compute against the column's
+    // actual `h_full` height. Spacer basis fractions sum to 1.0 (= parent
+    // height); the 10 px thumb overflows by 10 px and the default
+    // `flex_shrink: 1` shrinks the two spacers in proportion to their basis,
+    // landing the thumb center at `(1 - norm) * (H - 10) + 5` — the rail's
+    // usable range from `thumb_h/2` to `H - thumb_h/2`.
+    let mut thumb_accent = accent;
+    thumb_accent.a = 0.9;
+
+    let top_basis = (1.0 - value).clamp(0.0, 1.0);
+    let bot_basis = value.clamp(0.0, 1.0);
+
+    let mut col = div()
+        .relative()
+        .w(px(24.0))
+        .h_full()
+        .flex()
+        .flex_col()
+        .items_center();
+
+    // Background rail (absolute, layered).
+    col = col.child(
         div()
             .absolute()
             .top(px(FADER_THUMB_HEIGHT / 2.0))
@@ -107,7 +134,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
             .rounded_full(),
     );
 
-    // Tick marks at fractional positions on the rail.
+    // Tick marks (absolute, layered) at fractional positions on the rail.
     for &(db, _) in SCALE_MARKS.iter() {
         let pct = db_to_top_fraction(db);
         let w = if db == 0.0 { 14.0_f32 } else { 9.0_f32 };
@@ -127,63 +154,38 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
         );
     }
 
-    // Thumb — positioned via a flex-basis spacer pair.
-    //
-    // Geometry trick: both spacers use `flex_basis(relative(...))` summing to
-    // 1.0 of the parent height. Adding the 10 px thumb overflows by exactly
-    // 10 px, and the default flex_shrink:1 then shrinks the two spacers in
-    // proportion to their basis. That gives:
-    //   top = (1 - norm) * (H - 10)
-    //   thumb = 10
-    //   bot = norm * (H - 10)
-    // so the thumb's center lands at `(1 - norm) * (H - 10) + 5`, which is
-    // exactly the rail's usable range from `thumb_h/2` to `H - thumb_h/2`.
-    let mut thumb_accent = accent;
-    thumb_accent.a = 0.9;
-
-    let top_basis = (1.0 - value).clamp(0.0, 1.0);
-    let bot_basis = value.clamp(0.0, 1.0);
-
-    col.child(
-        div()
-            .absolute()
-            .top(px(0.0))
-            .bottom(px(0.0))
-            .left(px(thumb_left))
-            .w(px(THUMB_W))
-            .flex()
-            .flex_col()
-            .child(div().flex_basis(relative(top_basis)))
-            .child(
-                div()
-                    .flex_none()
-                    .h(px(FADER_THUMB_HEIGHT))
-                    .rounded_sm()
-                    .bg(rgba(0x1F262FFF_u32))
-                    .border(px(1.0))
-                    .border_color(rgba(0xFFFFFF66_u32))
-                    .relative()
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(1.0))
-                            .left(px(1.0))
-                            .right(px(1.0))
-                            .h(px(1.0))
-                            .bg(rgba(0xFFFFFF26_u32)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px((FADER_THUMB_HEIGHT - ACCENT_LINE_H) / 2.0))
-                            .left(px(2.0))
-                            .right(px(2.0))
-                            .h(px(ACCENT_LINE_H))
-                            .bg(thumb_accent),
-                    ),
-            )
-            .child(div().flex_basis(relative(bot_basis))),
-    )
+    // Flex flow: top spacer / thumb / bot spacer.
+    col.child(div().w(px(0.0)).flex_basis(relative(top_basis)))
+        .child(
+            div()
+                .flex_none()
+                .w(px(THUMB_W))
+                .h(px(FADER_THUMB_HEIGHT))
+                .rounded_sm()
+                .bg(rgba(0x1F262FFF_u32))
+                .border(px(1.0))
+                .border_color(rgba(0xFFFFFF66_u32))
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(1.0))
+                        .left(px(1.0))
+                        .right(px(1.0))
+                        .h(px(1.0))
+                        .bg(rgba(0xFFFFFF26_u32)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px((FADER_THUMB_HEIGHT - ACCENT_LINE_H) / 2.0))
+                        .left(px(2.0))
+                        .right(px(2.0))
+                        .h(px(ACCENT_LINE_H))
+                        .bg(thumb_accent),
+                ),
+        )
+        .child(div().w(px(0.0)).flex_basis(relative(bot_basis)))
 }
 
 /// Bordered dB readout pill. Use this above the fader instead of plain text so

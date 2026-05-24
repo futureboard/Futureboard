@@ -19,6 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::backend::BackendKind;
+use crate::device;
 use crate::engine::EngineInner;
 use crate::error::SphereAudioError;
 use crate::types::JsDauxConfig;
@@ -76,6 +77,36 @@ impl Default for EngineConfig {
             buffer_size: DEFAULT_BUFFER_SIZE,
             channels: 2,
             backend: AudioBackend::Auto,
+        }
+    }
+}
+
+/// Plain-Rust audio device descriptor returned by
+/// [`AudioEngine::list_output_devices`] / [`AudioEngine::list_input_devices`].
+///
+/// Mirrors the NAPI `JsAudioDeviceInfo` shape but lives entirely in Rust so
+/// the native shell does not pull NAPI types into its public surface.
+#[derive(Debug, Clone)]
+pub struct EngineDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub channels: u32,
+    pub default_sample_rate: u32,
+    pub is_default: bool,
+    pub backend: String,
+}
+
+impl From<crate::types::JsAudioDeviceInfo> for EngineDeviceInfo {
+    fn from(d: crate::types::JsAudioDeviceInfo) -> Self {
+        Self {
+            id: d.id,
+            name: d.name,
+            kind: d.kind,
+            channels: d.channels,
+            default_sample_rate: d.default_sample_rate,
+            is_default: d.is_default,
+            backend: d.backend,
         }
     }
 }
@@ -169,6 +200,55 @@ impl AudioEngine {
     /// Whether the stream is currently active.
     pub fn is_running(&self) -> bool {
         self.inner.get_status().running
+    }
+
+    /// Begin advancing the transport cursor. The audio stream must already
+    /// be open via [`AudioEngine::start`].
+    pub fn play(&self) -> Result<(), SphereAudioError> {
+        self.inner.play()
+    }
+
+    /// Pause the transport cursor. The audio stream remains active.
+    pub fn pause(&self) -> Result<(), SphereAudioError> {
+        self.inner.pause()
+    }
+
+    /// Toggle the transport between play and pause. Returns the new playing
+    /// state. No-ops cleanly if the stream is not open yet.
+    pub fn toggle_transport(&self) -> Result<bool, SphereAudioError> {
+        if self.inner.shared_playing() {
+            self.inner.pause()?;
+            Ok(false)
+        } else {
+            // `play` requires an open stream — surface the same error the
+            // engine would have produced.
+            self.inner.play()?;
+            Ok(true)
+        }
+    }
+
+    /// Enumerate output devices on the default host. Returns an empty list
+    /// on any backend error rather than panicking.
+    pub fn list_output_devices(&self) -> Vec<EngineDeviceInfo> {
+        device::list_output_devices()
+            .into_iter()
+            .map(EngineDeviceInfo::from)
+            .collect()
+    }
+
+    /// Enumerate input devices on the default host.
+    pub fn list_input_devices(&self) -> Vec<EngineDeviceInfo> {
+        device::list_input_devices()
+            .into_iter()
+            .map(EngineDeviceInfo::from)
+            .collect()
+    }
+
+    /// Return the default output device descriptor, if the platform has one.
+    pub fn default_output_device(&self) -> Option<EngineDeviceInfo> {
+        self.list_output_devices()
+            .into_iter()
+            .find(|d| d.is_default)
     }
 
     /// Polling snapshot for status bar / diagnostics.

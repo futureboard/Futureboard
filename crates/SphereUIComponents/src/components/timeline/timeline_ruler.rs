@@ -35,7 +35,9 @@ pub fn timeline_ruler(
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .child(
-            // Left Ruler Header Area
+            // Left Ruler Header Area — uses the same deeper background
+            // and strong right border as the TrackHeader rows so the
+            // entire left column reads as a single frontmost pane.
             div()
                 .flex()
                 .flex_row()
@@ -44,8 +46,9 @@ pub fn timeline_ruler(
                 .w(px(HEADER_WIDTH))
                 .h_full()
                 .px(px(8.0))
+                .bg(gpui::rgb(0x10141B))
                 .border_r(px(1.0))
-                .border_color(Colors::border_subtle())
+                .border_color(Colors::border_strong())
                 .child(
                     div()
                         .text_color(Colors::text_primary())

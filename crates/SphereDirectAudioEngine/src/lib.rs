@@ -40,9 +40,10 @@ mod vst3_processor;
 //
 // without reaching into the NAPI-flavored modules. Both this facade and
 // the `SphereDirectAudioEngine` NAPI class wrap the same `EngineInner`.
+pub use crate::audio_file::{probe_audio_file, AudioFileFormat, AudioFileInfo};
 pub use crate::error::SphereAudioError;
 pub use crate::native::{
-    AudioBackend, AudioEngine, EngineConfig, EngineStats, DEFAULT_BUFFER_SIZE,
+    AudioBackend, AudioEngine, EngineConfig, EngineDeviceInfo, EngineStats, DEFAULT_BUFFER_SIZE,
     DEFAULT_SAMPLE_RATE,
 };
 
@@ -52,9 +53,9 @@ use napi_derive::napi;
 
 use engine::EngineInner;
 use types::{
-    EngineProjectSnapshot, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig, JsDauxStatus,
-    JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult, JsRecordingStatus,
-    JsSphereAudioStatus, JsStartRecordingConfig, JsWavPeakResult,
+    EngineProjectSnapshot, JsAudioDeviceInfo, JsAudioFileInfo, JsDauxBackendInfo, JsDauxConfig,
+    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
+    JsRecordingStatus, JsSphereAudioStatus, JsStartRecordingConfig, JsWavPeakResult,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -411,6 +412,22 @@ impl SphereDirectAudioEngine {
     #[napi]
     pub fn get_meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()
+    }
+
+    /// Probe audio file metadata without loading it into the realtime engine.
+    /// This is the source of truth for import duration in Electron/native UI.
+    #[napi]
+    pub fn probe_audio_file(&self, file_path: String) -> napi::Result<JsAudioFileInfo> {
+        let info = audio_file::probe_audio_file(&file_path)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        Ok(JsAudioFileInfo {
+            path: info.path.to_string_lossy().to_string(),
+            sample_rate: info.sample_rate,
+            channel_count: info.channels as u32,
+            total_frames: info.total_frames as f64,
+            duration_seconds: info.duration_seconds,
+            format: info.format.as_str().to_string(),
+        })
     }
 
     /// Generate Int16 min/max waveform peaks for a PCM WAV file by streaming

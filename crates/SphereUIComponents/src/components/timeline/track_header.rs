@@ -107,10 +107,13 @@ pub fn track_header(
 ) -> impl IntoElement {
     let track_id = track.id.clone();
     let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
+    // Deeper-than-lane background so the header column reads as a separate
+    // *frontmost* layer instead of blending into the timeline body. The
+    // lane uses surface_base (0x171B22); the header sits one step deeper.
     let header_bg = if is_selected {
-        gpui::rgb(0x252c35)
+        gpui::rgb(0x222a35)
     } else {
-        gpui::rgb(0x1c2028)
+        gpui::rgb(0x10141B)
     };
 
     let id_num = {
@@ -183,9 +186,12 @@ pub fn track_header(
         .w(px(HEADER_WIDTH))
         .h(px(TRACK_HEIGHT))
         .bg(header_bg)
+        // Stronger right border so the header column reads as a distinct
+        // pane rather than blending into the lane area. The inner accent
+        // strip on the right keeps the overall feel subtle.
         .border_r(px(1.0))
         .border_b(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(Colors::border_strong())
         .id(("track-header", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_root)
         // Left accent strip — same column as the track lane stripe

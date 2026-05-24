@@ -552,7 +552,11 @@ impl EngineInner {
                 "track not found for insert editor: {track_id}"
             )));
         };
-        let Some(insert) = track.inserts.iter_mut().find(|insert| insert.id == insert_id) else {
+        let Some(insert) = track
+            .inserts
+            .iter_mut()
+            .find(|insert| insert.id == insert_id)
+        else {
             return Err(SphereAudioError::NativeError(format!(
                 "insert not found for editor: track={track_id} insert={insert_id}"
             )));
@@ -562,11 +566,13 @@ impl EngineInner {
                 "insert has no ready VST3 processor: track={track_id} insert={insert_id}"
             )));
         };
-        let handle = vst3.open_editor(window_id, title, width, height).ok_or_else(|| {
-            SphereAudioError::NativeError(format!(
-                "failed to open VST3 editor: track={track_id} insert={insert_id}"
-            ))
-        })?;
+        let handle = vst3
+            .open_editor(window_id, title, width, height)
+            .ok_or_else(|| {
+                SphereAudioError::NativeError(format!(
+                    "failed to open VST3 editor: track={track_id} insert={insert_id}"
+                ))
+            })?;
         eprintln!(
             "[SphereAudio] opened insert editor track={} insert={} handle={} processorHandle=0x{:x}",
             track_id,
@@ -587,7 +593,12 @@ impl EngineInner {
             .tracks
             .iter_mut()
             .find(|track| track.id == track_id)
-            .and_then(|track| track.inserts.iter_mut().find(|insert| insert.id == insert_id))
+            .and_then(|track| {
+                track
+                    .inserts
+                    .iter_mut()
+                    .find(|insert| insert.id == insert_id)
+            })
             .and_then(|insert| insert.vst3.as_mut())
         {
             vst3.close_editor();
@@ -609,7 +620,12 @@ impl EngineInner {
             .tracks
             .iter_mut()
             .find(|track| track.id == track_id)
-            .and_then(|track| track.inserts.iter_mut().find(|insert| insert.id == insert_id))
+            .and_then(|track| {
+                track
+                    .inserts
+                    .iter_mut()
+                    .find(|insert| insert.id == insert_id)
+            })
             .and_then(|insert| insert.vst3.as_mut())
         {
             return Ok(vst3.focus_editor());
@@ -1242,8 +1258,8 @@ pub fn render_project_sample(
 
     // ── Master bus: apply master track inserts on the summed output ──
     if let Some(m_idx) = master_index {
-        let muted = runtime.tracks[m_idx].muted
-            || (runtime.has_solo && !runtime.tracks[m_idx].solo);
+        let muted =
+            runtime.tracks[m_idx].muted || (runtime.has_solo && !runtime.tracks[m_idx].solo);
         if !muted {
             let master = &mut runtime.tracks[m_idx];
             for insert in &mut master.inserts {
@@ -1358,14 +1374,24 @@ pub fn render_project_block_interleaved(
             let mut clip_count = 0usize;
             let mut overlapping = 0usize;
             let mut first_clip = String::from("none");
-            for clip in runtime.clips.iter().filter(|clip| clip.track_id == track_id) {
+            for clip in runtime
+                .clips
+                .iter()
+                .filter(|clip| clip.track_id == track_id)
+            {
                 let clip_start = clip.start_sample;
                 let clip_end = clip.start_sample.saturating_add(clip.duration_samples);
                 let overlaps = block_end > clip_start && block_start < clip_end;
                 if clip_count == 0 {
                     first_clip = format!(
                         "{} range={}..{} offset={:.3}s gain={:.3} speed={:.3} overlaps={}",
-                        clip.id, clip_start, clip_end, clip.offset_seconds, clip.gain, clip.speed_ratio, overlaps
+                        clip.id,
+                        clip_start,
+                        clip_end,
+                        clip.offset_seconds,
+                        clip.gain,
+                        clip.speed_ratio,
+                        overlaps
                     );
                 }
                 clip_count += 1;
@@ -1406,8 +1432,8 @@ pub fn render_project_block_interleaved(
 
     // ── Master bus: apply master track inserts on the summed output ──
     if let Some(m_idx) = master_index {
-        let muted = runtime.tracks[m_idx].muted
-            || (runtime.has_solo && !runtime.tracks[m_idx].solo);
+        let muted =
+            runtime.tracks[m_idx].muted || (runtime.has_solo && !runtime.tracks[m_idx].solo);
         if !muted {
             let master = &mut runtime.tracks[m_idx];
             // Copy summed output into master scratch buffer.
@@ -1419,11 +1445,8 @@ pub fn render_project_block_interleaved(
             apply_track_chain_block(master, frames);
             // Write back, accumulate master meter, apply preview mode.
             for i in 0..frames {
-                let (l, r) = apply_preview_mode(
-                    master.block_l[i],
-                    master.block_r[i],
-                    master.preview_mode,
-                );
+                let (l, r) =
+                    apply_preview_mode(master.block_l[i], master.block_r[i], master.preview_mode);
                 master.meter_peak_l = master.meter_peak_l.max(l.abs());
                 master.meter_peak_r = master.meter_peak_r.max(r.abs());
                 master.meter_sum_sq_l += l * l;
@@ -1480,7 +1503,11 @@ pub fn apply_track_chain_block(track: &mut RuntimeTrack, frames: usize) {
         );
     }
     for insert in &mut track.inserts {
-        apply_insert_block(&mut track.block_l[..frames], &mut track.block_r[..frames], insert);
+        apply_insert_block(
+            &mut track.block_l[..frames],
+            &mut track.block_r[..frames],
+            insert,
+        );
     }
 }
 
@@ -1586,8 +1613,12 @@ pub fn apply_insert_block(block_l: &mut [f32], block_r: &mut [f32], insert: &mut
         .get("format")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    let before_peak_l = block_l.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-    let before_peak_r = block_r.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let before_peak_l = block_l
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let before_peak_r = block_r
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 
     if !insert.enabled {
         if !insert.callback_process_log_done {

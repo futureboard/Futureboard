@@ -49,10 +49,15 @@ pub fn track_list(
         rows.push(row);
     }
 
+    // Use `size_full()` (not `flex_1()`) so the track list fills the
+    // surrounding wrapper. The parent in `timeline.rs` is a plain
+    // (non-flex) sized block — `flex_1` there is a no-op and would
+    // collapse this container to its content height. Since the rows and
+    // grid below are absolutely positioned, that collapse hides every
+    // TrackHeader / TrackLane row even though `state.tracks` is populated.
     div()
         .relative()
-        .flex_1()
-        .w_full()
+        .size_full()
         .overflow_hidden()
         .child(
             div()

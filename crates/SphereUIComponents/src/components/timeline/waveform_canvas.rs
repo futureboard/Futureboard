@@ -29,14 +29,14 @@ pub fn waveform_canvas(
             waveform_cache::WaveformStatus::Ready(preview) => (preview, None, false),
             waveform_cache::WaveformStatus::Pending => (
                 waveform_cache::placeholder_waveform(
-                    clip.duration_beats * 60.0 / state.bpm.max(1.0),
+                    clip.duration_beats as f64 * 60.0 / state.bpm.max(1.0) as f64,
                 ),
                 Some("Waveform pending".to_string()),
                 false,
             ),
             waveform_cache::WaveformStatus::Error(_) => (
                 waveform_cache::placeholder_waveform(
-                    clip.duration_beats * 60.0 / state.bpm.max(1.0),
+                    clip.duration_beats as f64 * 60.0 / state.bpm.max(1.0) as f64,
                 ),
                 Some("Waveform error".to_string()),
                 true,
@@ -65,7 +65,7 @@ pub fn waveform_canvas(
 
     // ── LOD selection ────────────────────────────────────────────────────────
     // Total decoded samples covered by the *full* clip width.
-    let total_samples = preview.total_samples.max(1) as f32;
+    let total_samples = preview.total_frames.max(1) as f32;
     let samples_per_pixel = (total_samples / clip_width.max(1.0)).max(1.0);
     let Some(lod) = waveform_cache::pick_lod(&preview, samples_per_pixel) else {
         return empty_canvas();

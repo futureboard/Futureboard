@@ -10,8 +10,8 @@ use crate::components::timeline::track_list::track_list;
 use crate::components::timeline::waveform_cache;
 use crate::theme::Colors;
 use gpui::{
-    div, px, svg, Context, ExternalPaths, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollDelta, StatefulInteractiveElement, Styled, Window,
+    div, px, svg, Context, Empty, ExternalPaths, InteractiveElement, IntoElement, ParentElement,
+    Render, ScrollDelta, StatefulInteractiveElement, Styled, Window,
 };
 
 /// App chrome (top titlebar/menu strip) — used to convert window-space y into
@@ -133,16 +133,13 @@ impl Timeline {
         path: &std::path::Path,
         force_new_track: bool,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> bool {
         if !is_supported_audio_ext(path) {
             return false;
         }
 
-        let duration_seconds = match waveform_cache::get_file_status(&path.to_string_lossy()) {
-            waveform_cache::WaveformStatus::Ready(preview) => preview.duration_seconds,
-            _ => 0.0,
-        };
+        let path_key = path.to_string_lossy().to_string();
         let clip_name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -160,20 +157,76 @@ impl Timeline {
             _ => (0.0, 1.0e9_f32),
         };
 
-        self.state.import_audio_at(
-            path.to_string_lossy().to_string(),
-            clip_name,
-            drop_x,
-            drop_y,
-            duration_seconds,
-        );
-        waveform_cache::request_decode_file(path.to_path_buf());
+        self.state
+            .import_audio_at(path_key.clone(), clip_name, drop_x, drop_y);
+        Self::spawn_audio_import_jobs(path.to_path_buf(), path_key, cx);
         true
+    }
+
+    pub fn spawn_audio_import_jobs(
+        path: std::path::PathBuf,
+        path_key: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let meta_path = path.clone();
+            let metadata = cx
+                .background_executor()
+                .spawn(async move { DAUx::probe_audio_file(&meta_path) })
+                .await;
+
+            match metadata {
+                Ok(info) => {
+                    let format = info.format.as_str().to_string();
+                    let meta_path_key = path_key.clone();
+                    let _ = this.update(cx, move |this, cx| {
+                        this.state.update_audio_clip_metadata(
+                            &meta_path_key,
+                            &format,
+                            info.sample_rate,
+                            info.channels,
+                            info.total_frames,
+                            info.duration_seconds,
+                        );
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[audio-import] WARNING using fallback duration because metadata failed: path={} error={}",
+                        path_key, error
+                    );
+                }
+            }
+
+            let decode_path = path.clone();
+            let preview = cx
+                .background_executor()
+                .spawn(async move { waveform_cache::decode_and_cache_file(&decode_path) })
+                .await;
+            if let Some(preview) = preview {
+                let _ = this.update(cx, move |this, cx| {
+                    if let Some(source_duration) =
+                        this.state.audio_source_duration_seconds(&path_key)
+                    {
+                        let delta = (preview.duration_seconds - source_duration).abs();
+                        if delta > 0.01 {
+                            eprintln!(
+                                "[waveform] WARNING preview duration differs from DirectAudioEngine metadata: path={} preview_duration_seconds={:.6} metadata_duration_seconds={:.6}",
+                                path_key, preview.duration_seconds, source_duration
+                            );
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 }
 
 impl Render for Timeline {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let on_select_track = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.select_track(track_id);
             cx.notify();
@@ -261,6 +314,7 @@ impl Render for Timeline {
                     name,
                     start_beat: *beat,
                     duration_beats: duration,
+                    source_duration_seconds: None,
                     offset_beats: 0.0,
                     gain: 1.0,
                     clip_type,
@@ -388,6 +442,18 @@ impl Render for Timeline {
         let state = &self.state;
         let on_zoom_in_btn = on_zoom_in.clone();
         let on_zoom_out_btn = on_zoom_out.clone();
+
+        // ── Scrollbar geometry ──────────────────────────────────────────
+        // Computed once per render against the live window size. Both
+        // tracks (visible bar) are 8 px wide and sit at the right/bottom
+        // edges of the lane area. Clicking the track jumps the scroll
+        // position to that point — gives a functional scrollbar without
+        // needing a stateful drag.
+        let (scroll_max_x, scroll_max_y) = self.max_scroll_offsets(window);
+        let content_w = self.timeline_content_width();
+        let content_h = (self.state.tracks.len() as f32 * TRACK_HEIGHT).max(1.0);
+        let lane_view_h = (content_h - scroll_max_y).max(TRACK_HEIGHT);
+        let lane_view_w = (content_w - scroll_max_x).max(1.0);
 
         // ── Drag/drop import wiring ─────────────────────────────────────
         // Track the mouse position throughout an external file drag so that
@@ -552,7 +618,23 @@ impl Render for Timeline {
                         on_select_tool.clone(),
                     )),
             )
-            // 4. Zoom Controls
+            // 4. Vertical scrollbar (right edge, over the lane area)
+            .child(vertical_scrollbar(
+                cx,
+                state.viewport.scroll_y,
+                content_h,
+                lane_view_h,
+                scroll_max_y,
+            ))
+            // 5. Horizontal scrollbar (bottom edge, over the lane area)
+            .child(horizontal_scrollbar(
+                cx,
+                state.viewport.scroll_x,
+                content_w,
+                lane_view_w,
+                scroll_max_x,
+            ))
+            // 6. Zoom Controls
             .child(
                 div()
                     .absolute()
@@ -636,4 +718,113 @@ impl Render for Timeline {
                     ),
             )
     }
+}
+
+// ── Timeline scrollbars ─────────────────────────────────────────────────
+//
+// Both scrollbars are rendered as absolute overlays on top of the
+// arrangement area. The thumb is sized by `viewport / content` and
+// positioned by `scroll / max_scroll`. Mouse-down on the track jumps
+// the scroll position so the click point becomes the new thumb top
+// (vertical) or thumb left (horizontal). The wheel handler on the
+// Timeline div continues to handle smooth scrolling and zoom; the
+// scrollbar is the visible indicator + a coarse jump target.
+
+const SCROLLBAR_THICKNESS: f32 = 8.0;
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+
+fn vertical_scrollbar(
+    cx: &mut Context<Timeline>,
+    scroll_y: f32,
+    content_h: f32,
+    view_h: f32,
+    max_scroll: f32,
+) -> gpui::AnyElement {
+    if max_scroll <= 0.5 || view_h <= 0.0 {
+        return Empty.into_any_element();
+    }
+    let track_h = view_h;
+    let thumb_h = ((view_h / content_h) * track_h).max(SCROLLBAR_MIN_THUMB);
+    let progress = (scroll_y / max_scroll).clamp(0.0, 1.0);
+    let thumb_top = progress * (track_h - thumb_h).max(0.0);
+
+    let on_track_click = cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+        // Position is in window space; convert to a fraction of the
+        // scrollbar track. We approximate the track top as the click
+        // y minus the thumb half-height when clicking above the thumb,
+        // and snap the thumb center to the click otherwise.
+        let click_y: f32 = event.position.y.into();
+        // The scrollbar sits at top=RULER_HEIGHT inside the timeline.
+        // Re-derive the local y by subtracting an estimated chrome
+        // height; clamp with `max_scroll` so any over/under-estimate
+        // still yields a valid scroll position.
+        let local = (click_y - 36.0 - RULER_HEIGHT).max(0.0);
+        let frac = (local / track_h.max(1.0)).clamp(0.0, 1.0);
+        this.state.viewport.scroll_y = (frac * max_scroll).clamp(0.0, max_scroll);
+        cx.notify();
+    });
+
+    div()
+        .absolute()
+        .top(px(RULER_HEIGHT))
+        .right(px(0.0))
+        .bottom(px(0.0))
+        .w(px(SCROLLBAR_THICKNESS))
+        .id("timeline-vscroll")
+        .on_mouse_down(gpui::MouseButton::Left, on_track_click)
+        .child(
+            div()
+                .absolute()
+                .top(px(thumb_top))
+                .left(px(2.0))
+                .right(px(2.0))
+                .h(px(thumb_h))
+                .rounded_full()
+                .bg(gpui::rgba(0xFFFFFF33)),
+        )
+        .into_any_element()
+}
+
+fn horizontal_scrollbar(
+    cx: &mut Context<Timeline>,
+    scroll_x: f32,
+    content_w: f32,
+    view_w: f32,
+    max_scroll: f32,
+) -> gpui::AnyElement {
+    if max_scroll <= 0.5 || view_w <= 0.0 {
+        return Empty.into_any_element();
+    }
+    let track_w = view_w;
+    let thumb_w = ((view_w / content_w) * track_w).max(SCROLLBAR_MIN_THUMB);
+    let progress = (scroll_x / max_scroll).clamp(0.0, 1.0);
+    let thumb_left = progress * (track_w - thumb_w).max(0.0);
+
+    let on_track_click = cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+        let click_x: f32 = event.position.x.into();
+        let local = (click_x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+        let frac = (local / track_w.max(1.0)).clamp(0.0, 1.0);
+        this.state.viewport.scroll_x = (frac * max_scroll).clamp(0.0, max_scroll);
+        cx.notify();
+    });
+
+    div()
+        .absolute()
+        .bottom(px(0.0))
+        .left(px(HEADER_WIDTH))
+        .right(px(SCROLLBAR_THICKNESS))
+        .h(px(SCROLLBAR_THICKNESS))
+        .id("timeline-hscroll")
+        .on_mouse_down(gpui::MouseButton::Left, on_track_click)
+        .child(
+            div()
+                .absolute()
+                .left(px(thumb_left))
+                .top(px(2.0))
+                .bottom(px(2.0))
+                .w(px(thumb_w))
+                .rounded_full()
+                .bg(gpui::rgba(0xFFFFFF33)),
+        )
+        .into_any_element()
 }

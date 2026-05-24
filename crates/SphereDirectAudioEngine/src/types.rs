@@ -136,6 +136,17 @@ pub struct JsWavPeakResult {
     pub peaks: Vec<i32>,
 }
 
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsAudioFileInfo {
+    pub path: String,
+    pub sample_rate: u32,
+    pub channel_count: u32,
+    pub total_frames: f64,
+    pub duration_seconds: f64,
+    pub format: String,
+}
+
 // ── Internal (non-napi) serializable types ────────────────────────────────────
 // These live purely on the Rust side and are used for project snapshots
 // passed as JSON strings from the JS side.

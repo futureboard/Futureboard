@@ -34,6 +34,7 @@ pub struct ClipState {
     pub name: String,
     pub start_beat: f32,
     pub duration_beats: f32,
+    pub source_duration_seconds: Option<f64>,
     pub offset_beats: f32,
     pub gain: f32,
     pub clip_type: ClipType,
@@ -289,6 +290,7 @@ impl TimelineState {
                     name: "vocals_dry.wav".to_string(),
                     start_beat: 1.0,
                     duration_beats: 8.0,
+                    source_duration_seconds: None,
                     offset_beats: 0.0,
                     gain: 1.0,
                     clip_type: ClipType::Audio {
@@ -302,6 +304,7 @@ impl TimelineState {
                     name: "vocals_harmony.wav".to_string(),
                     start_beat: 10.0,
                     duration_beats: 6.0,
+                    source_duration_seconds: None,
                     offset_beats: 0.0,
                     gain: 1.0,
                     clip_type: ClipType::Audio {
@@ -350,6 +353,7 @@ impl TimelineState {
                 name: "drums_loop_120.wav".to_string(),
                 start_beat: 0.0,
                 duration_beats: 16.0,
+                source_duration_seconds: None,
                 offset_beats: 0.0,
                 gain: 1.0,
                 clip_type: ClipType::Audio {
@@ -379,6 +383,7 @@ impl TimelineState {
                 name: "synth_lead.mid".to_string(),
                 start_beat: 4.0,
                 duration_beats: 8.0,
+                source_duration_seconds: None,
                 offset_beats: 0.0,
                 gain: 1.0,
                 clip_type: ClipType::Midi {
@@ -475,8 +480,8 @@ impl TimelineState {
         60.0 / self.bpm.max(1.0)
     }
 
-    pub fn seconds_to_beats(&self, seconds: f32) -> f32 {
-        seconds / self.seconds_per_beat()
+    pub fn seconds_to_beats(&self, seconds: f64) -> f32 {
+        (seconds * self.bpm.max(1.0) as f64 / 60.0) as f32
     }
 
     pub fn beats_to_seconds(&self, beats: f32) -> f32 {
@@ -500,7 +505,7 @@ impl TimelineState {
     }
 
     pub fn x_to_beats(&self, x: f32) -> f32 {
-        self.seconds_to_beats(self.content_x_to_time(x))
+        self.seconds_to_beats(self.content_x_to_time(x) as f64)
     }
 
     pub fn get_visible_beat_range(&self, width: f32) -> (f32, f32) {
@@ -863,14 +868,14 @@ impl TimelineState {
 
     /// Drop a clip onto the timeline. `drop_x` and `drop_y` are in the track
     /// area coordinate system (header_width and ruler_height already stripped).
-    /// `duration_seconds` is used to compute clip length; if 0, falls back to 2 bars.
+    /// Imports a clip with unknown metadata. The 2-bar duration is a temporary
+    /// placeholder and must be replaced by DirectAudioEngine metadata.
     pub fn import_audio_at(
         &mut self,
         source_path: String,
         clip_name: String,
         drop_x: f32,
         drop_y: f32,
-        duration_seconds: f32,
     ) -> String {
         eprintln!(
             "[import] drop path={} clip={} drop_x={:.1} drop_y={:.1}",
@@ -888,20 +893,13 @@ impl TimelineState {
         let raw_beats = self.x_to_beats(drop_x.max(0.0));
         let start_beat = self.snap_beats(raw_beats).max(0.0);
 
-        self.insert_audio_clip(
-            track_id,
-            source_path,
-            clip_name,
-            start_beat,
-            duration_seconds,
-        )
+        self.insert_audio_clip(track_id, source_path, clip_name, start_beat)
     }
 
     pub fn import_audio_to_selected_or_new_track(
         &mut self,
         source_path: String,
         clip_name: String,
-        duration_seconds: f32,
     ) -> String {
         let track_id = self
             .selected_audio_track_id()
@@ -911,13 +909,7 @@ impl TimelineState {
             source_path, clip_name, track_id
         );
         let start_beat = self.snap_beats(self.x_to_beats(0.0)).max(0.0);
-        self.insert_audio_clip(
-            track_id,
-            source_path,
-            clip_name,
-            start_beat,
-            duration_seconds,
-        )
+        self.insert_audio_clip(track_id, source_path, clip_name, start_beat)
     }
 
     fn insert_audio_clip(
@@ -926,7 +918,6 @@ impl TimelineState {
         source_path: String,
         clip_name: String,
         start_beat: f32,
-        duration_seconds: f32,
     ) -> String {
         let track_id = if self.tracks.iter().any(|track| track.id == track_id) {
             track_id
@@ -938,11 +929,11 @@ impl TimelineState {
             self.create_audio_track()
         };
 
-        let duration_beats = if duration_seconds > 0.0 {
-            self.seconds_to_beats(duration_seconds)
-        } else {
-            8.0
-        };
+        let duration_beats = 8.0;
+        eprintln!(
+            "[audio-import] WARNING using fallback duration because metadata is pending: path={} duration_beats=8.0",
+            source_path
+        );
         let clip_id = self.next_clip_id();
         let log_clip_name = clip_name.clone();
         let new_clip = ClipState {
@@ -950,6 +941,7 @@ impl TimelineState {
             name: clip_name,
             start_beat: start_beat.max(0.0),
             duration_beats,
+            source_duration_seconds: None,
             offset_beats: 0.0,
             gain: 1.0,
             clip_type: ClipType::Audio {
@@ -990,5 +982,93 @@ impl TimelineState {
                 .unwrap_or("<none>")
         );
         clip_id
+    }
+
+    pub fn update_audio_clip_metadata(
+        &mut self,
+        source_path: &str,
+        format: &str,
+        sample_rate: u32,
+        channels: u16,
+        total_frames: u64,
+        duration_seconds: f64,
+    ) -> bool {
+        if duration_seconds <= 0.0 {
+            return false;
+        }
+        let duration_beats = self.seconds_to_beats(duration_seconds);
+        let mut changed = false;
+        let mut matched = false;
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if let ClipType::Audio {
+                    source_path: Some(path),
+                    ..
+                } = &clip.clip_type
+                {
+                    if path == source_path {
+                        matched = true;
+                        clip.source_duration_seconds = Some(duration_seconds);
+                        if (clip.duration_beats - duration_beats).abs() > 0.001 {
+                            clip.duration_beats = duration_beats;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if matched {
+            self.log_audio_meta(
+                source_path,
+                format,
+                sample_rate,
+                channels,
+                total_frames,
+                duration_seconds,
+            );
+            self.log_audio_import(duration_beats);
+        }
+        changed
+    }
+
+    pub fn audio_source_duration_seconds(&self, source_path: &str) -> Option<f64> {
+        self.tracks.iter().find_map(|track| {
+            track.clips.iter().find_map(|clip| {
+                if let ClipType::Audio {
+                    source_path: Some(path),
+                    ..
+                } = &clip.clip_type
+                {
+                    if path == source_path {
+                        return clip.source_duration_seconds;
+                    }
+                }
+                None
+            })
+        })
+    }
+
+    fn log_audio_meta(
+        &self,
+        source_path: &str,
+        format: &str,
+        sample_rate: u32,
+        channels: u16,
+        total_frames: u64,
+        duration_seconds: f64,
+    ) {
+        eprintln!("[audio-meta] path={}", source_path);
+        eprintln!("[audio-meta] format={}", format);
+        eprintln!("[audio-meta] sample_rate={}", sample_rate);
+        eprintln!("[audio-meta] channels={}", channels);
+        eprintln!("[audio-meta] total_frames={}", total_frames);
+        eprintln!("[audio-meta] duration_seconds={:.6}", duration_seconds);
+    }
+
+    fn log_audio_import(&self, duration_beats: f32) {
+        let bars_4_4 = duration_beats / 4.0;
+        eprintln!("[audio-import] bpm={:.3}", self.bpm);
+        eprintln!("[audio-import] duration_beats={:.6}", duration_beats);
+        eprintln!("[audio-import] bars_4_4={:.6}", bars_4_4);
     }
 }

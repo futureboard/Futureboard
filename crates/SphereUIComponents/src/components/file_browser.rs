@@ -1,17 +1,23 @@
-//! File browser state and filesystem walker for the left sidebar.
+//! File browser state + lazy directory index for the left sidebar.
 //!
-//! Mirrors the Electron browser's behavior: a navigable directory listing
-//! with audio-aware filtering. No globals — the layout owns one
-//! `FileBrowserState` and passes it to the sidebar each render.
+//! Mirrors the Electron browser's IPC model: a long-lived process owns the
+//! filesystem access and the UI reads from a cache. Here:
+//!
+//! * `FileBrowserState` holds **state only** — expand/select sets, drive
+//!   roots, and an [`IndexCache`] of previously-loaded directory listings.
+//! * `visible_nodes()` never touches the filesystem. It walks the cache
+//!   and emits "Loading…" / "Error" placeholder rows for paths the
+//!   indexer has not finished (or failed to) load.
+//! * The actual `std::fs::read_dir` work runs on `gpui::BackgroundExecutor`
+//!   from [`crate::layout`] — the UI thread is never blocked.
 //!
 //! Realtime / audio rules:
-//! * filesystem scans are best-effort and run on the UI thread when the user
-//!   navigates. They must not be triggered from audio paths.
-//! * we never block the audio engine on a `read_dir` call — this module is
-//!   pure UI state.
+//! * filesystem reads never happen in render/layout.
+//! * audio paths must never touch this module.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileEntryKind {
@@ -83,169 +89,186 @@ impl BrowserVisibleNode {
     }
 }
 
+/// Lazy directory cache populated by the background indexer.
+///
+/// Each known path is in exactly one of three states:
+///   * `loaded` — entries cached, render shows children.
+///   * `loading` — request in flight, render shows a Loading row.
+///   * `errors` — last load failed, render shows an Error row.
+/// Paths in none of these maps are treated as "never asked" and the
+/// layout will dispatch a load when the user expands them.
+#[derive(Debug, Clone, Default)]
+pub struct IndexCache {
+    pub loaded: HashMap<PathBuf, IndexedDir>,
+    pub loading: HashSet<PathBuf>,
+    pub errors: HashMap<PathBuf, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexedDir {
+    pub entries: Vec<FileBrowserEntry>,
+    pub loaded_at: Instant,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileBrowserState {
-    pub current_dir: PathBuf,
-    pub entries: Vec<FileBrowserEntry>,
     pub selected: Option<PathBuf>,
+    /// Expand state, keyed exclusively by path. Drive roots and folders
+    /// alike live here so toggle / lookup never disagree.
     pub expanded_paths: HashSet<PathBuf>,
-    pub expanded_sections: HashSet<String>,
-    pub root_sections: Vec<BrowserRootSection>,
-    pub error: Option<String>,
+    /// Top-level filesystem roots — drive letters on Windows, `/` and
+    /// per-volume mounts on Unix-like systems. Enumerated cheaply at
+    /// startup (Win32 `GetLogicalDrives` bitmask on Windows).
+    pub root_drives: Vec<BrowserRootSection>,
+    /// Lazy index of expanded directories. Render reads from here; the
+    /// layout owns the background loader that populates it.
+    pub index: IndexCache,
 }
 
 impl Default for FileBrowserState {
     fn default() -> Self {
-        let dir = default_directory();
-        let (entries, error) = read_directory(&dir);
-        let mut expanded_sections = HashSet::new();
-        expanded_sections.insert("audio-files".to_string());
+        // Startup must not touch the disk beyond enumerating mounted
+        // drives. Everything else loads on demand when the user expands
+        // a node.
         Self {
-            current_dir: dir,
-            entries,
             selected: None,
             expanded_paths: HashSet::new(),
-            expanded_sections,
-            root_sections: default_root_sections(),
-            error,
+            root_drives: default_root_drives(),
+            index: IndexCache::default(),
         }
     }
 }
 
 impl FileBrowserState {
-    /// Navigate to `path` (must be an existing directory). Refreshes entries.
-    pub fn navigate_to(&mut self, path: impl Into<PathBuf>) {
-        let target = path.into();
-        if !target.is_dir() {
-            return;
-        }
-        let (entries, error) = read_directory(&target);
-        self.current_dir = target;
-        self.entries = entries;
-        self.error = error;
-        self.selected = None;
-        self.expanded_paths.insert(self.current_dir.clone());
-    }
-
-    /// Move up one directory if a parent exists.
-    pub fn navigate_up(&mut self) {
-        if let Some(parent) = self.current_dir.parent().map(|p| p.to_path_buf()) {
-            self.navigate_to(parent);
-        }
-    }
-
-    pub fn refresh(&mut self) {
-        let (entries, error) = read_directory(&self.current_dir);
-        self.entries = entries;
-        self.error = error;
-    }
-
     pub fn select(&mut self, path: PathBuf) {
         self.selected = Some(path);
     }
 
-    pub fn toggle_node(&mut self, node_id: &str, path: Option<&Path>) {
-        if let Some(path) = path {
-            let path = path.to_path_buf();
-            if self.expanded_paths.contains(&path) {
-                self.expanded_paths.remove(&path);
-            } else {
-                self.expanded_paths.insert(path);
-            }
-            return;
-        }
-
-        if self.expanded_sections.contains(node_id) {
-            self.expanded_sections.remove(node_id);
+    /// Toggle expand state for a node. Path is the source of truth — the
+    /// `node_id` argument is kept for callsite ergonomics but unused.
+    /// Returns `true` if the path was just expanded (caller should ensure
+    /// it is indexed); `false` if it was collapsed.
+    pub fn toggle_node(&mut self, _node_id: &str, path: Option<&Path>) -> bool {
+        let Some(path) = path else {
+            return false;
+        };
+        let path = path.to_path_buf();
+        if self.expanded_paths.contains(&path) {
+            self.expanded_paths.remove(&path);
+            false
         } else {
-            self.expanded_sections.insert(node_id.to_string());
+            self.expanded_paths.insert(path);
+            true
         }
     }
 
-    pub fn is_expanded_node(&self, node_id: &str, path: Option<&Path>) -> bool {
-        if let Some(path) = path {
-            return self.expanded_paths.contains(path);
-        }
-        self.expanded_sections.contains(node_id)
+    pub fn is_expanded_node(&self, _node_id: &str, path: Option<&Path>) -> bool {
+        path.is_some_and(|p| self.expanded_paths.contains(p))
     }
 
+    /// Apply a finished directory listing from the background indexer.
+    pub fn apply_loaded(&mut self, path: PathBuf, entries: Vec<FileBrowserEntry>) {
+        self.index.loading.remove(&path);
+        self.index.errors.remove(&path);
+        self.index.loaded.insert(
+            path,
+            IndexedDir {
+                entries,
+                loaded_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Apply a finished directory listing failure from the background indexer.
+    pub fn apply_error(&mut self, path: PathBuf, error: String) {
+        self.index.loading.remove(&path);
+        self.index.loaded.remove(&path);
+        self.index.errors.insert(path, error);
+    }
+
+    /// Mark a path as having an in-flight load request.
+    pub fn mark_loading(&mut self, path: PathBuf) {
+        self.index.errors.remove(&path);
+        self.index.loading.insert(path);
+    }
+
+    /// Returns the list of currently-expanded paths whose contents have
+    /// neither been loaded nor are loading. The caller dispatches
+    /// background loads for each.
+    pub fn paths_needing_load(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for path in &self.expanded_paths {
+            if self.index.loaded.contains_key(path) || self.index.loading.contains(path) {
+                continue;
+            }
+            out.push(path.clone());
+        }
+        out
+    }
+
+    /// Flatten the tree into one row per visible node, driven entirely by
+    /// the in-memory cache. No filesystem access happens here.
     pub fn visible_nodes(&self) -> Vec<BrowserVisibleNode> {
         let mut nodes = Vec::new();
-        for section in &self.root_sections {
-            let expanded = self.expanded_sections.contains(&section.id);
-            let selected = section
-                .root_path
-                .as_ref()
-                .is_some_and(|p| self.selected.as_deref() == Some(p.as_path()));
+        for drive in &self.root_drives {
+            let drive_path = match drive.root_path.as_ref() {
+                Some(p) => p,
+                None => continue,
+            };
+            let expanded = self.expanded_paths.contains(drive_path);
+            let selected = self.selected.as_deref() == Some(drive_path.as_path());
             nodes.push(BrowserVisibleNode {
-                id: section.id.clone(),
-                label: section.label.clone(),
-                path: section.root_path.clone(),
-                kind: section.kind,
+                id: drive.id.clone(),
+                label: drive.label.clone(),
+                path: Some(drive_path.clone()),
+                kind: BrowserNodeKind::Folder,
                 depth: 0,
                 extension: String::new(),
-                expandable: section.root_path.is_some(),
+                expandable: true,
                 expanded,
                 selected,
-                error: section.root_path.as_ref().and_then(|p| {
-                    if p.exists() {
-                        None
-                    } else {
-                        Some("Missing folder".to_string())
-                    }
-                }),
+                error: None,
             });
 
             if expanded {
-                if let Some(root_path) = section.root_path.as_ref() {
-                    self.append_directory_nodes(root_path, 1, &mut nodes);
-                }
+                self.append_cached_dir(drive_path, 1, &mut nodes);
             }
         }
         nodes
     }
 
-    fn append_directory_nodes(
-        &self,
-        dir: &Path,
-        depth: usize,
-        nodes: &mut Vec<BrowserVisibleNode>,
-    ) {
-        let (entries, error) = read_directory(dir);
-        if let Some(error) = error {
-            nodes.push(BrowserVisibleNode {
-                id: format!("error:{}", dir.display()),
-                label: error,
-                path: None,
-                kind: BrowserNodeKind::File,
-                depth,
-                extension: String::new(),
-                expandable: false,
-                expanded: false,
-                selected: false,
-                error: Some("Cannot read folder".to_string()),
-            });
+    fn append_cached_dir(&self, dir: &Path, depth: usize, nodes: &mut Vec<BrowserVisibleNode>) {
+        // Cache state, in priority order: error > loading > loaded > unknown.
+        if let Some(err) = self.index.errors.get(dir) {
+            nodes.push(placeholder_row(dir, depth, err.clone(), true));
             return;
         }
+        if self.index.loading.contains(dir) {
+            nodes.push(placeholder_row(dir, depth, "Loading…".to_string(), false));
+            return;
+        }
+        let Some(indexed) = self.index.loaded.get(dir) else {
+            // Path is expanded but not yet asked for — the layout's
+            // `paths_needing_load` sweep will pick it up next render.
+            nodes.push(placeholder_row(dir, depth, "Loading…".to_string(), false));
+            return;
+        };
 
-        for entry in entries {
-            let entry_path = entry.path.clone();
-            let entry_name = entry.name;
-            let entry_extension = entry.extension;
+        for entry in &indexed.entries {
             let is_folder = entry.kind == FileEntryKind::Folder;
-            let expanded = is_folder && self.expanded_paths.contains(&entry_path);
-            let selected = self.selected.as_deref() == Some(entry_path.as_path());
+            let expanded = is_folder && self.expanded_paths.contains(&entry.path);
+            let selected = self.selected.as_deref() == Some(entry.path.as_path());
             nodes.push(BrowserVisibleNode {
-                id: entry_path.to_string_lossy().to_string(),
-                label: entry_name,
-                path: Some(entry_path.clone()),
+                id: entry.path.to_string_lossy().to_string(),
+                label: entry.name.clone(),
+                path: Some(entry.path.clone()),
                 kind: if is_folder {
                     BrowserNodeKind::Folder
                 } else {
                     BrowserNodeKind::File
                 },
                 depth,
-                extension: entry_extension,
+                extension: entry.extension.clone(),
                 expandable: is_folder,
                 expanded,
                 selected,
@@ -253,9 +276,32 @@ impl FileBrowserState {
             });
 
             if expanded {
-                self.append_directory_nodes(&entry_path, depth + 1, nodes);
+                self.append_cached_dir(&entry.path, depth + 1, nodes);
             }
         }
+    }
+}
+
+fn placeholder_row(dir: &Path, depth: usize, label: String, is_error: bool) -> BrowserVisibleNode {
+    BrowserVisibleNode {
+        id: format!(
+            "{}:{}",
+            if is_error { "error" } else { "loading" },
+            dir.display()
+        ),
+        label,
+        path: None,
+        kind: BrowserNodeKind::File,
+        depth,
+        extension: String::new(),
+        expandable: false,
+        expanded: false,
+        selected: false,
+        error: if is_error {
+            Some("Cannot read folder".to_string())
+        } else {
+            None
+        },
     }
 }
 
@@ -274,86 +320,110 @@ pub fn default_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn default_root_sections() -> Vec<BrowserRootSection> {
-    let audio_root = default_directory();
-    let home = dirs::home_dir();
-    let documents = dirs::document_dir().or_else(|| home.clone());
-    let projects = documents
-        .as_ref()
-        .map(|d| d.join("Futureboard Studio").join("Projects"))
-        .filter(|p| p.is_dir())
-        .or_else(|| documents.clone());
-    let samples = documents
-        .as_ref()
-        .map(|d| d.join("Futureboard Studio").join("Samples"))
-        .filter(|p| p.is_dir())
-        .or_else(|| Some(audio_root.clone()));
-
-    let plugin_root = default_plugin_root();
-
-    vec![
-        BrowserRootSection {
-            id: "audio-files".to_string(),
-            label: "Audio Files".to_string(),
-            root_path: Some(audio_root),
-            kind: BrowserNodeKind::Section,
-        },
-        BrowserRootSection {
-            id: "plugins".to_string(),
-            label: "Plug-ins (VST3/CLAP)".to_string(),
-            root_path: plugin_root,
-            kind: BrowserNodeKind::Section,
-        },
-        BrowserRootSection {
-            id: "instruments".to_string(),
-            label: "Instruments".to_string(),
-            root_path: default_instrument_root(),
-            kind: BrowserNodeKind::Section,
-        },
-        BrowserRootSection {
-            id: "projects".to_string(),
-            label: "Projects".to_string(),
-            root_path: projects,
-            kind: BrowserNodeKind::Section,
-        },
-        BrowserRootSection {
-            id: "samples".to_string(),
-            label: "Samples".to_string(),
-            root_path: samples,
-            kind: BrowserNodeKind::Section,
-        },
-        BrowserRootSection {
-            id: "user-library".to_string(),
-            label: "User Library".to_string(),
-            root_path: home,
-            kind: BrowserNodeKind::Section,
-        },
-    ]
+/// Enumerate top-level filesystem roots — drive letters on Windows,
+/// `/` plus mounted volumes on macOS / Linux. Each root maps to a single
+/// `BrowserRootSection` whose `root_path` is a real directory.
+fn default_root_drives() -> Vec<BrowserRootSection> {
+    let mut out = Vec::new();
+    for path in enumerate_filesystem_roots() {
+        let label = drive_label(&path);
+        let id = format!("root:{}", path.display());
+        out.push(BrowserRootSection {
+            id,
+            label,
+            root_path: Some(path),
+            kind: BrowserNodeKind::Folder,
+        });
+    }
+    out
 }
 
-fn default_plugin_root() -> Option<PathBuf> {
-    let candidates = [
-        #[cfg(target_os = "windows")]
-        PathBuf::from(r"C:\Program Files\Common Files\VST3"),
-        #[cfg(target_os = "windows")]
-        PathBuf::from(r"C:\Program Files\Common Files\CLAP"),
-        #[cfg(target_os = "macos")]
-        PathBuf::from("/Library/Audio/Plug-Ins/VST3"),
-        #[cfg(target_os = "macos")]
-        PathBuf::from("/Library/Audio/Plug-Ins/CLAP"),
-        #[cfg(target_os = "linux")]
-        PathBuf::from("/usr/lib/vst3"),
-        #[cfg(target_os = "linux")]
-        PathBuf::from("/usr/lib/clap"),
-    ];
-    candidates.into_iter().find(|p| p.is_dir())
+#[cfg(target_os = "windows")]
+fn enumerate_filesystem_roots() -> Vec<PathBuf> {
+    // Use kernel32 `GetLogicalDrives` — returns a 26-bit mask of mounted
+    // drive letters in microseconds. The previous probe loop called
+    // `Path::is_dir("A:\\")` for every letter, which causes Windows to
+    // spin up empty optical / floppy / disconnected removable drives and
+    // hang the UI for tens of seconds at startup.
+    extern "system" {
+        fn GetLogicalDrives() -> u32;
+    }
+    let mask = unsafe { GetLogicalDrives() };
+    let mut drives = Vec::new();
+    for i in 0u32..26 {
+        if mask & (1 << i) != 0 {
+            let letter = (b'A' + i as u8) as char;
+            drives.push(PathBuf::from(format!("{}:\\", letter)));
+        }
+    }
+    if drives.is_empty() {
+        if let Some(home) = dirs::home_dir() {
+            drives.push(home);
+        }
+    }
+    drives
 }
 
-fn default_instrument_root() -> Option<PathBuf> {
-    dirs::audio_dir()
-        .map(|p| p.join("Instruments"))
-        .filter(|p| p.is_dir())
-        .or_else(default_plugin_root)
+#[cfg(target_os = "macos")]
+fn enumerate_filesystem_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/")];
+    let volumes = PathBuf::from("/Volumes");
+    if let Ok(read) = std::fs::read_dir(&volumes) {
+        for entry in read.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                roots.push(p);
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home);
+    }
+    roots
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn enumerate_filesystem_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/")];
+    for parent in ["/media", "/mnt", "/run/media"] {
+        if let Ok(read) = std::fs::read_dir(parent) {
+            for entry in read.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    roots.push(p);
+                }
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home);
+    }
+    roots
+}
+
+/// Friendly label for a drive root. On Windows that's `C:` etc.; on
+/// Unix-likes the leaf folder name (or `/` for the root itself).
+fn drive_label(path: &Path) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let s = path.to_string_lossy();
+        // `C:\` → `C:`. Trim trailing separator(s) for display.
+        let trimmed = s.trim_end_matches(|c| c == '\\' || c == '/');
+        if trimmed.is_empty() {
+            return s.into_owned();
+        }
+        return trimmed.to_string();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if path == Path::new("/") {
+            return "/".to_string();
+        }
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    }
 }
 
 /// Read a directory into a sorted entry list. Folders first, then files,

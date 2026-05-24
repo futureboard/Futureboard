@@ -1,9 +1,12 @@
-use gpui::{div, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
+use gpui::{
+    div, AppContext, Context, Entity, IntoElement, ParentElement, Render, ScrollHandle, Styled,
+    Window,
+};
 
 use std::path::PathBuf;
 
 use crate::components;
-use crate::components::file_browser::FileBrowserState;
+use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
 use crate::components::timeline::timeline_state::TrackState;
 use crate::components::timeline::waveform_cache;
@@ -32,6 +35,10 @@ pub struct StudioLayout {
     bottom_panel_state: BottomPanelState,
     timeline: Entity<components::timeline::Timeline>,
     file_browser: FileBrowserState,
+    /// Stable scroll handle for the browser tree. Lives on the layout
+    /// (not in `FileBrowserState`) so the state stays free of gpui types
+    /// and so the handle survives across renders.
+    browser_scroll: ScrollHandle,
     menu_bar: MenuBarUiState,
 }
 
@@ -49,12 +56,117 @@ impl StudioLayout {
             bottom_panel_state: BottomPanelState::default(),
             timeline,
             file_browser: FileBrowserState::default(),
+            browser_scroll: ScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
         }
     }
 }
 
 impl StudioLayout {
+    /// Run a single-level directory scan on the GPUI background executor,
+    /// then push the result back into `file_browser.index` on the UI
+    /// thread. Never blocks render — this is the only place `read_dir`
+    /// is allowed to happen at runtime.
+    fn spawn_directory_load(cx: &mut Context<Self>, path: PathBuf) {
+        let started = std::time::Instant::now();
+        let path_for_log = path.clone();
+        eprintln!("[indexer] load requested: {}", path_for_log.display());
+        cx.spawn(async move |this, cx| {
+            let scan_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { read_directory(&scan_path) })
+                .await;
+            let elapsed = started.elapsed();
+            let _ = this.update(cx, move |this, cx| {
+                match result {
+                    (entries, None) => {
+                        eprintln!(
+                            "[indexer] load completed: {} ({} entries, {} ms)",
+                            path.display(),
+                            entries.len(),
+                            elapsed.as_millis()
+                        );
+                        this.file_browser.apply_loaded(path, entries);
+                    }
+                    (_, Some(error)) => {
+                        eprintln!(
+                            "[indexer] load failed: {} -> {} ({} ms)",
+                            path.display(),
+                            error,
+                            elapsed.as_millis()
+                        );
+                        this.file_browser.apply_error(path, error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn spawn_timeline_audio_import_jobs(
+        cx: &mut Context<Self>,
+        timeline: Entity<components::timeline::Timeline>,
+        path: PathBuf,
+        path_key: String,
+    ) {
+        cx.spawn(async move |_this, cx| {
+            let meta_path = path.clone();
+            let metadata = cx
+                .background_executor()
+                .spawn(async move { DAUx::probe_audio_file(&meta_path) })
+                .await;
+
+            match metadata {
+                Ok(info) => {
+                    let format = info.format.as_str().to_string();
+                    let meta_path_key = path_key.clone();
+                    let _ = timeline.update(cx, move |timeline, cx| {
+                        timeline.state.update_audio_clip_metadata(
+                            &meta_path_key,
+                            &format,
+                            info.sample_rate,
+                            info.channels,
+                            info.total_frames,
+                            info.duration_seconds,
+                        );
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[audio-import] WARNING using fallback duration because metadata failed: path={} error={}",
+                        path_key, error
+                    );
+                }
+            }
+
+            let decode_path = path.clone();
+            let preview = cx
+                .background_executor()
+                .spawn(async move { waveform_cache::decode_and_cache_file(&decode_path) })
+                .await;
+            if let Some(preview) = preview {
+                let _ = timeline.update(cx, move |timeline, cx| {
+                    if let Some(source_duration) =
+                        timeline.state.audio_source_duration_seconds(&path_key)
+                    {
+                        let delta = (preview.duration_seconds - source_duration).abs();
+                        if delta > 0.01 {
+                            eprintln!(
+                                "[waveform] WARNING preview duration differs from DirectAudioEngine metadata: path={} preview_duration_seconds={:.6} metadata_duration_seconds={:.6}",
+                                path_key, preview.duration_seconds, source_duration
+                            );
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Build the callback bundle used by the mixer. Every mutation lands in
     /// the same `TimelineState` instance owned by the Timeline entity, so the
     /// TrackHeader and Mixer always read identical values.
@@ -214,8 +326,18 @@ impl Render for StudioLayout {
             std::sync::Arc::new(move |(id, path): &(String, Option<PathBuf>), _w, cx| {
                 let id = id.clone();
                 let path = path.clone();
-                this.update(cx, |this, cx| {
-                    this.file_browser.toggle_node(&id, path.as_deref());
+                let _ = this.update(cx, |this, cx| {
+                    let expanded = this.file_browser.toggle_node(&id, path.as_deref());
+                    if expanded {
+                        // Drain any newly-expanded paths whose contents
+                        // haven't been indexed yet and kick off a
+                        // background load for each.
+                        let pending = this.file_browser.paths_needing_load();
+                        for p in pending {
+                            this.file_browser.mark_loading(p.clone());
+                            Self::spawn_directory_load(cx, p);
+                        }
+                    }
                     cx.notify();
                 });
             })
@@ -238,29 +360,36 @@ impl Render for StudioLayout {
             dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static,
         > = {
             let timeline = self.timeline.clone();
+            let layout = cx.entity().clone();
             std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
                 let path = path.clone();
                 let path_for_decode = path.clone();
+                let timeline_for_decode = timeline.clone();
                 timeline.update(cx, |t, cx| {
                     let path_key = path.to_string_lossy().to_string();
-                    let duration = match waveform_cache::get_file_status(&path_key) {
-                        waveform_cache::WaveformStatus::Ready(preview) => preview.duration_seconds,
-                        _ => 0.0,
-                    };
                     let name = path
                         .file_name()
                         .and_then(|n| n.to_str())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "Imported Audio".to_string());
                     t.state
-                        .import_audio_to_selected_or_new_track(path_key, name, duration);
+                        .import_audio_to_selected_or_new_track(path_key, name);
                     cx.notify();
                 });
-                waveform_cache::request_decode_file(path_for_decode);
+                let path_key = path_for_decode.to_string_lossy().to_string();
+                let _ = layout.update(cx, move |_layout, cx| {
+                    Self::spawn_timeline_audio_import_jobs(
+                        cx,
+                        timeline_for_decode,
+                        path_for_decode,
+                        path_key,
+                    );
+                });
             })
         };
 
         let file_browser = self.file_browser.clone();
+        let browser_scroll = self.browser_scroll.clone();
 
         // ── Top-menu callbacks ─────────────────────────────────────────────
         let on_open_menu: std::sync::Arc<
@@ -362,6 +491,7 @@ impl Render for StudioLayout {
                     .min_h_0()
                     .child(components::sidebar(
                         &file_browser,
+                        browser_scroll,
                         on_browser_toggle,
                         on_browser_select,
                         on_browser_activate,

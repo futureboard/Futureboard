@@ -150,6 +150,19 @@ interface NativeWavPeakResult {
   peaks: number[];
 }
 
+interface NativeAudioFileInfo {
+  path: string;
+  sampleRate?: number;
+  sample_rate?: number;
+  channelCount?: number;
+  channel_count?: number;
+  totalFrames?: number;
+  total_frames?: number;
+  durationSeconds?: number;
+  duration_seconds?: number;
+  format: string;
+}
+
 /** Shape of the `SphereDirectAudioEngine` napi class instance. */
 interface NativeEngine {
   getVersion(): string;
@@ -184,6 +197,7 @@ interface NativeEngine {
   startRecording(config: NativeStartRecordingConfig): void;
   stopRecording(): NativeRecordingResult[];
   getRecordingStatus(): NativeRecordingStatus;
+  probeAudioFile(filePath: string): NativeAudioFileInfo;
   generateWavPeaks(filePath: string, fileId: string, samplesPerPeak: number): NativeWavPeakResult;
 }
 
@@ -654,6 +668,26 @@ export class SphereAudioNative {
   getRecordingStatus(): SphereRecordingStatus {
     if (!this._engine) return { active: false, durationSeconds: 0, trackCount: 0 };
     return this._engine.getRecordingStatus();
+  }
+
+  probeAudioFile(filePath: string): {
+    path: string;
+    sampleRate: number;
+    channelCount: number;
+    totalFrames: number;
+    durationSeconds: number;
+    format: string;
+  } | null {
+    if (!this._engine) return null;
+    const result = this._engine.probeAudioFile(filePath);
+    return {
+      path: result.path,
+      sampleRate: result.sampleRate ?? result.sample_rate ?? 0,
+      channelCount: result.channelCount ?? result.channel_count ?? 0,
+      totalFrames: result.totalFrames ?? result.total_frames ?? 0,
+      durationSeconds: result.durationSeconds ?? result.duration_seconds ?? 0,
+      format: result.format,
+    };
   }
 
   generateWavPeaks(filePath: string, fileId: string, samplesPerPeak: number): {

@@ -275,15 +275,24 @@ impl RuntimeProject {
                     // plugin path + class_id + sample_rate.
                     let reused: Option<Vst3RuntimeProcessor> =
                         if let Some(ref mut map) = existing_vst3 {
-                            let can_reuse = map.get(&insert.id).map(|e| {
-                                e.plugin_path().map(|p| p == new_path.as_str()).unwrap_or(false)
-                                    && e.class_id()
-                                        .map(|c| c == new_class_id.as_str())
+                            let can_reuse = map
+                                .get(&insert.id)
+                                .map(|e| {
+                                    e.plugin_path()
+                                        .map(|p| p == new_path.as_str())
                                         .unwrap_or(false)
-                                    && e.sample_rate() == output_sample_rate
-                                    && e.is_ready()
-                            }).unwrap_or(false);
-                            if can_reuse { map.remove(&insert.id) } else { None }
+                                        && e.class_id()
+                                            .map(|c| c == new_class_id.as_str())
+                                            .unwrap_or(false)
+                                        && e.sample_rate() == output_sample_rate
+                                        && e.is_ready()
+                                })
+                                .unwrap_or(false);
+                            if can_reuse {
+                                map.remove(&insert.id)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         };
@@ -292,7 +301,8 @@ impl RuntimeProject {
                     let processor = reused.or_else(|| {
                         Vst3RuntimeProcessor::from_params(&insert.params, output_sample_rate)
                     });
-                    let processor_handle = processor.as_ref().map(|p| p.handle_value()).unwrap_or(0);
+                    let processor_handle =
+                        processor.as_ref().map(|p| p.handle_value()).unwrap_or(0);
                     eprintln!(
                         "[SphereAudio] native VST3 insert track='{}' insert='{}' pluginInstanceId='{}' reused={} ready={} processorHandle=0x{:x} path='{}'",
                         t.id,
@@ -365,7 +375,10 @@ impl RuntimeProject {
             .unwrap_or(0);
         eprintln!("[SphereAudio] RuntimeMaster inserts={master_insert_count}");
         for track in &tracks {
-            let track_clips = clips.iter().filter(|clip| clip.track_id == track.id).count();
+            let track_clips = clips
+                .iter()
+                .filter(|clip| clip.track_id == track.id)
+                .count();
             eprintln!(
                 "[SphereAudio] RuntimeTrack track={} clips={} inserts={}",
                 track.id,
@@ -393,11 +406,7 @@ impl RuntimeProject {
                         .unwrap_or("");
                     eprintln!(
                         "[SphereAudio] RuntimeInsert id={} format={} path={} classId={} bypass={}",
-                        insert.id,
-                        format,
-                        path,
-                        class_id,
-                        !insert.enabled
+                        insert.id, format, path, class_id, !insert.enabled
                     );
                 }
             }
@@ -531,7 +540,9 @@ impl RuntimeProject {
                 insert.silent_process_blocks = 0;
                 // Also persist in params map for snapshot/recall, then return —
                 // built-in DSP state rebuild is not applicable to VST3 inserts.
-                insert.params.insert(param_id.to_string(), Value::from(value as f64));
+                insert
+                    .params
+                    .insert(param_id.to_string(), Value::from(value as f64));
                 return;
             }
         }

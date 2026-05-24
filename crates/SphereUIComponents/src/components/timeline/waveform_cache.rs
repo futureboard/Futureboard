@@ -20,8 +20,8 @@ pub struct WaveformLod {
 pub struct WaveformPreview {
     pub sample_rate: u32,
     pub channels: u16,
-    pub duration_seconds: f32,
-    pub total_samples: u64,
+    pub duration_seconds: f64,
+    pub total_frames: u64,
     /// LODs sorted ascending by `samples_per_peak`.
     pub lods: Vec<WaveformLod>,
 }
@@ -136,12 +136,12 @@ fn decode_file_uncached(path: &Path) -> Option<WaveformPreview> {
 fn log_decoded(path: &Path, p: &WaveformPreview) {
     let total_peaks: usize = p.lods.iter().map(|l| l.peaks.len()).sum();
     eprintln!(
-        "[waveform] decoded {} | {:.2}s @ {}Hz ch={} samples={} lods={} total_peaks={}",
+        "[waveform] decoded {} | {:.2}s @ {}Hz ch={} frames={} lods={} total_peaks={}",
         path.display(),
         p.duration_seconds,
         p.sample_rate,
         p.channels,
-        p.total_samples,
+        p.total_frames,
         p.lods.len(),
         total_peaks,
     );
@@ -310,7 +310,7 @@ fn decode_wav(path: &Path) -> Option<WaveformPreview> {
     }
 
     let duration_seconds = if sample_rate > 0 {
-        frames_seen as f32 / sample_rate as f32
+        frames_seen as f64 / sample_rate as f64
     } else {
         0.0
     };
@@ -319,7 +319,7 @@ fn decode_wav(path: &Path) -> Option<WaveformPreview> {
         sample_rate,
         channels: channels as u16,
         duration_seconds,
-        total_samples: frames_seen,
+        total_frames: frames_seen,
         lods: lods.finalize(),
     })
 }
@@ -410,13 +410,14 @@ fn decode_via_symphonia(path: &Path) -> Option<WaveformPreview> {
         return None;
     }
 
-    let duration_seconds = frames_decoded as f32 / sample_rate as f32;
+    let metadata_frames = total_frames.max(frames_decoded);
+    let duration_seconds = metadata_frames as f64 / sample_rate as f64;
 
     Some(WaveformPreview {
         sample_rate,
         channels,
         duration_seconds,
-        total_samples: frames_decoded,
+        total_frames: metadata_frames,
         lods: lods.finalize(),
     })
 }
@@ -441,7 +442,7 @@ pub fn get_or_generate_waveform(
 }
 
 /// Flat preview returned when decoding fails. Single LOD with zero amplitude.
-pub fn placeholder_waveform(duration_seconds: f32) -> WaveformPreview {
+pub fn placeholder_waveform(duration_seconds: f64) -> WaveformPreview {
     // One coarse LOD is enough — there's nothing to zoom into.
     let lod = WaveformLod {
         samples_per_peak: LOD_LEVELS[LOD_LEVELS.len() / 2],
@@ -456,7 +457,7 @@ pub fn placeholder_waveform(duration_seconds: f32) -> WaveformPreview {
         sample_rate: 44_100,
         channels: 1,
         duration_seconds,
-        total_samples: (duration_seconds * 44_100.0) as u64,
+        total_frames: (duration_seconds * 44_100.0) as u64,
         lods: vec![lod],
     }
 }
@@ -465,8 +466,8 @@ pub fn placeholder_waveform(duration_seconds: f32) -> WaveformPreview {
 /// real LOD builder so the demo and decoded paths share rendering code.
 fn generate_waveform_preview(name: &str, duration_beats: f32, bpm: f32) -> WaveformPreview {
     let sample_rate: u32 = 44_100;
-    let duration_seconds = duration_beats * (60.0 / bpm.max(1.0));
-    let total_samples = (duration_seconds * sample_rate as f32) as u64;
+    let duration_seconds = duration_beats as f64 * (60.0 / bpm.max(1.0) as f64);
+    let total_samples = (duration_seconds * sample_rate as f64) as u64;
     // Cap synthetic size so we don't burn megabytes for the demo defaults.
     let total_samples = total_samples.min(sample_rate as u64 * 30);
 
@@ -485,7 +486,7 @@ fn generate_waveform_preview(name: &str, duration_beats: f32, bpm: f32) -> Wavef
 
     for i in 0..total_samples as usize {
         let t = i as f32 / sample_rate as f32;
-        let v = synth_sample(kind, t, duration_seconds);
+        let v = synth_sample(kind, t, duration_seconds as f32);
         lods.push(v.clamp(-1.0, 1.0));
     }
 
@@ -493,7 +494,7 @@ fn generate_waveform_preview(name: &str, duration_beats: f32, bpm: f32) -> Wavef
         sample_rate,
         channels: 1,
         duration_seconds,
-        total_samples,
+        total_frames: total_samples,
         lods: lods.finalize(),
     }
 }

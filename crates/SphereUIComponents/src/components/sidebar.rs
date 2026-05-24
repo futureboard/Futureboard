@@ -3,13 +3,17 @@
 //! The panel renders a real filesystem-backed TreeView. Root sections mirror
 //! the WebUI Browser categories, while expanded folders are read lazily from
 //! disk through `file_browser.rs`.
+//!
+//! Visual direction: closer to an FL-Studio-style DAW asset browser — dense
+//! rows, clear disclosure arrows, single-click expand on folders, light
+//! depth-indent guides — wrapped in the Futureboard dark theme.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
     div, px, svg, App, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window,
+    ScrollHandle, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::assets;
@@ -17,8 +21,16 @@ use crate::components::file_browser::{BrowserNodeKind, BrowserVisibleNode, FileB
 use crate::theme::Colors;
 
 pub const SIDEBAR_WIDTH: f32 = 272.0;
-const TREE_ROW_HEIGHT: f32 = 26.0;
-const TREE_INDENT: f32 = 14.0;
+/// Compact row height — FL-like density without losing readability.
+const TREE_ROW_HEIGHT: f32 = 22.0;
+/// Per-depth indent. Smaller than a generic file explorer so deep trees
+/// still fit the 272 px sidebar.
+const TREE_INDENT: f32 = 12.0;
+/// Width of the left padding before the disclosure arrow at depth 0.
+const TREE_LEFT_PAD: f32 = 6.0;
+/// Width of the disclosure arrow column. Keeps icons aligned across rows
+/// whether or not the row is expandable.
+const DISCLOSURE_W: f32 = 12.0;
 
 pub type ActivateFileCb = Arc<dyn Fn(&PathBuf, &mut Window, &mut App) + 'static>;
 pub type SelectEntryCb = Arc<dyn Fn(&PathBuf, &mut Window, &mut App) + 'static>;
@@ -66,11 +78,16 @@ impl Render for BrowserDragPreview {
 
 pub fn sidebar(
     state: &FileBrowserState,
+    scroll: ScrollHandle,
     on_toggle: ToggleNodeCb,
     on_select: SelectEntryCb,
     on_activate_file: ActivateFileCb,
 ) -> impl IntoElement {
     let header = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
         .px(px(10.0))
         .py(px(8.0))
         .border_b(px(1.0))
@@ -78,9 +95,15 @@ pub fn sidebar(
         .child(
             div()
                 .text_color(Colors::text_primary())
-                .text_xs()
+                .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::BOLD)
-                .child("Browser"),
+                .child("BROWSER"),
+        )
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(Colors::text_faint())
+                .child(format!("{} items", state.visible_nodes().len())),
         );
 
     let selected_label = state
@@ -95,12 +118,13 @@ pub fn sidebar(
         .items_center()
         .gap(px(6.0))
         .px(px(8.0))
-        .py(px(5.0))
+        .py(px(4.0))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
         .child(
             div()
-                .text_size(px(9.0))
+                .text_size(px(8.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_faint())
                 .child("SEL"),
@@ -132,24 +156,41 @@ pub fn sidebar(
         })
         .collect();
 
+    // Scrollable listing. `overflow_y_scroll()` enables wheel + drag
+    // scrolling; `track_scroll` plugs in our stable `ScrollHandle` so the
+    // custom thumb overlay below can read the live offset / max offset.
+    let scroll_for_thumb = scroll.clone();
+    let listing_scroll = div()
+        .size_full()
+        .id("browser-tree")
+        .overflow_y_scroll()
+        .track_scroll(&scroll)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .px(px(2.0))
+                .py(px(3.0))
+                .children(rows),
+        );
+
+    // Custom scrollbar thumb. Position and size are derived from the
+    // ScrollHandle's measured bounds — one frame behind, but the wheel
+    // event will retrigger render so the thumb stays in sync visually.
+    let thumb = scrollbar_thumb(scroll_for_thumb);
+
     let listing = div()
         .flex_1()
         .min_h_0()
-        .id("browser-tree")
-        .overflow_y_scroll()
-        .flex_col()
-        .px(px(4.0))
-        .py(px(4.0))
-        .children(rows);
+        .relative()
+        .child(listing_scroll)
+        .child(thumb);
 
-    let error_banner = state.error.as_ref().map(|e| {
-        div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .text_size(px(9.0))
-            .text_color(Colors::status_error())
-            .child(format!("Error: {}", e))
-    });
+    // Per-directory errors render as inline rows inside the tree
+    // (`placeholder_row` in file_browser.rs). No top-level error banner
+    // is needed now that the browser has no single "current_dir".
+    let error_banner: Option<gpui::AnyElement> = None;
 
     div()
         .flex()
@@ -177,25 +218,35 @@ fn tree_row(
     let path_for_select = node.path.clone();
     let path_for_activate = node.path.clone();
     let path_for_toggle = node.path.clone();
-    let path_for_disclosure = node.path.clone();
     let label = node.label.clone();
     let expandable = node.expandable;
     let expanded = node.expanded;
     let selected = node.selected;
     let is_section = node.kind == BrowserNodeKind::Section;
-    let is_folder = node.kind == BrowserNodeKind::Folder || node.kind == BrowserNodeKind::Section;
+    // Sections are *categories*, not filesystem folders. Keep the two
+    // concepts visually and behaviorally separate.
+    let is_folder = node.kind == BrowserNodeKind::Folder;
     let is_file = node.kind == BrowserNodeKind::File;
     let is_audio = node.is_audio();
     let is_midi = node.is_midi();
     let depth = node.depth as f32;
 
-    let bg = if selected {
+    // Uniform row height across all kinds so row boundaries, indent
+    // guides, and the selection bar line up regardless of node type.
+    let row_height = TREE_ROW_HEIGHT;
+
+    // Sections never paint a selection background — they are toggle-only
+    // category headers, not selectable assets. This avoids the "merged
+    // / wrong highlight" effect when clicking a section.
+    let bg = if selected && !is_section {
         Colors::accent_soft()
+    } else if is_section {
+        gpui::rgba(0xFFFFFF06).into()
     } else {
         gpui::transparent_black().into()
     };
 
-    let text_color = if selected {
+    let text_color = if selected && !is_section {
         Colors::text_primary()
     } else if is_section {
         Colors::text_secondary()
@@ -205,15 +256,15 @@ fn tree_row(
         Colors::text_faint()
     };
 
-    let icon_path = if is_folder {
+    let icon_path = if is_section || is_folder {
         assets::ICON_FOLDER_PATH
     } else {
         assets::ICON_FILE_PATH
     };
 
-    let icon_color = if selected {
+    let icon_color = if is_section {
         Colors::accent_primary()
-    } else if is_section {
+    } else if selected {
         Colors::accent_primary()
     } else if is_folder {
         Colors::text_muted()
@@ -225,49 +276,74 @@ fn tree_row(
         Colors::text_faint()
     };
 
-    let disclosure_id = id.clone();
-    let disclosure_toggle = on_toggle.clone();
-    let mut disclosure = div()
+    // Depth indent guides — thin vertical bars at each parent level, so the
+    // user can scan the hierarchy at a glance. Skipped for section/depth-0
+    // rows (they own the visual heading).
+    let mut indent_guides = Vec::new();
+    if depth > 0.0 {
+        for level in 0..(node.depth) {
+            let x = TREE_LEFT_PAD + (level as f32) * TREE_INDENT + DISCLOSURE_W * 0.5;
+            indent_guides.push(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .bottom(px(0.0))
+                    .left(px(x))
+                    .w(px(1.0))
+                    .bg(gpui::rgba(0xFFFFFF0A)),
+            );
+        }
+    }
+
+    // Disclosure cell is rendered for every row so file and folder labels
+    // line up. Only expandable rows get a visible arrow.
+    let disclosure = div()
         .flex()
         .items_center()
         .justify_center()
-        .w(px(12.0))
+        .w(px(DISCLOSURE_W))
         .h_full()
-        .rounded_sm()
-        .id(("browser-disclosure", index))
         .child(disclosure_icon(expandable, expanded));
-    if expandable {
-        disclosure = disclosure
-            .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(Colors::surface_hover()))
-            .on_click(move |_, w, cx| {
-                disclosure_toggle(&(disclosure_id.clone(), path_for_disclosure.clone()), w, cx);
-            });
-    }
+
+    let row_label_size = if is_section { 10.0 } else { 11.0 };
+    let label_weight = if is_section {
+        gpui::FontWeight::BOLD
+    } else if is_folder {
+        gpui::FontWeight::MEDIUM
+    } else {
+        gpui::FontWeight::NORMAL
+    };
+
+    // Section labels render uppercased to match DAW tree conventions; file /
+    // folder labels keep their original casing.
+    let display_label = if is_section {
+        label.to_uppercase()
+    } else {
+        label.clone()
+    };
 
     let mut row = div()
         .relative()
         .flex()
         .flex_row()
         .items_center()
-        .h(px(TREE_ROW_HEIGHT))
+        .h(px(row_height))
         .w_full()
-        .gap(px(4.0))
-        .pl(px(6.0 + depth * TREE_INDENT))
+        .gap(px(3.0))
+        .pl(px(TREE_LEFT_PAD + depth * TREE_INDENT))
         .pr(px(6.0))
-        .rounded_sm()
         .bg(bg)
         .id(("browser-tree-row", index))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_hover()))
-        .child(if selected {
+        .children(indent_guides)
+        .child(if selected && !is_section {
             div()
                 .absolute()
                 .left(px(0.0))
-                .top(px(4.0))
-                .bottom(px(4.0))
+                .top(px(3.0))
+                .bottom(px(3.0))
                 .w(px(2.0))
-                .rounded_full()
                 .bg(Colors::accent_primary())
                 .into_any_element()
         } else {
@@ -287,14 +363,10 @@ fn tree_row(
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .truncate()
-                .text_size(px(11.0))
-                .font_weight(if is_section {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
+                .text_size(px(row_label_size))
+                .font_weight(label_weight)
                 .text_color(text_color)
-                .child(label.clone()),
+                .child(display_label),
         )
         .children(node.error.as_ref().map(|_| {
             div()
@@ -303,20 +375,33 @@ fn tree_row(
                 .child("unavailable")
         }));
 
-    row = row.on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| {
-        if let Some(path) = path_for_select.as_ref() {
-            on_select(path, w, cx);
-        }
-    });
-
+    // Click semantics, by node kind:
+    //   - Section: toggle expand only. Never mutates `state.selected` —
+    //     a category header is not a selectable asset, and selecting it
+    //     would paint the section row with `accent_soft` on top of its
+    //     existing band, producing the "merged highlight" artifact.
+    //   - Folder: select + toggle expand on a single click (FL-style).
+    //   - File:   select on single click; double-click on audio/MIDI
+    //             imports it onto the timeline.
+    let toggle_for_click = on_toggle.clone();
+    let toggle_id = id.clone();
+    let toggle_path = path_for_toggle.clone();
+    let select_path = path_for_select.clone();
     row = row.on_click(move |event, w, cx| {
-        if expandable {
-            if event.click_count() >= 2 || is_section {
-                on_toggle(&(id.clone(), path_for_toggle.clone()), w, cx);
+        if is_section {
+            if expandable {
+                toggle_for_click(&(toggle_id.clone(), toggle_path.clone()), w, cx);
             }
+            return;
+        }
+        if let Some(p) = select_path.as_ref() {
+            on_select(p, w, cx);
+        }
+        if expandable {
+            toggle_for_click(&(toggle_id.clone(), toggle_path.clone()), w, cx);
         } else if is_file && event.click_count() >= 2 && (is_audio || is_midi) {
-            if let Some(path) = path_for_activate.as_ref() {
-                on_activate_file(path, w, cx);
+            if let Some(p) = path_for_activate.as_ref() {
+                on_activate_file(p, w, cx);
             }
         }
     });
@@ -341,6 +426,39 @@ fn tree_row(
     row
 }
 
+/// Render a subtle vertical scrollbar thumb on the right edge of the
+/// scroll viewport. The thumb is sized as `(viewport_h / content_h)` and
+/// positioned as `(-offset_y / content_h)` — reading the values that
+/// `track_scroll` populated during the previous paint. When the content
+/// fits, the thumb is hidden.
+fn scrollbar_thumb(scroll: ScrollHandle) -> impl IntoElement {
+    let viewport_h: f32 = scroll.bounds().size.height.into();
+    let max_y: f32 = scroll.max_offset().height.into();
+    let raw_y: f32 = scroll.offset().y.into();
+    let offset_y: f32 = -raw_y;
+
+    if viewport_h <= 0.0 || max_y <= 0.5 {
+        return div().w(px(0.0)).h(px(0.0)).into_any_element();
+    }
+
+    let content_h = viewport_h + max_y;
+    let min_thumb = 24.0_f32;
+    let thumb_h = ((viewport_h / content_h) * viewport_h).max(min_thumb);
+    let track_room = (viewport_h - thumb_h).max(0.0);
+    let progress = (offset_y / max_y).clamp(0.0, 1.0);
+    let thumb_top = progress * track_room;
+
+    div()
+        .absolute()
+        .top(px(thumb_top))
+        .right(px(2.0))
+        .w(px(4.0))
+        .h(px(thumb_h))
+        .rounded_full()
+        .bg(gpui::rgba(0xFFFFFF33))
+        .into_any_element()
+}
+
 fn disclosure_icon(expandable: bool, expanded: bool) -> impl IntoElement {
     if expandable {
         let icon_path = if expanded {
@@ -350,12 +468,12 @@ fn disclosure_icon(expandable: bool, expanded: bool) -> impl IntoElement {
         };
         svg()
             .path(icon_path)
-            .w(px(10.0))
-            .h(px(10.0))
-            .text_color(Colors::text_faint())
+            .w(px(9.0))
+            .h(px(9.0))
+            .text_color(Colors::text_muted())
             .into_any_element()
     } else {
-        div().w(px(10.0)).h(px(10.0)).into_any_element()
+        div().w(px(9.0)).h(px(9.0)).into_any_element()
     }
 }
 

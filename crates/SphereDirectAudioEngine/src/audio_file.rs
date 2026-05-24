@@ -9,8 +9,9 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::error::SphereAudioError;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -28,6 +29,55 @@ pub struct AudioFileBuffer {
     pub frames: usize,
     /// Interleaved PCM samples, normalised to `−1.0 … 1.0`.
     pub samples: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFileFormat {
+    Wav,
+    Mp3,
+    Flac,
+    Ogg,
+    Aiff,
+    Unknown,
+}
+
+impl AudioFileFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Mp3 => "mp3",
+            Self::Flac => "flac",
+            Self::Ogg => "ogg",
+            Self::Aiff => "aiff",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioFileInfo {
+    pub path: PathBuf,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub total_frames: u64,
+    pub duration_seconds: f64,
+    pub format: AudioFileFormat,
+}
+
+pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereAudioError> {
+    let path = path.as_ref();
+    let format = audio_file_format(path);
+    match format {
+        AudioFileFormat::Wav => probe_wav_file(path, format),
+        AudioFileFormat::Mp3
+        | AudioFileFormat::Flac
+        | AudioFileFormat::Ogg
+        | AudioFileFormat::Aiff => probe_via_symphonia(path, format),
+        AudioFileFormat::Unknown => Err(SphereAudioError::NativeError(format!(
+            "unsupported audio format for '{}'",
+            path.display()
+        ))),
+    }
 }
 
 /// Load an audio file from `path` into a decoded `AudioFileBuffer`.
@@ -53,6 +103,175 @@ pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
 
         other => Err(format!("unsupported native audio format '{other}'")),
     }
+}
+
+fn audio_file_format(path: &Path) -> AudioFileFormat {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "wav" | "wave" => AudioFileFormat::Wav,
+        "mp3" => AudioFileFormat::Mp3,
+        "flac" => AudioFileFormat::Flac,
+        "ogg" | "oga" => AudioFileFormat::Ogg,
+        "aiff" | "aif" => AudioFileFormat::Aiff,
+        _ => AudioFileFormat::Unknown,
+    }
+}
+
+fn probe_wav_file(path: &Path, format: AudioFileFormat) -> Result<AudioFileInfo, SphereAudioError> {
+    let mut file = File::open(path).map_err(|e| {
+        SphereAudioError::NativeError(format!("Cannot open '{}': {e}", path.display()))
+    })?;
+    let (fmt, _data_start, data_len) = read_wav_header(&mut file).map_err(|e| {
+        SphereAudioError::NativeError(format!(
+            "WAV metadata read failed for '{}': {e}",
+            path.display()
+        ))
+    })?;
+    let bytes_per_sample = (fmt.bits_per_sample / 8) as u64;
+    let bytes_per_frame = fmt.channels as u64 * bytes_per_sample;
+    if bytes_per_frame == 0 || fmt.sample_rate == 0 {
+        return Err(SphereAudioError::NativeError(format!(
+            "invalid WAV metadata for '{}'",
+            path.display()
+        )));
+    }
+    let total_frames = data_len / bytes_per_frame;
+    Ok(AudioFileInfo {
+        path: path.to_path_buf(),
+        sample_rate: fmt.sample_rate,
+        channels: fmt.channels as u16,
+        total_frames,
+        duration_seconds: total_frames as f64 / fmt.sample_rate as f64,
+        format,
+    })
+}
+
+fn probe_via_symphonia(
+    path: &Path,
+    format_kind: AudioFileFormat,
+) -> Result<AudioFileInfo, SphereAudioError> {
+    let src = File::open(path).map_err(|e| {
+        SphereAudioError::NativeError(format!("Cannot open '{}': {e}", path.display()))
+    })?;
+    let mss = MediaSourceStream::new(Box::new(src), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| SphereAudioError::NativeError(format!("Format probe failed: {e}")))?;
+
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .ok_or_else(|| SphereAudioError::NativeError("No decodable audio track found".to_string()))?
+        .clone();
+
+    let sample_rate = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| SphereAudioError::NativeError("Track has no sample rate".to_string()))?;
+    let channels = track
+        .codec_params
+        .channels
+        .map(|c| c.count() as u16)
+        .unwrap_or(1)
+        .max(1);
+
+    let total_frames = match track.codec_params.n_frames {
+        Some(frames) if frames > 0 => frames,
+        _ => decode_frame_count(&mut format, &track, channels)?,
+    };
+
+    if total_frames == 0 {
+        return Err(SphereAudioError::NativeError(format!(
+            "no audio frames decoded for '{}'",
+            path.display()
+        )));
+    }
+
+    Ok(AudioFileInfo {
+        path: path.to_path_buf(),
+        sample_rate,
+        channels,
+        total_frames,
+        duration_seconds: total_frames as f64 / sample_rate as f64,
+        format: format_kind,
+    })
+}
+
+fn decode_frame_count(
+    format: &mut Box<dyn symphonia::core::formats::FormatReader>,
+    track: &symphonia::core::formats::Track,
+    channels: u16,
+) -> Result<u64, SphereAudioError> {
+    let track_id = track.id;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| {
+            SphereAudioError::NativeError(format!("Failed to create codec decoder: {e}"))
+        })?;
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut frames_decoded = 0u64;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymphoniaError::IoError(ref e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                break
+            }
+            Err(SymphoniaError::ResetRequired) => {
+                decoder.reset();
+                continue;
+            }
+            Err(e) => {
+                return Err(SphereAudioError::NativeError(format!(
+                    "Packet read error: {e}"
+                )))
+            }
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(audio_buf_ref) => {
+                if sample_buf.is_none() {
+                    sample_buf = Some(SampleBuffer::<f32>::new(
+                        audio_buf_ref.capacity() as u64,
+                        *audio_buf_ref.spec(),
+                    ));
+                }
+                if let Some(buf) = &mut sample_buf {
+                    buf.copy_interleaved_ref(audio_buf_ref);
+                    frames_decoded += (buf.samples().len() / channels as usize) as u64;
+                }
+            }
+            Err(SymphoniaError::IoError(_)) | Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(e) => return Err(SphereAudioError::NativeError(format!("Decode error: {e}"))),
+        }
+    }
+
+    Ok(frames_decoded)
 }
 
 #[derive(Debug, Clone)]

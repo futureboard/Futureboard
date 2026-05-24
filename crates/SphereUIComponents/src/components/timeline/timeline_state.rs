@@ -827,6 +827,37 @@ impl TimelineState {
         id
     }
 
+    pub fn create_midi_track(&mut self) -> String {
+        let id = self.next_track_id();
+        let palette = [
+            0xC290F0_u32,
+            0x83B8FF,
+            0x7EDB9A,
+            0xF2C96D,
+            0x56C7C9,
+            0xF49AC2,
+        ];
+        let color = gpui::rgb(palette[self.tracks.len() % palette.len()]);
+        let name = format!("MIDI {}", self.tracks.len() + 1);
+        self.tracks.push(TrackState {
+            id: id.clone(),
+            name,
+            track_type: TrackType::Midi,
+            color,
+            volume: volume::db_to_norm(0.0),
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: false,
+            meter_level_l: 0.0,
+            meter_level_r: 0.0,
+            clips: Vec::new(),
+            automation_lanes: Vec::new(),
+        });
+        id
+    }
+
     pub fn selected_audio_track_id(&self) -> Option<String> {
         let selected = self.selection.selected_track_id.as_deref()?;
         self.tracks
@@ -907,6 +938,57 @@ impl TimelineState {
             }
         }
         None
+    }
+
+    pub fn delete_track(&mut self, track_id: &str) {
+        if let Some(index) = self.tracks.iter().position(|track| track.id == track_id) {
+            self.tracks.remove(index);
+            if self.selection.selected_track_id.as_deref() == Some(track_id) {
+                self.selection.selected_track_id = self
+                    .tracks
+                    .get(index.saturating_sub(1))
+                    .map(|t| t.id.clone());
+            }
+            self.selection.selected_clip_ids.clear();
+        }
+    }
+
+    pub fn delete_clip(&mut self, clip_id: &str) {
+        for track in &mut self.tracks {
+            if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+                track.clips.remove(index);
+                self.selection.selected_clip_ids.retain(|id| id != clip_id);
+                self.selection.selected_track_id = Some(track.id.clone());
+                return;
+            }
+        }
+    }
+
+    pub fn duplicate_clip(&mut self, clip_id: &str) {
+        let next_id = self.next_clip_id();
+        let snap_step = if self.snap_to_grid && self.grid_division != SnapDivision::Off {
+            Some((self.grid_division.step_beats(self.beats_per_bar())).max(0.0))
+        } else {
+            None
+        };
+        for track in &mut self.tracks {
+            if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+                let mut duplicate = track.clips[index].clone();
+                duplicate.id = next_id;
+                duplicate.name = format!("{} Copy", duplicate.name);
+                let raw_start = duplicate.start_beat + duplicate.duration_beats;
+                duplicate.start_beat = snap_step
+                    .filter(|step| *step > 0.0)
+                    .map(|step| (raw_start / step).round() * step)
+                    .unwrap_or(raw_start)
+                    .max(0.0);
+                let duplicate_id = duplicate.id.clone();
+                track.clips.insert(index + 1, duplicate);
+                self.selection.selected_track_id = Some(track.id.clone());
+                self.selection.selected_clip_ids = vec![duplicate_id];
+                return;
+            }
+        }
     }
 
     /// Multiplicative zoom around a content-space x anchor. Updates

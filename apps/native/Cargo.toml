@@ -9,6 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 gpui = "0.2.2"
+# Provides `gpui_platform::application()` which wraps
+# `gpui::Application::with_platform(current_platform(false))`. The
+# patched gpui in references/zed no longer exposes
+# `gpui::Application::new()` directly.
+gpui_platform = { path = "../../references/zed/crates/gpui_platform" }
 sphere_ui_components = { path = "../../crates/SphereUIComponents" }
 # Native audio engine. The crate also exposes an N-API surface for Electron;
 # we only use its `native` facade from here (no NAPI calls in this binary).

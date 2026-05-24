@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["references/zed"]
 members = [
     "apps/native",
     "crates/SphereAudioPlugins",
@@ -18,3 +19,6 @@ panic = "abort"
 [profile.release.package.futureboard-core]
 opt-level = "s"
 strip = "debuginfo"
+
+[patch.crates-io]
+gpui = { path = "references/zed/crates/gpui" }

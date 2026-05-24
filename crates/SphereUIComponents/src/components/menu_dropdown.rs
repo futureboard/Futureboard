@@ -30,37 +30,14 @@ use gpui::{
 
 use crate::assets;
 use crate::menu::{Menu, MenuItem, MenuItemKind};
-use crate::theme::Colors;
+use crate::theme::{menu as menu_style, Colors};
 
 pub const TOP_CHROME_HEIGHT: f32 = 36.0;
 
-/// Shared WebUI dropdown metrics:
-/// `min-w-[220px] rounded-[10px] p-1.5`, with `h-7` rows.
-/// Native allows a little more than the shared WebUI max-width so menu-bar
-/// labels and shortcuts do not crowd when rendered with GPUI text metrics.
-const MENU_PANEL_MIN_WIDTH: f32 = 220.0;
-const MENU_PANEL_MAX_WIDTH: f32 = 340.0;
 const MENU_PANEL_EDGE_GAP: f32 = 4.0;
 const MENU_SUBMENU_GAP: f32 = 4.0;
 const MENU_MIN_VISIBLE_HEIGHT: f32 = 80.0;
-const PANEL_PAD_TOP: f32 = 6.0;
-const PANEL_PAD_X: f32 = 6.0;
-const ROW_HEIGHT: f32 = 28.0;
-const ROW_PX: f32 = 8.0;
-/// Pixel space reserved on the left of every row in a panel that contains
-/// at least one checkbox item, so the check icon doesn't shift the label
-/// of neighbouring non-checkbox items. Panels with no checkboxes don't
-/// reserve this space at all.
-const CHECK_SLOT_W: f32 = 14.0;
-const ICON_SIZE: f32 = 12.0;
-const CHEVRON_SIZE: f32 = 12.0;
-const LABEL_TEXT_SIZE: f32 = 12.0;
-const SHORTCUT_TEXT_SIZE: f32 = 11.0;
-
-/// Vertical room each item type occupies inside a panel. Matches the
-/// `flex flex-col gap-px p-1.5` layout used by [`panel_view`].
-const SEPARATOR_HEIGHT: f32 = 9.0; // my(4) + 1 px line + my(4)
-const ITEM_GAP: f32 = 1.0;
+const SEPARATOR_HEIGHT: f32 = menu_style::SEPARATOR_MARGIN_Y * 2.0 + 1.0;
 
 pub type CommandCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 pub type CloseCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
@@ -174,7 +151,7 @@ fn submenu_left(parent_left: f32, parent_width: f32, child_width: f32, viewport_
 /// top edge, accounting for panel padding, item gaps, and the smaller
 /// height of separator rows.
 fn trigger_top_offset(items: &[MenuItem], trigger_index: usize) -> f32 {
-    let mut y = PANEL_PAD_TOP;
+    let mut y = menu_style::PANEL_PAD;
     for (i, item) in items.iter().enumerate() {
         if i == trigger_index {
             break;
@@ -184,9 +161,9 @@ fn trigger_top_offset(items: &[MenuItem], trigger_index: usize) -> f32 {
         }
         let h = match item.kind {
             MenuItemKind::Separator => SEPARATOR_HEIGHT,
-            _ => ROW_HEIGHT,
+            _ => menu_style::ROW_HEIGHT,
         };
-        y += h + ITEM_GAP;
+        y += h + menu_style::ITEM_GAP;
     }
     y
 }
@@ -195,7 +172,7 @@ fn panel_width_for_items(items: &[MenuItem]) -> f32 {
     let has_check = items
         .iter()
         .any(|it| it.visible && it.kind == MenuItemKind::Checkbox);
-    let mut width: f32 = MENU_PANEL_MIN_WIDTH;
+    let mut width: f32 = menu_style::PANEL_MIN_WIDTH;
 
     for item in items.iter().filter(|it| it.visible) {
         if item.kind == MenuItemKind::Separator {
@@ -204,14 +181,18 @@ fn panel_width_for_items(items: &[MenuItem]) -> f32 {
 
         let label_chars = item.label.as_deref().unwrap_or_default().chars().count() as f32;
         let shortcut_chars = item.shortcut.as_deref().unwrap_or_default().chars().count() as f32;
-        let left_slot = if has_check { CHECK_SLOT_W + 8.0 } else { 0.0 };
+        let left_slot = if has_check {
+            menu_style::CHECK_SLOT_W + 6.0
+        } else {
+            0.0
+        };
         let submenu_slot = if item.kind == MenuItemKind::Submenu {
-            CHEVRON_SIZE + 8.0
+            menu_style::CHEVRON_SIZE + 8.0
         } else {
             0.0
         };
         let shortcut_slot = if shortcut_chars > 0.0 {
-            16.0 + shortcut_chars * 6.5
+            14.0 + shortcut_chars * 6.0
         } else {
             0.0
         };
@@ -219,9 +200,9 @@ fn panel_width_for_items(items: &[MenuItem]) -> f32 {
         // Approximate Inter UI text width. GPUI rows do not currently
         // auto-size popovers from text contents, so this preserves the WebUI
         // content-driven feel without making the panel a hard narrow width.
-        let label_slot = label_chars * 6.7;
-        let needed = PANEL_PAD_X * 2.0
-            + ROW_PX * 2.0
+        let label_slot = label_chars * 6.1;
+        let needed = menu_style::PANEL_PAD * 2.0
+            + menu_style::ROW_PAD_X * 2.0
             + left_slot
             + label_slot
             + shortcut_slot
@@ -229,7 +210,7 @@ fn panel_width_for_items(items: &[MenuItem]) -> f32 {
         width = width.max(needed);
     }
 
-    width.clamp(MENU_PANEL_MIN_WIDTH, MENU_PANEL_MAX_WIDTH)
+    width.clamp(menu_style::PANEL_MIN_WIDTH, menu_style::PANEL_MAX_WIDTH)
 }
 
 fn panel_shadow() -> Vec<gpui::BoxShadow> {
@@ -293,7 +274,7 @@ fn panel_view(
         .flex()
         .flex_col()
         .gap(px(1.0))
-        .p(px(PANEL_PAD_X))
+        .p(px(menu_style::PANEL_PAD))
         .rounded_lg()
         .bg(Colors::surface_panel())
         .border(px(1.0))
@@ -305,7 +286,10 @@ fn panel_view(
 }
 
 fn separator() -> impl IntoElement {
-    div().my(px(4.0)).h(px(1.0)).bg(Colors::border_subtle())
+    div()
+        .my(px(menu_style::SEPARATOR_MARGIN_Y))
+        .h(px(1.0))
+        .bg(Colors::border_subtle())
 }
 
 fn menu_item_row(
@@ -355,14 +339,14 @@ fn menu_item_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .w(px(CHECK_SLOT_W))
-                .h(px(ROW_HEIGHT))
+                .w(px(menu_style::CHECK_SLOT_W))
+                .h(px(menu_style::ROW_HEIGHT))
                 .flex_none()
                 .child(if is_checked {
                     svg()
                         .path(assets::ICON_CHECK_PATH)
-                        .w(px(ICON_SIZE))
-                        .h(px(ICON_SIZE))
+                        .w(px(menu_style::ICON_SIZE))
+                        .h(px(menu_style::ICON_SIZE))
                         .text_color(Colors::accent_primary())
                         .into_any_element()
                 } else {
@@ -387,10 +371,11 @@ fn menu_item_row(
         div()
             .flex_1()
             .min_w(px(0.0))
-            .h(px(ROW_HEIGHT))
+            .h(px(menu_style::ROW_HEIGHT))
             .flex()
             .items_center()
-            .text_size(px(LABEL_TEXT_SIZE))
+            .truncate()
+            .text_size(px(menu_style::LABEL_TEXT_SIZE))
             .text_color(text_color)
             .child(label),
     );
@@ -406,8 +391,8 @@ fn menu_item_row(
     if let Some(sc) = shortcut {
         right = right.child(
             div()
-                .text_size(px(SHORTCUT_TEXT_SIZE))
-                .h(px(ROW_HEIGHT))
+                .text_size(px(menu_style::META_TEXT_SIZE))
+                .h(px(menu_style::ROW_HEIGHT))
                 .flex()
                 .items_center()
                 .text_color(shortcut_color)
@@ -418,8 +403,8 @@ fn menu_item_row(
         right = right.child(
             svg()
                 .path(assets::ICON_CHEVRON_RIGHT_PATH)
-                .w(px(CHEVRON_SIZE))
-                .h(px(CHEVRON_SIZE))
+                .w(px(menu_style::CHEVRON_SIZE))
+                .h(px(menu_style::CHEVRON_SIZE))
                 .text_color(Colors::text_faint()),
         );
     }
@@ -430,11 +415,11 @@ fn menu_item_row(
         .flex_row()
         .items_center()
         .justify_between()
-        .h(px(ROW_HEIGHT))
+        .h(px(menu_style::ROW_HEIGHT))
         .w_full()
-        .px(px(ROW_PX))
+        .px(px(menu_style::ROW_PAD_X))
         .rounded_md()
-        .text_size(px(LABEL_TEXT_SIZE))
+        .text_size(px(menu_style::LABEL_TEXT_SIZE))
         .id(("menu-item", depth * 10_000 + index))
         .child(left)
         .child(right);

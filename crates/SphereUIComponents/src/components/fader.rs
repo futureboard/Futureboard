@@ -1,17 +1,29 @@
 //! Vertical normalized fader used by the mixer channel strips.
 //!
-//! Same drag pattern as [`super::slider`] — start a drag on mouse-down,
-//! receive value updates via `on_drag_move`, never on plain click. The visible
-//! geometry (rail, ticks, thumb) matches the Web/Electron mixer fader.
+//! Drag pattern matches [`super::slider`] — start a drag on mouse-down,
+//! receive value updates via `on_drag_move`, never on plain click.
+//!
+//! The rail/scale/thumb geometry now uses `h_full` instead of a hard pixel
+//! height: the parent (mixer fader area) is the flex_1 slot inside the channel
+//! strip, so resizing the bottom panel makes the fader travel grow/shrink with
+//! the remaining space. Thumb position uses a flex-spacer pair sized
+//! proportionally to `norm`, so the thumb stays anchored on the rail at any
+//! container height. Tick labels and rail ticks use `top(relative(pct))`,
+//! which lays out as a fraction of parent height.
 
 use gpui::{
-    div, px, rgba, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    div, px, relative, rgba, App, AppContext, DragMoveEvent, Empty, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
 
+/// Minimum recommended rail travel height. The fader will still render at
+/// smaller heights, but below this the dB labels start to crowd.
 pub const FADER_TRACK_HEIGHT: f32 = 130.0;
 pub const FADER_THUMB_HEIGHT: f32 = 10.0;
-pub const FADER_USABLE: f32 = FADER_TRACK_HEIGHT - FADER_THUMB_HEIGHT;
+const RAIL_CENTER_X: f32 = 12.0;
+const RAIL_W: f32 = 2.0;
+const THUMB_W: f32 = 22.0;
+const ACCENT_LINE_H: f32 = 2.0;
 
 #[derive(Clone, Debug)]
 pub struct FaderDrag {
@@ -24,10 +36,8 @@ impl Render for FaderDrag {
     }
 }
 
-/// dB tick marks. Used by [`db_scale_column`] and [`fader_center_column`] so
-/// the scale tape lines up exactly with the fader's `0…-60 dB → norm 1…0`
-/// mapping. Note this is the *visual* scale; the underlying `volume` value is
-/// the linear normalized fader position.
+/// dB tick marks. Used by [`db_scale_column`] and the fader rail so the scale
+/// tape lines up with the fader's `0…-60 dB → norm 1…0` mapping.
 pub const SCALE_MARKS: [(f32, &str); 7] = [
     (0.0, "0"),
     (-6.0, "6"),
@@ -38,29 +48,25 @@ pub const SCALE_MARKS: [(f32, &str); 7] = [
     (-54.0, "∞"),
 ];
 
-/// Center Y of a dB mark inside the rail. The dB→thumb mapping is approximate
-/// (the fader thumb position is driven by `norm` directly, not dB) but matches
-/// the Web mixer's visual scale.
-pub fn db_to_center_y(db: f32) -> f32 {
+/// Fraction down from the top of the rail for a dB mark (0.0 = top, 1.0 = bot).
+fn db_to_top_fraction(db: f32) -> f32 {
     let t = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-    (1.0 - t) * FADER_USABLE + FADER_THUMB_HEIGHT / 2.0
+    1.0 - t
 }
 
-/// Convert a normalized fader value to the thumb's `top` y inside the rail.
-pub fn norm_to_thumb_top(norm: f32) -> f32 {
-    (1.0 - norm.clamp(0.0, 1.0)) * FADER_USABLE
-}
-
+/// dB scale column — uses `h_full` so it stretches with the strip's flex_1
+/// fader slot. Labels are anchored via fractional `top` positions; a small
+/// negative `mt` centers each ~7px label vertically on its tick.
 pub fn db_scale_column() -> gpui::Div {
-    let mut col = div().relative().w(px(15.0)).h(px(FADER_TRACK_HEIGHT));
+    let mut col = div().relative().w(px(15.0)).h_full();
     for &(db, label) in SCALE_MARKS.iter() {
-        let cy = db_to_center_y(db);
-        let top = (cy - 3.5).max(0.0);
+        let pct = db_to_top_fraction(db);
         col = col.child(
             div()
                 .absolute()
-                .top(px(top))
+                .top(relative(pct))
                 .right(px(0.0))
+                .mt(-px(4.0))
                 .text_size(px(7.5))
                 .text_color(if db == 0.0 {
                     rgba(0xFFFFFF59_u32)
@@ -76,44 +82,40 @@ pub fn db_scale_column() -> gpui::Div {
 /// Render the vertical rail + ticks + thumb at `value_norm`.
 ///
 /// Geometry contract:
-/// * rail column is 24 px wide; the rail centerline lives at x = 12 px.
+/// * column is 24 px wide; rail centerline at x = 12 px.
 /// * the rail itself is 2 px wide and inset so its center sits on x = 12.
 /// * the thumb is 22 px wide and centered on x = 12 (`left = 1`).
-/// * tick marks straddle x = 12.
-fn fader_rail(thumb_top: f32, accent: gpui::Rgba) -> gpui::Div {
-    let rail_center_x = 12.0_f32;
-    let rail_w = 2.0_f32;
-    let thumb_w = 22.0_f32;
-    let thumb_left = rail_center_x - thumb_w / 2.0;
-    let accent_line_h = 2.0_f32;
+/// * ticks straddle x = 12.
+/// * column uses `h_full` and the thumb position is driven by a flex-spacer
+///   pair so the thumb tracks the rail at any container height.
+fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
+    let value = value_norm.clamp(0.0, 1.0);
+    let thumb_left = RAIL_CENTER_X - THUMB_W / 2.0;
 
-    let mut col = div()
-        .relative()
-        .w(px(24.0))
-        .h(px(FADER_TRACK_HEIGHT))
-        // Rail — recessed dark line aligned to the centerline.
-        .child(
-            div()
-                .absolute()
-                .top(px(FADER_THUMB_HEIGHT / 2.0))
-                .left(px(rail_center_x - rail_w / 2.0))
-                .w(px(rail_w))
-                .h(px(FADER_USABLE))
-                .bg(rgba(0xFFFFFF14_u32))
-                .border(px(1.0))
-                .border_color(rgba(0x00000038_u32))
-                .rounded_full(),
-        );
+    // Background rail: stretches from thumb_h/2 inset top to thumb_h/2 inset
+    // bottom, so the thumb's travel never visually leaves the rail.
+    let mut col = div().relative().w(px(24.0)).h_full().child(
+        div()
+            .absolute()
+            .top(px(FADER_THUMB_HEIGHT / 2.0))
+            .bottom(px(FADER_THUMB_HEIGHT / 2.0))
+            .left(px(RAIL_CENTER_X - RAIL_W / 2.0))
+            .w(px(RAIL_W))
+            .bg(rgba(0xFFFFFF14_u32))
+            .border(px(1.0))
+            .border_color(rgba(0x00000038_u32))
+            .rounded_full(),
+    );
 
-    // Tick marks centered on the rail centerline.
+    // Tick marks at fractional positions on the rail.
     for &(db, _) in SCALE_MARKS.iter() {
-        let cy = db_to_center_y(db);
+        let pct = db_to_top_fraction(db);
         let w = if db == 0.0 { 14.0_f32 } else { 9.0_f32 };
-        let left = rail_center_x - w / 2.0;
+        let left = RAIL_CENTER_X - w / 2.0;
         col = col.child(
             div()
                 .absolute()
-                .top(px(cy))
+                .top(relative(pct))
                 .left(px(left))
                 .h(px(1.0))
                 .w(px(w))
@@ -125,42 +127,62 @@ fn fader_rail(thumb_top: f32, accent: gpui::Rgba) -> gpui::Div {
         );
     }
 
-    // Thumb — centered on the rail, with a crisp accent line through the cap
-    // anchored on the value position.
+    // Thumb — positioned via a flex-basis spacer pair.
+    //
+    // Geometry trick: both spacers use `flex_basis(relative(...))` summing to
+    // 1.0 of the parent height. Adding the 10 px thumb overflows by exactly
+    // 10 px, and the default flex_shrink:1 then shrinks the two spacers in
+    // proportion to their basis. That gives:
+    //   top = (1 - norm) * (H - 10)
+    //   thumb = 10
+    //   bot = norm * (H - 10)
+    // so the thumb's center lands at `(1 - norm) * (H - 10) + 5`, which is
+    // exactly the rail's usable range from `thumb_h/2` to `H - thumb_h/2`.
     let mut thumb_accent = accent;
     thumb_accent.a = 0.9;
+
+    let top_basis = (1.0 - value).clamp(0.0, 1.0);
+    let bot_basis = value.clamp(0.0, 1.0);
 
     col.child(
         div()
             .absolute()
-            .top(px(thumb_top))
+            .top(px(0.0))
+            .bottom(px(0.0))
             .left(px(thumb_left))
-            .w(px(thumb_w))
-            .h(px(FADER_THUMB_HEIGHT))
-            .rounded_sm()
-            .bg(rgba(0x1F262FFF_u32))
-            .border(px(1.0))
-            .border_color(rgba(0xFFFFFF66_u32))
-            // Top highlight band.
+            .w(px(THUMB_W))
+            .flex()
+            .flex_col()
+            .child(div().flex_basis(relative(top_basis)))
             .child(
                 div()
-                    .absolute()
-                    .top(px(1.0))
-                    .left(px(1.0))
-                    .right(px(1.0))
-                    .h(px(1.0))
-                    .bg(rgba(0xFFFFFF26_u32)),
+                    .flex_none()
+                    .h(px(FADER_THUMB_HEIGHT))
+                    .rounded_sm()
+                    .bg(rgba(0x1F262FFF_u32))
+                    .border(px(1.0))
+                    .border_color(rgba(0xFFFFFF66_u32))
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(1.0))
+                            .left(px(1.0))
+                            .right(px(1.0))
+                            .h(px(1.0))
+                            .bg(rgba(0xFFFFFF26_u32)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px((FADER_THUMB_HEIGHT - ACCENT_LINE_H) / 2.0))
+                            .left(px(2.0))
+                            .right(px(2.0))
+                            .h(px(ACCENT_LINE_H))
+                            .bg(thumb_accent),
+                    ),
             )
-            // Accent stripe through the cap, exactly centered on the thumb.
-            .child(
-                div()
-                    .absolute()
-                    .top(px((FADER_THUMB_HEIGHT - accent_line_h) / 2.0))
-                    .left(px(2.0))
-                    .right(px(2.0))
-                    .h(px(accent_line_h))
-                    .bg(thumb_accent),
-            ),
+            .child(div().flex_basis(relative(bot_basis))),
     )
 }
 
@@ -201,7 +223,9 @@ pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) ->
         )
 }
 
-/// Render a vertical fader and wire drag updates.
+/// Render a vertical fader and wire drag updates. Uses `h_full` — the parent
+/// must constrain height (e.g. via flex_1) so the rail/thumb scale with the
+/// available channel-strip slot.
 pub fn fader(
     id: impl Into<gpui::SharedString>,
     value_norm: f32,
@@ -211,20 +235,19 @@ pub fn fader(
     let id_str: gpui::SharedString = id.into();
     let id_string = id_str.to_string();
     let value = value_norm.clamp(0.0, 1.0);
-    let thumb_top = norm_to_thumb_top(value);
 
     div()
         .id(gpui::ElementId::Name(id_str.clone()))
-        // Hit area: the full rail width + a margin so users can wander
+        // Hit area: rail width + horizontal slack so users can wander
         // horizontally without losing the drag.
         .w(px(28.0))
-        .h(px(FADER_TRACK_HEIGHT))
+        .h_full()
         .relative()
         .cursor(gpui::CursorStyle::ResizeUpDown)
         .flex()
         .flex_row()
         .justify_center()
-        .child(fader_rail(thumb_top, accent))
+        .child(fader_rail(value, accent))
         .on_drag(
             FaderDrag {
                 id: id_string.clone(),

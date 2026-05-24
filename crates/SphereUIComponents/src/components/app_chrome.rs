@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
-    Window, WindowControlArea,
+    div, px, rgba, svg, App, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea,
 };
 
 use crate::assets;
@@ -15,6 +16,14 @@ use crate::theme::Colors;
 /// align itself under the clicked label.
 pub type MenuOpenCb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
 pub type ChromeActionCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
+pub type ProjectOpenCb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
+
+#[derive(Clone)]
+pub struct ProjectChromeState {
+    pub name: String,
+    pub is_dirty: bool,
+    pub on_open_project_menu: ProjectOpenCb,
+}
 
 #[derive(Clone)]
 pub struct TransportChromeState {
@@ -62,7 +71,10 @@ fn menu_area(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoE
         .children(manifest.menus.iter().enumerate().map(|(i, menu)| {
             let is_open = open_id_owned.as_deref() == Some(menu.id.as_str());
             let menu_id = menu.id.clone();
+            let hover_menu_id = menu.id.clone();
             let cb = on_open_menu.clone();
+            let hover_cb = on_open_menu.clone();
+            let can_hover_switch = open_id_owned.is_some() && !is_open;
             let (bg, fg) = if is_open {
                 (Colors::surface_hover(), Colors::text_primary())
             } else {
@@ -88,31 +100,50 @@ fn menu_area(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoE
                     let click_x: f32 = event.position.x.into();
                     cb(&(menu_id.clone(), click_x), w, cx);
                 })
+                .when(can_hover_switch, |this| {
+                    this.on_hover(move |hovered, window, cx| {
+                        if *hovered {
+                            let x: f32 = window.mouse_position().x.into();
+                            hover_cb(&(hover_menu_id.clone(), x), window, cx);
+                        }
+                    })
+                })
                 .occlude()
                 .child(menu.label.clone())
         }))
 }
 
-fn project_title() -> impl IntoElement {
+fn project_title(state: ProjectChromeState) -> impl IntoElement {
+    let on_open = state.on_open_project_menu.clone();
+    let status = if state.is_dirty { "Unsaved" } else { "Saved" };
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(4.0))
-        .px(px(6.0))
+        .h(px(28.0))
+        .px(px(7.0))
+        .rounded_md()
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_hover()))
+        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+            let x: f32 = event.position.x.into();
+            on_open(&x, window, cx);
+        })
+        .occlude()
         .child(
             div()
                 .text_color(Colors::text_secondary())
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::BOLD)
-                .child("Untitled Project"),
+                .child(state.name),
         )
         .child(
             div()
                 .text_color(Colors::text_muted())
                 .text_size(px(8.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .child("Saved"),
+                .child(status),
         )
 }
 
@@ -472,7 +503,7 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
                 "-",
                 px(32.0),
                 px(32.0),
-                px(12.0),
+                px(16.0),
                 Colors::text_muted(),
             )
             .window_control_area(WindowControlArea::Min)
@@ -484,7 +515,7 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
                 max_fallback,
                 px(32.0),
                 px(32.0),
-                px(12.0),
+                px(16.0),
                 Colors::text_muted(),
             )
             .window_control_area(WindowControlArea::Max)
@@ -496,7 +527,7 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
                 "X",
                 px(32.0),
                 px(32.0),
-                px(12.0),
+                px(16.0),
                 Colors::text_muted(),
             )
             .window_control_area(WindowControlArea::Close)
@@ -510,6 +541,7 @@ pub fn app_chrome(
     window: &gpui::Window,
     open_menu_id: Option<&str>,
     on_open_menu: MenuOpenCb,
+    project: ProjectChromeState,
     transport: TransportChromeState,
 ) -> impl IntoElement {
     div()
@@ -539,7 +571,7 @@ pub fn app_chrome(
         // ── Left: menus + project ─────────────────────────────────────────────
         .child(menu_area(open_menu_id, on_open_menu))
         .child(divider())
-        .child(project_title())
+        .child(project_title(project))
         // ── Drag region spacer ────────────────────────────────────────────────
         // Carry both drag mechanisms on the spacer too — Windows reads
         // the WindowControlArea, Linux/macOS reads the on_mouse_down.

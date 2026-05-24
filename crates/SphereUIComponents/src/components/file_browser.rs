@@ -206,6 +206,13 @@ impl FileBrowserState {
         out
     }
 
+    /// Count of visible rows. Currently delegates to `visible_nodes()`;
+    /// a streaming implementation could avoid the allocation if this
+    /// ever becomes hot.
+    pub fn visible_node_count(&self) -> usize {
+        self.visible_nodes().len()
+    }
+
     /// Flatten the tree into one row per visible node, driven entirely by
     /// the in-memory cache. No filesystem access happens here.
     pub fn visible_nodes(&self) -> Vec<BrowserVisibleNode> {

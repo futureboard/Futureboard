@@ -31,7 +31,10 @@ pub struct WaveformPeak {
 
 impl From<EnginePeak> for WaveformPeak {
     fn from(p: EnginePeak) -> Self {
-        Self { min: p.min, max: p.max }
+        Self {
+            min: p.min,
+            max: p.max,
+        }
     }
 }
 

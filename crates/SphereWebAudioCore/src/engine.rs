@@ -5,13 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
-
 use crate::commands::{CommandResult, EngineCommand};
 use crate::devices::{self, ProcessContext};
 use crate::events::{EngineEvent, EventQueue};
+use crate::graph::AudioGraph;
 use crate::ids::TrackId;
 use crate::mixer::MixerTrack;
-use crate::graph::AudioGraph;
 use crate::transport::{PlayState, Transport};
 
 /// Engine configuration.
@@ -245,8 +244,7 @@ impl DspEngine {
                 let len_before = self.tracks.len();
                 self.tracks.retain(|t| t.id != track_id);
                 if self.tracks.len() < len_before {
-                    self.events
-                        .push(EngineEvent::TrackRemoved { track_id });
+                    self.events.push(EngineEvent::TrackRemoved { track_id });
                     CommandResult::ok()
                 } else {
                     CommandResult::error(
@@ -260,21 +258,17 @@ impl DspEngine {
                     t.volume = volume.clamp(0.0, 4.0);
                 })
             }
-            EngineCommand::SetTrackPan { track_id, pan } => {
-                self.with_track_mut(&track_id, |t| {
-                    t.pan = pan.clamp(-1.0, 1.0);
-                })
-            }
+            EngineCommand::SetTrackPan { track_id, pan } => self.with_track_mut(&track_id, |t| {
+                t.pan = pan.clamp(-1.0, 1.0);
+            }),
             EngineCommand::SetTrackMute { track_id, muted } => {
                 self.with_track_mut(&track_id, |t| {
                     t.muted = muted;
                 })
             }
-            EngineCommand::SetTrackSolo { track_id, solo } => {
-                self.with_track_mut(&track_id, |t| {
-                    t.solo = solo;
-                })
-            }
+            EngineCommand::SetTrackSolo { track_id, solo } => self.with_track_mut(&track_id, |t| {
+                t.solo = solo;
+            }),
 
             // ── Devices ──────────────────────────────────────
             EngineCommand::AddInsertDevice {
@@ -423,10 +417,7 @@ impl DspEngine {
                 f(track);
                 CommandResult::ok()
             }
-            None => CommandResult::error(
-                "INVALID_TRACK_ID",
-                format!("Track {} not found", id),
-            ),
+            None => CommandResult::error("INVALID_TRACK_ID", format!("Track {} not found", id)),
         }
     }
 }
@@ -470,12 +461,16 @@ mod tests {
         assert!(matches!(r, CommandResult::Ok { .. }));
 
         let events = engine.drain_events();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, EngineEvent::PlaybackStarted)));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, EngineEvent::PlaybackStopped)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::PlaybackStarted))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::PlaybackStopped))
+        );
     }
 
     #[test]

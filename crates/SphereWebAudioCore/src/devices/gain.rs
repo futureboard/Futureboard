@@ -75,7 +75,8 @@ mod tests {
         let mut dev = GainDevice::new();
         let mut buf = AudioBuffer::new(2, 4);
         buf.channel_mut(0).copy_from_slice(&[1.0, 0.5, -0.5, -1.0]);
-        buf.channel_mut(1).copy_from_slice(&[0.5, 0.25, -0.25, -0.5]);
+        buf.channel_mut(1)
+            .copy_from_slice(&[0.5, 0.25, -0.25, -0.5]);
 
         let transport = crate::transport::Transport::new(44100.0, 120.0);
         let ctx = ProcessContext {

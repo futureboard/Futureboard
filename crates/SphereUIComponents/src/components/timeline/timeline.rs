@@ -9,6 +9,7 @@ use crate::components::timeline::timeline_state::{
 use crate::components::timeline::track_list::track_list;
 use crate::components::timeline::waveform_cache;
 use crate::theme::Colors;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, svg, AppContext, Context, Empty, ExternalPaths, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollDelta, StatefulInteractiveElement, Styled, Window,
@@ -42,7 +43,19 @@ pub struct Timeline {
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
+    on_context_menu: Option<TimelineContextMenuCb>,
 }
+
+#[derive(Clone, Debug)]
+pub enum TimelineContextTarget {
+    TimelineEmpty,
+    TrackHeader(String),
+    Clip(String),
+}
+
+pub type TimelineContextMenuCb = std::sync::Arc<
+    dyn Fn(&(TimelineContextTarget, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+>;
 
 #[derive(Clone, Debug)]
 struct ScrollbarDrag {
@@ -72,6 +85,7 @@ impl Timeline {
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             pan_last_position: None,
+            on_context_menu: None,
         }
     }
 
@@ -86,7 +100,12 @@ impl Timeline {
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             pan_last_position: None,
+            on_context_menu: None,
         }
+    }
+
+    pub fn set_context_menu_callback(&mut self, callback: Option<TimelineContextMenuCb>) {
+        self.on_context_menu = callback;
     }
 
     fn timeline_content_width(&self) -> f32 {
@@ -273,6 +292,7 @@ impl Timeline {
 
 impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _tl_scope = crate::perf::PerfScope::enter("Timeline");
         let (viewport_w, viewport_h, (scroll_max_x, scroll_max_y)) = self.scroll_geometry(window);
         self.state.update_viewport_size(viewport_w, viewport_h);
         self.state.clamp_scroll(scroll_max_x, scroll_max_y);
@@ -280,6 +300,7 @@ impl Render for Timeline {
         if scrolling {
             cx.notify();
         }
+        crate::perf::count("clips", self.state.tracks.iter().map(|t| t.clips.len() as u64).sum::<u64>());
 
         let on_select_track = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.select_track(track_id);
@@ -509,6 +530,39 @@ impl Render for Timeline {
             std::sync::Arc::new(on_zoom_in);
         let on_zoom_out: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(on_zoom_out);
+        let on_timeline_context = self.on_context_menu.clone();
+        let on_track_context_menu = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |(track_id, x, y): &(String, f32, f32),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    cb(
+                        &(TimelineContextTarget::TrackHeader(track_id.clone()), *x, *y),
+                        window,
+                        cx,
+                    );
+                },
+            )
+                as std::sync::Arc<
+                    dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+                >
+        });
+        let on_clip_context_menu = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |(clip_id, x, y): &(String, f32, f32),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    cb(
+                        &(TimelineContextTarget::Clip(clip_id.clone()), *x, *y),
+                        window,
+                        cx,
+                    );
+                },
+            )
+                as std::sync::Arc<
+                    dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+                >
+        });
 
         let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
             on_select_track: on_select_track.clone(),
@@ -518,6 +572,7 @@ impl Render for Timeline {
             on_toggle_input: on_toggle_input.clone(),
             on_delete_track: on_delete_track.clone(),
             on_volume_change: on_volume_change.clone(),
+            on_context_menu: on_track_context_menu.clone(),
         };
 
         let state = &self.state;
@@ -707,6 +762,13 @@ impl Render for Timeline {
             .on_drag_move::<ClipDragItem>(on_clip_drag_move)
             .on_drop::<ClipDragItem>(on_clip_dropped)
             .on_mouse_down(gpui::MouseButton::Middle, on_middle_pan_start)
+            .when_some(on_timeline_context, |this, cb| {
+                this.on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    cb(&(TimelineContextTarget::TimelineEmpty, x, y), window, cx);
+                })
+            })
             .on_mouse_move(on_middle_pan_move)
             .on_mouse_up(gpui::MouseButton::Middle, on_middle_pan_end)
             .on_mouse_up_out(gpui::MouseButton::Middle, on_middle_pan_end_out)
@@ -726,6 +788,8 @@ impl Render for Timeline {
                 on_select_track.clone(),
                 on_select_clip.clone(),
                 on_add_clip.clone(),
+                on_track_context_menu.clone(),
+                on_clip_context_menu.clone(),
             )))
             // 3. Playhead Overlay (spanning both ruler and tracks)
             .child(

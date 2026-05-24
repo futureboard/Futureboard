@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    div, px, svg, App, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, Window,
+    div, px, svg, uniform_list, App, AppContext, Empty, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled,
+    UniformListScrollHandle, Window,
 };
 
 use crate::assets;
@@ -35,6 +36,8 @@ const DISCLOSURE_W: f32 = 12.0;
 pub type ActivateFileCb = Arc<dyn Fn(&PathBuf, &mut Window, &mut App) + 'static>;
 pub type SelectEntryCb = Arc<dyn Fn(&PathBuf, &mut Window, &mut App) + 'static>;
 pub type ToggleNodeCb = Arc<dyn Fn(&(String, Option<PathBuf>), &mut Window, &mut App) + 'static>;
+pub type BrowserContextCb =
+    Arc<dyn Fn(&(Option<PathBuf>, f32, f32), &mut Window, &mut App) + 'static>;
 
 #[derive(Clone, Debug)]
 pub struct BrowserDragItem {
@@ -78,10 +81,11 @@ impl Render for BrowserDragPreview {
 
 pub fn sidebar(
     state: &FileBrowserState,
-    scroll: ScrollHandle,
+    scroll: UniformListScrollHandle,
     on_toggle: ToggleNodeCb,
     on_select: SelectEntryCb,
     on_activate_file: ActivateFileCb,
+    on_context_menu: BrowserContextCb,
 ) -> impl IntoElement {
     let header = div()
         .flex()
@@ -103,7 +107,7 @@ pub fn sidebar(
             div()
                 .text_size(px(9.0))
                 .text_color(Colors::text_faint())
-                .child(format!("{} items", state.visible_nodes().len())),
+                .child(format!("{} items", state.visible_node_count())),
         );
 
     let selected_label = state
@@ -140,44 +144,58 @@ pub fn sidebar(
                 .child(truncate_path(&selected_label, 42)),
         );
 
-    let nodes = state.visible_nodes();
-    let rows: Vec<gpui::AnyElement> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, node)| {
-            tree_row(
-                i,
-                node,
-                on_toggle.clone(),
-                on_select.clone(),
-                on_activate_file.clone(),
-            )
-            .into_any_element()
-        })
-        .collect();
+    // ── Row virtualization ──────────────────────────────────────────
+    // GPUI's `uniform_list` only constructs elements for the visible
+    // index range, then lays them out at a fixed item height. With
+    // hundreds of expanded browser nodes, this is the difference
+    // between O(N) per-frame allocation/layout and O(visible_rows).
+    //
+    // The render closure is `'static + Fn`, so `nodes` and every
+    // callback must be `'static`. We share them via `Arc` clones —
+    // `Arc::clone` is one atomic increment, far cheaper than
+    // re-allocating each row each frame.
+    let nodes = Arc::new(state.visible_nodes());
+    let count = nodes.len();
+    crate::perf::count("browser_rows", count as u64);
+    let scroll_for_thumb = scroll.0.borrow().base_handle.clone();
+    let on_toggle_l = on_toggle.clone();
+    let on_select_l = on_select.clone();
+    let on_activate_l = on_activate_file.clone();
+    let on_context_l = on_context_menu.clone();
+    let nodes_for_list = nodes.clone();
 
-    // Scrollable listing. `overflow_y_scroll()` enables wheel + drag
-    // scrolling; `track_scroll` plugs in our stable `ScrollHandle` so the
-    // custom thumb overlay below can read the live offset / max offset.
-    let scroll_for_thumb = scroll.clone();
-    let listing_scroll = div()
-        .size_full()
-        .id("browser-tree")
-        .overflow_y_scroll()
-        .track_scroll(&scroll)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .px(px(2.0))
-                .py(px(3.0))
-                .children(rows),
-        );
+    let listing_scroll = uniform_list(
+        "browser-tree",
+        count,
+        move |range, _window, _cx| {
+            let nodes = nodes_for_list.clone();
+            let on_toggle = on_toggle_l.clone();
+            let on_select = on_select_l.clone();
+            let on_activate = on_activate_l.clone();
+            let on_context = on_context_l.clone();
+            range
+                .map(|i| {
+                    tree_row(
+                        i,
+                        &nodes[i],
+                        on_toggle.clone(),
+                        on_select.clone(),
+                        on_activate.clone(),
+                        on_context.clone(),
+                    )
+                    .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .track_scroll(&scroll)
+    .size_full()
+    .px(px(2.0))
+    .py(px(3.0));
 
-    // Custom scrollbar thumb. Position and size are derived from the
-    // ScrollHandle's measured bounds — one frame behind, but the wheel
-    // event will retrigger render so the thumb stays in sync visually.
+    // Custom scrollbar thumb. Reads through the uniform list's
+    // base scroll handle so it tracks the same offset GPUI is using
+    // internally.
     let thumb = scrollbar_thumb(scroll_for_thumb);
 
     let listing = div()
@@ -212,12 +230,14 @@ fn tree_row(
     on_toggle: ToggleNodeCb,
     on_select: SelectEntryCb,
     on_activate_file: ActivateFileCb,
+    on_context_menu: BrowserContextCb,
 ) -> impl IntoElement {
     let id = node.id.clone();
     let path = node.path.clone();
     let path_for_select = node.path.clone();
     let path_for_activate = node.path.clone();
     let path_for_toggle = node.path.clone();
+    let path_for_context = node.path.clone();
     let label = node.label.clone();
     let expandable = node.expandable;
     let expanded = node.expanded;
@@ -406,6 +426,15 @@ fn tree_row(
         }
     });
 
+    row = row.on_mouse_down(
+        gpui::MouseButton::Right,
+        move |event: &gpui::MouseDownEvent, window, cx| {
+            let x: f32 = event.position.x.into();
+            let y: f32 = event.position.y.into();
+            on_context_menu(&(path_for_context.clone(), x, y), window, cx);
+        },
+    );
+
     if is_audio {
         let drag_label = label.clone();
         if let Some(path) = path {
@@ -433,7 +462,7 @@ fn tree_row(
 /// fits, the thumb is hidden.
 fn scrollbar_thumb(scroll: ScrollHandle) -> impl IntoElement {
     let viewport_h: f32 = scroll.bounds().size.height.into();
-    let max_y: f32 = scroll.max_offset().height.into();
+    let max_y: f32 = scroll.max_offset().y.into();
     let raw_y: f32 = scroll.offset().y.into();
     let offset_y: f32 = -raw_y;
 

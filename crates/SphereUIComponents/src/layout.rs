@@ -1,6 +1,6 @@
 use gpui::{
     div, px, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollHandle, Styled, Timer, Window,
+    KeyDownEvent, ParentElement, Render, Styled, UniformListScrollHandle, Window,
 };
 
 use std::{
@@ -11,8 +11,11 @@ use std::{
 };
 
 use crate::components;
+use crate::components::context_menu::ContextMenuEntry;
 use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
+use crate::components::project_switcher::ProjectSwitcherState;
+use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{
     self, ClipType, TimelineState, TrackState, TrackType,
 };
@@ -29,6 +32,8 @@ use DAUx::types::{
 /// Production builds must keep this `false` — the real app starts empty.
 const USE_DEMO_PROJECT: bool = false;
 
+// Frame pacing details live in tasks/native/frame-pacing.md.
+
 /// Top-menu open state. `open_menu_id` is the manifest menu id currently
 /// showing its dropdown; `anchor_x` is the click x position used to align
 /// the dropdown panel underneath the clicked label.
@@ -42,6 +47,24 @@ pub struct MenuBarUiState {
     pub submenu_path: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum OpenPopover {
+    Context {
+        target: ContextTarget,
+        x: f32,
+        y: f32,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ContextTarget {
+    TimelineEmpty,
+    Track(String),
+    Clip(String),
+    Browser(Option<PathBuf>),
+    Mixer(String),
+}
+
 pub struct StudioLayout {
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
@@ -50,8 +73,10 @@ pub struct StudioLayout {
     /// Stable scroll handle for the browser tree. Lives on the layout
     /// (not in `FileBrowserState`) so the state stays free of gpui types
     /// and so the handle survives across renders.
-    browser_scroll: ScrollHandle,
+    browser_scroll: UniformListScrollHandle,
     menu_bar: MenuBarUiState,
+    project_switcher: ProjectSwitcherState,
+    open_popover: Option<OpenPopover>,
     audio_engine: Option<DAUx::AudioEngine>,
     audio_running: bool,
     audio_last_error: Option<String>,
@@ -67,6 +92,77 @@ pub struct StudioLayout {
     /// Menu/key command IDs we've already logged as unsupported. Keeps
     /// the unified dispatcher quiet after the first miss per command.
     logged_unsupported_commands: HashSet<String>,
+    /// Repaint-rate diagnostics. Ticks once per `Render`, smoothed
+    /// EMA frame time, exposed in the status bar.
+    frame_diag: FrameDiagnostics,
+}
+
+/// Rolling UI repaint diagnostics.
+///
+/// Counts how often `Render` runs and how far apart those calls are
+/// — i.e. effective UI frame cadence, not unconditional display
+/// refresh. When the app is idle (nothing dirty), `Render` is not
+/// called and the readout stops updating; the `idle_after` check
+/// in `hud` decays the displayed FPS to 0.
+struct FrameDiagnostics {
+    last_frame: Option<Instant>,
+    last_log: Instant,
+    frame_count: u64,
+    /// Exponentially-smoothed frame-to-frame interval, in ms.
+    frame_time_ema_ms: f32,
+    fps: f32,
+    /// Most recent raw frame interval, in ms.
+    frame_ms: f32,
+    log_to_stderr: bool,
+}
+
+impl FrameDiagnostics {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_frame: None,
+            last_log: now,
+            frame_count: 0,
+            frame_time_ema_ms: 16.7,
+            fps: 60.0,
+            frame_ms: 16.7,
+            log_to_stderr: std::env::var_os("FUTUREBOARD_FRAME_DIAG").is_some(),
+        }
+    }
+
+    fn tick(&mut self, reason: &str) {
+        let now = Instant::now();
+        if let Some(prev) = self.last_frame {
+            let dt = now.duration_since(prev).as_secs_f32() * 1000.0;
+            // Drop absurd intervals: first frame after a long idle,
+            // or a debugger pause. Anything > 1 s is not a repaint
+            // cadence sample.
+            if dt > 0.0 && dt < 1000.0 {
+                let alpha = 0.12;
+                self.frame_time_ema_ms = self.frame_time_ema_ms * (1.0 - alpha) + dt * alpha;
+                self.frame_ms = dt;
+                self.fps = if self.frame_time_ema_ms > 0.0 {
+                    1000.0 / self.frame_time_ema_ms
+                } else {
+                    0.0
+                };
+            }
+        }
+        self.last_frame = Some(now);
+        self.frame_count = self.frame_count.saturating_add(1);
+
+        if self.log_to_stderr && now.duration_since(self.last_log) >= Duration::from_secs(1) {
+            eprintln!(
+                "[frame] {:.1} fps  {:.2} ms (last {:.2} ms)  reason={}  frames={}",
+                self.fps, self.frame_time_ema_ms, self.frame_ms, reason, self.frame_count
+            );
+            self.last_log = now;
+        }
+    }
+
+    fn hud(&self) -> String {
+        format!("{:.0} fps  {:.1} ms", self.fps, self.frame_time_ema_ms)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -161,8 +257,10 @@ impl StudioLayout {
             bottom_panel_state: BottomPanelState::default(),
             timeline,
             file_browser: FileBrowserState::default(),
-            browser_scroll: ScrollHandle::new(),
+            browser_scroll: UniformListScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
+            project_switcher: ProjectSwitcherState::default(),
+            open_popover: None,
             audio_engine,
             audio_running: false,
             audio_last_error: None,
@@ -172,6 +270,7 @@ impl StudioLayout {
             last_engine_sync: Instant::now(),
             focus_handle: cx.focus_handle(),
             logged_unsupported_commands: HashSet::new(),
+            frame_diag: FrameDiagnostics::new(),
         }
     }
 }
@@ -184,8 +283,9 @@ impl StudioLayout {
         // buffers), but the UI never needs to repaint faster than the
         // display, so we cap polling at the refresh interval and let
         // `interpolated_playhead_beat` smooth between engine snapshots.
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| loop {
-            Timer::after(Duration::from_millis(16)).await;
+            executor.timer(Duration::from_millis(16)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.poll_native_audio(cx) {
                     cx.notify();
@@ -196,6 +296,7 @@ impl StudioLayout {
     }
 
     fn poll_native_audio(&mut self, cx: &mut Context<Self>) -> bool {
+        let _s = crate::perf::PerfScope::enter("poll_native_audio");
         let Some(engine) = self.audio_engine.as_ref() else {
             return false;
         };
@@ -477,6 +578,8 @@ impl StudioLayout {
     /// and then ignored — this is the contract that lets future menu
     /// entries appear in the chrome without crashing the dispatcher.
     fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        let normalized = normalize_command_id(command_id);
+        let command_id = normalized.as_str();
         if let Some(command) = transport_command_from_id(command_id) {
             self.dispatch_transport_command(command, cx);
             return;
@@ -489,6 +592,20 @@ impl StudioLayout {
             "view:zoom-out" => self.zoom_timeline_by(cx, 0.8),
             "view:reset-zoom" => self.reset_timeline_zoom(cx),
 
+            // ── Project / track / edit commands available in native shell ─
+            "project:new" => self.reset_project(cx),
+            "track:add-audio" => self.add_audio_track(cx),
+            "track:add-midi" => self.add_midi_track(cx),
+            "track:delete" => self.delete_selected_track(cx),
+            "track:mute" => self.toggle_selected_track_mute(cx),
+            "track:solo" => self.toggle_selected_track_solo(cx),
+            "track:arm" => self.toggle_selected_track_arm(cx),
+            "mixer:reset-volume" => self.reset_selected_track_volume(cx),
+            "mixer:reset-pan" => self.reset_selected_track_pan(cx),
+            "edit:delete" | "clip:delete" => self.delete_selected_clip_or_track(cx),
+            "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
+            "project:switch-current" => {}
+
             // ── Transport extras (shared menu IDs) ───────────────────────
             "transport:go-to-end" => {
                 let end = self.project_end_beat(cx);
@@ -498,13 +615,269 @@ impl StudioLayout {
             "transport:fast-forward" => self.nudge_playhead_bars(cx, 1.0),
 
             other => {
-                if self
-                    .logged_unsupported_commands
-                    .insert(other.to_string())
-                {
+                if self.logged_unsupported_commands.insert(other.to_string()) {
                     eprintln!("[command] unsupported in native: {}", other);
                 }
             }
+        }
+    }
+
+    fn reset_project(&mut self, cx: &mut Context<Self>) {
+        self.project_switcher = ProjectSwitcherState::default();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.state = TimelineState::default();
+            cx.notify();
+        });
+    }
+
+    fn add_audio_track(&mut self, cx: &mut Context<Self>) {
+        self.project_switcher.current_project.is_dirty = true;
+        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            let id = timeline.state.create_audio_track();
+            timeline.state.select_track(&id);
+            cx.notify();
+        });
+    }
+
+    fn add_midi_track(&mut self, cx: &mut Context<Self>) {
+        self.project_switcher.current_project.is_dirty = true;
+        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            let id = timeline.state.create_midi_track();
+            timeline.state.select_track(&id);
+            cx.notify();
+        });
+    }
+
+    fn delete_selected_track(&mut self, cx: &mut Context<Self>) {
+        self.project_switcher.current_project.is_dirty = true;
+        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline.state.delete_track(&id);
+                cx.notify();
+            }
+        });
+    }
+
+    fn delete_selected_clip_or_track(&mut self, cx: &mut Context<Self>) {
+        self.project_switcher.current_project.is_dirty = true;
+        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
+                timeline.state.delete_clip(&id);
+            } else if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline.state.delete_track(&id);
+            }
+            cx.notify();
+        });
+    }
+
+    fn duplicate_selected_clip(&mut self, cx: &mut Context<Self>) {
+        self.project_switcher.current_project.is_dirty = true;
+        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
+                timeline.state.duplicate_clip(&id);
+                cx.notify();
+            }
+        });
+    }
+
+    fn toggle_selected_track_mute(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline.state.toggle_track_mute(&id);
+                cx.notify();
+            }
+        });
+    }
+
+    fn toggle_selected_track_solo(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline.state.toggle_track_solo(&id);
+                cx.notify();
+            }
+        });
+    }
+
+    fn toggle_selected_track_arm(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline.state.toggle_track_arm(&id);
+                cx.notify();
+            }
+        });
+    }
+
+    fn reset_selected_track_volume(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline
+                    .state
+                    .set_track_volume(&id, timeline_state::volume::db_to_norm(0.0));
+                cx.notify();
+            }
+        });
+    }
+
+    fn reset_selected_track_pan(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline.state.set_track_pan(&id, 0.0);
+                cx.notify();
+            }
+        });
+    }
+
+    fn project_switcher_visible_count(&self) -> usize {
+        1 + self
+            .project_switcher
+            .recent_projects
+            .iter()
+            .filter(|project| !project.is_current)
+            .filter(|project| {
+                let query = self.project_switcher.query.trim().to_lowercase();
+                if query.is_empty() {
+                    return true;
+                }
+                let path = project
+                    .path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                project.name.to_lowercase().contains(&query) || path.contains(&query)
+            })
+            .count()
+    }
+
+    fn handle_project_switcher_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.project_switcher.is_open {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.project_switcher.is_open = false;
+                true
+            }
+            "backspace" => {
+                self.project_switcher.query.pop();
+                self.project_switcher.selected_index = 0;
+                true
+            }
+            "arrow_down" | "down" => {
+                let max = self.project_switcher_visible_count().saturating_sub(1);
+                self.project_switcher.selected_index =
+                    (self.project_switcher.selected_index + 1).min(max);
+                true
+            }
+            "arrow_up" | "up" => {
+                self.project_switcher.selected_index =
+                    self.project_switcher.selected_index.saturating_sub(1);
+                true
+            }
+            "enter" | "numpad_enter" => {
+                if self.project_switcher.selected_index > 0 {
+                    self.dispatch_command_id("project:open-recent", cx);
+                    self.project_switcher.is_open = false;
+                }
+                true
+            }
+            _ => {
+                let no_mods = {
+                    let mods = event.keystroke.modifiers;
+                    !mods.control && !mods.alt && !mods.platform && !mods.function
+                };
+                if no_mods && key.chars().count() == 1 {
+                    self.project_switcher.query.push_str(key);
+                    self.project_switcher.selected_index = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn context_entries(
+        &self,
+        target: &ContextTarget,
+        cx: &mut Context<Self>,
+    ) -> Vec<ContextMenuEntry> {
+        match target {
+            ContextTarget::TimelineEmpty => vec![
+                ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
+                ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
+                ContextMenuEntry::Separator,
+                ContextMenuEntry::item("Paste", "edit:paste").with_shortcut("Ctrl+V"),
+                ContextMenuEntry::Separator,
+                ContextMenuEntry::item("Zoom In", "view:zoom-in"),
+                ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+            ],
+            ContextTarget::Clip(clip_id) => {
+                let exists = self.timeline.read(cx).state.find_clip(clip_id).is_some();
+                vec![
+                    ContextMenuEntry::disabled_item("Rename", "clip:rename"),
+                    ContextMenuEntry::item("Duplicate", "clip:duplicate").with_shortcut("Ctrl+D"),
+                    ContextMenuEntry::danger_item("Delete", "clip:delete"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Split at Playhead", "clip:split-at-playhead"),
+                    ContextMenuEntry::disabled_item(
+                        if exists {
+                            "Reveal in Browser"
+                        } else {
+                            "Clip unavailable"
+                        },
+                        "browser:reveal",
+                    ),
+                ]
+            }
+            ContextTarget::Track(track_id) => {
+                let track = self.timeline.read(cx).state.find_track(track_id).cloned();
+                let (muted, solo, armed) = track
+                    .as_ref()
+                    .map(|t| (t.muted, t.solo, t.armed))
+                    .unwrap_or((false, false, false));
+                vec![
+                    ContextMenuEntry::disabled_item("Rename Track", "track:rename"),
+                    ContextMenuEntry::disabled_item("Duplicate Track", "track:duplicate"),
+                    ContextMenuEntry::danger_item("Delete Track", "track:delete"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::checked_item("Mute", "track:mute", muted),
+                    ContextMenuEntry::checked_item("Solo", "track:solo", solo),
+                    ContextMenuEntry::checked_item("Arm", "track:arm", armed),
+                ]
+            }
+            ContextTarget::Browser(path) => vec![
+                ContextMenuEntry::item("Import to Timeline", "browser:import"),
+                ContextMenuEntry::disabled_item(
+                    if path.is_some() {
+                        "Reveal in Explorer/Finder"
+                    } else {
+                        "No file selected"
+                    },
+                    "browser:reveal",
+                ),
+                ContextMenuEntry::Separator,
+                ContextMenuEntry::item("Refresh", "browser:refresh"),
+            ],
+            ContextTarget::Mixer(_) => vec![
+                ContextMenuEntry::item("Reset Volume", "mixer:reset-volume"),
+                ContextMenuEntry::item("Reset Pan", "mixer:reset-pan"),
+                ContextMenuEntry::Separator,
+                ContextMenuEntry::item("Mute", "track:mute"),
+                ContextMenuEntry::item("Solo", "track:solo"),
+            ],
         }
     }
 
@@ -652,7 +1025,7 @@ impl StudioLayout {
             (_, Some(stats)) if stats.running => "Audio ready".to_string(),
             _ => "Ready".to_string(),
         };
-        let right = self
+        let audio = self
             .audio_stats
             .as_ref()
             .map(|stats| {
@@ -664,7 +1037,27 @@ impl StudioLayout {
                 )
             })
             .unwrap_or_else(|| "Audio offline".to_string());
+        // UI repaint cadence. Idle scenes stop updating when nothing is dirty.
+        let right = format!("{}  •  {}", audio, self.frame_diag.hud());
         (left, right)
+    }
+
+    fn frame_reason(&self) -> &'static str {
+        let playing = self
+            .audio_stats
+            .as_ref()
+            .map(|s| s.transport_playing)
+            .unwrap_or(false);
+        if playing {
+            return "transport";
+        }
+        if self.bottom_panel_state.is_resizing {
+            return "panel-resize";
+        }
+        if self.open_popover.is_some() || self.menu_bar.open_menu_id.is_some() {
+            return "menu";
+        }
+        "idle/interaction"
     }
 
     /// Map a keystroke to a shared menu command ID. Keys mirror the
@@ -815,7 +1208,7 @@ impl StudioLayout {
     /// Build the callback bundle used by the mixer. Every mutation lands in
     /// the same `TimelineState` instance owned by the Timeline entity, so the
     /// TrackHeader and Mixer always read identical values.
-    fn build_mixer_callbacks(&self) -> MixerCallbacks {
+    fn build_mixer_callbacks(&self, owner: Entity<Self>) -> MixerCallbacks {
         let audio_engine = self.audio_engine.clone();
         let timeline_select = self.timeline.clone();
         let on_select_track: std::sync::Arc<
@@ -938,6 +1331,31 @@ impl StudioLayout {
                 );
             }
         });
+        let on_context_menu: std::sync::Arc<
+            dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner;
+            std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), _w, cx| {
+                let track_id = track_id.clone();
+                let x = *x;
+                let y = *y;
+                let _ = this.update(cx, |this, cx| {
+                    let _ = this.timeline.update(cx, |timeline, cx| {
+                        timeline.state.select_track(&track_id);
+                        cx.notify();
+                    });
+                    this.menu_bar.open_menu_id = None;
+                    this.menu_bar.submenu_path.clear();
+                    this.project_switcher.is_open = false;
+                    this.open_popover = Some(OpenPopover::Context {
+                        target: ContextTarget::Mixer(track_id),
+                        x,
+                        y,
+                    });
+                    cx.notify();
+                });
+            })
+        };
 
         MixerCallbacks {
             on_select_track,
@@ -948,12 +1366,26 @@ impl StudioLayout {
             on_toggle_arm,
             on_toggle_input,
             on_master_volume_change,
+            on_context_menu: Some(on_context_menu),
         }
     }
 }
 
 impl Render for StudioLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
+        // Frame pacing tick. See FrameDiagnostics docs — only counts
+        // real repaints, not display refreshes.
+        let reason = self.frame_reason();
+        let reason_static: &'static str = match reason {
+            "transport" => "transport",
+            "panel-resize" => "panel-resize",
+            "menu" => "menu",
+            _ => "idle/interaction",
+        };
+        self.frame_diag.tick(reason);
+        crate::perf::tick_root_frame(reason_static);
+
         let on_tab_click = cx.listener(|this, tab: &components::BottomTab, _window, cx| {
             this.active_bottom_tab = *tab;
             cx.notify();
@@ -997,7 +1429,9 @@ impl Render for StudioLayout {
         };
 
         let panel_state = self.bottom_panel_state;
-        let mixer_callbacks = self.build_mixer_callbacks();
+        let mixer_callbacks = self.build_mixer_callbacks(cx.entity().clone());
+
+        crate::perf::count("tracks", tracks.len() as u64);
 
         // ── File browser callbacks ──────────────────────────────────────
         let on_browser_toggle: std::sync::Arc<
@@ -1086,9 +1520,72 @@ impl Render for StudioLayout {
                 });
             })
         };
+        let on_browser_context: std::sync::Arc<
+            dyn Fn(&(Option<PathBuf>, f32, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |(path, x, y): &(Option<PathBuf>, f32, f32), _w, cx| {
+                let path = path.clone();
+                let x = *x;
+                let y = *y;
+                let _ = this.update(cx, |this, cx| {
+                    this.menu_bar.open_menu_id = None;
+                    this.menu_bar.submenu_path.clear();
+                    this.project_switcher.is_open = false;
+                    this.open_popover = Some(OpenPopover::Context {
+                        target: ContextTarget::Browser(path),
+                        x,
+                        y,
+                    });
+                    cx.notify();
+                });
+            })
+        };
 
         let file_browser = self.file_browser.clone();
         let browser_scroll = self.browser_scroll.clone();
+
+        let on_timeline_context: components::timeline::timeline::TimelineContextMenuCb = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(
+                move |(target, x, y): &(TimelineContextTarget, f32, f32), _w, cx| {
+                    let target = target.clone();
+                    let x = *x;
+                    let y = *y;
+                    let _ = this.update(cx, |this, cx| {
+                        let context_target = match target {
+                            TimelineContextTarget::TimelineEmpty => ContextTarget::TimelineEmpty,
+                            TimelineContextTarget::TrackHeader(id) => {
+                                let _ = this.timeline.update(cx, |timeline, cx| {
+                                    timeline.state.select_track(&id);
+                                    cx.notify();
+                                });
+                                ContextTarget::Track(id)
+                            }
+                            TimelineContextTarget::Clip(id) => {
+                                let _ = this.timeline.update(cx, |timeline, cx| {
+                                    timeline.state.select_clip(&id);
+                                    cx.notify();
+                                });
+                                ContextTarget::Clip(id)
+                            }
+                        };
+                        this.menu_bar.open_menu_id = None;
+                        this.menu_bar.submenu_path.clear();
+                        this.project_switcher.is_open = false;
+                        this.open_popover = Some(OpenPopover::Context {
+                            target: context_target,
+                            x,
+                            y,
+                        });
+                        cx.notify();
+                    });
+                },
+            )
+        };
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            timeline.set_context_menu_callback(Some(on_timeline_context));
+        });
 
         // ── Top-menu callbacks ─────────────────────────────────────────────
         let on_open_menu: std::sync::Arc<
@@ -1106,6 +1603,8 @@ impl Render for StudioLayout {
                         this.menu_bar.anchor_x = anchor_x;
                     }
                     this.menu_bar.submenu_path.clear();
+                    this.open_popover = None;
+                    this.project_switcher.is_open = false;
                     cx.notify();
                 });
             })
@@ -1148,6 +1647,26 @@ impl Render for StudioLayout {
                 let command = command.clone();
                 let _ = this.update(cx, |this, cx| {
                     this.dispatch_command_id(&command, cx);
+                    this.open_popover = None;
+                    this.project_switcher.is_open = false;
+                    cx.notify();
+                });
+            })
+        };
+        let on_project_open: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |anchor_x: &f32, _w, cx| {
+                let anchor_x = *anchor_x;
+                let _ = this.update(cx, |this, cx| {
+                    this.menu_bar.open_menu_id = None;
+                    this.menu_bar.submenu_path.clear();
+                    this.open_popover = None;
+                    this.project_switcher.is_open = !this.project_switcher.is_open;
+                    this.project_switcher.anchor_x = anchor_x;
+                    if this.project_switcher.is_open {
+                        this.project_switcher.query.clear();
+                        this.project_switcher.selected_index = 0;
+                    }
                     cx.notify();
                 });
             })
@@ -1174,7 +1693,64 @@ impl Render for StudioLayout {
                 )
             })
         });
+        let on_close_popover: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_: &(), _w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.open_popover = None;
+                    this.project_switcher.is_open = false;
+                    cx.notify();
+                });
+            })
+        };
+        let on_popover_command: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |command: &String, _w, cx| {
+                let command = command.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.dispatch_command_id(&command, cx);
+                    this.open_popover = None;
+                    this.project_switcher.is_open = false;
+                    cx.notify();
+                });
+            })
+        };
+        let popover_overlay = if self.project_switcher.is_open {
+            Some(
+                components::project_switcher::project_switcher_popover(
+                    &self.project_switcher,
+                    viewport_width,
+                    viewport_height,
+                    on_popover_command.clone(),
+                    on_close_popover.clone(),
+                )
+                .into_any_element(),
+            )
+        } else {
+            match self.open_popover.clone() {
+                Some(OpenPopover::Context { target, x, y }) => Some(
+                    components::context_menu::context_menu_overlay(
+                        self.context_entries(&target, cx),
+                        x,
+                        y,
+                        viewport_width,
+                        viewport_height,
+                        on_popover_command.clone(),
+                        on_close_popover.clone(),
+                    )
+                    .into_any_element(),
+                ),
+                None => None,
+            }
+        };
         let transport_chrome = self.transport_chrome_state(cx);
+        let project_chrome = components::ProjectChromeState {
+            name: self.project_switcher.current_project.name.clone(),
+            is_dirty: self.project_switcher.current_project.is_dirty,
+            on_open_project_menu: on_project_open,
+        };
         let (status_left, status_right) = self.status_text();
         let shortcut_target = cx.entity().clone();
 
@@ -1183,7 +1759,7 @@ impl Render for StudioLayout {
         // events to focused elements; without this the root div never sees
         // keystrokes even though `shortcut_command` is wired.
         if window.focused(cx).is_none() {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
         let focus_holder = self.focus_handle.clone();
 
@@ -1207,6 +1783,26 @@ impl Render for StudioLayout {
             .bg(Colors::surface_base())
             .font_family(theme::FONT_FAMILY)
             .capture_key_down(move |event, _window, cx| {
+                let handled = shortcut_target.update(cx, |this, cx| {
+                    let handled = this.handle_project_switcher_key(event, cx);
+                    if handled {
+                        cx.notify();
+                    }
+                    handled
+                });
+                if handled {
+                    return;
+                }
+                if event.keystroke.key.as_str() == "escape" {
+                    let _ = shortcut_target.update(cx, |this, cx| {
+                        this.menu_bar.open_menu_id = None;
+                        this.menu_bar.submenu_path.clear();
+                        this.open_popover = None;
+                        this.project_switcher.is_open = false;
+                        cx.notify();
+                    });
+                    return;
+                }
                 if let Some(command_id) = Self::shortcut_command_id(event) {
                     let _ = shortcut_target.update(cx, |this, cx| {
                         this.dispatch_command_id(command_id, cx);
@@ -1219,54 +1815,67 @@ impl Render for StudioLayout {
             // it to register the focus handle. The root's
             // `capture_key_down` still fires for any key while this
             // descendant is focused (capture phase: root → focused).
-            .child(
-                div()
-                    .w(px(0.0))
-                    .h(px(0.0))
-                    .track_focus(&focus_holder),
-            )
-            .child(components::app_chrome(
-                window,
-                open_menu_id.as_deref(),
-                on_open_menu,
-                transport_chrome,
-            ))
+            .child(div().w(px(0.0)).h(px(0.0)).track_focus(&focus_holder))
+            .child({
+                let _s = crate::perf::PerfScope::enter("AppChrome");
+                components::app_chrome(
+                    window,
+                    open_menu_id.as_deref(),
+                    on_open_menu,
+                    project_chrome,
+                    transport_chrome,
+                )
+            })
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(components::sidebar(
-                        &file_browser,
-                        browser_scroll,
-                        on_browser_toggle,
-                        on_browser_select,
-                        on_browser_activate,
-                    ))
+                    .child({
+                        let _s = crate::perf::PerfScope::enter("Sidebar");
+                        components::sidebar(
+                            &file_browser,
+                            browser_scroll,
+                            on_browser_toggle,
+                            on_browser_select,
+                            on_browser_activate,
+                            on_browser_context,
+                        )
+                    })
                     .child(self.timeline.clone())
-                    .child(crate::components::panel::inspector_panel(
-                        &tracks,
-                        selected_track_id.as_deref(),
-                        selected_clip_id.as_deref(),
-                        find_clip_summary(&tracks, selected_clip_id.as_deref()),
-                    )),
+                    .child({
+                        let _s = crate::perf::PerfScope::enter("Inspector");
+                        crate::components::panel::inspector_panel(
+                            &tracks,
+                            selected_track_id.as_deref(),
+                            selected_clip_id.as_deref(),
+                            find_clip_summary(&tracks, selected_clip_id.as_deref()),
+                        )
+                    }),
             )
-            .child(components::bottom_panel(
-                self.active_bottom_tab,
-                panel_state,
-                &tracks,
-                &master,
-                selected_track_id.as_deref(),
-                mixer_callbacks,
-                on_tab_click,
-                on_resize_start,
-                on_resize_move,
-            ))
-            .child(components::status_bar(status_left, status_right))
+            .child({
+                let _s = crate::perf::PerfScope::enter("BottomPanel");
+                components::bottom_panel(
+                    self.active_bottom_tab,
+                    panel_state,
+                    &tracks,
+                    &master,
+                    selected_track_id.as_deref(),
+                    mixer_callbacks,
+                    on_tab_click,
+                    on_resize_start,
+                    on_resize_move,
+                )
+            })
+            .child({
+                let _s = crate::perf::PerfScope::enter("StatusBar");
+                components::status_bar(status_left, status_right)
+            })
             // Dropdown overlay — rendered last so it sits above every other
             // panel. The dropdown's own backdrop captures click-outside.
             .children(dropdown_overlay)
+            .children(popover_overlay)
     }
 }
 
@@ -1366,7 +1975,10 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
 /// these lists creates "imports but never plays" or "looks pending
 /// forever" bugs.
 fn is_supported_audio_ext(ext: &str) -> bool {
-    matches!(ext, "wav" | "wave" | "mp3" | "flac" | "ogg" | "oga" | "aiff" | "aif")
+    matches!(
+        ext,
+        "wav" | "wave" | "mp3" | "flac" | "ogg" | "oga" | "aiff" | "aif"
+    )
 }
 
 /// Resolve a shared menu command ID to a transport action.
@@ -1383,6 +1995,10 @@ fn transport_command_from_id(command_id: &str) -> Option<TransportCommand> {
         "transport:record" => Some(TransportCommand::Record),
         _ => None,
     }
+}
+
+fn normalize_command_id(command_id: &str) -> String {
+    command_id.trim().replace('.', ":").replace('_', "-")
 }
 
 fn track_type_name(track_type: TrackType) -> &'static str {

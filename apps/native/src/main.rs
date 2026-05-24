@@ -16,7 +16,10 @@ fn main() {
     }));
 
     eprintln!("[boot] gpui application starting");
-    gpui::Application::new()
+    // `gpui::Application::new()` was removed in the patched zed/gpui;
+    // use the platform helper crate which picks the right backend
+    // (Windows/macOS/Linux) and wires it into `with_platform`.
+    gpui_platform::application()
         .with_assets(EmbeddedAssets::new())
         .run(app::setup);
     eprintln!("[boot] gpui application exited");

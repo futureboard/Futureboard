@@ -25,12 +25,12 @@ pub fn timeline_ruler(
     on_cycle_grid: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
 ) -> impl IntoElement {
+    let _s = crate::perf::PerfScope::enter("TimelineRuler");
     let on_toggle_snap_clone = on_toggle_snap.clone();
     let on_cycle_grid_clone = on_cycle_grid.clone();
     let on_add_track_clone = on_add_track.clone();
 
-    // Width of the ruler grid area (e.g. window size 1400 - sidebar - header).
-    let ruler_grid_width = 5000.0;
+    let ruler_grid_width = state.viewport.viewport_width.max(1.0);
     let lines = state.get_arrangement_grid_lines(ruler_grid_width);
 
     let on_seek_clone = on_seek.clone();

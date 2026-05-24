@@ -13,9 +13,9 @@ use super::resample::resample_linear;
 
 /// Quality presets — map to OLA grain size.
 /// draft=1024, balanced=2048, high=4096.
-pub const GRAIN_SIZE_DRAFT:    usize = 1024;
+pub const GRAIN_SIZE_DRAFT: usize = 1024;
 pub const GRAIN_SIZE_BALANCED: usize = 2048;
-pub const GRAIN_SIZE_HIGH:     usize = 4096;
+pub const GRAIN_SIZE_HIGH: usize = 4096;
 
 pub fn pitch_shift_draft(input: &[f32], semitones: f32) -> Vec<f32> {
     pitch_shift_with_grain(input, semitones, GRAIN_SIZE_BALANCED)

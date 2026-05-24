@@ -79,7 +79,12 @@ impl MixerTrack {
     }
 
     /// Add a device to the insert chain.
-    pub fn add_device(&mut self, device_id: DeviceId, device: Box<dyn AudioDevice>, index: Option<usize>) {
+    pub fn add_device(
+        &mut self,
+        device_id: DeviceId,
+        device: Box<dyn AudioDevice>,
+        index: Option<usize>,
+    ) {
         match index {
             Some(i) if i < self.inserts.len() => {
                 self.inserts.insert(i, (device_id, device));

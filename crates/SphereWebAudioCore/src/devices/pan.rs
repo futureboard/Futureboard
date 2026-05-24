@@ -106,7 +106,15 @@ mod tests {
         };
         dev.process(&mut buf, &ctx);
         // Hard right: left should be near 0, right should be near 1
-        assert!(buf.channel(0)[0] < 0.01, "Left should be ~0: {}", buf.channel(0)[0]);
-        assert!(buf.channel(1)[0] > 0.99, "Right should be ~1: {}", buf.channel(1)[0]);
+        assert!(
+            buf.channel(0)[0] < 0.01,
+            "Left should be ~0: {}",
+            buf.channel(0)[0]
+        );
+        assert!(
+            buf.channel(1)[0] > 0.99,
+            "Right should be ~1: {}",
+            buf.channel(1)[0]
+        );
     }
 }

@@ -1,5 +1,6 @@
 mod app_chrome;
 mod bottom_panel;
+pub mod context_menu;
 pub mod fader;
 pub mod file_browser;
 mod icon;
@@ -8,12 +9,13 @@ pub mod knob;
 pub mod menu_dropdown;
 pub mod mixer_panel;
 pub mod panel;
+pub mod project_switcher;
 mod sidebar;
 pub mod slider;
 mod status_bar;
 pub mod timeline;
 
-pub use app_chrome::{app_chrome, TransportChromeState};
+pub use app_chrome::{app_chrome, ProjectChromeState, TransportChromeState};
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use fader::fader;
 pub use icon::icon;

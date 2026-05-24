@@ -35,11 +35,11 @@ pub mod transport;
 pub mod wasm_api;
 
 // Re-export primary types for convenience
-pub use engine::{DspEngine, EngineConfig, EngineStatus};
-pub use commands::{EngineCommand, CommandResult};
-pub use events::EngineEvent;
-pub use error::{EngineError, EngineResult};
-pub use ids::{TrackId, ClipId, DeviceId, AssetId, SendId};
-pub use params::ParamValue;
-pub use transport::{Transport, PlayState};
 pub use buffer::AudioBuffer;
+pub use commands::{CommandResult, EngineCommand};
+pub use engine::{DspEngine, EngineConfig, EngineStatus};
+pub use error::{EngineError, EngineResult};
+pub use events::EngineEvent;
+pub use ids::{AssetId, ClipId, DeviceId, SendId, TrackId};
+pub use params::ParamValue;
+pub use transport::{PlayState, Transport};

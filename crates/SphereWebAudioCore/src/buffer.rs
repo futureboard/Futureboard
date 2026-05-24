@@ -175,7 +175,8 @@ mod tests {
     fn apply_gain_works() {
         let mut buf = AudioBuffer::new(2, 4);
         buf.channel_mut(0).copy_from_slice(&[1.0, 0.5, -0.5, -1.0]);
-        buf.channel_mut(1).copy_from_slice(&[0.5, 0.25, -0.25, -0.5]);
+        buf.channel_mut(1)
+            .copy_from_slice(&[0.5, 0.25, -0.25, -0.5]);
         buf.apply_gain(0.5);
         assert_eq!(buf.channel(0), &[0.5, 0.25, -0.25, -0.5]);
         assert_eq!(buf.channel(1), &[0.25, 0.125, -0.125, -0.25]);
@@ -202,7 +203,10 @@ mod tests {
         // At center pan, both channels should get ~0.707
         let l = buf.channel(0)[0];
         let r = buf.channel(1)[0];
-        assert!((l - r).abs() < 0.001, "L={l} R={r} should be equal at center");
+        assert!(
+            (l - r).abs() < 0.001,
+            "L={l} R={r} should be equal at center"
+        );
         assert!((l - 0.707).abs() < 0.01, "Expected ~0.707, got {l}");
     }
 }

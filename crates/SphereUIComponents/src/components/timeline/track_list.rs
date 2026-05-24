@@ -15,8 +15,15 @@ pub fn track_list(
     on_add_clip: std::sync::Arc<
         dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
+    on_track_context_menu: Option<
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
+    on_clip_context_menu: Option<
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
 ) -> impl IntoElement {
-    let grid_width = 5000.0;
+    let _s = crate::perf::PerfScope::enter("TrackList");
+    let grid_width = state.viewport.viewport_width.max(1.0);
     let grid_height = state.viewport.viewport_height.max(TRACK_HEIGHT);
 
     let mut rows = Vec::new();
@@ -38,6 +45,8 @@ pub fn track_list(
                         on_select_track.clone(),
                         on_select_clip.clone(),
                         on_add_clip.clone(),
+                        on_track_context_menu.clone(),
+                        on_clip_context_menu.clone(),
                     )),
             )
             .children(

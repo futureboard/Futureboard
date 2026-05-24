@@ -22,34 +22,35 @@
 //! * Strip internals are a vertical flex with explicit per-section heights;
 //!   only the fader area grows to fill remaining height.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled,
 };
 
 use crate::assets;
-use crate::components::fader::{
-    db_scale_column, db_value_pill, fader as render_fader, FADER_TRACK_HEIGHT,
-};
+use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
 use crate::components::knob::{format_pan_label, knob_bipolar};
 use crate::components::timeline::timeline_state::{volume, MasterBusState, TrackState, TrackType};
-use crate::components::timeline::vu_meter::vu_meter_vertical;
+use crate::components::timeline::vu_meter::vu_meter_vertical_full;
 use crate::theme::Colors;
 
 // ── Section dimensions ─────────────────────────────────────────────────────
 const STRIP_WIDTH: f32 = 88.0;
-/// Minimum height needed to render every section without overlap.
-/// Below this the channel scroll area shows a vertical scrollbar instead of
-/// clipping. Sections sum: header 46 + inserts 56 + sends 56 + pan 80 +
-/// fader_area (pill 18 + rail 130 + pad 14) + buttons 46 + footer 26.
+/// Minimum height for a channel strip. Fixed sections sum to 236; below this
+/// the fader area still renders (it uses `flex_1` and `h_full` internals so
+/// the rail/meter/scale shrink with the slot) but the rail becomes hard to
+/// read. The scroll area shows a vertical scrollbar below this threshold.
+/// Sections: header 40 + inserts 44 + sends 44 + pan 60 + buttons 24 +
+/// footer 22 = 234 + at least ~86 for the fader cluster.
 const STRIP_MIN_HEIGHT: f32 = 320.0;
 
-const SEC_HEADER_H: f32 = 46.0;
-const SEC_INSERTS_H: f32 = 56.0;
-const SEC_SENDS_H: f32 = 56.0;
-const SEC_PAN_H: f32 = 80.0;
-const SEC_BUTTONS_H: f32 = 46.0;
-const SEC_FOOTER_H: f32 = 26.0;
+const SEC_HEADER_H: f32 = 40.0;
+const SEC_INSERTS_H: f32 = 44.0;
+const SEC_SENDS_H: f32 = 44.0;
+const SEC_PAN_H: f32 = 60.0;
+const SEC_BUTTONS_H: f32 = 24.0;
+const SEC_FOOTER_H: f32 = 22.0;
 
 /// Bundle of mixer interactions hooked up from the layout. Closures land in
 /// the same TimelineState mutation methods used by the TrackHeader so the two
@@ -71,6 +72,9 @@ pub struct MixerCallbacks {
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     pub on_master_volume_change:
         std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_context_menu: Option<
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
 }
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
@@ -225,7 +229,7 @@ fn msri_button(
         .flex()
         .items_center()
         .justify_center()
-        .h(px(18.0))
+        .h(px(16.0))
         .flex_1()
         .rounded_sm()
         .text_size(px(9.0))
@@ -277,11 +281,8 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .flex_row()
         .gap(px(2.0))
         .px(px(4.0))
-        .py(px(3.0))
         .h(px(SEC_BUTTONS_H))
         .items_center()
-        .border_t(px(1.0))
-        .border_color(rgba(0xFFFFFF0B_u32))
         .child(msri_button(
             ("mix-m-btn", id_num).into(),
             "M",
@@ -337,7 +338,7 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
         .px(px(5.0))
         .border_b(px(1.0))
         .border_color(rgba(0xFFFFFF0B_u32))
-        .child(div().w(px(2.0)).h(px(24.0)).rounded_full().bg(track.color))
+        .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(track.color))
         .child(
             div()
                 .flex()
@@ -357,7 +358,6 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
                         .flex_row()
                         .items_center()
                         .gap(px(3.0))
-                        .mt(px(1.0))
                         .child(
                             div()
                                 .text_size(px(7.5))
@@ -376,7 +376,7 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
         )
 }
 
-fn inserts_section(track: &TrackState, index: usize) -> impl IntoElement {
+fn inserts_section(track: &TrackState, _index: usize) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -384,11 +384,7 @@ fn inserts_section(track: &TrackState, index: usize) -> impl IntoElement {
         .border_b(px(1.0))
         .border_color(rgba(0xFFFFFF0B_u32))
         .child(section_header("INSERTS", track.color))
-        .child(if index == 0 {
-            insert_row("Pro-Q 4", track.color).into_any_element()
-        } else {
-            empty_slot().into_any_element()
-        })
+        .child(empty_slot())
 }
 
 fn sends_section(track: &TrackState) -> impl IntoElement {
@@ -419,9 +415,10 @@ fn pan_section(
         .flex()
         .flex_col()
         .items_center()
+        .justify_center()
         .gap(px(2.0))
         .h(px(SEC_PAN_H))
-        .py(px(6.0))
+        .py(px(4.0))
         .border_b(px(1.0))
         .border_color(rgba(0xFFFFFF0B_u32))
         .child(knob_bipolar(
@@ -478,6 +475,7 @@ fn fader_area(
         .flex_1()
         .min_h_0()
         .items_center()
+        .w_full()
         .px(px(4.0))
         .pt(px(5.0))
         .pb(px(6.0))
@@ -488,13 +486,15 @@ fn fader_area(
                 .flex()
                 .flex_row()
                 .gap(px(2.0))
-                .h(px(FADER_TRACK_HEIGHT))
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .justify_center()
                 .child(db_scale_column())
                 .child(
                     div()
                         .flex()
                         .flex_row()
-                        .flex_1()
                         .h_full()
                         .items_center()
                         .justify_center()
@@ -505,10 +505,9 @@ fn fader_area(
                             on_vol_change,
                         )),
                 )
-                .child(vu_meter_vertical(
+                .child(vu_meter_vertical_full(
                     track.meter_level_l,
                     track.meter_level_r,
-                    FADER_TRACK_HEIGHT,
                 )),
         )
 }
@@ -564,6 +563,8 @@ fn channel_strip(
         move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
             select_cb(&select_id, w, cx);
         };
+    let context_id = track.id.clone();
+    let on_context = callbacks.on_context_menu.clone();
 
     div()
         .flex()
@@ -577,6 +578,16 @@ fn channel_strip(
         .border_color(border_col)
         .id(("mix-strip", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
+        .when_some(on_context, |this, cb| {
+            this.on_mouse_down(
+                gpui::MouseButton::Right,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    cb(&(context_id.clone(), x, y), window, cx);
+                },
+            )
+        })
         // Top accent line
         .child(div().w_full().h(px(2.0)).bg(track.color))
         .child(strip_header(track, index))
@@ -622,7 +633,7 @@ fn master_strip(
                 .px(px(5.0))
                 .border_b(px(1.0))
                 .border_color(rgba(0xFFFFFF0B_u32))
-                .child(div().w(px(2.0)).h(px(24.0)).rounded_full().bg(accent))
+                .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
                 .child(
                     div()
                         .flex()
@@ -706,6 +717,7 @@ fn master_strip(
                 .flex_1()
                 .min_h_0()
                 .items_center()
+                .w_full()
                 .px(px(4.0))
                 .pt(px(5.0))
                 .pb(px(6.0))
@@ -716,13 +728,15 @@ fn master_strip(
                         .flex()
                         .flex_row()
                         .gap(px(2.0))
-                        .h(px(FADER_TRACK_HEIGHT))
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .justify_center()
                         .child(db_scale_column())
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
-                                .flex_1()
                                 .h_full()
                                 .items_center()
                                 .justify_center()
@@ -733,10 +747,9 @@ fn master_strip(
                                     on_change,
                                 )),
                         )
-                        .child(vu_meter_vertical(
+                        .child(vu_meter_vertical_full(
                             master.meter_level_l,
                             master.meter_level_r,
-                            FADER_TRACK_HEIGHT,
                         )),
                 ),
         )
@@ -747,14 +760,21 @@ fn master_strip(
                 .justify_center()
                 .h(px(SEC_BUTTONS_H))
                 .px(px(4.0))
-                .border_t(px(1.0))
-                .border_color(rgba(0xFFFFFF0B_u32))
                 .child(
                     div()
-                        .text_size(px(8.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(16.0))
+                        .px(px(6.0))
+                        .rounded_sm()
+                        .bg(rgba(0xFFFFFF0A_u32))
+                        .border(px(1.0))
+                        .border_color(rgba(0xFFFFFF17_u32))
+                        .text_size(px(8.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgba(0xFFFFFF38_u32))
-                        .child("master"),
+                        .text_color(rgba(0xDCE8F085_u32))
+                        .child("OUT 1·2"),
                 ),
         )
         .child(strip_footer("Master"))
@@ -768,6 +788,8 @@ pub fn mixer_panel(
     selected_track_id: Option<&str>,
     callbacks: MixerCallbacks,
 ) -> impl IntoElement {
+    let _s = crate::perf::PerfScope::enter("MixerPanel");
+    crate::perf::count("mixer_strips", tracks.len() as u64);
     let accent = Colors::accent_primary();
     let track_count = tracks.len();
     let on_master = callbacks.on_master_volume_change.clone();

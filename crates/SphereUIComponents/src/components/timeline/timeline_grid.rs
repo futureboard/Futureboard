@@ -6,7 +6,9 @@ pub fn timeline_grid(
     grid_width: f32,
     _grid_height: f32,
 ) -> impl IntoElement {
+    let _s = crate::perf::PerfScope::enter("TimelineGrid");
     let lines = state.get_arrangement_grid_lines(grid_width);
+    crate::perf::count("grid_lines", lines.len() as u64);
 
     // Alternating bar shading
     let ppb = state.viewport.pixels_per_second * state.seconds_per_beat();

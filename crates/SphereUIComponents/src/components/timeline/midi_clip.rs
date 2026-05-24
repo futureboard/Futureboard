@@ -2,6 +2,7 @@ use crate::components::timeline::timeline_state::{
     ClipDragItem, ClipState, ClipType, TimelineState, TRACK_HEIGHT,
 };
 use crate::theme::Colors;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, AppContext, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled,
@@ -13,6 +14,9 @@ pub fn midi_clip(
     track_color: gpui::Rgba,
     state: &TimelineState,
     on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_context_menu: Option<
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
 ) -> impl IntoElement {
     let clip_id = clip.id.clone();
     let drag_clip_id = clip.id.clone();
@@ -77,6 +81,7 @@ pub fn midi_clip(
     };
 
     let on_select = on_select_clip.clone();
+    let context_clip_id = clip.id.clone();
 
     div()
         .absolute()
@@ -106,6 +111,16 @@ pub fn midi_clip(
                 on_select(&clip_id, window, cx);
             },
         )
+        .when_some(on_context_menu, |this, cb| {
+            this.on_mouse_down(
+                gpui::MouseButton::Right,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    cb(&(context_clip_id.clone(), x, y), window, cx);
+                },
+            )
+        })
         .on_drag(
             ClipDragItem {
                 clip_id: drag_clip_id,

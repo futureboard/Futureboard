@@ -1,3 +1,4 @@
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled,
@@ -16,6 +17,8 @@ use crate::theme::Colors;
 type TrackCallback = std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
 type VolumeCallback =
     std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
+type TrackContextCallback =
+    std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
 /// Bundle of callbacks the TrackHeader can fire. Keeping them in one struct
 /// keeps the function signature manageable and lets new actions land without
@@ -29,6 +32,7 @@ pub struct TrackHeaderCallbacks {
     pub on_toggle_input: TrackCallback,
     pub on_delete_track: TrackCallback,
     pub on_volume_change: VolumeCallback,
+    pub on_context_menu: Option<TrackContextCallback>,
 }
 
 fn type_badge(kind: TrackType, color: gpui::Rgba) -> impl IntoElement {
@@ -176,6 +180,8 @@ pub fn track_header(
             cb(&(vol_id.clone(), *new_norm), window, cx);
         }
     };
+    let context_id = track_id.clone();
+    let on_context = callbacks.on_context_menu.clone();
 
     div()
         .flex()
@@ -191,6 +197,13 @@ pub fn track_header(
         .border_color(Colors::border_strong())
         .id(("track-header", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_root)
+        .when_some(on_context, |this, cb| {
+            this.on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+                let x: f32 = event.position.x.into();
+                let y: f32 = event.position.y.into();
+                cb(&(context_id.clone(), x, y), window, cx);
+            })
+        })
         // Left accent strip — same column as the track lane stripe
         .child(div().w(px(3.0)).h_full().bg(track.color))
         .child(

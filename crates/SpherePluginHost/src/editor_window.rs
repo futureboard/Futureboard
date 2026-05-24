@@ -1,5 +1,5 @@
-use std::ffi::CString;
 use std::ffi::CStr;
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_ulonglong};
 
 use napi_derive::napi;

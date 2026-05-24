@@ -6,7 +6,7 @@
 use crate::buffer::AudioBuffer;
 use crate::devices::ProcessContext;
 use crate::meters::StereoMeter;
-use crate::mixer::{update_solo_state, MixerTrack};
+use crate::mixer::{MixerTrack, update_solo_state};
 
 /// The audio graph manages track processing order and master output.
 pub struct AudioGraph {

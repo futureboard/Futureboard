@@ -16,6 +16,84 @@ pub fn vu_meter_vertical(level_l: f32, level_r: f32, height: f32) -> impl IntoEl
     vu_meter_sized(level_l, level_r, 5.0, height, 1.0)
 }
 
+/// Full-height variant used by the mixer fader area: the meter stretches to
+/// fill the parent's height, so it scales with the channel strip's flex_1
+/// fader slot. Bars are positioned as a fraction of parent height (`top` /
+/// `h(relative(...))`).
+pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
+    let width = 5.0_f32;
+    let gap = 1.0_f32;
+
+    let draw_bar = |level: f32| {
+        let green_pct = 0.70_f32;
+        let yellow_pct = 0.90_f32;
+
+        let level_n = level.clamp(0.0, 1.0);
+        let green_n = level_n.min(green_pct);
+        let yellow_n = if level_n > green_n {
+            (level_n - green_n).min(yellow_pct - green_pct)
+        } else {
+            0.0
+        };
+        let red_n = if level_n > green_n + yellow_n {
+            level_n - green_n - yellow_n
+        } else {
+            0.0
+        };
+
+        let mut bar = div()
+            .w(px(width))
+            .h_full()
+            .bg(gpui::rgba(0xFFFFFF0D))
+            .rounded_sm()
+            .relative();
+
+        if green_n > 0.0 {
+            bar = bar.child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+                    .h(gpui::relative(green_n))
+                    .bg(Colors::status_success()),
+            );
+        }
+        if yellow_n > 0.0 {
+            bar = bar.child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(gpui::relative(green_n))
+                    .h(gpui::relative(yellow_n))
+                    .bg(Colors::status_warning()),
+            );
+        }
+        if red_n > 0.0 {
+            bar = bar.child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(gpui::relative(green_n + yellow_n))
+                    .h(gpui::relative(red_n))
+                    .bg(Colors::status_error()),
+            );
+        }
+        bar
+    };
+
+    div()
+        .flex()
+        .flex_row()
+        .gap(px(gap))
+        .w(px(width * 2.0 + gap))
+        .h_full()
+        .child(draw_bar(level_l))
+        .child(draw_bar(level_r))
+}
+
 fn vu_meter_sized(
     level_l: f32,
     level_r: f32,

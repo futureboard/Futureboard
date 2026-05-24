@@ -17,7 +17,10 @@ use wasm_bindgen::prelude::*;
 use crate::commands::EngineCommand;
 use crate::dsp::{
     granular::time_stretch_granular,
-    pitch::{pitch_shift_draft, pitch_shift_draft_quality, GRAIN_SIZE_DRAFT, GRAIN_SIZE_BALANCED, GRAIN_SIZE_HIGH},
+    pitch::{
+        GRAIN_SIZE_BALANCED, GRAIN_SIZE_DRAFT, GRAIN_SIZE_HIGH, pitch_shift_draft,
+        pitch_shift_draft_quality,
+    },
     resample::resample_linear,
 };
 use crate::engine::{DspEngine, EngineConfig};
@@ -54,7 +57,11 @@ pub fn process_pitch_mono_quality(input: &[f32], semitones: f32, grain_size: u32
 
 /// Time-stretch with explicit grain size for quality control.
 #[wasm_bindgen]
-pub fn process_time_stretch_mono_quality(input: &[f32], stretch_ratio: f32, grain_size: u32) -> Vec<f32> {
+pub fn process_time_stretch_mono_quality(
+    input: &[f32],
+    stretch_ratio: f32,
+    grain_size: u32,
+) -> Vec<f32> {
     time_stretch_granular(input, stretch_ratio, grain_size as usize)
 }
 
@@ -63,8 +70,8 @@ pub fn process_time_stretch_mono_quality(input: &[f32], stretch_ratio: f32, grai
 #[wasm_bindgen]
 pub fn grain_size_for_quality(quality_index: u32) -> u32 {
     match quality_index {
-        0 => GRAIN_SIZE_DRAFT    as u32,
-        2 => GRAIN_SIZE_HIGH     as u32,
+        0 => GRAIN_SIZE_DRAFT as u32,
+        2 => GRAIN_SIZE_HIGH as u32,
         _ => GRAIN_SIZE_BALANCED as u32,
     }
 }
@@ -124,7 +131,9 @@ impl WasmAudioEngine {
 
     /// Start playback from current position.
     pub fn play(&mut self) {
-        self.inner.handle_command(EngineCommand::Play { position_beat: None });
+        self.inner.handle_command(EngineCommand::Play {
+            position_beat: None,
+        });
     }
 
     /// Pause playback (position is preserved).
@@ -139,7 +148,9 @@ impl WasmAudioEngine {
 
     /// Seek to a beat position.
     pub fn seek_beat(&mut self, beat: f64) {
-        self.inner.handle_command(EngineCommand::SeekBeat { beat: beat.max(0.0) });
+        self.inner.handle_command(EngineCommand::SeekBeat {
+            beat: beat.max(0.0),
+        });
     }
 
     /// Set BPM (clamped to 20–999).
@@ -234,8 +245,12 @@ impl WasmAudioEngine {
             for i in 0..n {
                 let l = output[i * ch].abs();
                 let r = output[i * ch + 1].abs();
-                if l > pl { pl = l; }
-                if r > pr { pr = r; }
+                if l > pl {
+                    pl = l;
+                }
+                if r > pr {
+                    pr = r;
+                }
             }
             // Exponential decay so the meter falls smoothly between calls.
             self.last_peak_l = self.last_peak_l.mul_add(0.85, pl * 0.15);

@@ -97,3 +97,5 @@ Thumbs.db
 
 # Local Claude / agent settings
 .claude/settings.local.json
+
+references

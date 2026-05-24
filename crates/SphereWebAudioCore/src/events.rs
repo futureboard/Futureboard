@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::ids::TrackId;
 use crate::meters::MeterSnapshot;
 
-
 /// Events emitted by the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]

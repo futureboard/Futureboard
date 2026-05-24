@@ -5,6 +5,7 @@ use crate::components::timeline::timeline_state::{
     ClipType, TimelineState, TimelineTool, TrackState, HEADER_WIDTH, TRACK_HEIGHT,
 };
 use crate::theme::Colors;
+use gpui::prelude::FluentBuilder;
 use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
 
 pub fn track_lane(
@@ -15,6 +16,12 @@ pub fn track_lane(
     on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     on_add_clip: std::sync::Arc<
         dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
+    on_track_context_menu: Option<
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
+    on_clip_context_menu: Option<
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
 ) -> impl IntoElement {
     let track_id = track.id.clone();
@@ -49,6 +56,7 @@ pub fn track_lane(
 
     let on_add = on_add_clip.clone();
     let track_id_add = track_id.clone();
+    let track_id_context = track_id.clone();
 
     // Map clips
     let clip_elements: Vec<_> = track
@@ -57,13 +65,26 @@ pub fn track_lane(
         .map(|clip| {
             let track_color = track.color;
             let on_sel_clip = on_select_clip.clone();
+            let on_clip_context = on_clip_context_menu.clone();
             match clip.clip_type {
-                ClipType::Audio { .. } => {
-                    audio_clip(clip, &track.id, track_color, state, on_sel_clip).into_any_element()
-                }
-                ClipType::Midi { .. } => {
-                    midi_clip(clip, &track.id, track_color, state, on_sel_clip).into_any_element()
-                }
+                ClipType::Audio { .. } => audio_clip(
+                    clip,
+                    &track.id,
+                    track_color,
+                    state,
+                    on_sel_clip,
+                    on_clip_context,
+                )
+                .into_any_element(),
+                ClipType::Midi { .. } => midi_clip(
+                    clip,
+                    &track.id,
+                    track_color,
+                    state,
+                    on_sel_clip,
+                    on_clip_context,
+                )
+                .into_any_element(),
             }
         })
         .collect();
@@ -105,5 +126,15 @@ pub fn track_lane(
                 }
             },
         )
+        .when_some(on_track_context_menu, |this, cb| {
+            this.on_mouse_down(
+                gpui::MouseButton::Right,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    cb(&(track_id_context.clone(), x, y), window, cx);
+                },
+            )
+        })
         .children(clip_elements)
 }

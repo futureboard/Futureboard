@@ -18,12 +18,20 @@ use crate::components::context_menu::ContextMenuEntry;
 use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
 use crate::components::project_switcher::ProjectSwitcherState;
+use crate::components::project_wizard::{
+    ProjectTemplate, ProjectWizardCallbacks, ProjectWizardResult, ProjectWizardState,
+};
+use crate::components::text_input::{TextInputAction, TextInputState};
 use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, TimelineState, TrackState, TrackType,
 };
 use crate::components::timeline::waveform_cache;
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
+use crate::project::{
+    apply_to_timeline, io::save_project, io::load_project, now_secs,
+    recent::RecentProjectsStore, FutureboardProject,
+};
 use crate::theme::{self, Colors};
 
 use DAUx::types::{
@@ -99,6 +107,22 @@ pub struct StudioLayout {
     /// Repaint-rate diagnostics. Ticks once per `Render`, smoothed
     /// EMA frame time, exposed in the status bar.
     frame_diag: FrameDiagnostics,
+    /// Current horizontal scroll offset for the mixer channel strip area.
+    /// Updated by the mixer scroll-wheel handler and clamped each frame.
+    mixer_scroll_x: f32,
+
+    // ── Project file system ───────────────────────────────────────────────────
+    /// Absolute path to the currently open `.fbproj` file, if any.
+    project_path: Option<PathBuf>,
+    /// Root folder of the current project (contains Media/, Cache/, etc.).
+    project_folder: Option<PathBuf>,
+    /// Persistent recent-projects list backed by `~/.config/Futureboard/recent.json`.
+    recent_projects: RecentProjectsStore,
+    /// State for the New Project wizard overlay.
+    project_wizard: ProjectWizardState,
+    /// Text inputs for the project wizard (project name and BPM).
+    wizard_name_input: TextInputState,
+    wizard_bpm_input: TextInputState,
 }
 
 /// Rolling UI repaint diagnostics.
@@ -276,6 +300,14 @@ impl StudioLayout {
             focus_handle: cx.focus_handle(),
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
+            mixer_scroll_x: 0.0,
+            project_path: None,
+            project_folder: None,
+            recent_projects: RecentProjectsStore::load(),
+            project_wizard: ProjectWizardState::closed(),
+            wizard_name_input: TextInputState::new("wizard-name", cx.focus_handle())
+                .with_placeholder("Project name"),
+            wizard_bpm_input: TextInputState::new("wizard-bpm", cx.focus_handle()),
         }
     }
 }
@@ -629,7 +661,25 @@ impl StudioLayout {
             "view:reset-zoom" => self.reset_timeline_zoom(cx),
 
             // ── Project / track / edit commands available in native shell ─
-            "project:new" => self.reset_project(cx),
+            "project:new" | "project:new-from-template" => self.open_project_wizard(cx),
+            "project:open" => self.cmd_open_project(cx),
+            "project:save" => self.cmd_save_project(cx),
+            "project:save-as" => self.cmd_save_project_as(cx),
+            "project:save-copy" => self.cmd_save_project_copy(cx),
+            "project:open-recent" => self.cmd_open_recent_project(cx),
+            "project:recent-clear" => {
+                self.recent_projects.clear();
+                self.sync_recent_to_switcher();
+            }
+            "project:reveal-folder" => self.cmd_reveal_project_folder(cx),
+            "project:switch-current" => {}
+
+            // ── Dev stress-test commands (not in release menus) ──────────────
+            "dev:tracks-32" => self.stress_add_tracks(32, cx),
+            "dev:tracks-64" => self.stress_add_tracks(64, cx),
+            "dev:tracks-128" => self.stress_add_tracks(128, cx),
+            "dev:tracks-500" => self.stress_add_tracks(500, cx),
+
             "track:add" | "project:add-track" => self.open_add_track_dialog(cx),
             "track:add-audio" => self.open_add_track_dialog_with_kind(AddTrackKind::Audio, cx),
             "track:add-midi" => self.open_add_track_dialog_with_kind(AddTrackKind::Midi, cx),
@@ -649,7 +699,6 @@ impl StudioLayout {
             "mixer:reset-pan" => self.reset_selected_track_pan(cx),
             "edit:delete" | "clip:delete" => self.delete_selected_clip_or_track(cx),
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
-            "project:switch-current" => {}
 
             // ── Transport extras (shared menu IDs) ───────────────────────
             "transport:go-to-end" => {
@@ -668,12 +717,337 @@ impl StudioLayout {
     }
 
     fn reset_project(&mut self, cx: &mut Context<Self>) {
+        self.project_path = None;
+        self.project_folder = None;
         self.project_switcher = ProjectSwitcherState::default();
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state = TimelineState::default();
             cx.notify();
         });
     }
+
+    // ── Project wizard ────────────────────────────────────────────────────────
+
+    fn open_project_wizard(&mut self, _cx: &mut Context<Self>) {
+        self.project_wizard = ProjectWizardState::open();
+        self.wizard_name_input.set_value("Untitled Project");
+        self.wizard_name_input.select_all();
+        self.wizard_bpm_input.set_value(
+            format!("{:.0}", self.project_wizard.bpm()).as_str(),
+        );
+    }
+
+    fn close_project_wizard(&mut self) {
+        self.project_wizard = ProjectWizardState::closed();
+    }
+
+    fn on_project_created(&mut self, result: &ProjectWizardResult, cx: &mut Context<Self>) {
+        self.close_project_wizard();
+
+        let folder = match crate::project::io::create_project_folder(&result.location, &result.name) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[project] failed to create folder: {e}");
+                return;
+            }
+        };
+        let project_file = folder.join(format!(
+            "{}.{}",
+            crate::project::io::sanitize_project_name(&result.name),
+            crate::project::io::PROJECT_FILE_EXT
+        ));
+
+        // Reset timeline to match wizard settings
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            timeline.state = TimelineState::default();
+            timeline.state.bpm = result.bpm as f32;
+            timeline.state.time_signature_num = result.time_sig_num;
+            timeline.state.time_signature_den = result.time_sig_den;
+        });
+
+        // Create tracks from template
+        let audio_count = result.template.audio_tracks();
+        let midi_count = result.template.midi_tracks();
+        if audio_count > 0 || midi_count > 0 {
+            let _ = self.timeline.update(cx, |timeline, _cx| {
+                for i in 0..audio_count {
+                    let color = timeline.state.track_color_for_index(i as usize);
+                    timeline.state.create_track(CreateTrackOptions {
+                        track_type: TrackType::Audio,
+                        name: format!("Audio {}", i + 1),
+                        color,
+                        volume: timeline_state::volume::db_to_norm(0.0),
+                        pan: 0.0,
+                        armed: false,
+                        input_monitor: false,
+                    });
+                }
+                for i in 0..midi_count {
+                    let color = timeline.state.track_color_for_index((audio_count + i) as usize);
+                    timeline.state.create_track(CreateTrackOptions {
+                        track_type: TrackType::Midi,
+                        name: format!("MIDI {}", i + 1),
+                        color,
+                        volume: timeline_state::volume::db_to_norm(0.0),
+                        pan: 0.0,
+                        armed: false,
+                        input_monitor: false,
+                    });
+                }
+            });
+        }
+
+        // Save initial project file
+        let tl_state = self.timeline.read(cx).state.clone();
+        let mut project = FutureboardProject::from(&tl_state);
+        project.name = result.name.clone();
+        project.settings.sample_rate = result.sample_rate;
+
+        if let Err(e) = save_project(&mut project, &project_file) {
+            eprintln!("[project] initial save failed: {e}");
+        }
+
+        self.project_path = Some(project_file.clone());
+        self.project_folder = Some(folder);
+        self.project_switcher.current_project.name = result.name.clone();
+        self.project_switcher.current_project.path = Some(project_file.clone());
+        self.project_switcher.current_project.is_dirty = false;
+        self.project_switcher.current_project.subtitle = "Saved".to_string();
+
+        self.recent_projects.push(&result.name, project_file, now_secs());
+        self.sync_recent_to_switcher();
+        cx.notify();
+    }
+
+    // ── Save / load ───────────────────────────────────────────────────────────
+
+    fn mark_dirty(&mut self) {
+        self.project_switcher.current_project.is_dirty = true;
+        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+    }
+
+    fn cmd_save_project(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.project_path.clone() {
+            self.do_save_project(&path, cx);
+        } else {
+            self.cmd_save_project_as(cx);
+        }
+    }
+
+    fn cmd_save_project_as(&mut self, cx: &mut Context<Self>) {
+        let default_dir = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(crate::project::io::default_projects_dir);
+        let name = self.project_switcher.current_project.name.clone();
+        let entity = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            let result = rfd::AsyncFileDialog::new()
+                .set_title("Save Project As")
+                .set_directory(&default_dir)
+                .set_file_name(&format!(
+                    "{}.{}",
+                    crate::project::io::sanitize_project_name(&name),
+                    crate::project::io::PROJECT_FILE_EXT
+                ))
+                .add_filter("Futureboard Project", &[crate::project::io::PROJECT_FILE_EXT])
+                .save_file()
+                .await;
+            if let Some(handle) = result {
+                let path = handle.path().to_path_buf();
+                let _ = entity.update(cx, |this, cx| {
+                    this.do_save_project(&path, cx);
+                    this.project_path = Some(path);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn cmd_save_project_copy(&mut self, cx: &mut Context<Self>) {
+        let default_dir = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(crate::project::io::default_projects_dir);
+        let name = self.project_switcher.current_project.name.clone();
+        let entity = cx.entity().clone();
+        let tl_state = self.timeline.read(cx).state.clone();
+        cx.spawn(async move |_this, cx| {
+            let result = rfd::AsyncFileDialog::new()
+                .set_title("Save Copy")
+                .set_directory(&default_dir)
+                .set_file_name(&format!(
+                    "{} Copy.{}",
+                    crate::project::io::sanitize_project_name(&name),
+                    crate::project::io::PROJECT_FILE_EXT
+                ))
+                .add_filter("Futureboard Project", &[crate::project::io::PROJECT_FILE_EXT])
+                .save_file()
+                .await;
+            if let Some(handle) = result {
+                let path = handle.path().to_path_buf();
+                let mut project = FutureboardProject::from(&tl_state);
+                let _ = entity.update(cx, |_this, _cx| {
+                    if let Err(e) = save_project(&mut project, &path) {
+                        eprintln!("[project] save copy failed: {e}");
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn do_save_project(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        let tl_state = self.timeline.read(cx).state.clone();
+        let mut project = FutureboardProject::from(&tl_state);
+        project.name = self.project_switcher.current_project.name.clone();
+        match save_project(&mut project, path) {
+            Ok(()) => {
+                self.project_switcher.current_project.is_dirty = false;
+                self.project_switcher.current_project.subtitle = "Saved".to_string();
+                self.project_switcher.current_project.path = Some(path.clone());
+                self.recent_projects.push(
+                    &project.name,
+                    path.clone(),
+                    now_secs(),
+                );
+                self.sync_recent_to_switcher();
+            }
+            Err(e) => {
+                eprintln!("[project] save failed: {e}");
+                self.project_switcher.current_project.subtitle = format!("Save failed: {e}");
+            }
+        }
+    }
+
+    fn cmd_open_project(&mut self, cx: &mut Context<Self>) {
+        let default_dir = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(crate::project::io::default_projects_dir);
+        let entity = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            let result = rfd::AsyncFileDialog::new()
+                .set_title("Open Project")
+                .set_directory(&default_dir)
+                .add_filter("Futureboard Project", &[crate::project::io::PROJECT_FILE_EXT])
+                .pick_file()
+                .await;
+            if let Some(handle) = result {
+                let path = handle.path().to_path_buf();
+                let _ = entity.update(cx, |this, cx| {
+                    this.load_project_from_path(path, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn load_project_from_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match load_project(&path) {
+            Ok(project) => {
+                let _ = self.timeline.update(cx, |timeline, _cx| {
+                    apply_to_timeline(&project, &mut timeline.state);
+                });
+                self.project_path = Some(path.clone());
+                self.project_folder = path.parent().map(|p| p.to_path_buf());
+                self.project_switcher.current_project.name = project.name.clone();
+                self.project_switcher.current_project.path = Some(path.clone());
+                self.project_switcher.current_project.is_dirty = false;
+                self.project_switcher.current_project.subtitle = "Opened".to_string();
+                self.recent_projects.push(&project.name, path, now_secs());
+                self.sync_recent_to_switcher();
+                cx.notify();
+            }
+            Err(e) => {
+                eprintln!("[project] load failed: {e}");
+            }
+        }
+    }
+
+    fn cmd_open_recent_project(&mut self, cx: &mut Context<Self>) {
+        self.recent_projects.refresh_missing();
+        let idx = self.project_switcher.selected_index;
+        if idx == 0 {
+            return;
+        }
+        let path = self
+            .recent_projects
+            .entries()
+            .get(idx.saturating_sub(1))
+            .map(|e| e.path.clone());
+        if let Some(path) = path {
+            self.load_project_from_path(path, cx);
+        }
+    }
+
+    fn cmd_reveal_project_folder(&self, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        if let Some(folder) = &self.project_folder {
+            let _ = std::process::Command::new("explorer").arg(folder).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(folder) = &self.project_folder {
+            let _ = std::process::Command::new("open").arg(folder).spawn();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(folder) = &self.project_folder {
+            let _ = std::process::Command::new("xdg-open").arg(folder).spawn();
+        }
+    }
+
+    fn sync_recent_to_switcher(&mut self) {
+        self.recent_projects.refresh_missing();
+        self.project_switcher.recent_projects = self
+            .recent_projects
+            .entries()
+            .iter()
+            .map(|e| crate::components::project_switcher::ProjectSummary {
+                name: e.name.clone(),
+                path: Some(e.path.clone()),
+                is_current: self.project_path.as_ref() == Some(&e.path),
+                is_dirty: false,
+                subtitle: if e.missing {
+                    "Missing".to_string()
+                } else {
+                    String::new()
+                },
+            })
+            .collect();
+    }
+
+    /// Dev-only: bulk-create `count` tracks for scalability stress testing.
+    /// Tracks cycle through Audio/MIDI/Instrument types. Does not add clips.
+    #[cfg(debug_assertions)]
+    fn stress_add_tracks(&mut self, count: usize, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            for _ in 0..count {
+                let idx = timeline.state.tracks.len();
+                let track_type = match idx % 3 {
+                    0 => TrackType::Audio,
+                    1 => TrackType::Midi,
+                    _ => TrackType::Instrument,
+                };
+                let color = timeline.state.track_color_for_index(idx);
+                timeline.state.create_track(timeline_state::CreateTrackOptions {
+                    track_type,
+                    name: format!("Track {}", idx + 1),
+                    color,
+                    volume: timeline_state::volume::db_to_norm(0.0),
+                    pan: 0.0,
+                    armed: false,
+                    input_monitor: false,
+                });
+            }
+        });
+        cx.notify();
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn stress_add_tracks(&mut self, _count: usize, _cx: &mut Context<Self>) {}
 
     fn open_add_track_dialog(&mut self, cx: &mut Context<Self>) {
         self.open_add_track_dialog_with_kind(AddTrackKind::Audio, cx);
@@ -736,8 +1110,7 @@ impl StudioLayout {
         let Some(track_type) = dialog.selected_kind.native_track_type() else {
             return;
         };
-        self.project_switcher.current_project.is_dirty = true;
-        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             let count = dialog.count.clamp(1, 32) as usize;
             let base_name = cleaned_track_name(&dialog.track_name, dialog.selected_kind);
@@ -772,8 +1145,7 @@ impl StudioLayout {
     }
 
     fn delete_selected_track(&mut self, cx: &mut Context<Self>) {
-        self.project_switcher.current_project.is_dirty = true;
-        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline.state.delete_track(&id);
@@ -783,8 +1155,7 @@ impl StudioLayout {
     }
 
     fn delete_selected_clip_or_track(&mut self, cx: &mut Context<Self>) {
-        self.project_switcher.current_project.is_dirty = true;
-        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
                 timeline.state.delete_clip(&id);
@@ -796,8 +1167,7 @@ impl StudioLayout {
     }
 
     fn duplicate_selected_clip(&mut self, cx: &mut Context<Self>) {
-        self.project_switcher.current_project.is_dirty = true;
-        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
                 timeline.state.duplicate_clip(&id);
@@ -1247,6 +1617,18 @@ impl StudioLayout {
         }
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
+
+        // Ctrl/Cmd shortcuts (no alt, no function)
+        if (mods.control || mods.platform) && !mods.alt && !mods.function {
+            return match key {
+                "s" | "S" if mods.shift => Some("project:save-as"),
+                "s" | "S" => Some("project:save"),
+                "o" | "O" => Some("project:open"),
+                "n" | "N" => Some("project:new"),
+                _ => None,
+            };
+        }
+
         if mods.control || mods.alt || mods.platform || mods.function {
             return None;
         }
@@ -1565,6 +1947,24 @@ impl Render for StudioLayout {
             this.active_bottom_tab = *tab;
             cx.notify();
         });
+
+        // Mixer scroll — updated by the mixer scroll-wheel handler.
+        let mixer_scroll_x = self.mixer_scroll_x;
+        // Approximate the scrollable channel area width: full window minus the
+        // master strip (STRIP_WIDTH) plus gutter (1px) and a small margin.
+        let window_w: f32 = window.bounds().size.width.into();
+        let mixer_viewport_width = (window_w - 90.0).max(100.0);
+        let on_mixer_scroll: std::sync::Arc<
+            dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |new_x: f32, _w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.mixer_scroll_x = new_x;
+                    cx.notify();
+                });
+            })
+        };
 
         let on_resize_start = cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
             let bs = &mut this.bottom_panel_state;
@@ -2020,6 +2420,120 @@ impl Render for StudioLayout {
         } else {
             None
         };
+
+        let wizard_overlay = if self.project_wizard.is_open {
+            let name_focused = self.wizard_name_input.focus_handle.is_focused(window);
+            let bpm_focused = self.wizard_bpm_input.focus_handle.is_focused(window);
+            let name_input = self.wizard_name_input.clone();
+            let bpm_input = self.wizard_bpm_input.clone();
+            let target = cx.entity().clone();
+            let callbacks = ProjectWizardCallbacks {
+                on_close: Arc::new({
+                    let target = target.clone();
+                    move |_, _, cx| {
+                        let _ = target.update(cx, |this, _cx| this.close_project_wizard());
+                    }
+                }),
+                on_create: Arc::new({
+                    let target = target.clone();
+                    move |result: &ProjectWizardResult, _, cx| {
+                        let result = result.clone();
+                        let _ = target.update(cx, |this, cx| {
+                            this.on_project_created(&result, cx);
+                        });
+                    }
+                }),
+                on_template: Arc::new({
+                    let target = target.clone();
+                    move |tmpl: &ProjectTemplate, _, cx| {
+                        let tmpl = *tmpl;
+                        let _ = target.update(cx, |this, cx| {
+                            this.project_wizard.apply_template(tmpl);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_bpm_step: Arc::new({
+                    let target = target.clone();
+                    move |delta: &i32, _, cx| {
+                        let delta = *delta;
+                        let _ = target.update(cx, |this, cx| {
+                            let current = this.project_wizard.bpm() as f32;
+                            let new_bpm = (current + delta as f32).clamp(20.0, 999.0);
+                            let text = format!("{:.0}", new_bpm);
+                            this.project_wizard.bpm_text = text.clone();
+                            this.wizard_bpm_input.set_value(text);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_time_sig_num: Arc::new({
+                    let target = target.clone();
+                    move |n: &u32, _, cx| {
+                        let n = *n;
+                        let _ = target.update(cx, |this, cx| {
+                            this.project_wizard.time_sig_num = n;
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_time_sig_den: Arc::new({
+                    let target = target.clone();
+                    move |d: &u32, _, cx| {
+                        let d = *d;
+                        let _ = target.update(cx, |this, cx| {
+                            this.project_wizard.time_sig_den = d;
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_sample_rate: Arc::new({
+                    let target = target.clone();
+                    move |sr: &u32, _, cx| {
+                        let sr = *sr;
+                        let _ = target.update(cx, |this, cx| {
+                            this.project_wizard.sample_rate = sr;
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_browse_location: Arc::new({
+                    let target = target.clone();
+                    move |_, _window, cx| {
+                        let current = target.read(cx).project_wizard.location.clone();
+                        let fut = rfd::AsyncFileDialog::new()
+                            .set_title("Choose Project Location")
+                            .set_directory(&current)
+                            .pick_folder();
+                        let target2 = target.clone();
+                        cx.spawn(async move |cx| {
+                            if let Some(handle) = fut.await {
+                                let path = handle.path().to_path_buf();
+                                let _ = target2.update(cx, |this, cx| {
+                                    this.project_wizard.location = path;
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
+                    }
+                }),
+            };
+            Some(
+                components::project_wizard(
+                    &self.project_wizard,
+                    &name_input,
+                    name_focused,
+                    &bpm_input,
+                    bpm_focused,
+                    callbacks,
+                )
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
+
         let transport_chrome = self.transport_chrome_state(cx);
         let project_chrome = components::ProjectChromeState {
             name: self.project_switcher.current_project.name.clone(),
@@ -2057,7 +2571,48 @@ impl Render for StudioLayout {
             .relative()
             .bg(Colors::surface_base())
             .font_family(theme::FONT_FAMILY)
-            .capture_key_down(move |event, _window, cx| {
+            .capture_key_down(move |event, window, cx| {
+                // ── Wizard text input routing ─────────────────────────────
+                // When the wizard is open and a text field has focus, route
+                // keys to it before any global shortcut handling so that
+                // spacebar doesn't start playback, letters don't trigger
+                // commands, etc.
+                // Check focus BEFORE the mutable update borrow (requires &Window).
+                let (wizard_open, name_focused, bpm_focused) = {
+                    let layout = shortcut_target.read(cx);
+                    let open = layout.project_wizard.is_open;
+                    let nf = layout.wizard_name_input.focus_handle.is_focused(window);
+                    let bf = layout.wizard_bpm_input.focus_handle.is_focused(window);
+                    (open, nf, bf)
+                };
+                let wizard_consumed = if wizard_open && (name_focused || bpm_focused) {
+                    shortcut_target.update(cx, |this, cx| {
+                        let input = if name_focused {
+                            &mut this.wizard_name_input
+                        } else {
+                            &mut this.wizard_bpm_input
+                        };
+                        let action = input.handle_key(event);
+                        // Keep wizard state in sync so result()/is_valid() see current text.
+                        this.project_wizard.name = this.wizard_name_input.value.clone();
+                        this.project_wizard.bpm_text = this.wizard_bpm_input.value.clone();
+                        match action {
+                            TextInputAction::Cancel => {
+                                this.close_project_wizard();
+                            }
+                            TextInputAction::Submit | TextInputAction::Consumed => {}
+                            TextInputAction::Pass => {}
+                        }
+                        cx.notify();
+                        action != TextInputAction::Pass
+                    })
+                } else {
+                    false
+                };
+                if wizard_consumed {
+                    return;
+                }
+
                 let handled = shortcut_target.update(cx, |this, cx| {
                     let handled = this.handle_add_track_dialog_key(event, cx)
                         || this.handle_project_switcher_key(event, cx);
@@ -2081,6 +2636,7 @@ impl Render for StudioLayout {
                         this.menu_bar.submenu_path.clear();
                         this.open_popover = None;
                         this.project_switcher.is_open = false;
+                        this.project_wizard.is_open = false;
                         cx.notify();
                     });
                     return;
@@ -2145,6 +2701,9 @@ impl Render for StudioLayout {
                     &master,
                     selected_track_id.as_deref(),
                     mixer_callbacks,
+                    mixer_scroll_x,
+                    mixer_viewport_width,
+                    on_mixer_scroll,
                     on_tab_click,
                     on_resize_start,
                     on_resize_move,
@@ -2159,6 +2718,7 @@ impl Render for StudioLayout {
             .children(dropdown_overlay)
             .children(popover_overlay)
             .children(add_track_overlay)
+            .children(wizard_overlay)
     }
 }
 

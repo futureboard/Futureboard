@@ -24,8 +24,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled,
+    div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, Styled,
 };
 
 use crate::assets;
@@ -761,26 +760,74 @@ fn master_strip(
 
 // ─── Public: Mixer Panel ─────────────────────────────────────────────────────
 
+/// Strip columns above/below the visible viewport that are kept rendered to
+/// prevent pop-in during horizontal mixer scrolling.
+const MIXER_OVERSCAN: usize = 1;
+
 pub fn mixer_panel(
     tracks: &[TrackState],
     master: &MasterBusState,
     selected_track_id: Option<&str>,
     callbacks: MixerCallbacks,
+    // Current horizontal scroll offset in pixels.
+    scroll_x: f32,
+    // Width of the scrollable channel area in pixels (for computing visibility).
+    viewport_width: f32,
+    // Called with the new clamped scroll_x whenever the user scrolls the mixer.
+    on_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("MixerPanel");
-    crate::perf::count("mixer_strips", tracks.len() as u64);
-    let accent = Colors::accent_primary();
     let track_count = tracks.len();
+    crate::perf::count("mixer_strips", track_count as u64);
+
+    let accent = Colors::accent_primary();
     let on_master = callbacks.on_master_volume_change.clone();
 
-    let strips: Vec<gpui::AnyElement> = tracks
+    // ── Virtual strip window ────────────────────────────────────────────────
+    // Only strips whose screen-space X overlaps [0, viewport_width] are built.
+    // The rest are represented by opaque spacer divs so the total scroll width
+    // stays correct even though individual strip elements don't exist.
+    let total_content_w = track_count as f32 * STRIP_WIDTH;
+    let max_scroll_x = (total_content_w - viewport_width).max(0.0);
+    let scroll_x = scroll_x.clamp(0.0, max_scroll_x.max(0.0));
+
+    let first_visible = (scroll_x / STRIP_WIDTH).floor() as usize;
+    let visible_start = first_visible.saturating_sub(MIXER_OVERSCAN);
+    let last_visible = ((scroll_x + viewport_width) / STRIP_WIDTH).ceil() as usize;
+    let visible_end = (last_visible + MIXER_OVERSCAN).min(track_count);
+
+    let left_spacer_w = visible_start as f32 * STRIP_WIDTH;
+    let right_spacer_w = track_count.saturating_sub(visible_end) as f32 * STRIP_WIDTH;
+
+    crate::perf::count(
+        "visible_mixer_strips",
+        visible_end.saturating_sub(visible_start) as u64,
+    );
+
+    let visible_strips: Vec<gpui::AnyElement> = tracks[visible_start..visible_end]
         .iter()
         .enumerate()
-        .map(|(i, t)| {
+        .map(|(rel_i, t)| {
+            let abs_i = visible_start + rel_i;
             let is_sel = selected_track_id == Some(t.id.as_str());
-            channel_strip(t, i, is_sel, &callbacks).into_any_element()
+            channel_strip(t, abs_i, is_sel, &callbacks).into_any_element()
         })
         .collect();
+
+    // Scroll-wheel handler: translate wheel delta into scroll_x updates.
+    let on_scroll_wheel = {
+        let on_scroll = on_scroll.clone();
+        move |event: &gpui::ScrollWheelEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            let (dx, dy) = match &event.delta {
+                gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+                gpui::ScrollDelta::Lines(l) => (l.x * STRIP_WIDTH, l.y * STRIP_WIDTH * 0.5),
+            };
+            // Prefer horizontal delta; fall back to vertical (mouse-wheel-only users).
+            let delta = if dx.abs() >= dy.abs() { dx } else { dy };
+            let new_x = (scroll_x + delta).clamp(0.0, max_scroll_x.max(0.0));
+            on_scroll(new_x, window, cx);
+        }
+    };
 
     div()
         .flex()
@@ -796,36 +843,47 @@ pub fn mixer_panel(
                 .flex_1()
                 .min_h_0()
                 .child(
-                    // Channel scroll area
+                    // Channel scroll area — manually virtualized in the x axis.
+                    // The outer div clips overflow; the inner absolute div is
+                    // shifted left by scroll_x so only visible strips appear.
                     div()
                         .flex_1()
                         .min_w(px(0.0))
                         .h_full()
-                        .id("mixer-strips-scroll")
-                        .overflow_x_scroll()
-                        .overflow_y_scroll()
+                        .relative()
+                        .overflow_hidden()
+                        .on_scroll_wheel(on_scroll_wheel)
                         .child(
                             div()
+                                .absolute()
+                                .left(px(-scroll_x))
+                                .top_0()
+                                .bottom_0()
                                 .flex()
                                 .flex_row()
-                                // No `items_start` here — leaving the default
-                                // stretch alignment lets each strip fill the
-                                // scroll-area height, so the mixer resizes
-                                // with the bottom panel instead of pinning
-                                // at STRIP_MIN_HEIGHT.
                                 .h_full()
-                                .min_h_full()
-                                .children(strips)
-                                // Soft trailing fill so the scroll surface
-                                // reads as deliberate empty space, not as a
-                                // gap before master.
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .h_full()
-                                        .bg(rgba(0x0B0E1300_u32)),
-                                ),
+                                .min_h(px(STRIP_MIN_HEIGHT))
+                                // Left spacer for off-screen strips.
+                                .when(left_spacer_w > 0.0, |d| {
+                                    d.child(
+                                        div()
+                                            .w(px(left_spacer_w))
+                                            .h_full()
+                                            .flex_none()
+                                            .bg(rgba(0x111418FF_u32)),
+                                    )
+                                })
+                                .children(visible_strips)
+                                // Right spacer for off-screen strips.
+                                .when(right_spacer_w > 0.0, |d| {
+                                    d.child(
+                                        div()
+                                            .w(px(right_spacer_w))
+                                            .h_full()
+                                            .flex_none()
+                                            .bg(rgba(0x111418FF_u32)),
+                                    )
+                                }),
                         ),
                 )
                 // Gutter separating channels from the master block.

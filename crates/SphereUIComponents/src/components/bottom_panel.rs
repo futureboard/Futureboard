@@ -323,6 +323,9 @@ pub fn bottom_panel(
     master: &MasterBusState,
     selected_track_id: Option<&str>,
     mixer_callbacks: MixerCallbacks,
+    mixer_scroll_x: f32,
+    mixer_viewport_width: f32,
+    on_mixer_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
     on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
     on_resize_move: impl Fn(&gpui::DragMoveEvent<BottomPanelResizeDrag>, &mut Window, &mut App)
@@ -402,8 +405,16 @@ pub fn bottom_panel(
                 .w_full()
                 .child(match active_tab {
                     BottomTab::Mixer => {
-                        render_mixer_panel(tracks, master, selected_track_id, mixer_callbacks)
-                            .into_any_element()
+                        render_mixer_panel(
+                            tracks,
+                            master,
+                            selected_track_id,
+                            mixer_callbacks,
+                            mixer_scroll_x,
+                            mixer_viewport_width,
+                            on_mixer_scroll,
+                        )
+                        .into_any_element()
                     }
                     BottomTab::Editor => editor_panel().into_any_element(),
                     BottomTab::EffectEditor => effect_editor_panel().into_any_element(),

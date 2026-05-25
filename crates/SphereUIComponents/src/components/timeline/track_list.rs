@@ -7,6 +7,10 @@ use crate::components::timeline::track_header::{track_header, TrackHeaderCallbac
 use crate::components::timeline::track_lane::track_lane;
 use crate::theme::Colors;
 
+/// Rows above/below the visible viewport that are kept rendered to prevent
+/// pop-in during fast scrolling. Measured in track rows.
+const OVERSCAN: usize = 2;
+
 pub fn track_list(
     state: &TimelineState,
     header_callbacks: TrackHeaderCallbacks,
@@ -30,8 +34,44 @@ pub fn track_list(
             .clamp(0.0, grid_height.max(TRACK_HEIGHT))
     });
 
-    let mut rows = Vec::new();
-    for (index, track) in state.tracks.iter().enumerate() {
+    // ── Virtual row window ──────────────────────────────────────────────────
+    // Only rows whose screen-space Y overlaps [0, viewport_height] are built.
+    // The remainder is represented by opaque spacer divs at the top/bottom of
+    // the flex column so the scroll geometry (total height, scrollbar thumb
+    // size, drop-indicator positions) stays correct.
+    let track_count = state.tracks.len();
+    let scroll_y = state.viewport.scroll_y;
+    let viewport_height = state.viewport.viewport_height;
+
+    let first_visible = (scroll_y / TRACK_HEIGHT).floor() as usize;
+    let visible_start = first_visible.saturating_sub(OVERSCAN);
+    let last_visible = ((scroll_y + viewport_height) / TRACK_HEIGHT).ceil() as usize;
+    let visible_end = (last_visible + OVERSCAN).min(track_count);
+
+    let top_spacer_h = visible_start as f32 * TRACK_HEIGHT;
+    let bottom_spacer_h = track_count.saturating_sub(visible_end) as f32 * TRACK_HEIGHT;
+
+    crate::perf::count(
+        "visible_track_rows",
+        visible_end.saturating_sub(visible_start) as u64,
+    );
+
+    let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(
+        visible_end.saturating_sub(visible_start) + 2,
+    );
+
+    if top_spacer_h > 0.0 {
+        rows.push(
+            div()
+                .w_full()
+                .h(px(top_spacer_h))
+                .flex_none()
+                .into_any_element(),
+        );
+    }
+
+    for (rel_idx, track) in state.tracks[visible_start..visible_end].iter().enumerate() {
+        let index = visible_start + rel_idx;
         let row = div()
             .flex()
             .flex_col()
@@ -60,7 +100,17 @@ pub fn track_list(
                     .filter(|l| l.visible)
                     .map(|lane| automation_lane(lane, track.color, state)),
             );
-        rows.push(row);
+        rows.push(row.into_any_element());
+    }
+
+    if bottom_spacer_h > 0.0 {
+        rows.push(
+            div()
+                .w_full()
+                .h(px(bottom_spacer_h))
+                .flex_none()
+                .into_any_element(),
+        );
     }
 
     // Use `size_full()` (not `flex_1()`) so the track list fills the

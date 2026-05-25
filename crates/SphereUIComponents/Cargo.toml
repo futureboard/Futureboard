@@ -26,3 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 raw-window-handle = { version = "0.6", optional = true }
 wgpu = { version = "29.0.3", default-features = false, features = ["std", "vulkan", "wgsl"], optional = true }
+# Native file dialogs (open/save/folder picker).
+rfd = "0.15"
+# CRC-32/ISO-HDLC checksum for .fbproj binary format.
+crc32fast = "1"

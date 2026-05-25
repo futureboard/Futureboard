@@ -18,6 +18,3 @@ panic = "abort"
 [profile.release.package.futureboard-core]
 opt-level = "s"
 strip = "debuginfo"
-
-[patch.crates-io]
-gpui = { path = "references/zed/crates/gpui" }

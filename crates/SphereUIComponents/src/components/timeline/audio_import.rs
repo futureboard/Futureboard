@@ -285,7 +285,7 @@ pub async fn run_import_pipeline(
                         if let Some(owner) = layout_for_meta.as_ref() {
                             let _ = owner.update(cx, |this, cx| {
                                 this.mark_engine_media_dirty();
-                                this.schedule_audio_project_sync(cx, false);
+                                this.schedule_audio_project_sync(cx, false, "audio_import_probe");
                             });
                         }
                     }

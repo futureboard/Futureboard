@@ -1996,6 +1996,7 @@ dependencies = [
 name = "futureboard_native"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "gpui",
  "sphere-direct-audio-engine",
  "sphere_ui_components",

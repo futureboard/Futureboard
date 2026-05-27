@@ -26,6 +26,9 @@
 
     "build:native":       "cargo build --release -p futureboard_native",
     "build:native:debug": "cargo build -p futureboard_native",
+    "bundle:native:mac":  "bash packaging/native/bundle-macos.sh",
+    "bundle:native:mac:dmg": "bash packaging/native/bundle-macos.sh && bash packaging/native/bundle-macos-dmg.sh",
+    "bundle:native:win":  "pwsh -File packaging/native/bundle-windows.ps1",
 
     "build:wasm": "bun run --cwd apps/web build:audio:wasm",
 

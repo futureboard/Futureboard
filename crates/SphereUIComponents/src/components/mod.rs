@@ -12,6 +12,8 @@ pub mod knob;
 pub mod menu_bar;
 pub mod menu_dropdown;
 pub mod mixer_panel;
+mod mixer_window;
+pub(crate) use mixer_window::external_mixer_debug;
 pub mod panel;
 pub mod project_switcher;
 pub mod project_wizard;
@@ -28,7 +30,9 @@ pub mod title_bar;
 pub use add_track_dialog::{
     add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
 };
-pub use app_chrome::{app_chrome, ProjectChromeState, TransportChromeState};
+pub use app_chrome::{
+    app_chrome, PanelChromeState, ProjectChromeState, TransportChromeState,
+};
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use combo_box::{combo_box_menu, combo_box_trigger, ComboBoxOption};
 pub use controls::{
@@ -41,6 +45,7 @@ pub use icon_button::icon_button;
 pub use knob::knob;
 pub use menu_bar::{menu_bar, menu_label_button};
 pub use mixer_panel::mixer_panel;
+pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::right_panel;
 pub use project_wizard::{
     open_project_wizard_window, ProjectCreateCallback, ProjectTemplate, ProjectWizardResult,

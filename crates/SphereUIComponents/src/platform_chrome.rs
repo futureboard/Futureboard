@@ -12,6 +12,12 @@ pub const TITLEBAR_HEIGHT_PX: f32 = 32.0;
 /// macOS traffic-light reserved width in the custom titlebar row.
 pub const MACOS_TRAFFIC_LIGHT_PADDING_PX: f32 = 72.0;
 
+/// Minimum left inset for external dialog titles (wizard, preferences) on Win/Linux.
+pub const EXTERNAL_DIALOG_TITLE_PADDING_PX: f32 = 12.0;
+
+/// Below this width the in-window menubar collapses to a hamburger control.
+pub const MENUBAR_COMPACT_BREAKPOINT_PX: f32 = 800.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformChromeKind {
     Windows,
@@ -37,11 +43,28 @@ impl PlatformChromePolicy {
     /// Chrome for floating external dialogs (wizard, preferences).
     pub fn external_dialog() -> Self {
         let main = Self::current();
+        let traffic_light_left_padding_px = match main.kind {
+            PlatformChromeKind::MacOS => MACOS_TRAFFIC_LIGHT_PADDING_PX,
+            PlatformChromeKind::Windows | PlatformChromeKind::Linux => {
+                EXTERNAL_DIALOG_TITLE_PADDING_PX
+            }
+        };
         Self {
             show_in_window_menubar: false,
             use_native_macos_menubar: false,
+            traffic_light_left_padding_px,
             ..main
         }
+    }
+
+    /// Left padding for external dialog titlebars (traffic lights or minimum inset).
+    pub fn external_titlebar_left_padding(&self) -> gpui::Pixels {
+        self.traffic_light_left_padding()
+    }
+
+    /// Use hamburger + picker instead of horizontal top-level menu labels.
+    pub fn menubar_compact(viewport_width: f32) -> bool {
+        viewport_width < MENUBAR_COMPACT_BREAKPOINT_PX
     }
 
     pub fn titlebar_height(&self) -> gpui::Pixels {

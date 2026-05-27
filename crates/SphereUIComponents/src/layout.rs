@@ -21,6 +21,7 @@ use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::project_wizard::{
     open_project_wizard_window, ProjectCreateCallback, ProjectWizardResult, ProjectWizardWindow,
 };
+use crate::components::{external_mixer_debug, open_mixer_window, MixerSnapshot, MixerWindow};
 use crate::components::settings_dialog::{
     OnSettingUpdate, SettingsWindow, open_settings_window,
 };
@@ -49,6 +50,17 @@ use DAUx::types::{
 /// Flip to `true` to seed the studio with demo tracks/clips at startup.
 /// Production builds must keep this `false` — the real app starts empty.
 const USE_DEMO_PROJECT: bool = false;
+
+/// Notify a satellite window's root view without calling `Entity::update` (which
+/// can re-enter the main studio entity and trip GPUI's lease checks).
+pub(crate) fn notify_window_root<T: gpui::Render>(
+    app: &mut gpui::App,
+    handle: &WindowHandle<T>,
+) {
+    if let Ok(entity) = handle.entity(app) {
+        app.notify(entity.entity_id());
+    }
+}
 
 // Frame pacing details live in tasks/native/frame-pacing.md.
 
@@ -96,6 +108,24 @@ pub enum ContextTarget {
     Mixer(String),
 }
 
+/// Which docked studio panels are visible in the main window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StudioPanelVisibility {
+    pub browser: bool,
+    pub inspector: bool,
+    pub mixer_docked: bool,
+}
+
+impl Default for StudioPanelVisibility {
+    fn default() -> Self {
+        Self {
+            browser: true,
+            inspector: true,
+            mixer_docked: true,
+        }
+    }
+}
+
 pub struct StudioLayout {
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
@@ -113,6 +143,11 @@ pub struct StudioLayout {
     add_track_name_input: TextInputState,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
+    /// Detached mixer window for multi-monitor layouts.
+    mixer_window: Option<WindowHandle<MixerWindow>>,
+    /// Open external mixer after the current studio update completes.
+    pending_mixer_external_open: Option<Bounds<gpui::Pixels>>,
+    panels: StudioPanelVisibility,
     settings: gpui::Entity<SettingsModel>,
 
     text_context_menu: Option<TextContextMenu>,
@@ -408,6 +443,9 @@ impl StudioLayout {
             add_track_name_input: TextInputState::new("add-track-name-input", cx.focus_handle())
                 .with_placeholder("Track name"),
             settings_window: None,
+            mixer_window: None,
+            pending_mixer_external_open: None,
+            panels: StudioPanelVisibility::default(),
             settings,
 
             text_context_menu: None,
@@ -448,12 +486,22 @@ impl StudioLayout {
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| loop {
             executor.timer(Duration::from_millis(16)).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.poll_native_audio(cx) {
-                    crate::perf::record_notify("transport");
-                    cx.notify();
+            let Ok((changed, mixer_handle)) = this.update(cx, |this, cx| {
+                let changed = this.poll_native_audio(cx);
+                (changed, this.mixer_window.clone())
+            }) else {
+                continue;
+            };
+            if changed {
+                crate::perf::record_notify("transport");
+                let studio_id = this.entity_id();
+                let _ = cx.update(|app| app.notify(studio_id));
+                if mixer_handle.is_some() {
+                    let _ = this.update(cx, |layout, cx| {
+                        layout.push_mixer_snapshot_to_window(cx);
+                    });
                 }
-            });
+            }
         })
         .detach();
     }
@@ -465,7 +513,7 @@ impl StudioLayout {
         }
 
         if self.engine_project_dirty || self.engine_media_dirty {
-            self.schedule_audio_project_sync(cx, false);
+            self.schedule_audio_project_sync(cx, false, "engine_dirty_poll");
         }
 
         let engine = self.audio_engine.as_ref().expect("checked above");
@@ -571,7 +619,12 @@ impl StudioLayout {
 
     /// Queue a background engine sync. `load_project` decodes media on the
     /// caller thread — never invoke it from the UI poll loop or render path.
-    pub(crate) fn schedule_audio_project_sync(&mut self, cx: &mut Context<Self>, force: bool) {
+    pub(crate) fn schedule_audio_project_sync(
+        &mut self,
+        cx: &mut Context<Self>,
+        force: bool,
+        reason: &'static str,
+    ) {
         let Some(engine) = self.audio_engine.clone() else {
             self.audio_last_error = Some("audio engine unavailable".to_string());
             return;
@@ -594,6 +647,7 @@ impl StudioLayout {
         log_engine_sync_snapshot(
             &snapshot,
             self.engine_project_dirty || self.engine_media_dirty,
+            reason,
         );
         let signature = serde_json::to_string(&snapshot).unwrap_or_default();
         if !force && self.last_audio_project_signature.as_deref() == Some(signature.as_str()) {
@@ -611,8 +665,9 @@ impl StudioLayout {
                 .await;
             let _ = owner.update(cx, |this, cx| {
                 this.complete_audio_project_sync(cx, result, signature);
-                cx.notify();
             });
+            let studio_id = owner.entity_id();
+            let _ = cx.update(|app| app.notify(studio_id));
         })
         .detach();
     }
@@ -643,7 +698,7 @@ impl StudioLayout {
         let pending_sync = self.audio_sync_pending;
         self.audio_sync_pending = false;
         if pending_sync {
-            self.schedule_audio_project_sync(cx, false);
+            self.schedule_audio_project_sync(cx, false, "audio_sync_pending");
             return;
         }
 
@@ -723,7 +778,7 @@ impl StudioLayout {
         }
         if self.engine_project_dirty || self.engine_media_dirty {
             self.pending_play_after_sync = true;
-            self.schedule_audio_project_sync(cx, false);
+            self.schedule_audio_project_sync(cx, false, "transport_play_pending_sync");
             return;
         }
         self.sync_metronome_controls(cx);
@@ -900,7 +955,7 @@ impl StudioLayout {
                         let _ = layout.update(cx, |this, cx| {
                             this.mark_dirty();
                             this.mark_engine_media_dirty();
-                            this.schedule_audio_project_sync(cx, false);
+                            this.schedule_audio_project_sync(cx, false, "browser_import");
                         });
                         let path_key = path_for_decode.to_string_lossy().to_string();
                         let owner = layout.clone();
@@ -1004,6 +1059,17 @@ impl StudioLayout {
 
             "app:preferences" | "edit:preferences" | "project:settings" => {
                 self.open_settings_dialog(owner_bounds, cx);
+            }
+
+            "panel:toggle-browser" | "window.show_browser" => self.toggle_browser_panel(cx),
+            "panel:toggle-inspector" | "view:toggle-inspector" | "window.show_inspector" => {
+                self.toggle_inspector_panel(cx)
+            }
+            "panel:toggle-mixer" | "view:toggle-mixer" | "window.show_mixer" => {
+                self.toggle_mixer_panel(cx)
+            }
+            "panel:mixer-float" | "floatingwindow:mixer" => {
+                self.open_mixer_external_window(owner_bounds, cx);
             }
 
             "track:add" | "project:add-track" => self.open_add_track_dialog(cx),
@@ -1326,7 +1392,7 @@ impl StudioLayout {
                 self.recent_projects.push(&project.name, path, now_secs());
                 self.sync_recent_to_switcher();
                 self.mark_engine_media_dirty();
-                self.schedule_audio_project_sync(cx, true);
+                self.schedule_audio_project_sync(cx, true, "project_loaded");
                 cx.notify();
             }
             Err(e) => {
@@ -1558,6 +1624,213 @@ impl StudioLayout {
         }
         self.text_context_menu = None;
         cx.notify();
+    }
+
+    pub(crate) fn notify_mixer_window(&mut self, cx: &mut Context<Self>) {
+        self.push_mixer_snapshot_to_window(cx);
+    }
+
+    pub(crate) fn build_mixer_snapshot(&self, cx: &gpui::App) -> MixerSnapshot {
+        let timeline = self.timeline.read(cx);
+        MixerSnapshot {
+            tracks: timeline.state.tracks.clone(),
+            master: timeline.state.master.clone(),
+            selected_track_id: timeline.state.selection.selected_track_id.clone(),
+            mixer_scroll_x: self.mixer_scroll_x,
+        }
+    }
+
+    pub(crate) fn mixer_view_state(
+        &self,
+        cx: &gpui::App,
+    ) -> (
+        Vec<TrackState>,
+        timeline_state::MasterBusState,
+        Option<String>,
+        f32,
+    ) {
+        let snapshot = self.build_mixer_snapshot(cx);
+        (
+            snapshot.tracks,
+            snapshot.master,
+            snapshot.selected_track_id,
+            snapshot.mixer_scroll_x,
+        )
+    }
+
+    pub(crate) fn push_mixer_snapshot_to_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.mixer_window.clone() else {
+            return;
+        };
+        let snapshot = self.build_mixer_snapshot(cx);
+        let _ = handle.update(cx, |mixer, _window, cx| {
+            mixer.set_snapshot(snapshot);
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn set_mixer_scroll_x(&mut self, scroll_x: f32, _cx: &mut Context<Self>) -> bool {
+        if (self.mixer_scroll_x - scroll_x).abs() > 0.25 {
+            self.mixer_scroll_x = scroll_x;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn mixer_window_handle(&self) -> Option<WindowHandle<MixerWindow>> {
+        self.mixer_window.clone()
+    }
+
+    fn prune_mixer_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.mixer_window.clone() else {
+            return;
+        };
+        if handle
+            .update(cx, |_mixer, _window, _cx| ())
+            .is_err()
+        {
+            self.mixer_window = None;
+        }
+    }
+
+    fn mixer_panel_chrome_visible(&self) -> bool {
+        self.panels.mixer_docked || self.mixer_window.is_some()
+    }
+
+    pub(crate) fn toggle_browser_panel(&mut self, cx: &mut Context<Self>) {
+        self.panels.browser = !self.panels.browser;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_inspector_panel(&mut self, cx: &mut Context<Self>) {
+        self.panels.inspector = !self.panels.inspector;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_mixer_panel(&mut self, cx: &mut Context<Self>) {
+        if self.mixer_window.is_some() {
+            self.close_mixer_window(cx);
+            self.panels.mixer_docked = true;
+        } else {
+            self.panels.mixer_docked = !self.panels.mixer_docked;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn open_mixer_external_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        external_mixer_debug("external mixer open requested");
+        self.pending_mixer_external_open = Some(owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        }));
+        self.schedule_pending_mixer_external_open(cx);
+        cx.notify();
+    }
+
+    fn schedule_pending_mixer_external_open(&mut self, cx: &mut Context<Self>) {
+        if self.pending_mixer_external_open.is_none() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(0))
+                .await;
+            let _ = this.update(cx, |layout, cx| layout.flush_pending_mixer_external_open(cx));
+        })
+        .detach();
+    }
+
+    fn flush_pending_mixer_external_open(&mut self, cx: &mut Context<Self>) {
+        let Some(owner_bounds) = self.pending_mixer_external_open.take() else {
+            return;
+        };
+
+        self.prune_mixer_window(cx);
+        if let Some(handle) = self.mixer_window.clone() {
+            if handle
+                .update(cx, |_mixer, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                self.panels.mixer_docked = false;
+                self.push_mixer_snapshot_to_window(cx);
+                cx.notify();
+                return;
+            }
+            self.mixer_window = None;
+        }
+
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+        self.open_popover = None;
+        self.panels.mixer_docked = false;
+
+        let snapshot = self.build_mixer_snapshot(cx);
+        let callbacks = self.build_mixer_callbacks(cx.entity().clone());
+        let owner = cx.entity().clone();
+        let on_close: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
+            std::sync::Arc::new(move |_window, cx| {
+                let _ = owner.update(cx, |layout, cx| layout.close_mixer_window(cx));
+            });
+        let scroll_owner = cx.entity().clone();
+        let on_mixer_scroll: std::sync::Arc<dyn Fn(f32, &mut Window, &mut gpui::App) + Send + Sync> =
+            std::sync::Arc::new(move |new_x: f32, _w, cx| {
+                let _ = scroll_owner.update(cx, |layout, cx| {
+                    if layout.set_mixer_scroll_x(new_x, cx) {
+                        layout.push_mixer_snapshot_to_window(cx);
+                    }
+                });
+            });
+
+        match open_mixer_window(
+            owner_bounds,
+            snapshot,
+            callbacks,
+            on_close,
+            on_mixer_scroll,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.mixer_window = Some(handle);
+                cx.notify();
+            }
+            Err(err) => {
+                eprintln!("[mixer] failed to open external mixer window: {err}");
+                self.panels.mixer_docked = true;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn close_mixer_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.mixer_window.take() {
+            let _ = handle.update(cx, |_mixer, window, _cx| window.remove_window());
+        }
+        cx.notify();
+    }
+
+    fn panel_chrome_state(&self, cx: &mut Context<Self>) -> components::PanelChromeState {
+        let make_handler = |command_id: &'static str| {
+            let this = cx.entity().clone();
+            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| {
+                    this.dispatch_command_id(command_id, cx);
+                    cx.notify();
+                });
+            })
+        };
+        components::PanelChromeState {
+            browser_visible: self.panels.browser,
+            inspector_visible: self.panels.inspector,
+            mixer_visible: self.mixer_panel_chrome_visible(),
+            on_toggle_browser: make_handler("panel:toggle-browser"),
+            on_toggle_mixer: make_handler("panel:toggle-mixer"),
+            on_toggle_inspector: make_handler("panel:toggle-inspector"),
+        }
     }
 
     fn sync_settings_to_systems(&mut self, cx: &mut Context<Self>) {
@@ -1990,7 +2263,7 @@ impl StudioLayout {
                             let _ = layout.update(cx, |this, cx| {
                                 this.mark_dirty();
                                 this.mark_engine_media_dirty();
-                                this.schedule_audio_project_sync(cx, false);
+                                this.schedule_audio_project_sync(cx, false, "browser_import");
                             });
                             let path_key = path_for_decode.to_string_lossy().to_string();
                             let owner = layout.clone();
@@ -2501,16 +2774,21 @@ impl StudioLayout {
     /// Build the callback bundle used by the mixer. Every mutation lands in
     /// the same `TimelineState` instance owned by the Timeline entity, so the
     /// TrackHeader and Mixer always read identical values.
-    fn build_mixer_callbacks(&self, owner: Entity<Self>) -> MixerCallbacks {
+    pub(crate) fn build_mixer_callbacks(&self, owner: Entity<Self>) -> MixerCallbacks {
         let audio_engine = self.audio_engine.clone();
         let timeline_select = self.timeline.clone();
+        let owner_select = owner.clone();
         let on_select_track: std::sync::Arc<
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |id: &String, _w, cx| {
             let id = id.clone();
+            external_mixer_debug(&format!("mixer command dispatched select_track id={id}"));
             timeline_select.update(cx, |t, cx| {
                 t.state.select_track(&id);
                 cx.notify();
+            });
+            let _ = owner_select.update(cx, |layout, cx| {
+                layout.push_mixer_snapshot_to_window(cx);
             });
         });
 
@@ -2521,11 +2799,15 @@ impl StudioLayout {
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
             let id = id.clone();
             let v = *v;
+            external_mixer_debug(&format!("mixer command dispatched set_volume id={id} v={v:.3}"));
             timeline_vol.update(cx, |t, cx| {
                 t.state.set_track_volume(&id, v);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
+            let _ = owner_dirty.update(cx, |this, cx| {
+                this.mark_dirty();
+                this.push_mixer_snapshot_to_window(cx);
+            });
             if let Some(engine) = audio_engine.as_ref() {
                 let _ = engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
             }
@@ -2539,11 +2821,15 @@ impl StudioLayout {
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
             let id = id.clone();
             let v = *v;
+            external_mixer_debug(&format!("mixer command dispatched set_pan id={id} v={v:.3}"));
             timeline_pan.update(cx, |t, cx| {
                 t.state.set_track_pan(&id, v);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
+            let _ = owner_dirty.update(cx, |this, cx| {
+                this.mark_dirty();
+                this.push_mixer_snapshot_to_window(cx);
+            });
             if let Some(engine) = audio_engine.as_ref() {
                 let _ = engine.update_track_param(&id, "pan", v as f64);
             }
@@ -2556,6 +2842,7 @@ impl StudioLayout {
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
                 let mut muted = false;
+                external_mixer_debug(&format!("mixer command dispatched toggle_mute id={id}"));
                 timeline_mute.update(cx, |t, cx| {
                     t.state.toggle_track_mute(&id);
                     muted = t
@@ -2565,7 +2852,10 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
-                let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
+                let _ = owner_dirty.update(cx, |this, cx| {
+                    this.mark_dirty();
+                    this.push_mixer_snapshot_to_window(cx);
+                });
                 if let Some(engine) = audio_engine.as_ref() {
                     let _ = engine.update_track_param(&id, "mute", if muted { 1.0 } else { 0.0 });
                 }
@@ -2578,6 +2868,7 @@ impl StudioLayout {
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
                 let mut solo = false;
+                external_mixer_debug(&format!("mixer command dispatched toggle_solo id={id}"));
                 timeline_solo.update(cx, |t, cx| {
                     t.state.toggle_track_solo(&id);
                     solo = t
@@ -2587,7 +2878,10 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
-                let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
+                let _ = owner_dirty.update(cx, |this, cx| {
+                    this.mark_dirty();
+                    this.push_mixer_snapshot_to_window(cx);
+                });
                 if let Some(engine) = audio_engine.as_ref() {
                     let _ = engine.update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 });
                 }
@@ -2598,11 +2892,15 @@ impl StudioLayout {
         let on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
+                external_mixer_debug(&format!("mixer command dispatched toggle_arm id={id}"));
                 timeline_arm.update(cx, |t, cx| {
                     t.state.toggle_track_arm(&id);
                     cx.notify();
                 });
-                let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
+                let _ = owner_dirty.update(cx, |this, cx| {
+                    this.mark_dirty();
+                    this.push_mixer_snapshot_to_window(cx);
+                });
             });
 
         let timeline_input = self.timeline.clone();
@@ -2611,11 +2909,15 @@ impl StudioLayout {
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |id: &String, _w, cx| {
             let id = id.clone();
+            external_mixer_debug(&format!("mixer command dispatched toggle_input id={id}"));
             timeline_input.update(cx, |t, cx| {
                 t.state.toggle_track_input_monitor(&id);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
+            let _ = owner_dirty.update(cx, |this, cx| {
+                this.mark_dirty();
+                this.push_mixer_snapshot_to_window(cx);
+            });
         });
 
         let audio_engine = self.audio_engine.clone();
@@ -2625,11 +2927,15 @@ impl StudioLayout {
             dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |v: &f32, _w, cx| {
             let v = *v;
+            external_mixer_debug(&format!("mixer command dispatched master_volume v={v:.3}"));
             timeline_master.update(cx, |t, cx| {
                 t.state.set_master_volume(v);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
+            let _ = owner_dirty.update(cx, |this, cx| {
+                this.mark_dirty();
+                this.push_mixer_snapshot_to_window(cx);
+            });
             if let Some(engine) = audio_engine.as_ref() {
                 let _ = engine.update_track_param(
                     "__master__",
@@ -2710,8 +3016,8 @@ impl Render for StudioLayout {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |new_x: f32, _w, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    if (this.mixer_scroll_x - new_x).abs() > 0.25 {
-                        this.mixer_scroll_x = new_x;
+                    if this.set_mixer_scroll_x(new_x, cx) {
+                        this.push_mixer_snapshot_to_window(cx);
                         cx.notify();
                     }
                 });
@@ -2866,7 +3172,7 @@ impl Render for StudioLayout {
                 let _ = layout.update(cx, |this, cx| {
                     this.mark_dirty();
                     this.mark_engine_media_dirty();
-                    this.schedule_audio_project_sync(cx, false);
+                    this.schedule_audio_project_sync(cx, false, "timeline_audio_import");
                 });
                 let path_key = path_for_decode.to_string_lossy().to_string();
                 let owner = layout.clone();
@@ -3062,19 +3368,33 @@ impl Render for StudioLayout {
         let chrome_policy = crate::platform_chrome::PlatformChromePolicy::current();
         let dropdown_overlay = if chrome_policy.show_in_window_menubar {
             open_menu_id.as_ref().and_then(|id| {
-                let manifest = crate::menu::MenuManifest::load();
-                manifest.menus.iter().find(|m| &m.id == id).map(|menu| {
-                    components::menu_dropdown::menu_dropdown(
-                        menu,
-                        menu_anchor,
-                        viewport_width,
-                        viewport_height,
-                        &submenu_path,
-                        on_toggle_submenu.clone(),
-                        on_menu_command.clone(),
-                        on_close_menu.clone(),
+                if id == components::menu_bar::MENU_PICKER_ID {
+                    Some(
+                        components::menu_bar::menu_picker_dropdown(
+                            menu_anchor,
+                            viewport_width,
+                            viewport_height,
+                            on_open_menu.clone(),
+                            on_close_menu.clone(),
+                        )
+                        .into_any_element(),
                     )
-                })
+                } else {
+                    let manifest = crate::menu::MenuManifest::load();
+                    manifest.menus.iter().find(|m| &m.id == id).map(|menu| {
+                        components::menu_dropdown::menu_dropdown(
+                            menu,
+                            menu_anchor,
+                            viewport_width,
+                            viewport_height,
+                            &submenu_path,
+                            on_toggle_submenu.clone(),
+                            on_menu_command.clone(),
+                            on_close_menu.clone(),
+                        )
+                        .into_any_element()
+                    })
+                }
             })
         } else {
             None
@@ -3298,7 +3618,13 @@ impl Render for StudioLayout {
             None
         };
 
+        self.prune_mixer_window(cx);
+
         let transport_chrome = self.transport_chrome_state(cx);
+        let panel_chrome = self.panel_chrome_state(cx);
+        let show_browser = self.panels.browser;
+        let show_inspector = self.panels.inspector;
+        let show_mixer_docked = self.panels.mixer_docked;
         let project_chrome = components::ProjectChromeState {
             name: self.project_switcher.current_project.name.clone(),
             is_dirty: self.project_switcher.current_project.is_dirty,
@@ -3391,15 +3717,17 @@ impl Render for StudioLayout {
                     on_open_menu,
                     project_chrome,
                     transport_chrome,
+                    panel_chrome,
                 )
             })
-            .child(
-                div()
+            .child({
+                let mut main_row = div()
                     .flex()
                     .flex_row()
                     .flex_1()
-                    .min_h_0()
-                    .child({
+                    .min_h_0();
+                if show_browser {
+                    main_row = main_row.child({
                         let _s = crate::perf::PerfScope::enter("Sidebar");
                         components::sidebar(
                             &file_browser,
@@ -3412,9 +3740,11 @@ impl Render for StudioLayout {
                             on_browser_activate,
                             on_browser_context,
                         )
-                    })
-                    .child(self.timeline.clone())
-                    .child({
+                    });
+                }
+                main_row = main_row.child(self.timeline.clone());
+                if show_inspector {
+                    main_row = main_row.child({
                         let _s = crate::perf::PerfScope::enter("Inspector");
                         crate::components::panel::inspector_panel(
                             &tracks,
@@ -3422,25 +3752,32 @@ impl Render for StudioLayout {
                             selected_clip_id.as_deref(),
                             find_clip_summary(&tracks, selected_clip_id.as_deref()),
                         )
-                    }),
-            )
-            .child({
+                    });
+                }
+                main_row
+            })
+            .children(if show_mixer_docked {
                 let _s = crate::perf::PerfScope::enter("BottomPanel");
-                components::bottom_panel(
-                    self.active_bottom_tab,
-                    panel_state,
-                    &tracks,
-                    &master,
-                    selected_track_id.as_deref(),
-                    mixer_callbacks,
-                    mixer_scroll_x,
-                    mixer_viewport_width,
-                    on_mixer_scroll,
-                    on_tab_click,
-                    on_resize_start,
-                    on_resize_move,
-                    on_resize_end,
+                Some(
+                    components::bottom_panel(
+                        self.active_bottom_tab,
+                        panel_state,
+                        &tracks,
+                        &master,
+                        selected_track_id.as_deref(),
+                        mixer_callbacks,
+                        mixer_scroll_x,
+                        mixer_viewport_width,
+                        on_mixer_scroll,
+                        on_tab_click,
+                        on_resize_start,
+                        on_resize_move,
+                        on_resize_end,
+                    )
+                    .into_any_element(),
                 )
+            } else {
+                None
             })
             .child({
                 let _s = crate::perf::PerfScope::enter("StatusBar");
@@ -3546,7 +3883,7 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
     }
 }
 
-fn log_engine_sync_snapshot(snapshot: &EngineProjectSnapshot, dirty: bool) {
+fn log_engine_sync_snapshot(snapshot: &EngineProjectSnapshot, dirty: bool, reason: &'static str) {
     let clips_with_path = snapshot
         .clips
         .iter()
@@ -3558,7 +3895,8 @@ fn log_engine_sync_snapshot(snapshot: &EngineProjectSnapshot, dirty: bool) {
         })
         .count();
     eprintln!(
-        "[engine-sync] tracks={} clips={} clips_with_path={} dirty={}",
+        "[engine-sync] reason={} tracks={} clips={} clips_with_path={} dirty={}",
+        reason,
         snapshot.tracks.len(),
         snapshot.clips.len(),
         clips_with_path,

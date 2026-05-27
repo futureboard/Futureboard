@@ -48,10 +48,12 @@
     ],
     "extraResources": [
       {
-        "from": "icons",
+        "from": "../shared",
         "to": "icons",
         "filter": [
-          "**/*"
+          "app.png",
+          "icon.ico",
+          "icon.icns"
         ]
       },
       {
@@ -79,7 +81,7 @@
         "name": "Futureboard Studio Project",
         "description": "Futureboard Studio Project File",
         "role": "Editor",
-        "icon": "icons/icon.ico"
+        "icon": "../shared/icon.ico"
       }
     ],
     "win": {
@@ -91,7 +93,7 @@
           ]
         }
       ],
-      "icon": "icons/icon.ico",
+      "icon": "../shared/icon.ico",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
@@ -100,8 +102,8 @@
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
       "shortcutName": "Futureboard Studio",
-      "installerIcon": "icons/icon.ico",
-      "uninstallerIcon": "icons/icon.ico"
+      "installerIcon": "../shared/icon.ico",
+      "uninstallerIcon": "../shared/icon.ico"
     },
     "mac": {
       "target": [
@@ -114,7 +116,7 @@
         }
       ],
       "category": "public.app-category.music",
-      "icon": "icons/icon.icns",
+      "icon": "../shared/icon.icns",
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "hardenedRuntime": false,
       "identity": null
@@ -137,7 +139,7 @@
       ],
       "executableName": "futureboard-studio",
       "category": "AudioVideo;Audio;Music",
-      "icon": "icons/app.png",
+      "icon": "../shared/app.png",
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "desktop": {
         "entry": {

@@ -2,6 +2,7 @@
 name = "futureboard_native"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [[bin]]
 name = "futureboard_native"
@@ -17,3 +18,6 @@ sphere-direct-audio-engine = { path = "../../crates/SphereDirectAudioEngine" }
 [features]
 default = []
 gpu-renderer = ["sphere_ui_components/gpu-renderer"]
+
+[build-dependencies]
+embed-resource = "3.0"

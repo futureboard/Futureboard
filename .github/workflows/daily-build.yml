@@ -42,6 +42,7 @@ jobs:
             updater-yml: apps/electron/release/latest.yml
             native-bin: target/release/futureboard_native.exe
             native-artifact-name: futureboard-native-win
+            native-bundle-glob: packaging/native/out/win/**/*
           - os: macos-latest
             platform: mac
             artifact-name: futureboard-mac
@@ -50,6 +51,7 @@ jobs:
             updater-yml: apps/electron/release/latest-mac.yml
             native-bin: target/release/futureboard_native
             native-artifact-name: futureboard-native-mac
+            native-bundle-glob: packaging/native/out/**
           - os: ubuntu-24.04
             platform: linux
             artifact-name: futureboard-linux
@@ -58,17 +60,14 @@ jobs:
             updater-yml: apps/electron/release/latest-linux.yml
             native-bin: target/release/futureboard_native
             native-artifact-name: futureboard-native-linux
+            native-bundle-glob: ""
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Initialize audio plugin SDK submodules without docs
-        run: |
-          git submodule sync -- external/vst3sdk external/clap external/clap-helpers external/yoga packages/shared/tabler-icons
-          git submodule update --init --force --depth=1 --checkout -- external/clap external/clap-helpers external/yoga packages/shared/tabler-icons
-          git submodule update --init --force --checkout -- external/vst3sdk
-          git -C external/vst3sdk submodule update --init --force --checkout -- base cmake pluginterfaces public.sdk tutorials vstgui4
+      - name: Initialize submodules (audio SDKs + shared icons)
+        run: bash .github/workflows/submodules-init.sh
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -130,25 +129,28 @@ jobs:
           bun install --cwd extentions/template
           bun run --cwd extentions/template typecheck
 
+      - name: Verify shared app assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in apps/shared/app.png apps/shared/icon.ico apps/shared/icon.icns apps/shared/app.rc apps/shared/app.manifest; do
+            test -f "$f" || { echo "missing $f"; exit 1; }
+          done
+          echo "Shared app assets OK"
+
       - name: Build native app (futureboard_native)
         run: cargo build --release -p futureboard_native
 
-      - name: Generate .icns app icon (macOS)
+      - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          set -euo pipefail
-          src="apps/electron/icons/app.png"
-          iconset="apps/electron/icons/AppIcon.iconset"
-          out="apps/electron/icons/icon.icns"
-          mkdir -p "$iconset"
-          for size in 16 32 128 256 512; do
-            sips -z $size $size "$src" --out "$iconset/icon_${size}x${size}.png"
-            double=$((size * 2))
-            sips -z $double $double "$src" --out "$iconset/icon_${size}x${size}@2x.png"
-          done
-          iconutil --convert icns "$iconset" --output "$out"
-          rm -rf "$iconset"
-          echo "Generated $out"
+          bash packaging/native/bundle-macos.sh
+          bash packaging/native/bundle-macos-dmg.sh
+
+      - name: Bundle native app (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./packaging/native/bundle-windows.ps1
 
       - name: Build & package (${{ matrix.platform }})
         run: bun run dist:electron:${{ matrix.platform }}
@@ -177,6 +179,15 @@ jobs:
         with:
           name: ${{ matrix.native-artifact-name }}
           path: ${{ matrix.native-bin }}
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload native bundle artifact
+        if: matrix.native-bundle-glob != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.native-artifact-name }}-bundle
+          path: ${{ matrix.native-bundle-glob }}
           if-no-files-found: error
           retention-days: 3
 

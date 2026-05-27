@@ -32,6 +32,7 @@ out/
 # Rust / Cargo
 target/
 **/target/
+extentions/**/target/
 Cargo.lock.bak
 
 # Rust analyzer / flycheck
@@ -40,6 +41,7 @@ Cargo.lock.bak
 
 # Electron build output
 apps/electron/release/
+packaging/native/out/
 apps/electron/dist/
 apps/electron/out/
 *.asar

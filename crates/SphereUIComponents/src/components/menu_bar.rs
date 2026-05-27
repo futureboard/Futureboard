@@ -2,18 +2,40 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, Window,
 };
 
+use crate::assets;
 use crate::menu::MenuManifest;
-use crate::theme::Colors;
+use crate::overlay::{compute_overlay_position, OverlayAnchor, OverlayPlacement, OverlaySize};
+use crate::platform_chrome::PlatformChromePolicy;
+use crate::theme::{menu as menu_style, Colors};
 
 use super::title_bar::{CHROME_TEXT_SIZE, TITLEBAR_HEIGHT};
 
 pub type MenuOpenCb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
+pub type MenuCloseCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 
-pub fn menu_bar(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
+/// `open_menu_id` value while the compact hamburger picker is shown.
+pub const MENU_PICKER_ID: &str = "__menu_picker__";
+
+const PICKER_PANEL_WIDTH: f32 = 168.0;
+const PICKER_ROW_HEIGHT: f32 = menu_style::ROW_HEIGHT;
+
+pub fn menu_bar(
+    open_menu_id: Option<&str>,
+    on_open_menu: MenuOpenCb,
+    viewport_width: f32,
+) -> impl IntoElement {
+    if PlatformChromePolicy::menubar_compact(viewport_width) {
+        menu_bar_compact(open_menu_id, on_open_menu).into_any_element()
+    } else {
+        menu_bar_full(open_menu_id, on_open_menu).into_any_element()
+    }
+}
+
+fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
     let manifest = MenuManifest::load();
     let open_id_owned = open_menu_id.map(|s| s.to_string());
 
@@ -49,6 +71,139 @@ pub fn menu_bar(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl In
                 },
             )
         }))
+}
+
+fn menu_bar_compact(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
+    let is_open = open_menu_id == Some(MENU_PICKER_ID);
+    let cb = on_open_menu.clone();
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(TITLEBAR_HEIGHT))
+        .px(px(4.0))
+        .child(
+            div()
+                .id("top-menu-hamburger")
+                .w(px(28.0))
+                .h(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .bg(if is_open {
+                    Colors::surface_control_hover()
+                } else {
+                    gpui::transparent_black().into()
+                })
+                .hover(|s| s.bg(Colors::surface_control_hover()))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                    let click_x: f32 = event.position.x.into();
+                    cb(&(MENU_PICKER_ID.to_string(), click_x), window, cx);
+                })
+                .occlude()
+                .child(
+                    svg()
+                        .path(assets::ICON_MENU_PATH)
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .text_color(if is_open {
+                            Colors::text_primary()
+                        } else {
+                            Colors::text_muted()
+                        }),
+                ),
+        )
+}
+
+/// Compact-mode overlay: pick a top-level menu (File, Edit, …) then open its panel.
+pub fn menu_picker_dropdown(
+    anchor: OverlayAnchor,
+    viewport_width: f32,
+    viewport_height: f32,
+    on_open_menu: MenuOpenCb,
+    on_close: MenuCloseCb,
+) -> impl IntoElement {
+    let manifest = MenuManifest::load();
+    let row_count = manifest.menus.len();
+    let panel_height = menu_style::PANEL_PAD * 2.0
+        + row_count as f32 * PICKER_ROW_HEIGHT
+        + (row_count.saturating_sub(1)) as f32 * menu_style::ITEM_GAP;
+
+    let window_bounds = gpui::bounds(
+        gpui::point(px(0.0), px(0.0)),
+        gpui::size(px(viewport_width), px(viewport_height)),
+    );
+    let pos = compute_overlay_position(
+        anchor.bounds,
+        OverlaySize {
+            width: PICKER_PANEL_WIDTH,
+            height: panel_height.max(80.0),
+        },
+        window_bounds,
+        OverlayPlacement::BottomStart,
+        4.0,
+    );
+    let panel_left: f32 = pos.x.into();
+    let panel_top: f32 = pos.y.into();
+
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .on_mouse_down(gpui::MouseButton::Left, {
+                    let on_close = on_close.clone();
+                    move |_, window, cx| on_close(&(), window, cx)
+                }),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(panel_left))
+                .top(px(panel_top))
+                .w(px(PICKER_PANEL_WIDTH))
+                .flex()
+                .flex_col()
+                .p(px(menu_style::PANEL_PAD))
+                .gap(px(menu_style::ITEM_GAP))
+                .rounded_md()
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_raised())
+                .shadow_lg()
+                .children(manifest.menus.iter().enumerate().map(|(i, menu)| {
+                    let menu_id = menu.id.clone();
+                    let label = menu.label.clone();
+                    let cb = on_open_menu.clone();
+                    div()
+                        .id(("menu-picker-row", i))
+                        .h(px(PICKER_ROW_HEIGHT))
+                        .px(px(menu_style::ROW_PAD_X))
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .text_size(px(menu_style::LABEL_TEXT_SIZE))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::text_primary())
+                        .hover(|s| s.bg(Colors::surface_control_hover()))
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                            let click_x: f32 = event.position.x.into();
+                            cb(&(menu_id.clone(), click_x), window, cx);
+                        })
+                        .occlude()
+                        .child(label)
+                })),
+        )
 }
 
 pub fn menu_label_button(

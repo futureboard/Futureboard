@@ -100,7 +100,7 @@ pub fn external_window_titlebar(
         .items_center()
         .justify_between()
         .h(px(policy.titlebar_height_px))
-        .pl(policy.traffic_light_left_padding())
+        .pl(policy.external_titlebar_left_padding())
         .pr(px(if policy.show_window_controls {
             0.0
         } else {

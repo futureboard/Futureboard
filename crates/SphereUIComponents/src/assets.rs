@@ -32,6 +32,7 @@ pub mod icons {
         include_str!("../../../packages/shared/lucide/icons/panel-right.svg");
     pub const BUG: &str = include_str!("../../../packages/shared/lucide/icons/bug.svg");
     pub const MINUS: &str = include_str!("../../../packages/shared/lucide/icons/minus.svg");
+    pub const MENU: &str = include_str!("../../../packages/shared/lucide/icons/menu.svg");
     pub const X: &str = include_str!("../../../packages/shared/lucide/icons/x.svg");
 
     // Window controls
@@ -106,6 +107,7 @@ pub const ICON_MINIMIZE_PATH: &str = "icons/generic_minimize.svg";
 pub const ICON_RESTORE_PATH: &str = "icons/generic_restore.svg";
 pub const ICON_X_PATH: &str = "icons/generic_close.svg";
 pub const ICON_MINUS_PATH: &str = "icons/minus.svg";
+pub const ICON_MENU_PATH: &str = "icons/menu.svg";
 
 // New path constants
 pub const ICON_MOUSE_POINTER_PATH: &str = "icons/mouse-pointer.svg";

@@ -18,7 +18,7 @@ module.exports = async function afterPack(ctx) {
 
   const productName = ctx.packager.appInfo.productFilename;
   const exePath = path.join(ctx.appOutDir, `${productName}.exe`);
-  const iconPath = path.join(ctx.packager.projectDir, "icons", "icon.ico");
+  const iconPath = path.join(ctx.packager.projectDir, "..", "shared", "icon.ico");
 
   if (!fs.existsSync(exePath)) {
     console.warn(`[after-pack] exe not found: ${exePath}`);

@@ -4,6 +4,12 @@ members = [
     "apps/native",
     "crates/*",
 ]
+exclude = [
+    "extentions",
+    "extentions/template",
+    "extentions/template-react",
+    "extentions/template-vue",
+]
 
 [workspace.package]
 version = "0.1.0"

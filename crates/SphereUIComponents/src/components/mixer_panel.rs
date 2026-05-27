@@ -23,7 +23,7 @@
 //!   only the fader area grows to fill remaining height.
 
 use gpui::prelude::FluentBuilder;
-use gpui::{div, px, svg, InteractiveElement, IntoElement, ParentElement, Styled};
+use gpui::{div, px, svg, App, InteractiveElement, IntoElement, ParentElement, Styled, Window};
 
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
@@ -72,6 +72,27 @@ pub struct MixerCallbacks {
     pub on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+}
+
+/// Inert callbacks for fallback UI when the studio entity is unavailable.
+pub fn noop_mixer_callbacks() -> MixerCallbacks {
+    use std::sync::Arc;
+
+    let noop_track = Arc::new(|_: &String, _: &mut Window, _: &mut App| {});
+    let noop_vol = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
+    let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
+    let noop_master = Arc::new(|_: &f32, _: &mut Window, _: &mut App| {});
+    MixerCallbacks {
+        on_select_track: noop_track.clone(),
+        on_volume_change: noop_vol,
+        on_pan_change: noop_pan,
+        on_toggle_mute: noop_track.clone(),
+        on_toggle_solo: noop_track.clone(),
+        on_toggle_arm: noop_track.clone(),
+        on_toggle_input: noop_track,
+        on_master_volume_change: noop_master,
+        on_context_menu: None,
+    }
 }
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────

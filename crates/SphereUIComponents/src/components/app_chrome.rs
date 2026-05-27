@@ -29,6 +29,16 @@ pub struct ProjectChromeState {
 }
 
 #[derive(Clone)]
+pub struct PanelChromeState {
+    pub browser_visible: bool,
+    pub inspector_visible: bool,
+    pub mixer_visible: bool,
+    pub on_toggle_browser: ChromeActionCb,
+    pub on_toggle_mixer: ChromeActionCb,
+    pub on_toggle_inspector: ChromeActionCb,
+}
+
+#[derive(Clone)]
 pub struct TransportChromeState {
     pub playing: bool,
     pub recording: bool,
@@ -44,8 +54,12 @@ pub struct TransportChromeState {
     pub on_metronome_toggle: ChromeActionCb,
 }
 
-fn menu_area(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
-    menu_bar::menu_bar(open_menu_id, on_open_menu)
+fn menu_area(
+    open_menu_id: Option<&str>,
+    on_open_menu: MenuOpenCb,
+    viewport_width: f32,
+) -> impl IntoElement {
+    menu_bar::menu_bar(open_menu_id, on_open_menu, viewport_width)
 }
 
 fn project_title(state: ProjectChromeState) -> impl IntoElement {
@@ -299,33 +313,53 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         )
 }
 
-fn panel_toggles() -> impl IntoElement {
+fn panel_toggle_button(
+    icon_path: &'static str,
+    fallback: &'static str,
+    active: bool,
+    on_click: ChromeActionCb,
+) -> impl IntoElement {
+    let color = if active {
+        Colors::accent_primary()
+    } else {
+        Colors::text_muted()
+    };
+    let on_click = on_click.clone();
+    chrome_button(Some(icon_path), fallback, active, color)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            on_click(&(), window, cx);
+        })
+        .occlude()
+}
+
+fn panel_toggles(state: PanelChromeState) -> impl IntoElement {
+    let on_browser = state.on_toggle_browser.clone();
+    let on_mixer = state.on_toggle_mixer.clone();
+    let on_inspector = state.on_toggle_inspector.clone();
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(2.0))
         .px(px(2.0))
-        // Browser
-        .child(chrome_button(
-            Some(assets::ICON_FOLDER_OPEN_PATH),
+        .child(panel_toggle_button(
+            assets::ICON_FOLDER_OPEN_PATH,
             "BROWSER",
-            false,
-            Colors::text_muted(),
+            state.browser_visible,
+            on_browser,
         ))
-        // Mixer
-        .child(chrome_button(
-            Some(assets::ICON_PANEL_BOTTOM_PATH),
+        .child(panel_toggle_button(
+            assets::ICON_PANEL_BOTTOM_PATH,
             "MIXER",
-            false,
-            Colors::text_muted(),
+            state.mixer_visible,
+            on_mixer,
         ))
-        // Inspector
-        .child(chrome_button(
-            Some(assets::ICON_PANEL_RIGHT_PATH),
+        .child(panel_toggle_button(
+            assets::ICON_PANEL_RIGHT_PATH,
             "INSPECT",
-            false,
-            Colors::text_muted(),
+            state.inspector_visible,
+            on_inspector,
         ))
 }
 
@@ -434,8 +468,10 @@ pub fn app_chrome(
     on_open_menu: MenuOpenCb,
     project: ProjectChromeState,
     transport: TransportChromeState,
+    panels: PanelChromeState,
 ) -> impl IntoElement {
     let policy = PlatformChromePolicy::current();
+    let viewport_width: f32 = window.bounds().size.width.into();
 
     let mut chrome = div()
         .flex()
@@ -465,7 +501,11 @@ pub fn app_chrome(
 
     if policy.show_in_window_menubar {
         chrome = chrome
-            .child(menu_area(open_menu_id, on_open_menu))
+            .child(menu_area(
+                open_menu_id,
+                on_open_menu,
+                viewport_width,
+            ))
             .child(section_separator());
     }
 
@@ -474,7 +514,7 @@ pub fn app_chrome(
         .child(draggable_spacer())
         .child(transport_controls(transport))
         .child(section_separator())
-        .child(panel_toggles())
+        .child(panel_toggles(panels))
         .child(section_separator())
         .child(utility_buttons())
         .child(section_separator())

@@ -53,9 +53,13 @@ pub use crate::native::{
 
 use std::sync::Arc;
 
+#[cfg(feature = "napi")]
 use napi_derive::napi;
 
+#[cfg(feature = "napi")]
 use engine::EngineInner;
+
+#[cfg(feature = "napi")]
 use types::{
     EngineProjectSnapshot, JsAudioDeviceInfo, JsAudioFileInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
@@ -75,11 +79,13 @@ use types::{
 /// engine.stop();           // pause stream
 /// engine.closeDevice();
 /// ```
+#[cfg(feature = "napi")]
 #[napi]
 pub struct SphereDirectAudioEngine {
     inner: Arc<EngineInner>,
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 impl SphereDirectAudioEngine {
     /// Create a new engine instance.  The audio stream is **not** started

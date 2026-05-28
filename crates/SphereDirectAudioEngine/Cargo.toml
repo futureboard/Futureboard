@@ -19,8 +19,8 @@ path = "src/bin/sphere_audio_test.rs"
 # ── Runtime dependencies ──────────────────────────────────────────────────────
 [dependencies]
 # N-API binding framework (Electron / Node.js native addon)
-napi        = { version = "2", features = ["napi4"] }
-napi-derive = "2"
+napi        = { version = "2", features = ["napi4"], optional = true }
+napi-derive = { version = "2", optional = true }
 
 # Cross-platform audio I/O (WASAPI shared on Win, CoreAudio on Mac, ALSA on Linux)
 cpal = "0.15"
@@ -67,3 +67,10 @@ windows = { version = "0.58", features = [
 napi-build = "2"
 cc = "1"
 pkg-config = "0.3"
+
+[features]
+# Default build of this crate is the Electron/Node addon.
+default = ["napi"]
+
+# Build the N-API surface (`SphereDirectAudioEngine` JS class, Js* types).
+napi = ["dep:napi", "dep:napi-derive"]

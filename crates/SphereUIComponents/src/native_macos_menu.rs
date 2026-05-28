@@ -34,9 +34,9 @@ pub fn install_native_macos_menu(cx: &mut App) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use gpui::{App, Menu, MenuItem, SharedString};
+    use gpui::{App, Menu, MenuItem as GpuiMenuItem, SharedString};
 
-    use crate::menu::{MenuItem, MenuItemKind, MenuManifest};
+    use crate::menu::{MenuItem as AppMenuItem, MenuItemKind, MenuManifest};
 
     #[derive(Clone, PartialEq, gpui::Action)]
     #[action(no_json)]
@@ -71,7 +71,7 @@ mod macos {
         cx.set_menus(menus);
     }
 
-    fn convert_items(items: &[MenuItem]) -> Vec<MenuItem> {
+    fn convert_items(items: &[AppMenuItem]) -> Vec<GpuiMenuItem> {
         items
             .iter()
             .filter(|item| item.visible)
@@ -79,12 +79,12 @@ mod macos {
             .collect()
     }
 
-    fn convert_item(item: &MenuItem) -> Option<MenuItem> {
+    fn convert_item(item: &AppMenuItem) -> Option<GpuiMenuItem> {
         match item.kind {
-            MenuItemKind::Separator => Some(MenuItem::separator()),
+            MenuItemKind::Separator => Some(GpuiMenuItem::separator()),
             MenuItemKind::Submenu => {
                 let label = item.label.clone().unwrap_or_else(|| item.id.clone());
-                Some(MenuItem::submenu(Menu {
+                Some(GpuiMenuItem::submenu(Menu {
                     name: label.into(),
                     items: convert_items(&item.children),
                 }))
@@ -95,7 +95,7 @@ mod macos {
                     return None;
                 }
                 let name = item.label.clone().unwrap_or_else(|| item.id.clone());
-                Some(MenuItem::action(
+                Some(GpuiMenuItem::action(
                     name,
                     RunMenuCommand {
                         command_id: command.into(),

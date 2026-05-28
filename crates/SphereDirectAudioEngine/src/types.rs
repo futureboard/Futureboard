@@ -1,9 +1,12 @@
-use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 
 // ── DAUx backend selection types ──────────────────────────────────────────────
 
+#[cfg(feature = "napi")]
+use napi_derive::napi;
+
 /// Information about one available DAUx backend.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
 pub struct JsDauxBackendInfo {
@@ -20,6 +23,7 @@ pub struct JsDauxBackendInfo {
 }
 
 /// Configuration for selecting / opening a DAUx backend.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
 pub struct JsDauxConfig {
@@ -38,6 +42,7 @@ pub struct JsDauxConfig {
 }
 
 /// Runtime status of the active DAUx backend.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
 pub struct JsDauxStatus {
@@ -66,6 +71,7 @@ pub struct JsDauxStatus {
 // so they arrive at JS looking natural.
 
 #[napi(object)]
+#[cfg(feature = "napi")]
 #[derive(Debug, Default)]
 pub struct JsSphereAudioStatus {
     pub available: bool,
@@ -83,6 +89,7 @@ pub struct JsSphereAudioStatus {
 }
 
 #[napi(object)]
+#[cfg(feature = "napi")]
 #[derive(Debug, Clone)]
 pub struct JsAudioDeviceInfo {
     pub id: String,
@@ -95,6 +102,7 @@ pub struct JsAudioDeviceInfo {
 }
 
 #[napi(object)]
+#[cfg(feature = "napi")]
 #[derive(Debug, Default)]
 pub struct JsDeviceOpenConfig {
     pub input_device_id: Option<String>,
@@ -104,6 +112,7 @@ pub struct JsDeviceOpenConfig {
 }
 
 #[napi(object)]
+#[cfg(feature = "napi")]
 #[derive(Debug, Default, Clone)]
 pub struct JsTrackMeterSnapshot {
     pub track_id: String,
@@ -114,6 +123,7 @@ pub struct JsTrackMeterSnapshot {
 }
 
 #[napi(object)]
+#[cfg(feature = "napi")]
 #[derive(Debug, Default, Clone)]
 pub struct JsMeterSnapshot {
     pub tracks: Vec<JsTrackMeterSnapshot>,
@@ -124,6 +134,7 @@ pub struct JsMeterSnapshot {
 }
 
 #[napi(object)]
+#[cfg(feature = "napi")]
 #[derive(Debug, Default, Clone)]
 pub struct JsWavPeakResult {
     pub file_id: String,
@@ -137,6 +148,7 @@ pub struct JsWavPeakResult {
 }
 
 #[napi(object)]
+#[cfg(feature = "napi")]
 #[derive(Debug, Default, Clone)]
 pub struct JsAudioFileInfo {
     pub path: String,
@@ -270,6 +282,7 @@ pub struct EngineStatus {
 // ── Recording types ───────────────────────────────────────────────────────────
 
 /// Config for one armed track being recorded.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
 pub struct JsRecordingTrackConfig {
@@ -281,6 +294,7 @@ pub struct JsRecordingTrackConfig {
 }
 
 /// Full config passed to `startRecording()`.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
 pub struct JsStartRecordingConfig {
@@ -298,6 +312,7 @@ pub struct JsStartRecordingConfig {
 }
 
 /// Per-track result returned by `stopRecording()`.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
 pub struct JsRecordingResult {
@@ -316,6 +331,7 @@ pub struct JsRecordingResult {
 }
 
 /// Snapshot of recording state for UI polling.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
 pub struct JsRecordingStatus {
@@ -326,6 +342,7 @@ pub struct JsRecordingStatus {
 
 /// Debug state snapshot returned by `getDebugInfo()`.
 /// Exposes the internal runtime graph so JS can verify the engine is loaded.
+#[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Default)]
 pub struct JsEngineDebugInfo {

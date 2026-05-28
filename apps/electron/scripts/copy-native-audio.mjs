@@ -35,7 +35,14 @@ const electronRoot  = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(electronRoot, "..", "..");
 const engineRoot    = path.join(workspaceRoot, "crates", "SphereDirectAudioEngine");
 const profile       = isDebug ? "debug" : "release";
-const sourcePath    = path.join(engineRoot, "target", profile, addonSourceName());
+const sourceCandidates = [
+  // When building as part of a Cargo workspace, the default target dir is
+  // workspaceRoot/target (NOT crateRoot/target). GitHub Actions uses this.
+  path.join(workspaceRoot, "target", profile, addonSourceName()),
+  // Local override: some devs may use a per-crate target dir.
+  path.join(engineRoot, "target", profile, addonSourceName()),
+];
+const sourcePath = sourceCandidates.find((p) => fs.existsSync(p));
 
 // Destination: apps/electron/resources/ (packaged via electron-builder extraResources)
 const resourcesDir  = path.join(electronRoot, "resources");
@@ -43,10 +50,11 @@ const destPath      = path.join(resourcesDir, NODE_ADDON_NAME);
 
 // ── Copy ──────────────────────────────────────────────────────────────────────
 
-if (!fs.existsSync(sourcePath)) {
+if (!sourcePath) {
   console.error(
-    `[copy-native-audio] ERROR: Built addon not found at:\n  ${sourcePath}\n` +
-    `  Run: cd crates/SphereDirectAudioEngine && cargo build${isDebug ? "" : " --release"}`
+    `[copy-native-audio] ERROR: Built addon not found at any of:\n` +
+    sourceCandidates.map((p) => `  ${p}`).join("\n") +
+    `\n\n  Run: cd crates/SphereDirectAudioEngine && cargo build${isDebug ? "" : " --release"}`
   );
   process.exit(1);
 }

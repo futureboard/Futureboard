@@ -88,6 +88,7 @@ function candidateAddonPaths(): string[] {
   const hostRoot = path.join(root, "crates", "SpherePluginHost");
   candidates.push(path.join(hostRoot, "PluginHost.node"));
   candidates.push(path.join(hostRoot, "target", "release", "PluginHost.node"));
+  candidates.push(path.join(hostRoot, "target", "release", "sphere_plugin_host.dll"));
   candidates.push(path.join(hostRoot, "target", "release", "PluginHost.dll"));
   candidates.push(path.join(hostRoot, "target", "debug", "PluginHost.node"));
   candidates.push(path.join(hostRoot, "target", "debug", "PluginHost.dll"));

@@ -12,8 +12,9 @@ use std::{
 
 use crate::components;
 use crate::components::add_track_dialog::{
-    add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
+    open_add_track_window, AddTrackDialogState, AddTrackKind, AddTrackWindow,
 };
+use crate::components::plugin_manager::{open_plugin_manager_window, PluginManagerWindow};
 use crate::components::context_menu::ContextMenuEntry;
 use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
@@ -87,7 +88,6 @@ pub enum OpenPopover {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextMenuTarget {
-    AddTrackName,
     ProjectSwitcherSearch,
     BrowserSearch,
 }
@@ -139,8 +139,8 @@ pub struct StudioLayout {
     project_switcher: ProjectSwitcherState,
     project_switcher_search_input: TextInputState,
     browser_search_input: TextInputState,
-    add_track_dialog: AddTrackDialogState,
-    add_track_name_input: TextInputState,
+    add_track_window: Option<WindowHandle<AddTrackWindow>>,
+    plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
     /// Detached mixer window for multi-monitor layouts.
@@ -439,9 +439,8 @@ impl StudioLayout {
                 cx.focus_handle(),
             )
             .with_placeholder("Search..."),
-            add_track_dialog: AddTrackDialogState::closed(),
-            add_track_name_input: TextInputState::new("add-track-name-input", cx.focus_handle())
-                .with_placeholder("Track name"),
+            add_track_window: None,
+            plugin_manager_window: None,
             settings_window: None,
             mixer_window: None,
             pending_mixer_external_open: None,
@@ -1072,17 +1071,32 @@ impl StudioLayout {
                 self.open_mixer_external_window(owner_bounds, cx);
             }
 
-            "track:add" | "project:add-track" => self.open_add_track_dialog(cx),
-            "track:add-audio" => self.open_add_track_dialog_with_kind(AddTrackKind::Audio, cx),
-            "track:add-midi" => self.open_add_track_dialog_with_kind(AddTrackKind::Midi, cx),
-            "track:add-instrument" => {
-                self.open_add_track_dialog_with_kind(AddTrackKind::Instrument, cx)
+            "track:add" | "project:add-track" => {
+                self.open_add_track_external_window(AddTrackKind::Audio, owner_bounds, cx)
             }
-            "track:add-plugin" => self.open_add_track_dialog_with_kind(AddTrackKind::Plugin, cx),
-            "track:add-bus" => self.open_add_track_dialog_with_kind(AddTrackKind::Bus, cx),
-            "track:add-return" => self.open_add_track_dialog_with_kind(AddTrackKind::Return, cx),
-            "track:add-group" => self.open_add_track_dialog_with_kind(AddTrackKind::Group, cx),
-            "track:add-master" => self.open_add_track_dialog_with_kind(AddTrackKind::Master, cx),
+            "track:add-audio" => {
+                self.open_add_track_external_window(AddTrackKind::Audio, owner_bounds, cx)
+            }
+            "track:add-midi" => {
+                self.open_add_track_external_window(AddTrackKind::Midi, owner_bounds, cx)
+            }
+            "track:add-instrument" => {
+                self.open_add_track_external_window(AddTrackKind::Instrument, owner_bounds, cx)
+            }
+            "track:add-plugin" => {
+                self.open_add_track_external_window(AddTrackKind::Plugin, owner_bounds, cx)
+            }
+            "track:add-bus" => self.open_add_track_external_window(AddTrackKind::Bus, owner_bounds, cx),
+            "track:add-return" => {
+                self.open_add_track_external_window(AddTrackKind::Return, owner_bounds, cx)
+            }
+            "track:add-group" => {
+                self.open_add_track_external_window(AddTrackKind::Group, owner_bounds, cx)
+            }
+            "track:add-master" => {
+                self.open_add_track_external_window(AddTrackKind::Master, owner_bounds, cx)
+            }
+            "plugins:manager" => self.open_plugin_manager_external_window(owner_bounds, cx),
             "track:delete" => self.delete_selected_track(cx),
             "track:mute" => self.toggle_selected_track_mute(cx),
             "track:solo" => self.toggle_selected_track_solo(cx),
@@ -1484,11 +1498,12 @@ impl StudioLayout {
     #[cfg(not(debug_assertions))]
     fn stress_add_tracks(&mut self, _count: usize, _cx: &mut Context<Self>) {}
 
-    fn open_add_track_dialog(&mut self, cx: &mut Context<Self>) {
-        self.open_add_track_dialog_with_kind(AddTrackKind::Audio, cx);
-    }
-
-    fn open_add_track_dialog_with_kind(&mut self, kind: AddTrackKind, cx: &mut Context<Self>) {
+    fn open_add_track_external_window(
+        &mut self,
+        kind: AddTrackKind,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let mut track_count = 0;
         let mut has_master_track = false;
         let _ = self.timeline.update(cx, |timeline, _cx| {
@@ -1499,34 +1514,142 @@ impl StudioLayout {
                 .iter()
                 .any(|track| track.track_type == TrackType::Master);
         });
-        self.open_add_track_dialog_with_context(kind, track_count, has_master_track, cx);
+
+        self.open_add_track_external_window_with_context(
+            kind,
+            track_count,
+            has_master_track,
+            owner_bounds,
+            cx,
+        );
     }
 
-    fn open_add_track_dialog_with_context(
+    /// Opens/activates the Add Track external window without reading/updating the Timeline.
+    ///
+    /// This is critical for callbacks originating from Timeline events: Timeline may already be
+    /// mid-update, and calling `self.timeline.update(...)` would panic (GPUI re-entrancy guard).
+    fn open_add_track_external_window_with_context(
         &mut self,
         kind: AddTrackKind,
         track_count: usize,
         has_master_track: bool,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        let mut dialog = AddTrackDialogState::open_for(track_count, has_master_track);
-        dialog.selected_kind = kind;
-        dialog.track_name = format!("{} {}", kind.label(), dialog.next_number);
-        self.add_track_name_input
-            .set_value(dialog.track_name.clone());
-        self.add_track_name_input.select_all();
-        self.add_track_dialog = dialog;
-        self.open_popover = None;
-        self.text_context_menu = None;
+
+        // If window is already open, activate and refresh its context.
+        if let Some(handle) = self.add_track_window.clone() {
+            if handle
+                .update(cx, |win, window, _cx| {
+                    win.set_context(kind, track_count, has_master_track);
+                    window.activate_window();
+                })
+                .is_ok()
+            {
+                return;
+            }
+            self.add_track_window = None;
+        }
+
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
-        cx.notify();
+        self.open_popover = None;
+        self.text_context_menu = None;
+
+        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        });
+
+        let layout = cx.entity().clone();
+        let on_confirm_request: Arc<
+            dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static,
+        > =
+            Arc::new(move |dialog, _name, cx| {
+                let Some(track_type) = dialog.selected_kind.native_track_type() else {
+                    return;
+                };
+                let _ = layout.update(cx, |this, cx| {
+                    this.mark_dirty();
+                    let _ = this.timeline.update(cx, |timeline, cx| {
+                        let count = dialog.count.clamp(1, 32) as usize;
+                        let base_name = cleaned_track_name(&dialog.track_name, dialog.selected_kind);
+                        let mut selected_track_id = None;
+                        for i in 0..count {
+                            let name = if count == 1 {
+                                base_name.clone()
+                            } else {
+                                format!(
+                                    "{} {}",
+                                    numbered_name_stem(&base_name),
+                                    dialog.next_number + i
+                                )
+                            };
+                            let id = timeline.state.create_track(CreateTrackOptions {
+                                track_type,
+                                name,
+                                color: timeline
+                                    .state
+                                    .track_color_for_index(dialog.color_index.saturating_add(i)),
+                                volume: timeline_state::volume::db_to_norm(0.0),
+                                pan: 0.0,
+                                armed: dialog.selected_kind == AddTrackKind::Audio && dialog.arm_track,
+                                input_monitor: dialog.selected_kind == AddTrackKind::Audio
+                                    && dialog.monitor_mode != "off",
+                            });
+                            selected_track_id = Some(id);
+                        }
+                        if let Some(id) = selected_track_id {
+                            timeline.state.select_track(&id);
+                        }
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+            });
+
+        match open_add_track_window(
+            owner_bounds,
+            kind,
+            track_count,
+            has_master_track,
+            on_confirm_request,
+            cx,
+        ) {
+            Ok(handle) => self.add_track_window = Some(handle),
+            Err(err) => eprintln!("[add-track] failed to open window: {err}"),
+        }
     }
 
-    fn close_add_track_dialog(&mut self, cx: &mut Context<Self>) {
-        self.add_track_dialog.is_open = false;
+    fn open_plugin_manager_external_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.plugin_manager_window.clone() {
+            if handle
+                .update(cx, |_pm, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.plugin_manager_window = None;
+        }
+
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+        self.open_popover = None;
         self.text_context_menu = None;
-        cx.notify();
+
+        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        });
+
+        match open_plugin_manager_window(owner_bounds, cx) {
+            Ok(handle) => self.plugin_manager_window = Some(handle),
+            Err(err) => eprintln!("[plugin-manager] failed to open window: {err}"),
+        }
     }
 
     fn open_settings_dialog(
@@ -1952,68 +2075,7 @@ impl StudioLayout {
         }
     }
 
-    fn select_add_track_kind(&mut self, kind: AddTrackKind, cx: &mut Context<Self>) {
-        if kind.native_track_type().is_none() {
-            return;
-        }
-        self.add_track_dialog.selected_kind = kind;
-        self.add_track_dialog.track_name =
-            format!("{} {}", kind.label(), self.add_track_dialog.next_number);
-        self.add_track_name_input
-            .set_value(self.add_track_dialog.track_name.clone());
-        self.add_track_name_input.select_all();
-        self.add_track_dialog.channel_count = if kind == AddTrackKind::Midi { 0 } else { 2 };
-        self.add_track_dialog.arm_track = false;
-        self.add_track_dialog.monitor_mode = "off";
-        cx.notify();
-    }
-
-    fn confirm_add_track_dialog(&mut self, cx: &mut Context<Self>) {
-        if !self.add_track_dialog.is_open || !self.add_track_dialog.is_valid() {
-            return;
-        }
-        self.add_track_dialog.track_name = self.add_track_name_input.value.clone();
-        let dialog = self.add_track_dialog.clone();
-        let Some(track_type) = dialog.selected_kind.native_track_type() else {
-            return;
-        };
-        self.mark_dirty();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            let count = dialog.count.clamp(1, 32) as usize;
-            let base_name = cleaned_track_name(&dialog.track_name, dialog.selected_kind);
-            let mut selected_track_id = None;
-            for i in 0..count {
-                let name = if count == 1 {
-                    base_name.clone()
-                } else {
-                    format!(
-                        "{} {}",
-                        numbered_name_stem(&base_name),
-                        dialog.next_number + i
-                    )
-                };
-                let id = timeline.state.create_track(CreateTrackOptions {
-                    track_type,
-                    name,
-                    color: timeline
-                        .state
-                        .track_color_for_index(dialog.color_index.saturating_add(i)),
-                    volume: timeline_state::volume::db_to_norm(0.0),
-                    pan: 0.0,
-                    armed: dialog.selected_kind == AddTrackKind::Audio && dialog.arm_track,
-                    input_monitor: dialog.selected_kind == AddTrackKind::Audio
-                        && dialog.monitor_mode != "off",
-                });
-                selected_track_id = Some(id);
-            }
-            if let Some(id) = selected_track_id {
-                timeline.state.select_track(&id);
-            }
-            cx.notify();
-        });
-        self.add_track_dialog.is_open = false;
-        cx.notify();
-    }
+    // Add Track is now an external window that owns its own state.
 
     fn delete_selected_track(&mut self, cx: &mut Context<Self>) {
         self.mark_dirty();
@@ -2306,53 +2368,16 @@ impl StudioLayout {
 
     fn handle_add_track_dialog_key(
         &mut self,
-        event: &KeyDownEvent,
-        window: &Window,
-        cx: &mut Context<Self>,
+        _event: &KeyDownEvent,
+        _window: &Window,
+        _cx: &mut Context<Self>,
     ) -> bool {
-        if !self.add_track_dialog.is_open {
-            return false;
-        }
-        if event.keystroke.key.as_str() == "escape" && self.text_context_menu.take().is_some() {
-            cx.notify();
-            return true;
-        }
-        if self.add_track_name_input.is_focused(window) {
-            let action = self
-                .add_track_name_input
-                .handle_key_with_clipboard(event, Some(cx));
-            self.add_track_dialog.track_name = self.add_track_name_input.value.clone();
-            match action {
-                TextInputAction::Submit => self.confirm_add_track_dialog(cx),
-                TextInputAction::Cancel => self.close_add_track_dialog(cx),
-                TextInputAction::Consumed | TextInputAction::Pass => cx.notify(),
-            }
-            return !matches!(action, TextInputAction::Pass);
-        }
-        let key = event.keystroke.key.as_str();
-        let no_mods = {
-            let mods = event.keystroke.modifiers;
-            !mods.control && !mods.alt && !mods.platform && !mods.function
-        };
-        match key {
-            "escape" => self.close_add_track_dialog(cx),
-            "enter" | "numpad_enter" => self.confirm_add_track_dialog(cx),
-            "arrow_up" | "up" if no_mods => {
-                self.add_track_dialog.count = (self.add_track_dialog.count + 1).min(32);
-                cx.notify();
-            }
-            "arrow_down" | "down" if no_mods => {
-                self.add_track_dialog.count = self.add_track_dialog.count.saturating_sub(1).max(1);
-                cx.notify();
-            }
-            _ => return false,
-        }
-        true
+        // Add Track is now an external window that handles its own keyboard events.
+        false
     }
 
     fn text_input_mut(&mut self, target: TextMenuTarget) -> &mut TextInputState {
         match target {
-            TextMenuTarget::AddTrackName => &mut self.add_track_name_input,
             TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
         }
@@ -2360,7 +2385,6 @@ impl StudioLayout {
 
     fn text_input(&self, target: TextMenuTarget) -> &TextInputState {
         match target {
-            TextMenuTarget::AddTrackName => &self.add_track_name_input,
             TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &self.browser_search_input,
         }
@@ -2368,9 +2392,6 @@ impl StudioLayout {
 
     fn sync_text_input_target(&mut self, target: TextMenuTarget) {
         match target {
-            TextMenuTarget::AddTrackName => {
-                self.add_track_dialog.track_name = self.add_track_name_input.value.clone();
-            }
             TextMenuTarget::ProjectSwitcherSearch => {
                 self.project_switcher.query = self.project_switcher_search_input.value.clone();
                 self.project_switcher.selected_index = 0;
@@ -2382,8 +2403,7 @@ impl StudioLayout {
     }
 
     fn text_input_has_focus(&self, window: &Window) -> bool {
-        self.add_track_name_input.is_focused(window)
-            || self.project_switcher_search_input.is_focused(window)
+        self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
     }
 
@@ -3258,10 +3278,13 @@ impl Render for StudioLayout {
             std::sync::Arc::new(move |request, _w, cx| {
                 let request = *request;
                 let _ = this.update(cx, |this, cx| {
-                    this.open_add_track_dialog_with_context(
+                    // Timeline requests originate while Timeline may already be mid-update.
+                    // Use the request context to avoid a nested `timeline.update(...)`.
+                    this.open_add_track_external_window_with_context(
                         AddTrackKind::Audio,
                         request.track_count,
                         request.has_master_track,
+                        None,
                         cx,
                     );
                 });
@@ -3509,114 +3532,7 @@ impl Render for StudioLayout {
                 }),
             )
         });
-        let add_track_overlay = if self.add_track_dialog.is_open {
-            let target = cx.entity().clone();
-            let track_name_callbacks = TextInputCallbacks {
-                on_context_menu: Some(Arc::new({
-                    let target = target.clone();
-                    move |(x, y): &(f32, f32), _w, cx| {
-                        let x = *x;
-                        let y = *y;
-                        let _ = target.update(cx, |this, cx| {
-                            this.text_context_menu = Some(TextContextMenu {
-                                target: TextMenuTarget::AddTrackName,
-                                x,
-                                y,
-                            });
-                            cx.notify();
-                        });
-                    }
-                })),
-            };
-            let callbacks = AddTrackDialogCallbacks {
-                on_close: Arc::new({
-                    let target = target.clone();
-                    move |_: &(), _w, cx| {
-                        let _ = target.update(cx, |this, cx| this.close_add_track_dialog(cx));
-                    }
-                }),
-                on_confirm: Arc::new({
-                    let target = target.clone();
-                    move |_: &(), _w, cx| {
-                        let _ = target.update(cx, |this, cx| this.confirm_add_track_dialog(cx));
-                    }
-                }),
-                on_select_kind: Arc::new({
-                    let target = target.clone();
-                    move |kind: &AddTrackKind, _w, cx| {
-                        let kind = *kind;
-                        let _ = target.update(cx, |this, cx| this.select_add_track_kind(kind, cx));
-                    }
-                }),
-                on_count_delta: Arc::new({
-                    let target = target.clone();
-                    move |delta: &i32, _w, cx| {
-                        let delta = *delta;
-                        let _ = target.update(cx, |this, cx| {
-                            let current = this.add_track_dialog.count as i32;
-                            this.add_track_dialog.count = (current + delta).clamp(1, 32) as u32;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_channel_count: Arc::new({
-                    let target = target.clone();
-                    move |channels: &u32, _w, cx| {
-                        let channels = *channels;
-                        let _ = target.update(cx, |this, cx| {
-                            this.add_track_dialog.channel_count = channels.clamp(1, 2);
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_color_index: Arc::new({
-                    let target = target.clone();
-                    move |index: &u32, _w, cx| {
-                        let index = *index as usize;
-                        let _ = target.update(cx, |this, cx| {
-                            this.add_track_dialog.color_index = index;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_arm: Arc::new({
-                    let target = target.clone();
-                    move |armed: &bool, _w, cx| {
-                        let armed = *armed;
-                        let _ = target.update(cx, |this, cx| {
-                            this.add_track_dialog.arm_track = armed;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_monitor: Arc::new({
-                    let target = target.clone();
-                    move |mode: &String, _w, cx| {
-                        let mode = match mode.as_str() {
-                            "auto" => "auto",
-                            "in" => "in",
-                            _ => "off",
-                        };
-                        let _ = target.update(cx, |this, cx| {
-                            this.add_track_dialog.monitor_mode = mode;
-                            cx.notify();
-                        });
-                    }
-                }),
-            };
-            Some(
-                add_track_dialog(
-                    &self.add_track_dialog,
-                    &self.add_track_name_input,
-                    self.add_track_name_input.is_focused(window),
-                    track_name_callbacks,
-                    callbacks,
-                )
-                .into_any_element(),
-            )
-        } else {
-            None
-        };
+        // Add Track moved to an external window.
 
         self.prune_mixer_window(cx);
 
@@ -3787,7 +3703,7 @@ impl Render for StudioLayout {
             // panel. The dropdown's own backdrop captures click-outside.
             .children(dropdown_overlay)
             .children(popover_overlay)
-            .children(add_track_overlay)
+            // Add Track moved to external window.
             .children(settings_overlay)
             .children(text_context_overlay)
     }

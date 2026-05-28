@@ -17,6 +17,7 @@ pub(crate) use mixer_window::external_mixer_debug;
 pub mod panel;
 pub mod project_switcher;
 pub mod project_wizard;
+pub mod plugin_manager;
 pub mod settings_layout;
 pub mod settings_dialog;
 mod sidebar;
@@ -28,7 +29,8 @@ pub mod title_bar;
 
 
 pub use add_track_dialog::{
-    add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
+    add_track_dialog, open_add_track_window, AddTrackDialogCallbacks, AddTrackDialogState,
+    AddTrackKind, AddTrackWindow,
 };
 pub use app_chrome::{
     app_chrome, PanelChromeState, ProjectChromeState, TransportChromeState,
@@ -47,6 +49,10 @@ pub use menu_bar::{menu_bar, menu_label_button};
 pub use mixer_panel::mixer_panel;
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::right_panel;
+pub use plugin_manager::{
+    open_plugin_manager_window, FilterCounts, PluginManagerDialogState, PluginManagerWindow,
+    SidebarFilter, SortDir, SortKey,
+};
 pub use project_wizard::{
     open_project_wizard_window, ProjectCreateCallback, ProjectTemplate, ProjectWizardResult,
     ProjectWizardState, ProjectWizardWindow,

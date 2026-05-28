@@ -13,12 +13,23 @@ default = []
 gpu-renderer = ["dep:pollster", "dep:raw-window-handle", "dep:wgpu"]
 
 [dependencies]
-gpui = "0.2.2"
+# NOTE: `default-features = false` opts out of gpui's `windows-manifest` feature.
+# The native `futureboard_native` binary embeds its own RT_MANIFEST via
+# `apps/shared/app.rc`; leaving gpui's manifest enabled triggers CVT1100
+# "duplicate resource" / LNK1123 at link time on Windows due to Cargo feature
+# unification. Other default features (font-kit, wayland, x11) are re-enabled
+# so non-Windows targets keep working unchanged.
+gpui = { version = "0.2.2", default-features = false, features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
 # Audio decoding + multi-LOD peak generation moved into DAUx
 # (SphereDirectAudioEngine) per PART 5 — the UI no longer carries its
 # own hound / symphonia decoder. Same engine, same LOD ladder, same
 # format coverage as the realtime path.
 sphere-direct-audio-engine = { path = "../SphereDirectAudioEngine" }
+sphere-plugin-host = { path = "../SpherePluginHost" }
 # Cross-platform user directories for the file browser default location.
 dirs = "5"
 # Menu manifest is shared with Electron/Web via a generated JSON file.

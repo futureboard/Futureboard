@@ -10,10 +10,10 @@ const mode = process.argv.includes("--debug") ? "debug" : "release";
 
 const sourceName =
   process.platform === "win32"
-    ? "PluginHost.dll"
+    ? "sphere_plugin_host.dll"
     : process.platform === "darwin"
-      ? "libPluginHost.dylib"
-      : "libPluginHost.so";
+      ? "libsphere_plugin_host.dylib"
+      : "libsphere_plugin_host.so";
 
 const source = path.join(hostRoot, "target", mode, sourceName);
 const targetDir = path.join(electronRoot, "resources");

@@ -5457,6 +5457,7 @@ name = "sphere-plugin-host"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "dirs 5.0.1",
  "napi",
  "napi-build",
  "napi-derive",
@@ -5477,6 +5478,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sphere-direct-audio-engine",
+ "sphere-plugin-host",
  "wgpu",
 ]
 

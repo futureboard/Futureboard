@@ -1,9 +1,25 @@
+//! Sphere plug-in host: VST3/CLAP scan (N-API cdylib for Electron, rlib for native GPUI).
+//!
+//! Electron loads `sphere_plugin_host` as `PluginHost.node`; GPUI links the rlib and uses
+//! [`registry`] for types and VST3/CLAP registry scan.
+
 #![allow(clippy::needless_pass_by_value)]
 #![allow(non_snake_case)]
 
 mod editor_window;
+pub mod preset;
+pub mod registry;
 mod scanner;
 mod types;
+
+pub use preset::{clear_all_presets, ensure_preset_folders, register_plugin, validate_plugin_for_registration, write_preset};
+pub use registry::{
+    classify_kind, default_preset_root, default_scan_paths, display_category,
+    native_host_status, registry_plugin_from_scan, NativeHostStatus, PluginFormat, PluginKind,
+    PluginRegistry, PluginScanFailure, PluginStatus, RegistryPlugin, RegistryScanResult, ScanOptions,
+    ScanProgress,
+};
+pub use scanner::{discover_plugin_bundles, scan_plugin_bundle};
 
 pub use editor_window::{
     attach_vst3_editor_view, close_plugin_editor_window, drain_plugin_editor_param_events,

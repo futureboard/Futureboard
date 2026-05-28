@@ -9,7 +9,17 @@ name = "futureboard_native"
 path = "src/main.rs"
 
 [dependencies]
-gpui = "0.2.2"
+# NOTE: `default-features = false` is used to opt out of gpui's `windows-manifest`
+# feature. gpui ships its own `RT_MANIFEST` (ID 1) and we embed our own custom
+# manifest via `apps/shared/app.rc` (DPI awareness, OS compat list, app identity).
+# Leaving both enabled produces a CVT1100 "duplicate resource" linker error on
+# Windows (LNK1123). We re-enable the remaining default features so non-Windows
+# targets (font-kit, wayland, x11) behave exactly as before.
+gpui = { version = "0.2.2", default-features = false, features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
 sphere_ui_components = { path = "../../crates/SphereUIComponents" }
 # Native audio engine. The crate also exposes an N-API surface for Electron;
 # we only use its `native` facade from here (no NAPI calls in this binary).

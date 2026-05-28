@@ -189,6 +189,57 @@ fn collect_plugin_entries(
     Ok(())
 }
 
+pub fn discover_plugin_bundles(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        discover_bundles_recursive(root, &mut found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn discover_bundles_recursive(current: &Path, found: &mut Vec<PathBuf>) {
+    if is_plugin_bundle(current, PluginFormat::Vst3) || is_plugin_bundle(current, PluginFormat::Clap) {
+        found.push(current.to_path_buf());
+        return;
+    }
+    if !current.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_plugin_bundle(&path, PluginFormat::Vst3) || is_plugin_bundle(&path, PluginFormat::Clap) {
+            found.push(path);
+            continue;
+        }
+        if path.is_dir() {
+            discover_bundles_recursive(&path, found);
+        }
+    }
+}
+
+/// Scan one `.vst3` or `.clap` bundle via the native metadata scanner.
+pub fn scan_plugin_bundle(bundle_path: &Path) -> Result<Vec<PluginInfo>, String> {
+    let path = bundle_path.to_string_lossy().into_owned();
+    if is_plugin_bundle(bundle_path, PluginFormat::Vst3) {
+        return scan_native_root(&path, PluginFormat::Vst3);
+    }
+    if is_plugin_bundle(bundle_path, PluginFormat::Clap) {
+        return scan_native_root(&path, PluginFormat::Clap);
+    }
+    Err(format!(
+        "Not a VST3 or CLAP bundle: {}",
+        bundle_path.display()
+    ))
+}
+
 fn is_plugin_bundle(path: &Path, format: PluginFormat) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())

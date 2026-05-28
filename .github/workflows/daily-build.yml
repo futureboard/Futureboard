@@ -188,6 +188,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Install web dependencies (rolldown native binding)
+        run: bun install --cwd apps/web
+
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-24.04'
         run: |

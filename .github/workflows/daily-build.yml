@@ -58,10 +58,14 @@ jobs:
         run: bash .github/workflows/submodules-init.sh
 
       - name: Sync versions
-        run: node scripts/sync-version.mjs --check
+        run: |
+          node scripts/sync-version.mjs
+          node scripts/sync-version.mjs --check
 
       - name: Sync versions
-        run: node scripts/sync-version.mjs --check
+        run: |
+          node scripts/sync-version.mjs
+          node scripts/sync-version.mjs --check
 
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-24.04'

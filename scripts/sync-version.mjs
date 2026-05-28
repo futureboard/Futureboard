@@ -84,7 +84,13 @@ for (const target of targets) {
   const result = target.apply(target);
   if (result.changed) {
     dirty = true;
-    console.log(`[sync-version] ${checkOnly ? "out of sync" : "updated"}: ${target.name}`);
+    const details =
+      checkOnly && result.from !== undefined
+        ? ` (${result.from} -> ${result.to})`
+        : "";
+    console.log(
+      `[sync-version] ${checkOnly ? "out of sync" : "updated"}: ${target.name}${details}`
+    );
   } else {
     console.log(`[sync-version] ok: ${target.name}`);
   }

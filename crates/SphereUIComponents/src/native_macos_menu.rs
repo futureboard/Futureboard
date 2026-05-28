@@ -95,10 +95,12 @@ mod macos {
                     return None;
                 }
                 let name = item.label.clone().unwrap_or_else(|| item.id.clone());
+                // Ensure the action payload owns its command id ('static).
+                let command_id: SharedString = command.to_string().into();
                 Some(GpuiMenuItem::action(
                     name,
                     RunMenuCommand {
-                        command_id: command.into(),
+                        command_id,
                     },
                 ))
             }

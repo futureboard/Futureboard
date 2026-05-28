@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use sphere_plugin_host::registry::default_preset_root;
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Canonical application name used in all directory paths.
@@ -205,10 +207,9 @@ impl FutureboardPaths {
         map.insert("samples".to_string(), self.samples.clone());
         map.insert("user_library".to_string(), self.user_library.clone());
 
-        // Expose the first VST3 path as the "plugins" entry for the browser.
-        if let Some(first_vst3) = self.vst3_paths.first() {
-            map.insert("plugins".to_string(), first_vst3.clone());
-        }
+        // Show registered plug-ins (.pst presets) in the browser.
+        // This matches the Plug-in Manager's preset root.
+        map.insert("plugins".to_string(), default_preset_root());
 
         map
     }

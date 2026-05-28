@@ -839,20 +839,47 @@ impl Render for Timeline {
                 on_track_context_menu.clone(),
                 on_clip_context_menu.clone(),
             )))
-            // 3. Playhead Overlay (spanning both ruler and tracks)
+            // 3. Playhead Overlay (frontmost timeline pass)
+            // Render after ruler + content so grid/ruler/content never cover it.
+            // Split into:
+            // - head overlay (ruler strip only)
+            // - body overlay (content strip only)
             .child(
                 div()
                     .absolute()
-                    .left(px(
-                        crate::components::timeline::timeline_state::HEADER_WIDTH,
-                    ))
+                    .left(px(HEADER_WIDTH))
                     .right_0()
                     .top_0()
+                    .h(px(RULER_HEIGHT))
+                    .overflow_hidden()
+                    .child({
+                        let playhead_x = state.beats_to_x(state.transport.playhead_beats);
+                        if std::env::var_os("FUTUREBOARD_PLAYHEAD_DEBUG").is_some() {
+                            eprintln!(
+                                "[playhead x] beat={:.3} scroll_x={:.1} px_per_beat={:.3} x={:.1}",
+                                state.transport.playhead_beats,
+                                state.viewport.scroll_x,
+                                state.viewport.pixels_per_beat,
+                                playhead_x
+                            );
+                        }
+                        crate::components::timeline::playhead::playhead_head_overlay_at(playhead_x)
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(HEADER_WIDTH))
+                    .right_0()
+                    .top(px(RULER_HEIGHT))
                     .bottom_0()
                     .overflow_hidden()
-                    .child(crate::components::timeline::playhead::playhead(state)),
+                    .child({
+                        let playhead_x = state.beats_to_x(state.transport.playhead_beats);
+                        crate::components::timeline::playhead::playhead_body_overlay_at(playhead_x)
+                    }),
             )
-            // 3. Floating Tools Bar
+            // 4. Floating Tools Bar (above playhead)
             .child(
                 div()
                     .absolute()
@@ -863,7 +890,7 @@ impl Render for Timeline {
                         on_select_tool.clone(),
                     )),
             )
-            // 4. Vertical scrollbar (right edge, over the lane area)
+            // 5. Vertical scrollbar (right edge, over the lane area)
             .child(vertical_scrollbar(
                 cx,
                 state.viewport.scroll_y,
@@ -871,7 +898,7 @@ impl Render for Timeline {
                 lane_view_h,
                 scroll_max_y,
             ))
-            // 5. Horizontal scrollbar (bottom edge, over the lane area)
+            // 6. Horizontal scrollbar (bottom edge, over the lane area)
             .child(horizontal_scrollbar(
                 cx,
                 state.viewport.scroll_x,
@@ -879,7 +906,7 @@ impl Render for Timeline {
                 lane_view_w,
                 scroll_max_x,
             ))
-            // 6. Zoom Controls
+            // 7. Zoom Controls
             .child(
                 div()
                     .absolute()

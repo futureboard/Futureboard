@@ -30,26 +30,11 @@ pub fn track_lane(
     let even = track_index % 2 == 0;
 
     let bg = if is_track_selected {
-        gpui::Rgba {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 0.055,
-        }
+        Colors::timeline_selected_lane_background()
     } else if even {
-        gpui::Rgba {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 0.026,
-        }
+        Colors::timeline_lane_background()
     } else {
-        gpui::Rgba {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.16,
-        }
+        Colors::timeline_lane_alt_background()
     };
 
     let on_select = on_select_track.clone();

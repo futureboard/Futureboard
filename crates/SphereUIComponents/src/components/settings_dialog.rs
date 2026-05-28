@@ -175,6 +175,11 @@ pub enum HardwareCombo {
     InputDevice,
     OutputDevice,
     ClockSource,
+    Language,
+    AutosaveInterval,
+    AutosaveMaxBackups,
+    SampleRate,
+    BufferSize,
 }
 
 #[derive(Clone)]
@@ -189,6 +194,63 @@ pub struct SettingsDialogCallbacks {
 
 fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
     svg().path(path).w(px(size)).h(px(size)).text_color(color)
+}
+
+fn reveal_path_os(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("\"{}\"", path.display()))
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
+}
+
+fn settings_path_list(paths: &[String]) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(paths.iter().enumerate().map(|(idx, path)| {
+            let path_string = path.clone();
+            div()
+                .id(("settings-path-row", idx))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h(px(30.0))
+                        .px(px(9.0))
+                        .rounded_md()
+                        .border(px(1.0))
+                        .border_color(Colors::border_subtle())
+                        .bg(Colors::surface_input())
+                        .flex()
+                        .items_center()
+                        .truncate()
+                        .text_size(px(10.5))
+                        .text_color(Colors::text_secondary())
+                        .child(path_string.clone()),
+                )
+                .child(fb_button(
+                    ("settings-path-reveal", idx),
+                    "Reveal",
+                    FbButtonKind::Default,
+                    true,
+                    move |_, _w, _cx| reveal_path_os(std::path::Path::new(&path_string)),
+                ))
+        }))
 }
 
 fn hardware_select(
@@ -379,24 +441,17 @@ fn build_settings_content(
                 .child(settings_header("Application", assets::ICON_FILE_PATH))
                 .child(settings_daw_row(
                     "Language",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .child({
-                            let val = schema.general.language.clone();
-                            let up = on_update.clone();
-                            fb_segmented_button("lang-en", "English", val == "en", move |_, w, cx| {
-                                up(Arc::new(|s| s.general.language = "en".to_string()), w, cx);
-                            })
-                        })
-                        .child({
-                            let val = schema.general.language.clone();
-                            let up = on_update.clone();
-                            fb_segmented_button("lang-fr", "French", val == "fr", move |_, w, cx| {
-                                up(Arc::new(|s| s.general.language = "fr".to_string()), w, cx);
-                            })
-                        })
+                    {
+                        let open_combo = callbacks.open_hardware_combo;
+                        let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+                        hardware_select(
+                            HardwareCombo::Language,
+                            "settings-general-language",
+                            &schema.general.language,
+                            open_combo,
+                            on_toggle,
+                        )
+                    }
                 ))
                 .child(settings_daw_row(
                     "Start Wizard",
@@ -476,83 +531,31 @@ fn build_settings_content(
                 ))
                 .child(settings_daw_row(
                     "Interval",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child({
-                            let val = schema.general.autosave.interval_minutes;
-                            let up = on_update.clone();
-                            fb_stepper_button("autosave-interval-dec", "-", move |_, w, cx| {
-                                up(Arc::new(move |s| s.general.autosave.interval_minutes = val.saturating_sub(1).max(1)), w, cx);
-                            })
-                        })
-                        .child(
-                            div()
-                                .w(px(40.0))
-                                .h(px(28.0))
-                                .rounded_md()
-                                .border(px(1.0))
-                                .border_color(Colors::border_subtle())
-                                .bg(Colors::surface_input())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(11.0))
-                                .text_color(Colors::text_primary())
-                                .child(schema.general.autosave.interval_minutes.to_string())
+                    {
+                        let open_combo = callbacks.open_hardware_combo;
+                        let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+                        hardware_select(
+                            HardwareCombo::AutosaveInterval,
+                            "settings-general-autosave-interval",
+                            &format!("{} min", schema.general.autosave.interval_minutes),
+                            open_combo,
+                            on_toggle,
                         )
-                        .child({
-                            let val = schema.general.autosave.interval_minutes;
-                            let up = on_update.clone();
-                            fb_stepper_button("autosave-interval-inc", "+", move |_, w, cx| {
-                                up(Arc::new(move |s| s.general.autosave.interval_minutes = (val + 1).min(120)), w, cx);
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child("minutes")
-                        )
+                    }
                 ))
                 .child(settings_daw_row(
                     "Max Backups",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child({
-                            let val = schema.general.autosave.max_backups;
-                            let up = on_update.clone();
-                            fb_stepper_button("autosave-backups-dec", "-", move |_, w, cx| {
-                                up(Arc::new(move |s| s.general.autosave.max_backups = val.saturating_sub(1).max(1)), w, cx);
-                            })
-                        })
-                        .child(
-                            div()
-                                .w(px(40.0))
-                                .h(px(28.0))
-                                .rounded_md()
-                                .border(px(1.0))
-                                .border_color(Colors::border_subtle())
-                                .bg(Colors::surface_input())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(11.0))
-                                .text_color(Colors::text_primary())
-                                .child(schema.general.autosave.max_backups.to_string())
+                    {
+                        let open_combo = callbacks.open_hardware_combo;
+                        let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+                        hardware_select(
+                            HardwareCombo::AutosaveMaxBackups,
+                            "settings-general-autosave-backups",
+                            &schema.general.autosave.max_backups.to_string(),
+                            open_combo,
+                            on_toggle,
                         )
-                        .child({
-                            let val = schema.general.autosave.max_backups;
-                            let up = on_update.clone();
-                            fb_stepper_button("autosave-backups-inc", "+", move |_, w, cx| {
-                                up(Arc::new(move |s| s.general.autosave.max_backups = (val + 1).min(99)), w, cx);
-                            })
-                        })
+                    }
                 ))
                 .into_any_element()
         );
@@ -719,59 +722,33 @@ fn build_settings_content(
                 .child(settings_header("Sample Rate & Buffer", assets::ICON_MIC_PATH))
                 .child(settings_daw_row(
                     "Sample Rate",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .child({
-                            let val = schema.general.project_defaults.sample_rate;
-                            let up = on_update.clone();
-                            fb_segmented_button("audio-sr-44100", "44.1 kHz", val == 44100, move |_, w, cx| {
-                                up(Arc::new(|s| s.general.project_defaults.sample_rate = 44100), w, cx);
-                            })
-                        })
-                        .child({
-                            let val = schema.general.project_defaults.sample_rate;
-                            let up = on_update.clone();
-                            fb_segmented_button("audio-sr-48000", "48 kHz", val == 48000, move |_, w, cx| {
-                                up(Arc::new(|s| s.general.project_defaults.sample_rate = 48000), w, cx);
-                            })
-                        })
-                        .child({
-                            let val = schema.general.project_defaults.sample_rate;
-                            let up = on_update.clone();
-                            fb_segmented_button("audio-sr-96000", "96 kHz", val == 96000, move |_, w, cx| {
-                                up(Arc::new(|s| s.general.project_defaults.sample_rate = 96000), w, cx);
-                            })
-                        }),
+                    {
+                        let open_combo = callbacks.open_hardware_combo;
+                        let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+                        let sr = schema.general.project_defaults.sample_rate;
+                        hardware_select(
+                            HardwareCombo::SampleRate,
+                            "settings-audio-sample-rate",
+                            &format!("{} Hz", sr),
+                            open_combo,
+                            on_toggle,
+                        )
+                    }
                 ))
                 .child(settings_daw_row(
                     "Buffer Size",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .child({
-                            let val = schema.general.project_defaults.buffer_size;
-                            let up = on_update.clone();
-                            fb_segmented_button("audio-buf-128", "128", val == 128, move |_, w, cx| {
-                                up(Arc::new(|s| s.general.project_defaults.buffer_size = 128), w, cx);
-                            })
-                        })
-                        .child({
-                            let val = schema.general.project_defaults.buffer_size;
-                            let up = on_update.clone();
-                            fb_segmented_button("audio-buf-256", "256", val == 256, move |_, w, cx| {
-                                up(Arc::new(|s| s.general.project_defaults.buffer_size = 256), w, cx);
-                            })
-                        })
-                        .child({
-                            let val = schema.general.project_defaults.buffer_size;
-                            let up = on_update.clone();
-                            fb_segmented_button("audio-buf-512", "512", val == 512, move |_, w, cx| {
-                                up(Arc::new(|s| s.general.project_defaults.buffer_size = 512), w, cx);
-                            })
-                        }),
+                    {
+                        let open_combo = callbacks.open_hardware_combo;
+                        let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+                        let buf = schema.general.project_defaults.buffer_size;
+                        hardware_select(
+                            HardwareCombo::BufferSize,
+                            "settings-audio-buffer-size",
+                            &format!("{buf}"),
+                            open_combo,
+                            on_toggle,
+                        )
+                    }
                 ))
                 .child(settings_daw_row(
                     "Round-trip Latency",
@@ -1611,29 +1588,11 @@ fn build_settings_content(
                 ))
                 .child(settings_daw_row(
                     "VST3 Folders",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .children(schema.plugins.vst3.paths.iter().map(|path| {
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(path.clone())
-                        }))
+                    settings_path_list(&schema.plugins.vst3.paths)
                 ))
                 .child(settings_daw_row(
                     "CLAP Folders",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .children(schema.plugins.clap.paths.iter().map(|path| {
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(path.clone())
-                        }))
+                    settings_path_list(&schema.plugins.clap.paths)
                 ))
                 .child(settings_daw_row(
                     "Actions",
@@ -1880,6 +1839,11 @@ const SETTINGS_WIDTH: f32 = SETTINGS_WINDOW_WIDTH;
 const SETTINGS_HEIGHT: f32 = SETTINGS_WINDOW_HEIGHT;
 const COMBO_MENU_ESTIMATE_HEIGHT: f32 = 148.0;
 const CLOCK_SOURCE_OPTIONS: &[&str] = &["Internal", "MIDI"];
+const LANGUAGE_OPTIONS: &[&str] = &["en", "fr"];
+const AUTOSAVE_INTERVAL_OPTIONS: &[u32] = &[1, 2, 3, 5, 10, 15, 30, 60];
+const AUTOSAVE_MAX_BACKUPS_OPTIONS: &[u32] = &[1, 2, 3, 5, 10, 20, 50, 99];
+const SAMPLE_RATE_OPTIONS: &[u32] = &[44100, 48000, 88200, 96000];
+const BUFFER_SIZE_OPTIONS: &[u32] = &[64, 128, 256, 512, 1024];
 
 fn combo_menu_position(anchor: OverlayAnchor, window: &Window) -> crate::overlay::OverlayPosition {
     let layout = settings_form_column(window);
@@ -1909,16 +1873,29 @@ fn hardware_combo_overlay(
 ) -> impl IntoElement {
     let position = combo_menu_position(anchor, window);
     let close_target = close_target.clone();
+    let experimental_asio = std::env::var("FUTUREBOARD_EXPERIMENTAL_ASIO")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let menu = match open_combo {
         HardwareCombo::AudioDriver => {
             let selected = schema.hardware.audio.driver_type.clone();
             let up = on_update.clone();
+            let filtered_backends: Vec<String> = if experimental_asio {
+                available_backends.to_vec()
+            } else {
+                available_backends
+                    .iter()
+                    .filter(|b| !b.to_ascii_lowercase().contains("asio"))
+                    .cloned()
+                    .collect()
+            };
             combo_box_string_menu(
                 "settings-audio-driver-menu",
                 position,
                 &selected,
-                available_backends,
+                &filtered_backends,
                 Arc::new(move |value, window, cx| {
                     up(
                         Arc::new(move |s| s.hardware.audio.driver_type = value.clone()),
@@ -1977,6 +1954,115 @@ fn hardware_combo_overlay(
                 Arc::new(move |value, window, cx| {
                     up(
                         Arc::new(move |s| s.hardware.sync.clock_source = value.clone()),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::Language => {
+            let selected = schema.general.language.clone();
+            let options: Vec<String> = LANGUAGE_OPTIONS.iter().map(|s| s.to_string()).collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-general-language-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    up(Arc::new(move |s| s.general.language = value.clone()), window, cx);
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::AutosaveInterval => {
+            let selected = format!("{} min", schema.general.autosave.interval_minutes);
+            let options: Vec<String> = AUTOSAVE_INTERVAL_OPTIONS
+                .iter()
+                .map(|m| format!("{m} min"))
+                .collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-general-autosave-interval-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let minutes = value
+                        .split_whitespace()
+                        .next()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(5);
+                    up(
+                        Arc::new(move |s| s.general.autosave.interval_minutes = minutes),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::AutosaveMaxBackups => {
+            let selected = schema.general.autosave.max_backups.to_string();
+            let options: Vec<String> = AUTOSAVE_MAX_BACKUPS_OPTIONS
+                .iter()
+                .map(|v| v.to_string())
+                .collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-general-autosave-backups-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let backups = value.parse::<u32>().unwrap_or(10);
+                    up(
+                        Arc::new(move |s| s.general.autosave.max_backups = backups),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::SampleRate => {
+            let selected = format!("{} Hz", schema.general.project_defaults.sample_rate);
+            let options: Vec<String> = SAMPLE_RATE_OPTIONS.iter().map(|v| format!("{v} Hz")).collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-audio-sample-rate-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let sr = value
+                        .split_whitespace()
+                        .next()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(48000);
+                    up(
+                        Arc::new(move |s| s.general.project_defaults.sample_rate = sr),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::BufferSize => {
+            let selected = schema.general.project_defaults.buffer_size.to_string();
+            let options: Vec<String> = BUFFER_SIZE_OPTIONS.iter().map(|v| v.to_string()).collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-audio-buffer-size-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let buf = value.parse::<u32>().unwrap_or(256);
+                    up(
+                        Arc::new(move |s| s.general.project_defaults.buffer_size = buf),
                         window,
                         cx,
                     );
@@ -2131,6 +2217,7 @@ impl Render for SettingsWindow {
 
         let search_callbacks = TextInputCallbacks {
             on_context_menu: None,
+            on_mouse: None,
         };
 
         let (sidebar_items, sections) = build_settings_content(

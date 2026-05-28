@@ -29,6 +29,23 @@ pub fn track_list(
     let _s = crate::perf::PerfScope::enter("TrackList");
     let grid_width = state.viewport.viewport_width.max(1.0);
     let grid_height = state.viewport.viewport_height.max(TRACK_HEIGHT);
+    let track_count = state.tracks.len();
+    let total_tracks_height = track_count as f32 * TRACK_HEIGHT;
+    // Where the "tail" (below the last actual track) begins in viewport coords.
+    // Rows are shifted by `-scroll_y`, so we need to subtract scroll to find the
+    // last track's bottom edge relative to the visible viewport.
+    let tail_start_y = (total_tracks_height - state.viewport.scroll_y).max(0.0);
+
+    if std::env::var_os("FUTUREBOARD_TIMELINE_BG_DEBUG").is_some() {
+        eprintln!(
+            "[timeline bg] tracks={} total_h={:.1} scroll_y={:.1} viewport_h={:.1} tail_start_y={:.1}",
+            track_count,
+            total_tracks_height,
+            state.viewport.scroll_y,
+            grid_height,
+            tail_start_y
+        );
+    }
     let insert_y = state.drag_target_index.map(|index| {
         (index as f32 * TRACK_HEIGHT - state.viewport.scroll_y)
             .clamp(0.0, grid_height.max(TRACK_HEIGHT))
@@ -39,7 +56,6 @@ pub fn track_list(
     // The remainder is represented by opaque spacer divs at the top/bottom of
     // the flex column so the scroll geometry (total height, scrollbar thumb
     // size, drop-indicator positions) stays correct.
-    let track_count = state.tracks.len();
     let scroll_y = state.viewport.scroll_y;
     let viewport_height = state.viewport.viewport_height;
 
@@ -156,6 +172,25 @@ pub fn track_list(
                 .right_0()
                 .top_0()
                 .bottom_0()
+                // Base body background: always fill the full content viewport,
+                // even when there are 0 tracks or the track list doesn't fill
+                // the visible height.
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(Colors::timeline_content_background()),
+                )
+                // Empty tail background below the last track, if any.
+                .children((tail_start_y < grid_height).then(|| {
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(tail_start_y))
+                        .bottom_0()
+                        .bg(Colors::timeline_empty_body_background())
+                }))
                 .child(timeline_surface(state, grid_width, grid_height)),
         )
         // Foreground layer: scrolling TrackHeader/TrackLane rows.

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, App, ClipboardItem, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ParentElement, Styled, Window,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Styled, Window,
 };
 
 use crate::components::context_menu::ContextMenuEntry;
@@ -16,10 +16,26 @@ pub const TEXT_INPUT_PASTE: &str = "text-input:paste";
 pub const TEXT_INPUT_SELECT_ALL: &str = "text-input:select-all";
 
 pub type TextInputContextCb = Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>;
+pub type TextInputMouseCb = Arc<dyn Fn(&TextInputMouseEvent, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone, Default)]
 pub struct TextInputCallbacks {
     pub on_context_menu: Option<TextInputContextCb>,
+    pub on_mouse: Option<TextInputMouseCb>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TextInputMousePhase {
+    Down,
+    Drag,
+    Up,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TextInputMouseEvent {
+    pub phase: TextInputMousePhase,
+    /// X position in the input's local coordinate space (best-effort; treated as local).
+    pub x: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +57,7 @@ pub struct TextInputState {
     pub disabled: bool,
     pub read_only: bool,
     pub is_password: bool,
+    mouse_selecting: bool,
 }
 
 impl TextInputState {
@@ -55,6 +72,7 @@ impl TextInputState {
             disabled: false,
             read_only: false,
             is_password: false,
+            mouse_selecting: false,
         }
     }
 
@@ -115,6 +133,51 @@ impl TextInputState {
 
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
+    }
+
+    /// Begin mouse selection/cursor placement.
+    ///
+    /// Note: `x` is treated as local-x within the text field. Since GPUI does not
+    /// currently expose element-local coordinates here, we use a best-effort mapping
+    /// that is "good enough" for drag selection.
+    pub fn handle_mouse_down(&mut self, x: f32, extend: bool) {
+        if self.disabled {
+            return;
+        }
+        let idx = self.cursor_from_x(x);
+        if extend {
+            self.move_cursor_to(idx, true);
+        } else {
+            self.cursor = idx;
+            self.selection_anchor = Some(idx);
+        }
+        self.mouse_selecting = true;
+    }
+
+    pub fn handle_mouse_drag(&mut self, x: f32) {
+        if self.disabled || !self.mouse_selecting {
+            return;
+        }
+        let idx = self.cursor_from_x(x);
+        self.move_cursor_to(idx, true);
+    }
+
+    pub fn handle_mouse_up(&mut self) {
+        self.mouse_selecting = false;
+        // Collapse empty selection created by click.
+        if self.selection_anchor == Some(self.cursor) {
+            self.clear_selection();
+        }
+    }
+
+    fn cursor_from_x(&self, x: f32) -> usize {
+        // Matches text field padding in `text_field_with_callbacks`.
+        const PAD_X: f32 = 9.0;
+        // Heuristic average glyph width at 12px Inter.
+        const CHAR_W: f32 = 7.0;
+        let local = (x - PAD_X).max(0.0);
+        let idx = (local / CHAR_W).round() as isize;
+        idx.clamp(0, self.char_count() as isize) as usize
     }
 
     pub fn handle_key(&mut self, event: &KeyDownEvent) -> TextInputAction {
@@ -409,6 +472,30 @@ pub fn text_input_context_entries(
     ]
 }
 
+/// Convenience helper: binds mouse drag selection to a `TextInputState` stored
+/// inside an entity, without duplicating handler boilerplate.
+pub fn bind_mouse_selection<T: gpui::Render>(
+    target: gpui::Entity<T>,
+    get: impl Fn(&mut T) -> &mut TextInputState + Send + Sync + 'static,
+) -> TextInputCallbacks {
+    TextInputCallbacks {
+        on_context_menu: None,
+        on_mouse: Some(Arc::new(move |event: &TextInputMouseEvent, _w, cx| {
+            let x = event.x;
+            let phase = event.phase;
+            let _ = target.update(cx, |this, cx| {
+                let input = get(this);
+                match phase {
+                    TextInputMousePhase::Down => input.handle_mouse_down(x, false),
+                    TextInputMousePhase::Drag => input.handle_mouse_drag(x),
+                    TextInputMousePhase::Up => input.handle_mouse_up(),
+                }
+                cx.notify();
+            });
+        })),
+    }
+}
+
 fn menu_item(
     label: &'static str,
     command: &'static str,
@@ -446,6 +533,9 @@ pub fn text_field_with_callbacks(
     let selection = state.selection_range();
     let cursor = state.cursor.min(value.chars().count());
     let on_context_menu = callbacks.on_context_menu.clone();
+    let on_mouse_down = callbacks.on_mouse.clone();
+    let on_mouse_move = callbacks.on_mouse.clone();
+    let on_mouse_up = callbacks.on_mouse.clone();
 
     let border = if focused {
         Colors::border_focus()
@@ -537,9 +627,55 @@ pub fn text_field_with_callbacks(
                 spread_radius: px(1.0),
             }])
         })
-        .on_mouse_down(MouseButton::Left, move |_, window, _cx| {
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             if !disabled {
                 fh_click.focus(window);
+                if let Some(cb) = on_mouse_down.as_ref() {
+                    let x: f32 = event.position.x.into();
+                    cb(
+                        &TextInputMouseEvent {
+                            phase: TextInputMousePhase::Down,
+                            x,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            }
+        })
+        .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+            if disabled {
+                return;
+            }
+            if event.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            if let Some(cb) = on_mouse_move.as_ref() {
+                let x: f32 = event.position.x.into();
+                cb(
+                    &TextInputMouseEvent {
+                        phase: TextInputMousePhase::Drag,
+                        x,
+                    },
+                    window,
+                    cx,
+                );
+            }
+        })
+        .on_mouse_up(MouseButton::Left, move |event: &MouseUpEvent, window, cx| {
+            if disabled {
+                return;
+            }
+            if let Some(cb) = on_mouse_up.as_ref() {
+                let x: f32 = event.position.x.into();
+                cb(
+                    &TextInputMouseEvent {
+                        phase: TextInputMousePhase::Up,
+                        x,
+                    },
+                    window,
+                    cx,
+                );
             }
         })
         .on_mouse_down(MouseButton::Right, move |event, window, cx| {

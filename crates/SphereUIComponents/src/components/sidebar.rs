@@ -117,6 +117,7 @@ pub fn sidebar(
     // Search bar above content
     let search_callbacks = TextInputCallbacks {
         on_context_menu: Some(on_search_context_menu),
+        on_mouse: None,
     };
     let search_container = div()
         .px(px(8.0))
@@ -507,10 +508,16 @@ fn disclosure_icon(expandable: bool, expanded: bool) -> impl IntoElement {
 }
 
 fn truncate_path(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let tail = &s[s.len().saturating_sub(max - 1)..];
-        format!("...{}", tail)
+    let max = max.max(4);
+    let char_len = s.chars().count();
+    if char_len <= max {
+        return s.to_string();
     }
+
+    // Take the last `max - 3` chars (leave room for "...") without slicing in the middle
+    // of a UTF-8 codepoint.
+    let keep = max.saturating_sub(3);
+    let start = char_len.saturating_sub(keep);
+    let tail: String = s.chars().skip(start).collect();
+    format!("...{tail}")
 }

@@ -18,7 +18,8 @@ use sphere_plugin_host::registry::{
 use crate::assets;
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::text_input::{
-    text_field_with_callbacks, TextInputAction, TextInputCallbacks, TextInputState,
+    bind_mouse_selection, text_field_with_callbacks, TextInputAction, TextInputCallbacks,
+    TextInputState,
 };
 use crate::components::title_bar::external_window_titlebar;
 use crate::theme::{self, Colors};
@@ -1528,7 +1529,7 @@ impl Render for PluginManagerWindow {
                     &self.state,
                     &self.search_input,
                     search_focused,
-                    TextInputCallbacks::default(),
+                    bind_mouse_selection(cx.entity().clone(), |this| &mut this.search_input),
                     callbacks,
                 ),
             )

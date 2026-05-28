@@ -16,6 +16,7 @@
 //! * audio paths must never touch this module.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -803,6 +804,21 @@ pub fn read_directory(path: &Path) -> (Vec<FileBrowserEntry>, Option<String>) {
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_default();
+            if ext == "pst" {
+                let display = read_pst_plugin_name(&p).unwrap_or_else(|| {
+                    p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&name)
+                        .to_string()
+                });
+                files.push(FileBrowserEntry {
+                    name: display,
+                    path: p,
+                    kind: FileEntryKind::File,
+                    extension: ext,
+                });
+                continue;
+            }
             files.push(FileBrowserEntry {
                 name,
                 path: p,
@@ -816,4 +832,26 @@ pub fn read_directory(path: &Path) -> (Vec<FileBrowserEntry>, Option<String>) {
     files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     folders.extend(files);
     (folders, None)
+}
+
+fn read_pst_plugin_name(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() < 24 {
+        return None;
+    }
+    if &bytes[0..5] != b"FBPST" {
+        return None;
+    }
+    let meta_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+    if bytes.len() < 24 + meta_len {
+        return None;
+    }
+    let meta = &bytes[24..24 + meta_len];
+    let value: serde_json::Value = serde_json::from_slice(meta).ok()?;
+    value
+        .get("pluginMetadata")
+        .and_then(|m| m.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }

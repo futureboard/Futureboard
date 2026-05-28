@@ -272,15 +272,69 @@ impl Colors {
     }
 
     pub fn timeline_grid_major() -> Rgba {
-        rgba(0xFFFFFF1A)
+        rgba(0xFFFFFF12)
     }
 
     pub fn timeline_grid_minor() -> Rgba {
-        rgba(0xFFFFFF0A)
+        rgba(0xFFFFFF08)
+    }
+
+    pub fn timeline_grid_bar() -> Rgba {
+        rgba(0xFFFFFF1A)
     }
 
     pub fn timeline_playhead() -> Rgba {
         rgb(0xFF6B68)
+    }
+
+    pub fn timeline_background() -> Rgba {
+        Self::surface_base()
+    }
+
+    pub fn timeline_content_background() -> Rgba {
+        Self::surface_base()
+    }
+
+    pub fn timeline_region_background() -> Rgba {
+        rgba(0xFFFFFF06)
+    }
+
+    pub fn timeline_region_background_alt() -> Rgba {
+        rgba(0xFFFFFF04)
+    }
+
+    pub fn timeline_lane_background() -> Rgba {
+        rgba(0xFFFFFF07)
+    }
+
+    pub fn timeline_lane_alt_background() -> Rgba {
+        rgba(0x00000029)
+    }
+
+    pub fn timeline_selected_lane_background() -> Rgba {
+        rgba(0xFFFFFF12)
+    }
+
+    pub fn timeline_empty_body_background() -> Rgba {
+        // Slightly calmer than lane alt so the grid doesn't look "too forward"
+        // in empty space below the last track.
+        rgba(0x00000024)
+    }
+
+    pub fn timeline_ruler_background() -> Rgba {
+        Self::surface_panel()
+    }
+
+    pub fn timeline_ruler_tick() -> Rgba {
+        rgba(0xFFFFFF1F)
+    }
+
+    pub fn timeline_ruler_text() -> Rgba {
+        Self::text_secondary()
+    }
+
+    pub fn timeline_selection() -> Rgba {
+        Self::accent_soft()
     }
 
     // Track colors (fallbacks)

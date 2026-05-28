@@ -20,28 +20,29 @@ impl GpuiPaintTimelineRenderer {
     fn paint_grid(snapshot: &TimelineRenderSnapshot, bounds: Bounds<Pixels>, window: &mut gpui::Window) {
         let grid_height = snapshot.viewport.height;
         let grid_width = snapshot.viewport.width;
-        let paint_bounds = Bounds::new(bounds.origin, size(px(grid_width), px(grid_height)));
-        window.paint_layer(paint_bounds, |window| {
-            for shade in &snapshot.bar_shades {
-                let bar_bounds = local_bounds(bounds, shade.x, 0.0, shade.width, grid_height);
-                window.paint_quad(fill(
-                    bar_bounds,
-                    Colors::with_alpha(Colors::text_primary(), 0.022),
-                ));
-            }
-            for line in &snapshot.grid_lines {
-                let alpha = match line.level {
-                    GridLineLevel::Bar => 0.14,
-                    GridLineLevel::Beat => 0.062,
-                    GridLineLevel::Sub => 0.026,
-                };
-                let line_bounds = local_bounds(bounds, line.x, 0.0, 1.0, grid_height);
-                window.paint_quad(fill(
-                    line_bounds,
-                    Colors::with_alpha(Colors::text_primary(), alpha),
-                ));
-            }
-        });
+
+        // IMPORTANT: do NOT use `window.paint_layer` here.
+        // `paint_layer` is promoted into a separate compositor layer which can
+        // appear above later GPUI elements (clips/playhead/selection). We want
+        // strict DOM child ordering: grid/regions must stay behind content.
+        if std::env::var_os("FUTUREBOARD_TIMELINE_LAYER_DEBUG").is_some() {
+            eprintln!("[timeline paint] base->regions->grid (gpui_paint) w={grid_width:.1} h={grid_height:.1}");
+        }
+
+        for shade in &snapshot.bar_shades {
+            let bar_bounds = local_bounds(bounds, shade.x, 0.0, shade.width, grid_height);
+            window.paint_quad(fill(bar_bounds, Colors::timeline_region_background()));
+        }
+
+        for line in &snapshot.grid_lines {
+            let color = match line.level {
+                GridLineLevel::Bar => Colors::timeline_grid_bar(),
+                GridLineLevel::Beat => Colors::timeline_grid_major(),
+                GridLineLevel::Sub => Colors::timeline_grid_minor(),
+            };
+            let line_bounds = local_bounds(bounds, line.x, 0.0, 1.0, grid_height);
+            window.paint_quad(fill(line_bounds, color));
+        }
     }
 }
 

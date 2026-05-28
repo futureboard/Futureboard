@@ -9,7 +9,7 @@ use gpui::{
 
 use crate::assets;
 use crate::components::text_input::{
-    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+    bind_mouse_selection, text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
 use crate::components::title_bar::external_window_titlebar;
 use crate::components::timeline::timeline_state::TrackType;
@@ -1461,7 +1461,7 @@ impl Render for AddTrackWindow {
                 &self.state,
                 &self.track_name_input,
                 search_focused,
-                TextInputCallbacks::default(),
+                bind_mouse_selection(cx.entity().clone(), |this| &mut this.track_name_input),
                 callbacks,
             ))
     }

@@ -3464,6 +3464,7 @@ impl Render for StudioLayout {
                         });
                     }
                 })),
+                on_mouse: None,
             };
             Some(
                 components::project_switcher::project_switcher_popover(

@@ -1,8 +1,6 @@
 use crate::assets;
 use crate::components::sidebar::SIDEBAR_WIDTH;
-use crate::components::timeline::timeline_state::{
-    GridLineLevel, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
-};
+use crate::components::timeline::timeline_state::{GridLineLevel, TimelineState, HEADER_WIDTH, RULER_HEIGHT};
 use crate::theme::Colors;
 use gpui::{
     div, px, svg, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
@@ -41,7 +39,7 @@ pub fn timeline_ruler(
         .flex_row()
         .h(px(RULER_HEIGHT))
         .w_full()
-        .bg(Colors::surface_panel())
+        .bg(Colors::timeline_ruler_background())
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .child(
@@ -61,7 +59,7 @@ pub fn timeline_ruler(
                 .border_color(Colors::border_strong())
                 .child(
                     div()
-                        .text_color(Colors::text_primary())
+                        .text_color(Colors::timeline_ruler_text())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child("Arrangement"),
@@ -193,10 +191,12 @@ pub fn timeline_ruler(
                             .bottom_0()
                             .left(px(lx))
                             .w(px(width))
-                            .bg(Colors::with_alpha(Colors::status_success(), 0.08))
+                            // Loop range highlight: keep extremely subtle so it never reads
+                            // as a foreground "region strip" over the ruler/viewport.
+                            .bg(Colors::with_alpha(Colors::timeline_selection(), 0.20))
                             .border_l(px(1.0))
                             .border_r(px(1.0))
-                            .border_color(Colors::status_success()),
+                            .border_color(Colors::with_alpha(Colors::timeline_selection(), 0.45)),
                     )
                 } else {
                     None
@@ -221,7 +221,7 @@ pub fn timeline_ruler(
                         .bottom_0()
                         .w(px(1.0))
                         .h(px(tick_h))
-                        .bg(Colors::with_alpha(Colors::text_primary(), tick_alpha))
+                        .bg(Colors::with_alpha(Colors::timeline_ruler_tick(), tick_alpha))
                 }))
                 // Labels: emitted as siblings of the ticks (not children of a
                 // 1 px-wide tick div, which previously made labels wrap one
@@ -230,7 +230,7 @@ pub fn timeline_ruler(
                 .children(lines.iter().filter(|l| l.show_label).map(|line| {
                     let label = state.format_bar_beat(line.beat);
                     let (font_weight, text_color) = match line.level {
-                        GridLineLevel::Bar => (gpui::FontWeight::BOLD, Colors::text_secondary()),
+                        GridLineLevel::Bar => (gpui::FontWeight::BOLD, Colors::timeline_ruler_text()),
                         _ => (gpui::FontWeight::NORMAL, Colors::text_muted()),
                     };
                     div()

@@ -173,6 +173,42 @@ pub fn settings_daw_row(label: &'static str, child: impl IntoElement) -> impl In
         .child(div().flex_1().min_w_0().child(child))
 }
 
+/// DAW-aligned label + control row, with optional description under the label.
+pub fn settings_daw_row_with_description(
+    label: &'static str,
+    description: Option<&'static str>,
+    child: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(SETTINGS_ROW_GAP))
+        .min_h(px(30.0))
+        .child(
+            div()
+                .w(px(SETTINGS_LABEL_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::text_muted())
+                        .child(label),
+                )
+                .children(description.map(|d| {
+                    div()
+                        .text_size(px(9.0))
+                        .text_color(Colors::text_faint())
+                        .child(d)
+                })),
+        )
+        .child(div().flex_1().min_w_0().child(child))
+}
+
 pub fn settings_value_readout(text: impl Into<String>) -> impl IntoElement {
     div()
         .text_size(px(10.0))

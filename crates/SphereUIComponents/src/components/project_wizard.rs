@@ -957,6 +957,7 @@ impl Render for ProjectWizardWindow {
                     });
                 }
             })),
+            on_mouse: None,
         };
 
         let text_menu_overlay = self.text_menu.map(|menu| {

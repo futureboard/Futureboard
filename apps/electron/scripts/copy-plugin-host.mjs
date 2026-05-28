@@ -15,12 +15,20 @@ const sourceName =
       ? "libsphere_plugin_host.dylib"
       : "libsphere_plugin_host.so";
 
-const source = path.join(hostRoot, "target", mode, sourceName);
+// In a Cargo workspace, artifacts land in workspaceRoot/target by default.
+const sourceCandidates = [
+  path.join(workspaceRoot, "target", mode, sourceName),
+  path.join(hostRoot, "target", mode, sourceName),
+];
+const source = sourceCandidates.find((p) => fs.existsSync(p));
 const targetDir = path.join(electronRoot, "resources");
 const target = path.join(targetDir, "PluginHost.node");
 
-if (!fs.existsSync(source)) {
-  console.error(`[copy-plugin-host] Missing native addon: ${source}`);
+if (!source) {
+  console.error(
+    `[copy-plugin-host] Missing native addon. Checked:\n` +
+    sourceCandidates.map((p) => `  ${p}`).join("\n")
+  );
   process.exit(1);
 }
 

@@ -32,4 +32,26 @@ SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_resize_window(unsigned long lon
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_plugin_editor_drain_param_events_json();
 SPHERE_PLUGIN_HOST_API void sphere_plugin_host_free_string(SpherePluginHostString value);
 
+// ── Embedded editor (GPUI-hosted) ───────────────────────────────────────────
+// Attach a VST3 IPlugView into a WS_CHILD region under a caller-provided parent
+// window (the GPUI borderless editor window's native HWND). No NanoVG shell.
+// Must be called on the thread that owns `parent_hwnd`. Returns a non-zero
+// session handle on success, 0 on failure (never throws).
+SPHERE_PLUGIN_HOST_API unsigned long long sphere_plugin_editor_embed_attach(
+    unsigned long long parent_hwnd,
+    const char* plugin_path,
+    const char* class_id,
+    int x,
+    int y,
+    int width,
+    int height);
+SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_set_bounds(
+    unsigned long long handle,
+    int x,
+    int y,
+    int width,
+    int height);
+SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_detach(unsigned long long handle);
+SPHERE_PLUGIN_HOST_API int sphere_plugin_editor_embed_is_valid(unsigned long long handle);
+
 }

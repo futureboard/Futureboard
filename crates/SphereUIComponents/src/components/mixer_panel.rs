@@ -29,7 +29,7 @@ use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
 use crate::components::knob::knob_bipolar;
 use crate::components::timeline::timeline_state::{
-    volume, InsertLoadStatus, InsertSlotState, MasterBusState, TrackState, TrackType,
+    volume, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState, TrackState, TrackType,
 };
 use crate::components::timeline::vu_meter::vu_meter_vertical_full;
 use crate::theme::Colors;
@@ -74,9 +74,9 @@ pub struct MixerCallbacks {
     pub on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
-    /// Append an empty insert slot to the track. The picker overlay is
-    /// deferred — Phase 1 seeds a stub descriptor at insert time so the
-    /// project round-trip can be exercised end-to-end.
+    /// Open the insert plugin picker overlay for the track (Phase 2b). The
+    /// slot is created only when the user picks a plugin; an empty registry
+    /// offers a stub fallback so the project round-trip stays exercisable.
     pub on_add_insert:
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     /// Remove the named insert slot from the track.
@@ -88,6 +88,13 @@ pub struct MixerCallbacks {
     /// User clicked the slot chip — Phase 4 will open the native plugin
     /// editor; Phase 1 logs the request.
     pub on_open_insert_editor:
+        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Add an aux send from the track to the first available Bus/Return
+    /// (Phase 3). A target picker is a follow-up.
+    pub on_add_send:
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Remove the named send `(track_id, send_id)`.
+    pub on_remove_send:
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
 }
 
@@ -110,10 +117,12 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_toggle_input: noop_track.clone(),
         on_master_volume_change: noop_master,
         on_context_menu: None,
-        on_add_insert: noop_track,
+        on_add_insert: noop_track.clone(),
         on_remove_insert: noop_insert_pair.clone(),
         on_toggle_insert_bypass: noop_insert_pair.clone(),
-        on_open_insert_editor: noop_insert_pair,
+        on_open_insert_editor: noop_insert_pair.clone(),
+        on_add_send: noop_track,
+        on_remove_send: noop_insert_pair,
     }
 }
 
@@ -344,6 +353,8 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
         TrackType::Audio => "AUDIO",
         TrackType::Midi => "MIDI",
         TrackType::Instrument => "INST",
+        TrackType::Bus => "BUS",
+        TrackType::Return => "RTN",
         TrackType::Master => "MST",
     };
 
@@ -535,7 +546,104 @@ fn inserts_section(
         .child(chips)
 }
 
-fn sends_section(track: &TrackState) -> impl IntoElement {
+fn send_chip(
+    track_id: &str,
+    send: &SendSlotState,
+    target_name: &str,
+    callbacks: &MixerCallbacks,
+) -> impl IntoElement {
+    let remove_pair = (track_id.to_string(), send.id.clone());
+    let on_remove = callbacks.on_remove_send.clone();
+    let (bg, text) = if send.enabled {
+        (Colors::accent_muted(), Colors::text_primary())
+    } else {
+        (Colors::surface_input(), Colors::text_muted())
+    };
+    div()
+        .id(gpui::SharedString::from(format!("send-chip-{}", send.id)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(3.0))
+        .mx(px(2.0))
+        .px(px(4.0))
+        .h(px(18.0))
+        .rounded_sm()
+        .bg(bg)
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(text)
+        .child(
+            div()
+                .truncate()
+                .flex_1()
+                .child(format!("→ {target_name}")),
+        )
+        .child(
+            div()
+                .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))
+                .text_size(px(10.0))
+                .text_color(Colors::text_faint())
+                .px(px(2.0))
+                .child("×")
+                .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                    on_remove(&remove_pair, w, cx);
+                })
+                .occlude(),
+        )
+}
+
+fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoElement {
+    let track_id_owned = track_id.to_string();
+    let on_add = callbacks.on_add_send.clone();
+    div()
+        .id(gpui::SharedString::from(format!("send-add-{}", track_id_owned)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .mx(px(2.0))
+        .px(px(4.0))
+        .h(px(18.0))
+        .rounded_sm()
+        .border(px(1.0))
+        .border_dashed()
+        .border_color(Colors::slot_border())
+        .text_size(px(10.0))
+        .text_color(Colors::slot_empty_text())
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .child("+")
+        .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+            on_add(&track_id_owned, w, cx);
+        })
+        .occlude()
+}
+
+fn sends_section(
+    track: &TrackState,
+    all_tracks: &[TrackState],
+    callbacks: &MixerCallbacks,
+) -> impl IntoElement {
+    // Routing tracks (bus/return) don't themselves carry an aux-send rack in
+    // this slice — they are send *targets*. Show an empty placeholder.
+    let is_routing = track.track_type.is_routing();
+    let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
+    if is_routing {
+        chips = chips.child(empty_slot());
+    } else {
+        for send in &track.sends {
+            // Resolve the live target name (handles renames) with the stored
+            // label as a fallback.
+            let target_name = all_tracks
+                .iter()
+                .find(|t| t.id == send.target_track_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| send.target_name.clone());
+            chips = chips.child(send_chip(&track.id, send, &target_name, callbacks));
+        }
+        chips = chips.child(add_send_button(&track.id, callbacks));
+    }
+
     div()
         .flex()
         .flex_col()
@@ -543,7 +651,7 @@ fn sends_section(track: &TrackState) -> impl IntoElement {
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .child(section_header("SENDS", track.color))
-        .child(empty_slot())
+        .child(chips)
 }
 
 fn pan_section(
@@ -685,6 +793,7 @@ fn strip_footer(name: &str) -> impl IntoElement {
 
 fn channel_strip(
     track: &TrackState,
+    all_tracks: &[TrackState],
     index: usize,
     is_selected: bool,
     callbacks: &MixerCallbacks,
@@ -744,7 +853,7 @@ fn channel_strip(
         .child(div().w_full().h(px(2.0)).bg(track.color))
         .child(strip_header(track, index))
         .child(inserts_section(track, index, callbacks))
-        .child(sends_section(track))
+        .child(sends_section(track, all_tracks, callbacks))
         .child(pan_section(track, callbacks, is_selected))
         .child(fader_area(track, callbacks, is_selected))
         .child(button_row(track, callbacks, id_num))
@@ -982,7 +1091,7 @@ pub fn mixer_panel(
         .map(|(rel_i, t)| {
             let abs_i = visible_start + rel_i;
             let is_sel = selected_track_id == Some(t.id.as_str());
-            channel_strip(t, abs_i, is_sel, &callbacks).into_any_element()
+            channel_strip(t, tracks, abs_i, is_sel, &callbacks).into_any_element()
         })
         .collect();
 

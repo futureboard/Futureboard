@@ -47,8 +47,8 @@ pub use crate::audio_file::{
 };
 pub use crate::error::SphereAudioError;
 pub use crate::native::{
-    AudioBackend, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo, EngineStats,
-    DEFAULT_BUFFER_SIZE, DEFAULT_SAMPLE_RATE,
+    AudioBackend, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo,
+    EngineInsertStatus, EngineStats, DEFAULT_BUFFER_SIZE, DEFAULT_SAMPLE_RATE,
 };
 
 use std::sync::Arc;

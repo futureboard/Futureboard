@@ -100,5 +100,14 @@ Thumbs.db
 # Local Claude / agent settings
 .claude/settings.local.json
 
+# i18n — generated locale build artifacts
+# Source of truth: packages/shared/locales/*/app.ftl (committed)
+# Regenerate via scripts/generate-app-ftl.mjs + scripts/apply-locale-translations.mjs
+scripts/translations/entries.json
+scripts/translations/unique-en.txt
+scripts/translations/zh-CN.json
+scripts/translations/ja-JP.json
+scripts/translations/th-TH.json
+
 references
 .antigravitycli

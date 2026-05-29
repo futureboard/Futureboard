@@ -74,6 +74,8 @@ fn type_badge(kind: TrackType, color: gpui::Rgba) -> impl IntoElement {
         TrackType::Audio => "AUD",
         TrackType::Midi => "MID",
         TrackType::Instrument => "INS",
+        TrackType::Bus => "BUS",
+        TrackType::Return => "RTN",
         TrackType::Master => "MAS",
     };
     let mut bg = color;

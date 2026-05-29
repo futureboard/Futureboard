@@ -118,7 +118,7 @@ pub struct ProjectInsert {
 #[derive(Debug, Clone)]
 pub struct TrackRouting {
     pub output_bus: Option<String>,
-    pub sends: Vec<String>,
+    pub sends: Vec<ProjectSend>,
 }
 
 impl Default for TrackRouting {
@@ -128,6 +128,17 @@ impl Default for TrackRouting {
             sends: Vec::new(),
         }
     }
+}
+
+/// Persisted aux send (Phase 3). Mirrors `timeline_state::SendSlotState`
+/// minus the transient resolved `target_name`.
+#[derive(Debug, Clone)]
+pub struct ProjectSend {
+    pub id: String,
+    pub target_track_id: String,
+    pub enabled: bool,
+    pub pre_fader: bool,
+    pub gain_db: f32,
 }
 
 // ── Automation ────────────────────────────────────────────────────────────────
@@ -298,6 +309,8 @@ impl From<&TimelineState> for FutureboardProject {
                     TlTrackType::Audio => ProjectTrackType::Audio,
                     TlTrackType::Midi => ProjectTrackType::Midi,
                     TlTrackType::Instrument => ProjectTrackType::Instrument,
+                    TlTrackType::Bus => ProjectTrackType::Bus,
+                    TlTrackType::Return => ProjectTrackType::Return,
                     TlTrackType::Master => ProjectTrackType::Master,
                 };
                 let clips = t
@@ -368,7 +381,20 @@ impl From<&TimelineState> for FutureboardProject {
                     } else {
                         InputMonitorMode::Off
                     },
-                    routing: TrackRouting::default(),
+                    routing: TrackRouting {
+                        output_bus: None,
+                        sends: t
+                            .sends
+                            .iter()
+                            .map(|s| ProjectSend {
+                                id: s.id.clone(),
+                                target_track_id: s.target_track_id.clone(),
+                                enabled: s.enabled,
+                                pre_fader: s.pre_fader,
+                                gain_db: s.gain_db,
+                            })
+                            .collect(),
+                    },
                     inserts: t
                         .inserts
                         .iter()
@@ -417,7 +443,8 @@ impl From<&TimelineState> for FutureboardProject {
 /// Apply a loaded `FutureboardProject` back onto an existing `TimelineState`.
 pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
     use crate::components::timeline::timeline_state::{
-        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiNoteState, TrackState,
+        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiNoteState, SendSlotState,
+        TrackState,
     };
 
     tl.bpm = project.settings.bpm as f32;
@@ -433,8 +460,11 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 ProjectTrackType::Audio => TlTrackType::Audio,
                 ProjectTrackType::Midi => TlTrackType::Midi,
                 ProjectTrackType::Instrument => TlTrackType::Instrument,
+                ProjectTrackType::Bus => TlTrackType::Bus,
+                ProjectTrackType::Return => TlTrackType::Return,
                 ProjectTrackType::Master => TlTrackType::Master,
-                _ => TlTrackType::Audio,
+                // Group has no timeline equivalent yet — treat as a bus.
+                ProjectTrackType::Group => TlTrackType::Bus,
             };
             let clips = pt
                 .clips
@@ -522,6 +552,27 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                     }
                 })
                 .collect();
+            let sends = pt
+                .routing
+                .sends
+                .iter()
+                .map(|s| {
+                    let target_name = project
+                        .tracks
+                        .iter()
+                        .find(|t| t.id == s.target_track_id)
+                        .map(|t| t.name.clone())
+                        .unwrap_or_else(|| s.target_track_id.clone());
+                    SendSlotState {
+                        id: s.id.clone(),
+                        target_track_id: s.target_track_id.clone(),
+                        target_name,
+                        enabled: s.enabled,
+                        pre_fader: s.pre_fader,
+                        gain_db: s.gain_db,
+                    }
+                })
+                .collect();
             TrackState {
                 id: pt.id.clone(),
                 name: pt.name.clone(),
@@ -538,6 +589,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 clips,
                 automation_lanes,
                 inserts,
+                sends,
             }
         })
         .collect();

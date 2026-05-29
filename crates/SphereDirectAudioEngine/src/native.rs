@@ -341,6 +341,27 @@ impl AudioEngine {
             position_seconds: info.position_seconds,
         }
     }
+
+    /// Structured per-insert instantiation status (Phase 2b). Cheap — locks
+    /// the runtime briefly and clones a small descriptor list. Used by the
+    /// native shell to flip `InsertLoadStatus::Failed` on plugin load failure.
+    pub fn insert_statuses(&self) -> Vec<EngineInsertStatus> {
+        self.inner.insert_statuses()
+    }
+}
+
+/// Per-insert instantiation status for UI readback (Phase 2b). Plain Rust,
+/// no NAPI — consumed by the native shell's audio poll to surface
+/// `InsertLoadStatus::Failed` when a native plugin fails to instantiate.
+#[derive(Debug, Clone)]
+pub struct EngineInsertStatus {
+    pub track_id: String,
+    pub insert_id: String,
+    /// `true` when this is a native-plugin insert (vs. a built-in DSP).
+    pub native: bool,
+    /// `true` when the insert's processor is live. A native insert with
+    /// `ready == false` is a definitive instantiation failure.
+    pub ready: bool,
 }
 
 /// Plain-Rust mirror of the realtime engine's debug snapshot, suitable for

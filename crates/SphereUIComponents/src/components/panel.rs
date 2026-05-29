@@ -147,6 +147,8 @@ fn track_inspector(track: &TrackState) -> impl IntoElement {
         TrackType::Audio => "Audio",
         TrackType::Midi => "MIDI",
         TrackType::Instrument => "Instrument",
+        TrackType::Bus => "Bus",
+        TrackType::Return => "Return",
         TrackType::Master => "Master",
     };
     let pan = if track.pan.abs() < 0.01 {

@@ -125,12 +125,24 @@ UI scaffold only. No runtime changes.
 See [plugin-pipeline-checklist.md](./plugin-pipeline-checklist.md)
 for the live tick-list.
 
-- **Phase 2b**: real picker overlay + wire
-  `Vst3RuntimeProcessor::new` to instantiate via a new
-  `native_processor` C ABI; audio thread sees only `process(...)`.
-- **Phase 3**: `TrackType::Bus`, `TrackType::Return` in
-  `timeline_state.rs`; topological scheduling + cycle reject in
-  DAUx runtime.
+- **Phase 2b**: **shipped** — picker overlay (`plugin_picker.rs`) +
+  real audio wiring. The DAUx `sphere_daux_vst3_*` bridge and
+  `Vst3RuntimeProcessor` instantiation already existed; the actual native
+  gap was `build_engine_project_snapshot` hardcoding `inserts: Vec::new()`.
+  Now `build_engine_inserts` emits `native-plugin` descriptors so DAUx
+  instantiates the processor on its `load_project` worker and routes audio
+  through it (`enabled = !bypassed`). Status readback **shipped** too:
+  `AudioEngine::insert_statuses()` → `complete_audio_project_sync`
+  reconciles `InsertLoadStatus::Failed`. Remaining: on-device verification
+  of tests #6–9.
+- **Phase 3**: **shipped** — `TrackType::Bus`/`Return`, `SendSlotState` +
+  `TrackRouting`→`ProjectSend` round-trip, mixer sends UI (add/remove), and
+  the DAUx two-pass realtime routing in `render_project_block_interleaved`
+  (post-fader send taps → `recv_*` buffers → bus/return processing → master)
+  with forward-only cycle-safe send rules and `FUTUREBOARD_ROUTING_DEBUG`
+  build-time graph logging. Unit-tested in `engine::routing_tests`.
+  Remaining polish: pre-fader sends, send target picker, bus/return strip
+  styling, inspector routing readout, on-device audio verification.
 - **Phase 4**: GPUI shell consumes `native_editor::*` for external
   plugin windows; HWND / NSView path; fallback panel on attach
   failure.

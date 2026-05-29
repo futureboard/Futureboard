@@ -1,7 +1,8 @@
 use super::{
     AutomationLane, AutomationPoint, ClipSource, FutureboardProject, InputMonitorMode, MidiNote,
     PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer,
-    ProjectPluginInstance, ProjectSettings, ProjectTrack, ProjectTrackType, TrackRouting,
+    ProjectPluginInstance, ProjectSend, ProjectSettings, ProjectTrack, ProjectTrackType,
+    TrackRouting,
 };
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
@@ -394,7 +395,11 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     w.write_opt_str(&t.routing.output_bus);
     w.write_u32(t.routing.sends.len() as u32);
     for s in &t.routing.sends {
-        w.write_str(s);
+        w.write_str(&s.id);
+        w.write_str(&s.target_track_id);
+        w.write_bool(s.enabled);
+        w.write_bool(s.pre_fader);
+        w.write_f32(s.gain_db);
     }
     // inserts
     w.write_u32(t.inserts.len() as u32);
@@ -646,7 +651,18 @@ fn decode_track(r: &mut FbReader) -> Result<ProjectTrack, ProjectError> {
     let send_count = r.read_u32()? as usize;
     let mut sends = Vec::with_capacity(send_count);
     for _ in 0..send_count {
-        sends.push(r.read_str()?);
+        let id = r.read_str()?;
+        let target_track_id = r.read_str()?;
+        let enabled = r.read_bool()?;
+        let pre_fader = r.read_bool()?;
+        let gain_db = r.read_f32()?;
+        sends.push(ProjectSend {
+            id,
+            target_track_id,
+            enabled,
+            pre_fader,
+            gain_db,
+        });
     }
     let routing = TrackRouting { output_bus, sends };
 

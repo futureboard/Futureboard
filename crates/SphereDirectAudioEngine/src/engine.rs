@@ -868,6 +868,42 @@ impl EngineInner {
         }
     }
 
+    /// Structured per-insert instantiation status for UI readback (Phase 2b).
+    ///
+    /// Built-in DSP inserts are always `ready`. Native-plugin inserts are
+    /// `ready` only when their `Vst3RuntimeProcessor` instantiated and is live;
+    /// a native insert with `ready == false` is a definitive instantiation
+    /// failure (the worker attempted it during `load_project` and got `None`).
+    /// Used by the native shell to flip `InsertLoadStatus::Failed`.
+    pub fn insert_statuses(&self) -> Vec<crate::native::EngineInsertStatus> {
+        let runtime = self.runtime.lock();
+        runtime
+            .tracks
+            .iter()
+            .flat_map(|track| {
+                let track_id = track.id.clone();
+                track.inserts.iter().map(move |insert| {
+                    let native = insert.kind.eq_ignore_ascii_case("native-plugin");
+                    let ready = if native {
+                        insert
+                            .vst3
+                            .as_ref()
+                            .map(|p| p.is_ready())
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    crate::native::EngineInsertStatus {
+                        track_id: track_id.clone(),
+                        insert_id: insert.id.clone(),
+                        native,
+                        ready,
+                    }
+                })
+            })
+            .collect()
+    }
+
     // ── Recording API ──────────────────────────────────────────────────────
 
     /// Open an input stream and begin writing armed tracks to WAV files.
@@ -1309,6 +1345,130 @@ pub fn render_project_sample(
     )
 }
 
+/// Routing track kinds (Phase 3): receive sends rather than hosting clips.
+#[inline]
+fn is_routing_type(track_type: &str) -> bool {
+    track_type == "bus" || track_type == "return"
+}
+
+/// Two distinct mutable elements of a slice without allocation. Panics in
+/// debug if `a == b`; callers guarantee distinct indices.
+#[inline]
+fn two_mut<T>(v: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
+    debug_assert!(a != b);
+    if a < b {
+        let (lo, hi) = v.split_at_mut(b);
+        (&mut lo[a], &mut hi[0])
+    } else {
+        let (lo, hi) = v.split_at_mut(a);
+        (&mut hi[0], &mut lo[b])
+    }
+}
+
+/// Apply a track's fader (volume / pan / preview mode) to its `block_*`
+/// (which already holds the post-insert signal), write the post-fader result
+/// back into `block_*`, sum it into the interleaved master output, and
+/// accumulate the track meter. No allocation.
+#[inline]
+fn apply_fader_and_sum(
+    track: &mut RuntimeTrack,
+    frames: usize,
+    output: &mut [f32],
+    channels: usize,
+) {
+    let (pan_l, pan_r) = pan_gains(track.pan);
+    for frame_idx in 0..frames {
+        let (l, r) = apply_preview_mode(
+            track.block_l[frame_idx] * track.volume * pan_l,
+            track.block_r[frame_idx] * track.volume * pan_r,
+            track.preview_mode,
+        );
+        track.block_l[frame_idx] = l;
+        track.block_r[frame_idx] = r;
+        track.meter_peak_l = track.meter_peak_l.max(l.abs());
+        track.meter_peak_r = track.meter_peak_r.max(r.abs());
+        track.meter_sum_sq_l += l * l;
+        track.meter_sum_sq_r += r * r;
+        let out = &mut output[frame_idx * channels..frame_idx * channels + channels];
+        out[0] += l;
+        out[1] += r;
+    }
+}
+
+/// Run a track's input block (already in `block_*`) through its insert chain
+/// then fader, summing to master, with pre-fader and post-fader send taps in
+/// the correct order: pre-fader sends read the post-insert signal, post-fader
+/// sends read the post-fader signal. No allocation.
+#[inline]
+fn process_track_block(
+    runtime: &mut RuntimeProject,
+    track_index: usize,
+    frames: usize,
+    output: &mut [f32],
+    channels: usize,
+) {
+    apply_track_chain_block(&mut runtime.tracks[track_index], frames);
+    // Pre-fader sends tap the post-insert signal currently in block_*.
+    accumulate_sends(runtime, track_index, frames, true);
+    apply_fader_and_sum(&mut runtime.tracks[track_index], frames, output, channels);
+    // Post-fader sends tap the post-fader signal now in block_*.
+    accumulate_sends(runtime, track_index, frames, false);
+}
+
+/// Add the source track's block (`block_*`, holding either the post-insert or
+/// post-fader signal depending on `pre_fader`) into each accepted send target's
+/// receive buffer (`recv_*`), scaled by the send level. Only sends whose
+/// `pre_fader` flag matches the requested phase are routed.
+///
+/// Cycle-safe by construction: a send is accepted only when the target is a
+/// routing track (bus/return); a *routing* source may additionally only target
+/// a *later* routing track in array order. Sends to non-routing tracks, to
+/// self, or backward between routing tracks are dropped (logged at build time
+/// under `FUTUREBOARD_ROUTING_DEBUG`). No allocation on the audio thread.
+#[inline]
+fn accumulate_sends(
+    runtime: &mut RuntimeProject,
+    src_index: usize,
+    frames: usize,
+    pre_fader: bool,
+) {
+    let send_count = runtime.tracks[src_index].sends.len();
+    if send_count == 0 {
+        return;
+    }
+    let src_routing = is_routing_type(&runtime.tracks[src_index].track_type);
+    for s in 0..send_count {
+        let (enabled, level) = {
+            let send = &runtime.tracks[src_index].sends[s];
+            if send.pre_fader != pre_fader {
+                continue;
+            }
+            (send.enabled, send.level)
+        };
+        if !enabled || level == 0.0 {
+            continue;
+        }
+        let target_index = {
+            let target_id = &runtime.tracks[src_index].sends[s].return_track_id;
+            runtime.tracks.iter().position(|t| &t.id == target_id)
+        };
+        let Some(t) = target_index else {
+            continue;
+        };
+        if t == src_index || !is_routing_type(&runtime.tracks[t].track_type) {
+            continue;
+        }
+        if src_routing && t <= src_index {
+            continue;
+        }
+        let (src, tgt) = two_mut(&mut runtime.tracks, src_index, t);
+        for f in 0..frames {
+            tgt.recv_l[f] += src.block_l[f] * level;
+            tgt.recv_r[f] += src.block_r[f] * level;
+        }
+    }
+}
+
 pub fn render_project_block_interleaved(
     runtime: &mut RuntimeProject,
     base_sample: u64,
@@ -1336,8 +1496,16 @@ pub fn render_project_block_interleaved(
             track.block_l.resize(frames, 0.0);
             track.block_r.resize(frames, 0.0);
         }
+        // Receive buffers grow lazily to the largest block seen; the audio
+        // thread only `fill`s, never allocates, once warmed.
+        if track.recv_l.len() < frames {
+            track.recv_l.resize(frames, 0.0);
+            track.recv_r.resize(frames, 0.0);
+        }
         track.block_l[..frames].fill(0.0);
         track.block_r[..frames].fill(0.0);
+        track.recv_l[..frames].fill(0.0);
+        track.recv_r[..frames].fill(0.0);
     }
 
     let master_index = runtime.tracks.iter().position(|t| t.track_type == "master");
@@ -1378,8 +1546,15 @@ pub fn render_project_block_interleaved(
         }
     }
 
+    // ── Pass 1: source tracks (audio / midi / instrument) ───────────────
+    // Clips → inserts → fader, sum the post-fader signal into the master
+    // output, then feed sends into routing-track receive buffers. Routing
+    // tracks (bus/return) are deferred to Pass 2 so their inputs are complete.
     for track_index in 0..runtime.tracks.len() {
         if Some(track_index) == master_index {
+            continue;
+        }
+        if is_routing_type(&runtime.tracks[track_index].track_type) {
             continue;
         }
         if runtime.tracks[track_index].muted
@@ -1440,23 +1615,30 @@ pub fn render_project_block_interleaved(
                 first_clip
             );
         }
-        let track = &mut runtime.tracks[track_index];
-        apply_track_chain_block(track, frames);
-        let (pan_l, pan_r) = pan_gains(track.pan);
-        for frame_idx in 0..frames {
-            let (l, r) = apply_preview_mode(
-                track.block_l[frame_idx] * track.volume * pan_l,
-                track.block_r[frame_idx] * track.volume * pan_r,
-                track.preview_mode,
-            );
-            track.meter_peak_l = track.meter_peak_l.max(l.abs());
-            track.meter_peak_r = track.meter_peak_r.max(r.abs());
-            track.meter_sum_sq_l += l * l;
-            track.meter_sum_sq_r += r * r;
-            let out = &mut output[frame_idx * channels..frame_idx * channels + channels];
-            out[0] += l;
-            out[1] += r;
+        process_track_block(runtime, track_index, frames, output, channels);
+    }
+
+    // ── Pass 2: routing tracks (bus / return) ───────────────────────────
+    // Input = the accumulated send receive buffer. Process inserts → fader and
+    // sum to the master output. Solo is ignored for routing tracks so soloing
+    // a *source* track still lets its send reach the return. A routing track
+    // may itself send to a *later* routing track (forward-only → acyclic).
+    for track_index in 0..runtime.tracks.len() {
+        if Some(track_index) == master_index {
+            continue;
         }
+        if !is_routing_type(&runtime.tracks[track_index].track_type) {
+            continue;
+        }
+        if runtime.tracks[track_index].muted {
+            continue;
+        }
+        {
+            let track = &mut runtime.tracks[track_index];
+            track.block_l[..frames].copy_from_slice(&track.recv_l[..frames]);
+            track.block_r[..frames].copy_from_slice(&track.recv_r[..frames]);
+        }
+        process_track_block(runtime, track_index, frames, output, channels);
     }
 
     // ── Master bus: apply master track inserts on the summed output ──
@@ -2146,4 +2328,129 @@ where
         .map_err(|e| e.to_string())?;
 
     Ok(stream)
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use crate::runtime::{RuntimeProject, RuntimeSend, RuntimeTrack, RuntimePreviewMode};
+    use std::sync::Arc;
+
+    fn track(id: &str, ty: &str, sends: Vec<RuntimeSend>) -> RuntimeTrack {
+        let cap = 8;
+        RuntimeTrack {
+            id: id.to_string(),
+            track_type: ty.to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            preview_mode: RuntimePreviewMode::Stereo,
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends,
+            meter: Arc::new(Default::default()),
+            meter_peak_l: 0.0,
+            meter_peak_r: 0.0,
+            meter_sum_sq_l: 0.0,
+            meter_sum_sq_r: 0.0,
+            callback_insert_log_done: false,
+            callback_clip_route_log_done: false,
+            block_l: vec![0.0; cap],
+            block_r: vec![0.0; cap],
+            recv_l: vec![0.0; cap],
+            recv_r: vec![0.0; cap],
+        }
+    }
+
+    fn send(target: &str, level: f32) -> RuntimeSend {
+        RuntimeSend {
+            id: format!("send-{target}"),
+            return_track_id: target.to_string(),
+            level,
+            enabled: true,
+            pre_fader: false,
+        }
+    }
+
+    #[test]
+    fn send_to_return_accumulates_scaled() {
+        let frames = 4;
+        let mut p = RuntimeProject {
+            tracks: vec![
+                track("audio", "audio", vec![send("ret", 0.5)]),
+                track("ret", "return", vec![]),
+            ],
+            ..Default::default()
+        };
+        // Source post-fader signal (accumulate_sends reads block_*).
+        p.tracks[0].block_l[..frames].fill(1.0);
+        p.tracks[0].block_r[..frames].fill(-2.0);
+
+        accumulate_sends(&mut p, 0, frames, false);
+
+        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| (v - 0.5).abs() < 1e-6));
+        assert!(p.tracks[1].recv_r[..frames].iter().all(|&v| (v + 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn pre_fader_filter_only_routes_matching_phase() {
+        let frames = 4;
+        let mut pre = send("ret", 1.0);
+        pre.pre_fader = true;
+        let mut p = RuntimeProject {
+            tracks: vec![
+                track("audio", "audio", vec![pre]),
+                track("ret", "return", vec![]),
+            ],
+            ..Default::default()
+        };
+        p.tracks[0].block_l[..frames].fill(1.0);
+
+        // Post-fader phase: the pre-fader send must NOT route.
+        accumulate_sends(&mut p, 0, frames, false);
+        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| v == 0.0));
+
+        // Pre-fader phase: now it routes.
+        accumulate_sends(&mut p, 0, frames, true);
+        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| (v - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn send_to_non_routing_target_is_rejected() {
+        let frames = 4;
+        let mut p = RuntimeProject {
+            tracks: vec![
+                track("a", "audio", vec![send("b", 1.0)]),
+                track("b", "audio", vec![]),
+            ],
+            ..Default::default()
+        };
+        p.tracks[0].block_l[..frames].fill(1.0);
+        accumulate_sends(&mut p, 0, frames, false);
+        // Target is a normal audio track → not a valid send destination.
+        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn routing_to_earlier_routing_is_rejected_as_cycle_unsafe() {
+        let frames = 4;
+        // bus "early" at index 0 sends to "late" at index 1 (forward → OK),
+        // and "late" sends back to "early" (backward → rejected).
+        let mut p = RuntimeProject {
+            tracks: vec![
+                track("early", "bus", vec![send("late", 1.0)]),
+                track("late", "return", vec![send("early", 1.0)]),
+            ],
+            ..Default::default()
+        };
+        p.tracks[0].block_l[..frames].fill(1.0);
+        p.tracks[1].block_l[..frames].fill(1.0);
+
+        accumulate_sends(&mut p, 0, frames, false); // early → late: forward, accepted
+        accumulate_sends(&mut p, 1, frames, false); // late → early: backward, rejected
+
+        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| (v - 1.0).abs() < 1e-6));
+        assert!(p.tracks[0].recv_l[..frames].iter().all(|&v| v == 0.0));
+    }
 }

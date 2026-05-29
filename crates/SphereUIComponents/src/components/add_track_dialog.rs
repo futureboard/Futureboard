@@ -90,7 +90,9 @@ impl AddTrackKind {
             Self::Audio => Some(TrackType::Audio),
             Self::Instrument => Some(TrackType::Instrument),
             Self::Midi => Some(TrackType::Midi),
-            Self::Plugin | Self::Bus | Self::Return | Self::Group | Self::Master => None,
+            Self::Bus => Some(TrackType::Bus),
+            Self::Return => Some(TrackType::Return),
+            Self::Plugin | Self::Group | Self::Master => None,
         }
     }
 
@@ -534,8 +536,12 @@ fn summary_text(state: &AddTrackDialogState) -> String {
             )
         }
         AddTrackKind::Plugin => "Plugin tracks are not wired in Native yet".to_string(),
-        AddTrackKind::Bus => "Bus tracks are not wired in Native yet".to_string(),
-        AddTrackKind::Return => "Return tracks are not wired in Native yet".to_string(),
+        AddTrackKind::Bus => {
+            format!("Add {n}bus track{plural} - sub-mix -> {out} (sends routing pending)")
+        }
+        AddTrackKind::Return => {
+            format!("Add {n}return track{plural} - FX return -> {out} (sends routing pending)")
+        }
         AddTrackKind::Group => "Group tracks are not wired in Native yet".to_string(),
         AddTrackKind::Master => "Native uses a managed master bus".to_string(),
     }

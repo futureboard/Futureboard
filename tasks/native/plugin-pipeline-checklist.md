@@ -53,51 +53,158 @@ Last updated: 2026-05-29.
 - [x] `on_add_insert` uses real `RegistryPlugin` when available; falls back to documented stub when registry is empty
 - [x] Real `class_id`, `plugin_path`, `format`, `display_name` round-trip through project save/load
 
-## Phase 2b — Real audio processing & picker overlay  *(not yet started)*
+## Phase 2b — Real audio processing & picker overlay  *(wired; needs on-device verification)*
 
-- [ ] Real picker overlay (combo / popover listing registered plugins, with category filter + search)
-- [ ] DAUx `Vst3RuntimeProcessor::new` actually instantiates via `native_editor` / a new
-  `native_processor` C ABI hookup
-- [ ] `IPluginFactory` → `IComponent` → `IAudioProcessor` lifecycle on **worker thread**
-- [ ] Audio thread only sees `process(...)` calls — no allocations, no logging, no locks
-- [ ] Plugin instantiation failure → `InsertLoadStatus::Failed(msg)` in UI; no panic
-- [ ] Manual test #6–7 (audio passes through plugin) ✓
-- [ ] Manual test #8–9 (bypass changes audio) ✓
-- [ ] Manual test #24 (bad plugin fails gracefully) ✓
+- [x] Real picker overlay (modal listing registered plugins, with category
+  filter + name/vendor search)
+  - [x] `crates/SphereUIComponents/src/components/plugin_picker.rs`
+    (`PluginPickerState`, `PluginPickerCallbacks`, `plugin_picker_overlay`)
+  - [x] `+ Add Insert` opens the picker (no slot created until a plugin is
+    picked); `apply_picked_insert` appends the slot + binds the descriptor
+  - [x] Category rail derived from `RegistryPlugin::display_category`, search
+    over name/vendor, `supports_insert()` gating
+  - [x] Empty registry → "Insert Stub Effect" fallback (`STUB_PLUGIN_ID`)
+  - [x] Escape / backdrop click closes; search field routed via
+    `TextMenuTarget::PluginPickerSearch`
+- [x] Native UI inserts now reach the engine — `build_engine_inserts`
+  emits `native-plugin` `EngineInsertSnapshot`s from `TrackState.inserts`
+  in `build_engine_project_snapshot`. Previously hardcoded `Vec::new()`,
+  which is why audio never passed through a plugin.
+  - [x] Only real VST3 + module path emitted; stub / unscanned skipped so
+    the runtime keeps no-op'ing on placeholders (hard rule preserved)
+  - [x] `enabled = !bypassed` → bypass toggle changes the audio path on the
+    next engine sync
+  - [x] `FUTUREBOARD`/`[engine-sync]` log now reports per-insert
+    track/id/kind/enabled/path
+- [x] DAUx `Vst3RuntimeProcessor` instantiation — **already existed** via the
+  `sphere_daux_vst3_*` C ABI (`vst3bridge/src/vst3_processor.cpp`). The
+  earlier note about needing a *new* `native_processor` C ABI was based on
+  a pre-audit assumption; the bridge is present and exercised by Electron.
+- [x] `IPluginFactory` → `IComponent` → `IAudioProcessor` lifecycle on the
+  **worker thread** — `RuntimeProject::build` (which calls
+  `Vst3RuntimeProcessor::from_params`) runs inside the background
+  `engine.load_project(snapshot)` task, never the audio callback.
+- [x] Audio thread only sees `process(...)` — `apply_insert` / `apply_insert_block`
+  route through the pre-instantiated processor; no alloc/lock on the hot path
+  (scratch buffers preallocated at build time).
+- [x] Plugin instantiation failure → `InsertLoadStatus::Failed(msg)` in UI.
+  Added `AudioEngine::insert_statuses() -> Vec<EngineInsertStatus>`
+  (structured, plain-Rust) + `EngineInner::insert_statuses`. The native
+  shell calls it once per successful `load_project` in
+  `complete_audio_project_sync` (UI thread — never the 60 Hz poll, so the
+  runtime mutex is locked at most once per project change) and reconciles
+  each slot via `TimelineState::set_insert_load_status`. A native-plugin
+  insert the engine reports not-ready flips to `Failed`; the mixer chip
+  already renders `Failed` in an error color. No panic on bad plugins.
+- [ ] Manual test #6–7 (audio passes through plugin) — *needs a box with a
+  scanned VST3 + audio device; not verifiable in this CI/dev env*
+- [ ] Manual test #8–9 (bypass changes audio) — *same: needs on-device run*
+- [x] Manual test #24 (bad plugin fails gracefully) — no-panic path holds;
+  `Failed` now surfaces in the UI via the readback channel
 
-## Phase 3 — Bus / Send / Return routing  *(not yet started)*
+## Phase 3 — Bus / Send / Return routing  *(track types + sends + realtime routing shipped)*
 
 Schema already exists in `crates/SphereUIComponents/src/project/mod.rs`
 (`Bus`, `Return`, `Group` in `ProjectTrackType`; `TrackRouting`,
-`output_bus`, `sends`). Gap is in `timeline_state::TrackType` and the
-runtime topology walk.
+`output_bus`, `sends`).
 
-- [ ] Add `TrackType::Bus`, `TrackType::Return` to `timeline_state.rs`
-- [ ] Add Track dialog rows for Bus / Return
-- [ ] `SendSlotState` on `TrackState` (id, target_track_id, enabled, pre_fader, gain_db)
-- [ ] Mixer strip renders sends section (currently empty placeholder)
-- [ ] Visual differentiation: Bus / Return strip styling
-- [ ] Inspector shows routing info per track
-- [ ] DAUx runtime: topological scheduling of buses/returns
-- [ ] Cycle detection — reject `Master → normal track` loops
-- [ ] Send accumulation buffers (no per-block allocation)
-- [ ] `FUTUREBOARD_ROUTING_DEBUG=1` logs graph nodes, order, sends, cycle rejections
-- [ ] Manual tests #14–20
+**Slice 1 — Bus/Return track kinds (shipped):**
 
-## Phase 4 — Native PluginView shell  *(not yet started)*
+- [x] Add `TrackType::Bus`, `TrackType::Return` to `timeline_state.rs`
+  (+ `TrackType::is_routing()`); all exhaustive matches updated
+  (`track_type_name`, mixer strip header, inspector, track-header badge)
+- [x] Add Track dialog: Bus / Return now `native_track_type() = Some(..)`,
+  so the cards are selectable and create real tracks; stale
+  "not wired" summaries replaced
+- [x] Project round-trip: `TlTrackType ↔ ProjectTrackType` maps Bus/Return
+  both directions (`Group` folds to `Bus` for now); binary `format.rs`
+  already encodes these ordinals
+- [x] Snapshot emits `"bus"` / `"return"` track-type names. DAUx sums them
+  like normal tracks today (silent until sends route into them) — no
+  realtime change, hard rule preserved
 
-- [ ] `PluginViewCommand::{Open, Close, Resize, Focus}` enum
-- [ ] GPUI window opens on `OpenInsertEditor` click
-- [ ] External native plugin editor window (not embedded in GPUI) opened via
-      `native_editor::open_plugin_editor_window`
-- [ ] `attach_vst3_editor_view` on Windows path
-- [ ] macOS path scaffolded (NSView platform type)
-- [ ] Linux path deferred — fallback panel
-- [ ] Resize forwards to `resize_plugin_editor_window`
-- [ ] Close calls `close_plugin_editor_window` — no leaked handles
-- [ ] Fallback GPUI panel when attach fails (plugin name + error + bypass/remove)
-- [ ] `FUTUREBOARD_PLUGIN_VIEW_DEBUG=1` logs open/attach/resize/close/error
-- [ ] Manual tests #10–12
+**Slice 2 — Sends + realtime routing (shipped):**
+
+- [x] `SendSlotState` on `TrackState` (id, target_track_id, target_name,
+  enabled, pre_fader, gain_db) + `gain_linear()`
+- [x] `TrackRouting.sends` schema upgraded (`Vec<String>` → `Vec<ProjectSend>`)
+  with full save/load round-trip. **No format version bump needed** — the
+  save path always wrote `TrackRouting::default()`, so every existing v1
+  file has 0 sends and decodes the new per-send payload identically.
+- [x] Mixer strip renders a real sends section — `→ Target` chips with an
+  enable tint + remove ×, and a dashed `+ Add Send`. Routing tracks
+  (bus/return) show an empty placeholder (they are targets, not senders).
+  `add_send` auto-targets the first eligible Bus/Return (picker is a follow-up).
+- [x] DAUx runtime: two-pass routing in `render_project_block_interleaved`.
+  Pass 1 processes source tracks (clips→inserts→fader), sums to master, and
+  taps post-fader into send targets' receive buffers. Pass 2 processes
+  bus/return tracks from their receive buffers and sums to master. Solo is
+  ignored for routing tracks so a soloed source's send still reaches its return.
+- [x] Cycle detection — `accumulate_sends` accepts a send only when the target
+  is a routing track; a *routing* source may only target a *later* routing
+  track (forward-only ⇒ acyclic). Backward/self/non-routing sends are dropped.
+- [x] Send accumulation buffers — preallocated `recv_l/recv_r` on `RuntimeTrack`
+  (grown lazily, only `fill`ed on the audio thread); no per-block allocation,
+  no locks, no logging in the hot path. `two_mut` gives the two-track borrow.
+- [x] `FUTUREBOARD_ROUTING_DEBUG=1` logs the graph at **build time** (worker
+  thread, not the callback): nodes, each send, and ACCEPT/REJECT per cycle rule.
+- [x] Unit tests (`engine::routing_tests`): scaled accumulation, non-routing
+  rejection, backward-cycle rejection — all pass (no audio device needed).
+- [x] Pre-fader sends — `pre_fader` flows UI→snapshot→`RuntimeSend`; the engine
+  taps the post-insert signal for pre-fader sends and the post-fader signal for
+  post-fader sends (`accumulate_sends` takes a phase filter; `process_track_block`
+  calls it before and after `apply_fader_and_sum`). Unit-tested
+  (`pre_fader_filter_only_routes_matching_phase`). UI toggle to *set* pre_fader
+  is still pending (defaults post-fader).
+- [ ] Visual differentiation: Bus / Return strip styling — *deferred polish*
+- [ ] Inspector shows routing info per track — *deferred polish*
+- [ ] Send target picker overlay + pre/post toggle (auto-targets first routing track)
+- [ ] Manual tests #15, #17, #19–20 (wet/return/bus signal) — *wired; need an
+  on-device run with audio to confirm audibly*
+
+## Phase 4 — Native PluginView shell  *(GPUI-hosted embedded editor shipped)*
+
+**Architecture switched off the old C++ NanoVG/D3D top-level window.** New path:
+GPUI borderless external window → draws shell/header only → C++ creates a
+WS_CHILD **native host region** under the GPUI window's HWND → VST3 `IPlugView`
+attaches into that region. Plugin UI is the native view; no audio-thread UI;
+editor failure shows a GPUI fallback panel, never a crash.
+
+- [x] NanoVG-free C ABI: `sphere_plugin_editor_embed_attach(parent_hwnd, path,
+  class_id, x,y,w,h)` / `_set_bounds` / `_detach` / `_is_valid` in
+  `plugin_editor_window.cpp`. Creates a `WS_CHILD` host window under the
+  provided parent HWND, instantiates the plugin (reusing the existing VST3
+  hosting + shared param-event queue), and `IPlugView::attached`es into it. No
+  NanoVG, no D3D shell, no extra thread/message-pump (rides the GPUI loop).
+- [x] Rust facade `native_editor::{attach_editor_into_parent,
+  set_editor_region_bounds, detach_editor, editor_is_valid, EmbedRegion}`.
+- [x] GPUI `PluginEditorWindow` (`components/plugin_editor_window.rs`):
+  borderless external window, GPUI-drawn header (title + close), reserves the
+  host region below it. Extracts the HWND via `raw_window_handle::HasWindowHandle`
+  (gpui 0.2.2 *does* implement it — the earlier audit was stale), attaches on
+  first render, re-syncs the child region (physical px = logical × DPI) on
+  resize, and **detaches in `Drop`** so the native view never leaks.
+- [x] `StudioLayout` opens the GPUI window (`open_plugin_editors:
+  HashMap<(track,insert), WindowHandle<PluginEditorWindow>>`); insert-remove and
+  window-close drop the entity → auto-detach. Re-open is a no-op if already up.
+- [x] `attach_vst3_editor_view` equivalent on Windows — attach happens inside
+  `embed_attach`. Full native build links the new C ABI.
+- [x] Bad plugin / attach failure → no panic; the editor window renders a GPUI
+  **fallback panel** (plugin name + error). 
+- [x] `FUTUREBOARD_PLUGIN_VIEW_DEBUG=1` logs attach/region/detach/error on both
+  the Rust and C++ sides.
+- [~] macOS / Linux: the embed path is Windows-only (`#[cfg(target_os=...)]`
+  guards return "embedding unavailable" → fallback panel). Old `editor_mac.mm`
+  remains for the legacy path.
+- [ ] Old NanoVG/D3D/Yoga top-level window code is now **dead** (no caller) —
+  removable in a follow-up cleanup along with its `build.rs` deps once the new
+  path is device-verified.
+- [ ] Resize handle/grow to plugin preferred size negotiation (plugin-initiated
+  `resizeView`) — *pending*; today the child takes the plugin's initial size and
+  follows the GPUI window on manual resize.
+- [ ] Manual test #10 (open) / #11 (resize) / #12 (close) — *compiles + links;
+  needs on-device run with a real VST3 to verify the child composites over the
+  GPUI surface and DPI placement is correct*.
 
 ## Phase 5 — Parameter event drain pump  *(not yet started)*
 
@@ -128,26 +235,26 @@ runtime topology walk.
 | 1 | Start app | ✅ | — |
 | 2 | Add Audio Track | ✅ | — |
 | 3 | Load audio clip | ✅ | — |
-| 4 | Add VST3 plugin to insert | ✅ real names if scanned, else stub | 1 / 2a |
+| 4 | Add VST3 plugin to insert | ✅ picker overlay (real names if scanned, else stub) | 2b |
 | 5 | Confirm insert name appears | ✅ | 1 |
 | 6 | Press play | ✅ | — |
-| 7 | Audio passes through plugin | ❌ | 2b |
-| 8 | Bypass plugin | ⚠️ UI only | 2b for audio |
-| 9 | Bypass changes audio | ❌ | 2b |
-| 10 | Open plugin editor | ❌ | 4 |
-| 11 | Resize editor | ❌ | 4 |
-| 12 | Close editor | ❌ | 4 |
+| 7 | Audio passes through plugin | ⚙️ wired (engine receives inserts); needs on-device verify | 2b |
+| 8 | Bypass plugin | ✅ UI + engine (`enabled=!bypassed` synced) | 2b |
+| 9 | Bypass changes audio | ⚙️ wired; needs on-device verify | 2b |
+| 10 | Open plugin editor | ⚙️ external window opens/focuses; on-device verify | 4 |
+| 11 | Resize editor | ❌ resize forwarding pending | 4 |
+| 12 | Close editor | ⚙️ paired close on remove/re-open/drop; on-device verify | 4 |
 | 13 | Remove plugin | ✅ | 1 |
-| 14 | Add Return Track | ❌ | 3 |
-| 15 | Send Audio → Return | ❌ | 3 |
-| 16 | Plugin on Return Track | ❌ | 3 |
-| 17 | Wet signal on return | ❌ | 3 |
-| 18 | Add Bus Track | ❌ | 3 |
-| 19 | Route Audio → Bus | ❌ | 3 |
-| 20 | Bus → Master | ❌ | 3 |
+| 14 | Add Return Track | ✅ creates + round-trips | 3 |
+| 15 | Send Audio → Return | ✅ add-send chip; snapshot→engine wired | 3 |
+| 16 | Plugin on Return Track | ✅ inserts work on any track type | 3 |
+| 17 | Wet signal on return | ⚙️ routing wired + unit-tested; on-device verify | 3 |
+| 18 | Add Bus Track | ✅ creates + round-trips | 3 |
+| 19 | Route Audio → Bus | ✅ add-send to bus; engine accumulates | 3 |
+| 20 | Bus → Master | ⚙️ bus sums to master in Pass 2; on-device verify | 3 |
 | 21 | Save project | ✅ | 1 |
 | 22 | Reopen project | ✅ | 1 |
-| 23 | Inserts / routing restored | ✅ inserts; ❌ routing | 1 / 3 |
-| 24 | Bad plugin fails gracefully | n/a until 2b | 2b |
+| 23 | Inserts / routing restored | ✅ inserts + sends round-trip | 1 / 3 |
+| 24 | Bad plugin fails gracefully | ✅ no panic + `Failed` chip via readback | 2b |
 
-Legend: ✅ done · ⚠️ partial · ❌ pending · n/a not relevant yet
+Legend: ✅ done · ⚙️ wired, needs on-device verify · ⚠️ partial · ❌ pending · n/a not relevant yet

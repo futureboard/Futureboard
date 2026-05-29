@@ -5,12 +5,33 @@ fn plugin_debug_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some())
 }
 
+/// `FUTUREBOARD_ROUTING_DEBUG=1` enables eprintln traces for send/routing
+/// mutations (mirrors the DAUx-side flag). Cached on first read.
+fn routing_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackType {
     Audio,
     Midi,
     Instrument,
+    /// Sub-mix bus — other tracks route their output here for grouped
+    /// processing before the master. Phase 3.
+    Bus,
+    /// FX return — receives sends from other tracks (aux/reverb returns).
+    /// Phase 3.
+    Return,
     Master,
+}
+
+impl TrackType {
+    /// `true` for routing tracks (Bus/Return) that receive audio from other
+    /// tracks rather than hosting clips directly.
+    pub fn is_routing(self) -> bool {
+        matches!(self, TrackType::Bus | TrackType::Return)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,6 +207,31 @@ impl InsertSlotState {
     }
 }
 
+/// A single aux send from this track to a Bus/Return track (Phase 3). The
+/// runtime sums `gain_db`-scaled signal into the target's input. UI stores the
+/// descriptor; DAUx owns the realtime accumulation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendSlotState {
+    pub id: String,
+    /// Id of the destination Bus/Return track.
+    pub target_track_id: String,
+    /// Display label for the destination (resolved at edit time; refreshed
+    /// from the track list on render).
+    pub target_name: String,
+    pub enabled: bool,
+    /// `true` = tap before the source track fader; `false` = post-fader.
+    /// Realtime currently honours post-fader only (pre-fader is a refinement).
+    pub pre_fader: bool,
+    pub gain_db: f32,
+}
+
+impl SendSlotState {
+    /// Linear send gain from `gain_db` (clamped to a sane range).
+    pub fn gain_linear(&self) -> f32 {
+        10f32.powf(self.gain_db.clamp(-60.0, 6.0) / 20.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackState {
     pub id: String,
@@ -213,6 +259,8 @@ pub struct TrackState {
     /// only descriptor + transient state; the runtime owns the actual
     /// plugin processor.
     pub inserts: Vec<InsertSlotState>,
+    /// Aux sends to Bus/Return tracks (Phase 3). Empty for most tracks.
+    pub sends: Vec<SendSlotState>,
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +577,7 @@ impl TimelineState {
                 ],
             }],
             inserts: Vec::new(),
+            sends: Vec::new(),
         };
 
         let track2 = TrackState {
@@ -561,6 +610,7 @@ impl TimelineState {
             }],
             automation_lanes: vec![],
             inserts: Vec::new(),
+            sends: Vec::new(),
         };
 
         let track3 = TrackState {
@@ -628,6 +678,7 @@ impl TimelineState {
             }],
             automation_lanes: vec![],
             inserts: Vec::new(),
+            sends: Vec::new(),
         };
 
         Self {
@@ -1118,6 +1169,7 @@ impl TimelineState {
             clips: Vec::new(),
             automation_lanes: Vec::new(),
             inserts: Vec::new(),
+            sends: Vec::new(),
         });
         id
     }
@@ -1240,6 +1292,88 @@ impl TimelineState {
             );
         }
         Some(slot.bypassed)
+    }
+
+    /// Set an insert slot's load status by id (Phase 2b engine readback).
+    /// Returns `true` if the status actually changed, so callers can decide
+    /// whether to repaint. Used by the audio sync completion handler to flip
+    /// `Failed` when the engine reports a native plugin failed to instantiate.
+    pub fn set_insert_load_status(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        status: InsertLoadStatus,
+    ) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return false;
+        };
+        let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+            return false;
+        };
+        if slot.load_status == status {
+            return false;
+        }
+        if plugin_debug_enabled() {
+            eprintln!(
+                "[plugin] set_load_status track={} slot={} -> {:?}",
+                track_id, insert_id, status
+            );
+        }
+        slot.load_status = status;
+        true
+    }
+
+    /// Add an aux send from `track_id` to the first Bus/Return track that
+    /// isn't already a target (Phase 3 — a richer target picker is a follow-up,
+    /// mirroring how inserts auto-seeded before the picker overlay). Returns
+    /// the new send id, or `None` if there is no eligible routing track or the
+    /// track already sends to every routing track.
+    pub fn add_send(&mut self, track_id: &str) -> Option<String> {
+        let existing: Vec<String> = self
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .map(|t| t.sends.iter().map(|s| s.target_track_id.clone()).collect())
+            .unwrap_or_default();
+        let target = self.tracks.iter().find(|t| {
+            t.id != track_id && t.track_type.is_routing() && !existing.contains(&t.id)
+        })?;
+        let target_id = target.id.clone();
+        let target_name = target.name.clone();
+
+        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
+        let send_id = format!("send-{}-{}", track.id, track.sends.len() + 1);
+        track.sends.push(SendSlotState {
+            id: send_id.clone(),
+            target_track_id: target_id.clone(),
+            target_name,
+            enabled: true,
+            pre_fader: false,
+            gain_db: 0.0,
+        });
+        if routing_debug_enabled() {
+            eprintln!(
+                "[routing] add_send track={} send={} -> {}",
+                track_id, send_id, target_id
+            );
+        }
+        Some(send_id)
+    }
+
+    pub fn remove_send(&mut self, track_id: &str, send_id: &str) {
+        if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            track.sends.retain(|s| s.id != send_id);
+            if routing_debug_enabled() {
+                eprintln!("[routing] remove_send track={} send={}", track_id, send_id);
+            }
+        }
+    }
+
+    pub fn toggle_send_enabled(&mut self, track_id: &str, send_id: &str) -> Option<bool> {
+        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
+        let send = track.sends.iter_mut().find(|s| s.id == send_id)?;
+        send.enabled = !send.enabled;
+        Some(send.enabled)
     }
 
     pub fn toggle_track_input_monitor(&mut self, track_id: &str) {

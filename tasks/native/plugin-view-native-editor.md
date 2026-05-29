@@ -117,9 +117,24 @@ falls back to a GPUI panel showing:
 - Phase 1 persists `instance_id`/`plugin_path`/`plugin_uid`/`display_name`
   on `InsertSlotState`.
 - Phase 2a removes the N-API dependency from the editor C ABI surface
-  via `native_editor`. The `OpenInsertEditor` callback is still a TODO
-  log line — Phase 4 wires it to `native_editor::open_plugin_editor_window`
-  + GPUI shell.
+  via `native_editor`.
+- **Phase 4 (revised architecture) shipped** — the old C++ NanoVG/D3D
+  top-level editor window is **retired from the path**. New design:
+  - GPUI owns a borderless external window (`PluginEditorWindow`) and draws
+    only the shell/header.
+  - The HWND is extracted via `raw_window_handle::HasWindowHandle` (gpui 0.2.2
+    implements it for `Window` — gap #2 above is resolved; option 2b chosen).
+  - A new NanoVG-free C ABI (`sphere_plugin_editor_embed_attach/_set_bounds/
+    _detach/_is_valid`) creates a `WS_CHILD` native host region under that HWND
+    and attaches the VST3 `IPlugView` into it. Plugin UI is the native view.
+  - `StudioLayout` tracks `WindowHandle<PluginEditorWindow>` per slot; the
+    window entity's `Drop` detaches the native view (no leaks). Attach failure
+    renders a GPUI fallback panel — no crash. `FUTUREBOARD_PLUGIN_VIEW_DEBUG`
+    traces both sides.
+  - The legacy `sphere_plugin_editor_open_window` + NanoVG/Yoga/D3D shell is
+    now dead code (no caller), removable in a follow-up cleanup.
+  - Pending: plugin-initiated resize negotiation, macOS/Linux embed, Phase 5
+    param drain pump, and on-device verification of child compositing + DPI.
 
 See [plugin-pipeline-checklist.md](./plugin-pipeline-checklist.md) for
 the live tick-list.

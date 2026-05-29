@@ -207,6 +207,10 @@ pub struct EngineSendSnapshot {
     pub return_track_id: String,
     pub level: f32,
     pub enabled: bool,
+    /// `true` taps the signal before the source track fader; `false`
+    /// (default) taps post-fader. Phase 3.
+    #[serde(default)]
+    pub pre_fader: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

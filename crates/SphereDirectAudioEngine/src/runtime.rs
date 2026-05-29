@@ -36,6 +36,12 @@ pub struct RuntimeTrack {
     pub callback_clip_route_log_done: bool,
     pub block_l: Vec<f32>,
     pub block_r: Vec<f32>,
+    /// Send-receive accumulation buffers (Phase 3). Sends from other tracks
+    /// sum into these; routing tracks (bus/return) then process this as their
+    /// input. Preallocated alongside `block_*` so the audio callback never
+    /// allocates. Zeroed at the top of each render block.
+    pub recv_l: Vec<f32>,
+    pub recv_r: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +136,8 @@ pub struct RuntimeSend {
     pub return_track_id: String,
     pub level: f32,
     pub enabled: bool,
+    /// Pre-fader tap (Phase 3). See [`EngineSendSnapshot::pre_fader`].
+    pub pre_fader: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +362,7 @@ impl RuntimeProject {
                         return_track_id: send.return_track_id.clone(),
                         level: send.level.clamp(0.0, 2.0),
                         enabled: send.enabled,
+                        pre_fader: send.pre_fader,
                     })
                     .collect(),
                 meter: Arc::new(RuntimeTrackMeter::default()),
@@ -365,6 +374,8 @@ impl RuntimeProject {
                 callback_clip_route_log_done: false,
                 block_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 block_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                recv_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                recv_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
             });
         }
         let has_solo = tracks.iter().any(|t| t.solo);
@@ -407,6 +418,48 @@ impl RuntimeProject {
                     eprintln!(
                         "[SphereAudio] RuntimeInsert id={} format={} path={} classId={} bypass={}",
                         insert.id, format, path, class_id, !insert.enabled
+                    );
+                }
+            }
+        }
+
+        // Phase 3 routing graph trace. Logged here on the build (worker)
+        // thread — never in the audio callback. Reports node kinds, each
+        // track's sends, and any sends that will be rejected at render time
+        // (cycle-safe rule: source→routing only, routing→later-routing only).
+        if std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some() {
+            let is_routing = |ty: &str| ty == "bus" || ty == "return";
+            eprintln!("[routing] graph nodes={}", tracks.len());
+            for (idx, track) in tracks.iter().enumerate() {
+                eprintln!(
+                    "[routing] node[{idx}] track={} type={} sends={}",
+                    track.id,
+                    track.track_type,
+                    track.sends.len()
+                );
+                for send in &track.sends {
+                    let target_idx = tracks.iter().position(|t| t.id == send.return_track_id);
+                    let target_routing = target_idx
+                        .map(|t| is_routing(&tracks[t].track_type))
+                        .unwrap_or(false);
+                    let source_routing = is_routing(&track.track_type);
+                    // Accepted when: target is a routing track, AND if the
+                    // source is itself routing the target must come later in
+                    // the array (forward-only) to stay acyclic.
+                    let accepted = target_routing
+                        && match (source_routing, target_idx) {
+                            (true, Some(t)) => t > idx,
+                            (false, Some(_)) => true,
+                            _ => false,
+                        };
+                    eprintln!(
+                        "[routing]   send id={} -> {} target_idx={:?} level={:.3} enabled={} {}",
+                        send.id,
+                        send.return_track_id,
+                        target_idx,
+                        send.level,
+                        send.enabled,
+                        if accepted { "ACCEPT" } else { "REJECT(cycle-unsafe)" }
                     );
                 }
             }

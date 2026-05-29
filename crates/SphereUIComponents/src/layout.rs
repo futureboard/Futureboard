@@ -14,7 +14,11 @@ use crate::components;
 use crate::components::add_track_dialog::{
     open_add_track_window, AddTrackDialogState, AddTrackKind, AddTrackWindow,
 };
+use crate::components::plugin_editor_window::PluginEditorWindow;
 use crate::components::plugin_manager::{open_plugin_manager_window, PluginManagerWindow};
+use crate::components::plugin_picker::{
+    plugin_picker_overlay, PluginPickerCallbacks, PluginPickerState, STUB_PLUGIN_ID,
+};
 use crate::components::context_menu::ContextMenuEntry;
 use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
@@ -44,8 +48,8 @@ use crate::overlay::{project_title_anchor, titlebar_label_anchor, OverlayAnchor}
 use crate::theme::{self, Colors};
 
 use DAUx::types::{
-    EngineClipAudioProcess, EngineClipSnapshot, EngineProjectSnapshot, EngineRoutingSnapshot,
-    EngineTrackSnapshot,
+    EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineProjectSnapshot,
+    EngineRoutingSnapshot, EngineSendSnapshot, EngineTrackSnapshot,
 };
 
 /// Flip to `true` to seed the studio with demo tracks/clips at startup.
@@ -90,6 +94,7 @@ pub enum OpenPopover {
 enum TextMenuTarget {
     ProjectSwitcherSearch,
     BrowserSearch,
+    PluginPickerSearch,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +144,9 @@ pub struct StudioLayout {
     project_switcher: ProjectSwitcherState,
     project_switcher_search_input: TextInputState,
     browser_search_input: TextInputState,
+    /// Phase 2b insert plugin picker overlay state.
+    plugin_picker: PluginPickerState,
+    plugin_picker_search_input: TextInputState,
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
     /// Cached plugin registry scan result. `None` until the first
@@ -146,6 +154,12 @@ pub struct StudioLayout {
     /// dialog populates it). Phase 2a uses the first insert-capable
     /// entry; Phase 2b adds a real picker overlay.
     available_plugins: Option<Vec<sphere_plugin_host::RegistryPlugin>>,
+    /// Open native plugin editor windows (Phase 4). Keyed by
+    /// `(track_id, insert_id)` → the GPUI-hosted editor window handle. GPUI
+    /// owns the borderless shell; the C++ backend embeds the VST3 IPlugView in
+    /// a native child region. Dropping the window entity detaches the view.
+    open_plugin_editors:
+        std::collections::HashMap<(String, String), WindowHandle<PluginEditorWindow>>,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
     /// Detached mixer window for multi-monitor layouts.
@@ -495,9 +509,16 @@ impl StudioLayout {
                 cx.focus_handle(),
             )
             .with_placeholder("Search..."),
+            plugin_picker: PluginPickerState::closed(),
+            plugin_picker_search_input: TextInputState::new(
+                "plugin-picker-search-input",
+                cx.focus_handle(),
+            )
+            .with_placeholder("Search plugins..."),
             add_track_window: None,
             plugin_manager_window: None,
             available_plugins: None,
+            open_plugin_editors: std::collections::HashMap::new(),
             settings_window: None,
             mixer_window: None,
             pending_mixer_external_open: None,
@@ -776,6 +797,12 @@ impl StudioLayout {
             }
         }
 
+        // Phase 2b: read back per-insert instantiation status now that the
+        // runtime graph reflects this snapshot. A native-plugin insert that
+        // the engine reports as not-ready failed to instantiate — flip its
+        // UI slot to `Failed` (no panic; just surfaces the error).
+        self.apply_engine_insert_statuses(cx);
+
         let pending_sync = self.audio_sync_pending;
         self.audio_sync_pending = false;
         if pending_sync {
@@ -786,6 +813,45 @@ impl StudioLayout {
         if self.pending_play_after_sync {
             self.pending_play_after_sync = false;
             self.start_native_playback(cx);
+        }
+    }
+
+    /// Read structured per-insert status from the engine and reconcile each
+    /// UI slot's `load_status` (Phase 2b). Only native-plugin inserts are
+    /// reconciled — built-ins are always live, and the stub / unscanned slots
+    /// aren't sent to the engine so they keep their optimistic UI status.
+    /// Runs on the UI thread right after a sync completes — not in the poll
+    /// loop — so the runtime mutex is locked at most once per project change.
+    fn apply_engine_insert_statuses(&mut self, cx: &mut Context<Self>) {
+        use crate::components::timeline::timeline_state::InsertLoadStatus;
+        let Some(engine) = self.audio_engine.as_ref() else {
+            return;
+        };
+        let statuses = engine.insert_statuses();
+        if statuses.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        self.timeline.update(cx, |timeline, _cx| {
+            for st in &statuses {
+                if !st.native {
+                    continue;
+                }
+                let status = if st.ready {
+                    InsertLoadStatus::Ready
+                } else {
+                    InsertLoadStatus::Failed("Plugin failed to instantiate".to_string())
+                };
+                if timeline
+                    .state
+                    .set_insert_load_status(&st.track_id, &st.insert_id, status)
+                {
+                    changed = true;
+                }
+            }
+        });
+        if changed {
+            cx.notify();
         }
     }
 
@@ -1460,7 +1526,107 @@ impl StudioLayout {
     /// cache backing the registry makes subsequent scans fast. The UI
     /// thread blocks here on purpose; the audio thread is untouched.
     /// `None` return = registry has zero insert-capable plugins.
-    fn pick_default_insert_plugin(&mut self) -> Option<sphere_plugin_host::RegistryPlugin> {
+    /// Open the GPUI-hosted native editor window for an insert slot (Phase 4).
+    /// GPUI owns a borderless shell; the C++ backend embeds the VST3 IPlugView
+    /// in a native child region under it. If already open, this is a no-op (the
+    /// window stays up). UI thread only; bad plugin → the editor window shows a
+    /// fallback panel, never a crash.
+    fn open_insert_editor(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+        let debug = std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some();
+        let key = (track_id.to_string(), insert_id.to_string());
+
+        // Drop any stale handle whose window the user already closed.
+        if let Some(handle) = self.open_plugin_editors.get(&key) {
+            if handle.update(cx, |_, _, _| ()).is_ok() {
+                if debug {
+                    eprintln!("[plugin-view] already open track={track_id} slot={insert_id}");
+                }
+                return;
+            }
+            self.open_plugin_editors.remove(&key);
+        }
+
+        let descriptor = {
+            let timeline = self.timeline.read(cx);
+            timeline.state.find_track(track_id).and_then(|t| {
+                t.inserts.iter().find(|i| i.id == insert_id).map(|slot| {
+                    (
+                        slot.plugin_id.clone(),
+                        slot.plugin_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        slot.plugin_format,
+                        slot.display_name.clone(),
+                    )
+                })
+            })
+        };
+        let Some((plugin_id, plugin_path, plugin_format, display_name)) = descriptor else {
+            if debug {
+                eprintln!("[plugin-view] no slot track={track_id} slot={insert_id}");
+            }
+            return;
+        };
+
+        let path = plugin_path.filter(|p| !p.trim().is_empty());
+        let editable =
+            plugin_format == Some(InsertPluginFormat::Vst3) && path.is_some() && plugin_id.is_some();
+        if !editable {
+            if debug {
+                eprintln!(
+                    "[plugin-view] not editable track={track_id} slot={insert_id} fmt={plugin_format:?}"
+                );
+            }
+            return;
+        }
+
+        let owner_bounds = window.bounds();
+        match crate::components::plugin_editor_window::open_plugin_editor_window(
+            owner_bounds,
+            track_id.to_string(),
+            insert_id.to_string(),
+            path.unwrap_or_default(),
+            plugin_id.unwrap_or_default(),
+            display_name,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.open_plugin_editors.insert(key, handle);
+                if debug {
+                    eprintln!("[plugin-view] open track={track_id} slot={insert_id}");
+                }
+            }
+            Err(err) => {
+                if debug {
+                    eprintln!(
+                        "[plugin-view] open FAILED track={track_id} slot={insert_id} err={err}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Close the editor window for a slot if one is open. Idempotent. Removing
+    /// the GPUI window drops the entity, which detaches the native view.
+    fn close_insert_editor(&mut self, track_id: &str, insert_id: &str, cx: &mut Context<Self>) {
+        let key = (track_id.to_string(), insert_id.to_string());
+        if let Some(handle) = self.open_plugin_editors.remove(&key) {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
+                eprintln!("[plugin-view] close track={track_id} slot={insert_id}");
+            }
+        }
+    }
+
+
+    fn ensure_plugins_scanned(&mut self) {
         if self.available_plugins.is_none() {
             if std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some() {
                 eprintln!("[plugin] populating registry cache (first add_insert)");
@@ -1468,11 +1634,83 @@ impl StudioLayout {
             let result = sphere_plugin_host::PluginRegistry::scan(None);
             self.available_plugins = Some(result.plugins);
         }
-        let plugins = self.available_plugins.as_ref()?;
-        plugins
-            .iter()
-            .find(|p| p.supports_insert())
-            .cloned()
+    }
+
+    /// Open the Phase 2b insert picker for `track_id`. Runs the lazy registry
+    /// scan (UI thread) so the overlay has a populated list, then focuses the
+    /// search field. No insert slot is created until the user picks a plugin.
+    fn open_insert_picker(&mut self, track_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_plugins_scanned();
+        self.plugin_picker = PluginPickerState::open_for(track_id);
+        self.plugin_picker_search_input.set_value("");
+        self.plugin_picker_search_input.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    /// Apply a picked plugin: append an insert slot to the picker's target
+    /// track and bind the chosen descriptor. `plugin_id` is a
+    /// `RegistryPlugin.id` or [`STUB_PLUGIN_ID`]. Closes the picker. No audio
+    /// thread interaction — the next project sync carries the descriptor down.
+    fn apply_picked_insert(&mut self, plugin_id: &str, cx: &mut Context<Self>) {
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+        use sphere_plugin_host::PluginFormat as RegFmt;
+
+        let track_id = self.plugin_picker.track_id.clone();
+        if track_id.is_empty() {
+            self.plugin_picker = PluginPickerState::closed();
+            cx.notify();
+            return;
+        }
+
+        // Resolve the descriptor from the registry cache (or stub fallback)
+        // before touching the timeline entity to avoid overlapping borrows.
+        let descriptor = if plugin_id == STUB_PLUGIN_ID {
+            None
+        } else {
+            self.available_plugins
+                .as_ref()
+                .and_then(|plugins| plugins.iter().find(|p| p.id == plugin_id))
+                .map(|reg| {
+                    let format = match reg.format {
+                        RegFmt::Vst3 => InsertPluginFormat::Vst3,
+                        RegFmt::Clap => InsertPluginFormat::Clap,
+                        RegFmt::Au => InsertPluginFormat::Au,
+                        RegFmt::Lv2 => InsertPluginFormat::Lv2,
+                        _ => InsertPluginFormat::Unknown,
+                    };
+                    let id = reg.class_id.clone().unwrap_or_else(|| reg.id.clone());
+                    (id, Some(reg.path.clone()), format, reg.name.clone())
+                })
+        };
+        let (plugin_id_out, plugin_path, plugin_format, display_name) =
+            descriptor.unwrap_or_else(|| {
+                (
+                    STUB_PLUGIN_ID.to_string(),
+                    None,
+                    InsertPluginFormat::Vst3,
+                    "Stub Effect".to_string(),
+                )
+            });
+
+        let new_slot_id = self
+            .timeline
+            .update(cx, |timeline, _cx| timeline.state.add_insert(&track_id));
+        if let Some(slot_id) = new_slot_id {
+            self.timeline.update(cx, |timeline, _cx| {
+                timeline.state.set_insert_plugin(
+                    &track_id,
+                    &slot_id,
+                    plugin_id_out,
+                    plugin_path,
+                    plugin_format,
+                    display_name,
+                );
+            });
+            self.mark_dirty();
+            self.engine_project_dirty = true;
+        }
+        self.plugin_picker = PluginPickerState::closed();
+        cx.notify();
     }
 
     fn cmd_save_project(&mut self, cx: &mut Context<Self>) {
@@ -2587,10 +2825,42 @@ impl StudioLayout {
         false
     }
 
+    fn handle_plugin_picker_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.plugin_picker.is_open {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.plugin_picker = PluginPickerState::closed();
+                cx.notify();
+                true
+            }
+            _ => {
+                if self.plugin_picker_search_input.is_focused(window) || is_text_input_key(event) {
+                    let action = self
+                        .plugin_picker_search_input
+                        .handle_key_with_clipboard(event, Some(cx));
+                    self.sync_text_input_target(TextMenuTarget::PluginPickerSearch);
+                    return !matches!(action, TextInputAction::Pass);
+                }
+                false
+            }
+        }
+    }
+
     fn text_input_mut(&mut self, target: TextMenuTarget) -> &mut TextInputState {
         match target {
             TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
+            TextMenuTarget::PluginPickerSearch => &mut self.plugin_picker_search_input,
         }
     }
 
@@ -2598,6 +2868,7 @@ impl StudioLayout {
         match target {
             TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &self.browser_search_input,
+            TextMenuTarget::PluginPickerSearch => &self.plugin_picker_search_input,
         }
     }
 
@@ -2610,12 +2881,16 @@ impl StudioLayout {
             TextMenuTarget::BrowserSearch => {
                 self.file_browser.set_filter(&self.browser_search_input.value);
             }
+            TextMenuTarget::PluginPickerSearch => {
+                self.plugin_picker.query = self.plugin_picker_search_input.value.clone();
+            }
         }
     }
 
     fn text_input_has_focus(&self, window: &Window) -> bool {
         self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
+            || self.plugin_picker_search_input.is_focused(window)
     }
 
     fn context_entries(
@@ -3260,60 +3535,17 @@ impl StudioLayout {
         // mutate UI state and let the next project sync carry the
         // descriptor down to the engine (which currently no-ops on
         // unrecognised plugins).
+        // Phase 2b: opens the registry-driven picker overlay. The insert slot
+        // is created only when the user picks a plugin (see
+        // `apply_picked_insert`). No audio thread interaction.
         let on_add_insert: std::sync::Arc<
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = owner.clone();
-            std::sync::Arc::new(move |track_id: &String, _w, cx| {
+            std::sync::Arc::new(move |track_id: &String, window, cx| {
                 let track_id = track_id.clone();
                 let _ = this.update(cx, |this, cx| {
-                    let new_slot_id = this
-                        .timeline
-                        .update(cx, |timeline, _cx| timeline.state.add_insert(&track_id));
-                    if let Some(slot_id) = new_slot_id {
-                        let picked = this.pick_default_insert_plugin();
-                        let (plugin_id, plugin_path, plugin_format, display_name) = match picked {
-                            Some(reg) => {
-                                use crate::components::timeline::timeline_state::InsertPluginFormat;
-                                use sphere_plugin_host::PluginFormat as RegFmt;
-                                let format = match reg.format {
-                                    RegFmt::Vst3 => InsertPluginFormat::Vst3,
-                                    RegFmt::Clap => InsertPluginFormat::Clap,
-                                    RegFmt::Au => InsertPluginFormat::Au,
-                                    RegFmt::Lv2 => InsertPluginFormat::Lv2,
-                                    _ => InsertPluginFormat::Unknown,
-                                };
-                                let id = reg.class_id.clone().unwrap_or_else(|| reg.id.clone());
-                                (id, Some(reg.path.clone()), format, reg.name.clone())
-                            }
-                            None => {
-                                // Registry not populated yet (no scan run, or
-                                // no insert-capable plugin found). Fall back
-                                // to the documented stub so the round-trip is
-                                // still exercised. Phase 2b adds the picker.
-                                use crate::components::timeline::timeline_state::InsertPluginFormat;
-                                (
-                                    "futureboard.stub.gain".to_string(),
-                                    None,
-                                    InsertPluginFormat::Vst3,
-                                    "Stub Effect".to_string(),
-                                )
-                            }
-                        };
-                        this.timeline.update(cx, |timeline, _cx| {
-                            timeline.state.set_insert_plugin(
-                                &track_id,
-                                &slot_id,
-                                plugin_id,
-                                plugin_path,
-                                plugin_format,
-                                display_name,
-                            );
-                        });
-                    }
-                    this.mark_dirty();
-                    this.engine_project_dirty = true;
-                    cx.notify();
+                    this.open_insert_picker(&track_id, window, cx);
                 });
             })
         };
@@ -3325,6 +3557,9 @@ impl StudioLayout {
                 let track_id = track_id.clone();
                 let insert_id = insert_id.clone();
                 let _ = this.update(cx, |this, cx| {
+                    // Close any open editor window for this slot before dropping
+                    // the descriptor — every open pairs with a close.
+                    this.close_insert_editor(&track_id, &insert_id, cx);
                     this.timeline.update(cx, |timeline, _cx| {
                         timeline.state.remove_insert(&track_id, &insert_id);
                     });
@@ -3351,19 +3586,59 @@ impl StudioLayout {
                 });
             })
         };
+        // Phase 4: open the GPUI-hosted native plugin editor window.
         let on_open_insert_editor: std::sync::Arc<
             dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
-        > = std::sync::Arc::new(move |(track_id, insert_id), _w, _cx| {
-            // Phase 4 will open the native plugin editor window via the
-            // de-napi'd SpherePluginHost. For Phase 1 we just log the
-            // intent so the wiring is exercised by manual tests.
-            if std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some() {
-                eprintln!(
-                    "[plugin] open_editor track={} slot={} (TODO Phase 4)",
-                    track_id, insert_id
-                );
-            }
-        });
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |(track_id, insert_id), window, cx| {
+                let track_id = track_id.clone();
+                let insert_id = insert_id.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.open_insert_editor(&track_id, &insert_id, window, cx);
+                });
+            })
+        };
+
+        // ── Send callbacks (Phase 3) ─────────────────────────────────────
+        // add_send auto-targets the first eligible Bus/Return (a target picker
+        // is a follow-up). Both flip `engine_project_dirty` so the next audio
+        // sync carries the send list down to the runtime.
+        let on_add_send: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |track_id: &String, _w, cx| {
+                let track_id = track_id.clone();
+                let _ = this.update(cx, |this, cx| {
+                    let added = this
+                        .timeline
+                        .update(cx, |timeline, _cx| timeline.state.add_send(&track_id));
+                    if added.is_some() {
+                        this.mark_dirty();
+                        this.engine_project_dirty = true;
+                        cx.notify();
+                    }
+                });
+            })
+        };
+        let on_remove_send: std::sync::Arc<
+            dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |(track_id, send_id): &(String, String), _w, cx| {
+                let track_id = track_id.clone();
+                let send_id = send_id.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.timeline.update(cx, |timeline, _cx| {
+                        timeline.state.remove_send(&track_id, &send_id);
+                    });
+                    this.mark_dirty();
+                    this.engine_project_dirty = true;
+                    cx.notify();
+                });
+            })
+        };
 
         MixerCallbacks {
             on_select_track,
@@ -3379,6 +3654,8 @@ impl StudioLayout {
             on_remove_insert,
             on_toggle_insert_bypass,
             on_open_insert_editor,
+            on_add_send,
+            on_remove_send,
         }
     }
 }
@@ -3914,6 +4191,77 @@ impl Render for StudioLayout {
         });
         // Add Track moved to an external window.
 
+        // Phase 2b insert plugin picker overlay.
+        let plugin_picker_overlay_el: Option<gpui::AnyElement> = if self.plugin_picker.is_open {
+            let search_context_callbacks = TextInputCallbacks {
+                on_context_menu: Some(Arc::new({
+                    let this = cx.entity().clone();
+                    move |(x, y): &(f32, f32), _w, cx| {
+                        let x = *x;
+                        let y = *y;
+                        let _ = this.update(cx, |this, cx| {
+                            this.text_context_menu = Some(TextContextMenu {
+                                target: TextMenuTarget::PluginPickerSearch,
+                                x,
+                                y,
+                            });
+                            cx.notify();
+                        });
+                    }
+                })),
+                on_mouse: None,
+            };
+            let picker_callbacks = PluginPickerCallbacks {
+                on_close: Arc::new({
+                    let this = cx.entity().clone();
+                    move |_: &(), _w, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.plugin_picker = PluginPickerState::closed();
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_select_category: Arc::new({
+                    let this = cx.entity().clone();
+                    move |cat: &String, _w, cx| {
+                        let cat = cat.clone();
+                        let _ = this.update(cx, |this, cx| {
+                            this.plugin_picker.category =
+                                if cat == crate::components::plugin_picker::CATEGORY_ALL {
+                                    None
+                                } else {
+                                    Some(cat)
+                                };
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_pick: Arc::new({
+                    let this = cx.entity().clone();
+                    move |plugin_id: &String, _w, cx| {
+                        let plugin_id = plugin_id.clone();
+                        let _ = this.update(cx, |this, cx| {
+                            this.apply_picked_insert(&plugin_id, cx);
+                        });
+                    }
+                }),
+            };
+            let plugins = self.available_plugins.clone().unwrap_or_default();
+            Some(
+                plugin_picker_overlay(
+                    &self.plugin_picker,
+                    &plugins,
+                    &self.plugin_picker_search_input,
+                    self.plugin_picker_search_input.is_focused(window),
+                    search_context_callbacks,
+                    picker_callbacks,
+                )
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
+
         self.prune_mixer_window(cx);
 
         let transport_chrome = self.transport_chrome_state(cx);
@@ -3986,6 +4334,7 @@ impl Render for StudioLayout {
                 let handled = shortcut_target.update(cx, |this, cx| {
                     let handled = this.handle_settings_dialog_key(event, window, cx)
                         || this.handle_add_track_dialog_key(event, window, cx)
+                        || this.handle_plugin_picker_key(event, window, cx)
                         || this.handle_project_switcher_key(event, window, cx)
                         || this.handle_browser_key(event, window, cx);
                     if handled {
@@ -4110,8 +4459,85 @@ impl Render for StudioLayout {
             .children(popover_overlay)
             // Add Track moved to external window.
             .children(settings_overlay)
+            .children(plugin_picker_overlay_el)
             .children(text_context_overlay)
     }
+}
+
+/// Build the DAUx insert descriptors for one track's mixer insert chain
+/// (Phase 2b). Only real, instantiable VST3 plugins are emitted as
+/// `native-plugin` descriptors — DAUx then instantiates a
+/// `Vst3RuntimeProcessor` on its worker and routes audio through it. The
+/// documented stub (`STUB_PLUGIN_ID`) and any slot without a usable path are
+/// skipped so the realtime runtime keeps no-op'ing on placeholders rather than
+/// logging passthrough noise.
+///
+/// `enabled` mirrors the UI bypass flag (`!bypassed`), so toggling bypass in
+/// the mixer changes the audio path on the next engine sync. This runs on the
+/// UI thread inside snapshot construction — never the audio callback.
+fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
+    use crate::components::timeline::timeline_state::InsertPluginFormat;
+
+    track
+        .inserts
+        .iter()
+        .filter_map(|slot| {
+            let plugin_id = slot.plugin_id.as_deref()?;
+            // Skip the placeholder stub — it has no real processor.
+            if plugin_id == STUB_PLUGIN_ID {
+                return None;
+            }
+            // Only VST3 with a real module path is instantiable today.
+            if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+                return None;
+            }
+            let path = slot
+                .plugin_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .filter(|p| !p.trim().is_empty())?;
+
+            let mut params: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
+            params.insert("format".to_string(), serde_json::json!("VST3"));
+            params.insert("modulePath".to_string(), serde_json::json!(path));
+            params.insert("path".to_string(), serde_json::json!(path));
+            params.insert("classId".to_string(), serde_json::json!(plugin_id));
+            params.insert("class_id".to_string(), serde_json::json!(plugin_id));
+            params.insert("pluginInstanceId".to_string(), serde_json::json!(slot.id));
+            params.insert(
+                "displayName".to_string(),
+                serde_json::json!(slot.display_name),
+            );
+
+            Some(EngineInsertSnapshot {
+                id: slot.id.clone(),
+                kind: "native-plugin".to_string(),
+                enabled: slot.enabled && !slot.bypassed,
+                params,
+            })
+        })
+        .collect()
+}
+
+/// Build the DAUx send descriptors for one track (Phase 3). Each send carries
+/// a linear level (from `gain_db`) and its target Bus/Return track id; DAUx
+/// accumulates the scaled signal into the target's receive buffer. Sends with
+/// no target are skipped. Pre-fader is persisted but the runtime currently taps
+/// post-fader only. Runs on the UI thread during snapshot construction.
+fn build_engine_sends(track: &TrackState) -> Vec<EngineSendSnapshot> {
+    track
+        .sends
+        .iter()
+        .filter(|s| !s.target_track_id.trim().is_empty())
+        .map(|s| EngineSendSnapshot {
+            id: s.id.clone(),
+            return_track_id: s.target_track_id.clone(),
+            level: s.gain_linear(),
+            enabled: s.enabled,
+            pre_fader: s.pre_fader,
+        })
+        .collect()
 }
 
 fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> EngineProjectSnapshot {
@@ -4128,8 +4554,8 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
             armed: track.armed,
             preview_mode: "stereo".to_string(),
             output_track_id: None,
-            inserts: Vec::new(),
-            sends: Vec::new(),
+            inserts: build_engine_inserts(track),
+            sends: build_engine_sends(track),
         })
         .collect();
 
@@ -4215,14 +4641,32 @@ fn log_engine_sync_snapshot(snapshot: &EngineProjectSnapshot, dirty: bool, reaso
                 .unwrap_or(false)
         })
         .count();
+    let insert_count: usize = snapshot.tracks.iter().map(|t| t.inserts.len()).sum();
     eprintln!(
-        "[engine-sync] reason={} tracks={} clips={} clips_with_path={} dirty={}",
+        "[engine-sync] reason={} tracks={} clips={} clips_with_path={} inserts={} dirty={}",
         reason,
         snapshot.tracks.len(),
         snapshot.clips.len(),
         clips_with_path,
+        insert_count,
         dirty
     );
+    for track in &snapshot.tracks {
+        for insert in &track.inserts {
+            eprintln!(
+                "[engine-sync] insert track={} id={} kind={} enabled={} path={}",
+                track.id,
+                insert.id,
+                insert.kind,
+                insert.enabled,
+                insert
+                    .params
+                    .get("modulePath")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<none>")
+            );
+        }
+    }
     for clip in &snapshot.clips {
         eprintln!(
             "[engine-sync] clip id={} track={} path={} start={:.3} duration={:.3}",
@@ -4318,6 +4762,8 @@ fn track_type_name(track_type: TrackType) -> &'static str {
         TrackType::Audio => "audio",
         TrackType::Midi => "midi",
         TrackType::Instrument => "instrument",
+        TrackType::Bus => "bus",
+        TrackType::Return => "return",
         TrackType::Master => "master",
     }
 }

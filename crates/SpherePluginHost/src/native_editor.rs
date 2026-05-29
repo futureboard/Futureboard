@@ -40,6 +40,101 @@ extern "C" {
     fn sphere_plugin_editor_resize_window(handle: c_ulonglong, width: c_int, height: c_int);
     fn sphere_plugin_editor_drain_param_events_json() -> SpherePluginHostString;
     fn sphere_plugin_host_free_string(value: SpherePluginHostString);
+
+    fn sphere_plugin_editor_embed_attach(
+        parent_hwnd: c_ulonglong,
+        plugin_path: *const c_char,
+        class_id: *const c_char,
+        x: c_int,
+        y: c_int,
+        width: c_int,
+        height: c_int,
+    ) -> c_ulonglong;
+    fn sphere_plugin_editor_embed_set_bounds(
+        handle: c_ulonglong,
+        x: c_int,
+        y: c_int,
+        width: c_int,
+        height: c_int,
+    );
+    fn sphere_plugin_editor_embed_detach(handle: c_ulonglong);
+    fn sphere_plugin_editor_embed_is_valid(handle: c_ulonglong) -> c_int;
+}
+
+/// Region (in physical pixels, relative to the parent window's client area)
+/// for the embedded plugin host child window.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmbedRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Attach a VST3 IPlugView into a WS_CHILD host region under `parent_hwnd`
+/// (the GPUI editor window's native handle). Returns a non-zero session handle.
+///
+/// Must be called on the thread that owns `parent_hwnd` (the GPUI UI thread),
+/// never the audio thread. `Err` on any failure — the caller renders a GPUI
+/// fallback; no panic.
+pub fn attach_editor_into_parent(
+    parent_hwnd: u64,
+    plugin_path: &str,
+    class_id: &str,
+    region: EmbedRegion,
+) -> Result<u64, String> {
+    if parent_hwnd == 0 {
+        return Err("attach_editor_into_parent: null parent handle".to_string());
+    }
+    let path = to_cstring("plugin_path", plugin_path.to_string())?;
+    let class = to_cstring("class_id", class_id.to_string())?;
+    let handle = unsafe {
+        sphere_plugin_editor_embed_attach(
+            parent_hwnd as c_ulonglong,
+            path.as_ptr(),
+            class.as_ptr(),
+            region.x as c_int,
+            region.y as c_int,
+            region.width as c_int,
+            region.height as c_int,
+        )
+    };
+    if handle == 0 {
+        Err("embedded plugin editor failed to attach".to_string())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Reposition / resize the embedded host child region (physical pixels).
+pub fn set_editor_region_bounds(handle: u64, region: EmbedRegion) {
+    if handle == 0 {
+        return;
+    }
+    unsafe {
+        sphere_plugin_editor_embed_set_bounds(
+            handle as c_ulonglong,
+            region.x as c_int,
+            region.y as c_int,
+            region.width as c_int,
+            region.height as c_int,
+        )
+    };
+}
+
+/// Detach the IPlugView and destroy the host child window. Idempotent.
+pub fn detach_editor(handle: u64) {
+    if handle == 0 {
+        return;
+    }
+    unsafe { sphere_plugin_editor_embed_detach(handle as c_ulonglong) };
+}
+
+pub fn editor_is_valid(handle: u64) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    unsafe { sphere_plugin_editor_embed_is_valid(handle as c_ulonglong) != 0 }
 }
 
 /// Options accepted by the native editor window. `width`/`height` default

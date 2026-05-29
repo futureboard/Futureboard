@@ -1212,6 +1212,151 @@ void run_win32_editor(EditorWindowConfig* config) {
 }
 #endif
 
+#ifdef _WIN32
+// ── Embedded (GPUI-hosted) editor path ──────────────────────────────────────
+//
+// Instead of the C++ NanoVG top-level window above, GPUI owns a borderless
+// external window and draws the shell/header. This path creates a WS_CHILD
+// host region under the GPUI window's HWND and attaches the VST3 IPlugView into
+// it. No NanoVG/D3D shell, no extra thread/message-pump — the child rides the
+// GPUI window's event loop. Must be called on the GPUI UI thread (the thread
+// that owns the parent HWND), never the audio thread.
+
+// Build a VST3 attachment (module → component → controller → IPlugView) without
+// attaching it to any window yet. Reuses the same helpers + shared param queue
+// as the legacy path so Phase 5 drain works for either. Returns null + `error`
+// on failure; never throws across the C ABI.
+std::unique_ptr<Vst3EditorAttachment> build_vst3_attachment(
+    const std::string& plugin_path,
+    const std::string& class_id,
+    const std::string& window_id,
+    std::string& error) {
+  auto attachment = std::make_unique<Vst3EditorAttachment>();
+  attachment->plugin_path = plugin_path;
+  attachment->class_id = class_id;
+
+  attachment->module = VST3::Hosting::Module::create(attachment->plugin_path, error);
+  if (!attachment->module) {
+    if (error.empty()) error = "module load failed";
+    return nullptr;
+  }
+
+  const auto factory = attachment->module->getFactory();
+  factory.setHostContext(&attachment->host_context);
+
+  VST3::Optional<VST3::UID> uid;
+  std::string fallback_name;
+  if (!looks_like_zero_class_id(attachment->class_id)) {
+    uid = VST3::UID::fromString(attachment->class_id);
+  }
+  if (uid) {
+    attachment->component = factory.createInstance<Steinberg::Vst::IComponent>(*uid);
+    if (!attachment->component) {
+      uid = first_audio_module_uid(factory, &fallback_name);
+      if (uid) attachment->component = factory.createInstance<Steinberg::Vst::IComponent>(*uid);
+    }
+  } else {
+    uid = first_audio_module_uid(factory, &fallback_name);
+    if (uid) attachment->component = factory.createInstance<Steinberg::Vst::IComponent>(*uid);
+  }
+  if (!attachment->component) {
+    error = "failed to create VST3 component; no usable Audio Module Class found";
+    return nullptr;
+  }
+  if (uid) attachment->class_id = uid->toString();
+
+  if (auto component_base = Steinberg::FUnknownPtr<Steinberg::IPluginBase>(attachment->component)) {
+    if (component_base->initialize(&attachment->host_context) != Steinberg::kResultOk) {
+      error = "component initialize() failed";
+      return nullptr;
+    }
+  } else {
+    error = "component does not implement IPluginBase";
+    return nullptr;
+  }
+
+  Steinberg::Vst::IEditController* raw_controller = nullptr;
+  if (attachment->component->queryInterface(Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&raw_controller)) == Steinberg::kResultTrue) {
+    attachment->controller = Steinberg::IPtr<Steinberg::Vst::IEditController>::adopt(raw_controller);
+    attachment->controller_is_component = true;
+  } else {
+    Steinberg::TUID controller_cid{};
+    if (attachment->component->getControllerClassId(controller_cid) != Steinberg::kResultTrue) {
+      error = "component did not provide controller classId";
+      return nullptr;
+    }
+    attachment->controller = factory.createInstance<Steinberg::Vst::IEditController>(VST3::UID(controller_cid));
+    if (!attachment->controller) {
+      error = "failed to create edit controller";
+      return nullptr;
+    }
+    if (auto controller_base = Steinberg::FUnknownPtr<Steinberg::IPluginBase>(attachment->controller)) {
+      if (controller_base->initialize(&attachment->host_context) != Steinberg::kResultOk) {
+        error = "controller initialize() failed";
+        return nullptr;
+      }
+    } else {
+      error = "controller does not implement IPluginBase";
+      return nullptr;
+    }
+  }
+
+  attachment->component_handler =
+      Steinberg::IPtr<MinimalComponentHandler>::adopt(new MinimalComponentHandler(window_id));
+  attachment->controller->setComponentHandler(attachment->component_handler);
+
+  attachment->component_connection =
+      Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(attachment->component);
+  attachment->controller_connection =
+      Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(attachment->controller);
+  if (attachment->component_connection && attachment->controller_connection) {
+    attachment->component_connection->connect(attachment->controller_connection);
+    attachment->controller_connection->connect(attachment->component_connection);
+  }
+
+  attachment->view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
+      attachment->controller->createView(Steinberg::Vst::ViewType::kEditor));
+  if (!attachment->view) {
+    error = "controller did not create editor view";
+    return nullptr;
+  }
+  if (attachment->view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) != Steinberg::kResultTrue) {
+    error = "editor view does not support HWND platform type";
+    return nullptr;
+  }
+  return attachment;
+}
+
+struct EmbedSession {
+  HWND child = nullptr;
+  std::unique_ptr<Vst3EditorAttachment> vst3;
+  std::string window_id;
+};
+
+std::unordered_map<unsigned long long, std::unique_ptr<EmbedSession>> g_embed_sessions; // guarded by g_windows_mutex
+
+LRESULT CALLBACK embed_child_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+  // The plugin parents its own view window inside this child; we just host it.
+  if (msg == WM_ERASEBKGND) return 1; // plugin paints; avoid background flash
+  return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+const wchar_t* kEmbedChildClass = L"SpherePluginEmbedHost";
+
+void ensure_embed_child_class() {
+  static std::once_flag once;
+  std::call_once(once, []() {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = embed_child_wndproc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+    wc.lpszClassName = kEmbedChildClass;
+    RegisterClassExW(&wc);
+  });
+}
+#endif // _WIN32
+
 } // namespace
 
 extern "C" unsigned long long sphere_plugin_editor_open_window(
@@ -1387,5 +1532,174 @@ extern "C" SpherePluginHostString sphere_plugin_editor_drain_param_events_json()
   return make_string_local(json.str());
 #else
   return make_string_local("[]");
+#endif
+}
+
+// ── Embedded editor C ABI (GPUI-hosted) ─────────────────────────────────────
+
+extern "C" unsigned long long sphere_plugin_editor_embed_attach(
+    unsigned long long parent_hwnd,
+    const char* plugin_path,
+    const char* class_id,
+    int x,
+    int y,
+    int width,
+    int height) {
+#ifdef _WIN32
+  HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
+  if (!IsWindow(parent)) {
+    std::fprintf(stderr, "[SpherePluginHost] embed_attach: invalid parent HWND\n");
+    return 0;
+  }
+  ensure_embed_child_class();
+  HWND child = CreateWindowExW(
+      0,
+      kEmbedChildClass,
+      L"",
+      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+      x,
+      y,
+      width > 1 ? width : 1,
+      height > 1 ? height : 1,
+      parent,
+      nullptr,
+      GetModuleHandleW(nullptr),
+      nullptr);
+  if (!child) {
+    std::fprintf(stderr, "[SpherePluginHost] embed_attach: CreateWindowEx child failed\n");
+    return 0;
+  }
+
+  const std::string path = plugin_path ? plugin_path : "";
+  const std::string cid = class_id ? class_id : "";
+  const std::string window_id = std::string("embed:") + path;
+  std::string error;
+  auto attachment = build_vst3_attachment(path, cid, window_id, error);
+  if (!attachment) {
+    std::fprintf(stderr, "[SpherePluginHost] embed_attach: %s\n", error.c_str());
+    DestroyWindow(child);
+    return 0;
+  }
+
+  const auto attach_result =
+      attachment->view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
+  if (attach_result != Steinberg::kResultTrue) {
+    std::fprintf(stderr, "[SpherePluginHost] embed_attach: IPlugView::attached(HWND) failed\n");
+    DestroyWindow(child);
+    return 0;
+  }
+  attachment->attached = true;
+
+  // Honour the plugin's preferred editor size for the child region; the GPUI
+  // shell reads it back via get/resize so it can size its host area.
+  Steinberg::ViewRect preferred{};
+  if (attachment->view->getSize(&preferred) == Steinberg::kResultTrue) {
+    const int pw = preferred.right - preferred.left;
+    const int ph = preferred.bottom - preferred.top;
+    if (pw > 1 && ph > 1) {
+      MoveWindow(child, x, y, pw, ph, TRUE);
+      attachment->view->onSize(&preferred);
+    }
+  }
+
+  const auto handle = g_next_handle.fetch_add(1);
+  auto session = std::make_unique<EmbedSession>();
+  session->child = child;
+  session->window_id = window_id;
+  session->vst3 = std::move(attachment);
+  {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    g_embed_sessions[handle] = std::move(session);
+  }
+  std::fprintf(
+      stderr,
+      "[SpherePluginHost] embed_attach ok handle=%llu parent=0x%p child=0x%p path=%s\n",
+      handle,
+      static_cast<void*>(parent),
+      static_cast<void*>(child),
+      path.c_str());
+  return handle;
+#else
+  (void)parent_hwnd;
+  (void)plugin_path;
+  (void)class_id;
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
+  return 0;
+#endif
+}
+
+extern "C" void sphere_plugin_editor_embed_set_bounds(
+    unsigned long long handle,
+    int x,
+    int y,
+    int width,
+    int height) {
+#ifdef _WIN32
+  HWND child = nullptr;
+  Steinberg::IPlugView* view = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    auto it = g_embed_sessions.find(handle);
+    if (it == g_embed_sessions.end() || !it->second) return;
+    child = it->second->child;
+    if (it->second->vst3) view = it->second->vst3->view.get();
+  }
+  if (!child || !IsWindow(child)) return;
+  MoveWindow(child, x, y, width > 1 ? width : 1, height > 1 ? height : 1, TRUE);
+  if (view) {
+    Steinberg::ViewRect rect{0, 0, width, height};
+    view->onSize(&rect);
+  }
+#else
+  (void)handle;
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
+#endif
+}
+
+extern "C" void sphere_plugin_editor_embed_detach(unsigned long long handle) {
+#ifdef _WIN32
+  std::unique_ptr<EmbedSession> session;
+  {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    auto it = g_embed_sessions.find(handle);
+    if (it != g_embed_sessions.end()) {
+      session = std::move(it->second);
+      g_embed_sessions.erase(it);
+    }
+  }
+  if (!session) return;
+  // Detach the IPlugView from the child before destroying it, then release the
+  // attachment (which terminates the controller/component) and the child HWND.
+  if (session->vst3 && session->vst3->view && session->vst3->attached) {
+    session->vst3->view->removed();
+    session->vst3->attached = false;
+  }
+  session->vst3.reset();
+  if (session->child && IsWindow(session->child)) {
+    DestroyWindow(session->child);
+  }
+  std::fprintf(stderr, "[SpherePluginHost] embed_detach handle=%llu\n", handle);
+#else
+  (void)handle;
+#endif
+}
+
+extern "C" int sphere_plugin_editor_embed_is_valid(unsigned long long handle) {
+#ifdef _WIN32
+  std::lock_guard<std::mutex> lock(g_windows_mutex);
+  auto it = g_embed_sessions.find(handle);
+  return (it != g_embed_sessions.end() && it->second && it->second->child &&
+          IsWindow(it->second->child))
+             ? 1
+             : 0;
+#else
+  (void)handle;
+  return 0;
 #endif
 }

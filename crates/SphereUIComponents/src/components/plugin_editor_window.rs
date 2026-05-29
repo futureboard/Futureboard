@@ -6,6 +6,11 @@
 //!   C++ backend (`native_editor::attach_editor_into_parent`), and the VST3
 //!   `IPlugView` is attached into it. The plugin UI is the native view; GPUI
 //!   never draws plugin content.
+//! - On Windows the native app sets `GPUI_DISABLE_DIRECT_COMPOSITION=1` at boot.
+//! - VST3 UI is hosted in an **owned tool window** (`WS_POPUP|WS_EX_TOOLWINDOW`)
+//!   aligned to the content region below the GPUI titlebar (default). Set
+//!   `FUTUREBOARD_PLUGIN_EDITOR_MODE=child` to force in-client `WS_CHILD` embed.
+//! - The GPUI shell uses an opaque background; the tool window carries the plugin UI.
 //! - No audio-thread interaction: attach/resize/detach run on the UI thread.
 //! - Editor failure never crashes — a GPUI fallback panel is shown instead.
 //!
@@ -19,14 +24,32 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
-use crate::components::title_bar::external_window_titlebar;
+use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
-use sphere_plugin_host::native_editor::{
-    attach_editor_into_parent, detach_editor, set_editor_region_bounds, EmbedRegion,
-};
+use sphere_plugin_host::native_editor::PluginEditorPresentationMode;
 
-/// Logical-pixel height reserved for the GPUI-drawn header.
-const HEADER_H: f32 = 34.0;
+/// Physical-pixel host region under the GPUI window. (Local mirror of the
+/// backend's region struct — the editor is now driven by the DAUx runtime
+/// instance, not SpherePluginHost.)
+#[derive(Debug, Clone, Copy, Default)]
+struct EmbedRegion {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+/// Map the DAUx embed host-kind code (0 = WS_CHILD, 1 = owned tool window) to
+/// the shared presentation-mode enum. Exactly one mode is active per editor.
+fn presentation_mode_from_host_kind(kind: i32) -> PluginEditorPresentationMode {
+    match kind {
+        0 => PluginEditorPresentationMode::ChildHwndEmbed,
+        _ => PluginEditorPresentationMode::OwnedToolWindowFallback,
+    }
+}
+
+/// Logical-pixel height reserved for the GPUI-drawn header (matches titlebar).
+const HEADER_H: f32 = TITLEBAR_HEIGHT;
 pub const EDITOR_WINDOW_WIDTH: f32 = 820.0;
 pub const EDITOR_WINDOW_HEIGHT: f32 = 560.0;
 pub const EDITOR_WINDOW_MIN_WIDTH: f32 = 360.0;
@@ -52,8 +75,8 @@ enum PluginEditorStatus {
     WaitingForHostHandle,
     /// Bounds are ready; about to create the native child + attach.
     Attaching,
-    /// Native editor attached and visible.
-    Attached,
+    /// Native editor attached and visible, via exactly one presentation mode.
+    Attached(PluginEditorPresentationMode),
     /// Attach failed — fallback panel with Retry / Close.
     Failed(String),
 }
@@ -61,10 +84,13 @@ enum PluginEditorStatus {
 pub struct PluginEditorWindow {
     pub track_id: String,
     pub insert_id: String,
-    plugin_path: String,
-    class_id: String,
     display_name: String,
-    /// Embed session handle from the C++ backend; `None` until first attach.
+    /// Clone of the live runtime VST3 instance for this insert. The editor view
+    /// is created from THIS instance's controller — never a new one — so GUI
+    /// edits drive the actual audio processor. Holding the clone keeps the C++
+    /// instance alive while the editor is open.
+    processor: DAUx::Vst3RuntimeProcessor,
+    /// Editor handle from the embed attach; `None` until first attach.
     embed_handle: Option<u64>,
     status: PluginEditorStatus,
     /// Number of waiting ticks elapsed (reset on retry).
@@ -82,17 +108,15 @@ impl PluginEditorWindow {
     pub fn new(
         track_id: String,
         insert_id: String,
-        plugin_path: String,
-        class_id: String,
         display_name: String,
+        processor: DAUx::Vst3RuntimeProcessor,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             track_id,
             insert_id,
-            plugin_path,
-            class_id,
             display_name,
+            processor,
             embed_handle: None,
             status: PluginEditorStatus::Opening,
             wait_ticks: 0,
@@ -192,7 +216,7 @@ impl PluginEditorWindow {
     /// explicit states and defers via `schedule_tick` until bounds are ready.
     fn drive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.status.clone() {
-            PluginEditorStatus::Attached => {
+            PluginEditorStatus::Attached(_) => {
                 self.sync_region(window);
                 return;
             }
@@ -260,19 +284,49 @@ impl PluginEditorWindow {
             self.note_waiting("host bounds not ready before attach", cx);
             return;
         }
-        match attach_editor_into_parent(parent, &self.plugin_path, &self.class_id, region) {
-            Ok(handle) => {
-                self.embed_handle = Some(handle);
-                self.last_region = Some((region.x, region.y, region.width, region.height));
-                self.status = PluginEditorStatus::Attached;
-                if plugin_view_debug() {
-                    eprintln!(
-                        "[plugin-view] attach ok editor_id={} handle=0x{handle:x} parent=0x{parent:x}",
-                        self.editor_id()
-                    );
+        // Attach the editor view of the EXISTING runtime instance into our GPUI
+        // window — never create a new VST3 component/controller for the editor.
+        match self
+            .processor
+            .embed_editor(parent, region.x, region.y, region.width, region.height)
+        {
+            Some(handle) => {
+                if !self.processor.embed_has_visible_ui() {
+                    self.processor.embed_detach();
+                    let msg = "Plugin editor attached but no visible UI was detected \
+                               (blank editor). See stderr [SphereVST3] logs or set \
+                               FUTUREBOARD_PLUGIN_VIEW_DEBUG=1."
+                        .to_string();
+                    if plugin_view_debug() {
+                        eprintln!(
+                            "[plugin-view] attach blank editor_id={} parent=0x{parent:x}",
+                            self.editor_id()
+                        );
+                    }
+                    self.status = PluginEditorStatus::Failed(msg);
+                } else {
+                    self.embed_handle = Some(handle);
+                    self.last_region = Some((region.x, region.y, region.width, region.height));
+                    // Re-apply bounds + z-order after attach (plugins may resize the host).
+                    self.processor
+                        .embed_set_bounds(region.x, region.y, region.width, region.height);
+                    self.processor.embed_refresh();
+                    // Record the single presentation mode the host selected so we
+                    // never drive both a child-HWND embed and a tool-window overlay.
+                    let mode = presentation_mode_from_host_kind(self.processor.embed_host_kind());
+                    self.status = PluginEditorStatus::Attached(mode);
+                    if plugin_view_debug() {
+                        eprintln!(
+                            "[plugin-view] attach ok editor_id={} handle=0x{handle:x} parent=0x{parent:x} mode={mode:?} (reused runtime instance)",
+                            self.editor_id()
+                        );
+                    }
                 }
             }
-            Err(err) => {
+            None => {
+                let err = "failed to attach editor to runtime plugin instance \
+                           (no ready VST3 processor for this insert)"
+                    .to_string();
                 if plugin_view_debug() {
                     eprintln!(
                         "[plugin-view] attach failed error={err} editor_id={}",
@@ -288,8 +342,9 @@ impl PluginEditorWindow {
     /// User-initiated retry from the failure panel: tear down any partial state
     /// and restart the lifecycle from `Opening`.
     fn retry(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.embed_handle.take() {
-            detach_editor(handle);
+        if self.embed_handle.take().is_some() {
+            // Detach the editor view only — the runtime processor keeps running.
+            self.processor.embed_detach();
         }
         self.status = PluginEditorStatus::Opening;
         self.wait_ticks = 0;
@@ -302,11 +357,16 @@ impl PluginEditorWindow {
     }
 
     fn sync_region(&mut self, window: &Window) {
-        let Some(handle) = self.embed_handle else {
+        if !matches!(self.status, PluginEditorStatus::Attached(_)) {
             return;
-        };
+        }
+        if self.embed_handle.is_none() || !self.processor.embed_is_valid() {
+            return;
+        }
         let region = Self::host_region(window);
         let tuple = (region.x, region.y, region.width, region.height);
+        // Only push an explicit resize when our client-relative region actually
+        // changed (Part D — ignore resize events if the rect is unchanged).
         if self.last_region != Some(tuple) {
             self.last_region = Some(tuple);
             if plugin_view_debug() {
@@ -315,18 +375,27 @@ impl PluginEditorWindow {
                     region.x, region.y, region.width, region.height, self.editor_id()
                 );
             }
-            set_editor_region_bounds(handle, region);
+            self.processor
+                .embed_set_bounds(region.x, region.y, region.width, region.height);
         }
+        // Cheap per-frame poll so the overlay still tracks a *parent window move*
+        // (screen coords change while our client-relative region does not). The
+        // C++ side compares the recomputed screen rect against the last applied
+        // one and no-ops when unchanged, so idle frames do no SetWindowPos /
+        // onSize / raise work — no flicker, no resize spam.
+        self.processor.embed_refresh();
     }
 }
 
 impl Drop for PluginEditorWindow {
     fn drop(&mut self) {
-        if let Some(handle) = self.embed_handle.take() {
-            detach_editor(handle);
+        if self.embed_handle.take().is_some() {
+            // Detach the editor view + destroy the host window. The runtime
+            // processor (and audio) keep running — only insert removal destroys it.
+            self.processor.embed_detach();
             if plugin_view_debug() {
                 eprintln!(
-                    "[plugin-view] close editor_id={} handle=0x{handle:x} (drop → detach)",
+                    "[plugin-view] close editor_id={} (drop → detach view only, processor kept)",
                     self.editor_id()
                 );
             }
@@ -438,34 +507,57 @@ impl Render for PluginEditorWindow {
         // state machine and resyncs the host region on resize once attached.
         self.drive(window, cx);
 
-        let body = match &self.status {
-            PluginEditorStatus::Opening => self.render_status_message("Opening editor…"),
-            PluginEditorStatus::WaitingForHostHandle => {
-                self.render_status_message("Opening editor… (waiting for host window)")
+        // When attached, GPUI must not paint anything below the titlebar — gpui
+        // composites its surface above child HWNDs (DirectComposition topmost). A
+        // flex_1 content div would create an opaque compositor layer and hide the
+        // native plugin even when attach reports ok. Only draw overlays while
+        // opening / waiting / attaching / failed.
+        let content_overlay: Option<gpui::AnyElement> = match &self.status {
+            PluginEditorStatus::Opening => {
+                Some(self.render_status_message("Opening editor…"))
             }
+            PluginEditorStatus::WaitingForHostHandle => Some(self.render_status_message(
+                "Opening editor… (waiting for host window)",
+            )),
             PluginEditorStatus::Attaching => {
-                self.render_status_message("Attaching plugin editor…")
+                Some(self.render_status_message("Attaching plugin editor…"))
             }
             PluginEditorStatus::Failed(err) => {
                 let err = err.clone();
-                self.render_failure_panel(&err, cx)
+                Some(self.render_failure_panel(&err, cx))
             }
-            PluginEditorStatus::Attached => {
-                // TRANSPARENT host region — the native WS_CHILD view renders
-                // beneath gpui's (topmost, premultiplied-alpha) composition, so
-                // we must NOT paint an opaque background here or the plugin is
-                // hidden (blank editor). The child window paints its own black
-                // backing, so there is no see-through to the desktop.
-                div().size_full().into_any_element()
+            PluginEditorStatus::Attached(mode) => {
+                // Transparent hole — the single active host HWND is aligned to
+                // this region. GPUI must not paint an opaque layer here or it
+                // would composite over the native plugin.
+                if plugin_view_debug() {
+                    Some(
+                        div()
+                            .absolute()
+                            .top(px(HEADER_H))
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(Colors::surface_base())
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(Colors::text_secondary())
+                                    .child(format!("External editor overlay active ({mode:?})")),
+                            )
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                }
             }
         };
 
-        // Root stays transparent; only the header (opaque) and the non-attached
-        // panels paint a surface. This keeps the attached content region clear
-        // so the native plugin child composites through.
-        div()
-            .flex()
-            .flex_col()
+        let mut root = div()
+            .relative()
             .size_full()
             .font_family(theme::FONT_FAMILY)
             .overflow_hidden()
@@ -474,8 +566,21 @@ impl Render for PluginEditorWindow {
                 self.display_name.clone(),
                 "plugin-editor-window-close",
                 move |window, _cx| window.remove_window(),
-            ))
-            .child(div().flex_1().min_h(px(0.0)).child(body))
+            ));
+
+        if let Some(overlay) = content_overlay {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(HEADER_H))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .child(overlay),
+            );
+        }
+
+        root
     }
 }
 
@@ -487,9 +592,8 @@ pub fn open_plugin_editor_window(
     owner_bounds: Bounds<gpui::Pixels>,
     track_id: String,
     insert_id: String,
-    plugin_path: String,
-    class_id: String,
     display_name: String,
+    processor: DAUx::Vst3RuntimeProcessor,
     cx: &mut App,
 ) -> Result<WindowHandle<PluginEditorWindow>, String> {
     if plugin_view_debug() {
@@ -515,11 +619,11 @@ pub fn open_plugin_editor_window(
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = false;
-    // The native VST3 editor lives in a WS_CHILD under this window. gpui composes
-    // its surface *on top of* child windows (DirectComposition topmost visual),
-    // but with premultiplied alpha — so a transparent content region lets the
-    // child show through. Opaque content would hide the plugin (blank editor).
-    options.window_background = WindowBackgroundAppearance::Transparent;
+    // Opaque shell: Transparent uses ACCENT_ENABLE_TRANSPARENTGRADIENT and shows
+    // whatever window is *behind* this floating editor (timeline bleed-through).
+    // The VST3 UI is a WS_CHILD under this HWND; with DirectComposition disabled
+    // at app boot it composites above the swap chain in the content region.
+    options.window_background = WindowBackgroundAppearance::Opaque;
     options.window_min_size = Some(size(
         px(EDITOR_WINDOW_MIN_WIDTH),
         px(EDITOR_WINDOW_MIN_HEIGHT),
@@ -528,14 +632,7 @@ pub fn open_plugin_editor_window(
     let editor_id = format!("{track_id}::{insert_id}");
     let result = cx.open_window(options, |_window, cx| {
         cx.new(|cx| {
-            PluginEditorWindow::new(
-                track_id,
-                insert_id,
-                plugin_path,
-                class_id,
-                display_name,
-                cx,
-            )
+            PluginEditorWindow::new(track_id, insert_id, display_name, processor, cx)
         })
     });
     if plugin_view_debug() {

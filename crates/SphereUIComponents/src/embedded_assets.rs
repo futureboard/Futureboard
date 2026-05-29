@@ -2,6 +2,13 @@ use crate::assets;
 use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
+/// Asset path for the boot splash image, resolvable via `gpui::img(...)`.
+pub const SPLASH_IMAGE_PATH: &str = "images/splash.png";
+
+/// Splash PNG, embedded at compile time so it ships inside the binary (no
+/// runtime file dependency on the source tree / install layout).
+static SPLASH_PNG: &[u8] = include_bytes!("../../../packages/shared/images/splash.png");
+
 pub struct EmbeddedAssets;
 
 impl EmbeddedAssets {
@@ -18,6 +25,9 @@ impl Default for EmbeddedAssets {
 
 impl AssetSource for EmbeddedAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == SPLASH_IMAGE_PATH {
+            return Ok(Some(Cow::Borrowed(SPLASH_PNG)));
+        }
         let bytes = match path {
             assets::ICON_PLAY_PATH => Some(assets::icons::PLAY.as_bytes()),
             assets::ICON_PAUSE_PATH => Some(assets::icons::PAUSE.as_bytes()),

@@ -1,5 +1,95 @@
 use crate::theme::Colors;
-use gpui::{div, px, IntoElement, ParentElement, Styled};
+use gpui::{canvas, div, fill, px, Bounds, IntoElement, ParentElement, Pixels, Point, Size, Styled};
+
+/// Segment thresholds shared by every meter variant (fraction of full scale).
+const METER_GREEN_TOP: f32 = 0.70;
+const METER_YELLOW_TOP: f32 = 0.90;
+
+/// GPU-composited meter renderer.
+///
+/// Replaces the per-segment nested-`div` meter (`vu_meter_vertical_full`) with a
+/// single `canvas` element that paints the rail + green/yellow/red segments of
+/// both channels directly via `window.paint_quad`. GPUI composites these quads
+/// on the GPU in its own render pass — same backend the timeline/chrome use — so
+/// the whole mixer's meters cost one element each with no intermediate div tree.
+///
+/// (A standalone `wgpu::Device` pipeline was evaluated and rejected: GPUI 0.2.2
+/// can only composite an *external* texture via `paint_surface(CVPixelBuffer)`,
+/// which is macOS-only. On Windows the only GPU→GPUI path is `paint_image` with
+/// CPU bytes — i.e. a per-frame GPU→CPU readback, which is slower than letting
+/// GPUI rasterize the quads. This is also why the timeline's offscreen wgpu
+/// renderer discards its texture and falls back to GPUI paint.)
+pub fn meter_surface(level_l: f32, level_r: f32) -> impl IntoElement {
+    let bar_w = 5.0_f32;
+    let gap = 1.0_f32;
+    let total_w = bar_w * 2.0 + gap;
+    div().w(px(total_w)).h_full().child(
+        canvas(
+            |_bounds, _window, _cx| (),
+            move |bounds, _state, window, _cx| {
+                paint_meter_bar(bounds, 0.0, bar_w, level_l, window);
+                paint_meter_bar(bounds, bar_w + gap, bar_w, level_r, window);
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// Paint one channel bar (rail + level segments) at `x_offset` from the canvas
+/// origin, filling the canvas height bottom-up. Quads are emitted directly into
+/// the GPUI scene for the current frame.
+fn paint_meter_bar(canvas_bounds: Bounds<Pixels>, x_offset: f32, width: f32, level: f32, window: &mut gpui::Window) {
+    let origin_x = f32::from(canvas_bounds.origin.x) + x_offset;
+    let origin_y = f32::from(canvas_bounds.origin.y);
+    let h = f32::from(canvas_bounds.size.height).max(0.0);
+    if h <= 0.0 {
+        return;
+    }
+    let bottom = origin_y + h;
+
+    let rect = |y: f32, height: f32| Bounds {
+        origin: Point {
+            x: px(origin_x),
+            y: px(y),
+        },
+        size: Size {
+            width: px(width),
+            height: px(height.max(0.0)),
+        },
+    };
+
+    // Rail (full-height background track).
+    window.paint_quad(fill(rect(origin_y, h), Colors::meter_rail()));
+
+    let level_n = level.clamp(0.0, 1.0);
+    let green_n = level_n.min(METER_GREEN_TOP);
+    let yellow_n = if level_n > green_n {
+        (level_n - green_n).min(METER_YELLOW_TOP - METER_GREEN_TOP)
+    } else {
+        0.0
+    };
+    let red_n = (level_n - green_n - yellow_n).max(0.0);
+
+    let green_h = green_n * h;
+    let yellow_h = yellow_n * h;
+    let red_h = red_n * h;
+
+    if green_h > 0.0 {
+        window.paint_quad(fill(rect(bottom - green_h, green_h), Colors::meter_low()));
+    }
+    if yellow_h > 0.0 {
+        window.paint_quad(fill(
+            rect(bottom - green_h - yellow_h, yellow_h),
+            Colors::meter_mid(),
+        ));
+    }
+    if red_h > 0.0 {
+        window.paint_quad(fill(
+            rect(bottom - green_h - yellow_h - red_h, red_h),
+            Colors::meter_high(),
+        ));
+    }
+}
 
 /// Legacy zero meter, kept so old call sites still link. New code should use
 /// [`vu_meter_with_levels`] and pass real engine-backed meter state.
@@ -20,6 +110,10 @@ pub fn vu_meter_vertical(level_l: f32, level_r: f32, height: f32) -> impl IntoEl
 /// fill the parent's height, so it scales with the channel strip's flex_1
 /// fader slot. Bars are positioned as a fraction of parent height (`top` /
 /// `h(relative(...))`).
+/// Legacy nested-`div` full-height meter. Superseded by [`meter_surface`],
+/// which paints the same bars as GPU quads in a single element. Kept for
+/// reference / non-mixer call sites.
+#[allow(dead_code)]
 pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
     let width = 5.0_f32;
     let gap = 1.0_f32;

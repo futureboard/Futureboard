@@ -241,26 +241,37 @@ pub struct StudioLayout {
 /// in `hud` decays the displayed FPS to 0.
 struct FrameDiagnostics {
     last_frame: Option<Instant>,
-    last_log: Instant,
-    frame_count: u64,
-    /// Exponentially-smoothed frame-to-frame interval, in ms.
-    frame_time_ema_ms: f32,
-    fps: f32,
-    /// Most recent raw frame interval, in ms.
-    frame_ms: f32,
+    /// Start of the current 1-second accumulation window.
+    window_start: Instant,
+    /// Frame samples + frame-time aggregates collected this window.
+    window_frames: u64,
+    window_total_ms: f32,
+    window_max_ms: f32,
+    /// Stable readout refreshed once per second (the status-bar perf monitor).
+    /// Updating only at the window boundary keeps the numbers from jittering
+    /// every frame.
+    displayed_fps: f32,
+    displayed_avg_ms: f32,
+    displayed_peak_ms: f32,
+    has_sample: bool,
     log_to_stderr: bool,
 }
 
 impl FrameDiagnostics {
+    /// How often the displayed perf readout refreshes.
+    const WINDOW: Duration = Duration::from_secs(1);
+
     fn new() -> Self {
-        let now = Instant::now();
         Self {
             last_frame: None,
-            last_log: now,
-            frame_count: 0,
-            frame_time_ema_ms: 16.7,
-            fps: 60.0,
-            frame_ms: 16.7,
+            window_start: Instant::now(),
+            window_frames: 0,
+            window_total_ms: 0.0,
+            window_max_ms: 0.0,
+            displayed_fps: 0.0,
+            displayed_avg_ms: 0.0,
+            displayed_peak_ms: 0.0,
+            has_sample: false,
             log_to_stderr: std::env::var_os("FUTUREBOARD_FRAME_DIAG").is_some(),
         }
     }
@@ -269,34 +280,60 @@ impl FrameDiagnostics {
         let now = Instant::now();
         if let Some(prev) = self.last_frame {
             let dt = now.duration_since(prev).as_secs_f32() * 1000.0;
-            // Drop absurd intervals: first frame after a long idle,
-            // or a debugger pause. Anything > 1 s is not a repaint
-            // cadence sample.
+            // Drop absurd intervals: first frame after a long idle, or a
+            // debugger pause. Anything > 1 s is not a repaint cadence sample.
             if dt > 0.0 && dt < 1000.0 {
-                let alpha = 0.12;
-                self.frame_time_ema_ms = self.frame_time_ema_ms * (1.0 - alpha) + dt * alpha;
-                self.frame_ms = dt;
-                self.fps = if self.frame_time_ema_ms > 0.0 {
-                    1000.0 / self.frame_time_ema_ms
-                } else {
-                    0.0
-                };
+                self.window_frames += 1;
+                self.window_total_ms += dt;
+                if dt > self.window_max_ms {
+                    self.window_max_ms = dt;
+                }
             }
         }
         self.last_frame = Some(now);
-        self.frame_count = self.frame_count.saturating_add(1);
 
-        if self.log_to_stderr && now.duration_since(self.last_log) >= Duration::from_secs(1) {
-            eprintln!(
-                "[frame] {:.1} fps  {:.2} ms (last {:.2} ms)  reason={}  frames={}",
-                self.fps, self.frame_time_ema_ms, self.frame_ms, reason, self.frame_count
-            );
-            self.last_log = now;
+        // Roll the window once per second: recompute the displayed fps / avg /
+        // peak from this window's samples, then reset. Render is only called
+        // when something is dirty, so during idle the window simply doesn't roll
+        // and the last readout stays put (no false 0-fps flicker mid-window).
+        let elapsed = now.duration_since(self.window_start);
+        if elapsed >= Self::WINDOW {
+            let secs = elapsed.as_secs_f32().max(0.001);
+            if self.window_frames > 0 {
+                self.displayed_fps = self.window_frames as f32 / secs;
+                self.displayed_avg_ms = self.window_total_ms / self.window_frames as f32;
+                self.displayed_peak_ms = self.window_max_ms;
+                self.has_sample = true;
+            } else {
+                self.displayed_fps = 0.0;
+            }
+            if self.log_to_stderr {
+                eprintln!(
+                    "[frame] {:.1} fps  {:.2} ms avg  {:.2} ms peak  reason={}  frames={}",
+                    self.displayed_fps,
+                    self.displayed_avg_ms,
+                    self.displayed_peak_ms,
+                    reason,
+                    self.window_frames
+                );
+            }
+            self.window_start = now;
+            self.window_frames = 0;
+            self.window_total_ms = 0.0;
+            self.window_max_ms = 0.0;
         }
     }
 
+    /// Status-bar perf monitor: fps, average frame time, and the worst frame
+    /// (peak) over the last second. Refreshes at 1 Hz.
     fn hud(&self) -> String {
-        format!("{:.0} fps  {:.1} ms", self.fps, self.frame_time_ema_ms)
+        if !self.has_sample {
+            return "— fps".to_string();
+        }
+        format!(
+            "{:.0} fps  {:.1} ms  peak {:.1} ms",
+            self.displayed_fps, self.displayed_avg_ms, self.displayed_peak_ms
+        )
     }
 }
 
@@ -321,6 +358,7 @@ impl StudioLayout {
 
         let settings = SettingsModel::load_or_create(cx);
         cx.set_global(GlobalSettingsModel(settings.clone()));
+        crate::boot::log("settings loaded");
 
         let schema = settings.read(cx).current.clone();
 
@@ -406,6 +444,7 @@ impl StudioLayout {
                 None
             }
         };
+        crate::boot::log("audio engine handle ready");
 
         let timeline = cx.new(|_| {
             if USE_DEMO_PROJECT {
@@ -488,6 +527,12 @@ impl StudioLayout {
 
         let studio_entity = cx.entity();
         crate::platform_chrome::register_studio_menu_dispatcher(studio_entity, cx);
+
+        // Close native plugin editors before GPUI/thread-local teardown on exit.
+        let _ = cx.on_app_quit(|layout, cx| {
+            layout.shutdown_plugin_editors(cx);
+            async {}
+        });
 
         // settings and paths are loaded and registered at the top of this function
 
@@ -1542,13 +1587,26 @@ impl StudioLayout {
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some();
         let key = (track_id.to_string(), insert_id.to_string());
 
-        // Drop any stale handle whose window the user already closed.
+        // One editor window per insert. If a live editor already exists for this
+        // slot, focus/raise it instead of opening (or instantiating) a second
+        // one. Only drop the handle when its window is actually gone.
         if let Some(handle) = self.open_plugin_editors.get(&key) {
-            if handle.update(cx, |_, _, _| ()).is_ok() {
+            if handle
+                .update(cx, |_, window, _| {
+                    window.activate_window();
+                })
+                .is_ok()
+            {
                 if debug {
-                    eprintln!("[plugin-view] already open track={track_id} slot={insert_id}");
+                    eprintln!(
+                        "[plugin-view] existing editor found track={track_id} slot={insert_id} \
+                         → focus (no new instance)"
+                    );
                 }
                 return;
+            }
+            if debug {
+                eprintln!("[plugin-view] stale editor handle track={track_id} slot={insert_id} → recreating");
             }
             self.open_plugin_editors.remove(&key);
         }
@@ -1587,14 +1645,32 @@ impl StudioLayout {
             return;
         }
 
+        // The editor attaches to the EXISTING runtime VST3 instance for this
+        // insert — never a new component/controller. Look it up from the engine;
+        // if the insert has no ready native processor, there is nothing to edit.
+        let Some(engine) = self.audio_engine.as_ref() else {
+            if debug {
+                eprintln!("[plugin-view] no audio engine track={track_id} slot={insert_id}");
+            }
+            return;
+        };
+        let Some(processor) = engine.insert_processor(track_id, insert_id) else {
+            if debug {
+                eprintln!(
+                    "[plugin-view] no ready runtime VST3 instance track={track_id} slot={insert_id} \
+                     (insert not loaded / not native)"
+                );
+            }
+            return;
+        };
+
         let owner_bounds = window.bounds();
         match crate::components::plugin_editor_window::open_plugin_editor_window(
             owner_bounds,
             track_id.to_string(),
             insert_id.to_string(),
-            path.unwrap_or_default(),
-            plugin_id.unwrap_or_default(),
             display_name,
+            processor,
             cx,
         ) {
             Ok(handle) => {
@@ -1623,6 +1699,16 @@ impl StudioLayout {
                 eprintln!("[plugin-view] close track={track_id} slot={insert_id}");
             }
         }
+    }
+
+    /// Close every open plugin editor and release native embed sessions before
+    /// application exit (avoids HWND/VST3 teardown during TLS destruction).
+    fn shutdown_plugin_editors(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<(String, String)> = self.open_plugin_editors.keys().cloned().collect();
+        for (track_id, insert_id) in keys {
+            self.close_insert_editor(&track_id, &insert_id, cx);
+        }
+        sphere_plugin_host::native_editor::detach_all_embedded_editors();
     }
 
 
@@ -2891,6 +2977,22 @@ impl StudioLayout {
         self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
             || self.plugin_picker_search_input.is_focused(window)
+    }
+
+    /// Whether a *live* main-window text field currently owns the keyboard —
+    /// i.e. its focus handle is focused AND its overlay is actually open.
+    ///
+    /// This differs from [`text_input_has_focus`] in that it does NOT trust a
+    /// focused search handle whose overlay has closed: GPUI keeps a closed
+    /// overlay's `FocusHandle` "focused" (the handle is still ref-counted) even
+    /// though its element is no longer rendered. That orphaned focus is exactly
+    /// what silently killed every keyboard shortcut — see `reclaim` in render.
+    fn keyboard_text_capture_live(&self, window: &Window) -> bool {
+        (self.project_switcher.is_open
+            && self.project_switcher_search_input.is_focused(window))
+            || (self.plugin_picker.is_open
+                && self.plugin_picker_search_input.is_focused(window))
+            || self.browser_search_input.is_focused(window)
     }
 
     fn context_entries(
@@ -4302,11 +4404,19 @@ impl Render for StudioLayout {
         let (status_left, status_right) = self.status_text();
         let shortcut_target = cx.entity().clone();
 
-        // Take initial keyboard focus so transport shortcuts (Space, Enter, L,
-        // K, R, Home) reach `capture_key_down` below. GPUI only delivers key
-        // events to focused elements; without this the root div never sees
-        // keystrokes even though `shortcut_command` is wired.
-        if window.focused(cx).is_none() {
+        // Keep keyboard focus on our shortcut anchor so transport shortcuts
+        // (Space, Enter, L, K, R, Home) reach `capture_key_down` below. GPUI
+        // dispatches key events along the focused element's path; when focus is
+        // None — OR stale (stuck on a search field whose overlay has since
+        // closed, which GPUI still reports as "focused") — the dispatch path
+        // falls back to the synthetic root node, which does NOT include this
+        // div's `capture_key_down`, so every shortcut silently dies.
+        //
+        // Reclaim the anchor whenever it isn't focused and no *live* text field
+        // is capturing the keyboard. This is intentionally stricter than
+        // `window.focused().is_none()`: it also recovers from orphaned focus,
+        // while never stealing focus from a field the user is actively typing in.
+        if !self.focus_handle.is_focused(window) && !self.keyboard_text_capture_live(window) {
             self.focus_handle.focus(window);
         }
         let focus_holder = self.focus_handle.clone();
@@ -4345,8 +4455,23 @@ impl Render for StudioLayout {
                 if handled {
                     return;
                 }
-                if shortcut_target.read(cx).text_input_has_focus(window) && is_text_input_key(event)
-                {
+                let focus = FocusContext {
+                    text_input_focused: shortcut_target.read(cx).text_input_has_focus(window),
+                };
+                if key_debug() {
+                    eprintln!(
+                        "[key] key={:?} text_input_focused={} held={} (plugin editor, when active, \
+                         consumes keys before this handler)",
+                        event.keystroke.key, focus.text_input_focused, event.is_held
+                    );
+                }
+                if focus.text_input_focused && is_text_input_key(event) {
+                    if key_debug() {
+                        eprintln!(
+                            "[key] ignored key={:?} reason=text-input-focused (typed into field)",
+                            event.keystroke.key
+                        );
+                    }
                     return;
                 }
                 if event.keystroke.key.as_str() == "escape" {
@@ -4367,6 +4492,22 @@ impl Render for StudioLayout {
                     return;
                 }
                 if let Some(command_id) = Self::shortcut_command_id(event) {
+                    // Transport shortcuts go through the same dispatcher as the
+                    // chrome Play button (transport:play-pause → PlayPause), so
+                    // Spacebar and the button are always one command. Only the
+                    // focus gate differs between them.
+                    let is_transport = transport_command_from_id(command_id).is_some();
+                    if is_transport && !should_handle_global_transport_shortcut(&focus) {
+                        if key_debug() {
+                            eprintln!(
+                                "[key] ignored command={command_id} reason=global-transport-shortcut-suppressed"
+                            );
+                        }
+                        return;
+                    }
+                    if key_debug() {
+                        eprintln!("[key] dispatched command={command_id}");
+                    }
                     let _ = shortcut_target.update(cx, |this, cx| {
                         this.dispatch_command_id_from_bounds(command_id, Some(window.bounds()), cx);
                         cx.notify();
@@ -4708,6 +4849,31 @@ fn transport_command_from_id(command_id: &str) -> Option<TransportCommand> {
         "transport:record" => Some(TransportCommand::Record),
         _ => None,
     }
+}
+
+/// Focus-relevant snapshot used to decide whether a global transport shortcut
+/// (Space, Enter, …) should be handled by the workspace or left to the focused
+/// widget. Captured on the UI thread at the moment a key arrives.
+struct FocusContext {
+    /// A Futureboard text field (search / rename / numeric edit) owns focus.
+    text_input_focused: bool,
+}
+
+/// Whether the workspace should claim a global transport shortcut.
+///
+/// - Text field focused → keep the keystroke (Space types a space).
+/// - Otherwise → the workspace handles it (Space toggles playback).
+///
+/// Note: when the **native plugin editor window** is the active OS window this
+/// code path is never reached — Windows delivers the key to the plugin's HWND,
+/// not the GPUI workspace window — so "plugin editor focused" implicitly means
+/// the plugin consumes the key, matching the current policy.
+fn should_handle_global_transport_shortcut(focus: &FocusContext) -> bool {
+    !focus.text_input_focused
+}
+
+fn key_debug() -> bool {
+    std::env::var_os("FUTUREBOARD_KEY_DEBUG").is_some()
 }
 
 fn is_text_input_key(event: &KeyDownEvent) -> bool {

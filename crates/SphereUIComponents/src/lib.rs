@@ -1,5 +1,7 @@
 pub mod assets;
+pub mod boot;
 pub mod overlay;
+pub mod splash;
 pub mod components;
 pub mod embedded_assets;
 pub mod layout;

@@ -28,6 +28,30 @@ pub fn linear_to_db(linear: f32) -> f32 {
     }
 }
 
+/// Soft-knee master limiter for a single sample.
+///
+/// Replaces a hard `clamp(-1.0, 1.0)` on the master bus. Below `THRESHOLD` the
+/// signal passes through at unity (transparent for normal levels); above it the
+/// excess is smoothly compressed with a `tanh` knee that asymptotes to ±1.0, so
+/// a hot bus is *limited* like a brick-wall limiter instead of hard-clipped into
+/// harsh digital distortion. The output is still guaranteed to stay within
+/// ±1.0, so nothing overflows the audio device.
+///
+/// Stateless and branch-cheap — safe to call per sample on the audio thread.
+#[inline]
+pub fn soft_limit(sample: f32) -> f32 {
+    // Knee starts at ~ -1.9 dBFS. Below this the curve is exactly unity.
+    const THRESHOLD: f32 = 0.8;
+    let mag = sample.abs();
+    if mag <= THRESHOLD {
+        return sample;
+    }
+    let over = (mag - THRESHOLD) / (1.0 - THRESHOLD);
+    let limited = THRESHOLD + (1.0 - THRESHOLD) * over.tanh();
+    // `tanh` asymptotes below 1.0, but clamp defensively against FP edge cases.
+    limited.copysign(sample).clamp(-1.0, 1.0)
+}
+
 /// Constant-power stereo pan.
 ///
 /// `pan`: -1.0 = full left, 0.0 = center, 1.0 = full right.

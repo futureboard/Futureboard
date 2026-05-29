@@ -58,7 +58,35 @@ extern "C" {
         height: c_int,
     );
     fn sphere_plugin_editor_embed_detach(handle: c_ulonglong);
+    fn sphere_plugin_editor_embed_detach_all();
     fn sphere_plugin_editor_embed_is_valid(handle: c_ulonglong) -> c_int;
+    fn sphere_plugin_editor_embed_has_visible_ui(handle: c_ulonglong) -> c_int;
+    fn sphere_plugin_editor_embed_host_kind(handle: c_ulonglong) -> c_int;
+    fn sphere_plugin_editor_embed_refresh(handle: c_ulonglong);
+}
+
+/// Which native presentation backs an attached embed session. Exactly one mode
+/// is ever active per session — the C++ host never creates both a WS_CHILD
+/// embed and an owned tool window at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginEditorPresentationMode {
+    /// `WS_CHILD` region under the GPUI window's HWND.
+    ChildHwndEmbed,
+    /// `WS_POPUP | WS_EX_TOOLWINDOW` owned by the GPUI window (default).
+    OwnedToolWindowFallback,
+}
+
+/// Query the presentation mode currently backing an attached editor session.
+/// `None` if the handle is unknown / detached.
+pub fn editor_presentation_mode(handle: u64) -> Option<PluginEditorPresentationMode> {
+    if handle == 0 {
+        return None;
+    }
+    match unsafe { sphere_plugin_editor_embed_host_kind(handle as c_ulonglong) } {
+        0 => Some(PluginEditorPresentationMode::ChildHwndEmbed),
+        1 => Some(PluginEditorPresentationMode::OwnedToolWindowFallback),
+        _ => None,
+    }
 }
 
 /// Region (in physical pixels, relative to the parent window's client area)
@@ -130,11 +158,34 @@ pub fn detach_editor(handle: u64) {
     unsafe { sphere_plugin_editor_embed_detach(handle as c_ulonglong) };
 }
 
+/// Tear down every embedded editor session (call on application quit).
+pub fn detach_all_embedded_editors() {
+    unsafe { sphere_plugin_editor_embed_detach_all() };
+}
+
 pub fn editor_is_valid(handle: u64) -> bool {
     if handle == 0 {
         return false;
     }
     unsafe { sphere_plugin_editor_embed_is_valid(handle as c_ulonglong) != 0 }
+}
+
+/// Returns true when the embedded session has a visible host child and either
+/// plugin-owned sub-windows or a non-trivial `IPlugView::getSize` after attach.
+pub fn editor_has_visible_ui(handle: u64) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    unsafe { sphere_plugin_editor_embed_has_visible_ui(handle as c_ulonglong) != 0 }
+}
+
+/// Pump paint/size messages and re-sync host geometry (tool window screen position).
+/// Call on the GPUI UI thread each frame while the editor is attached.
+pub fn refresh_editor_host(handle: u64) {
+    if handle == 0 {
+        return;
+    }
+    unsafe { sphere_plugin_editor_embed_refresh(handle as c_ulonglong) };
 }
 
 /// Options accepted by the native editor window. `width`/`height` default

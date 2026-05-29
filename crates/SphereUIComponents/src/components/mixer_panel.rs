@@ -31,7 +31,7 @@ use crate::components::knob::knob_bipolar;
 use crate::components::timeline::timeline_state::{
     volume, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState, TrackState, TrackType,
 };
-use crate::components::timeline::vu_meter::vu_meter_vertical_full;
+use crate::components::timeline::vu_meter::meter_surface;
 use crate::theme::Colors;
 
 // ── Section dimensions ─────────────────────────────────────────────────────
@@ -760,7 +760,7 @@ fn fader_area(
                             on_vol_change,
                         )),
                 )
-                .child(vu_meter_vertical_full(
+                .child(meter_surface(
                     track.meter_level_l,
                     track.meter_level_r,
                 )),
@@ -1006,7 +1006,7 @@ fn master_strip(
                                     on_change,
                                 )),
                         )
-                        .child(vu_meter_vertical_full(
+                        .child(meter_surface(
                             master.meter_level_l,
                             master.meter_level_r,
                         )),

@@ -328,6 +328,19 @@ struct SphereDauxVst3Processor {
   int editor_requested_width{0};
   int editor_requested_height{0};
   bool editor_attached{false};
+  // ── GPUI-embedded editor state ───────────────────────────────────────────
+  // When the editor is hosted inside a GPUI PluginView window (rather than the
+  // daux-owned top-level shell above), `editor_parent_hwnd` is the GPUI window
+  // and `editor_attach_hwnd` is a host window (WS_CHILD or owned tool window)
+  // created under it. The IPlugView is created from THIS processor's existing
+  // `controller` — never a new component/controller. `editor_hwnd` stays null
+  // in embed mode (there is no daux-owned shell).
+  HWND editor_parent_hwnd{nullptr};
+  int  embed_host_kind{1};        // 0 = WS_CHILD, 1 = owned tool window
+  bool embed_mode{false};
+  bool embed_geometry_valid{false};
+  RECT embed_last_applied{};      // last applied window rect (screen for tool)
+  int  embed_host_x{0}, embed_host_y{0}, embed_host_w{0}, embed_host_h{0};
   // Guards window proc access; set to false before destroy so pending messages
   // received after GWLP_USERDATA is zeroed still find a valid flag.
   std::atomic<bool> processor_valid{true};
@@ -525,6 +538,9 @@ struct SphereDauxVst3Processor {
 #ifdef _WIN32
   void close_editor_window();
   void close_editor_view_only(const char* reason);
+  // Detach the embedded IPlugView and destroy the host window, keeping the
+  // component/controller (and thus the realtime processor) alive.
+  void close_embed_editor(const char* reason);
 #endif
 };
 
@@ -964,6 +980,174 @@ void SphereDauxVst3Processor::close_editor_view_only(const char* reason) {
                "[SphereVST3] close_editor_view_only handle=%llu reason=%s "
                "childHwndDestroyed=1\n",
                editor_handle, reason ? reason : "unknown");
+}
+
+// ── GPUI-embedded editor (reuses this processor's controller) ────────────────
+
+bool daux_embed_debug() {
+  static const bool enabled = std::getenv("FUTUREBOARD_PLUGIN_VIEW_DEBUG") != nullptr;
+  return enabled;
+}
+
+// 0 = WS_CHILD embed, 1 = owned tool window. GPUI's D3D swap chain paints over
+// WS_CHILD hosts, so an owned WS_POPUP|WS_EX_TOOLWINDOW overlay is the default.
+int daux_embed_resolve_host_kind() {
+  const char* mode = std::getenv("FUTUREBOARD_PLUGIN_EDITOR_MODE");
+  if (mode && *mode) {
+    if (_stricmp(mode, "child") == 0 || _stricmp(mode, "ws_child") == 0) return 0;
+    if (_stricmp(mode, "tool") == 0 || _stricmp(mode, "owned") == 0 ||
+        _stricmp(mode, "popup") == 0) return 1;
+  }
+  return 1;
+}
+
+const char* daux_embed_host_kind_name(int kind) {
+  return kind == 1 ? "OwnedToolWindowFallback" : "ChildHwndEmbed";
+}
+
+bool daux_embed_content_screen_rect(HWND parent, int x, int y, int w, int h, RECT* out) {
+  if (!parent || !IsWindow(parent) || !out || w <= 0 || h <= 0) return false;
+  POINT tl{x, y};
+  POINT br{x + w, y + h};
+  if (!ClientToScreen(parent, &tl) || !ClientToScreen(parent, &br)) return false;
+  out->left = tl.x; out->top = tl.y; out->right = br.x; out->bottom = br.y;
+  return true;
+}
+
+void daux_embed_apply_tool_styles(HWND overlay, HWND owner) {
+  if (!overlay || !IsWindow(overlay)) return;
+  LONG_PTR ex = GetWindowLongPtr(overlay, GWL_EXSTYLE);
+  ex &= ~WS_EX_APPWINDOW;
+  ex |= WS_EX_TOOLWINDOW;
+  SetWindowLongPtr(overlay, GWL_EXSTYLE, ex);
+  if (owner && IsWindow(owner)) {
+    SetWindowLongPtrW(overlay, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
+  }
+}
+
+void daux_embed_raise(HWND host) {
+  if (!host || !IsWindow(host)) return;
+  EnumChildWindows(
+      host,
+      [](HWND hwnd, LPARAM) -> BOOL {
+        ShowWindow(hwnd, SW_SHOW);
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        return TRUE;
+      },
+      0);
+}
+
+HWND daux_embed_create_host(HWND parent, int kind, int x, int y, int w, int h) {
+  register_editor_window_classes(); // kDauxEditorChildClass: DefWindowProc + black bg
+  if (kind == 1) {
+    RECT screen{};
+    if (!daux_embed_content_screen_rect(parent, x, y, w, h, &screen)) return nullptr;
+    HWND tool = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        kDauxEditorChildClass,
+        L"",
+        WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+        screen.left, screen.top,
+        screen.right - screen.left, screen.bottom - screen.top,
+        parent, // owner — z-order with PluginView, no taskbar entry
+        nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (tool) {
+      daux_embed_apply_tool_styles(tool, parent);
+      ShowWindow(tool, SW_SHOWNA);
+    }
+    return tool;
+  }
+  return CreateWindowExW(
+      0,
+      kDauxEditorChildClass,
+      L"",
+      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+      x, y, w, h,
+      parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+}
+
+// Reposition/resize the host window to the requested region. Returns true only
+// when the applied rect actually changed, so idle frames do no SetWindowPos /
+// onSize / raise work (mirrors the SpherePluginHost anti-flicker fix).
+bool daux_embed_sync_geometry(SphereDauxVst3Processor* p, int x, int y, int w, int h,
+                              bool log_reposition) {
+  if (!p || !p->editor_attach_hwnd || !IsWindow(p->editor_attach_hwnd)) return false;
+  p->embed_host_x = x; p->embed_host_y = y; p->embed_host_w = w; p->embed_host_h = h;
+  if (p->embed_host_kind == 1 && p->editor_parent_hwnd) {
+    if (!IsWindow(p->editor_parent_hwnd)) return false;
+    const bool parent_visible =
+        IsWindowVisible(p->editor_parent_hwnd) && !IsIconic(p->editor_parent_hwnd);
+    ShowWindow(p->editor_attach_hwnd, parent_visible ? SW_SHOWNA : SW_HIDE);
+    RECT screen{};
+    if (!daux_embed_content_screen_rect(p->editor_parent_hwnd, x, y, w, h, &screen)) return false;
+    if (p->embed_geometry_valid && EqualRect(&screen, &p->embed_last_applied)) return false;
+    p->embed_last_applied = screen;
+    p->embed_geometry_valid = true;
+    SetWindowPos(p->editor_attach_hwnd, p->editor_parent_hwnd,
+                 screen.left, screen.top,
+                 screen.right - screen.left, screen.bottom - screen.top,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    daux_embed_apply_tool_styles(p->editor_attach_hwnd, p->editor_parent_hwnd);
+  } else {
+    RECT want{x, y, x + w, y + h};
+    if (p->embed_geometry_valid && EqualRect(&want, &p->embed_last_applied)) return false;
+    p->embed_last_applied = want;
+    p->embed_geometry_valid = true;
+    SetWindowPos(p->editor_attach_hwnd, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+  }
+  EnableWindow(p->editor_attach_hwnd, TRUE);
+  daux_embed_raise(p->editor_attach_hwnd);
+  if (log_reposition && daux_embed_debug()) {
+    std::fprintf(stderr,
+                 "[plugin-view] daux reposition host=0x%p mode=%s\n",
+                 static_cast<void*>(p->editor_attach_hwnd),
+                 daux_embed_host_kind_name(p->embed_host_kind));
+  }
+  return true;
+}
+
+bool daux_embed_has_visible_ui(SphereDauxVst3Processor* p) {
+  if (!p || !p->editor_attach_hwnd || !IsWindow(p->editor_attach_hwnd)) return false;
+  if (!IsWindowVisible(p->editor_attach_hwnd)) return false;
+  RECT cr{};
+  GetClientRect(p->editor_attach_hwnd, &cr);
+  if (cr.right - cr.left < 4 || cr.bottom - cr.top < 4) return false;
+  struct Ctx { int visible = 0; } ctx{};
+  EnumChildWindows(
+      p->editor_attach_hwnd,
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        if (!IsWindowVisible(hwnd)) return TRUE;
+        RECT r{};
+        GetWindowRect(hwnd, &r);
+        if (r.right > r.left && r.bottom > r.top) reinterpret_cast<Ctx*>(lp)->visible++;
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+  if (ctx.visible > 0) return true;
+  if (p->editor_view) {
+    Steinberg::ViewRect sz{};
+    const auto gs = p->editor_view->getSize(&sz);
+    if (gs == Steinberg::kResultTrue || gs == Steinberg::kResultOk) {
+      if (sz.right - sz.left > 16 && sz.bottom - sz.top > 16) return true;
+    }
+  }
+  return false;
+}
+
+void SphereDauxVst3Processor::close_embed_editor(const char* reason) {
+  detach_editor_view(this); // IPlugView::removed(); keeps controller/processor
+  if (editor_attach_hwnd && IsWindow(editor_attach_hwnd)) {
+    DestroyWindow(editor_attach_hwnd);
+  }
+  editor_attach_hwnd = nullptr;
+  editor_parent_hwnd = nullptr;
+  embed_mode = false;
+  embed_geometry_valid = false;
+  editor_handle = 0;
+  std::fprintf(stderr,
+               "[SphereVST3] close_embed_editor reason=%s (processor kept alive)\n",
+               reason ? reason : "unknown");
 }
 #endif
 
@@ -1620,6 +1804,173 @@ extern "C" int sphere_daux_vst3_focus_editor(SphereDauxVst3Processor* processor)
   return focus_editor_linux(processor);
 #endif
   return 0;
+}
+
+// ── GPUI-embedded editor C ABI ───────────────────────────────────────────────
+// These attach the EXISTING runtime instance's editor view (built from
+// processor->controller) into a GPUI-provided parent HWND. They never create a
+// new component/controller — GUI parameter edits flow through the same
+// ComponentHandlerImpl that feeds the realtime processor.
+
+extern "C" unsigned long long sphere_daux_vst3_embed_editor(
+    SphereDauxVst3Processor* processor,
+    unsigned long long       parent_hwnd,
+    int x, int y, int width, int height) {
+#ifdef _WIN32
+  if (!processor || !processor->controller) {
+    set_last_error("embed editor: processor/controller missing");
+    return 0;
+  }
+  HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
+  if (!parent || !IsWindow(parent) || width <= 0 || height <= 0) {
+    set_last_error("embed editor: invalid parent HWND or region");
+    return 0;
+  }
+
+  // Reuse: if this instance already has an embedded editor attached, just
+  // re-sync geometry and return the existing handle — never re-create.
+  if (processor->embed_mode && processor->editor_attached &&
+      processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+    processor->editor_parent_hwnd = parent;
+    processor->embed_geometry_valid = false; // force re-apply against new parent
+    daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug());
+    std::fprintf(stderr,
+                 "[SphereVST3] embed editor reuse handle=%llu (existing instance/view)\n",
+                 processor->editor_handle);
+    return processor->editor_handle;
+  }
+
+  const int kind = daux_embed_resolve_host_kind();
+  HWND host = daux_embed_create_host(parent, kind, x, y, width, height);
+  if (!host) {
+    set_last_error("embed editor: host window creation failed");
+    return 0;
+  }
+
+  processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
+      processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
+  if (!processor->editor_view) {
+    DestroyWindow(host);
+    set_last_error("embed editor: controller did not create view");
+    return 0;
+  }
+  if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
+      Steinberg::kResultTrue) {
+    processor->editor_view = nullptr;
+    DestroyWindow(host);
+    set_last_error("embed editor: view does not support HWND");
+    return 0;
+  }
+
+  const auto attach_res =
+      processor->editor_view->attached(reinterpret_cast<void*>(host), Steinberg::kPlatformTypeHWND);
+  if (attach_res != Steinberg::kResultTrue && attach_res != Steinberg::kResultOk) {
+    processor->editor_view = nullptr;
+    DestroyWindow(host);
+    set_last_error("embed editor: IPlugView::attached(HWND) failed");
+    return 0;
+  }
+
+  processor->editor_attached = true;
+  processor->editor_attach_hwnd = host;
+  processor->editor_parent_hwnd = parent;
+  processor->editor_hwnd = nullptr; // embed mode: no daux-owned shell
+  processor->embed_host_kind = kind;
+  processor->embed_mode = true;
+  processor->embed_geometry_valid = false;
+  processor->editor_handle = g_next_editor_handle.fetch_add(1);
+
+  daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug());
+  resize_editor_view(processor);
+  if (kind == 1) daux_embed_apply_tool_styles(host, parent);
+
+  if (!IsWindowVisible(host) || !daux_embed_has_visible_ui(processor)) {
+    std::fprintf(stderr,
+                 "[SphereVST3] embed editor attached but no visible UI handle=%llu mode=%s\n",
+                 processor->editor_handle, daux_embed_host_kind_name(kind));
+    // Leave it attached — the caller decides whether to surface a fallback.
+  }
+
+  std::fprintf(stderr,
+               "[SphereVST3] embed editor ok handle=%llu mode=%s parent=0x%p host=0x%p "
+               "region=(%d,%d,%d,%d) (reused runtime instance)\n",
+               processor->editor_handle,
+               daux_embed_host_kind_name(kind),
+               static_cast<void*>(parent),
+               static_cast<void*>(host),
+               x, y, width, height);
+  return processor->editor_handle;
+#else
+  (void)processor; (void)parent_hwnd; (void)x; (void)y; (void)width; (void)height;
+  return 0;
+#endif
+}
+
+extern "C" void sphere_daux_vst3_embed_set_bounds(
+    SphereDauxVst3Processor* processor, int x, int y, int width, int height) {
+#ifdef _WIN32
+  if (!processor || !processor->embed_mode) return;
+  if (daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug())) {
+    resize_editor_view(processor);
+  }
+#else
+  (void)processor; (void)x; (void)y; (void)width; (void)height;
+#endif
+}
+
+extern "C" void sphere_daux_vst3_embed_refresh(SphereDauxVst3Processor* processor) {
+#ifdef _WIN32
+  if (!processor || !processor->embed_mode || !processor->editor_attach_hwnd) return;
+  if (!IsWindow(processor->editor_attach_hwnd)) return;
+  // Idle frames: re-sync geometry only (tracks parent moves). onSize/pump only
+  // run when the applied rect actually changed — no per-frame flicker/spam.
+  if (daux_embed_sync_geometry(processor,
+                               processor->embed_host_x, processor->embed_host_y,
+                               processor->embed_host_w, processor->embed_host_h,
+                               false)) {
+    resize_editor_view(processor);
+  }
+#else
+  (void)processor;
+#endif
+}
+
+extern "C" void sphere_daux_vst3_embed_detach(SphereDauxVst3Processor* processor) {
+#ifdef _WIN32
+  if (!processor || !processor->embed_mode) return;
+  processor->close_embed_editor("embed_detach");
+#else
+  (void)processor;
+#endif
+}
+
+extern "C" int sphere_daux_vst3_embed_is_valid(SphereDauxVst3Processor* processor) {
+#ifdef _WIN32
+  return (processor && processor->embed_mode && processor->editor_attach_hwnd &&
+          IsWindow(processor->editor_attach_hwnd)) ? 1 : 0;
+#else
+  (void)processor;
+  return 0;
+#endif
+}
+
+extern "C" int sphere_daux_vst3_embed_has_visible_ui(SphereDauxVst3Processor* processor) {
+#ifdef _WIN32
+  return daux_embed_has_visible_ui(processor) ? 1 : 0;
+#else
+  (void)processor;
+  return 0;
+#endif
+}
+
+extern "C" int sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor* processor) {
+#ifdef _WIN32
+  if (!processor || !processor->embed_mode) return -1;
+  return processor->embed_host_kind; // 0 child, 1 tool
+#else
+  (void)processor;
+  return -1;
+#endif
 }
 
 extern "C" unsigned long long sphere_daux_vst3_process_count(

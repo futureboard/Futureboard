@@ -635,6 +635,26 @@ impl EngineInner {
         Ok(())
     }
 
+    /// Clone the live runtime VST3 processor handle for an insert, if it has a
+    /// ready native plugin instance. The returned handle is `Arc`-backed and
+    /// cheap to clone; holding it keeps the C++ instance alive even across a
+    /// runtime rebuild or insert removal (the GUI editor relies on this so it
+    /// can attach to / refresh the *existing* instance without re-locking the
+    /// engine every frame). Used by the GPUI PluginView for the embedded editor.
+    pub fn insert_processor(
+        &self,
+        track_id: &str,
+        insert_id: &str,
+    ) -> Option<crate::vst3_processor::Vst3RuntimeProcessor> {
+        let mut runtime = self.runtime.lock();
+        runtime
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.inserts.iter_mut().find(|insert| insert.id == insert_id))
+            .and_then(|insert| insert.vst3.as_ref().cloned())
+    }
+
     pub fn focus_insert_editor(
         &self,
         track_id: &str,
@@ -1340,8 +1360,8 @@ pub fn render_project_sample(
     }
 
     (
-        (out_l * master_volume).clamp(-1.0, 1.0),
-        (out_r * master_volume).clamp(-1.0, 1.0),
+        crate::dsp::gain::soft_limit(out_l * master_volume),
+        crate::dsp::gain::soft_limit(out_r * master_volume),
     )
 }
 
@@ -1669,11 +1689,12 @@ pub fn render_project_block_interleaved(
         }
     }
 
-    // Final master volume + clamp.
+    // Final master volume + soft-knee limiter (graceful brick-wall instead of
+    // a harsh hard clip when the bus is hot).
     for i in 0..frames {
         let out = &mut output[i * channels..i * channels + channels];
-        out[0] = (out[0] * master_volume).clamp(-1.0, 1.0);
-        out[1] = (out[1] * master_volume).clamp(-1.0, 1.0);
+        out[0] = crate::dsp::gain::soft_limit(out[0] * master_volume);
+        out[1] = crate::dsp::gain::soft_limit(out[1] * master_volume);
     }
 
     frames as u64

@@ -52,6 +52,15 @@ SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_set_bounds(
     int width,
     int height);
 SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_detach(unsigned long long handle);
+SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_detach_all();
 SPHERE_PLUGIN_HOST_API int sphere_plugin_editor_embed_is_valid(unsigned long long handle);
+SPHERE_PLUGIN_HOST_API int sphere_plugin_editor_embed_has_visible_ui(unsigned long long handle);
+// Presentation mode currently backing this embed session:
+//   0 = ChildHwndEmbed (WS_CHILD), 1 = OwnedToolWindowFallback (WS_POPUP tool),
+//  -1 = no such session. Exactly one mode is ever active per session.
+SPHERE_PLUGIN_HOST_API int sphere_plugin_editor_embed_host_kind(unsigned long long handle);
+// Reposition (if needed), onSize, WM_SIZE/WM_SHOWWINDOW to plugin children, and pump
+// pending paint messages. Call from the GPUI UI thread while Attached.
+SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_refresh(unsigned long long handle);
 
 }

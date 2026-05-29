@@ -447,7 +447,7 @@ thread_local! {
 /// Record a UI repaint driver (transport, meter, scroll, etc.). Logged at
 /// 1 Hz when `FUTUREBOARD_NOTIFY_DEBUG=1`.
 pub fn record_notify(reason: &'static str) {
-    NOTIFY.with(|n| n.borrow_mut().record(reason));
+    let _ = NOTIFY.try_with(|n| n.borrow_mut().record(reason));
 }
 
 /// Render-cost setting profile applied by the UI to reduce frame cost on
@@ -539,14 +539,16 @@ pub fn perf_hud_enabled() -> bool {
 /// read. Callers can use this to skip building counter labels when
 /// disabled, though `count` is already a no-op when disabled.
 pub fn enabled() -> bool {
-    COLLECTOR.with(|c| c.borrow().enabled)
+    COLLECTOR
+        .try_with(|c| c.borrow().enabled)
+        .unwrap_or(false)
 }
 
 /// Record a named counter (visible row count, grid line count, etc.).
 /// Cheap no-op when disabled. Last write wins for the log line; the
 /// per-window max is also retained.
 pub fn count(name: &'static str, value: u64) {
-    COLLECTOR.with(|c| {
+    let _ = COLLECTOR.try_with(|c| {
         let mut c = c.borrow_mut();
         if !c.enabled {
             return;
@@ -564,18 +566,24 @@ pub struct PerfScope {
 
 impl PerfScope {
     pub fn enter(name: &'static str) -> Self {
-        let start = COLLECTOR.with(|c| c.borrow().enabled.then(Instant::now));
+        let start = COLLECTOR
+            .try_with(|c| c.borrow().enabled.then(Instant::now))
+            .ok()
+            .flatten();
         Self { name, start }
     }
 }
 
 impl Drop for PerfScope {
     fn drop(&mut self) {
-        if let Some(start) = self.start {
-            let ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-            let name = self.name;
-            COLLECTOR.with(|c| c.borrow_mut().add_scope(name, ns));
-        }
+        let Some(start) = self.start.take() else {
+            return;
+        };
+        let ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let name = self.name;
+        // During process exit the main thread TLS may already be destroyed; `with`
+        // panics with AccessError — use `try_with` and skip recording instead.
+        let _ = COLLECTOR.try_with(|c| c.borrow_mut().add_scope(name, ns));
     }
 }
 
@@ -584,8 +592,10 @@ impl Drop for PerfScope {
 /// formatted HUD string and flushes the per-second log when the
 /// window rolls over.
 pub fn tick_root_frame(reason: &'static str) {
-    let should_flush = COLLECTOR.with(|c| c.borrow_mut().tick_frame(reason));
+    let Ok(should_flush) = COLLECTOR.try_with(|c| c.borrow_mut().tick_frame(reason)) else {
+        return;
+    };
     if should_flush {
-        COLLECTOR.with(|c| c.borrow_mut().flush());
+        let _ = COLLECTOR.try_with(|c| c.borrow_mut().flush());
     }
 }

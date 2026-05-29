@@ -219,8 +219,10 @@ Several subsystems expose verbose logging behind environment variables (set to `
 | Variable | Logs |
 |---|---|
 | `FUTUREBOARD_PLUGIN_DEBUG` | Insert add/set/remove/bypass mutations and engine-sync per-insert details |
-| `FUTUREBOARD_PLUGIN_VIEW_DEBUG` | Native plugin editor lifecycle: open → host region → child HWND → IPlugView attach/resize/detach (`[plugin-view]` / `[vst3-editor]`) |
+| `FUTUREBOARD_PLUGIN_VIEW_DEBUG` | Native plugin editor lifecycle: open → host region → child HWND → IPlugView attach/resize/detach (`[plugin-view]` / `[vst3-editor-audit]`) |
 | `FUTUREBOARD_ROUTING_DEBUG` | Send/return/bus routing graph at build time (nodes, sends, cycle ACCEPT/REJECT) |
+| `GPUI_DISABLE_DIRECT_COMPOSITION` | Set automatically to `1` on Windows at native boot so native plugin UI can composite with GPUI |
+| `FUTUREBOARD_PLUGIN_EDITOR_MODE` | `tool` (default): `OwnedToolWindowFallback` — borderless owned overlay aligned to the content region (no taskbar/Alt+Tab); `child`: `ChildHwndEmbed` under the GPUI HWND |
 
 Example (PowerShell):
 

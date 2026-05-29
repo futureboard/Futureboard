@@ -18,7 +18,31 @@ thread_local! {
         RefCell::new(None);
 }
 
-fn with_renderer<R>(f: impl FnOnce(&mut dyn TimelineRenderer, TimelineRendererBackend) -> R) -> R {
+fn render_arrangement_with(
+    snapshot: &TimelineRenderSnapshot,
+    renderer: &mut dyn TimelineRenderer,
+    backend: TimelineRendererBackend,
+) -> gpui::AnyElement {
+    gpui_paint::log_snapshot_stats(snapshot, backend.label());
+    match renderer.render_arrangement(snapshot) {
+        TimelineRenderOutput::Gpui(element) => element,
+        #[cfg(feature = "gpu-renderer")]
+        TimelineRenderOutput::WgpuOffscreen(frame) => {
+            let _ = frame;
+            match GpuiPaintTimelineRenderer::new().render_arrangement(snapshot) {
+                TimelineRenderOutput::Gpui(element) => element,
+                TimelineRenderOutput::WgpuOffscreen(_) => unreachable!(),
+            }
+        }
+    }
+}
+
+fn with_renderer(snapshot: &TimelineRenderSnapshot) -> gpui::AnyElement {
+    if TIMELINE_RENDERER.try_with(|_| ()).is_err() {
+        let preferred = TimelineRendererBackend::from_env();
+        let (mut renderer, backend) = create_timeline_renderer_with_fallback(preferred);
+        return render_arrangement_with(snapshot, renderer.as_mut(), backend);
+    }
     TIMELINE_RENDERER.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
@@ -27,7 +51,7 @@ fn with_renderer<R>(f: impl FnOnce(&mut dyn TimelineRenderer, TimelineRendererBa
             *slot = Some((backend, renderer));
         }
         let (backend, renderer) = slot.as_mut().expect("renderer slot");
-        f(renderer.as_mut(), *backend)
+        render_arrangement_with(snapshot, renderer.as_mut(), *backend)
     })
 }
 
@@ -46,20 +70,5 @@ pub fn timeline_surface(
     snapshot.viewport.width = grid_width.max(1.0);
     snapshot.viewport.height = grid_height.max(1.0);
 
-    with_renderer(|renderer, backend| {
-        gpui_paint::log_snapshot_stats(&snapshot, backend.label());
-        match renderer.render_arrangement(&snapshot) {
-            TimelineRenderOutput::Gpui(element) => element,
-            #[cfg(feature = "gpu-renderer")]
-            TimelineRenderOutput::WgpuOffscreen(frame) => {
-                let _ = frame;
-                // Offscreen WGPU frame is ready; GPUI 0.2.2 cannot sample it yet.
-                // Keep displaying the GPUI paint path until Blade/texture interop lands.
-                match GpuiPaintTimelineRenderer::new().render_arrangement(&snapshot) {
-                    TimelineRenderOutput::Gpui(element) => element,
-                    TimelineRenderOutput::WgpuOffscreen(_) => unreachable!(),
-                }
-            }
-        }
-    })
+    with_renderer(&snapshot)
 }

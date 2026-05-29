@@ -55,6 +55,27 @@ extern "C" {
     fn sphere_daux_vst3_focus_editor(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_get_latency_samples(processor: *mut SphereDauxVst3Processor) -> i32;
+    // GPUI-embedded editor (Windows): attaches the existing instance's view.
+    fn sphere_daux_vst3_embed_editor(
+        processor: *mut SphereDauxVst3Processor,
+        parent_hwnd: u64,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> u64;
+    fn sphere_daux_vst3_embed_set_bounds(
+        processor: *mut SphereDauxVst3Processor,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    );
+    fn sphere_daux_vst3_embed_refresh(processor: *mut SphereDauxVst3Processor);
+    fn sphere_daux_vst3_embed_detach(processor: *mut SphereDauxVst3Processor);
+    fn sphere_daux_vst3_embed_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_embed_has_visible_ui(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_embed_host_kind(processor: *mut SphereDauxVst3Processor) -> i32;
 }
 
 #[derive(Debug)]
@@ -342,6 +363,82 @@ impl Vst3RuntimeProcessor {
             return false;
         }
         unsafe { sphere_daux_vst3_focus_editor(self.inner.raw) != 0 }
+    }
+
+    // ── GPUI-embedded editor ──────────────────────────────────────────────
+    //
+    // Attach THIS runtime instance's editor view into a GPUI-provided parent
+    // window. No new VST3 component/controller is created; GUI parameter edits
+    // affect the live audio processor. These take `&self` because they only
+    // pass the opaque processor pointer across the FFI — no Rust-side mutation.
+
+    /// Attach the editor view into `parent_hwnd` at the given physical-pixel
+    /// region (parent-client coords). Returns a non-zero editor handle, or
+    /// `None` on failure.
+    pub fn embed_editor(
+        &self,
+        parent_hwnd: u64,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Option<u64> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        let handle = unsafe {
+            sphere_daux_vst3_embed_editor(self.inner.raw, parent_hwnd, x, y, width, height)
+        };
+        if handle == 0 {
+            None
+        } else {
+            Some(handle)
+        }
+    }
+
+    pub fn embed_set_bounds(&self, x: i32, y: i32, width: i32, height: i32) {
+        if self.inner.raw.is_null() {
+            return;
+        }
+        unsafe { sphere_daux_vst3_embed_set_bounds(self.inner.raw, x, y, width, height) };
+    }
+
+    pub fn embed_refresh(&self) {
+        if self.inner.raw.is_null() {
+            return;
+        }
+        unsafe { sphere_daux_vst3_embed_refresh(self.inner.raw) };
+    }
+
+    /// Detach the embedded view and destroy the host window. The processor
+    /// (and audio) keep running.
+    pub fn embed_detach(&self) {
+        if self.inner.raw.is_null() {
+            return;
+        }
+        unsafe { sphere_daux_vst3_embed_detach(self.inner.raw) };
+    }
+
+    pub fn embed_is_valid(&self) -> bool {
+        if self.inner.raw.is_null() {
+            return false;
+        }
+        unsafe { sphere_daux_vst3_embed_is_valid(self.inner.raw) != 0 }
+    }
+
+    pub fn embed_has_visible_ui(&self) -> bool {
+        if self.inner.raw.is_null() {
+            return false;
+        }
+        unsafe { sphere_daux_vst3_embed_has_visible_ui(self.inner.raw) != 0 }
+    }
+
+    /// 0 = WS_CHILD, 1 = owned tool window, -1 = no embedded editor.
+    pub fn embed_host_kind(&self) -> i32 {
+        if self.inner.raw.is_null() {
+            return -1;
+        }
+        unsafe { sphere_daux_vst3_embed_host_kind(self.inner.raw) }
     }
 }
 

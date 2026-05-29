@@ -74,6 +74,42 @@ SPHERE_DAUX_VST3_API void sphere_daux_vst3_close_editor(
 SPHERE_DAUX_VST3_API int sphere_daux_vst3_focus_editor(
     SphereDauxVst3Processor* processor);
 
+// ── GPUI-embedded editor (Windows) ───────────────────────────────────────────
+// Attach the already-created instance's editor view (built from the same
+// IEditController that feeds the realtime processor) into a GPUI-provided
+// parent window, instead of a daux-owned top-level shell. No new
+// component/controller is created — GUI edits affect the live audio processor.
+// UI thread only. `parent_hwnd` is the GPUI PluginView HWND; x/y/width/height
+// are the host region in physical pixels relative to the parent client area.
+// Returns a non-zero editor handle on success, 0 on failure.
+SPHERE_DAUX_VST3_API unsigned long long sphere_daux_vst3_embed_editor(
+    SphereDauxVst3Processor* processor,
+    unsigned long long       parent_hwnd,
+    int x, int y, int width, int height);
+
+// Reposition/resize the embedded host window (physical px, parent-client coords).
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_embed_set_bounds(
+    SphereDauxVst3Processor* processor, int x, int y, int width, int height);
+
+// Cheap per-frame poll: tracks parent-window moves; no-ops when unchanged.
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_embed_refresh(
+    SphereDauxVst3Processor* processor);
+
+// Detach the embedded IPlugView and destroy the host window. The
+// component/controller (and thus the realtime processor) stay alive.
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_embed_detach(
+    SphereDauxVst3Processor* processor);
+
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_is_valid(
+    SphereDauxVst3Processor* processor);
+
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_has_visible_ui(
+    SphereDauxVst3Processor* processor);
+
+// 0 = WS_CHILD, 1 = owned tool window, -1 = no embedded editor.
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_host_kind(
+    SphereDauxVst3Processor* processor);
+
 /// Returns 1 if the processor has not been destroyed, 0 if it has.
 /// The audio callback should call this before processing and bypass the insert
 /// if it returns 0, to avoid use-after-free crashes.

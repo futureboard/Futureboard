@@ -309,6 +309,20 @@ impl AudioEngine {
         self.inner.update_track_param(track_id, param_id, value)
     }
 
+    /// Clone the live runtime VST3 processor handle for an insert, if it has a
+    /// ready native plugin instance. The GPUI PluginView uses this to open the
+    /// editor from the *existing* instance/controller — never a new one — so
+    /// GUI parameter edits affect the actual audio processor. The handle is
+    /// `Arc`-backed; holding it keeps the C++ instance alive while the editor
+    /// is open.
+    pub fn insert_processor(
+        &self,
+        track_id: &str,
+        insert_id: &str,
+    ) -> Option<crate::vst3_processor::Vst3RuntimeProcessor> {
+        self.inner.insert_processor(track_id, insert_id)
+    }
+
     /// Poll meter atomics and runtime track meters for UI display.
     pub fn meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()

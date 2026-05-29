@@ -10,6 +10,7 @@ mod icon;
 mod icon_button;
 pub mod knob;
 pub mod menu_bar;
+pub mod message_box_dialog;
 pub mod menu_dropdown;
 pub mod mixer_panel;
 mod mixer_window;
@@ -50,6 +51,10 @@ pub use icon::icon;
 pub use icon_button::icon_button;
 pub use knob::knob;
 pub use menu_bar::{menu_bar, menu_label_button};
+pub use message_box_dialog::{
+    open_message_box_window, unsaved_changes_options, MessageBoxKind, MessageBoxOptions,
+    MessageBoxResult, MessageBoxWindow, MESSAGE_BOX_WIDTH,
+};
 pub use mixer_panel::mixer_panel;
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::right_panel;

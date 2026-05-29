@@ -172,10 +172,42 @@ editor failure shows a GPUI fallback panel, never a crash.
 
 - [x] NanoVG-free C ABI: `sphere_plugin_editor_embed_attach(parent_hwnd, path,
   class_id, x,y,w,h)` / `_set_bounds` / `_detach` / `_is_valid` in
-  `plugin_editor_window.cpp`. Creates a `WS_CHILD` host window under the
-  provided parent HWND, instantiates the plugin (reusing the existing VST3
-  hosting + shared param-event queue), and `IPlugView::attached`es into it. No
-  NanoVG, no D3D shell, no extra thread/message-pump (rides the GPUI loop).
+  `plugin_editor_window.cpp`. Instantiates the plugin (reusing the existing VST3
+  hosting + shared param-event queue) and `IPlugView::attached`es into a host
+  window. No NanoVG, no D3D shell, no extra thread/message-pump.
+- [x] **Parenting fix (WS_CHILD anchoring):** the editor must be a *real child*
+  of the GPUI PluginView window, not a floating top-level. `embed_attach` now
+  creates a dedicated **`WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
+  WS_CLIPCHILDREN`** host region parented to the GPUI top-level HWND (never
+  `WS_POPUP`, never the main app HWND, never null), positioned with
+  client-relative physical-px coords (no `ClientToScreen`). The VST3
+  `IPlugView` is attached into that child; after attach we `getSize`, then
+  `SetWindowPos` the child to the host region and `onSize` the content rect.
+  `set_bounds` repositions **and resizes** the child + re-`onSize`s on every
+  GPUI move/resize so the editor moves/clips/resizes with the window. `detach`
+  calls `IPlugView::removed()`, destroys the child HWND, and clears the handle.
+  Debug-build asserts validate `IsWindow(parent)`, `WS_CHILD`, `!WS_POPUP`, and
+  `GetParent(child) == parent`.
+  - **Compositing root-cause (resolved):** gpui (0.2.2) composites its surface
+    via DirectComposition with `CreateTargetForHwnd(hwnd, /*topmost=*/true)`, so
+    its rendered content is **always above all child HWNDs** — which made a
+    successful `WS_CHILD` attach render blank. gpui clears its swapchain to
+    **alpha 0** and the composition swapchain is **`DXGI_ALPHA_MODE_PREMULTIPLIED`**,
+    so the fix is to make the editor window **transparent** (`WindowOptions
+    .window_background = Transparent`) and paint **no opaque background** in the
+    attached content region. The child then composites through gpui's topmost
+    layer. The header + the Opening/Waiting/Attaching/Failed panels stay opaque
+    (`surface_base`/titlebar) so there is never see-through to the desktop, and
+    the child window paints a black backing under the plugin.
+  - **Post-attach hardening:** after `attached`, the C++ side force-shows the
+    child (`SetWindowPos SWP_SHOWWINDOW` + `ShowWindow` + `EnableWindow` +
+    `InvalidateRect` + `UpdateWindow`), re-`onSize`s, logs the full Win32 state
+    (IsWindow/IsWindowVisible/GetParent/window+client rect/style/exstyle),
+    `getSize` before & after attach, the IPlugView ptr, and
+    `EnumChildWindows` (count + each plugin sub-window's class/text/rect/visible/
+    style). If `IsWindowVisible(child)` is false it `removed()`s + destroys the
+    child and returns 0 so the GPUI side surfaces a visible `Failed` panel —
+    attach ok is never reported for an invisible child.
 - [x] Rust facade `native_editor::{attach_editor_into_parent,
   set_editor_region_bounds, detach_editor, editor_is_valid, EmbedRegion}`.
 - [x] GPUI `PluginEditorWindow` (`components/plugin_editor_window.rs`):
@@ -190,9 +222,22 @@ editor failure shows a GPUI fallback panel, never a crash.
 - [x] `attach_vst3_editor_view` equivalent on Windows — attach happens inside
   `embed_attach`. Full native build links the new C ABI.
 - [x] Bad plugin / attach failure → no panic; the editor window renders a GPUI
-  **fallback panel** (plugin name + error). 
-- [x] `FUTUREBOARD_PLUGIN_VIEW_DEBUG=1` logs attach/region/detach/error on both
-  the Rust and C++ sides.
+  **fallback panel** (plugin name + "Editor failed to open" + exact error +
+  **Retry / Close** buttons).
+- [x] **Explicit lifecycle state machine** (`PluginEditorStatus`:
+  `Opening → WaitingForHostHandle → Attaching → Attached | Failed(err)`). Render
+  shows a distinct surface per state ("Opening editor…", "Attaching plugin
+  editor…", failure panel) so a **blank panel never appears** unless status is
+  `Attached`. Attach is **deferred** until the native parent HWND exists *and*
+  content bounds are `> 0` (Phase 6/7): the driver re-renders on a ~32 ms tick
+  (capped at ~5 s → visible `Failed` timeout) instead of attaching once-and-
+  silently-dropping. `Retry` tears down and restarts from `Opening`.
+- [x] `FUTUREBOARD_PLUGIN_VIEW_DEBUG=1` logs the full lifecycle: `[plugin-view]`
+  open requested / gpui window created / top hwnd / host region mounted / attach
+  requested / attach ok|failed / resize / close on the Rust side, and
+  `[vst3-editor]` attach begin / IsWindow(parent) / parent style+GetParent /
+  child hwnd+style / getSize / attached / onSize / resize / removed on the C++
+  side. Attach failures are never swallowed (logged + surfaced as `Failed`).
 - [~] macOS / Linux: the embed path is Windows-only (`#[cfg(target_os=...)]`
   guards return "embedding unavailable" → fallback panel). Old `editor_mac.mm`
   remains for the legacy path.

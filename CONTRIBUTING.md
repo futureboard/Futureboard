@@ -1,5 +1,11 @@
 # Contributing to Futureboard Studio
 
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#-submission-checklist)
+[![Rust](https://img.shields.io/badge/Rust-2024-ce422b?logo=rust&logoColor=white)](https://rustup.rs)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Bun](https://img.shields.io/badge/Bun-runtime-fbf0df?logo=bun&logoColor=black)](https://bun.sh)
+[![Code Style](https://img.shields.io/badge/style-rustfmt%20%2B%20clippy-blue)](#-submission-checklist)
+
 Welcome to Futureboard Studio! We are thrilled to have you here. This document serves as the guide for contributing code, styling interfaces, and writing DSP algorithms for both the Web and Native builds of Futureboard.
 
 Before starting development, please review this guide to ensure alignment with our development rules, styling paradigms, and real-time audio safety standards.
@@ -101,22 +107,74 @@ To ensure a seamless desktop DAW experience, all interface elements must share t
 - Manage plugin instance lifecycles defensively to prevent host crashes.
 
 ---
-### Get Source code and setup
+### Get Source Code and Setup
 
-Clone Source Code
+This repo vendors native SDKs (`external/vst3sdk`, `external/clap`, …) as **git submodules**. Always clone recursively:
+
 ```bash
 git clone --recursive https://github.com/futureboard/Futureboard
+cd Futureboard
 ```
----
-### Setup
 
-#### for WebUI
+Already cloned without submodules? Initialize them:
+
+```bash
+git submodule update --init --recursive
 ```
+
+#### Prerequisites
+
+- [Bun](https://bun.sh) — JS/TS dependencies and task runner.
+- [Rust](https://rustup.rs) 1.78+ (edition 2024). Add the web target: `rustup target add wasm32-unknown-unknown`.
+- [CMake](https://cmake.org) 3.20+ and a C++ toolchain (MSVC on Windows, Xcode CLT on macOS, GCC/Clang + `libasound2-dev` on Linux) — required to compile the C++ plugin host.
+
+#### Setup — WebUI
+
+```bash
 bun install
+bun run dev:web
 ```
 
-#### for Desktop
-- Desktop Development using Cargo
+#### Setup — Desktop (Native GPUI client)
+
+Development builds run through Cargo (wrapped by Bun scripts):
+
+```bash
+# debug run
+bun run dev:native            # cargo run -p futureboard_native
+
+# release build
+bun run build:native          # cargo build --release -p futureboard_native
+```
+
+See the [Building the Native App](README.md#-building-the-native-app) section of the README for packaging and platform notes.
+
+---
+
+## 🔍 Debugging & Diagnostics
+
+Set these environment variables to `1` to enable verbose subsystem logging while developing:
+
+| Variable | Logs |
+|---|---|
+| `FUTUREBOARD_PLUGIN_DEBUG` | Insert add/set/remove/bypass mutations + engine-sync per-insert details |
+| `FUTUREBOARD_PLUGIN_VIEW_DEBUG` | Native plugin editor lifecycle (`[plugin-view]` / `[vst3-editor]`): open → host region → child HWND → IPlugView attach/resize/detach |
+| `FUTUREBOARD_ROUTING_DEBUG` | Send/return/bus routing graph at build time (nodes, sends, cycle ACCEPT/REJECT) |
+
+```bash
+FUTUREBOARD_PLUGIN_VIEW_DEBUG=1 cargo run -p futureboard_native
+```
+
+---
+
+## 🌱 Commit & Pull Request Conventions
+
+- Keep each PR focused on one feature, patch, or bug fix (see the Prime Directive above).
+- Write present-tense, imperative commit subjects (e.g. `Fix VST3 editor child parenting`).
+- Reference the relevant crate/app in the message body when scope isn't obvious.
+- Rebase / keep history tidy; squash noisy WIP commits before review.
+- Ensure all checks in the [Submission Checklist](#-submission-checklist) pass locally before opening the PR.
+
 ---
 
 ## 🔧 Submission Checklist
@@ -142,4 +200,17 @@ bun run build:audio:plugins
 ```bash
 cargo check --workspace
 cargo test --workspace
+```
+
+### Rust Lint & Format
+
+```bash
+bun run cargo:fmt:check   # cargo fmt --all -- --check
+bun run cargo:clippy      # cargo clippy --workspace -- -D warnings
+```
+
+### Native Build Smoke Test
+
+```bash
+bun run build:native:debug   # cargo build -p futureboard_native
 ```

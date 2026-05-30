@@ -20,6 +20,7 @@
 #![allow(non_snake_case)] // lib name "DAUx" is intentional branding
 
 mod audio_file;
+mod audio_source;
 pub mod backend;
 mod command;
 pub mod device;
@@ -43,7 +44,12 @@ mod vst3_processor;
 // the `SphereDirectAudioEngine` NAPI class wrap the same `EngineInner`.
 pub use crate::audio_file::{
     generate_audio_peaks, probe_audio_file, AudioFileFormat, AudioFileInfo, AudioPeak,
-    AudioPeakFile, AudioPeakLod, PEAK_LOD_LEVELS,
+    AudioPeakFile, AudioPeakLod, MAX_IN_MEMORY_DECODE_BYTES, PEAK_LOD_LEVELS,
+    STREAMING_WAV_THRESHOLD_BYTES,
+};
+pub use crate::audio_source::{
+    open_clip_audio_source, read_frame_stereo, sample_source_stereo, ClipAudioSource,
+    MappedWavSource,
 };
 pub use crate::error::SphereAudioError;
 pub use crate::native::{

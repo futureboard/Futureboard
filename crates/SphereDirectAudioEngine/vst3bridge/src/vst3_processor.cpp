@@ -422,6 +422,8 @@ struct SphereDauxVst3Processor {
   SimpleEventList      input_events_obj;   // reused per process call
   int                  event_input_bus_count{0};
   ComponentHandlerImpl component_handler;  // installed on IEditController
+  /// Owned copy of the loaded module path (survives after create() returns).
+  std::string plugin_path;
 
 #if defined(_WIN32)
   Steinberg::IPtr<Steinberg::IPlugView> editor_view;
@@ -455,7 +457,6 @@ struct SphereDauxVst3Processor {
   bool embed_geometry_valid{false};
   RECT embed_last_applied{};      // last applied window rect (screen for tool)
   int  embed_host_x{0}, embed_host_y{0}, embed_host_w{0}, embed_host_h{0};
-  std::string plugin_path;
   // Bundled browser/WebView runtime — active only while an editor is open.
   // One DLL-directory cookie per native runtime dir we added to the search path.
   std::vector<DLL_DIRECTORY_COOKIE> plugin_browser_dll_cookies;
@@ -2007,7 +2008,7 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
     return nullptr;
   }
 
-  instance->plugin_path = plugin_path;
+  instance->plugin_path = plugin_path ? plugin_path : "";
   set_last_error("");
   std::fprintf(stderr, "[DAUx VST3] processor ready: %s handle=0x%p\n",
                plugin_path, static_cast<void*>(instance.get()));

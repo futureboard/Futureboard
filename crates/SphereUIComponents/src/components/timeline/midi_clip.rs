@@ -18,6 +18,10 @@ pub fn midi_clip(
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
+    on_erase_clip: Option<
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
+    erase_target: bool,
 ) -> impl IntoElement {
     let clip_id = clip.id.clone();
     let drag_clip_id = clip.id.clone();
@@ -101,6 +105,9 @@ pub fn midi_clip(
 
     let on_select = on_select_clip.clone();
     let context_clip_id = clip.id.clone();
+    let erase_cb = on_erase_clip.clone();
+    let ctx_cb = on_context_menu.clone();
+    let clip_for_erase = clip.id.clone();
 
     div()
         .absolute()
@@ -115,7 +122,9 @@ pub fn midi_clip(
             c
         })
         .border(px(1.0))
-        .border_color(if selected {
+        .border_color(if erase_target {
+            Colors::status_error()
+        } else if selected {
             Colors::text_primary()
         } else {
             let mut c = track_color;
@@ -139,13 +148,18 @@ pub fn midi_clip(
                 }
             },
         )
-        .when_some(on_context_menu, |this, cb| {
+        .when_some(on_erase_clip.clone(), |this, _erase| {
             this.on_mouse_down(
                 gpui::MouseButton::Right,
                 move |event: &gpui::MouseDownEvent, window, cx| {
-                    let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
-                    cb(&(context_clip_id.clone(), x, y), window, cx);
+                    cx.stop_propagation();
+                    if let Some(erase) = erase_cb.as_ref() {
+                        erase(&clip_for_erase, window, cx);
+                    } else if let Some(cb) = ctx_cb.as_ref() {
+                        let x: f32 = event.position.x.into();
+                        let y: f32 = event.position.y.into();
+                        cb(&(context_clip_id.clone(), x, y), window, cx);
+                    }
                 },
             )
         })

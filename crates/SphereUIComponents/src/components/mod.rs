@@ -1,8 +1,12 @@
 pub mod add_track_dialog;
 mod app_chrome;
+mod audio_editor_adapter;
+mod audio_editor_host;
 mod bottom_panel;
+mod editor_panel;
 pub mod combo_box;
 pub mod context_menu;
+pub mod edit;
 pub mod controls;
 pub mod fader;
 pub mod file_browser;
@@ -42,6 +46,8 @@ pub use app_chrome::{
     PanelChromeState, ProjectChromeState, TransportChromeState, BPM_DRAG_DEADZONE_PX, BPM_MAX,
     BPM_MIN,
 };
+pub use audio_editor_host::AudioEditorHost;
+pub use editor_panel::ClipEditorPanel;
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use combo_box::{combo_box_menu, combo_box_trigger, ComboBoxOption};
 pub use controls::{

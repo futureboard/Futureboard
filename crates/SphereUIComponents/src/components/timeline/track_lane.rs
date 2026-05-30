@@ -24,6 +24,16 @@ pub fn track_lane(
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
+    on_range_start: Option<
+        std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
+    on_erase_start: Option<
+        std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
+    on_erase_clip: Option<
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
+    erase_preview_ids: Option<&std::collections::HashSet<String>>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackLane");
     let track_id = track.id.clone();
@@ -43,7 +53,6 @@ pub fn track_lane(
 
     let on_add = on_add_clip.clone();
     let track_id_add = track_id.clone();
-    let track_id_context = track_id.clone();
 
     let viewport_w = state.viewport.viewport_width.max(1.0);
 
@@ -65,6 +74,10 @@ pub fn track_lane(
             let on_sel_clip = on_select_clip.clone();
             let on_clip_context = on_clip_context_menu.clone();
             let on_open = on_open_editor.clone();
+            let on_del = on_erase_clip.clone();
+            let erase_target = erase_preview_ids
+                .map(|s| s.contains(&clip.id))
+                .unwrap_or(false);
             Some(match clip.clip_type {
                 ClipType::Audio { .. } => audio_clip(
                     clip,
@@ -72,7 +85,10 @@ pub fn track_lane(
                     track_color,
                     state,
                     on_sel_clip,
+                    on_open,
                     on_clip_context,
+                    on_del,
+                    erase_target,
                 )
                 .into_any_element(),
                 ClipType::Midi { .. } => midi_clip(
@@ -83,6 +99,8 @@ pub fn track_lane(
                     on_sel_clip,
                     on_clip_context,
                     on_open,
+                    on_del,
+                    erase_target,
                 )
                 .into_any_element(),
             })
@@ -96,6 +114,7 @@ pub fn track_lane(
 
     let active_tool = state.active_tool;
     let state_ref = state.clone();
+    let state_erase = state.clone();
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -117,27 +136,34 @@ pub fn track_lane(
             move |event: &gpui::MouseDownEvent, window, cx| {
                 let x: f32 = event.position.x.into();
                 let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
+                let click_beat = state_ref.x_to_beats(click_x);
+                let snapped_sec =
+                    state_ref.snap_time(click_beat * state_ref.seconds_per_beat());
+                let snapped_beat = snapped_sec / state_ref.seconds_per_beat();
 
                 if active_tool == TimelineTool::Pen {
-                    // Pen tool adds a clip at the clicked location (snapped)
-                    let click_beat = state_ref.x_to_beats(click_x);
-                    let snapped_sec =
-                        state_ref.snap_time(click_beat * state_ref.seconds_per_beat());
-                    let snapped_beat = snapped_sec / state_ref.seconds_per_beat();
                     on_add(&(track_id_add.clone(), snapped_beat), window, cx);
                 } else {
-                    // Otherwise, clicking lane selects track and clears clip selection
                     on_select(&track_id_select, window, cx);
+                    if let Some(start_range) = on_range_start.as_ref() {
+                        start_range(&snapped_beat, window, cx);
+                    }
                 }
             },
         )
-        .when_some(on_track_context_menu, |this, cb| {
+        .when_some(on_erase_start, |this, start_erase| {
+            let start_erase = start_erase.clone();
             this.on_mouse_down(
                 gpui::MouseButton::Right,
                 move |event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
                     let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
-                    cb(&(track_id_context.clone(), x, y), window, cx);
+                    let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
+                    let click_beat = state_erase.x_to_beats(click_x);
+                    let snapped_sec =
+                        state_erase.snap_time(click_beat * state_erase.seconds_per_beat());
+                    let snapped_beat = snapped_sec / state_erase.seconds_per_beat();
+                    start_erase(&snapped_beat, window, cx);
                 },
             )
         })

@@ -26,6 +26,10 @@ pub fn track_list(
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
+    on_range_start: Option<std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>>,
+    on_erase_start: Option<std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>>,
+    on_erase_clip: Option<std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>>,
+    erase_preview_ids: Option<&std::collections::HashSet<String>>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackList");
     let grid_width = state.viewport.viewport_width.max(1.0);
@@ -108,6 +112,10 @@ pub fn track_list(
                         on_track_context_menu.clone(),
                         on_clip_context_menu.clone(),
                         on_open_editor.clone(),
+                        on_range_start.clone(),
+                        on_erase_start.clone(),
+                        on_erase_clip.clone(),
+                        erase_preview_ids,
                     )),
             )
             .children(

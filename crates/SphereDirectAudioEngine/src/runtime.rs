@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::audio_file::{load_audio_file, AudioFileBuffer};
+use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
 
@@ -162,7 +162,7 @@ pub struct RuntimeClip {
     pub offset_seconds: f64,
     pub gain: f32,
     pub speed_ratio: f32,
-    pub source: Arc<AudioFileBuffer>,
+    pub source: Arc<ClipAudioSource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +235,7 @@ impl RuntimeProject {
     pub fn build(
         snapshot: &EngineProjectSnapshot,
         output_sample_rate: u32,
-        decoded_by_path: &mut HashMap<String, Arc<AudioFileBuffer>>,
+        decoded_by_path: &mut HashMap<String, Arc<ClipAudioSource>>,
         mut existing_vst3: Option<&mut HashMap<String, Vst3RuntimeProcessor>>,
     ) -> Self {
         let output_sample_rate = output_sample_rate.max(1);
@@ -260,21 +260,25 @@ impl RuntimeProject {
                 Some(existing) => {
                     eprintln!(
                         "[SphereAudio] clip '{}' — cache hit: '{path}' ({} frames)",
-                        clip.id, existing.frames
+                        clip.id, existing.frames()
                     );
                     loaded_from_cache += 1;
                     Arc::clone(existing)
                 }
-                None => match load_audio_file(path) {
-                    Ok(buffer) => {
+                None => match open_clip_audio_source(path) {
+                    Ok(source) => {
                         eprintln!(
-                            "[SphereAudio] clip '{}' — decoded: '{path}' {} frames @ {}Hz {} ch",
-                            clip.id, buffer.frames, buffer.sample_rate, buffer.channels
+                            "[SphereAudio] clip '{}' — opened: '{path}' {} frames @ {}Hz {} ch ({})",
+                            clip.id,
+                            source.frames(),
+                            source.sample_rate(),
+                            source.channels(),
+                            if source.is_mapped() { "mmap" } else { "memory" }
                         );
                         loaded_fresh += 1;
-                        let buffer = Arc::new(buffer);
-                        decoded_by_path.insert(path.to_string(), Arc::clone(&buffer));
-                        buffer
+                        let source = Arc::new(source);
+                        decoded_by_path.insert(path.to_string(), Arc::clone(&source));
+                        source
                     }
                     Err(e) => {
                         skipped_decode_err += 1;
@@ -1059,7 +1063,7 @@ fn build_midi_runtime(
 
 fn build_clip_runtime(
     clip: &EngineClipSnapshot,
-    source: Arc<AudioFileBuffer>,
+    source: Arc<ClipAudioSource>,
     beats_per_second: f64,
     output_sample_rate: u32,
 ) -> Option<RuntimeClip> {

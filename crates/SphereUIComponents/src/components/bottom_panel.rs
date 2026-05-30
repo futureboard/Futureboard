@@ -52,99 +52,20 @@ impl Render for BottomPanelResizeDrag {
 
 // ─── Sub-components for Editor ───────────────────────────────────────────────
 
-fn piano_key(is_black: bool) -> impl IntoElement {
-    let bg_color = if is_black {
-        Colors::surface_base()
-    } else {
-        Colors::text_primary()
-    };
-    div()
-        .h(px(14.0))
-        .w_full()
-        .bg(bg_color)
-        .border_b(px(1.0))
-        .border_color(Colors::panel_border())
-}
-
-fn midi_note(width: f32, delay: f32, note_y: f32) -> impl IntoElement {
-    div()
-        .absolute()
-        .top(px(note_y))
-        .left(px(delay))
-        .w(px(width))
-        .h(px(10.0))
-        .rounded_sm()
-        .bg(Colors::accent_primary())
-        .border(px(1.0))
-        .border_color(Colors::with_alpha(Colors::accent_primary(), 0.8)) // Approved: MIDI note state border opacity
-}
-
+/// Fallback for the docked Editor tab when no real Piano Roll element is
+/// supplied. Previously this drew mock MIDI notes; that violated the
+/// "no mock timeline rendering" rule, so it is now an empty placeholder.
+/// The normal layout always passes the real `PianoRoll` and never hits this.
 fn editor_panel() -> impl IntoElement {
     div()
         .flex()
-        .flex_row()
+        .items_center()
+        .justify_center()
         .size_full()
         .bg(Colors::surface_base())
-        // Left Piano Roll Keys
-        .child(
-            div()
-                .w(px(40.0))
-                .h_full()
-                .bg(Colors::surface_panel())
-                .border_r(px(1.0))
-                .border_color(Colors::panel_border())
-                .flex_col()
-                .child(piano_key(false))
-                .child(piano_key(true))
-                .child(piano_key(false))
-                .child(piano_key(true))
-                .child(piano_key(false))
-                .child(piano_key(false))
-                .child(piano_key(true))
-                .child(piano_key(false))
-                .child(piano_key(true))
-                .child(piano_key(false)),
-        )
-        // Right Grid Area
-        .child(
-            div()
-                .flex_1()
-                .h_full()
-                .relative()
-                // Horizontal grid lanes
-                .child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .flex_col()
-                        .children((0..10).map(|_| {
-                            div()
-                                .h(px(14.0))
-                                .w_full()
-                                .border_b(px(1.0))
-                                .border_color(Colors::border_subtle())
-                        })),
-                )
-                // Vertical beat dividers
-                .child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .flex_row()
-                        .children((0..8).map(|_| {
-                            div()
-                                .w(px(80.0))
-                                .h_full()
-                                .border_r(px(1.0))
-                                .border_color(Colors::border_subtle())
-                        })),
-                )
-                // Render mock MIDI notes
-                .child(midi_note(60.0, 20.0, 14.0))
-                .child(midi_note(80.0, 90.0, 42.0))
-                .child(midi_note(40.0, 180.0, 70.0))
-                .child(midi_note(120.0, 240.0, 28.0)),
-        )
+        .text_size(px(11.0))
+        .text_color(Colors::text_muted())
+        .child("Select a clip to edit")
 }
 
 // ─── Sub-components for Effect Editor ────────────────────────────────────────

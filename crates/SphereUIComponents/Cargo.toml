@@ -31,6 +31,7 @@ gpui = { version = "0.2.2", default-features = false, features = [
 # IMPORTANT: UI components are used by the standalone `futureboard_native` app.
 # Disable Node/N-API surfaces so native builds don't try to link against `napi_*`.
 sphere-direct-audio-engine = { path = "../SphereDirectAudioEngine", default-features = false }
+sphere-audio-editor = { path = "../SphereAudioEditor" }
 sphere-plugin-host = { path = "../SpherePluginHost", default-features = false }
 # Cross-platform user directories for the file browser default location.
 dirs = "5"

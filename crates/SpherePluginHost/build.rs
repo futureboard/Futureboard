@@ -108,9 +108,7 @@ fn main() {
         .include(&nanovg_root)
         .include(&d3d_nanovg_root)
         .include(&embedded_assets_include)
-        .define("SMTG_OS_WINDOWS", Some("1"))
         .file(backend_root.join("src/vst3_scanner.cpp"))
-        .file(backend_root.join("src/plugin_editor_window.cpp"))
         .file(nanovg_root.join("nanovg.c"))
         .file(yoga_root.join("yoga/YGConfig.cpp"))
         .file(yoga_root.join("yoga/YGEnums.cpp"))
@@ -141,18 +139,50 @@ fn main() {
         .file(sdk_root.join("public.sdk/source/vst/hosting/pluginterfacesupport.cpp"))
         .file(sdk_root.join("public.sdk/source/vst/hosting/module.cpp"));
 
-    if cfg!(target_os = "windows") {
-        build.file(sdk_root.join("public.sdk/source/vst/hosting/module_win32.cpp"));
-        println!("cargo:rustc-link-lib=ole32");
-        println!("cargo:rustc-link-lib=user32");
-        println!("cargo:rustc-link-lib=gdi32");
-        println!("cargo:rustc-link-lib=d3d11");
-        println!("cargo:rustc-link-lib=dxgi");
-        println!("cargo:rustc-link-lib=dwmapi");
-    } else if cfg!(target_os = "linux") {
-        println!("cargo:rustc-link-lib=dl");
-    }
+    apply_vst3_platform_config(&mut build, &sdk_root, &backend_root);
 
     build.compile("sphere_plugin_host_vst3");
     napi_build::setup();
+}
+
+fn apply_vst3_platform_config(
+    build: &mut cc::Build,
+    sdk_root: &std::path::Path,
+    backend_root: &std::path::Path,
+) {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    match target_os.as_str() {
+        "windows" => {
+            build.define("SMTG_OS_WINDOWS", "1");
+            build
+                .file(backend_root.join("src/plugin_editor_window.cpp"))
+                .file(sdk_root.join("public.sdk/source/vst/hosting/module_win32.cpp"));
+            println!("cargo:rustc-link-lib=ole32");
+            println!("cargo:rustc-link-lib=user32");
+            println!("cargo:rustc-link-lib=gdi32");
+            println!("cargo:rustc-link-lib=d3d11");
+            println!("cargo:rustc-link-lib=dxgi");
+            println!("cargo:rustc-link-lib=dwmapi");
+        }
+        "macos" => {
+            build.define("SMTG_OS_MACOS", "1");
+            build
+                .file(backend_root.join("src/plugin_editor_window.cpp"))
+                .flag("-fobjc-arc")
+                .file(sdk_root.join("public.sdk/source/vst/hosting/module_mac.mm"));
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
+            println!("cargo:rustc-link-lib=framework=Foundation");
+        }
+        "linux" => {
+            build.define("SMTG_OS_LINUX", "1");
+            build
+                .file(backend_root.join("src/plugin_editor_window.cpp"))
+                .file(sdk_root.join("public.sdk/source/vst/hosting/module_linux.cpp"));
+            println!("cargo:rustc-link-lib=dl");
+        }
+        _ => {
+            build.file(backend_root.join("src/plugin_editor_window.cpp"));
+        }
+    }
 }

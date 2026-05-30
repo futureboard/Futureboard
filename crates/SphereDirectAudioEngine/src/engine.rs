@@ -21,7 +21,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use sphere_audio_plugins::{canonical_plugin_id, process_stereo_sample};
 
-use crate::audio_file::AudioFileBuffer;
+use crate::audio_source::{sample_source_stereo, ClipAudioSource};
 #[cfg(target_os = "windows")]
 use crate::backend::wasapi_exclusive::{self, WasapiExclusiveHandle};
 use crate::backend::{
@@ -200,7 +200,7 @@ pub struct EngineInner {
 
     // Prepared render graph shared with new streams and pushed to callbacks.
     runtime: Mutex<RuntimeProject>,
-    audio_cache: Mutex<HashMap<String, Arc<AudioFileBuffer>>>,
+    audio_cache: Mutex<HashMap<String, Arc<ClipAudioSource>>>,
 
     // DAUx config & glitch counter (shared with audio thread for diagnostics).
     glitch_counter: Arc<AtomicU64>,
@@ -805,7 +805,7 @@ impl EngineInner {
         let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
         let position_samples = self.shared.position_samples.load(Ordering::Relaxed);
 
-        let ready_clips = runtime.clips.iter().filter(|c| c.source.frames > 0).count() as u32;
+        let ready_clips = runtime.clips.iter().filter(|c| c.source.frames() > 0).count() as u32;
         let clip_summaries: Vec<String> = runtime
             .clips
             .iter()
@@ -816,7 +816,7 @@ impl EngineInner {
                     c.track_id,
                     c.start_sample as f64 / sample_rate as f64,
                     c.duration_samples as f64 / sample_rate as f64,
-                    c.source.frames,
+                    c.source.frames(),
                     c.gain,
                 )
             })
@@ -1273,7 +1273,7 @@ pub fn render_project_sample(
 
         let source_pos_seconds = clip_offset_seconds
             + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip_speed_ratio as f64;
-        let source_pos = source_pos_seconds * source.sample_rate as f64;
+        let source_pos = source_pos_seconds * source.sample_rate() as f64;
         let (mut l, mut r) = sample_source_stereo(&source, source_pos);
         if l == 0.0 && r == 0.0 {
             continue;
@@ -1557,7 +1557,7 @@ pub fn render_project_block_interleaved(
             let rel = project_sample - clip_start;
             let source_pos_seconds = clip.offset_seconds
                 + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip.speed_ratio as f64;
-            let source_pos = source_pos_seconds * source.sample_rate as f64;
+            let source_pos = source_pos_seconds * source.sample_rate() as f64;
             let (mut l, mut r) = sample_source_stereo(&source, source_pos);
             l *= clip.gain;
             r *= clip.gain;
@@ -1979,41 +1979,6 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
         (1.0, 1.0 + pan)
     } else {
         (1.0 - pan, 1.0)
-    }
-}
-
-#[inline]
-pub fn sample_source_stereo(source: &crate::audio_file::AudioFileBuffer, pos: f64) -> (f32, f32) {
-    if pos < 0.0 || source.frames == 0 {
-        return (0.0, 0.0);
-    }
-
-    let idx = pos.floor() as usize;
-    if idx >= source.frames {
-        return (0.0, 0.0);
-    }
-    let frac = (pos - idx as f64) as f32;
-    let next_idx = (idx + 1).min(source.frames - 1);
-
-    let (l0, r0) = read_frame_stereo(source, idx);
-    let (l1, r1) = read_frame_stereo(source, next_idx);
-
-    (l0 + (l1 - l0) * frac, r0 + (r1 - r0) * frac)
-}
-
-#[inline]
-pub fn read_frame_stereo(source: &crate::audio_file::AudioFileBuffer, frame: usize) -> (f32, f32) {
-    let base = frame * source.channels;
-    match source.channels {
-        0 => (0.0, 0.0),
-        1 => {
-            let v = source.samples.get(base).copied().unwrap_or(0.0);
-            (v, v)
-        }
-        _ => (
-            source.samples.get(base).copied().unwrap_or(0.0),
-            source.samples.get(base + 1).copied().unwrap_or(0.0),
-        ),
     }
 }
 

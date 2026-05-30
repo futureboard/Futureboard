@@ -51,9 +51,16 @@ pub fn audio_clip(
     track_color: gpui::Rgba,
     state: &TimelineState,
     on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_open_editor: Option<
+        std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
     on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+    on_erase_clip: Option<
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    >,
+    erase_target: bool,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("AudioClip");
     let clip_id = clip.id.clone();
@@ -80,7 +87,11 @@ pub fn audio_clip(
     };
 
     let on_select = on_select_clip.clone();
+    let open_editor = on_open_editor.clone();
     let context_clip_id = clip.id.clone();
+    let clip_for_erase = clip.id.clone();
+    let erase_cb = on_erase_clip.clone();
+    let ctx_cb = on_context_menu.clone();
 
     div()
         .absolute()
@@ -95,7 +106,9 @@ pub fn audio_clip(
             c
         }) // semi-transparent background
         .border(px(1.0))
-        .border_color(if selected {
+        .border_color(if erase_target {
+            Colors::status_error()
+        } else if selected {
             Colors::text_primary()
         } else {
             let mut c = track_color;
@@ -106,20 +119,28 @@ pub fn audio_clip(
         .id(("audio-clip", id_num))
         .on_mouse_down(
             gpui::MouseButton::Left,
-            move |_event: &gpui::MouseDownEvent, window, cx| {
+            move |event: &gpui::MouseDownEvent, window, cx| {
                 on_select(&clip_id, window, cx);
+                if event.click_count >= 2 {
+                    if let Some(open) = open_editor.as_ref() {
+                        open(window, cx);
+                    }
+                }
             },
         )
-        .when_some(on_context_menu, |this, cb| {
-            this.on_mouse_down(
-                gpui::MouseButton::Right,
-                move |event: &gpui::MouseDownEvent, window, cx| {
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                if let Some(erase) = erase_cb.as_ref() {
+                    erase(&clip_for_erase, window, cx);
+                } else if let Some(cb) = ctx_cb.as_ref() {
                     let x: f32 = event.position.x.into();
                     let y: f32 = event.position.y.into();
                     cb(&(context_clip_id.clone(), x, y), window, cx);
-                },
-            )
-        })
+                }
+            },
+        )
         .on_drag(
             ClipDragItem {
                 clip_id: drag_clip_id,

@@ -104,18 +104,38 @@ pub struct AudioPeakFile {
 /// step apart at every meaningful zoom level.
 pub const PEAK_LOD_LEVELS: &[u32] = &[256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
 
+/// WAV files at or above this size refuse full in-memory decode.
+pub const STREAMING_WAV_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Non-WAV formats refuse in-memory decode above this size.
+pub const MAX_IN_MEMORY_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Generate a multi-LOD peak summary for any audio format supported by
 /// [`load_audio_file`] (WAV via inline RIFF parser, MP3 / FLAC / OGG /
-/// AIFF via symphonia). All channels are mono-mixed; the LOD ladder is
-/// always `PEAK_LOD_LEVELS`.
-///
-/// Realtime safety: caller MUST run this on a background thread. Decodes
-/// the entire file into memory via `load_audio_file`, then sweeps it
-/// once and folds every sample into every LOD builder in lock-step. Cost
-/// is O(frames × LODs) but cache-friendly — one pass over the source.
+/// AIFF via symphonia). WAV files are scanned from disk in chunks without
+/// loading the full PCM buffer. Other formats decode in memory when small
+/// enough; larger files return an error.
 pub fn generate_audio_peaks(path: impl AsRef<Path>) -> Result<AudioPeakFile, SphereAudioError> {
     let path = path.as_ref();
     let info = probe_audio_file(path)?;
+    match info.format {
+        AudioFileFormat::Wav => generate_wav_peaks_streaming(path, &info),
+        _ => generate_peaks_in_memory(path, &info),
+    }
+}
+
+fn generate_peaks_in_memory(
+    path: &Path,
+    info: &AudioFileInfo,
+) -> Result<AudioPeakFile, SphereAudioError> {
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if file_size > MAX_IN_MEMORY_DECODE_BYTES {
+        return Err(SphereAudioError::NativeError(format!(
+            "file too large ({} bytes) for in-memory peak generation — convert to WAV",
+            file_size
+        )));
+    }
+
     let path_str = path.to_string_lossy().to_string();
     let buffer = load_audio_file(&path_str)
         .map_err(|error| SphereAudioError::NativeError(format!("decode failed: {error}")))?;
@@ -127,19 +147,34 @@ pub fn generate_audio_peaks(path: impl AsRef<Path>) -> Result<AudioPeakFile, Sph
         )));
     }
 
-    // Build all LODs in one pass. Each builder owns its own min/max
-    // accumulator; folding every sample once keeps the cache hot.
+    let lods = peaks_from_interleaved_buffer(&buffer.samples, buffer.channels, buffer.frames as u64);
+    Ok(AudioPeakFile {
+        source_path: info.path.clone(),
+        sample_rate: info.sample_rate,
+        channels: info.channels,
+        total_frames: info.total_frames.max(buffer.frames as u64),
+        duration_seconds: info.duration_seconds,
+        format: info.format,
+        lods,
+    })
+}
+
+fn peaks_from_interleaved_buffer(
+    samples: &[f32],
+    channels: usize,
+    total_frames: u64,
+) -> Vec<AudioPeakLod> {
+    let channels = channels.max(1);
     let mut builders: Vec<PeakLodBuilder> = PEAK_LOD_LEVELS
         .iter()
-        .map(|&spp| PeakLodBuilder::with_capacity(spp, buffer.frames as u64))
+        .map(|&spp| PeakLodBuilder::with_capacity(spp, total_frames))
         .collect();
 
-    let channels = buffer.channels.max(1);
     let mut sample_cursor = 0usize;
-    while sample_cursor + channels <= buffer.samples.len() {
+    while sample_cursor + channels <= samples.len() {
         let mut sum = 0.0f32;
         for c in 0..channels {
-            sum += buffer.samples[sample_cursor + c];
+            sum += samples[sample_cursor + c];
         }
         let mono = (sum / channels as f32).clamp(-1.0, 1.0);
         for b in &mut builders {
@@ -148,13 +183,96 @@ pub fn generate_audio_peaks(path: impl AsRef<Path>) -> Result<AudioPeakFile, Sph
         sample_cursor += channels;
     }
 
+    builders.into_iter().map(PeakLodBuilder::finalize).collect()
+}
+
+fn generate_wav_peaks_streaming(
+    path: &Path,
+    info: &AudioFileInfo,
+) -> Result<AudioPeakFile, SphereAudioError> {
+    let mut file = File::open(path).map_err(|e| {
+        SphereAudioError::NativeError(format!("Cannot open '{}': {e}", path.display()))
+    })?;
+    let (fmt, data_start, data_len) = read_wav_header(&mut file).map_err(|e| {
+        SphereAudioError::NativeError(format!("WAV header read failed: {e}"))
+    })?;
+
+    let bytes_per_sample = match fmt.bits_per_sample {
+        8 => 1usize,
+        16 => 2,
+        24 => 3,
+        32 => 4,
+        bits => {
+            return Err(SphereAudioError::NativeError(format!(
+                "unsupported WAV bit depth for peak scan: {bits}"
+            )))
+        }
+    };
+    let bytes_per_frame = fmt.channels * bytes_per_sample;
+    if bytes_per_frame == 0 || data_len < bytes_per_frame as u64 {
+        return Err(SphereAudioError::NativeError(
+            "empty WAV data".to_string(),
+        ));
+    }
+
+    let frames = data_len / bytes_per_frame as u64;
+    let mut builders: Vec<PeakLodBuilder> = PEAK_LOD_LEVELS
+        .iter()
+        .map(|&spp| PeakLodBuilder::with_capacity(spp, frames))
+        .collect();
+
+    file.seek(SeekFrom::Start(data_start))
+        .map_err(|e| SphereAudioError::NativeError(format!("seek failed: {e}")))?;
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut remaining = data_len;
+    let channels = fmt.channels.max(1);
+
+    while remaining > 0 {
+        let wanted = buffer.len().min(remaining as usize);
+        let aligned = if remaining as usize <= buffer.len() {
+            wanted
+        } else {
+            (wanted / bytes_per_frame).max(1) * bytes_per_frame
+        };
+        let read = file
+            .read(&mut buffer[..aligned])
+            .map_err(|e| SphereAudioError::NativeError(format!("read failed: {e}")))?;
+        if read == 0 {
+            break;
+        }
+
+        let frame_count = read / bytes_per_frame;
+        for frame in 0..frame_count {
+            let frame_byte = frame * bytes_per_frame;
+            let mut sum = 0.0f32;
+            for ch in 0..channels {
+                let sample_byte = frame_byte + ch * bytes_per_sample;
+                let value = decode_wav_sample(&buffer, sample_byte, &fmt).map_err(|e| {
+                    SphereAudioError::NativeError(format!("sample decode failed: {e}"))
+                })?;
+                sum += value;
+            }
+            let mono = (sum / channels as f32).clamp(-1.0, 1.0);
+            for b in &mut builders {
+                b.push(mono);
+            }
+        }
+
+        remaining = remaining.saturating_sub((frame_count * bytes_per_frame) as u64);
+    }
+
+    for b in &mut builders {
+        b.flush_partial();
+    }
+
     let lods: Vec<AudioPeakLod> = builders.into_iter().map(PeakLodBuilder::finalize).collect();
 
     Ok(AudioPeakFile {
         source_path: info.path.clone(),
         sample_rate: info.sample_rate,
         channels: info.channels,
-        total_frames: info.total_frames.max(buffer.frames as u64),
+        total_frames: info.total_frames.max(frames),
         duration_seconds: info.duration_seconds,
         format: info.format,
         lods,
@@ -203,15 +321,22 @@ impl PeakLodBuilder {
     }
 
     fn finalize(mut self) -> AudioPeakLod {
+        self.flush_partial();
+        AudioPeakLod {
+            samples_per_peak: self.samples_per_peak,
+            peaks: self.peaks,
+        }
+    }
+
+    fn flush_partial(&mut self) {
         if self.count > 0 {
             self.peaks.push(AudioPeak {
                 min: self.min,
                 max: self.max,
             });
-        }
-        AudioPeakLod {
-            samples_per_peak: self.samples_per_peak,
-            peaks: self.peaks,
+            self.min = 0.0;
+            self.max = 0.0;
+            self.count = 0;
         }
     }
 }
@@ -535,6 +660,13 @@ pub fn generate_wav_peaks_from_path(
 // ── Symphonia decoder ──────────────────────────────────────────────────────────
 
 fn load_via_symphonia(path: &Path) -> Result<AudioFileBuffer, String> {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if size > MAX_IN_MEMORY_DECODE_BYTES {
+        return Err(format!(
+            "file too large ({size} bytes) for in-memory decode — convert to WAV for streaming import"
+        ));
+    }
+
     let src = File::open(path).map_err(|e| format!("Cannot open '{}': {e}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(src), Default::default());
 
@@ -640,50 +772,15 @@ fn load_via_symphonia(path: &Path) -> Result<AudioFileBuffer, String> {
 // the most common format.
 
 fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if file_size >= STREAMING_WAV_THRESHOLD_BYTES {
+        return Err(format!(
+            "WAV file too large ({file_size} bytes) for in-memory decode — use streaming source"
+        ));
+    }
+
     let bytes = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
-    if bytes.len() < 44 {
-        return Err("file too small for WAV".to_string());
-    }
-    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("not a RIFF/WAVE file".to_string());
-    }
-
-    let mut cursor = 12usize;
-    let mut fmt: Option<WavFmt> = None;
-    let mut data_range: Option<(usize, usize)> = None;
-
-    while cursor + 8 <= bytes.len() {
-        let id = &bytes[cursor..cursor + 4];
-        let len = read_u32_le(&bytes, cursor + 4)? as usize;
-        let body = cursor + 8;
-        let end = body.saturating_add(len);
-        if end > bytes.len() {
-            return Err("truncated WAV chunk".to_string());
-        }
-
-        match id {
-            b"fmt " => {
-                if len < 16 {
-                    return Err("invalid fmt chunk".to_string());
-                }
-                fmt = Some(WavFmt {
-                    audio_format: read_u16_le(&bytes, body)?,
-                    channels: read_u16_le(&bytes, body + 2)? as usize,
-                    sample_rate: read_u32_le(&bytes, body + 4)?,
-                    bits_per_sample: read_u16_le(&bytes, body + 14)?,
-                });
-            }
-            b"data" => {
-                data_range = Some((body, len));
-            }
-            _ => {}
-        }
-
-        cursor = end + (len & 1); // skip padding byte for odd-length chunks
-    }
-
-    let fmt = fmt.ok_or_else(|| "missing fmt chunk".to_string())?;
-    let (data_start, data_len) = data_range.ok_or_else(|| "missing data chunk".to_string())?;
+    let (fmt, data_start, data_len) = wav_data_layout(&bytes)?;
     if fmt.channels == 0 || fmt.sample_rate == 0 {
         return Err("invalid channel count or sample rate".to_string());
     }
@@ -706,22 +803,8 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
 
     let mut offset = data_start;
     for _ in 0..sample_count {
-        let value = match (fmt.audio_format, fmt.bits_per_sample) {
-            // PCM integer
-            (1, 8) => (bytes[offset] as f32 - 128.0) / 128.0,
-            (1, 16) => read_i16_le(&bytes, offset)? as f32 / 32_768.0,
-            (1, 24) => read_i24_le(&bytes, offset)? as f32 / 8_388_608.0,
-            (1, 32) => read_i32_le(&bytes, offset)? as f32 / 2_147_483_648.0,
-            // IEEE float
-            (3, 32) => f32::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]),
-            (format, _) => return Err(format!("unsupported WAV format code: {format}")),
-        };
-        samples.push(value.clamp(-1.0, 1.0));
+        let value = decode_wav_sample(&bytes, offset, &fmt)?;
+        samples.push(value);
         offset += bytes_per_sample;
     }
 
@@ -804,11 +887,85 @@ fn read_wav_header(file: &mut File) -> Result<(WavFmt, u64, u64), String> {
 // ── Byte-level helpers ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
-struct WavFmt {
-    audio_format: u16,
-    channels: usize,
-    sample_rate: u32,
-    bits_per_sample: u16,
+pub(crate) struct WavFmt {
+    pub audio_format: u16,
+    pub channels: usize,
+    pub sample_rate: u32,
+    pub bits_per_sample: u16,
+}
+
+/// Parse RIFF/WAVE layout from bytes without decoding PCM.
+pub(crate) fn wav_data_layout(bytes: &[u8]) -> Result<(WavFmt, usize, usize), String> {
+    if bytes.len() < 44 {
+        return Err("file too small for WAV".to_string());
+    }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE file".to_string());
+    }
+
+    let mut cursor = 12usize;
+    let mut fmt: Option<WavFmt> = None;
+    let mut data_range: Option<(usize, usize)> = None;
+
+    while cursor + 8 <= bytes.len() {
+        let id = &bytes[cursor..cursor + 4];
+        let len = read_u32_le(bytes, cursor + 4)? as usize;
+        let body = cursor + 8;
+        let end = body.saturating_add(len);
+        if end > bytes.len() {
+            return Err("truncated WAV chunk".to_string());
+        }
+
+        match id {
+            b"fmt " => {
+                if len < 16 {
+                    return Err("invalid fmt chunk".to_string());
+                }
+                fmt = Some(WavFmt {
+                    audio_format: read_u16_le(bytes, body)?,
+                    channels: read_u16_le(bytes, body + 2)? as usize,
+                    sample_rate: read_u32_le(bytes, body + 4)?,
+                    bits_per_sample: read_u16_le(bytes, body + 14)?,
+                });
+            }
+            b"data" => {
+                data_range = Some((body, len));
+            }
+            _ => {}
+        }
+
+        cursor = end + (len & 1);
+    }
+
+    let fmt = fmt.ok_or_else(|| "missing fmt chunk".to_string())?;
+    let (data_start, data_len) = data_range.ok_or_else(|| "missing data chunk".to_string())?;
+    if fmt.channels == 0 || fmt.sample_rate == 0 {
+        return Err("invalid channel count or sample rate".to_string());
+    }
+    Ok((fmt, data_start, data_len))
+}
+
+/// Decode one interleaved sample from WAV bytes at `offset`.
+pub(crate) fn decode_wav_sample(bytes: &[u8], offset: usize, fmt: &WavFmt) -> Result<f32, String> {
+    let value = match (fmt.audio_format, fmt.bits_per_sample) {
+        (1, 8) => (bytes
+            .get(offset)
+            .copied()
+            .ok_or_else(|| "unexpected EOF".to_string())? as f32
+            - 128.0)
+            / 128.0,
+        (1, 16) => read_i16_le(bytes, offset)? as f32 / 32_768.0,
+        (1, 24) => read_i24_le(bytes, offset)? as f32 / 8_388_608.0,
+        (1, 32) => read_i32_le(bytes, offset)? as f32 / 2_147_483_648.0,
+        (3, 32) => {
+            let b = bytes
+                .get(offset..offset + 4)
+                .ok_or_else(|| "unexpected EOF".to_string())?;
+            f32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        }
+        (format, _) => return Err(format!("unsupported WAV format code: {format}")),
+    };
+    Ok(value.clamp(-1.0, 1.0))
 }
 
 fn read_u16_le(bytes: &[u8], offset: usize) -> Result<u16, String> {
@@ -848,12 +1005,13 @@ fn read_i32_le(bytes: &[u8], offset: usize) -> Result<i32, String> {
 }
 
 fn read_wav_pcm_sample(bytes: &[u8], offset: usize, bits_per_sample: u16) -> Result<f32, String> {
-    match bits_per_sample {
-        16 => Ok(read_i16_le(bytes, offset)? as f32 / 32_768.0),
-        24 => Ok(read_i24_le(bytes, offset)? as f32 / 8_388_608.0),
-        32 => Ok(read_i32_le(bytes, offset)? as f32 / 2_147_483_648.0),
-        bits => Err(format!("unsupported WAV bit depth: {bits}")),
-    }
+    let fmt = WavFmt {
+        audio_format: 1,
+        channels: 1,
+        sample_rate: 0,
+        bits_per_sample,
+    };
+    decode_wav_sample(bytes, offset, &fmt)
 }
 
 fn reset_peak_min_max(min: &mut [f32], max: &mut [f32]) {

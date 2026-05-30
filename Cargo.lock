@@ -3,10 +3,6 @@
 version = 4
 
 [[package]]
-name = "SphereAudioEditor"
-version = "0.1.0"
-
-[[package]]
 name = "SphereFBEncoder"
 version = "0.1.0"
 
@@ -33,6 +29,9 @@ version = "0.1.0"
 [[package]]
 name = "SphereFBVoiceTune"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "adler2"
@@ -5523,6 +5522,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sphere-audio-editor"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
 name = "sphere-audio-plugins"
 version = "0.1.0"
 dependencies = [
@@ -5537,6 +5543,7 @@ dependencies = [
  "cc",
  "cpal",
  "crossbeam-channel",
+ "memmap2",
  "napi",
  "napi-build",
  "napi-derive",
@@ -5575,6 +5582,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sphere-audio-editor",
  "sphere-direct-audio-engine",
  "sphere-plugin-host",
  "wgpu",

@@ -213,7 +213,8 @@ fn run_peak_job(path: &Path, path_key: &str) -> Result<Arc<WaveformPreview>, Str
         }
     }
 
-    waveform_cache::set_import_state(path_key, AudioImportState::Decoding { progress: 0.0 });
+    waveform_cache::set_import_state(path_key, AudioImportState::GeneratingPeaks { progress: 0.0 });
+    eprintln!("[audio-import] peak cache scanning path={} size={file_size} bytes", path.display());
 
     let peaks = DAUx::generate_audio_peaks(path).map_err(|e| e.to_string())?;
     let preview: WaveformPreview = peaks.into();
@@ -226,7 +227,7 @@ fn run_peak_job(path: &Path, path_key: &str) -> Result<Arc<WaveformPreview>, Str
     if import_debug() {
         let total_peaks: usize = preview.lods.iter().map(|l| l.peaks.len()).sum();
         eprintln!(
-            "[audio-import] peak job done path={} decode_ms={} total_peaks={}",
+            "[audio-import] peak cache completed path={} scan_ms={} total_peaks={}",
             path.display(),
             started.elapsed().as_millis(),
             total_peaks
@@ -266,6 +267,15 @@ pub async fn run_import_pipeline(
 
         match probe {
             Ok(info) => {
+                eprintln!(
+                    "[audio-import] metadata read path={} sr={} ch={} frames={} duration={:.3}s size={}",
+                    key,
+                    info.sample_rate,
+                    info.channels,
+                    info.total_frames,
+                    info.duration_seconds,
+                    std::fs::metadata(&path_for_job).map(|m| m.len()).unwrap_or(0)
+                );
                 let format = info.format.as_str().to_string();
                 let path_key = key.clone();
                 let layout_for_meta = layout_weak.clone();
@@ -282,6 +292,7 @@ pub async fn run_import_pipeline(
                         .state
                         .set_audio_import_for_path(&path_key, AudioImportState::Decoding { progress: 0.0 });
                     if changed {
+                        eprintln!("[audio-import] clip metadata updated path={path_key}");
                         if let Some(owner) = layout_for_meta.as_ref() {
                             let _ = owner.update(cx, |this, cx| {
                                 this.mark_engine_media_dirty();
@@ -294,13 +305,27 @@ pub async fn run_import_pipeline(
             }
             Err(error) => {
                 eprintln!(
-                    "[audio-import] probe failed path={} error={}",
+                    "[audio-import] metadata read failed path={} error={}",
                     key, error
                 );
+                waveform_cache::install_failed(&key, error.to_string());
+                let path_key = key.clone();
+                let _ = timeline_probe.update(cx, move |timeline, cx| {
+                    timeline.state.set_audio_import_for_path(
+                        &path_key,
+                        AudioImportState::Failed {
+                            message: "metadata read failed".to_string(),
+                        },
+                    );
+                    cx.notify();
+                });
+                throttled_timeline_notify(&timeline_probe, cx, true);
+                return;
             }
         }
 
-        // ── Peak generation (full decode, off UI thread) ───────────────────
+        // ── Peak generation (streaming for WAV, off UI thread) ─────────────
+        eprintln!("[audio-import] peak cache started path={key}");
         waveform_cache::set_import_state(&key, AudioImportState::GeneratingPeaks { progress: 0.0 });
         throttled_timeline_notify(&timeline_peaks, cx, true);
 
@@ -329,6 +354,7 @@ pub async fn run_import_pipeline(
                 throttled_timeline_notify(&timeline_peaks, cx, true);
             }
             Err(message) => {
+                eprintln!("[audio-import] peak cache failed path={path_key} error={message}");
                 waveform_cache::install_failed(&path_key, message.clone());
                 let _ = timeline_peaks.update(cx, move |timeline, cx| {
                     timeline.state.set_audio_import_for_path(

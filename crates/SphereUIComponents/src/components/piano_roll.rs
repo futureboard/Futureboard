@@ -26,6 +26,7 @@ use gpui::{
     Render, ScrollWheelEvent, StatefulInteractiveElement, Styled, Window,
 };
 
+use crate::components::edit::{normalize_range, EditCommand};
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::{
     midi_debug_enabled, MidiNoteState, MIN_NOTE_BEATS,
@@ -40,6 +41,8 @@ const KEY_W: f32 = 56.0; // piano key lane width
 const VEL_H: f32 = 72.0; // velocity lane height
 const RULER_H: f32 = 18.0; // bar/beat ruler header height
 const RESIZE_ZONE: f32 = 6.0; // px on the right edge that starts a resize
+/// Pixels of movement before an empty-grid press becomes a marquee drag.
+const MARQUEE_DRAG_THRESHOLD: f32 = 4.0;
 
 /// Strength tier of a vertical timing gridline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +124,37 @@ impl GridRes {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarqueeSelectionMode {
+    Replace,
+    Add,
+    Toggle,
+    Subtract,
+}
+
+impl MarqueeSelectionMode {
+    fn from_modifiers(modifiers: &gpui::Modifiers) -> Self {
+        if modifiers.alt {
+            MarqueeSelectionMode::Subtract
+        } else if modifiers.control || modifiers.platform {
+            MarqueeSelectionMode::Toggle
+        } else if modifiers.shift {
+            MarqueeSelectionMode::Add
+        } else {
+            MarqueeSelectionMode::Replace
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            MarqueeSelectionMode::Replace => "Replace",
+            MarqueeSelectionMode::Add => "Add",
+            MarqueeSelectionMode::Toggle => "Toggle",
+            MarqueeSelectionMode::Subtract => "Subtract",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PianoDrag {
     None,
@@ -147,6 +181,30 @@ enum PianoDrag {
         start_y: f32,
         orig_vel: u8,
     },
+    /// Rectangular marquee selection on the note grid (local grid px).
+    MarqueeSelect {
+        start_x: f32,
+        start_y: f32,
+        current_x: f32,
+        current_y: f32,
+        mode: MarqueeSelectionMode,
+        /// `true` once the pointer moves past [`MARQUEE_DRAG_THRESHOLD`].
+        dragging: bool,
+    },
+    /// Left-drag note creation preview (committed on mouse-up).
+    DrawNote {
+        pitch: u8,
+        start_beat: f32,
+        end_beat: f32,
+    },
+    /// Right-drag erase — ids collected until mouse-up.
+    EraseNotes {
+        start_x: f32,
+        start_y: f32,
+        current_x: f32,
+        current_y: f32,
+        erased: HashSet<u64>,
+    },
 }
 
 pub struct PianoRoll {
@@ -163,6 +221,10 @@ pub struct PianoRoll {
     scroll_x: f32,
     scroll_y: f32,
     drag: PianoDrag,
+    /// Selection snapshot taken when a marquee gesture begins (for modifier modes).
+    selection_before_marquee: HashSet<u64>,
+    /// Notes highlighted during an erase drag.
+    erase_preview_ids: HashSet<u64>,
     /// Last clip id we ran [`Self::fit_piano_roll_to_notes`] for.
     fitted_clip_id: Option<String>,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -186,6 +248,8 @@ impl PianoRoll {
             scroll_x: 0.0,
             scroll_y: 0.0,
             drag: PianoDrag::None,
+            selection_before_marquee: HashSet::new(),
+            erase_preview_ids: HashSet::new(),
             fitted_clip_id: None,
             grid_bounds: Rc::new(Cell::new(None)),
             last_editing_clip: None,
@@ -233,6 +297,10 @@ impl PianoRoll {
                     cx.notify();
                 }
             }
+            "midi:scroll-to-c4" | "midi:reset-pitch-zoom" => {
+                self.scroll_to_pitch(60);
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -275,6 +343,165 @@ impl PianoRoll {
         (PITCH_CNT - 1 - pitch as i32) as f32 * ROW_H - self.scroll_y
     }
 
+    fn point_to_beat_pitch(&self, local_x: f32, local_y: f32) -> (f32, u8) {
+        (self.x_to_beat(local_x), self.y_to_pitch(local_y))
+    }
+
+    fn rects_intersect(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+        a.0 < b.2 && a.2 > b.0 && a.1 < b.3 && a.3 > b.1
+    }
+
+    fn normalized_marquee_rect(
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        view_w: f32,
+        view_h: f32,
+    ) -> (f32, f32, f32, f32) {
+        let left = x0.min(x1).max(0.0);
+        let top = y0.min(y1).max(0.0);
+        let right = x0.max(x1).min(view_w);
+        let bottom = y0.max(y1).min(view_h);
+        (left, top, right, bottom)
+    }
+
+    fn apply_marquee_mode(
+        before: &HashSet<u64>,
+        hits: &HashSet<u64>,
+        mode: MarqueeSelectionMode,
+    ) -> HashSet<u64> {
+        match mode {
+            MarqueeSelectionMode::Replace => hits.clone(),
+            MarqueeSelectionMode::Add => before.union(hits).copied().collect(),
+            MarqueeSelectionMode::Toggle => before.symmetric_difference(hits).copied().collect(),
+            MarqueeSelectionMode::Subtract => before.difference(hits).copied().collect(),
+        }
+    }
+
+    fn begin_marquee_select(
+        &mut self,
+        lx: f32,
+        ly: f32,
+        mode: MarqueeSelectionMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection_before_marquee = self.selection.clone();
+        self.drag = PianoDrag::MarqueeSelect {
+            start_x: lx,
+            start_y: ly,
+            current_x: lx,
+            current_y: ly,
+            mode,
+            dragging: false,
+        };
+        cx.notify();
+    }
+
+    fn update_marquee_select(
+        &mut self,
+        lx: f32,
+        ly: f32,
+        clip_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (view_w, view_h) = self.grid_view_size();
+        let clamped_x = lx.clamp(0.0, view_w);
+        let clamped_y = ly.clamp(0.0, view_h);
+
+        if let PianoDrag::MarqueeSelect {
+            current_x,
+            current_y,
+            ..
+        } = &mut self.drag
+        {
+            *current_x = clamped_x;
+            *current_y = clamped_y;
+        } else {
+            return;
+        }
+
+        let (start_x, start_y, current_x, current_y, mode, was_dragging) =
+            match &self.drag {
+                PianoDrag::MarqueeSelect {
+                    start_x,
+                    start_y,
+                    current_x,
+                    current_y,
+                    mode,
+                    dragging,
+                } => (*start_x, *start_y, *current_x, *current_y, *mode, *dragging),
+                _ => return,
+            };
+
+        if !was_dragging {
+            let dx = current_x - start_x;
+            let dy = current_y - start_y;
+            if (dx * dx + dy * dy).sqrt() < MARQUEE_DRAG_THRESHOLD {
+                return;
+            }
+            if let PianoDrag::MarqueeSelect { dragging, .. } = &mut self.drag {
+                *dragging = true;
+            }
+            if midi_debug_enabled() {
+                eprintln!("[midi] marquee_start mode={}", mode.label());
+            }
+        }
+
+        let marquee = Self::normalized_marquee_rect(
+            start_x, start_y, current_x, current_y, view_w, view_h,
+        );
+        let hits = self.marquee_hits(cx, clip_id, marquee);
+        self.selection =
+            Self::apply_marquee_mode(&self.selection_before_marquee, &hits, mode);
+
+        if midi_debug_enabled() {
+            let (min_beat, max_pitch) = self.point_to_beat_pitch(marquee.0, marquee.1);
+            let (max_beat, min_pitch) = self.point_to_beat_pitch(marquee.2, marquee.3);
+            let (min_pitch, max_pitch) = (min_pitch.min(max_pitch), min_pitch.max(max_pitch));
+            let (min_beat, max_beat) = (min_beat.min(max_beat), min_beat.max(max_beat));
+            eprintln!(
+                "[midi] marquee_update beats={:.3}..{:.3} pitch={}..{} hits={}",
+                min_beat,
+                max_beat,
+                min_pitch,
+                max_pitch,
+                hits.len()
+            );
+            eprintln!("[midi] marquee_mode mode={}", mode.label());
+        }
+
+        cx.notify();
+    }
+
+    fn commit_marquee_select(&mut self, cx: &mut Context<Self>) {
+        let drag = std::mem::replace(&mut self.drag, PianoDrag::None);
+        let PianoDrag::MarqueeSelect { dragging, mode, .. } = drag else {
+            return;
+        };
+
+        if dragging {
+            if midi_debug_enabled() {
+                eprintln!("[midi] marquee_commit selected={}", self.selection.len());
+            }
+        } else if mode == MarqueeSelectionMode::Replace && !self.selection.is_empty() {
+            // Click on empty grid without drag — clear selection.
+            self.selection.clear();
+            cx.notify();
+        }
+
+        self.selection_before_marquee.clear();
+    }
+
+    fn cancel_marquee_select(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
+            self.selection = self.selection_before_marquee.clone();
+            self.selection_before_marquee.clear();
+            self.drag = PianoDrag::None;
+            cx.notify();
+        }
+    }
+
     /// Resolve the local (grid-relative) cursor position from a window-space
     /// point using the bounds captured during paint. `None` until the first
     /// frame has laid the grid out.
@@ -309,6 +536,14 @@ impl PianoRoll {
             }
         }
         (0.0, 4.0)
+    }
+
+    /// Scroll the pitch axis so `pitch` is vertically centered in the view.
+    fn scroll_to_pitch(&mut self, pitch: u8) {
+        let (_, view_h) = self.grid_view_size();
+        let target =
+            ((PITCH_CNT - 1) as f32 - pitch as f32) * ROW_H - view_h * 0.5 + ROW_H * 0.5;
+        self.scroll_y = target.clamp(0.0, self.max_scroll_y());
     }
 
     /// Scroll/zoom the grid so selected notes (or all notes) are visible.
@@ -427,45 +662,125 @@ impl PianoRoll {
         self.timeline.update(cx, |tl, tcx| tl.mark_project_changed(tcx));
     }
 
+    fn run_edit_command(&mut self, cmd: EditCommand, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |tl, tcx| {
+            tl.run_edit_command(cmd, tcx);
+        });
+        if self.midi_editor_sink {
+            crate::components::midi_editor_window::midi_editor_debug("edit command committed");
+        }
+    }
+
+    fn note_at_grid(&self, cx: &Context<Self>, clip_id: &str, lx: f32, ly: f32) -> Option<u64> {
+        let (view_w, view_h) = self.grid_view_size();
+        let rect = (
+            (lx - 2.0).max(0.0),
+            (ly - 2.0).max(0.0),
+            (lx + 2.0).min(view_w),
+            (ly + 2.0).min(view_h),
+        );
+        self.collect_notes_in_rect(cx, clip_id, rect).into_iter().next()
+    }
+
+    fn collect_notes_in_rect(
+        &self,
+        cx: &Context<Self>,
+        clip_id: &str,
+        rect: (f32, f32, f32, f32),
+    ) -> HashSet<u64> {
+        let tl = self.timeline.read(cx);
+        let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
+            return HashSet::new();
+        };
+        notes
+            .iter()
+            .filter(|n| {
+                Self::rects_intersect(rect, self.note_to_rect(&self.display_note(n)))
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+
     // ── Mouse handlers ─────────────────────────────────────────────────────
     // Notes are interactive elements that handle their own select/move/resize/
     // delete (and stop propagation), so the grid surface only deals with empty
     // space: create a note (Draw tool) or clear the selection (Select tool).
     fn on_grid_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
         window.focus(&self.focus);
         let Some((lx, ly)) = self.grid_local(event.position) else {
             // Bounds not captured yet (first frame) — ignore to avoid creating
             // a note at the wrong coordinate.
             return;
         };
-        let Some(clip_id) = self.editing_clip_id(cx) else {
+        let Some(_clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        if self.tool == PianoTool::Draw {
+
+        let marquee_modifier = event.modifiers.shift
+            || event.modifiers.control
+            || event.modifiers.platform
+            || event.modifiers.alt;
+
+        if self.tool == PianoTool::Draw && !marquee_modifier {
             let pitch = self.y_to_pitch(ly);
             let start = self.snap_beats(self.x_to_beat(lx));
-            let dur = self.step_beats().max(MIN_NOTE_BEATS);
-            let new_id = self.with_timeline(cx, |tl, _| {
-                tl.state.add_midi_note(&clip_id, pitch, start, dur, 100)
-            });
-            if let Some(id) = new_id {
-                self.selection = HashSet::from([id]);
-                // Drag right to extend the freshly drawn note.
-                self.drag = PianoDrag::Resize {
-                    id,
-                    start_x: event.position.x.into(),
-                    prev_dur: dur,
-                    new_dur: dur,
-                };
-            }
+            self.drag = PianoDrag::DrawNote {
+                pitch,
+                start_beat: start,
+                end_beat: start,
+            };
             cx.notify();
-        } else if !self.selection.is_empty() {
-            self.selection.clear();
-            cx.notify();
+        } else if self.tool == PianoTool::Select || marquee_modifier {
+            let mode = MarqueeSelectionMode::from_modifiers(&event.modifiers);
+            self.begin_marquee_select(lx, ly, mode, cx);
         }
     }
 
-    /// Note body mouse-down: (multi-)select and begin a move drag.
+    fn on_grid_right_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.focus(&self.focus);
+        let Some((lx, ly)) = self.grid_local(event.position) else {
+            return;
+        };
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let mut erased = HashSet::new();
+        if let Some(id) = self.note_at_grid(cx, &clip_id, lx, ly) {
+            erased.insert(id);
+        }
+        self.erase_preview_ids = erased.clone();
+        self.drag = PianoDrag::EraseNotes {
+            start_x: lx,
+            start_y: ly,
+            current_x: lx,
+            current_y: ly,
+            erased,
+        };
+        cx.notify();
+    }
+
+    fn note_right_down(&mut self, id: u64, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let Some(_clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let erased = HashSet::from([id]);
+        self.erase_preview_ids = erased.clone();
+        self.drag = PianoDrag::EraseNotes {
+            start_x: lx,
+            start_y: ly,
+            current_x: lx,
+            current_y: ly,
+            erased,
+        };
+        cx.notify();
+    }
     fn note_mouse_down(
         &mut self,
         id: u64,
@@ -533,23 +848,6 @@ impl PianoRoll {
         cx.notify();
     }
 
-    /// Right-click a note: delete it (or the whole selection if part of one).
-    fn note_right_down(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(clip_id) = self.editing_clip_id(cx) else {
-            return;
-        };
-        let ids: Vec<u64> = if self.selection.contains(&id) && self.selection.len() > 1 {
-            self.selection.iter().copied().collect()
-        } else {
-            vec![id]
-        };
-        self.with_timeline(cx, |tl, _| {
-            tl.state.delete_midi_notes(&clip_id, &ids);
-        });
-        self.selection.clear();
-        cx.notify();
-    }
-
     /// Velocity bar mouse-down: begin a velocity drag.
     fn begin_velocity_drag(
         &mut self,
@@ -584,7 +882,65 @@ impl PianoRoll {
     }
 
     fn on_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if event.pressed_button == Some(MouseButton::Right) {
+            let Some((lx, ly)) = self.grid_local(event.position) else {
+                return;
+            };
+            let Some(clip_id) = self.editing_clip_id(cx) else {
+                return;
+            };
+            if let PianoDrag::EraseNotes {
+                current_x,
+                current_y,
+                ..
+            } = &mut self.drag
+            {
+                *current_x = lx;
+                *current_y = ly;
+            }
+            let (start_x, start_y, cur_x, cur_y) = match &self.drag {
+                PianoDrag::EraseNotes {
+                    start_x,
+                    start_y,
+                    current_x,
+                    current_y,
+                    ..
+                } => (*start_x, *start_y, *current_x, *current_y),
+                _ => return,
+            };
+            let (view_w, view_h) = self.grid_view_size();
+            let rect = Self::normalized_marquee_rect(start_x, start_y, cur_x, cur_y, view_w, view_h);
+            let hits = self.collect_notes_in_rect(cx, &clip_id, rect);
+            if let PianoDrag::EraseNotes { erased, .. } = &mut self.drag {
+                for id in hits {
+                    erased.insert(id);
+                }
+                self.erase_preview_ids = erased.clone();
+                cx.notify();
+            }
+            return;
+        }
         if event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        if matches!(self.drag, PianoDrag::DrawNote { .. }) {
+            if let Some((lx, _)) = self.grid_local(event.position) {
+                let beat = self.snap_beats(self.x_to_beat(lx));
+                if let PianoDrag::DrawNote { end_beat, .. } = &mut self.drag {
+                    *end_beat = beat;
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        if let PianoDrag::MarqueeSelect { .. } = &self.drag {
+            let Some((lx, ly)) = self.grid_local(event.position) else {
+                return;
+            };
+            let Some(clip_id) = self.editing_clip_id(cx) else {
+                return;
+            };
+            self.update_marquee_select(lx, ly, &clip_id, cx);
             return;
         }
         match &mut self.drag {
@@ -634,11 +990,102 @@ impl PianoRoll {
                     });
                 }
             }
+            PianoDrag::MarqueeSelect { .. } => {}
+            PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
         }
     }
 
+    fn commit_draw_note(&mut self, drag: PianoDrag, cx: &mut Context<Self>) {
+        let PianoDrag::DrawNote {
+            pitch,
+            start_beat,
+            end_beat,
+        } = drag
+        else {
+            return;
+        };
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let clip_len = self.timeline.read(cx).state.clip_duration_beats(&clip_id);
+        let Some(clip_len) = clip_len else {
+            return;
+        };
+        let (lo, hi) = normalize_range(start_beat, end_beat);
+        let step = self.step_beats().max(MIN_NOTE_BEATS);
+        let mut duration = (hi - lo).max(step);
+        if self.snap_on {
+            duration = ((duration / step).ceil() * step).max(MIN_NOTE_BEATS);
+        }
+        let Some((start, duration)) =
+            crate::components::timeline::timeline_state::TimelineState::clamp_note_to_clip_bounds(
+                lo, duration, clip_len,
+            )
+        else {
+            return;
+        };
+        let note = MidiNoteState::new(pitch, start, duration, 100);
+        let id = note.id;
+        self.run_edit_command(
+            EditCommand::CreateMidiNote {
+                clip_id,
+                note,
+            },
+            cx,
+        );
+        self.selection = HashSet::from([id]);
+        cx.notify();
+    }
+
+    fn commit_erase_notes(&mut self, drag: PianoDrag, cx: &mut Context<Self>) {
+        let PianoDrag::EraseNotes { erased, .. } = drag else {
+            return;
+        };
+        self.erase_preview_ids.clear();
+        if erased.is_empty() {
+            return;
+        }
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let notes: Vec<MidiNoteState> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| erased.contains(&n.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if notes.is_empty() {
+            return;
+        }
+        self.run_edit_command(
+            EditCommand::DeleteMidiNotes { clip_id, notes },
+            cx,
+        );
+        self.selection.retain(|id| !erased.contains(id));
+        cx.notify();
+    }
+
     fn on_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
+            self.commit_marquee_select(cx);
+            return;
+        }
         let drag = std::mem::replace(&mut self.drag, PianoDrag::None);
+        if matches!(drag, PianoDrag::DrawNote { .. }) {
+            self.commit_draw_note(drag, cx);
+            return;
+        }
+        if matches!(drag, PianoDrag::EraseNotes { .. }) {
+            self.commit_erase_notes(drag, cx);
+            return;
+        }
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
@@ -682,6 +1129,8 @@ impl PianoRoll {
                 // the change is saved / synced.
                 self.mark_project_dirty(cx);
             }
+            PianoDrag::MarqueeSelect { .. } => {}
+            PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
         }
     }
 
@@ -693,15 +1142,8 @@ impl PianoRoll {
         let ctrl = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         match key {
             "delete" | "backspace" if !self.selection.is_empty() => {
-                // Stop the key from bubbling to the layout shortcut dispatcher,
-                // which would otherwise run `edit:delete` and remove the whole
-                // MIDI clip on top of deleting the notes.
                 cx.stop_propagation();
-                let ids: Vec<u64> = self.selection.iter().copied().collect();
-                self.with_timeline(cx, |tl, _| {
-                    tl.state.delete_midi_notes(&clip_id, &ids);
-                });
-                self.selection.clear();
+                self.delete_selection(cx);
             }
             "a" if ctrl => {
                 cx.stop_propagation();
@@ -717,9 +1159,13 @@ impl PianoRoll {
             }
             "escape" => {
                 cx.stop_propagation();
-                self.drag = PianoDrag::None;
-                self.selection.clear();
-                cx.notify();
+                if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
+                    self.cancel_marquee_select(cx);
+                } else {
+                    self.drag = PianoDrag::None;
+                    self.selection.clear();
+                    cx.notify();
+                }
             }
             "f" if !ctrl => {
                 cx.stop_propagation();
@@ -748,10 +1194,27 @@ impl PianoRoll {
         if self.selection.is_empty() {
             return;
         }
-        let ids: Vec<u64> = self.selection.iter().copied().collect();
-        self.with_timeline(cx, |tl, _| {
-            tl.state.delete_midi_notes(&clip_id, &ids);
-        });
+        let ids: HashSet<u64> = self.selection.clone();
+        let notes: Vec<MidiNoteState> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| ids.contains(&n.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if notes.is_empty() {
+            return;
+        }
+        self.run_edit_command(
+            EditCommand::DeleteMidiNotes { clip_id, notes },
+            cx,
+        );
         self.selection.clear();
     }
 
@@ -814,6 +1277,133 @@ impl PianoRoll {
             duration,
             velocity: n.velocity,
         }
+    }
+
+    fn note_to_rect(&self, note: &DisplayNote) -> (f32, f32, f32, f32) {
+        let x = self.beat_to_x(note.start);
+        let w = (note.duration * self.ppb).max(3.0);
+        let y = self.pitch_to_y(note.pitch) + 1.0;
+        let h = ROW_H - 2.0;
+        (x, y, x + w, y + h)
+    }
+
+    fn marquee_hits(
+        &self,
+        cx: &Context<Self>,
+        clip_id: &str,
+        marquee: (f32, f32, f32, f32),
+    ) -> HashSet<u64> {
+        let tl = self.timeline.read(cx);
+        let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
+            return HashSet::new();
+        };
+        notes
+            .iter()
+            .filter(|n| {
+                let d = self.display_note(n);
+                Self::rects_intersect(marquee, self.note_to_rect(&d))
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+
+    fn build_draw_note_preview(&self) -> Option<gpui::AnyElement> {
+        let PianoDrag::DrawNote {
+            pitch,
+            start_beat,
+            end_beat,
+        } = &self.drag
+        else {
+            return None;
+        };
+        let (lo, hi) = normalize_range(*start_beat, *end_beat);
+        let step = self.step_beats().max(MIN_NOTE_BEATS);
+        let duration = (hi - lo).max(step);
+        let x = self.beat_to_x(lo);
+        let w = (duration * self.ppb).max(3.0);
+        let y = self.pitch_to_y(*pitch);
+        Some(
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(y + 1.0))
+                .w(px(w))
+                .h(px(ROW_H - 2.0))
+                .rounded(px(2.0))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.35))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.85))
+                .into_any_element(),
+        )
+    }
+
+    fn build_erase_overlay(&self) -> Option<gpui::AnyElement> {
+        let PianoDrag::EraseNotes {
+            start_x,
+            start_y,
+            current_x,
+            current_y,
+            ..
+        } = &self.drag
+        else {
+            return None;
+        };
+        let (view_w, view_h) = self.grid_view_size();
+        let (left, top, right, bottom) =
+            Self::normalized_marquee_rect(*start_x, *start_y, *current_x, *current_y, view_w, view_h);
+        let w = (right - left).max(0.0);
+        let h = (bottom - top).max(0.0);
+        if w < 1.0 && h < 1.0 {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(w.max(1.0)))
+                .h(px(h.max(1.0)))
+                .bg(Colors::with_alpha(Colors::status_error(), 0.12))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::status_error(), 0.75))
+                .into_any_element(),
+        )
+    }
+
+    fn build_marquee_overlay(&self) -> Option<gpui::AnyElement> {
+        let PianoDrag::MarqueeSelect {
+            start_x,
+            start_y,
+            current_x,
+            current_y,
+            dragging: true,
+            ..
+        } = &self.drag
+        else {
+            return None;
+        };
+
+        let (view_w, view_h) = self.grid_view_size();
+        let (left, top, right, bottom) =
+            Self::normalized_marquee_rect(*start_x, *start_y, *current_x, *current_y, view_w, view_h);
+        let w = (right - left).max(0.0);
+        let h = (bottom - top).max(0.0);
+        if w < 1.0 || h < 1.0 {
+            return None;
+        }
+
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(w))
+                .h(px(h))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.15))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.85))
+                .into_any_element(),
+        )
     }
 }
 
@@ -878,6 +1468,8 @@ impl Render for PianoRoll {
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_up))
             .on_scroll_wheel(cx.listener(Self::on_wheel))
             .child(toolbar)
             .child(body)
@@ -966,6 +1558,15 @@ impl PianoRoll {
                     }
                 }),
             ))
+            .child(tool_btn(
+                "pr-c4",
+                "C4",
+                false,
+                cx.listener(|this, _, _w, cx| {
+                    this.scroll_to_pitch(60);
+                    cx.notify();
+                }),
+            ))
             .child(div().flex_1())
             .when_some(self.on_pop_out.clone(), |row, pop_out| {
                 row.child(
@@ -1011,11 +1612,23 @@ impl PianoRoll {
         let end_beat = self.x_to_beat(view_w);
 
         // Piano key lane.
+        // Label policy: show every note name when each row has enough vertical
+        // room (>= 14 px), otherwise fall back to C-only labels so the lane
+        // stays readable.
+        let show_all_labels = ROW_H >= 14.0;
         let keys: Vec<_> = (first_pitch..=last_pitch)
             .map(|p| {
                 let y = self.pitch_to_y(p as u8);
                 let black = is_black(p);
-                let is_c = p % 12 == 0;
+                let is_c = p.rem_euclid(12) == 0;
+                let label_color = if is_c {
+                    Colors::text_primary()
+                } else if black {
+                    Colors::text_muted()
+                } else {
+                    Colors::text_secondary()
+                };
+                let show_label = is_c || show_all_labels;
                 div()
                     .absolute()
                     .top(px(y))
@@ -1033,11 +1646,11 @@ impl PianoRoll {
                     .items_center()
                     .justify_end()
                     .pr(px(5.0))
-                    .when(is_c, |this| {
+                    .when(show_label, |this| {
                         this.child(
                             div()
                                 .text_size(px(8.0))
-                                .text_color(Colors::text_secondary())
+                                .text_color(label_color)
                                 .child(note_name(p)),
                         )
                     })
@@ -1063,6 +1676,9 @@ impl PianoRoll {
         let ruler = self.build_ruler(start_beat, end_beat, bpb);
         let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
         let notes_geo = self.build_note_elements(cx, clip_id, track_color);
+        let marquee_overlay = self.build_marquee_overlay();
+        let draw_preview = self.build_draw_note_preview();
+        let erase_overlay = self.build_erase_overlay();
         let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
         let grid_cursor = if self.tool == PianoTool::Draw {
             gpui::CursorStyle::Crosshair
@@ -1164,7 +1780,14 @@ impl PianoRoll {
                             .children(clip_bounds)
                             .when_some(playhead_line, |el, line| el.child(line))
                             .children(notes_geo)
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_grid_down)),
+                            .when_some(marquee_overlay, |el, overlay| el.child(overlay))
+                            .when_some(draw_preview, |el, overlay| el.child(overlay))
+                            .when_some(erase_overlay, |el, overlay| el.child(overlay))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_grid_down))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(Self::on_grid_right_down),
+                            ),
                     )
                     // Velocity lane.
                     .child(
@@ -1383,21 +2006,29 @@ impl PianoRoll {
             );
         }
 
-        // ── Horizontal octave boundary lines (top of each C row) ──
+        // ── Horizontal pitch row lines ──
+        // Draw a line for every visible semitone row so editing reads like a
+        // real piano roll. C gets the strongest line (octave boundary), F gets
+        // a medium line (the other white-white separator on a piano), and every
+        // other row gets a faint hairline.
         for p in first_pitch..=last_pitch {
-            if p % 12 == 0 {
-                let y = self.pitch_to_y(p as u8);
-                out.push(
-                    div()
-                        .absolute()
-                        .top(px(y))
-                        .left_0()
-                        .w(px(view_w))
-                        .h(px(1.0))
-                        .bg(Colors::with_alpha(Colors::text_primary(), 0.12))
-                        .into_any_element(),
-                );
-            }
+            let m = p.rem_euclid(12);
+            let alpha = match m {
+                0 => 0.14,   // C: octave boundary
+                5 => 0.07,   // F: white/white separator
+                _ => 0.035,  // every other semitone row
+            };
+            let y = self.pitch_to_y(p as u8);
+            out.push(
+                div()
+                    .absolute()
+                    .top(px(y))
+                    .left_0()
+                    .w(px(view_w))
+                    .h(px(1.0))
+                    .bg(Colors::with_alpha(Colors::text_primary(), alpha))
+                    .into_any_element(),
+            );
         }
 
         out
@@ -1491,7 +2122,7 @@ impl PianoRoll {
         let (view_w, view_h) = self.grid_view_size();
         // Collect owned geometry first so the timeline read borrow is released
         // before we build per-note listeners (which borrow `cx` mutably).
-        let geos: Vec<(u64, f32, f32, f32, bool)> = {
+        let geos: Vec<(u64, f32, f32, f32, bool, bool)> = {
             let tl = self.timeline.read(cx);
             let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
                 return Vec::new();
@@ -1507,16 +2138,31 @@ impl PianoRoll {
                     if x + w < 0.0 || x > view_w || y + ROW_H < 0.0 || y > view_h {
                         return None;
                     }
-                    Some((d.id, x, y, w, self.selection.contains(&d.id)))
+                    Some((
+                        d.id,
+                        x,
+                        y,
+                        w,
+                        self.selection.contains(&d.id),
+                        self.erase_preview_ids.contains(&d.id),
+                    ))
                 })
                 .collect()
         };
 
         geos.into_iter()
-            .map(|(id, x, y, w, selected)| {
+            .map(|(id, x, y, w, selected, erase_target)| {
                 let mut fill = track_color;
-                fill.a = if selected { 1.0 } else { 0.78 };
-                let border = if selected {
+                fill.a = if erase_target {
+                    0.45
+                } else if selected {
+                    1.0
+                } else {
+                    0.78
+                };
+                let border = if erase_target {
+                    Colors::status_error()
+                } else if selected {
                     Colors::text_primary()
                 } else {
                     Colors::with_alpha(track_color, 0.55)
@@ -1542,9 +2188,10 @@ impl PianoRoll {
                     )
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                        cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                             cx.stop_propagation();
-                            this.note_right_down(id, cx);
+                            let (lx, ly) = this.grid_local(ev.position).unwrap_or((0.0, 0.0));
+                            this.note_right_down(id, lx, ly, cx);
                         }),
                     );
                 // Right-edge resize handle (only when the note is wide enough to

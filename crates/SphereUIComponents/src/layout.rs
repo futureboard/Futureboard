@@ -141,9 +141,12 @@ pub struct StudioLayout {
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
     timeline: Entity<components::timeline::Timeline>,
-    /// Piano-roll editor shown in the bottom panel's Editor tab. Holds a handle
-    /// to the timeline so note edits mutate the single project source of truth.
+    /// Piano-roll editor for MIDI clips in the bottom panel router.
     piano_roll: Entity<components::piano_roll::PianoRoll>,
+    /// Audio clip editor for the bottom panel router.
+    audio_editor: Entity<components::AudioEditorHost>,
+    /// Routes bottom Editor tab between audio / MIDI / empty state.
+    clip_editor_panel: Entity<components::ClipEditorPanel>,
     /// Second piano-roll instance for the floating MIDI editor (same timeline).
     piano_roll_floating: Entity<components::piano_roll::PianoRoll>,
     /// Global floating MIDI editor window (one instance; switches clip on open).
@@ -483,6 +486,17 @@ impl StudioLayout {
             let timeline = timeline.clone();
             cx.new(|cx| components::piano_roll::PianoRoll::new(timeline, cx))
         };
+        let audio_editor = {
+            let timeline = timeline.clone();
+            cx.new(|cx| components::AudioEditorHost::new(timeline, cx))
+        };
+        let clip_editor_panel = cx.new(|_| {
+            components::ClipEditorPanel::new(
+                timeline.clone(),
+                piano_roll.clone(),
+                audio_editor.clone(),
+            )
+        });
         let piano_roll_floating = {
             let timeline = timeline.clone();
             cx.new(|cx| {
@@ -598,6 +612,8 @@ impl StudioLayout {
             bottom_panel_state: BottomPanelState::default(),
             timeline,
             piano_roll,
+            audio_editor,
+            clip_editor_panel,
             piano_roll_floating,
             midi_editor_window: None,
             pending_midi_editor_open: None,
@@ -1469,6 +1485,18 @@ impl StudioLayout {
             "mixer:reset-volume" => self.reset_selected_track_volume(cx),
             "mixer:reset-pan" => self.reset_selected_track_pan(cx),
             "edit:delete" | "clip:delete" => self.delete_selected_clip_or_track(cx),
+            "edit:undo" => {
+                let _ = self.timeline.update(cx, |timeline, cx| {
+                    timeline.undo_edit(cx);
+                });
+                self.mark_dirty();
+            }
+            "edit:redo" => {
+                let _ = self.timeline.update(cx, |timeline, cx| {
+                    timeline.redo_edit(cx);
+                });
+                self.mark_dirty();
+            }
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
 
             "editor:open-bottom" => self.open_midi_editor_bottom_panel(cx),
@@ -2672,10 +2700,14 @@ impl StudioLayout {
         });
     }
 
-    pub(crate) fn open_midi_editor_bottom_panel(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_editor_bottom_panel(&mut self, cx: &mut Context<Self>) {
         self.active_bottom_tab = components::BottomTab::Editor;
         self.panels.mixer_docked = true;
         cx.notify();
+    }
+
+    pub(crate) fn open_midi_editor_bottom_panel(&mut self, cx: &mut Context<Self>) {
+        self.open_editor_bottom_panel(cx);
     }
 
     pub(crate) fn open_midi_editor_external_window(
@@ -2683,6 +2715,9 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_midi_clip_id(cx).is_none() {
+            return;
+        }
         self.pending_midi_editor_open = Some(owner_bounds.unwrap_or_else(|| Bounds {
             origin: gpui::Point::default(),
             size: gpui::size(px(1400.0), px(900.0)),
@@ -2964,15 +2999,16 @@ impl StudioLayout {
     }
 
     fn delete_selected_clip_or_track(&mut self, cx: &mut Context<Self>) {
-        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
-                timeline.state.delete_clip(&id);
+                timeline.delete_clip_command(&id, cx);
             } else if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline.state.delete_track(&id);
+                timeline.mark_project_changed(cx);
+                cx.notify();
             }
-            cx.notify();
         });
+        self.mark_dirty();
     }
 
     fn duplicate_selected_clip(&mut self, cx: &mut Context<Self>) {
@@ -4984,7 +5020,7 @@ impl Render for StudioLayout {
                         mixer_scroll_x,
                         mixer_viewport_width,
                         on_mixer_scroll,
-                        Some(self.piano_roll.clone().into_any_element()),
+                        Some(self.clip_editor_panel.clone().into_any_element()),
                         on_tab_click,
                         on_resize_start,
                         on_resize_move,

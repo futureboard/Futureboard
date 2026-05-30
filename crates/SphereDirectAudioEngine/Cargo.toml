@@ -39,6 +39,9 @@ sphere-audio-plugins = { path = "../SphereAudioPlugins" }
 # Multi-format audio decoder (MP3, FLAC, OGG Vorbis, WAV, AIFF).
 # WAV is also decoded by our own hand-written parser (fast, zero deps);
 # symphonia handles the compressed and container formats.
+# Memory-map large WAV files for playback without decoding into RAM.
+memmap2 = "0.9"
+
 symphonia = { version = "0.5", default-features = false, features = [
     "wav",      # WAV/RIFF container
     "pcm",      # PCM codec (WAV)

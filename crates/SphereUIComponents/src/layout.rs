@@ -17,10 +17,12 @@ use crate::components::add_track_dialog::{
 use crate::components::plugin_editor_window::PluginEditorWindow;
 use crate::components::plugin_manager::{open_plugin_manager_window, PluginManagerWindow};
 use crate::components::plugin_picker::{
-    plugin_picker_overlay, CatalogStatus as PluginCatalogStatus, PickerFilter,
-    PluginPickerCallbacks, PluginPickerState, STUB_PLUGIN_ID,
+    compute_filter_result, ensure_default_highlight, move_highlight, page_size_for_height,
+    plugin_picker_overlay, sync_selection_from_highlight, visible_plugin_id_at,
+    CatalogStatus as PluginCatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
+    PluginPickerState, PluginSearchIndex, STUB_PLUGIN_ID,
 };
-use sphere_plugin_host::CatalogLoad;
+use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
 use crate::components::context_menu::ContextMenuEntry;
 use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
@@ -164,6 +166,9 @@ pub struct StudioLayout {
     /// Phase 2b insert plugin picker overlay state.
     plugin_picker: PluginPickerState,
     plugin_picker_search_input: TextInputState,
+    plugin_picker_prefs: PluginPickerPrefs,
+    plugin_search_index: Option<PluginSearchIndex>,
+    plugin_picker_au_error: Option<String>,
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
     /// Cached plugin registry scan result. `None` until the first
@@ -636,7 +641,10 @@ impl StudioLayout {
                 "plugin-picker-search-input",
                 cx.focus_handle(),
             )
-            .with_placeholder("Search plugins..."),
+            .with_placeholder("Search plugins by name, vendor, category, or format…"),
+            plugin_picker_prefs: PluginPickerPrefs::load(),
+            plugin_search_index: None,
+            plugin_picker_au_error: load_au_cache_state().last_error,
             add_track_window: None,
             plugin_manager_window: None,
             available_plugins: None,
@@ -1852,7 +1860,9 @@ impl StudioLayout {
                             .iter()
                             .map(|e| e.to_registry_plugin())
                             .collect();
-                        this.available_plugins = Some(plugins);
+                        this.available_plugins = Some(plugins.clone());
+                        this.plugin_search_index = Some(PluginSearchIndex::from_plugins(plugins));
+                        this.plugin_picker_au_error = load_au_cache_state().last_error;
                         this.plugin_cache_present = true;
                         this.plugin_catalog_status = PluginCatalogStatus::Ready;
                         if debug {
@@ -1899,11 +1909,35 @@ impl StudioLayout {
     /// overlay opens instantly even with 1000+ plug-ins. No insert slot is
     /// created until the user picks a plugin.
     fn open_insert_picker(&mut self, track_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::components::timeline::timeline_state::TrackType;
+
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
         let started = std::time::Instant::now();
-        self.plugin_picker = PluginPickerState::open_for(track_id);
+        let track_info = self.timeline.read(cx).state.find_track(track_id).map(|track| {
+            (
+                track.name.clone(),
+                track.track_type,
+                track.inserts.len(),
+            )
+        });
+        let (track_name, track_type, next_slot) = track_info.unwrap_or((
+            track_id.to_string(),
+            TrackType::Audio,
+            0,
+        ));
+        self.plugin_picker = PluginPickerState::open_for(
+            track_id,
+            &track_name,
+            track_type,
+            next_slot,
+            self.plugin_picker_prefs.show_details,
+        );
         self.plugin_picker_search_input.set_value("");
+        self.plugin_picker.query = String::new();
         self.plugin_picker_search_input.focus_handle.focus(window);
+        if let Some(index) = self.plugin_search_index.as_ref() {
+            ensure_default_highlight(&mut self.plugin_picker, index, &self.plugin_picker_prefs);
+        }
         // Kick off (or rejoin) the background SQLite load. Picker shell is
         // visible immediately; skeleton rows fill in until the catalog lands.
         if self.available_plugins.is_none()
@@ -1931,18 +1965,30 @@ impl StudioLayout {
     /// `RegistryPlugin.id` or [`STUB_PLUGIN_ID`]. Closes the picker. No audio
     /// thread interaction — the next project sync carries the descriptor down.
     fn apply_picked_insert(&mut self, plugin_id: &str, cx: &mut Context<Self>) {
+        use crate::components::plugin_picker::validate_insert;
         use crate::components::timeline::timeline_state::InsertPluginFormat;
         use sphere_plugin_host::PluginFormat as RegFmt;
 
-        let track_id = self.plugin_picker.track_id.clone();
+        let track_id = self.plugin_picker.insert_target.track_id.clone();
         if track_id.is_empty() {
             self.plugin_picker = PluginPickerState::closed();
             cx.notify();
             return;
         }
 
-        // Resolve the descriptor from the registry cache (or stub fallback)
-        // before touching the timeline entity to avoid overlapping borrows.
+        if plugin_id != STUB_PLUGIN_ID {
+            if let Some(plugins) = self.available_plugins.as_ref() {
+                if let Some(reg) = plugins.iter().find(|p| p.id == plugin_id) {
+                    if validate_insert(reg, &self.plugin_picker.insert_target)
+                        != crate::components::plugin_picker::InsertValidation::Ok
+                    {
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        }
+
         let descriptor = if plugin_id == STUB_PLUGIN_ID {
             None
         } else {
@@ -1987,6 +2033,9 @@ impl StudioLayout {
             });
             self.mark_dirty();
             self.engine_project_dirty = true;
+            if plugin_id != STUB_PLUGIN_ID {
+                self.plugin_picker_prefs.record_recent(plugin_id);
+            }
         }
         self.plugin_picker = PluginPickerState::closed();
         cx.notify();
@@ -3291,7 +3340,7 @@ impl StudioLayout {
     fn handle_plugin_picker_key(
         &mut self,
         event: &KeyDownEvent,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.plugin_picker.is_open {
@@ -3300,23 +3349,136 @@ impl StudioLayout {
         if event.is_held {
             return true;
         }
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.plugin_picker = PluginPickerState::closed();
-                cx.notify();
-                true
-            }
-            _ => {
-                if self.plugin_picker_search_input.is_focused(window) || is_text_input_key(event) {
-                    let action = self
-                        .plugin_picker_search_input
-                        .handle_key_with_clipboard(event, Some(cx));
-                    self.sync_text_input_target(TextMenuTarget::PluginPickerSearch);
-                    return !matches!(action, TextInputAction::Pass);
-                }
-                false
-            }
+
+        let modifiers = &event.keystroke.modifiers;
+        let key = event.keystroke.key.as_str();
+
+        if key == "escape" {
+            self.plugin_picker = PluginPickerState::closed();
+            cx.notify();
+            return true;
         }
+
+        if (modifiers.control || modifiers.platform) && key.eq_ignore_ascii_case("f") {
+            self.plugin_picker_search_input.focus_handle.focus(window);
+            cx.notify();
+            return true;
+        }
+
+        let Some(index) = self.plugin_search_index.clone() else {
+            return self.handle_plugin_picker_text_input(event, window, cx);
+        };
+
+        let visible_len = compute_filter_result(
+            &index,
+            &self.plugin_picker.query,
+            &self.plugin_picker.filters,
+            &self.plugin_picker_prefs,
+            std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some(),
+        )
+        .indices
+        .len();
+
+        match key {
+            "enter" => {
+                if let Some(id) = visible_plugin_id_at(
+                    &self.plugin_picker,
+                    &index,
+                    &self.plugin_picker_prefs,
+                ) {
+                    self.apply_picked_insert(&id, cx);
+                }
+                return true;
+            }
+            "up" | "arrowup" => {
+                move_highlight(&mut self.plugin_picker, -1, visible_len);
+                sync_selection_from_highlight(
+                    &mut self.plugin_picker,
+                    &index,
+                    &self.plugin_picker_prefs,
+                );
+                cx.notify();
+                return true;
+            }
+            "down" | "arrowdown" => {
+                move_highlight(&mut self.plugin_picker, 1, visible_len);
+                sync_selection_from_highlight(
+                    &mut self.plugin_picker,
+                    &index,
+                    &self.plugin_picker_prefs,
+                );
+                cx.notify();
+                return true;
+            }
+            "home" => {
+                self.plugin_picker.highlighted_index = 0;
+                sync_selection_from_highlight(
+                    &mut self.plugin_picker,
+                    &index,
+                    &self.plugin_picker_prefs,
+                );
+                cx.notify();
+                return true;
+            }
+            "end" => {
+                if visible_len > 0 {
+                    self.plugin_picker.highlighted_index = visible_len - 1;
+                    sync_selection_from_highlight(
+                        &mut self.plugin_picker,
+                        &index,
+                        &self.plugin_picker_prefs,
+                    );
+                }
+                cx.notify();
+                return true;
+            }
+            "pageup" => {
+                let page = page_size_for_height(self.plugin_picker_prefs.window_height);
+                move_highlight(
+                    &mut self.plugin_picker,
+                    -(page as isize),
+                    visible_len,
+                );
+                sync_selection_from_highlight(
+                    &mut self.plugin_picker,
+                    &index,
+                    &self.plugin_picker_prefs,
+                );
+                cx.notify();
+                return true;
+            }
+            "pagedown" => {
+                let page = page_size_for_height(self.plugin_picker_prefs.window_height);
+                move_highlight(&mut self.plugin_picker, page as isize, visible_len);
+                sync_selection_from_highlight(
+                    &mut self.plugin_picker,
+                    &index,
+                    &self.plugin_picker_prefs,
+                );
+                cx.notify();
+                return true;
+            }
+            _ => self.handle_plugin_picker_text_input(event, window, cx),
+        }
+    }
+
+    fn handle_plugin_picker_text_input(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.plugin_picker_search_input.is_focused(window) || is_text_input_key(event) {
+            let action = self
+                .plugin_picker_search_input
+                .handle_key_with_clipboard(event, Some(cx));
+            self.sync_text_input_target(TextMenuTarget::PluginPickerSearch);
+            if let Some(index) = self.plugin_search_index.as_ref() {
+                ensure_default_highlight(&mut self.plugin_picker, index, &self.plugin_picker_prefs);
+            }
+            return !matches!(action, TextInputAction::Pass);
+        }
+        false
     }
 
     fn text_input_mut(&mut self, target: TextMenuTarget) -> &mut TextInputState {
@@ -3346,6 +3508,14 @@ impl StudioLayout {
             }
             TextMenuTarget::PluginPickerSearch => {
                 self.plugin_picker.query = self.plugin_picker_search_input.value.clone();
+                if let Some(index) = self.plugin_search_index.as_ref() {
+                    self.plugin_picker.highlighted_index = 0;
+                    ensure_default_highlight(
+                        &mut self.plugin_picker,
+                        index,
+                        &self.plugin_picker_prefs,
+                    );
+                }
             }
         }
     }
@@ -4723,6 +4893,23 @@ impl Render for StudioLayout {
                     move |plugin_id: &String, _w, cx| {
                         let plugin_id = plugin_id.clone();
                         let _ = this.update(cx, |this, cx| {
+                            if let Some(index) = this.plugin_search_index.as_ref() {
+                                let result = compute_filter_result(
+                                        index,
+                                        &this.plugin_picker.query,
+                                        &this.plugin_picker.filters,
+                                        &this.plugin_picker_prefs,
+                                        std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG")
+                                            .is_some(),
+                                    );
+                                if let Some(highlight) = result.indices.iter().position(|&idx| {
+                                    index
+                                        .plugin_at(idx)
+                                        .is_some_and(|p| p.id == plugin_id)
+                                }) {
+                                    this.plugin_picker.highlighted_index = highlight;
+                                }
+                            }
                             this.plugin_picker.selected_id = Some(plugin_id);
                             cx.notify();
                         });
@@ -4733,8 +4920,24 @@ impl Render for StudioLayout {
                     move |filter: &PickerFilter, _w, cx| {
                         let filter = filter.clone();
                         let _ = this.update(cx, |this, cx| {
-                            this.plugin_picker.filter = filter;
-                            this.plugin_picker.selected_id = None;
+                            this.plugin_picker.set_sidebar_filter(filter);
+                            if let Some(index) = this.plugin_search_index.as_ref() {
+                                ensure_default_highlight(
+                                    &mut this.plugin_picker,
+                                    index,
+                                    &this.plugin_picker_prefs,
+                                );
+                            }
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_toggle_favorite: Arc::new({
+                    let this = cx.entity().clone();
+                    move |plugin_id: &String, _w, cx| {
+                        let plugin_id = plugin_id.clone();
+                        let _ = this.update(cx, |this, cx| {
+                            this.plugin_picker_prefs.toggle_favorite(&plugin_id);
                             cx.notify();
                         });
                     }
@@ -4753,6 +4956,7 @@ impl Render for StudioLayout {
                     move |_: &(), _w, cx| {
                         let _ = this.update(cx, |this, cx| {
                             this.available_plugins = None;
+                            this.plugin_search_index = None;
                             this.plugin_catalog_status = PluginCatalogStatus::Loading;
                             this.arm_catalog_load(cx);
                             cx.notify();
@@ -4778,6 +4982,7 @@ impl Render for StudioLayout {
                             // reports MissingDatabase, prompting Scan Now.
                             let _ = sphere_plugin_host::plugin_db::delete_database_file();
                             this.available_plugins = None;
+                            this.plugin_search_index = None;
                             this.plugin_catalog_status = PluginCatalogStatus::Loading;
                             this.arm_catalog_load(cx);
                             cx.notify();
@@ -4785,17 +4990,18 @@ impl Render for StudioLayout {
                     }
                 }),
             };
-            let plugins = self.available_plugins.clone().unwrap_or_default();
             let catalog_status = self.plugin_catalog_status.clone();
             Some(
                 plugin_picker_overlay(
                     &self.plugin_picker,
-                    &plugins,
+                    self.plugin_search_index.as_ref(),
+                    &self.plugin_picker_prefs,
                     catalog_status,
                     &self.plugin_picker_search_input,
                     self.plugin_picker_search_input.is_focused(window),
                     search_context_callbacks,
                     picker_callbacks,
+                    self.plugin_picker_au_error.as_deref(),
                 )
                 .into_any_element(),
             )

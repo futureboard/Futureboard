@@ -28,34 +28,46 @@ const SCHEMA_VERSION: i32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginScanStatus {
-    /// Plug-in scanned successfully and the binary is reachable.
-    Ok,
-    /// Plug-in registered from metadata only; binary missing.
-    MetadataOnly,
-    /// Last scan attempt failed (kept for visibility in the manager).
+    Pending,
+    Scanning,
+    Success,
     Failed,
-    /// User-disabled — kept in the cache but hidden by default.
+    Crashed,
+    Skipped,
+    /// Legacy alias for [`Self::Success`].
+    Ok,
+    /// Legacy alias for [`Self::Failed`].
+    MetadataOnly,
+    /// Legacy alias for [`Self::Skipped`].
     Disabled,
 }
 
 impl PluginScanStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            PluginScanStatus::Ok => "ok",
-            PluginScanStatus::MetadataOnly => "metadata_only",
-            PluginScanStatus::Failed => "failed",
-            PluginScanStatus::Disabled => "disabled",
+            PluginScanStatus::Pending => "pending",
+            PluginScanStatus::Scanning => "scanning",
+            PluginScanStatus::Success | PluginScanStatus::Ok => "success",
+            PluginScanStatus::Failed | PluginScanStatus::MetadataOnly => "failed",
+            PluginScanStatus::Crashed => "crashed",
+            PluginScanStatus::Skipped | PluginScanStatus::Disabled => "skipped",
         }
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
         match s {
-            "ok" => PluginScanStatus::Ok,
-            "metadata_only" => PluginScanStatus::MetadataOnly,
-            "failed" => PluginScanStatus::Failed,
-            "disabled" => PluginScanStatus::Disabled,
-            _ => PluginScanStatus::Ok,
+            "pending" => PluginScanStatus::Pending,
+            "scanning" => PluginScanStatus::Scanning,
+            "success" | "ok" => PluginScanStatus::Success,
+            "failed" | "metadata_only" => PluginScanStatus::Failed,
+            "crashed" => PluginScanStatus::Crashed,
+            "skipped" | "disabled" => PluginScanStatus::Skipped,
+            _ => PluginScanStatus::Success,
         }
+    }
+
+    pub fn is_usable(self) -> bool {
+        matches!(self, PluginScanStatus::Success | PluginScanStatus::Ok)
     }
 }
 
@@ -105,7 +117,7 @@ impl PluginCatalogEntry {
             PluginKind::Effect
         };
         let status = match self.scan_status {
-            PluginScanStatus::Ok => PluginStatus::PresetReady,
+            PluginScanStatus::Success | PluginScanStatus::Ok => PluginStatus::PresetReady,
             _ => PluginStatus::MissingPreset,
         };
         RegistryPlugin {
@@ -120,10 +132,12 @@ impl PluginCatalogEntry {
             path: self.path.clone(),
             class_id: self.class_id.clone(),
             version: self.version.clone(),
-            sdk_metadata_loaded: matches!(self.scan_status, PluginScanStatus::Ok),
+            sdk_metadata_loaded: self.scan_status.is_usable(),
             preset_path: PathBuf::new(),
             scanned_at_ms: parse_iso8601_to_ms(self.last_scanned_at.as_deref()).unwrap_or(0),
             status,
+            scan_status: self.scan_status,
+            error_message: self.error.clone(),
         }
     }
 }
@@ -145,10 +159,6 @@ impl From<&RegistryPlugin> for PluginCatalogEntry {
         )
         .to_lowercase();
         let last_scanned_at = ms_to_iso8601(p.scanned_at_ms);
-        let scan_status = match p.status {
-            PluginStatus::PresetReady => PluginScanStatus::Ok,
-            PluginStatus::MissingPreset => PluginScanStatus::MetadataOnly,
-        };
         Self {
             id: p.id.clone(),
             format: p.format,
@@ -165,14 +175,14 @@ impl From<&RegistryPlugin> for PluginCatalogEntry {
             version: p.version.clone(),
             is_instrument: kind_is_instrument,
             is_effect: !kind_is_instrument,
-            scan_status,
+            scan_status: p.scan_status,
             validation_level: None,
             disabled: false,
             favorite: false,
             file_modified_at: None,
             file_size: None,
             last_scanned_at,
-            error: None,
+            error: p.error_message.clone(),
             metadata_json: None,
             search_text,
         }

@@ -15,6 +15,9 @@ struct SpherePluginHostString {
 
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_vst3_scan_path_json(const char* path);
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_clap_scan_path_json(const char* path);
+SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_au_scan_json();
+SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_au_validate_component_json(
+    const char* component_id);
 SPHERE_PLUGIN_HOST_API unsigned long long sphere_plugin_editor_open_window(
     const char* window_id,
     const char* title,

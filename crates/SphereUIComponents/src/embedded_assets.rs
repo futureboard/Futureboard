@@ -80,6 +80,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_CHEVRON_RIGHT_PATH => Some(assets::icons::CHEVRON_RIGHT.as_bytes()),
             assets::ICON_CHEVRON_DOWN_PATH => Some(assets::icons::CHEVRON_DOWN.as_bytes()),
             assets::ICON_CHECK_PATH => Some(assets::icons::CHECK.as_bytes()),
+            assets::ICON_STAR_PATH => Some(assets::icons::STAR.as_bytes()),
             assets::ICON_PLAYHEAD_HANDLE_PATH => Some(assets::icons::PLAYHEAD_HANDLE.as_bytes()),
 
             _ => None,
@@ -136,6 +137,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_CHEVRON_RIGHT_PATH,
             assets::ICON_CHEVRON_DOWN_PATH,
             assets::ICON_CHECK_PATH,
+            assets::ICON_STAR_PATH,
             assets::ICON_PLAYHEAD_HANDLE_PATH,
         ];
         let mut list = Vec::new();

@@ -5,7 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::preset::{clear_all_presets, ensure_preset_folders, register_plugin};
+use crate::scan::cache::{
+    load_au_cache_state, record_au_scan_failure, record_au_scan_success, save_au_cache_state,
+    should_auto_scan_au,
+};
+use crate::scan::isolation::{run_isolated_format_scan, IsolatedScanRequest, plugin_info_from_descriptor};
+use crate::scan::types::PluginScanFormat;
 use crate::scanner::{discover_plugin_bundles, scan_plugin_bundle};
+use crate::plugin_db::PluginScanStatus;
 use crate::types::PluginInfo;
 
 /// Plug-in container format (aligned with Electron `AudioPluginRegistryEntry.format`).
@@ -84,6 +91,8 @@ pub struct RegistryPlugin {
     pub preset_path: PathBuf,
     pub scanned_at_ms: i64,
     pub status: PluginStatus,
+    pub scan_status: PluginScanStatus,
+    pub error_message: Option<String>,
 }
 
 impl RegistryPlugin {
@@ -286,14 +295,33 @@ pub struct RegistryScanResult {
     pub scanned_paths: Vec<PathBuf>,
     pub failed: Vec<PluginScanFailure>,
     pub generated_presets: u32,
+    pub au_scan_error: Option<String>,
+    pub au_scan_crashed: bool,
+    pub au_auto_scan_disabled: bool,
+    pub au_scan_available: bool,
 }
 
 /// Scan job options for the native plug-in manager.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub paths: Option<Vec<PathBuf>>,
     /// When true, delete all `.pst` files under the preset root before scanning.
     pub delete_presets_first: bool,
+    /// When true, scan AudioUnit plug-ins (macOS only). Ignored when safe mode is active.
+    pub include_au: bool,
+    /// When set, only scan the listed formats.
+    pub formats_only: Option<Vec<PluginFormat>>,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            paths: None,
+            delete_presets_first: false,
+            include_au: true,
+            formats_only: None,
+        }
+    }
 }
 
 /// Incremental scan progress (bundle discovery → metadata → registration).
@@ -317,6 +345,13 @@ pub enum ScanProgress {
     Failed {
         path: PathBuf,
         error: String,
+    },
+    FormatFinished {
+        format: PluginFormat,
+        success_count: usize,
+        failed_count: usize,
+        crashed_count: usize,
+        error: Option<String>,
     },
 }
 
@@ -354,6 +389,7 @@ fn preset_path_for_plugin(
 ) -> PathBuf {
     let fmt_dir = match format {
         PluginFormat::Clap => "CLAP",
+        PluginFormat::Au => "AU",
         _ => "VST3",
     };
     let kind_dir = match kind {
@@ -441,6 +477,12 @@ pub fn registry_plugin_from_scan(info: &PluginInfo, scanned_at_ms: i64) -> Regis
         preset_path,
         scanned_at_ms,
         status,
+        scan_status: if info.sdk_metadata_loaded {
+            PluginScanStatus::Success
+        } else {
+            PluginScanStatus::Failed
+        },
+        error_message: None,
     }
 }
 
@@ -449,7 +491,16 @@ pub fn native_host_status() -> NativeHostStatus {
     let preset_root = default_preset_root();
     // Native GPUI build does not link the N-API surface; treat host as available
     // if we can compute scan paths + preset root. Electron uses the N-API entrypoints.
-    let (available, backend, message) = (true, "native".to_string(), "Native plugin scanner ready.".to_string());
+    let (available, backend, message) = (
+        true,
+        "native".to_string(),
+        if cfg!(target_os = "macos") {
+            "Native plugin scanner ready (VST3, CLAP, AudioUnit)."
+        } else {
+            "Native plugin scanner ready (VST3, CLAP). AudioUnit unavailable on this platform."
+        }
+        .to_string(),
+    );
     NativeHostStatus {
         available,
         backend,
@@ -600,6 +651,8 @@ impl PluginRegistry {
             ScanOptions {
                 paths: requested_paths,
                 delete_presets_first: false,
+                include_au: true,
+                formats_only: None,
             },
             |_| {},
         )
@@ -610,112 +663,223 @@ impl PluginRegistry {
         options: ScanOptions,
         mut on_progress: impl FnMut(ScanProgress) + Send,
     ) -> RegistryScanResult {
-        let requested: Vec<PathBuf> = options
-            .paths
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(default_scan_paths);
+        let scan_vst3_clap = options.formats_only.as_ref().is_none_or(|formats| {
+            formats
+                .iter()
+                .any(|format| matches!(format, PluginFormat::Vst3 | PluginFormat::Clap))
+        });
+        let scan_au_requested = options.include_au
+            && options.formats_only.as_ref().is_none_or(|formats| {
+                formats.iter().any(|format| *format == PluginFormat::Au)
+            });
+
+        let mut au_cache_state = load_au_cache_state();
+        let au_scan_available = cfg!(target_os = "macos");
+        let scan_au = scan_au_requested && au_scan_available && should_auto_scan_au(&au_cache_state);
+
+        let cached_plugins: Vec<RegistryPlugin> = if options.delete_presets_first {
+            Vec::new()
+        } else {
+            Self::load_cached().0
+        };
+        let cached_vst3_clap_plugins: Vec<RegistryPlugin> = cached_plugins
+            .iter()
+            .filter(|plugin| plugin.format != PluginFormat::Au)
+            .cloned()
+            .collect();
+        let cached_au_plugins: Vec<RegistryPlugin> = cached_plugins
+            .iter()
+            .filter(|plugin| plugin.format == PluginFormat::Au)
+            .cloned()
+            .collect();
 
         let mut scanned_paths = Vec::new();
         let mut failed = Vec::new();
+        let mut plugins = Vec::new();
+        let mut generated_presets = 0u32;
+        let mut au_scan_error = None;
+        let mut au_scan_crashed = false;
 
-        for path in requested {
-            if path.exists() {
-                scanned_paths.push(path);
-            } else {
-                failed.push(PluginScanFailure {
-                    path: path.clone(),
-                    error: "Path does not exist".to_string(),
-                });
-                on_progress(ScanProgress::Failed {
-                    path,
-                    error: "Path does not exist".to_string(),
-                });
+        if scan_vst3_clap {
+            let requested: Vec<PathBuf> = options
+                .paths
+                .clone()
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(default_scan_paths);
+
+            for path in requested {
+                if path.exists() {
+                    scanned_paths.push(path);
+                } else {
+                    failed.push(PluginScanFailure {
+                        path: path.clone(),
+                        error: "Path does not exist".to_string(),
+                    });
+                    on_progress(ScanProgress::Failed {
+                        path,
+                        error: "Path does not exist".to_string(),
+                    });
+                }
             }
-        }
 
-        if options.delete_presets_first {
-            if let Err(error) = clear_all_presets() {
-                failed.push(PluginScanFailure {
-                    path: PathBuf::from("(presets)"),
-                    error: format!("Failed to clear presets: {error}"),
-                });
+            if options.delete_presets_first {
+                if let Err(error) = clear_all_presets() {
+                    failed.push(PluginScanFailure {
+                        path: PathBuf::from("(presets)"),
+                        error: format!("Failed to clear presets: {error}"),
+                    });
+                }
             }
-        }
 
-        let _ = ensure_preset_folders();
+            let _ = ensure_preset_folders();
 
-        let bundles = discover_plugin_bundles(&scanned_paths);
-        let bundle_total = bundles.len();
-        on_progress(ScanProgress::Started { bundle_total });
+            let bundles = discover_plugin_bundles(&scanned_paths);
+            let bundle_total = bundles.len();
+            on_progress(ScanProgress::Started { bundle_total });
 
-        let scanned_at = now_ms();
-        let mut pending = Vec::new();
-        let mut seen = HashSet::new();
-        let mut occupied_presets = HashSet::new();
+            let scanned_at = now_ms();
+            let mut pending = Vec::new();
+            let mut seen = HashSet::new();
+            let mut occupied_presets = HashSet::new();
 
-        for (index, bundle) in bundles.iter().enumerate() {
-            on_progress(ScanProgress::ScanningBundle {
-                current: index + 1,
-                total: bundle_total.max(1),
-                path: bundle.clone(),
-            });
+            for (index, bundle) in bundles.iter().enumerate() {
+                on_progress(ScanProgress::ScanningBundle {
+                    current: index + 1,
+                    total: bundle_total.max(1),
+                    path: bundle.clone(),
+                });
 
-            match scan_plugin_bundle(bundle) {
-                Ok(infos) => {
-                    for info in infos {
-                        let mut plugin = registry_plugin_from_scan(&info, scanned_at);
-                        let key = registry_display_key(&plugin);
-                        if !seen.insert(key) {
-                            continue;
+                match scan_plugin_bundle(bundle) {
+                    Ok(infos) => {
+                        for info in infos {
+                            let mut plugin = registry_plugin_from_scan(&info, scanned_at);
+                            let key = registry_display_key(&plugin);
+                            if !seen.insert(key) {
+                                continue;
+                            }
+                            plugin = resolve_unique_preset_path(plugin, &mut occupied_presets);
+                            pending.push(plugin);
                         }
-                        plugin = resolve_unique_preset_path(plugin, &mut occupied_presets);
-                        pending.push(plugin);
+                    }
+                    Err(error) => {
+                        failed.push(PluginScanFailure {
+                            path: bundle.clone(),
+                            error: error.clone(),
+                        });
+                        on_progress(ScanProgress::Failed {
+                            path: bundle.clone(),
+                            error,
+                        });
                     }
                 }
-                Err(error) => {
+            }
+
+            let register_total = pending.len();
+            for (index, mut plugin) in pending.into_iter().enumerate() {
+                let current = index + 1;
+                match register_plugin(&mut plugin) {
+                    Ok(()) => {
+                        generated_presets += 1;
+                    }
+                    Err(error) => {
+                        plugin.scan_status = PluginScanStatus::Failed;
+                        plugin.error_message = Some(error.clone());
+                        failed.push(PluginScanFailure {
+                            path: plugin.path.clone(),
+                            error: error.clone(),
+                        });
+                        on_progress(ScanProgress::Failed {
+                            path: plugin.path.clone(),
+                            error,
+                        });
+                    }
+                }
+
+                plugins.push(plugin.clone());
+                on_progress(ScanProgress::Registering {
+                    current,
+                    total: register_total.max(1),
+                    name: plugin.name.clone(),
+                    plugin,
+                    generated_presets,
+                });
+            }
+        } else {
+            plugins.extend(cached_vst3_clap_plugins);
+            if options.delete_presets_first {
+                if let Err(error) = clear_all_presets() {
                     failed.push(PluginScanFailure {
-                        path: bundle.clone(),
-                        error: error.clone(),
-                    });
-                    on_progress(ScanProgress::Failed {
-                        path: bundle.clone(),
-                        error,
+                        path: PathBuf::from("(presets)"),
+                        error: format!("Failed to clear presets: {error}"),
                     });
                 }
             }
         }
 
-        let register_total = pending.len();
-        let mut plugins = Vec::with_capacity(register_total);
-        let mut generated_presets = 0u32;
-
-        for (index, mut plugin) in pending.into_iter().enumerate() {
-            let current = index + 1;
-            match register_plugin(&mut plugin) {
-                Ok(()) => {
-                    generated_presets += 1;
-                }
-                Err(error) => {
-                    failed.push(PluginScanFailure {
-                        path: plugin.path.clone(),
-                        error: error.clone(),
-                    });
-                    on_progress(ScanProgress::Failed {
-                        path: plugin.path.clone(),
-                        error,
-                    });
-                }
-            }
-
-            plugins.push(plugin.clone());
-            on_progress(ScanProgress::Registering {
-                current,
-                total: register_total.max(1),
-                name: plugin.name.clone(),
-                plugin,
-                generated_presets,
+        if scan_au {
+            let au_outcome = run_isolated_format_scan(IsolatedScanRequest {
+                format: PluginScanFormat::AudioUnit,
+                paths: Vec::new(),
+                validate_plugins: false,
             });
+            let payload = au_outcome.payload;
+            au_scan_crashed = payload.process_crashed;
+            if payload.process_crashed {
+                au_scan_error = payload
+                    .error
+                    .clone()
+                    .or_else(|| Some("AudioUnit scan process crashed".into()));
+                record_au_scan_failure(
+                    &mut au_cache_state,
+                    au_scan_error.clone().unwrap_or_default(),
+                    true,
+                );
+                plugins.extend(cached_au_plugins);
+            } else if let Some(error) = payload.error {
+                au_scan_error = Some(error.clone());
+                record_au_scan_failure(&mut au_cache_state, error, false);
+                plugins.extend(cached_au_plugins);
+            } else {
+                let scanned_at = now_ms();
+                for descriptor in payload.plugins {
+                    let info = plugin_info_from_descriptor(&descriptor);
+                    let mut plugin = registry_plugin_from_scan(&info, scanned_at);
+                    plugin.scan_status = match descriptor.scan_status {
+                        crate::scan::types::PluginScanStatus::Success => PluginScanStatus::Success,
+                        crate::scan::types::PluginScanStatus::Crashed => PluginScanStatus::Crashed,
+                        crate::scan::types::PluginScanStatus::Skipped => PluginScanStatus::Skipped,
+                        _ => PluginScanStatus::Failed,
+                    };
+                    plugin.error_message = descriptor.error_message.clone();
+                    if plugin.format == PluginFormat::Au {
+                        plugin.status = PluginStatus::MissingPreset;
+                    }
+                    plugins.push(plugin);
+                }
+                record_au_scan_success(&mut au_cache_state, scanned_at);
+            }
+
+            on_progress(ScanProgress::FormatFinished {
+                format: PluginFormat::Au,
+                success_count: plugins
+                    .iter()
+                    .filter(|plugin| plugin.format == PluginFormat::Au)
+                    .count(),
+                failed_count: payload.failures.len(),
+                crashed_count: payload.crashed_plugins.len(),
+                error: au_scan_error.clone(),
+            });
+        } else if scan_au_requested && au_cache_state.auto_scan_disabled {
+            au_scan_error = Some(
+                "AudioUnit auto-scan disabled after repeated crashes. Use Retry AudioUnit Scan."
+                    .into(),
+            );
+            plugins.extend(cached_au_plugins);
+        } else if !au_scan_available && scan_au_requested {
+            au_scan_error = Some("AudioUnit scanning is unavailable on this platform.".into());
         }
+
+        let _ = save_au_cache_state(&au_cache_state);
 
         plugins.sort_by(|a, b| {
             let kind = match (a.kind, b.kind) {
@@ -727,20 +891,19 @@ impl PluginRegistry {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
-        // Persist the catalog to the SQLite cache so the Plugin Picker can
-        // load it on the next open without re-running the SDK scanner. Errors
-        // are non-fatal — the scan result is still returned to the manager.
-        if let Err(err) = Self::write_catalog(&plugins) {
-            failed.push(PluginScanFailure {
-                path: crate::plugin_db::database_path(),
-                error: format!("sqlite write: {err}"),
-            });
-        } else if std::env::var_os("FUTUREBOARD_PLUGIN_DB_DEBUG").is_some() {
-            eprintln!(
-                "[plugin-db] wrote {} rows to {}",
-                plugins.len(),
-                crate::plugin_db::database_path().display()
-            );
+        if scan_vst3_clap || scan_au {
+            if let Err(err) = Self::write_catalog(&plugins) {
+                failed.push(PluginScanFailure {
+                    path: crate::plugin_db::database_path(),
+                    error: format!("sqlite write: {err}"),
+                });
+            } else if std::env::var_os("FUTUREBOARD_PLUGIN_DB_DEBUG").is_some() {
+                eprintln!(
+                    "[plugin-db] wrote {} rows to {}",
+                    plugins.len(),
+                    crate::plugin_db::database_path().display()
+                );
+            }
         }
 
         RegistryScanResult {
@@ -748,7 +911,27 @@ impl PluginRegistry {
             scanned_paths,
             failed,
             generated_presets,
+            au_scan_error,
+            au_scan_crashed,
+            au_auto_scan_disabled: au_cache_state.auto_scan_disabled,
+            au_scan_available,
         }
+    }
+
+    /// Scan AudioUnit plug-ins only. Safe to call when VST3/CLAP results should be preserved.
+    pub fn scan_au_only() -> RegistryScanResult {
+        let mut au_cache_state = load_au_cache_state();
+        au_cache_state.auto_scan_disabled = false;
+        let _ = save_au_cache_state(&au_cache_state);
+        Self::scan_with_progress(
+            ScanOptions {
+                paths: None,
+                delete_presets_first: false,
+                include_au: true,
+                formats_only: Some(vec![PluginFormat::Au]),
+            },
+            |_| {},
+        )
     }
 }
 

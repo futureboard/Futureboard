@@ -10,6 +10,7 @@ use gpui::{
     Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 use sphere_plugin_host::preset::register_plugin;
+use sphere_plugin_host::load_au_cache_state;
 use sphere_plugin_host::registry::{
     NativeHostStatus, PluginFormat, PluginKind, PluginRegistry, PluginStatus, RegistryPlugin,
     RegistryScanResult, ScanOptions, ScanProgress,
@@ -73,6 +74,8 @@ pub enum PluginScanMode {
     Rescan,
     /// Delete all `.pst` presets, clear the list, then scan and register everything.
     RescanAll,
+    /// Scan AudioUnit plug-ins only (macOS).
+    RescanAu,
 }
 
 #[derive(Debug, Clone)]
@@ -95,11 +98,15 @@ pub struct PluginManagerDialogState {
     pub last_scan_at_ms: i64,
     /// True once the cached index has been loaded (or determined to be empty).
     pub cache_loaded: bool,
+    pub au_scan_available: bool,
+    pub au_scan_error: Option<String>,
+    pub au_auto_scan_disabled: bool,
 }
 
 impl PluginManagerDialogState {
     pub fn new_empty() -> Self {
         let host = PluginRegistry::host_status();
+        let au_cache = load_au_cache_state();
         let status_text = if host.available {
             "Loading cached plug-in index…".to_string()
         } else {
@@ -122,6 +129,9 @@ impl PluginManagerDialogState {
             host,
             last_scan_at_ms: 0,
             cache_loaded: false,
+            au_scan_available: cfg!(target_os = "macos"),
+            au_scan_error: au_cache.last_error.clone(),
+            au_auto_scan_disabled: au_cache.auto_scan_disabled,
         }
     }
 
@@ -147,6 +157,9 @@ impl PluginManagerDialogState {
         self.scan_paths = result.scanned_paths;
         self.failed_count = result.failed.len() as u32;
         self.generated_presets = result.generated_presets;
+        self.au_scan_available = result.au_scan_available;
+        self.au_scan_error = result.au_scan_error.clone();
+        self.au_auto_scan_disabled = result.au_auto_scan_disabled;
         self.scanning = false;
         self.cache_loaded = true;
         self.last_scan_at_ms = self.plugins.iter().map(|p| p.scanned_at_ms).max().unwrap_or(0);
@@ -155,7 +168,17 @@ impl PluginManagerDialogState {
         self.scan_progress_label.clear();
 
         let count = self.plugins.len();
-        self.status_text = if count == 0 && self.failed_count > 0 {
+        self.status_text = if let Some(au_error) = &result.au_scan_error {
+            if count > 0 {
+                format!(
+                    "AudioUnit scan failed. VST3/CLAP results are still available. {au_error}"
+                )
+            } else if self.failed_count > 0 {
+                format!("Scan finished with {} path error(s). {au_error}", self.failed_count)
+            } else {
+                format!("AudioUnit scan failed. {au_error}")
+            }
+        } else if count == 0 && self.failed_count > 0 {
             format!(
                 "Scan finished with {} path error(s).",
                 self.failed_count
@@ -193,11 +216,15 @@ impl PluginManagerDialogState {
             self.plugins.clear();
             self.generated_presets = 0;
         }
+        self.au_scan_error = None;
         self.status_text = match mode {
-            PluginScanMode::Rescan => "Scanning and registering VST3/CLAP plug-ins…".to_string(),
+            PluginScanMode::Rescan => {
+                "Scanning and registering VST3, CLAP, and AudioUnit plug-ins…".to_string()
+            }
             PluginScanMode::RescanAll => {
                 "Deleting presets and rescanning all plug-ins…".to_string()
             }
+            PluginScanMode::RescanAu => "Scanning AudioUnit plug-ins…".to_string(),
         };
     }
 
@@ -240,6 +267,26 @@ impl PluginManagerDialogState {
                 }
             }
             ScanProgress::Failed { .. } => {}
+            ScanProgress::FormatFinished {
+                format,
+                success_count,
+                failed_count,
+                crashed_count,
+                error,
+            } => {
+                if *format == PluginFormat::Au {
+                    self.au_scan_error = error.clone();
+                    if *crashed_count > 0 {
+                        self.status_text = format!(
+                            "AudioUnit scan process crashed. VST3/CLAP results are still available."
+                        );
+                    } else if let Some(message) = error {
+                        self.status_text = format!(
+                            "AudioUnit scan failed ({success_count} ok, {failed_count} failed): {message}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -273,7 +320,11 @@ impl PluginManagerDialogState {
                 .iter()
                 .filter(|p| p.format == PluginFormat::Clap)
                 .count(),
-            au: 0,
+            au: self
+                .plugins
+                .iter()
+                .filter(|p| p.format == PluginFormat::Au)
+                .count(),
         }
     }
 
@@ -346,6 +397,7 @@ pub struct PluginManagerCallbacks {
     pub on_reveal_preset: StrCb,
     pub on_register_plugin: StrCb,
     pub on_rescan_all: VoidCb,
+    pub on_rescan_au: VoidCb,
     pub on_clear_cache: VoidCb,
     pub on_open_db_folder: VoidCb,
 }
@@ -810,6 +862,7 @@ pub fn plugin_manager_panel(
 ) -> impl IntoElement {
     let rescan = callbacks.on_rescan.clone();
     let rescan_all = callbacks.on_rescan_all.clone();
+    let rescan_au = callbacks.on_rescan_au.clone();
     let clear_cache = callbacks.on_clear_cache.clone();
     let open_db_folder = callbacks.on_open_db_folder.clone();
     let counts = state.counts();
@@ -824,6 +877,7 @@ pub fn plugin_manager_panel(
     let sidebar_fx = filter_cb.clone();
     let sidebar_vst3 = filter_cb.clone();
     let sidebar_clap = filter_cb.clone();
+    let sidebar_au = filter_cb.clone();
 
     let mut list_rows: Vec<gpui::AnyElement> = Vec::new();
     if visible.is_empty() {
@@ -1004,6 +1058,19 @@ pub fn plugin_manager_panel(
                             !state.scanning,
                             move |_, window, cx| rescan_all(&(), window, cx),
                         ))
+                        .when(state.au_scan_available, |row| {
+                            row.child(fb_button(
+                                "plugin-manager-retry-au",
+                                if state.au_auto_scan_disabled {
+                                    "Retry AudioUnit Scan"
+                                } else {
+                                    "Scan AudioUnit"
+                                },
+                                FbButtonKind::Default,
+                                !state.scanning,
+                                move |_, window, cx| rescan_au(&(), window, cx),
+                            ))
+                        })
                         .child(fb_button(
                             "plugin-manager-clear-cache",
                             "Clear Database",
@@ -1020,6 +1087,38 @@ pub fn plugin_manager_panel(
                         )),
                 )
                 .when(state.scanning, |panel| panel.child(scan_progress_bar(state)))
+                .when(state.au_auto_scan_disabled && state.au_scan_available, |panel| {
+                    panel.child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .border_b(px(1.0))
+                            .border_color(Colors::divider())
+                            .bg(rgba_warning_soft())
+                            .text_size(px(10.5))
+                            .text_color(Colors::status_warning())
+                            .child(
+                                "AudioUnit auto-scan disabled after repeated crashes. Use Retry AudioUnit Scan.",
+                            ),
+                    )
+                })
+                .when(
+                    state.au_scan_error.is_some() && !state.scanning && state.au_scan_available,
+                    |panel| {
+                        let message = state.au_scan_error.clone().unwrap_or_default();
+                        panel.child(
+                            div()
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .border_b(px(1.0))
+                                .border_color(Colors::divider())
+                                .bg(Colors::surface_input())
+                                .text_size(px(10.5))
+                                .text_color(Colors::status_warning())
+                                .child(message),
+                        )
+                    },
+                )
                 .child(
                     div()
                         .flex()
@@ -1136,11 +1235,22 @@ pub fn plugin_manager_panel(
                                                         .into_any_element(),
                                                         sidebar_item(
                                                             "pm-filter-au",
-                                                            "AU",
+                                                            if state.au_scan_available {
+                                                                "AU"
+                                                            } else {
+                                                                "AU (Unavailable)"
+                                                            },
                                                             counts.au,
-                                                            false,
-                                                            true,
-                                                            |_, _, _| {},
+                                                            state.sidebar_filter
+                                                                == SidebarFilter::Format(PluginFormat::Au),
+                                                            !state.au_scan_available,
+                                                            move |_, w, cx| {
+                                                                sidebar_au(
+                                                                    &SidebarFilter::Format(PluginFormat::Au),
+                                                                    w,
+                                                                    cx,
+                                                                )
+                                                            },
                                                         )
                                                         .into_any_element(),
                                                     ],
@@ -1404,6 +1514,12 @@ impl PluginManagerWindow {
         let options = ScanOptions {
             paths: None,
             delete_presets_first: mode == PluginScanMode::RescanAll,
+            include_au: mode != PluginScanMode::RescanAu || cfg!(target_os = "macos"),
+            formats_only: if mode == PluginScanMode::RescanAu {
+                Some(vec![PluginFormat::Au])
+            } else {
+                None
+            },
         };
 
         cx.spawn(async move |this, cx| {
@@ -1510,6 +1626,19 @@ impl Render for PluginManagerWindow {
                         this.state.begin_scan(PluginScanMode::RescanAll);
                         cx.notify();
                         PluginManagerWindow::arm_background_scan(cx, PluginScanMode::RescanAll);
+                    });
+                }
+            }),
+            on_rescan_au: Arc::new({
+                let target = target.clone();
+                move |_: &(), _w, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        if this.state.scanning || !this.state.au_scan_available {
+                            return;
+                        }
+                        this.state.begin_scan(PluginScanMode::RescanAu);
+                        cx.notify();
+                        PluginManagerWindow::arm_background_scan(cx, PluginScanMode::RescanAu);
                     });
                 }
             }),

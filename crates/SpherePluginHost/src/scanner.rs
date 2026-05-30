@@ -19,25 +19,25 @@ extern "C" {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NativePluginInfo {
-    name: String,
-    vendor: String,
-    category: String,
-    format: String,
-    path: String,
+pub struct NativePluginInfo {
+    pub name: String,
+    pub vendor: String,
+    pub category: String,
+    pub format: String,
+    pub path: String,
     #[serde(default)]
-    sub_categories: Option<String>,
+    pub sub_categories: Option<String>,
     #[serde(default)]
-    module_path: Option<String>,
+    pub module_path: Option<String>,
     #[serde(default)]
-    class_id: Option<String>,
+    pub class_id: Option<String>,
     #[serde(default)]
-    version: Option<String>,
+    pub version: Option<String>,
     #[serde(default)]
-    sdk_version: Option<String>,
+    pub sdk_version: Option<String>,
     #[serde(default)]
-    is_shell_child: Option<bool>,
-    sdk_metadata_loaded: bool,
+    pub is_shell_child: Option<bool>,
+    pub sdk_metadata_loaded: bool,
 }
 
 pub fn scan_vst3_paths(paths: &[String]) -> Result<Vec<PluginInfo>, String> {
@@ -277,4 +277,8 @@ fn stable_id(prefix: &str, input: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{prefix}:{hash:016x}")
+}
+
+pub fn stable_id_for_au(input: &str) -> String {
+    stable_id("au", input)
 }

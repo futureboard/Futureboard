@@ -141,8 +141,22 @@ fn main() {
 
     apply_vst3_platform_config(&mut build, &sdk_root, &backend_root);
 
+    if target_os_for_au() == "macos" {
+        build
+            .file(backend_root.join("src/au_scanner.mm"))
+            .flag("-fobjc-arc");
+        println!("cargo:rustc-link-lib=framework=AudioToolbox");
+        println!("cargo:rustc-link-lib=framework=CoreAudio");
+    } else {
+        build.file(backend_root.join("src/au_scanner_stub.cpp"));
+    }
+
     build.compile("sphere_plugin_host_vst3");
     napi_build::setup();
+}
+
+fn target_os_for_au() -> String {
+    std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
 }
 
 fn apply_vst3_platform_config(

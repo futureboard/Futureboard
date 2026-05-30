@@ -8,6 +8,11 @@ description = "SpherePluginHost — N-API control bridge and native plugin host 
 name = "sphere_plugin_host"
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "futureboard_plugin_scanner"
+path = "src/bin/futureboard_plugin_scanner.rs"
+required-features = []
+
 [dependencies]
 napi        = { version = "2", features = ["napi4"], optional = true }
 napi-derive = { version = "2", optional = true }

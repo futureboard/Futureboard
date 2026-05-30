@@ -15,6 +15,8 @@ pub mod editor_quirk;
 pub mod plugin_db;
 pub mod preset;
 pub mod registry;
+pub mod scan;
+pub mod au_scanner;
 mod scanner;
 mod types;
 
@@ -28,6 +30,10 @@ pub use registry::{
 pub use plugin_db::{
     database_dir, database_exists, database_path, open_database, open_database_readonly,
     PluginCatalog, PluginCatalogEntry, PluginScanStatus,
+};
+pub use scan::{
+    load_au_cache_state, save_au_cache_state, AuScanCacheState, FormatCacheStatus,
+    PluginDescriptor, PluginScanError, PluginScanFormat, ScanResultPayload,
 };
 pub use editor_quirk::{
     detect_plugin_editor_runtime, match_quirk, PluginEditorHostMode, PluginEditorQuirk,

@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::registry::{default_preset_root, RegistryPlugin};
+use crate::plugin_db::PluginScanStatus;
+use crate::registry::{default_preset_root, PluginStatus, RegistryPlugin};
 
 const PRESET_MAGIC: &[u8; 5] = b"FBPST";
 
@@ -207,6 +208,11 @@ pub fn read_preset_file(preset_path: &Path) -> Result<RegistryPlugin, String> {
     } else {
         PluginStatus::MissingPreset
     };
+    let scan_status = if binary_path.exists() {
+        PluginScanStatus::Success
+    } else {
+        PluginScanStatus::MetadataOnly
+    };
 
     Ok(RegistryPlugin {
         id: pm.id,
@@ -224,6 +230,8 @@ pub fn read_preset_file(preset_path: &Path) -> Result<RegistryPlugin, String> {
         preset_path: preset_path.to_path_buf(),
         scanned_at_ms: parsed.created_at,
         status,
+        scan_status,
+        error_message: None,
     })
 }
 

@@ -173,16 +173,22 @@ impl Render for MidiEditorWindow {
 
         let on_close = self.on_close.clone();
         let dispatch_command = self.dispatch_command.clone();
+        let target = cx.entity().clone();
 
         div()
             .flex()
             .flex_col()
             .size_full()
+            .relative()
             .font_family(crate::theme::FONT_FAMILY)
             .bg(Colors::surface_window())
             .overflow_hidden()
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::on_key))
+            // Keep focus on a 0×0 child — not the root. Root `track_focus` adds a
+            // full-window hitbox that wins over `WindowControlArea::Drag` on Windows
+            // (see layout.rs main window comment).
+            .capture_key_down(move |event, window, cx| {
+                let _ = target.update(cx, |this, cx| this.on_key(event, window, cx));
+            })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar(
                 title.as_str(),
@@ -284,7 +290,7 @@ pub fn open_midi_editor_window(
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = true;
-    options.window_background = WindowBackgroundAppearance::Opaque;
+    options.window_background = WindowBackgroundAppearance::Transparent;
     options.window_min_size = Some(size(
         px(MIDI_EDITOR_WINDOW_MIN_WIDTH),
         px(MIDI_EDITOR_WINDOW_MIN_HEIGHT),

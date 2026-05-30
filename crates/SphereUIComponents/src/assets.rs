@@ -85,6 +85,12 @@ pub mod icons {
 
     // Playhead downward-pointing triangle
     pub const PLAYHEAD_HANDLE: &str = r#"<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"><polygon points="0,0 12,0 6,12" fill="currentColor"/></svg>"#;
+
+    // Plug-in format brand marks
+    pub const PLUGIN_CLAP: &str =
+        include_str!("../../../packages/shared/icons/plugins/clap.svg");
+    pub const PLUGIN_VST3: &str =
+        include_str!("../../../packages/shared/icons/plugins/vst3.svg");
 }
 
 // SVG virtual path constants
@@ -139,6 +145,8 @@ pub const ICON_CHEVRON_DOWN_PATH: &str = "icons/chevron-down.svg";
 pub const ICON_CHECK_PATH: &str = "icons/check.svg";
 pub const ICON_STAR_PATH: &str = "icons/star.svg";
 pub const ICON_PLAYHEAD_HANDLE_PATH: &str = "icons/playhead_handle.svg";
+pub const ICON_PLUGIN_CLAP_PATH: &str = "icons/plugins/clap.svg";
+pub const ICON_PLUGIN_VST3_PATH: &str = "icons/plugins/vst3.svg";
 
 /// Registers the embedded Inter Variable font with the platform's text
 /// system. Native uses a single family — `theme::FONT_FAMILY` resolves to

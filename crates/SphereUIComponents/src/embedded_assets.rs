@@ -82,6 +82,8 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_CHECK_PATH => Some(assets::icons::CHECK.as_bytes()),
             assets::ICON_STAR_PATH => Some(assets::icons::STAR.as_bytes()),
             assets::ICON_PLAYHEAD_HANDLE_PATH => Some(assets::icons::PLAYHEAD_HANDLE.as_bytes()),
+            assets::ICON_PLUGIN_CLAP_PATH => Some(assets::icons::PLUGIN_CLAP.as_bytes()),
+            assets::ICON_PLUGIN_VST3_PATH => Some(assets::icons::PLUGIN_VST3.as_bytes()),
 
             _ => None,
         };
@@ -139,6 +141,8 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_CHECK_PATH,
             assets::ICON_STAR_PATH,
             assets::ICON_PLAYHEAD_HANDLE_PATH,
+            assets::ICON_PLUGIN_CLAP_PATH,
+            assets::ICON_PLUGIN_VST3_PATH,
         ];
         let mut list = Vec::new();
         for p in all_paths {

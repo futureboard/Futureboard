@@ -18,6 +18,7 @@ use sphere_plugin_host::registry::{
 
 use crate::assets;
 use crate::components::controls::{fb_button, FbButtonKind};
+use crate::components::plugin_format_badge::plugin_format_badge;
 use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks, TextInputAction, TextInputCallbacks,
     TextInputState,
@@ -498,42 +499,6 @@ fn status_badge(label: &'static str, ready: bool) -> impl IntoElement {
         .child(label)
 }
 
-fn format_badge(format: PluginFormat) -> impl IntoElement {
-    let (fg, bg, border) = match format {
-        PluginFormat::Vst3 => (
-            Colors::accent_primary(),
-            Colors::accent_muted(),
-            Colors::border_accent(),
-        ),
-        PluginFormat::Clap => (
-            Colors::status_success(),
-            rgba_success_soft(),
-            Colors::status_success(),
-        ),
-        PluginFormat::Au => (
-            Colors::status_warning(),
-            rgba_warning_soft(),
-            Colors::status_warning(),
-        ),
-        _ => (
-            Colors::text_faint(),
-            Colors::surface_input(),
-            Colors::border_subtle(),
-        ),
-    };
-    div()
-        .px(px(6.0))
-        .py(px(2.0))
-        .rounded_sm()
-        .border(px(1.0))
-        .border_color(border)
-        .bg(bg)
-        .text_size(px(9.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(fg)
-        .child(format.label())
-}
-
 fn format_relative_time(ms: i64) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now_ms = SystemTime::now()
@@ -555,10 +520,6 @@ fn format_relative_time(ms: i64) -> String {
     }
     let days = hours / 24;
     format!("{days}d ago")
-}
-
-fn rgba_success_soft() -> gpui::Rgba {
-    gpui::rgba(0x6FCF9720)
 }
 
 fn rgba_warning_soft() -> gpui::Rgba {
@@ -978,7 +939,7 @@ pub fn plugin_manager_panel(
                             .w(px(72.0))
                             .flex()
                             .items_center()
-                            .child(format_badge(plugin.format)),
+                            .child(plugin_format_badge(plugin.format)),
                     )
                     .child(
                         div()

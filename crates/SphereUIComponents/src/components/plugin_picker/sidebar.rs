@@ -152,6 +152,7 @@ pub fn plugin_filter_sidebar(
         .flex_col()
         .w(px(SIDEBAR_WIDTH))
         .min_w(px(SIDEBAR_WIDTH))
+        .flex_shrink_0()
         .border_r(px(1.0))
         .border_color(Colors::divider())
         .bg(Colors::surface_panel_alt())

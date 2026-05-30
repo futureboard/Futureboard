@@ -25,6 +25,7 @@ pub mod project_switcher;
 pub mod project_wizard;
 pub mod piano_roll;
 pub mod plugin_editor_window;
+pub mod plugin_format_badge;
 pub mod plugin_manager;
 pub mod plugin_picker;
 pub mod settings_layout;

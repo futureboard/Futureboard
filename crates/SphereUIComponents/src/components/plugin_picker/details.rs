@@ -27,6 +27,7 @@ pub fn plugin_details_panel(
         .flex_col()
         .w(px(DETAILS_WIDTH))
         .min_w(px(DETAILS_WIDTH))
+        .flex_shrink_0()
         .border_l(px(1.0))
         .border_color(Colors::divider())
         .bg(Colors::surface_panel_alt())

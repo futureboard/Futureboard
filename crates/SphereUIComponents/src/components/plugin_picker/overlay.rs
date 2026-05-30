@@ -10,13 +10,15 @@ use gpui::{
 
 use crate::assets;
 use crate::components::controls::{fb_button, FbButtonKind};
-use crate::components::plugin_picker::details::{plugin_details_panel, DETAILS_WIDTH};
+use crate::components::plugin_picker::details::plugin_details_panel;
 use crate::components::plugin_picker::filter::{compute_filter_result, FilterResult};
 use crate::components::plugin_picker::insert::{validate_insert, InsertValidation};
-use crate::components::plugin_picker::list_view::{plugin_row, skeleton_body, ROW_HEIGHT};
+use crate::components::plugin_picker::list_view::{
+    plugin_row, plugin_table_header, skeleton_body, ROW_HEIGHT,
+};
 use crate::components::plugin_picker::prefs::PluginPickerPrefs;
 use crate::components::plugin_picker::search_index::PluginSearchIndex;
-use crate::components::plugin_picker::sidebar::{plugin_filter_sidebar, SIDEBAR_WIDTH};
+use crate::components::plugin_picker::sidebar::plugin_filter_sidebar;
 use crate::components::plugin_picker::state::{CatalogStatus, PluginPickerState};
 use crate::components::plugin_picker::PluginPickerCallbacks;
 use crate::components::text_input::{text_field_with_callbacks, TextInputCallbacks, TextInputState};
@@ -101,8 +103,16 @@ pub fn plugin_picker_overlay(
         .flex_col()
         .flex_1()
         .min_w(px(0.0))
-        .child(list_header())
-        .child(div().flex_1().min_h(px(0.0)).child(list_body));
+        .overflow_hidden()
+        .child(plugin_table_header())
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_hidden()
+                .child(list_body),
+        );
 
     let footer_label = footer_label_for(
         selected_plugin,
@@ -203,11 +213,16 @@ pub fn plugin_picker_overlay(
                         .flex_row()
                         .flex_1()
                         .min_h(px(0.0))
-                        .child(sidebar)
+                        .w_full()
+                        .child(div().flex_shrink_0().child(sidebar))
                         .child(list_section)
                         .when(state.show_details, |panel| {
                             panel.when_some(selected_plugin, |panel, plugin| {
-                                panel.child(plugin_details_panel(plugin, &state.insert_target))
+                                panel.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(plugin_details_panel(plugin, &state.insert_target)),
+                                )
                             })
                         }),
                 )
@@ -254,28 +269,6 @@ fn build_header(close_button: VoidCb) -> impl IntoElement {
                 .on_click(move |_, window, cx| close_button(&(), window, cx))
                 .child(icon(assets::ICON_X_PATH, 12.0, Colors::text_faint())),
         )
-}
-
-fn list_header() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(px(26.0))
-        .px(px(10.0))
-        .border_b(px(1.0))
-        .border_color(Colors::divider())
-        .bg(Colors::surface_input())
-        .gap(px(8.0))
-        .text_size(px(9.5))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(Colors::text_faint())
-        .child(div().w(px(12.0)))
-        .child(div().w(px(18.0)))
-        .child(div().flex_1().min_w(px(0.0)).child("Plug-in"))
-        .child(div().w(px(128.0)).child("Vendor"))
-        .child(div().w(px(96.0)).child("Category"))
-        .child(div().w(px(54.0)).child("Format"))
 }
 
 fn build_list_body(

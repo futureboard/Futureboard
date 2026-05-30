@@ -50,8 +50,9 @@ use crate::overlay::{project_title_anchor, titlebar_label_anchor, OverlayAnchor}
 use crate::theme::{self, Colors};
 
 use DAUx::types::{
-    EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineProjectSnapshot,
-    EngineRoutingSnapshot, EngineSendSnapshot, EngineTrackSnapshot,
+    EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineMidiClipSnapshot,
+    EngineMidiNoteSnapshot, EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot,
+    EngineTrackSnapshot,
 };
 
 /// Flip to `true` to seed the studio with demo tracks/clips at startup.
@@ -137,6 +138,9 @@ pub struct StudioLayout {
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
     timeline: Entity<components::timeline::Timeline>,
+    /// Piano-roll editor shown in the bottom panel's Editor tab. Holds a handle
+    /// to the timeline so note edits mutate the single project source of truth.
+    piano_roll: Entity<components::piano_roll::PianoRoll>,
     file_browser: FileBrowserState,
     /// Stable scroll handle for the browser tree. Lives on the layout
     /// (not in `FileBrowserState`) so the state stays free of gpui types
@@ -466,6 +470,11 @@ impl StudioLayout {
         let _ = timeline.update(cx, |t, _cx| {
             t.state.transport.metronome_enabled = metronome_enabled;
         });
+
+        let piano_roll = {
+            let timeline = timeline.clone();
+            cx.new(|cx| components::piano_roll::PianoRoll::new(timeline, cx))
+        };
         if let Some(engine) = audio_engine.clone() {
             let seek_engine = engine.clone();
             let param_engine = engine.clone();
@@ -526,6 +535,19 @@ impl StudioLayout {
                 })));
             });
         }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_open_editor_callback(Some(Arc::new(move |_window, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.active_bottom_tab = components::BottomTab::Editor;
+                        this.panels.mixer_docked = true;
+                        cx.notify();
+                    });
+                })));
+            });
+        }
+
         let initial_audio_stats = audio_engine.as_ref().map(|engine| engine.stats());
         let initial_audio_running = initial_audio_stats
             .as_ref()
@@ -549,6 +571,7 @@ impl StudioLayout {
             active_bottom_tab: components::BottomTab::Mixer,
             bottom_panel_state: BottomPanelState::default(),
             timeline,
+            piano_roll,
             file_browser: FileBrowserState::default(),
             browser_scroll: UniformListScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
@@ -4728,6 +4751,7 @@ impl Render for StudioLayout {
                         mixer_scroll_x,
                         mixer_viewport_width,
                         on_mixer_scroll,
+                        Some(self.piano_roll.clone().into_any_element()),
                         on_tab_click,
                         on_resize_start,
                         on_resize_move,
@@ -4903,6 +4927,41 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
         })
         .collect();
 
+    // MIDI clips (Phase 2): notes stay clip-relative; the engine resolves them
+    // to absolute beats/samples. Muted clips are skipped, matching audio clips.
+    let midi_clips = state
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            let track_id = track.id.clone();
+            track.clips.iter().filter_map(move |clip| {
+                if clip.muted {
+                    return None;
+                }
+                let ClipType::Midi { notes } = &clip.clip_type else {
+                    return None;
+                };
+                Some(EngineMidiClipSnapshot {
+                    id: clip.id.clone(),
+                    track_id: track_id.clone(),
+                    start_beat: clip.start_beat.max(0.0) as f64,
+                    length_beats: clip.duration_beats.max(0.0) as f64,
+                    notes: notes
+                        .iter()
+                        .map(|n| EngineMidiNoteSnapshot {
+                            id: n.id,
+                            pitch: n.pitch.min(127),
+                            start_beat: n.start.max(0.0) as f64,
+                            length_beats: n.duration.max(0.0) as f64,
+                            velocity: n.velocity.clamp(1, 127),
+                            channel: 0,
+                        })
+                        .collect(),
+                })
+            })
+        })
+        .collect();
+
     EngineProjectSnapshot {
         project_id: "futureboard-native".to_string(),
         project_root: None,
@@ -4911,6 +4970,7 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
         sample_rate: sample_rate.max(1),
         tracks,
         clips,
+        midi_clips,
         routing: EngineRoutingSnapshot {
             master_output_device: None,
             sample_rate: sample_rate.max(1),
@@ -4931,13 +4991,16 @@ fn log_engine_sync_snapshot(snapshot: &EngineProjectSnapshot, dirty: bool, reaso
         })
         .count();
     let insert_count: usize = snapshot.tracks.iter().map(|t| t.inserts.len()).sum();
+    let midi_note_count: usize = snapshot.midi_clips.iter().map(|c| c.notes.len()).sum();
     eprintln!(
-        "[engine-sync] reason={} tracks={} clips={} clips_with_path={} inserts={} dirty={}",
+        "[engine-sync] reason={} tracks={} clips={} clips_with_path={} inserts={} midi_clips={} midi_notes={} dirty={}",
         reason,
         snapshot.tracks.len(),
         snapshot.clips.len(),
         clips_with_path,
         insert_count,
+        snapshot.midi_clips.len(),
+        midi_note_count,
         dirty
     );
     for track in &snapshot.tracks {

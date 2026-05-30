@@ -332,7 +332,7 @@ impl From<&TimelineState> for FutureboardProject {
                                         pitch: n.pitch,
                                         start_beats: n.start,
                                         duration_beats: n.duration,
-                                        velocity: 100,
+                                        velocity: n.velocity,
                                     })
                                     .collect(),
                             },
@@ -483,11 +483,12 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         ClipSource::Midi { notes } => ClipType::Midi {
                             notes: notes
                                 .iter()
-                                .map(|n| MidiNoteState {
-                                    pitch: n.pitch,
-                                    start: n.start_beats,
-                                    duration: n.duration_beats,
-                                })
+                                .map(|n| MidiNoteState::new(
+                                    n.pitch,
+                                    n.start_beats,
+                                    n.duration_beats,
+                                    n.velocity,
+                                ))
                                 .collect(),
                         },
                         ClipSource::Empty => ClipType::Midi { notes: Vec::new() },

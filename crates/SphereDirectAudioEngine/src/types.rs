@@ -164,7 +164,35 @@ pub struct EngineProjectSnapshot {
     pub sample_rate: u32,
     pub tracks: Vec<EngineTrackSnapshot>,
     pub clips: Vec<EngineClipSnapshot>,
+    /// MIDI clips (Phase 2). Defaulted so older snapshots without the field
+    /// still deserialize. Notes are stored relative to the clip start; the
+    /// runtime converts them to absolute project beats/samples at build time.
+    #[serde(default)]
+    pub midi_clips: Vec<EngineMidiClipSnapshot>,
     pub routing: EngineRoutingSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMidiClipSnapshot {
+    pub id: String,
+    pub track_id: String,
+    pub start_beat: f64,
+    pub length_beats: f64,
+    pub notes: Vec<EngineMidiNoteSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMidiNoteSnapshot {
+    pub id: u64,
+    pub pitch: u8,
+    /// Start beat relative to the clip start.
+    pub start_beat: f64,
+    pub length_beats: f64,
+    pub velocity: u8,
+    #[serde(default)]
+    pub channel: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2089,6 +2089,19 @@ where
                             );
                             runtime = next_runtime;
                             runtime.sample_rate = output_sample_rate;
+                            if crate::runtime::midi_engine_debug_enabled() {
+                                let notes: usize =
+                                    runtime.midi_clips.iter().map(|c| c.events.len() / 2).sum();
+                                eprintln!(
+                                    "[DAUx MIDI] snapshot clips={} notes={}",
+                                    runtime.midi_clips.len(),
+                                    notes
+                                );
+                            }
+                            // Position MIDI cursors for the current transport
+                            // position so a load mid-playback stays in sync.
+                            let midi_pos = shared.position_samples.load(Ordering::Relaxed);
+                            runtime.reset_midi_playback(midi_pos);
                         }
                         EngineCommand::SetTestTone { enabled, frequency } => {
                             osc_on = enabled;
@@ -2110,6 +2123,9 @@ where
                             }
                             playing_local = true;
                             shared.playing.store(true, Ordering::Relaxed);
+                            // Position MIDI cursors at the start beat and clear
+                            // any stale active notes so play-from is clean.
+                            runtime.reset_midi_playback(pos);
                         }
                         EngineCommand::StopTransport => {
                             if command_debug_enabled() {
@@ -2117,6 +2133,8 @@ where
                             }
                             playing_local = false;
                             shared.playing.store(false, Ordering::Relaxed);
+                            // Release held notes so nothing is left stuck.
+                            runtime.all_notes_off("stop");
                         }
                         EngineCommand::Seek { position_seconds } => {
                             let sr_local = shared.sample_rate.load(Ordering::Relaxed) as f64;
@@ -2129,6 +2147,8 @@ where
                             }
                             shared.position_samples.store(pos, Ordering::Relaxed);
                             metronome.reset_metronome_schedule(pos, output_sample_rate);
+                            // Re-seek MIDI cursors + flush held notes.
+                            runtime.reset_midi_playback(pos);
                         }
                         EngineCommand::SetMetronomeEnabled(enabled) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -2189,6 +2209,14 @@ where
                 let mut frames = 0u64;
                 let base_sample = shared.position_samples.load(Ordering::Relaxed);
                 runtime.begin_meter_block();
+
+                // MIDI scheduling — once per block, path-independent. Advances
+                // each MIDI track's event cursor and emits note on/off for the
+                // block range (debug-logged; instrument routing is Phase 2B).
+                if playing_local && ch > 0 {
+                    let frames_needed = (data.len() / ch) as u64;
+                    runtime.schedule_midi_block(base_sample, frames_needed);
+                }
 
                 if ch >= 2 && playing_local {
                     let frames_needed = data.len() / ch;

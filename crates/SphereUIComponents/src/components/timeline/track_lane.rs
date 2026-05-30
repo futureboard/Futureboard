@@ -23,6 +23,7 @@ pub fn track_lane(
     on_clip_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+    on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackLane");
     let track_id = track.id.clone();
@@ -63,6 +64,7 @@ pub fn track_lane(
             let track_color = track.color;
             let on_sel_clip = on_select_clip.clone();
             let on_clip_context = on_clip_context_menu.clone();
+            let on_open = on_open_editor.clone();
             Some(match clip.clip_type {
                 ClipType::Audio { .. } => audio_clip(
                     clip,
@@ -80,6 +82,7 @@ pub fn track_lane(
                     state,
                     on_sel_clip,
                     on_clip_context,
+                    on_open,
                 )
                 .into_any_element(),
             })

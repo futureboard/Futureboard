@@ -326,6 +326,7 @@ pub fn bottom_panel(
     mixer_scroll_x: f32,
     mixer_viewport_width: f32,
     on_mixer_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    editor_content: Option<gpui::AnyElement>,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
     on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
     on_resize_move: impl Fn(&gpui::DragMoveEvent<BottomPanelResizeDrag>, &mut Window, &mut App)
@@ -333,6 +334,7 @@ pub fn bottom_panel(
     on_resize_end: impl Fn(&gpui::MouseUpEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let on_tab_click = std::sync::Arc::new(on_tab_click);
+    let mut editor_content = editor_content;
     div()
         .flex()
         .flex_col()
@@ -416,7 +418,9 @@ pub fn bottom_panel(
                         on_mixer_scroll,
                     )
                     .into_any_element(),
-                    BottomTab::Editor => editor_panel().into_any_element(),
+                    BottomTab::Editor => editor_content
+                        .take()
+                        .unwrap_or_else(|| editor_panel().into_any_element()),
                     BottomTab::EffectEditor => effect_editor_panel().into_any_element(),
                 }),
         )

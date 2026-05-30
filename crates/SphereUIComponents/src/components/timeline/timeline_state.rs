@@ -34,11 +34,51 @@ impl TrackType {
     }
 }
 
+/// `FUTUREBOARD_MIDI_DEBUG=1` enables eprintln traces for MIDI clip/note
+/// mutations (mirrors the plugin/routing debug flags). Cached on first read.
+pub fn midi_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_DEBUG").is_some())
+}
+
+/// Smallest allowed note length, in beats (1/32 note). Mirrors the WebUI
+/// `MIN_DUR` guard so a note can never collapse to zero width.
+pub const MIN_NOTE_BEATS: f32 = 1.0 / 32.0;
+
+/// Monotonic source of transient note identities. Note ids are NOT persisted —
+/// they exist only so the piano-roll editor can track selection / drag targets
+/// across edits. Fresh ids are minted on create and on project load.
+fn next_midi_note_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MidiNoteState {
+    /// Transient identity (not serialized). Used by the piano-roll editor to
+    /// track selection and in-flight drag targets.
+    pub id: u64,
     pub pitch: u8,
     pub start: f32,    // beats relative to clip start
     pub duration: f32, // beats
+    /// MIDI velocity in 1..=127.
+    pub velocity: u8,
+}
+
+impl MidiNoteState {
+    /// Construct a note with a freshly minted transient id. `pitch` is clamped
+    /// to 0..=127, `velocity` to 1..=127, and `duration` to at least
+    /// [`MIN_NOTE_BEATS`].
+    pub fn new(pitch: u8, start: f32, duration: f32, velocity: u8) -> Self {
+        Self {
+            id: next_midi_note_id(),
+            pitch: pitch.min(127),
+            start: start.max(0.0),
+            duration: duration.max(MIN_NOTE_BEATS),
+            velocity: velocity.clamp(1, 127),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -636,41 +676,13 @@ impl TimelineState {
                 gain: 1.0,
                 clip_type: ClipType::Midi {
                     notes: vec![
-                        MidiNoteState {
-                            pitch: 60,
-                            start: 0.0,
-                            duration: 1.0,
-                        },
-                        MidiNoteState {
-                            pitch: 64,
-                            start: 1.0,
-                            duration: 1.0,
-                        },
-                        MidiNoteState {
-                            pitch: 67,
-                            start: 2.0,
-                            duration: 1.0,
-                        },
-                        MidiNoteState {
-                            pitch: 72,
-                            start: 3.0,
-                            duration: 2.0,
-                        },
-                        MidiNoteState {
-                            pitch: 67,
-                            start: 5.0,
-                            duration: 1.0,
-                        },
-                        MidiNoteState {
-                            pitch: 64,
-                            start: 6.0,
-                            duration: 1.0,
-                        },
-                        MidiNoteState {
-                            pitch: 60,
-                            start: 7.0,
-                            duration: 1.0,
-                        },
+                        MidiNoteState::new(60, 0.0, 1.0, 100),
+                        MidiNoteState::new(64, 1.0, 1.0, 100),
+                        MidiNoteState::new(67, 2.0, 1.0, 100),
+                        MidiNoteState::new(72, 3.0, 2.0, 110),
+                        MidiNoteState::new(67, 5.0, 1.0, 90),
+                        MidiNoteState::new(64, 6.0, 1.0, 90),
+                        MidiNoteState::new(60, 7.0, 1.0, 80),
                     ],
                 },
                 muted: false,
@@ -1145,6 +1157,178 @@ impl TimelineState {
             armed: false,
             input_monitor: false,
         })
+    }
+
+    // ── MIDI clip / note mutations ────────────────────────────────────────
+    // Single source of truth for piano-roll edits. The piano-roll editor calls
+    // these inside `Timeline::update` and then marks the project dirty so the
+    // engine sync + autosave see the change. Notes are stored relative to the
+    // clip start (matches the WebUI model). Every mutation clamps to valid
+    // ranges so a bad gesture can never produce an out-of-range note.
+
+    /// Create an empty MIDI clip on `track_id` at `start_beat` (snapped by the
+    /// caller if desired). Returns the new clip id, or `None` if the track is
+    /// missing. The clip is selected so the editor can pick it up immediately.
+    pub fn create_midi_clip(&mut self, track_id: &str, start_beat: f32, length_beats: f32) -> Option<String> {
+        if !self.tracks.iter().any(|t| t.id == track_id) {
+            return None;
+        }
+        let clip_id = self.next_clip_id();
+        let name = format!("MIDI {}", clip_id.strip_prefix("clip-").unwrap_or(&clip_id));
+        let new_clip = ClipState {
+            id: clip_id.clone(),
+            name,
+            start_beat: start_beat.max(0.0),
+            duration_beats: length_beats.max(1.0),
+            source_duration_seconds: None,
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Midi { notes: Vec::new() },
+            muted: false,
+            audio_import: AudioImportState::default(),
+        };
+        if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            track.clips.push(new_clip);
+        }
+        self.selection.selected_track_id = Some(track_id.to_string());
+        self.selection.selected_clip_ids = vec![clip_id.clone()];
+        if midi_debug_enabled() {
+            eprintln!(
+                "[midi] create_midi_clip track={} clip={} start={:.3} len={:.3}",
+                track_id, clip_id, start_beat, length_beats
+            );
+        }
+        Some(clip_id)
+    }
+
+    /// Borrow the notes of a MIDI clip by id.
+    pub fn midi_clip_notes(&self, clip_id: &str) -> Option<&Vec<MidiNoteState>> {
+        for track in &self.tracks {
+            for clip in &track.clips {
+                if clip.id == clip_id {
+                    if let ClipType::Midi { notes } = &clip.clip_type {
+                        return Some(notes);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn midi_clip_notes_mut(&mut self, clip_id: &str) -> Option<&mut Vec<MidiNoteState>> {
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if clip.id == clip_id {
+                    if let ClipType::Midi { notes } = &mut clip.clip_type {
+                        return Some(notes);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Add a note to a MIDI clip. Returns the new note id.
+    pub fn add_midi_note(
+        &mut self,
+        clip_id: &str,
+        pitch: u8,
+        start: f32,
+        duration: f32,
+        velocity: u8,
+    ) -> Option<u64> {
+        let note = MidiNoteState::new(pitch, start, duration, velocity);
+        let id = note.id;
+        let notes = self.midi_clip_notes_mut(clip_id)?;
+        notes.push(note);
+        if midi_debug_enabled() {
+            eprintln!(
+                "[midi] add_note clip={} id={} pitch={} start={:.3} dur={:.3} vel={}",
+                clip_id, id, pitch.min(127), start.max(0.0), duration.max(MIN_NOTE_BEATS), velocity.clamp(1, 127)
+            );
+        }
+        Some(id)
+    }
+
+    /// Apply absolute start/pitch to a set of notes (move gesture). Each tuple
+    /// is `(note_id, new_start_beats, new_pitch)`.
+    pub fn move_midi_notes(&mut self, clip_id: &str, updates: &[(u64, f32, u8)]) {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return;
+        };
+        for (id, new_start, new_pitch) in updates {
+            if let Some(note) = notes.iter_mut().find(|n| n.id == *id) {
+                note.start = new_start.max(0.0);
+                note.pitch = (*new_pitch).min(127);
+            }
+        }
+        if midi_debug_enabled() {
+            eprintln!("[midi] move_notes clip={} count={}", clip_id, updates.len());
+        }
+    }
+
+    /// Set a note's length (resize gesture), clamped to [`MIN_NOTE_BEATS`].
+    pub fn resize_midi_note(&mut self, clip_id: &str, id: u64, new_duration: f32) {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return;
+        };
+        if let Some(note) = notes.iter_mut().find(|n| n.id == id) {
+            note.duration = new_duration.max(MIN_NOTE_BEATS);
+            if midi_debug_enabled() {
+                eprintln!(
+                    "[midi] resize_note clip={} id={} dur={:.3}",
+                    clip_id, id, note.duration
+                );
+            }
+        }
+    }
+
+    /// Delete the given note ids from a MIDI clip. Returns how many were removed.
+    pub fn delete_midi_notes(&mut self, clip_id: &str, ids: &[u64]) -> usize {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return 0;
+        };
+        let before = notes.len();
+        notes.retain(|n| !ids.contains(&n.id));
+        let removed = before - notes.len();
+        if removed > 0 && midi_debug_enabled() {
+            eprintln!("[midi] delete_notes clip={} removed={}", clip_id, removed);
+        }
+        removed
+    }
+
+    /// Set a note's velocity (1..=127).
+    pub fn set_midi_note_velocity(&mut self, clip_id: &str, id: u64, velocity: u8) {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return;
+        };
+        if let Some(note) = notes.iter_mut().find(|n| n.id == id) {
+            note.velocity = velocity.clamp(1, 127);
+        }
+    }
+
+    /// Quantize the given note starts (or all notes when `ids` is empty) to the
+    /// supplied grid step in beats. Rounds to the nearest step.
+    pub fn quantize_midi_notes(&mut self, clip_id: &str, ids: &[u64], step_beats: f32) {
+        if step_beats <= 0.0 {
+            return;
+        }
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return;
+        };
+        let mut count = 0;
+        for note in notes.iter_mut() {
+            if ids.is_empty() || ids.contains(&note.id) {
+                note.start = ((note.start / step_beats).round() * step_beats).max(0.0);
+                count += 1;
+            }
+        }
+        if midi_debug_enabled() {
+            eprintln!(
+                "[midi] quantize clip={} count={} step={:.4}",
+                clip_id, count, step_beats
+            );
+        }
     }
 
     pub fn track_color_for_index(&self, index: usize) -> gpui::Rgba {

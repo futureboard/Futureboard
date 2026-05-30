@@ -18,6 +18,7 @@ pub(crate) use mixer_window::external_mixer_debug;
 pub mod panel;
 pub mod project_switcher;
 pub mod project_wizard;
+pub mod piano_roll;
 pub mod plugin_editor_window;
 pub mod plugin_manager;
 pub mod plugin_picker;
@@ -56,6 +57,7 @@ pub use message_box_dialog::{
     MessageBoxResult, MessageBoxWindow, MESSAGE_BOX_WIDTH,
 };
 pub use mixer_panel::mixer_panel;
+pub use piano_roll::PianoRoll;
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::right_panel;
 pub use plugin_manager::{

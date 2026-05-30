@@ -17,6 +17,7 @@ pub fn midi_clip(
     on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+    on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
 ) -> impl IntoElement {
     let clip_id = clip.id.clone();
     let drag_clip_id = clip.id.clone();
@@ -107,8 +108,17 @@ pub fn midi_clip(
         .id(("midi-clip", id_num))
         .on_mouse_down(
             gpui::MouseButton::Left,
-            move |_event: &gpui::MouseDownEvent, window, cx| {
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                // Stop the parent lane handler from re-selecting the track and
+                // clearing this clip selection — the piano roll edits the
+                // selected clip, so selection must survive the click.
+                cx.stop_propagation();
                 on_select(&clip_id, window, cx);
+                if event.click_count >= 2 {
+                    if let Some(open) = on_open_editor.as_ref() {
+                        open(window, cx);
+                    }
+                }
             },
         )
         .when_some(on_context_menu, |this, cb| {

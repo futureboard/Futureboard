@@ -12,8 +12,16 @@ use crate::audio_file::{load_audio_file, AudioFileBuffer};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
 
-use crate::types::{EngineClipSnapshot, EngineProjectSnapshot};
+use crate::types::{EngineClipSnapshot, EngineMidiClipSnapshot, EngineProjectSnapshot};
 use crate::vst3_processor::Vst3RuntimeProcessor;
+
+/// `FUTUREBOARD_MIDI_ENGINE_DEBUG=1` enables eprintln traces for MIDI runtime
+/// build + per-block scheduling. Cached on first read so the audio callback
+/// never touches the environment.
+pub fn midi_engine_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_ENGINE_DEBUG").is_some())
+}
 
 #[derive(Debug, Clone)]
 pub struct RuntimeTrack {
@@ -152,12 +160,62 @@ pub struct RuntimeClip {
     pub source: Arc<AudioFileBuffer>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMidiEventKind {
+    NoteOff,
+    NoteOn,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeMidiEvent {
+    /// Absolute project sample at which the event fires (precomputed from the
+    /// snapshot BPM at build time, mirroring how audio clips resolve to
+    /// samples — keeps scheduling deterministic and lock-free in the callback).
+    pub sample: u64,
+    /// Absolute project beat (kept for debug logging only).
+    pub beat: f64,
+    pub kind: RuntimeMidiEventKind,
+    pub pitch: u8,
+    pub velocity: u8,
+    pub channel: u8,
+    pub note_id: u64,
+}
+
+/// Structural per-clip representation, retained for logging / future reuse.
+#[derive(Debug, Clone)]
+pub struct RuntimeMidiClip {
+    pub id: String,
+    pub track_id: String,
+    pub start_beat: f64,
+    pub end_beat: f64,
+    pub events: Vec<RuntimeMidiEvent>,
+}
+
+/// Per-track merged + sorted event list with a playback cursor and active-note
+/// set. Scheduling reads `events[cursor..]` each block; `cursor` is repositioned
+/// on seek/play. `active` prevents stuck notes across stop/seek.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeMidiTrack {
+    pub track_id: String,
+    pub events: Vec<RuntimeMidiEvent>,
+    pub cursor: usize,
+    /// Currently-sounding (channel, pitch) pairs since the last NoteOn.
+    pub active: Vec<(u8, u8)>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeProject {
     pub sample_rate: u32,
     pub tracks: Vec<RuntimeTrack>,
     pub clips: Vec<RuntimeClip>,
     pub has_solo: bool,
+    /// Samples per beat at the snapshot BPM (constant-tempo; tempo automation
+    /// is a TODO — see midi-phase2-engine-playback.md).
+    pub samples_per_beat: f64,
+    /// Structural MIDI clips (logging / inspection).
+    pub midi_clips: Vec<RuntimeMidiClip>,
+    /// Per-track scheduling state driven by the audio callback.
+    pub midi_tracks: Vec<RuntimeMidiTrack>,
 }
 
 impl RuntimeProject {
@@ -465,11 +523,138 @@ impl RuntimeProject {
             }
         }
 
+        // ── MIDI runtime build (Phase 2) ────────────────────────────────────
+        let samples_per_beat = if snapshot.bpm > 0.0 {
+            output_sample_rate as f64 * 60.0 / snapshot.bpm
+        } else {
+            0.0
+        };
+        let (midi_clips, midi_tracks) =
+            build_midi_runtime(&snapshot.midi_clips, samples_per_beat);
+
+        if midi_engine_debug_enabled() {
+            let total_events: usize = midi_clips.iter().map(|c| c.events.len()).sum();
+            for c in &midi_clips {
+                eprintln!(
+                    "[DAUx MIDI] RuntimeMidiClip id={} track={} notes={} events={} beats={:.3}..{:.3}",
+                    c.id,
+                    c.track_id,
+                    c.events.len() / 2,
+                    c.events.len(),
+                    c.start_beat,
+                    c.end_beat
+                );
+            }
+            eprintln!(
+                "[DAUx MIDI] RuntimeProject midi_clips={} midi_events={} midi_tracks={} samples_per_beat={:.2}",
+                midi_clips.len(),
+                total_events,
+                midi_tracks.len(),
+                samples_per_beat
+            );
+        }
+
         Self {
             sample_rate: output_sample_rate,
             tracks,
             clips,
             has_solo,
+            samples_per_beat,
+            midi_clips,
+            midi_tracks,
+        }
+    }
+
+    /// Reposition every MIDI track's cursor to the first event at/after
+    /// `position_sample` and clear active notes (emitting note-offs so the
+    /// destination never gets a stuck note). Called on seek / play-from.
+    pub fn reset_midi_playback(&mut self, position_sample: u64) {
+        self.all_notes_off("seek/play");
+        for mt in &mut self.midi_tracks {
+            // Binary search: first event with sample >= position.
+            mt.cursor = mt
+                .events
+                .partition_point(|ev| ev.sample < position_sample);
+        }
+        if midi_engine_debug_enabled() {
+            eprintln!(
+                "[DAUx MIDI] reset_midi_playback pos={}sa tracks={}",
+                position_sample,
+                self.midi_tracks.len()
+            );
+        }
+    }
+
+    /// Emit note-off for all active notes on every MIDI track and clear the
+    /// active set. Called on stop/seek to prevent stuck notes.
+    pub fn all_notes_off(&mut self, reason: &str) {
+        let debug = midi_engine_debug_enabled();
+        for mt in &mut self.midi_tracks {
+            if mt.active.is_empty() {
+                continue;
+            }
+            if debug {
+                eprintln!(
+                    "[DAUx MIDI] all notes off track={} active={} reason={}",
+                    mt.track_id,
+                    mt.active.len(),
+                    reason
+                );
+            }
+            // TODO (Phase 2B): forward note-off to the track's instrument insert
+            // (VST3 event input) before clearing.
+            mt.active.clear();
+        }
+    }
+
+    /// Schedule the MIDI events that fall inside `[base_sample, base_sample +
+    /// frames)`. Runs once per audio block from the callback. No heap
+    /// allocation on the steady-state path (event lists are preallocated; the
+    /// active-note Vec is reserved at build time).
+    pub fn schedule_midi_block(&mut self, base_sample: u64, frames: u64) {
+        if self.midi_tracks.is_empty() || frames == 0 {
+            return;
+        }
+        let block_end = base_sample.saturating_add(frames);
+        let debug = midi_engine_debug_enabled();
+        let spb = self.samples_per_beat.max(1.0);
+        for mt in &mut self.midi_tracks {
+            let mut scheduled = 0u32;
+            while mt.cursor < mt.events.len() && mt.events[mt.cursor].sample < block_end {
+                let ev = mt.events[mt.cursor].clone();
+                mt.cursor += 1;
+                if ev.sample < base_sample {
+                    // Stale (e.g. just after a seek landing mid-block) — still
+                    // apply active-note bookkeeping so state stays consistent.
+                    apply_active(&mut mt.active, &ev);
+                    continue;
+                }
+                let offset = (ev.sample - base_sample) as usize;
+                apply_active(&mut mt.active, &ev);
+                // TODO (Phase 2B): route `ev` to the track's instrument insert
+                // (VST3 IEventList) at `offset` samples into the block.
+                if debug {
+                    match ev.kind {
+                        RuntimeMidiEventKind::NoteOn => eprintln!(
+                            "[DAUx MIDI] note_on ch={} pitch={} vel={} offset={}",
+                            ev.channel, ev.pitch, ev.velocity, offset
+                        ),
+                        RuntimeMidiEventKind::NoteOff => eprintln!(
+                            "[DAUx MIDI] note_off ch={} pitch={} offset={}",
+                            ev.channel, ev.pitch, offset
+                        ),
+                    }
+                }
+                scheduled += 1;
+            }
+            if debug && scheduled > 0 {
+                let bs = base_sample as f64 / spb;
+                let be = block_end as f64 / spb;
+                eprintln!(
+                    "[DAUx MIDI] block beat={:.3}..{:.3} track={} events={} active={}",
+                    bs, be, mt.track_id, scheduled, mt.active.len()
+                );
+            }
         }
     }
 
@@ -613,6 +798,109 @@ impl RuntimeProject {
     }
 }
 
+/// Apply a note event to the active-note set (NoteOn inserts, NoteOff removes).
+#[inline]
+fn apply_active(active: &mut Vec<(u8, u8)>, ev: &RuntimeMidiEvent) {
+    let key = (ev.channel, ev.pitch);
+    match ev.kind {
+        RuntimeMidiEventKind::NoteOn => {
+            if !active.contains(&key) {
+                active.push(key);
+            }
+        }
+        RuntimeMidiEventKind::NoteOff => {
+            active.retain(|k| *k != key);
+        }
+    }
+}
+
+/// Convert snapshot MIDI clips into structural [`RuntimeMidiClip`]s and merged
+/// per-track [`RuntimeMidiTrack`] schedules. Note starts are clip-relative and
+/// converted to absolute project beats/samples here (outside the audio
+/// callback). Events are sorted by sample, with NoteOff before NoteOn at the
+/// same sample to avoid retrigger glitches / stuck notes.
+fn build_midi_runtime(
+    snapshot_clips: &[EngineMidiClipSnapshot],
+    samples_per_beat: f64,
+) -> (Vec<RuntimeMidiClip>, Vec<RuntimeMidiTrack>) {
+    let mut clips: Vec<RuntimeMidiClip> = Vec::with_capacity(snapshot_clips.len());
+    let mut by_track: HashMap<String, Vec<RuntimeMidiEvent>> = HashMap::new();
+
+    for clip in snapshot_clips {
+        let mut events: Vec<RuntimeMidiEvent> = Vec::with_capacity(clip.notes.len() * 2);
+        for note in &clip.notes {
+            if note.length_beats <= 0.0 {
+                continue; // skip zero/negative-length notes
+            }
+            let pitch = note.pitch.min(127);
+            let velocity = note.velocity.clamp(1, 127);
+            let channel = note.channel.min(15);
+            let abs_start = clip.start_beat + note.start_beat.max(0.0);
+            let abs_end = abs_start + note.length_beats;
+            let on_sample = (abs_start * samples_per_beat).round().max(0.0) as u64;
+            let off_sample = (abs_end * samples_per_beat).round().max(0.0) as u64;
+            events.push(RuntimeMidiEvent {
+                sample: on_sample,
+                beat: abs_start,
+                kind: RuntimeMidiEventKind::NoteOn,
+                pitch,
+                velocity,
+                channel,
+                note_id: note.id,
+            });
+            events.push(RuntimeMidiEvent {
+                sample: off_sample,
+                beat: abs_end,
+                kind: RuntimeMidiEventKind::NoteOff,
+                pitch,
+                velocity: 0,
+                channel,
+                note_id: note.id,
+            });
+        }
+        // Sort by sample; NoteOff before NoteOn at the same sample.
+        events.sort_by(|a, b| {
+            a.sample
+                .cmp(&b.sample)
+                .then((a.kind as u8).cmp(&(b.kind as u8)))
+        });
+        let end_beat = clip.start_beat + clip.length_beats.max(0.0);
+        by_track
+            .entry(clip.track_id.clone())
+            .or_default()
+            .extend(events.iter().cloned());
+        clips.push(RuntimeMidiClip {
+            id: clip.id.clone(),
+            track_id: clip.track_id.clone(),
+            start_beat: clip.start_beat,
+            end_beat,
+            events,
+        });
+    }
+
+    let mut midi_tracks: Vec<RuntimeMidiTrack> = by_track
+        .into_iter()
+        .map(|(track_id, mut events)| {
+            events.sort_by(|a, b| {
+                a.sample
+                    .cmp(&b.sample)
+                    .then((a.kind as u8).cmp(&(b.kind as u8)))
+            });
+            let mut active = Vec::new();
+            active.reserve(128); // bound growth out of the audio callback
+            RuntimeMidiTrack {
+                track_id,
+                events,
+                cursor: 0,
+                active,
+            }
+        })
+        .collect();
+    midi_tracks.sort_by(|a, b| a.track_id.cmp(&b.track_id));
+
+    (clips, midi_tracks)
+}
+
 fn build_clip_runtime(
     clip: &EngineClipSnapshot,
     source: Arc<AudioFileBuffer>,
@@ -661,4 +949,105 @@ fn f32_store(v: f32) -> u32 {
 #[inline]
 fn f32_load(v: u32) -> f32 {
     f32::from_bits(v)
+}
+
+#[cfg(test)]
+mod midi_tests {
+    use super::*;
+    use crate::types::{EngineMidiClipSnapshot, EngineMidiNoteSnapshot};
+
+    // 120 BPM @ 48 kHz → 24000 samples per beat.
+    const SPB: f64 = 24000.0;
+
+    fn clip_with_one_note() -> EngineMidiClipSnapshot {
+        EngineMidiClipSnapshot {
+            id: "mc1".into(),
+            track_id: "track-1".into(),
+            start_beat: 4.0, // bar 2 in 4/4
+            length_beats: 4.0,
+            notes: vec![EngineMidiNoteSnapshot {
+                id: 1,
+                pitch: 60, // C4
+                start_beat: 0.0,
+                length_beats: 1.0,
+                velocity: 100,
+                channel: 0,
+            }],
+        }
+    }
+
+    fn project_with(clips: Vec<EngineMidiClipSnapshot>) -> RuntimeProject {
+        let (midi_clips, midi_tracks) = build_midi_runtime(&clips, SPB);
+        RuntimeProject {
+            sample_rate: 48_000,
+            samples_per_beat: SPB,
+            midi_clips,
+            midi_tracks,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn note_resolves_to_absolute_samples_with_off_before_on() {
+        let p = project_with(vec![clip_with_one_note()]);
+        let evs = &p.midi_tracks[0].events;
+        assert_eq!(evs.len(), 2);
+        // absolute start beat = 4 + 0 = 4 → 96000 sa; end beat 5 → 120000 sa.
+        let on = evs.iter().find(|e| e.kind == RuntimeMidiEventKind::NoteOn).unwrap();
+        let off = evs.iter().find(|e| e.kind == RuntimeMidiEventKind::NoteOff).unwrap();
+        assert_eq!(on.sample, 96_000);
+        assert_eq!(off.sample, 120_000);
+        assert_eq!(on.pitch, 60);
+        assert_eq!(on.velocity, 100);
+    }
+
+    #[test]
+    fn zero_length_note_is_skipped() {
+        let mut clip = clip_with_one_note();
+        clip.notes[0].length_beats = 0.0;
+        let p = project_with(vec![clip]);
+        assert!(p.midi_tracks.is_empty() || p.midi_tracks[0].events.is_empty());
+    }
+
+    #[test]
+    fn schedule_fires_note_on_then_off_and_tracks_active() {
+        let mut p = project_with(vec![clip_with_one_note()]);
+        p.reset_midi_playback(0);
+        // Block before the note: nothing active.
+        p.schedule_midi_block(0, 512);
+        assert_eq!(p.midi_tracks[0].active.len(), 0);
+        // Block covering the NoteOn (96000).
+        p.schedule_midi_block(96_000, 512);
+        assert_eq!(p.midi_tracks[0].active, vec![(0u8, 60u8)]);
+        // Block covering the NoteOff (120000).
+        p.schedule_midi_block(120_000, 512);
+        assert!(p.midi_tracks[0].active.is_empty());
+    }
+
+    #[test]
+    fn seek_before_note_then_play_fires_it() {
+        let mut p = project_with(vec![clip_with_one_note()]);
+        p.reset_midi_playback(95_000); // just before the NoteOn
+        p.schedule_midi_block(95_000, 2048); // covers 95000..97048 → fires NoteOn
+        assert_eq!(p.midi_tracks[0].active, vec![(0u8, 60u8)]);
+    }
+
+    #[test]
+    fn seek_after_note_does_not_fire_old_note() {
+        let mut p = project_with(vec![clip_with_one_note()]);
+        p.reset_midi_playback(200_000); // well past the note
+        p.schedule_midi_block(200_000, 512);
+        assert!(p.midi_tracks[0].active.is_empty());
+        assert_eq!(p.midi_tracks[0].cursor, p.midi_tracks[0].events.len());
+    }
+
+    #[test]
+    fn all_notes_off_clears_active() {
+        let mut p = project_with(vec![clip_with_one_note()]);
+        p.reset_midi_playback(96_000);
+        p.schedule_midi_block(96_000, 512);
+        assert_eq!(p.midi_tracks[0].active.len(), 1);
+        p.all_notes_off("stop");
+        assert!(p.midi_tracks[0].active.is_empty());
+    }
 }

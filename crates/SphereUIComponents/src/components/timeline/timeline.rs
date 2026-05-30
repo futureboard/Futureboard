@@ -3,7 +3,7 @@ use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipState, ClipType, MidiNoteState, SnapDivision, TimelineState, TimelineTool,
+    ClipDragItem, ClipState, ClipType, SnapDivision, TimelineState, TimelineTool,
     TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
@@ -59,8 +59,14 @@ pub struct Timeline {
     clip_drag_target_track_index: Option<usize>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     on_context_menu: Option<TimelineContextMenuCb>,
+    /// Invoked when the user double-clicks a MIDI clip — `StudioLayout` uses it
+    /// to switch the bottom panel to the piano-roll Editor tab.
+    on_open_editor: Option<TimelineOpenEditorCb>,
     chrome_metrics: TimelineChromeMetrics,
 }
+
+pub type TimelineOpenEditorCb =
+    std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>;
 
 #[derive(Clone, Debug)]
 pub enum TimelineContextTarget {
@@ -116,6 +122,7 @@ impl Timeline {
             clip_drag_target_track_index: None,
             pan_last_position: None,
             on_context_menu: None,
+            on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
         }
     }
@@ -135,6 +142,7 @@ impl Timeline {
             clip_drag_target_track_index: None,
             pan_last_position: None,
             on_context_menu: None,
+            on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
         }
     }
@@ -150,6 +158,10 @@ impl Timeline {
         self.on_context_menu = callback;
     }
 
+    pub fn set_open_editor_callback(&mut self, callback: Option<TimelineOpenEditorCb>) {
+        self.on_open_editor = callback;
+    }
+
     pub fn set_add_track_callback(&mut self, callback: Option<TimelineAddTrackCb>) {
         self.on_add_track = callback;
     }
@@ -162,7 +174,7 @@ impl Timeline {
         self.on_media_changed = callback;
     }
 
-    fn mark_project_changed(&self, cx: &mut gpui::App) {
+    pub(crate) fn mark_project_changed(&self, cx: &mut gpui::App) {
         if let Some(callback) = self.on_project_changed.as_ref() {
             callback(cx);
         }
@@ -432,51 +444,64 @@ impl Render for Timeline {
         });
 
         let on_add_clip = cx.listener(|this, (track_id, beat): &(String, f32), _window, cx| {
-            if let Some(t) = this.state.tracks.iter_mut().find(|t| t.id == *track_id) {
-                let name = match t.track_type {
-                    TrackType::Audio => "vocals_harmony_new.wav".to_string(),
-                    _ => "midi_clip_new.mid".to_string(),
-                };
-                let duration = 4.0;
-                let clip_type = match t.track_type {
-                    TrackType::Audio => ClipType::Audio {
-                        file_id: "new-file".to_string(),
-                        source_path: None,
-                    },
-                    _ => ClipType::Midi {
-                        notes: vec![
-                            MidiNoteState {
-                                pitch: 60,
-                                start: 0.0,
-                                duration: 1.0,
+            let track_type = this
+                .state
+                .tracks
+                .iter()
+                .find(|t| t.id == *track_id)
+                .map(|t| t.track_type);
+            let duration = 4.0;
+            match track_type {
+                Some(TrackType::Audio) => {
+                    if let Some(t) = this.state.tracks.iter_mut().find(|t| t.id == *track_id) {
+                        let clip_id = format!("clip-{}-{}", t.clips.len() + 1, beat);
+                        t.clips.push(ClipState {
+                            id: clip_id,
+                            name: "vocals_harmony_new.wav".to_string(),
+                            start_beat: *beat,
+                            duration_beats: duration,
+                            source_duration_seconds: None,
+                            offset_beats: 0.0,
+                            gain: 1.0,
+                            clip_type: ClipType::Audio {
+                                file_id: "new-file".to_string(),
+                                source_path: None,
                             },
-                            MidiNoteState {
-                                pitch: 64,
-                                start: 1.0,
-                                duration: 1.0,
-                            },
-                            MidiNoteState {
-                                pitch: 67,
-                                start: 2.0,
-                                duration: 2.0,
-                            },
-                        ],
-                    },
-                };
-                let clip_id = format!("clip-{}-{}", t.clips.len() + 1, beat);
-                t.clips.push(ClipState {
-                    id: clip_id,
-                    name,
-                    start_beat: *beat,
-                    duration_beats: duration,
-                    source_duration_seconds: None,
-                    offset_beats: 0.0,
-                    gain: 1.0,
-                    clip_type,
-                    muted: false,
-                    audio_import: crate::components::timeline::timeline_state::AudioImportState::default(),
-                });
-                this.mark_project_changed(cx);
+                            muted: false,
+                            audio_import: crate::components::timeline::timeline_state::AudioImportState::default(),
+                        });
+                        this.mark_project_changed(cx);
+                    }
+                }
+                Some(_) => {
+                    // MIDI / Instrument: create an EMPTY clip (user draws notes).
+                    // Demo notes are dev-only, behind FUTUREBOARD_DEMO_MIDI=1.
+                    if let Some(clip_id) =
+                        this.state.create_midi_clip(track_id, *beat, duration)
+                    {
+                        let demo = std::env::var_os("FUTUREBOARD_DEMO_MIDI").is_some();
+                        if demo {
+                            this.state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100);
+                            this.state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100);
+                            this.state.add_midi_note(&clip_id, 67, 2.0, 2.0, 100);
+                        }
+                        if std::env::var_os("FUTUREBOARD_MIDI_DEBUG").is_some() {
+                            let notes = this
+                                .state
+                                .midi_clip_notes(&clip_id)
+                                .map(|n| n.len())
+                                .unwrap_or(0);
+                            eprintln!(
+                                "[Native MIDI] create_midi_clip reason={} clip_id={} notes={}",
+                                if demo { "demo_env" } else { "user_pen_tool" },
+                                clip_id,
+                                notes
+                            );
+                        }
+                        this.mark_project_changed(cx);
+                    }
+                }
+                None => {}
             }
             cx.notify();
         });
@@ -894,6 +919,7 @@ impl Render for Timeline {
                 on_add_clip.clone(),
                 on_track_context_menu.clone(),
                 on_clip_context_menu.clone(),
+                self.on_open_editor.clone(),
             )))
             // 3. Playhead Overlay (frontmost timeline pass)
             // Render after ruler + content so grid/ruler/content never cover it.

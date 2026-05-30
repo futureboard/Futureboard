@@ -1,0 +1,255 @@
+/**
+ * Generate keyboard shortcut profiles from native-menu.json.
+ *
+ * Output: packages/keymaps/{default,ableton,cubase,fl_studio,studio_one}.json
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.join(__dirname, "..");
+const menuPath = path.join(root, "packages/shared/generated/native-menu.json");
+const outDir = path.join(root, "packages/keymaps");
+
+/** @typedef {{ version: number, generatedAt: string, menus: { items: unknown[] }[] }} MenuManifest */
+
+/** @param {unknown[]} items @param {Record<string, string|null>} out */
+function walkMenuItems(items, out) {
+  for (const raw of items) {
+    const item = /** @type {{ command?: string; shortcut?: string|null; children?: unknown[] }} */ (raw);
+    if (item.children?.length) walkMenuItems(item.children, out);
+    if (item.command && item.command !== "noop") {
+      out[item.command] = item.shortcut ?? null;
+    }
+  }
+}
+
+/** @param {MenuManifest} menu */
+function extractDefaultBindings(menu) {
+  /** @type {Record<string, string|null>} */
+  const bindings = {};
+  for (const group of menu.menus) walkMenuItems(group.items, bindings);
+  return bindings;
+}
+
+/** @param {Record<string, string|null>} bindings */
+function assignedOnly(bindings) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const [command, shortcut] of Object.entries(bindings)) {
+    if (shortcut) out[command] = shortcut;
+  }
+  return out;
+}
+
+/**
+ * DAW-specific overrides keyed by command id.
+ * Values of `null` remove a default binding for that profile.
+ * @type {Record<string, Record<string, string|null>>}
+ */
+const DAW_OVERRIDES = {
+  ableton: {
+    "transport:record": "F9",
+    "transport:toggle-loop": "Ctrl+L",
+    "transport:toggle-metronome": "O",
+    "clip:split-at-playhead": "Ctrl+E",
+    "midi:quantize": "Ctrl+U",
+    "edit:deselect-all": "Ctrl+Shift+A",
+    "file:export-audio": "Ctrl+Shift+R",
+    "panel:toggle-browser": "Ctrl+Alt+B",
+    "tools:select-pen": "B",
+    "tools:select-pointer": null,
+    "tools:select-cut": null,
+    "tools:select-glue": null,
+    "tools:select-time": null,
+    "tools:select-automation": "A",
+    "timeline:toggle-snap": null,
+    "marker:add": null,
+    "audio:bounce-in-place": "Ctrl+J",
+    "audio:render-selection": "Ctrl+Shift+R",
+    "view:zoom-in": "+",
+    "view:zoom-out": "-",
+    "view:reset-zoom": null,
+    "panel:toggle-mixer": null,
+    "panel:toggle-inspector": null,
+    "panel:toggle-device-panel": null,
+    "panel:toggle-midi-editor": null,
+    "panel:toggle-automation": null,
+    "tools:quick-search": null,
+  },
+  cubase: {
+    "transport:record": "Numpad*",
+    "transport:toggle-loop": "Numpad/",
+    "transport:toggle-metronome": "C",
+    "transport:go-to-start": "Numpad.",
+    "transport:rewind": "Shift+Numpad-",
+    "transport:fast-forward": "Shift+Numpad+",
+    "clip:split-at-playhead": "Alt+X",
+    "tools:select-pointer": "1",
+    "tools:select-pen": "8",
+    "tools:select-cut": "3",
+    "tools:select-glue": "4",
+    "tools:select-time": "6",
+    "tools:select-automation": "A",
+    "timeline:toggle-snap": null,
+    "marker:add": null,
+    "track:show-add-dialog": "Ctrl+T",
+    "track:add-midi": "Ctrl+Shift+I",
+    "audio:bounce-in-place": "Ctrl+Shift+B",
+    "audio:render-selection": "Alt+Shift+R",
+    "edit:deselect-all": "Ctrl+Shift+A",
+    "midi:nudge-left": "Ctrl+ArrowLeft",
+    "midi:nudge-right": "Ctrl+ArrowRight",
+    "midi:transpose-up": "Shift+ArrowUp",
+    "midi:transpose-down": "Shift+ArrowDown",
+    "midi:transpose-octave-up": "Ctrl+Shift+ArrowUp",
+    "midi:transpose-octave-down": "Ctrl+Shift+ArrowDown",
+    "panel:toggle-browser": null,
+    "panel:toggle-mixer": "F3",
+    "panel:toggle-inspector": null,
+    "panel:toggle-midi-editor": "F2",
+    "tools:command-palette": null,
+  },
+  fl_studio: {
+    "transport:stop": "Ctrl+Space",
+    "transport:toggle-metronome": "Ctrl+M",
+    "transport:go-to-start": null,
+    "transport:go-to-end": null,
+    "transport:rewind": "Numpad/",
+    "transport:fast-forward": "Numpad0",
+    "clip:split-at-playhead": null,
+    "timeline:toggle-snap": "Backspace",
+    "tools:select-pointer": null,
+    "tools:select-pen": null,
+    "tools:select-cut": null,
+    "tools:select-glue": null,
+    "tools:select-time": null,
+    "tools:select-automation": null,
+    "marker:add": null,
+    "track:show-add-dialog": null,
+    "track:add-midi": null,
+    "file:import-audio": "Ctrl+Shift+H",
+    "panel:toggle-browser": null,
+    "panel:toggle-mixer": "F9",
+    "panel:toggle-midi-editor": "F7",
+    "panel:toggle-device-panel": "F10",
+    "tools:quick-search": "Alt+F8",
+    "edit:duplicate": "Ctrl+B",
+    "audio:bounce-in-place": "Ctrl+Shift+B",
+    "view:zoom-in": "Ctrl+Up",
+    "view:zoom-out": "Ctrl+Down",
+    "view:reset-zoom": null,
+    "tools:command-palette": null,
+  },
+  studio_one: {
+    "transport:record": "Numpad*",
+    "transport:stop": "Numpad0",
+    "transport:toggle-loop": "Numpad/",
+    "transport:go-to-start": "Numpad,",
+    "transport:rewind": "Numpad-",
+    "transport:fast-forward": "Numpad+",
+    "clip:split-at-playhead": "Alt+X",
+    "tools:select-pointer": "1",
+    "tools:select-pen": "5",
+    "tools:select-cut": "3",
+    "tools:select-glue": null,
+    "tools:select-time": null,
+    "tools:select-automation": "A",
+    "track:show-add-dialog": "T",
+    "track:add-midi": "Ctrl+Shift+T",
+    "edit:duplicate": "D",
+    "edit:deselect-all": "Ctrl+D",
+    "file:export-audio": "Ctrl+E",
+    "file:export-stems": "Ctrl+Shift+E",
+    "audio:bounce-in-place": "Ctrl+B",
+    "audio:render-selection": "Ctrl+R",
+    "midi:nudge-left": "Alt+ArrowLeft",
+    "midi:nudge-right": "Alt+ArrowRight",
+    "midi:transpose-up": "Shift+ArrowUp",
+    "midi:transpose-down": "Shift+ArrowDown",
+    "midi:transpose-octave-up": "Ctrl+Shift+ArrowUp",
+    "midi:transpose-octave-down": "Ctrl+Shift+ArrowDown",
+    "timeline:toggle-snap": "N",
+    "marker:add": null,
+    "panel:toggle-browser": "F5",
+    "panel:toggle-mixer": "F3",
+    "panel:toggle-inspector": "F4",
+    "panel:toggle-midi-editor": "F2",
+    "tools:command-palette": null,
+  },
+};
+
+/** @type {{ id: string; label: string; description: string; overrides?: Record<string, string|null> }[]} */
+const PROFILES = [
+  {
+    id: "default",
+    label: "Futureboard Default",
+    description: "Default shortcuts from the application menu manifest.",
+  },
+  {
+    id: "ableton",
+    label: "Ableton Live",
+    description: "Shortcuts aligned with Ableton Live defaults where commands overlap.",
+    overrides: DAW_OVERRIDES.ableton,
+  },
+  {
+    id: "cubase",
+    label: "Cubase",
+    description: "Shortcuts aligned with Steinberg Cubase defaults where commands overlap.",
+    overrides: DAW_OVERRIDES.cubase,
+  },
+  {
+    id: "fl_studio",
+    label: "FL Studio",
+    description: "Shortcuts aligned with FL Studio defaults where commands overlap.",
+    overrides: DAW_OVERRIDES.fl_studio,
+  },
+  {
+    id: "studio_one",
+    label: "Studio One",
+    description: "Shortcuts aligned with PreSonus Studio One defaults where commands overlap.",
+    overrides: DAW_OVERRIDES.studio_one,
+  },
+];
+
+/**
+ * @param {Record<string, string|null>} base
+ * @param {Record<string, string|null>|undefined} overrides
+ */
+function mergeBindings(base, overrides) {
+  const merged = { ...base };
+  if (!overrides) return merged;
+  for (const [command, shortcut] of Object.entries(overrides)) {
+    if (shortcut === null) delete merged[command];
+    else merged[command] = shortcut;
+  }
+  return merged;
+}
+
+function main() {
+  const menu = /** @type {MenuManifest} */ (
+    JSON.parse(fs.readFileSync(menuPath, "utf8"))
+  );
+  const defaultBindings = extractDefaultBindings(menu);
+
+  fs.mkdirSync(outDir, { recursive: true });
+
+  for (const profile of PROFILES) {
+    const merged = mergeBindings(defaultBindings, profile.overrides);
+    const payload = {
+      version: 1,
+      id: profile.id,
+      label: profile.label,
+      description: profile.description,
+      sourceMenuVersion: menu.version,
+      generatedAt: new Date().toISOString(),
+      bindings: assignedOnly(merged),
+    };
+    const outPath = path.join(outDir, `${profile.id}.json`);
+    fs.writeFileSync(outPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    console.log(`wrote ${outPath} (${Object.keys(payload.bindings).length} bindings)`);
+  }
+}
+
+main();

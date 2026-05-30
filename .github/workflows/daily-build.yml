@@ -62,11 +62,6 @@ jobs:
           node scripts/sync-version.mjs
           node scripts/sync-version.mjs --check
 
-      - name: Sync versions
-        run: |
-          node scripts/sync-version.mjs
-          node scripts/sync-version.mjs --check
-
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-24.04'
         run: |
@@ -81,10 +76,8 @@ jobs:
             libxi-dev libgl1-mesa-dev libfontconfig1-dev \
             libssl-dev
 
-      - name: Setup Rust + wasm32 target
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -93,8 +86,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            extentions/template/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'extentions/template/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
@@ -138,137 +130,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  build_electron:
-    name: Build Electron (${{ matrix.os }})
-    needs: version
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: win
-            artifact-name: futureboard-win
-            artifact-glob: apps/electron/release/*.exe
-            artifact-glob2: ""
-            updater-yml: apps/electron/release/latest.yml
-          - os: macos-latest
-            platform: mac
-            artifact-name: futureboard-mac
-            artifact-glob: apps/electron/release/*.dmg
-            artifact-glob2: ""
-            updater-yml: apps/electron/release/latest-mac.yml
-          - os: ubuntu-24.04
-            platform: linux
-            artifact-name: futureboard-linux
-            artifact-glob: apps/electron/release/*.AppImage
-            artifact-glob2: apps/electron/release/*.deb
-            updater-yml: apps/electron/release/latest-linux.yml
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Initialize submodules (audio SDKs + shared icons)
-        run: bash .github/workflows/submodules-init.sh
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock', 'extentions/template/bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Install web dependencies (rolldown native binding)
-        run: bun install --cwd apps/web
-
-      - name: Install Linux build dependencies
-        if: matrix.os == 'ubuntu-24.04'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential pkg-config libarchive-tools fakeroot rpm \
-            libopenjp2-tools libasound2-dev \
-            libgtk-4-dev libglib2.0-dev \
-            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libxcb1-dev libxcb-xfixes0-dev libxcb-shape0-dev \
-            libxcb-render-util0-dev libxcb-composite0-dev \
-            libxi-dev libgl1-mesa-dev libfontconfig1-dev \
-            libssl-dev
-
-      - name: Setup Rust + wasm32 target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            extentions/template/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'extentions/template/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
-
-      - name: Build WASM (SphereWebAudioCore)
-        run: bun run --cwd apps/web build:audio:wasm
-
-      - name: Check audio plugin framework
-        run: |
-          cargo check --manifest-path crates/SphereAudioPlugins/Cargo.toml
-          cargo check --manifest-path extentions/template/Cargo.toml
-          bun install --cwd extentions/template
-          bun run --cwd extentions/template typecheck
-
-      - name: Verify shared app assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          for f in apps/shared/app.png apps/shared/icon.ico apps/shared/icon.icns apps/shared/app.rc apps/shared/app.manifest; do
-            test -f "$f" || { echo "missing $f"; exit 1; }
-          done
-          echo "Shared app assets OK"
-
-      - name: Build & package (${{ matrix.platform }})
-        run: bun run dist:electron:${{ matrix.platform }}
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ matrix.platform == 'win' && secrets.WIN_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.platform == 'win' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
-
-      - name: Upload Electron artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact-name }}
-          path: |
-            ${{ matrix.artifact-glob }}
-            ${{ matrix.artifact-glob2 }}
-            ${{ matrix.updater-yml }}
-          if-no-files-found: error
-          retention-days: 3
-
   publish:
     name: Publish Pre-Release
-    needs: [version, build_native, build_electron]
+    needs: [version, build_native]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

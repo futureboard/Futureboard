@@ -27,12 +27,12 @@ jobs:
       - name: Read app version
         id: read
         run: |
-          VERSION=$(node -p "require('./apps/electron/package.json').version")
+          VERSION=$(node -p "require('./version.json').version")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "App version: $VERSION"
 
   build:
-    name: Build (${{ matrix.os }})
+    name: Build Native (${{ matrix.os }})
     needs: version
     runs-on: ${{ matrix.os }}
     strategy:
@@ -41,28 +41,16 @@ jobs:
         include:
           - os: windows-latest
             platform: win
-            artifact-name: futureboard-win
-            artifact-glob: apps/electron/release/*.exe
-            artifact-glob2: ""
-            updater-yml: apps/electron/release/latest.yml
             native-bin: target/release/futureboard_native.exe
             native-artifact-name: futureboard-native-win
             native-bundle-glob: packaging/native/out/win/**/*
           - os: macos-latest
             platform: mac
-            artifact-name: futureboard-mac
-            artifact-glob: apps/electron/release/*.dmg
-            artifact-glob2: ""
-            updater-yml: apps/electron/release/latest-mac.yml
             native-bin: target/release/futureboard_native
             native-artifact-name: futureboard-native-mac
             native-bundle-glob: packaging/native/out/**
           - os: ubuntu-24.04
             platform: linux
-            artifact-name: futureboard-linux
-            artifact-glob: apps/electron/release/*.AppImage
-            artifact-glob2: apps/electron/release/*.deb
-            updater-yml: apps/electron/release/latest-linux.yml
             native-bin: target/release/futureboard_native
             native-artifact-name: futureboard-native-linux
             native-bundle-glob: ""
@@ -73,39 +61,6 @@ jobs:
 
       - name: Initialize submodules (audio SDKs + shared icons)
         run: bash .github/workflows/submodules-init.sh
-
-      - name: Download vswhere.exe and detect Visual Studio (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path .bin | Out-Null
-          Invoke-WebRequest `
-            -Uri "https://github.com/microsoft/vswhere/releases/latest/download/vswhere.exe" `
-            -OutFile ".bin\vswhere.exe"
-          Write-Host "vswhere version: $(& '.bin\vswhere.exe' -version)"
-          $install  = & ".bin\vswhere.exe" -latest -property installationPath
-          $instance = & ".bin\vswhere.exe" -latest -property instanceId
-          $version  = & ".bin\vswhere.exe" -latest -property installationVersion
-          if (-not $install) { Write-Error "No Visual Studio installation found"; exit 1 }
-          Write-Host "VS installationPath:    $install"
-          Write-Host "VS instanceId:          $instance"
-          Write-Host "VS installationVersion: $version"
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock', 'extentions/template/bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install
 
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-24.04'
@@ -121,10 +76,8 @@ jobs:
             libxi-dev libgl1-mesa-dev libfontconfig1-dev \
             libssl-dev
 
-      - name: Setup Rust + wasm32 target
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -133,23 +86,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            extentions/template/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'extentions/template/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
-
-      - name: Build WASM (SphereWebAudioCore)
-        run: bun run --cwd apps/web build:audio:wasm
-
-      - name: Check audio plugin framework
-        run: |
-          cargo check --manifest-path crates/SphereAudioPlugins/Cargo.toml
-          cargo check --manifest-path extentions/template/Cargo.toml
-          bun install --cwd extentions/template
-          bun run --cwd extentions/template typecheck
 
       - name: Verify shared app assets
         shell: bash
@@ -173,31 +112,6 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: ./packaging/native/bundle-windows.ps1
-
-      - name: Build & package (${{ matrix.platform }})
-        run: bun run dist:electron:${{ matrix.platform }}
-        env:
-          # Disable cert auto-discovery on all platforms
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Windows Authenticode signing — only relevant on win runner
-          CSC_LINK: ${{ matrix.platform == 'win' && secrets.WIN_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.platform == 'win' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
-          # macOS notarization — only relevant on mac runner
-          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
-
-      - name: Upload Electron artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact-name }}
-          path: |
-            ${{ matrix.artifact-glob }}
-            ${{ matrix.artifact-glob2 }}
-            ${{ matrix.updater-yml }}
-          if-no-files-found: error
-          retention-days: 7
 
       - name: Upload native app artifact
         uses: actions/upload-artifact@v4

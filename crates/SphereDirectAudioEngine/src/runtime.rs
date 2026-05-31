@@ -1041,8 +1041,7 @@ fn build_midi_runtime(
                     .cmp(&b.sample)
                     .then((a.kind as u8).cmp(&(b.kind as u8)))
             });
-            let mut active = Vec::new();
-            active.reserve(128); // bound growth out of the audio callback
+            let active = Vec::with_capacity(128); // bound growth out of the audio callback
             RuntimeMidiTrack {
                 track_id,
                 events,

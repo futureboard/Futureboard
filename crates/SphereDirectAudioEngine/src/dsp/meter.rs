@@ -1,5 +1,4 @@
 /// Per-block peak and RMS computation — allocation-free, no division by zero.
-
 /// Returns `(peak, rms)` for a mono slice of samples.
 #[allow(dead_code)]
 #[inline]

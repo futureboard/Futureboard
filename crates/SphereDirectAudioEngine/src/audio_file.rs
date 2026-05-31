@@ -631,7 +631,7 @@ pub fn generate_wav_peaks_from_path(
             }
 
             frame_index += 1;
-            if frame_index % spp == 0 {
+            if frame_index.is_multiple_of(spp) {
                 write_i16_peak_i32(&mut peaks, current_peak, fmt.channels, &min, &max);
                 current_peak += 1;
                 reset_peak_min_max(&mut min, &mut max);
@@ -750,11 +750,7 @@ fn load_via_symphonia(path: &Path) -> Result<AudioFileBuffer, String> {
         }
     }
 
-    let frames = if channels > 0 {
-        all_samples.len() / channels
-    } else {
-        0
-    };
+    let frames = all_samples.len().checked_div(channels).unwrap_or(0);
     Ok(AudioFileBuffer {
         sample_rate,
         channels,

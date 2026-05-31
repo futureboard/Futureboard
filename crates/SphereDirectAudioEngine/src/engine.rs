@@ -242,6 +242,12 @@ struct OutputStreamCandidate {
 unsafe impl Send for EngineInner {}
 unsafe impl Sync for EngineInner {}
 
+impl Default for EngineInner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EngineInner {
     pub fn new() -> Self {
         Self {
@@ -2209,12 +2215,12 @@ where
 
                 // MIDI scheduling — once per block when playing.
                 if playing_local && ch > 0 {
-                    let frames_needed = (data.len() / ch) as u64;
+                    let frames_needed = data.len().checked_div(ch).unwrap_or(0) as u64;
                     runtime.schedule_midi_block(base_sample, frames_needed);
                 }
 
                 if ch > 0 {
-                    let frames_needed = data.len() / ch;
+                    let frames_needed = data.len().checked_div(ch).unwrap_or(0);
                     let pending_midi = runtime
                         .tracks
                         .iter()

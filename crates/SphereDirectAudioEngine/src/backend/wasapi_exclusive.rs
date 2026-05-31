@@ -241,7 +241,7 @@ unsafe fn wasapi_thread(
     eprintln!("[DAUx WASAPI Excl] Opening: {device_name}");
 
     // ── Open exclusive stream with format negotiation ─────────────────────────
-    match open_exclusive_stream(
+    let _stream_completed = open_exclusive_stream(
         &device,
         requested_sr,
         buf_frames,
@@ -254,10 +254,7 @@ unsafe fn wasapi_thread(
         initial_runtime,
         &device_name,
         mmcss_h,
-    ) {
-        true => {}  // stream ran to completion
-        false => {} // error already sent via info_tx
-    }
+    );
 
     cleanup_mmcss(mmcss_h);
     shared.mmcss_active.store(false, Ordering::Relaxed);

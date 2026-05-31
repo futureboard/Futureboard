@@ -119,7 +119,7 @@ impl LocalAudioState {
         let interval = self.metronome_interval_samples(sample_rate);
         while project_sample >= self.metronome_next_sample {
             let beat_index = self.metronome_next_sample / interval.max(1);
-            let accent = beat_index % self.metronome_ts_num.max(1) as u64 == 0;
+            let accent = beat_index.is_multiple_of(self.metronome_ts_num.max(1) as u64);
             let freq = if accent { 1760.0 } else { 980.0 };
             self.metronome_click_phase = 0.0;
             self.metronome_click_phase_inc = freq / sample_rate.max(1) as f64;

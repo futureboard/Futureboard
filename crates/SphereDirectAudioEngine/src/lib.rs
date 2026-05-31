@@ -93,6 +93,13 @@ pub struct SphereDirectAudioEngine {
 }
 
 #[cfg(feature = "napi")]
+impl Default for SphereDirectAudioEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "napi")]
 #[napi]
 impl SphereDirectAudioEngine {
     /// Create a new engine instance.  The audio stream is **not** started

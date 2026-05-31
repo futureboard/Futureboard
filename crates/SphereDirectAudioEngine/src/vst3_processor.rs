@@ -72,6 +72,7 @@ extern "C" {
         out_l: *mut c_float,
         out_r: *mut c_float,
     ) -> i32;
+    #[allow(dead_code)]
     fn sphere_daux_vst3_process_stereo_block(
         processor: *mut SphereDauxVst3Processor,
         in_l: *const c_float,

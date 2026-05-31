@@ -189,11 +189,7 @@ fn disk_writer_thread(
 
     // Drain audio blocks until the sender (input stream) disconnects.
     while let Ok(block) = audio_rx.recv() {
-        let frames = if input_ch > 0 {
-            block.len() / input_ch
-        } else {
-            0
-        };
+        let frames = block.len().checked_div(input_ch).unwrap_or(0);
         if frames == 0 {
             continue;
         }

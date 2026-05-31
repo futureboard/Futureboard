@@ -148,6 +148,7 @@ pub fn open(
 
 // ── Stream builders ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn build_typed_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -186,6 +187,7 @@ fn build_typed_stream(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_stream_typed<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -204,7 +206,10 @@ where
     let mut runtime = initial_runtime;
     runtime.sample_rate = output_sample_rate;
     let mut local = LocalAudioState::new(sr);
+    #[cfg(target_os = "windows")]
     let mut mmcss_set = false;
+    #[cfg(not(target_os = "windows"))]
+    let mmcss_set = false;
     // f32 scratch buffer for shared render kernel.
     let mut f32_scratch: Vec<f32> = Vec::new();
 

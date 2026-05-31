@@ -9,8 +9,8 @@ use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled,
     Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
-use sphere_plugin_host::preset::register_plugin;
 use sphere_plugin_host::load_au_cache_state;
+use sphere_plugin_host::preset::register_plugin;
 use sphere_plugin_host::registry::{
     NativeHostStatus, PluginFormat, PluginKind, PluginRegistry, PluginStatus, RegistryPlugin,
     RegistryScanResult, ScanOptions, ScanProgress,
@@ -163,7 +163,12 @@ impl PluginManagerDialogState {
         self.au_auto_scan_disabled = result.au_auto_scan_disabled;
         self.scanning = false;
         self.cache_loaded = true;
-        self.last_scan_at_ms = self.plugins.iter().map(|p| p.scanned_at_ms).max().unwrap_or(0);
+        self.last_scan_at_ms = self
+            .plugins
+            .iter()
+            .map(|p| p.scanned_at_ms)
+            .max()
+            .unwrap_or(0);
         self.scan_progress_current = 0;
         self.scan_progress_total = 0;
         self.scan_progress_label.clear();
@@ -171,19 +176,17 @@ impl PluginManagerDialogState {
         let count = self.plugins.len();
         self.status_text = if let Some(au_error) = &result.au_scan_error {
             if count > 0 {
-                format!(
-                    "AudioUnit scan failed. VST3/CLAP results are still available. {au_error}"
-                )
+                format!("AudioUnit scan failed. VST3/CLAP results are still available. {au_error}")
             } else if self.failed_count > 0 {
-                format!("Scan finished with {} path error(s). {au_error}", self.failed_count)
+                format!(
+                    "Scan finished with {} path error(s). {au_error}",
+                    self.failed_count
+                )
             } else {
                 format!("AudioUnit scan failed. {au_error}")
             }
         } else if count == 0 && self.failed_count > 0 {
-            format!(
-                "Scan finished with {} path error(s).",
-                self.failed_count
-            )
+            format!("Scan finished with {} path error(s).", self.failed_count)
         } else if count == 0 {
             "No plug-ins found in scan locations.".to_string()
         } else if self.failed_count > 0 {
@@ -375,7 +378,6 @@ impl PluginManagerDialogState {
 
         result
     }
-
 }
 
 fn reveal_path_for_plugin(plugin: &RegistryPlugin) -> &Path {
@@ -404,10 +406,7 @@ pub struct PluginManagerCallbacks {
 }
 
 fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
-    svg()
-        .path(path)
-        .text_color(color)
-        .size(px(size))
+    svg().path(path).text_color(color).size(px(size))
 }
 
 fn scan_progress_bar(state: &PluginManagerDialogState) -> impl IntoElement {
@@ -469,7 +468,6 @@ fn scan_progress_bar(state: &PluginManagerDialogState) -> impl IntoElement {
                 ),
         )
 }
-
 
 fn status_badge(label: &'static str, ready: bool) -> impl IntoElement {
     let (fg, bg) = if ready {
@@ -616,24 +614,17 @@ fn col_header(
             Colors::text_faint()
         })
         .child(label)
-        .child(
-            div()
-                .text_size(px(9.0))
-                .child(if active {
-                    match state.sort_dir {
-                        SortDir::Asc => "▲",
-                        SortDir::Desc => "▼",
-                    }
-                } else {
-                    "⇅"
-                }),
-        )
+        .child(div().text_size(px(9.0)).child(if active {
+            match state.sort_dir {
+                SortDir::Asc => "▲",
+                SortDir::Desc => "▼",
+            }
+        } else {
+            "⇅"
+        }))
 }
 
-fn details_panel(
-    plugin: &RegistryPlugin,
-    callbacks: &PluginManagerCallbacks,
-) -> impl IntoElement {
+fn details_panel(plugin: &RegistryPlugin, callbacks: &PluginManagerCallbacks) -> impl IntoElement {
     let insert_enabled = plugin.supports_insert();
     let editor_enabled = plugin.supports_editor();
     let insert_cb = callbacks.on_insert.clone();
@@ -691,8 +682,12 @@ fn details_panel(
                     },
                 ))
                 .child(detail_row("Path", &plugin.path.display().to_string()))
-                .when_some(plugin.class_id.as_ref(), |this, cid| this.child(detail_row("Class ID", cid)))
-                .when_some(plugin.version.as_ref(), |this, ver| this.child(detail_row("Version", ver)))
+                .when_some(plugin.class_id.as_ref(), |this, cid| {
+                    this.child(detail_row("Class ID", cid))
+                })
+                .when_some(plugin.version.as_ref(), |this, ver| {
+                    this.child(detail_row("Version", ver))
+                })
                 .child(detail_row(
                     "Preset",
                     &plugin.preset_path.display().to_string(),
@@ -953,11 +948,7 @@ pub fn plugin_manager_panel(
                                 reveal(&reveal_id, window, cx);
                             })
                             .child(status_badge(
-                                if status_ready {
-                                    "Available"
-                                } else {
-                                    "Missing"
-                                },
+                                if status_ready { "Available" } else { "Missing" },
                                 status_ready,
                             )),
                     )
@@ -1608,11 +1599,7 @@ impl Render for PluginManagerWindow {
                 move |id: &String, _w, cx| {
                     let _ = target.update(cx, |this, cx| {
                         let toggle_off = this.state.selected_id.as_deref() == Some(id.as_str());
-                        this.state.selected_id = if toggle_off {
-                            None
-                        } else {
-                            Some(id.clone())
-                        };
+                        this.state.selected_id = if toggle_off { None } else { Some(id.clone()) };
                         cx.notify();
                     });
                 }
@@ -1649,8 +1636,7 @@ impl Render for PluginManagerWindow {
                 let target = target.clone();
                 move |_id: &String, _w, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.state.status_text =
-                            "Insert on track: not connected yet.".to_string();
+                        this.state.status_text = "Insert on track: not connected yet.".to_string();
                         cx.notify();
                     });
                 }
@@ -1659,8 +1645,7 @@ impl Render for PluginManagerWindow {
                 let target = target.clone();
                 move |_id: &String, _w, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.state.status_text =
-                            "Plug-in editor: not connected yet.".to_string();
+                        this.state.status_text = "Plug-in editor: not connected yet.".to_string();
                         cx.notify();
                     });
                 }
@@ -1701,8 +1686,7 @@ impl Render for PluginManagerWindow {
                                 );
                             }
                             Err(error) => {
-                                this.state.status_text =
-                                    format!("Clear cache failed: {error}");
+                                this.state.status_text = format!("Clear cache failed: {error}");
                             }
                         }
                         cx.notify();
@@ -1713,20 +1697,20 @@ impl Render for PluginManagerWindow {
                 let target = target.clone();
                 move |id: &String, _w, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        let Some(plugin) = this.state.plugins.iter_mut().find(|p| p.id == *id) else {
+                        let Some(plugin) = this.state.plugins.iter_mut().find(|p| p.id == *id)
+                        else {
                             return;
                         };
                         let name = plugin.name.clone();
                         match register_plugin(plugin) {
                             Ok(()) => {
-                                this.state.generated_presets = this
-                                    .state
-                                    .plugins
-                                    .iter()
-                                    .filter(|p| p.status == PluginStatus::PresetReady)
-                                    .count() as u32;
-                                this.state.status_text =
-                                    format!("Registered preset for {name}.");
+                                this.state.generated_presets =
+                                    this.state
+                                        .plugins
+                                        .iter()
+                                        .filter(|p| p.status == PluginStatus::PresetReady)
+                                        .count() as u32;
+                                this.state.status_text = format!("Registered preset for {name}.");
                             }
                             Err(error) => {
                                 this.state.status_text = format!("Register failed: {error}");
@@ -1755,28 +1739,24 @@ impl Render for PluginManagerWindow {
                 }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
-            .child(
-                external_window_titlebar(
-                    "Audio Plug-in Manager",
-                    "plugin-manager-window-close",
-                    {
-                        let target = sw_target.clone();
-                        move |window, cx| {
-                            let _ = target.update(cx, |_, cx| cx.notify());
-                            window.remove_window();
-                        }
-                    },
-                ),
-            )
-            .child(
-                plugin_manager_panel(
-                    &self.state,
-                    &self.search_input,
-                    search_focused,
-                    bind_mouse_selection(cx.entity().clone(), |this| &mut this.search_input),
-                    callbacks,
-                ),
-            )
+            .child(external_window_titlebar(
+                "Audio Plug-in Manager",
+                "plugin-manager-window-close",
+                {
+                    let target = sw_target.clone();
+                    move |window, cx| {
+                        let _ = target.update(cx, |_, cx| cx.notify());
+                        window.remove_window();
+                    }
+                },
+            ))
+            .child(plugin_manager_panel(
+                &self.state,
+                &self.search_input,
+                search_focused,
+                bind_mouse_selection(cx.entity().clone(), |this| &mut this.search_input),
+                callbacks,
+            ))
     }
 }
 

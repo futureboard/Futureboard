@@ -227,7 +227,10 @@ impl PluginEditorWindow {
         if self.wait_ticks > MAX_WAIT_TICKS {
             let msg = format!("host region never became ready ({reason})");
             if plugin_view_debug() {
-                eprintln!("[plugin-view] attach failed error={msg} editor_id={}", self.editor_id());
+                eprintln!(
+                    "[plugin-view] attach failed error={msg} editor_id={}",
+                    self.editor_id()
+                );
             }
             self.status = PluginEditorStatus::Failed(msg);
             cx.notify();
@@ -276,7 +279,10 @@ impl PluginEditorWindow {
             return;
         };
         if plugin_view_debug() {
-            eprintln!("[plugin-view] top hwnd=0x{parent:x} editor_id={}", self.editor_id());
+            eprintln!(
+                "[plugin-view] top hwnd=0x{parent:x} editor_id={}",
+                self.editor_id()
+            );
         }
 
         // Phase 7: require real (>0) content bounds before attaching.
@@ -291,7 +297,11 @@ impl PluginEditorWindow {
             if plugin_view_debug() {
                 eprintln!(
                     "[plugin-view] host region mounted bounds={{x:{},y:{},w:{},h:{}}} editor_id={}",
-                    region.x, region.y, region.width, region.height, self.editor_id()
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                    self.editor_id()
                 );
             }
         }
@@ -403,7 +413,10 @@ impl PluginEditorWindow {
         self.host_mounted_logged = false;
         self.last_region = None;
         if plugin_view_debug() {
-            eprintln!("[plugin-view] retry requested editor_id={}", self.editor_id());
+            eprintln!(
+                "[plugin-view] retry requested editor_id={}",
+                self.editor_id()
+            );
         }
         cx.notify();
     }
@@ -433,7 +446,10 @@ impl PluginEditorWindow {
     fn on_ready_probe(&mut self, probe_index: u8, cx: &mut Context<Self>) {
         // Only act if we are still in ProbingReady for *this* probe sequence —
         // a retry or close may have moved the state under us.
-        let PluginEditorStatus::ProbingReady { mode, probe_index: current } = self.status.clone()
+        let PluginEditorStatus::ProbingReady {
+            mode,
+            probe_index: current,
+        } = self.status.clone()
         else {
             return;
         };
@@ -508,7 +524,11 @@ impl PluginEditorWindow {
             if plugin_view_debug() {
                 eprintln!(
                     "[plugin-view] resize host bounds={{x:{},y:{},w:{},h:{}}} editor_id={}",
-                    region.x, region.y, region.width, region.height, self.editor_id()
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                    self.editor_id()
                 );
             }
             self.processor
@@ -649,12 +669,10 @@ impl Render for PluginEditorWindow {
         // native plugin even when attach reports ok. Only draw overlays while
         // opening / waiting / attaching / failed.
         let content_overlay: Option<gpui::AnyElement> = match &self.status {
-            PluginEditorStatus::Opening => {
-                Some(self.render_status_message("Opening editor…"))
+            PluginEditorStatus::Opening => Some(self.render_status_message("Opening editor…")),
+            PluginEditorStatus::WaitingForHostHandle => {
+                Some(self.render_status_message("Opening editor… (waiting for host window)"))
             }
-            PluginEditorStatus::WaitingForHostHandle => Some(self.render_status_message(
-                "Opening editor… (waiting for host window)",
-            )),
             PluginEditorStatus::Attaching => {
                 Some(self.render_status_message("Attaching plugin editor…"))
             }
@@ -774,9 +792,7 @@ pub fn open_plugin_editor_window(
 
     let editor_id = format!("{track_id}::{insert_id}");
     let result = cx.open_window(options, |_window, cx| {
-        cx.new(|cx| {
-            PluginEditorWindow::new(track_id, insert_id, display_name, processor, cx)
-        })
+        cx.new(|cx| PluginEditorWindow::new(track_id, insert_id, display_name, processor, cx))
     });
     if plugin_view_debug() {
         match &result {

@@ -4,15 +4,17 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::plugin_db::PluginScanStatus;
 use crate::preset::{clear_all_presets, ensure_preset_folders, register_plugin};
 use crate::scan::cache::{
     load_au_cache_state, record_au_scan_failure, record_au_scan_success, save_au_cache_state,
     should_auto_scan_au,
 };
-use crate::scan::isolation::{run_isolated_format_scan, IsolatedScanRequest, plugin_info_from_descriptor};
+use crate::scan::isolation::{
+    plugin_info_from_descriptor, run_isolated_format_scan, IsolatedScanRequest,
+};
 use crate::scan::types::PluginScanFormat;
 use crate::scanner::{discover_plugin_bundles, scan_plugin_bundle};
-use crate::plugin_db::PluginScanStatus;
 use crate::types::PluginInfo;
 
 /// Plug-in container format (aligned with Electron `AudioPluginRegistryEntry.format`).
@@ -178,10 +180,16 @@ pub fn display_category(
         } else {
             specific
         };
-        if display_tags.iter().any(|t| t.eq_ignore_ascii_case("instrument")) {
+        if display_tags
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("instrument"))
+        {
             return "Instrument".to_string();
         }
-        if display_tags.iter().any(|t| t.to_ascii_lowercase().contains("effect")) {
+        if display_tags
+            .iter()
+            .any(|t| t.to_ascii_lowercase().contains("effect"))
+        {
             return "Effect".to_string();
         }
         if category.eq_ignore_ascii_case("audio effect") {
@@ -206,13 +214,8 @@ pub fn display_category(
 }
 
 pub fn classify_kind(category: &str, name: &str, sub_categories: Option<&str>) -> PluginKind {
-    let haystack = format!(
-        "{} {} {}",
-        category,
-        sub_categories.unwrap_or(""),
-        name
-    )
-    .to_ascii_lowercase();
+    let haystack =
+        format!("{} {} {}", category, sub_categories.unwrap_or(""), name).to_ascii_lowercase();
     if haystack.contains("instrument")
         || haystack.contains("synth")
         || haystack.contains("synthesizer")
@@ -409,13 +412,21 @@ fn resolve_unique_preset_path(
     let mut candidate = plugin.preset_path.to_string_lossy().to_string();
     let mut index = 2;
     while occupied.contains(&candidate.to_lowercase()) {
-        let parsed = plugin.preset_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let parsed = plugin
+            .preset_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         let stem = plugin
             .preset_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Plug-in");
-        let ext = plugin.preset_path.extension().and_then(|e| e.to_str()).unwrap_or("pst");
+        let ext = plugin
+            .preset_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("pst");
         candidate = parsed
             .join(format!("{stem} ({index}).{ext}"))
             .to_string_lossy()
@@ -526,15 +537,10 @@ pub enum CatalogLoad {
         sqlite_ms: u128,
     },
     /// `index.dat` does not exist on disk yet.
-    MissingDatabase {
-        path: PathBuf,
-    },
+    MissingDatabase { path: PathBuf },
     /// SQLite open/read failed — caller renders an error panel and offers
     /// rebuild/retry.
-    Error {
-        path: PathBuf,
-        message: String,
-    },
+    Error { path: PathBuf, message: String },
 }
 
 impl PluginRegistry {
@@ -557,12 +563,7 @@ impl PluginRegistry {
         let started = std::time::Instant::now();
         let conn = match open_database_readonly() {
             Ok(c) => c,
-            Err(e) => {
-                return CatalogLoad::Error {
-                    path,
-                    message: e,
-                }
-            }
+            Err(e) => return CatalogLoad::Error { path, message: e },
         };
         let plugins = match read_all(&conn) {
             Ok(v) => v,
@@ -669,13 +670,15 @@ impl PluginRegistry {
                 .any(|format| matches!(format, PluginFormat::Vst3 | PluginFormat::Clap))
         });
         let scan_au_requested = options.include_au
-            && options.formats_only.as_ref().is_none_or(|formats| {
-                formats.iter().any(|format| *format == PluginFormat::Au)
-            });
+            && options
+                .formats_only
+                .as_ref()
+                .is_none_or(|formats| formats.iter().any(|format| *format == PluginFormat::Au));
 
         let mut au_cache_state = load_au_cache_state();
         let au_scan_available = cfg!(target_os = "macos");
-        let scan_au = scan_au_requested && au_scan_available && should_auto_scan_au(&au_cache_state);
+        let scan_au =
+            scan_au_requested && au_scan_available && should_auto_scan_au(&au_cache_state);
 
         let cached_plugins: Vec<RegistryPlugin> = if options.delete_presets_first {
             Vec::new()

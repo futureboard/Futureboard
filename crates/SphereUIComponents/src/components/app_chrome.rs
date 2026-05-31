@@ -633,11 +633,7 @@ pub fn app_chrome(
 
     if policy.show_in_window_menubar {
         chrome = chrome
-            .child(menu_area(
-                open_menu_id,
-                on_open_menu,
-                viewport_width,
-            ))
+            .child(menu_area(open_menu_id, on_open_menu, viewport_width))
             .child(section_separator());
     }
 

@@ -51,9 +51,7 @@ pub fn audio_clip(
     track_color: gpui::Rgba,
     state: &TimelineState,
     on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_open_editor: Option<
-        std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>,
-    >,
+    on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
     on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,

@@ -120,11 +120,7 @@ impl EditCommand {
 }
 
 fn restore_clip_snapshot(state: &mut TimelineState, snapshot: &ClipSnapshot) {
-    if let Some(track) = state
-        .tracks
-        .iter_mut()
-        .find(|t| t.id == snapshot.track_id)
-    {
+    if let Some(track) = state.tracks.iter_mut().find(|t| t.id == snapshot.track_id) {
         if !track.clips.iter().any(|c| c.id == snapshot.clip.id) {
             track.clips.push(snapshot.clip.clone());
         }

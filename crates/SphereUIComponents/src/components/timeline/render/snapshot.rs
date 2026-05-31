@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use gpui::Rgba;
 use super::viewport::TimelineViewport;
 use crate::components::timeline::timeline_state::{
     ClipState, ClipType, GridLineLevel, TimelineState, TrackState, TRACK_HEIGHT,
@@ -12,6 +11,7 @@ use crate::components::timeline::timeline_state::{
 use crate::components::timeline::waveform_cache::{
     self, WaveformDisplayStatus, CHUNK_PEAKS, PEAK_FINE_SPP,
 };
+use gpui::Rgba;
 
 /// Track rows included in this snapshot (after vertical virtualization).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,8 +268,7 @@ fn build_clips(
             if clip_left + clip_width < 0.0 || clip_left > viewport.width {
                 continue;
             }
-            let clip_y =
-                track_index as f32 * TRACK_HEIGHT - state.viewport.scroll_y + pad;
+            let clip_y = track_index as f32 * TRACK_HEIGHT - state.viewport.scroll_y + pad;
             clips.push(build_clip_snapshot(
                 clip,
                 track,

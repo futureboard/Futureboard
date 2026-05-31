@@ -15,14 +15,14 @@ use crate::components::context_menu::context_menu_overlay;
 use crate::components::controls::{
     fb_button, fb_form_row, fb_section_label, fb_stepper_button, FbButtonKind,
 };
-use crate::components::title_bar::external_window_titlebar;
 use crate::components::text_input::{
     text_field_with_callbacks, text_input_context_entries, TextInputAction, TextInputCallbacks,
     TextInputState,
 };
+use crate::components::title_bar::external_window_titlebar;
 use crate::overlay::{
-    compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor,
-    wizard_form_column, OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
+    compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor, wizard_form_column,
+    OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
 };
 use crate::theme::{self, Colors};
 
@@ -438,10 +438,9 @@ pub fn open_project_wizard_window(
     options.window_background = WindowBackgroundAppearance::Transparent;
     options.window_min_size = Some(size(px(WIZARD_WIDTH), px(WIZARD_HEIGHT)));
 
-    cx.open_window(
-        options,
-        |_window, cx| cx.new(|cx| ProjectWizardWindow::new(on_create, cx)),
-    )
+    cx.open_window(options, |_window, cx| {
+        cx.new(|cx| ProjectWizardWindow::new(on_create, cx))
+    })
     .map_err(|error| error.to_string())
 }
 
@@ -642,7 +641,10 @@ fn stepper_button(
     fb_stepper_button(id, label, on_click)
 }
 
-fn wizard_combo_menu_position(anchor: OverlayAnchor, window: &Window) -> crate::overlay::OverlayPosition {
+fn wizard_combo_menu_position(
+    anchor: OverlayAnchor,
+    window: &Window,
+) -> crate::overlay::OverlayPosition {
     let layout = wizard_form_column(window);
     let refreshed = refresh_form_anchor(anchor, layout);
     compute_overlay_position(
@@ -857,87 +859,86 @@ impl Render for ProjectWizardWindow {
             },
         );
 
-        let combo_overlay = if let (Some(open_combo), Some(anchor)) =
-            (self.open_combo, self.combo_anchor)
-        {
-            let position = wizard_combo_menu_position(anchor, window);
-            let close_target = target.clone();
-            Some(
-            div()
-                .absolute()
-                .inset_0()
-                .id("project-wizard-combo-overlay")
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    let _ = close_target.update(cx, |this, cx| {
-                        this.open_combo = None;
-                        this.combo_anchor = None;
-                        cx.notify();
-                    });
-                })
-                .child(match open_combo {
-                    WizardCombo::TimeSignature => {
-                        let select_target = target.clone();
-                        combo_box_menu(
-                            "project-time-signature-menu",
-                            position,
-                            (self.state.time_sig_num, self.state.time_sig_den),
-                            TIME_SIGNATURE_OPTIONS,
-                            Arc::new(move |(num, den), _, cx| {
-                                let _ = select_target.update(cx, |this, cx| {
-                                    this.state.time_sig_num = num;
-                                    this.state.time_sig_den = den;
-                                    this.state.error = None;
-                                    this.open_combo = None;
-                                    this.combo_anchor = None;
-                                    cx.notify();
-                                });
-                            }),
-                        )
-                        .into_any_element()
-                    }
-                    WizardCombo::BeatGrid => {
-                        let select_target = target.clone();
-                        combo_box_menu(
-                            "project-beat-grid-menu",
-                            position,
-                            self.state.beat_value,
-                            BEAT_GRID_OPTIONS,
-                            Arc::new(move |value, _, cx| {
-                                let _ = select_target.update(cx, |this, cx| {
-                                    this.state.beat_value = value;
-                                    this.state.error = None;
-                                    this.open_combo = None;
-                                    this.combo_anchor = None;
-                                    cx.notify();
-                                });
-                            }),
-                        )
-                        .into_any_element()
-                    }
-                    WizardCombo::SampleRate => {
-                        let select_target = target.clone();
-                        combo_box_menu(
-                            "project-sample-rate-menu",
-                            position,
-                            self.state.sample_rate,
-                            SAMPLE_RATE_OPTIONS,
-                            Arc::new(move |value, _, cx| {
-                                let _ = select_target.update(cx, |this, cx| {
-                                    this.state.sample_rate = value;
-                                    this.state.error = None;
-                                    this.open_combo = None;
-                                    this.combo_anchor = None;
-                                    cx.notify();
-                                });
-                            }),
-                        )
-                        .into_any_element()
-                    }
-                })
-            )
-        } else {
-            None
-        };
+        let combo_overlay =
+            if let (Some(open_combo), Some(anchor)) = (self.open_combo, self.combo_anchor) {
+                let position = wizard_combo_menu_position(anchor, window);
+                let close_target = target.clone();
+                Some(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .id("project-wizard-combo-overlay")
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            let _ = close_target.update(cx, |this, cx| {
+                                this.open_combo = None;
+                                this.combo_anchor = None;
+                                cx.notify();
+                            });
+                        })
+                        .child(match open_combo {
+                            WizardCombo::TimeSignature => {
+                                let select_target = target.clone();
+                                combo_box_menu(
+                                    "project-time-signature-menu",
+                                    position,
+                                    (self.state.time_sig_num, self.state.time_sig_den),
+                                    TIME_SIGNATURE_OPTIONS,
+                                    Arc::new(move |(num, den), _, cx| {
+                                        let _ = select_target.update(cx, |this, cx| {
+                                            this.state.time_sig_num = num;
+                                            this.state.time_sig_den = den;
+                                            this.state.error = None;
+                                            this.open_combo = None;
+                                            this.combo_anchor = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                                )
+                                .into_any_element()
+                            }
+                            WizardCombo::BeatGrid => {
+                                let select_target = target.clone();
+                                combo_box_menu(
+                                    "project-beat-grid-menu",
+                                    position,
+                                    self.state.beat_value,
+                                    BEAT_GRID_OPTIONS,
+                                    Arc::new(move |value, _, cx| {
+                                        let _ = select_target.update(cx, |this, cx| {
+                                            this.state.beat_value = value;
+                                            this.state.error = None;
+                                            this.open_combo = None;
+                                            this.combo_anchor = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                                )
+                                .into_any_element()
+                            }
+                            WizardCombo::SampleRate => {
+                                let select_target = target.clone();
+                                combo_box_menu(
+                                    "project-sample-rate-menu",
+                                    position,
+                                    self.state.sample_rate,
+                                    SAMPLE_RATE_OPTIONS,
+                                    Arc::new(move |value, _, cx| {
+                                        let _ = select_target.update(cx, |this, cx| {
+                                            this.state.sample_rate = value;
+                                            this.state.error = None;
+                                            this.open_combo = None;
+                                            this.combo_anchor = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                                )
+                                .into_any_element()
+                            }
+                        }),
+                )
+            } else {
+                None
+            };
 
         let text_input_callbacks = |text_target: WizardTextTarget| TextInputCallbacks {
             on_context_menu: Some(Arc::new({

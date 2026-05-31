@@ -65,11 +65,13 @@ impl AudioEditorHost {
             crate::components::timeline::timeline_state::ClipType::Audio {
                 source_path: Some(path),
                 ..
-            } => Some(std::path::Path::new(path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(path)
-                .to_string()),
+            } => Some(
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
+            ),
             _ => None,
         };
 
@@ -83,13 +85,7 @@ impl AudioEditorHost {
             beats_per_bar: tl.state.beats_per_bar(),
             bpm: tl.state.bpm,
             track_color: track.color,
-            waveform: build_waveform_view_model(
-                clip,
-                &tl.state,
-                ppb,
-                scroll_x,
-                viewport_w,
-            ),
+            waveform: build_waveform_view_model(clip, &tl.state, ppb, scroll_x, viewport_w),
             playhead_in_clip,
             selection_range,
             theme,
@@ -130,10 +126,10 @@ impl Render for AudioEditorHost {
         let theme = audio_editor_theme();
         let body: gpui::AnyElement = match self.build_view_model(cx) {
             Some(vm) => {
-                self.state
-                    .reset_for_clip_change(Some(&vm.clip_id));
+                self.state.reset_for_clip_change(Some(&vm.clip_id));
                 let viewport_w = self.viewport_width.get().max(320.0);
-                self.state.fit_clip(&vm.clip_id, vm.duration_beats, viewport_w);
+                self.state
+                    .fit_clip(&vm.clip_id, vm.duration_beats, viewport_w);
                 audio_editor_panel(&vm, &self.state, viewport_w).into_any_element()
             }
             None => empty_audio_editor(&theme).into_any_element(),
@@ -147,13 +143,7 @@ impl Render for AudioEditorHost {
             .size_full()
             .bg(Colors::surface_base())
             .on_scroll_wheel(cx.listener(Self::on_wheel))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .size_full()
-                    .child(body),
-            )
+            .child(div().flex_1().min_h_0().size_full().child(body))
     }
 }
 

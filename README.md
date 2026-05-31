@@ -2,9 +2,14 @@
 
 # Futureboard Studio
 
-**Futureboard Studio** is a professional Digital Audio Workstation (DAW) built around a modern, hybrid web-native stack. It is designed to start directly in the browser, scale into Electron, and share its layout and core engine workflows with a native Rust GPUI application.
+**Futureboard Studio** is a Digital Audio Workstation (DAW) whose primary maintained surface is a native Rust application built on **GPUI** (the rendering framework behind the Zed editor), driving an in-process Rust audio engine. Secondary **web/Electron** surfaces (referred to as _Futureboard Lite / Express_) share layout and engine concepts via a WebAssembly DSP core but are not the focus of day-to-day development.
+
+> [!WARNING]
+> **Pre-alpha.** Futureboard Studio is under active, early development. Expect breaking changes, incomplete features, missing persistence guarantees, and rough edges. It is **not** ready for production work — do not trust it with irreplaceable projects. There are no stable releases yet; nightly builds are snapshots for testing only. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the surfaces and crates fit together.
 
 <!-- Badges -->
+[![CI](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml/badge.svg)](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml)
+[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-f59e0b.svg)](ARCHITECTURE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024-ce422b?logo=rust&logoColor=white)](https://rustup.rs)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
@@ -34,21 +39,25 @@
 
 ## 🚀 Architectural Overview
 
-Futureboard Studio is split into active modular directories targeting different runtime environments:
+Futureboard Studio is split into modular directories targeting different runtime environments. The **native** app is the primary maintained surface; the others are secondary or in-progress.
 
 ### 📱 Applications (`apps/`)
 
-- **Web Version (`apps/web`)**
-  - An interactive React + TypeScript + Vite single-page application.
-  - Leverages the high-performance WASM AudioWorklet fallback for audio processing in sandboxed web environments.
-- **Native Version (`apps/native`)**
+- **Native Version (`apps/native`)** — _Primary, actively maintained_
   - A high-performance desktop shell built on Rust using the **GPUI** framework (the layout/rendering engine behind the Zed editor).
   - Integrates natively with our Rust direct audio engine without Electron or browser-engine overhead.
-- **Electron Version (`apps/electron`)** — _Discontinued_
+  - This is **Futureboard Studio** proper and the surface new development targets first.
+- **Web Version (`apps/web`)** — _Secondary (Futureboard Lite)_
+  - An interactive React + TypeScript + Vite single-page application.
+  - Leverages the WASM AudioWorklet DSP core for audio processing in sandboxed web environments.
+  - Tracks the native app's concepts but lags it in feature coverage.
+- **Electron Version (`apps/electron`)** — _Secondary / legacy (Futureboard Express)_
   - A desktop wrapper linking the React-based frontend with native audio components via an N-API control bridge.
-  - Maintained as legacy reference code.
+  - Maintained as reference; not the recommended desktop path (use the native app instead).
 - **Server Module (`apps/server`)**
   - Collaboration stream sync and file hosting server.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full surface/engine/crate breakdown.
 
 ---
 
@@ -78,7 +87,7 @@ The core DAW logic, DSP, and user interface kit are written in modular Rust and 
 
 - [plugins/](plugins/) — Web/React UI and DSP editors for stock plugins (e.g., `Equz8`, `FB2AComp`, `UltraVerb`).
 - [modules/](modules/) — High-level companion processors (e.g., `NoiseRemover`, `StemExtractor`).
-- [extentions/](extentions/) — Extension templates (`template`, `template-react`, `template-vue`) for building customizable DAW extensions.
+- [extensions/](extensions/) — Extension templates (`template`, `template-react`, `template-vue`) for building customizable DAW extensions.
 - [packages/shared/](packages/shared/) — Shared fonts, icons, menus, and layout manifests.
 - [external/](external/) — Vendored SDKs and native dependencies (`vst3sdk`, `clap`, `yoga`, `ARA_SDK`) pulled in as git submodules.
 

@@ -1,5 +1,5 @@
-use crate::types::{PitchFrame, VoiceNote};
 use crate::note_model::hz_to_midi_cents;
+use crate::types::{PitchFrame, VoiceNote};
 
 /// Segments a list of pitch frames into discrete voice notes.
 pub fn segment_notes(
@@ -16,8 +16,8 @@ pub fn segment_notes(
     let mut current_segment = Vec::new();
 
     for frame in frames {
-        let is_voiced = frame.confidence >= voiced_threshold 
-            && frame.rms >= rms_threshold 
+        let is_voiced = frame.confidence >= voiced_threshold
+            && frame.rms >= rms_threshold
             && frame.frequency_hz > 0.0;
         if is_voiced {
             current_segment.push(frame);

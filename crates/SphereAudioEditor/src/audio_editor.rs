@@ -1,12 +1,10 @@
 //! Main audio clip editor panel — waveform, ruler, metadata, playhead.
 
-use gpui::{
-    div, px, IntoElement, ParentElement, ScrollWheelEvent, Styled,
-};
+use gpui::{IntoElement, ParentElement, ScrollWheelEvent, Styled, div, px};
 
-use crate::audio_ruler::{audio_ruler, ruler_height};
 use crate::audio_editor_state::AudioEditorState;
-use crate::waveform_view::{waveform_view, WaveformViewModel};
+use crate::audio_ruler::{audio_ruler, ruler_height};
+use crate::waveform_view::{WaveformViewModel, waveform_view};
 
 /// Theme tokens passed from the host shell (Futureboard dark DAW palette).
 #[derive(Debug, Clone, Copy)]
@@ -83,8 +81,7 @@ fn build_grid_lines(
     while beat <= end.min(duration_beats + step) {
         let x = beat * pixels_per_beat - scroll_x;
         if x >= 0.0 && x <= viewport_width {
-            let is_bar = (beat.fract()).abs() < 0.001
-                || ((beat % 1.0).abs() < 0.001 && beat > 0.0);
+            let is_bar = (beat.fract()).abs() < 0.001 || ((beat % 1.0).abs() < 0.001 && beat > 0.0);
             lines.push(
                 div()
                     .absolute()
@@ -117,12 +114,7 @@ fn playhead_overlay(x: f32, view_h: f32, theme: &AudioEditorTheme) -> impl IntoE
         .bg(theme.playhead)
 }
 
-fn selection_overlay(
-    x0: f32,
-    x1: f32,
-    view_h: f32,
-    theme: &AudioEditorTheme,
-) -> impl IntoElement {
+fn selection_overlay(x0: f32, x1: f32, view_h: f32, theme: &AudioEditorTheme) -> impl IntoElement {
     let left = x0.min(x1);
     let w = (x1 - x0).abs().max(1.0);
     div()
@@ -185,10 +177,7 @@ pub fn audio_editor_panel(
     let offset_label = format!("{:.2} bt", vm.offset_beats);
     let length_label = format!("{:.2} bt", vm.duration_beats);
     let start_label = format!("{:.2} bt", vm.start_beat);
-    let file_label = vm
-        .file_label
-        .clone()
-        .unwrap_or_else(|| "—".to_string());
+    let file_label = vm.file_label.clone().unwrap_or_else(|| "—".to_string());
 
     div()
         .flex()
@@ -226,39 +215,28 @@ pub fn audio_editor_panel(
                 .child(meta_chip("Length", length_label, &vm.theme))
                 .child(meta_chip("Offset", offset_label, &vm.theme)),
         )
+        .child(audio_ruler(
+            vm.duration_beats,
+            vm.start_beat,
+            vm.beats_per_bar,
+            ppb,
+            scroll_x,
+            viewport_width,
+            &vm.theme,
+        ))
         .child(
-            audio_ruler(
-                vm.duration_beats,
-                vm.start_beat,
-                vm.beats_per_bar,
-                ppb,
-                scroll_x,
-                viewport_width,
-                &vm.theme,
-            ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .relative()
-                .overflow_hidden()
-                .child(
+            div().flex_1().min_h_0().relative().overflow_hidden().child(
+                div().absolute().top(px(0.0)).left(px(-scroll_x)).child(
                     div()
-                        .absolute()
-                        .top(px(0.0))
-                        .left(px(-scroll_x))
-                        .child(
-                            div()
-                                .relative()
-                                .w(px(clip_width_px.max(viewport_width)))
-                                .h(px(view_h))
-                                .children(grid)
-                                .child(waveform_el)
-                                .children(selection)
-                                .children(playhead),
-                        ),
+                        .relative()
+                        .w(px(clip_width_px.max(viewport_width)))
+                        .h(px(view_h))
+                        .children(grid)
+                        .child(waveform_el)
+                        .children(selection)
+                        .children(playhead),
                 ),
+            ),
         )
 }
 

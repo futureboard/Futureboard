@@ -94,19 +94,17 @@ impl NotifyAgg {
             .window_start
             .is_some_and(|start| now.duration_since(start) >= Duration::from_secs(1))
         {
-            let elapsed = self.window_start.unwrap().elapsed().as_secs_f32().max(0.001);
-            eprintln!(
-                "[notify-debug] notify/s={:.0}",
-                self.total as f32 / elapsed
-            );
+            let elapsed = self
+                .window_start
+                .unwrap()
+                .elapsed()
+                .as_secs_f32()
+                .max(0.001);
+            eprintln!("[notify-debug] notify/s={:.0}", self.total as f32 / elapsed);
             let mut reasons: Vec<_> = self.reasons.iter().collect();
             reasons.sort_by(|a, b| b.1.cmp(a.1));
             for (name, count) in reasons {
-                eprintln!(
-                    "[notify-debug]   {}={:.1}/s",
-                    name,
-                    *count as f32 / elapsed
-                );
+                eprintln!("[notify-debug]   {}={:.1}/s", name, *count as f32 / elapsed);
             }
             *self = Self::default();
         }
@@ -209,11 +207,7 @@ impl Collector {
             fps, avg_ms, min_ms, self.frame_max_ms, self.frame_count, dominant_reason.0, reason_pct
         );
 
-        let mut scopes: Vec<_> = self
-            .scopes
-            .iter()
-            .filter(|(_, a)| a.count > 0)
-            .collect();
+        let mut scopes: Vec<_> = self.scopes.iter().filter(|(_, a)| a.count > 0).collect();
         scopes.sort_by(|a, b| b.1.total_ns.cmp(&a.1.total_ns));
         for (name, agg) in scopes.iter().take(12) {
             let calls = agg.count;
@@ -510,14 +504,16 @@ impl PowerMode {
 /// changing the env var requires a restart.
 pub fn power_mode() -> PowerMode {
     static MODE: std::sync::OnceLock<PowerMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("FUTUREBOARD_POWER_MODE")
-        .map(|v| v.to_ascii_lowercase())
-        .ok()
-        .as_deref()
-    {
-        Some("lowend") | Some("low-end") | Some("low_end") | Some("low") => PowerMode::LowEnd,
-        Some("performance") | Some("perf") | Some("high") => PowerMode::Performance,
-        _ => PowerMode::Balanced,
+    *MODE.get_or_init(|| {
+        match std::env::var("FUTUREBOARD_POWER_MODE")
+            .map(|v| v.to_ascii_lowercase())
+            .ok()
+            .as_deref()
+        {
+            Some("lowend") | Some("low-end") | Some("low_end") | Some("low") => PowerMode::LowEnd,
+            Some("performance") | Some("perf") | Some("high") => PowerMode::Performance,
+            _ => PowerMode::Balanced,
+        }
     })
 }
 
@@ -539,9 +535,7 @@ pub fn perf_hud_enabled() -> bool {
 /// read. Callers can use this to skip building counter labels when
 /// disabled, though `count` is already a no-op when disabled.
 pub fn enabled() -> bool {
-    COLLECTOR
-        .try_with(|c| c.borrow().enabled)
-        .unwrap_or(false)
+    COLLECTOR.try_with(|c| c.borrow().enabled).unwrap_or(false)
 }
 
 /// Record a named counter (visible row count, grid line count, etc.).

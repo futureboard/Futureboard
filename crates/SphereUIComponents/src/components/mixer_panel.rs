@@ -77,8 +77,7 @@ pub struct MixerCallbacks {
     /// Open the insert plugin picker overlay for the track (Phase 2b). The
     /// slot is created only when the user picks a plugin; an empty registry
     /// offers a stub fallback so the project round-trip stays exercisable.
-    pub on_add_insert:
-        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_add_insert: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     /// Remove the named insert slot from the track.
     pub on_remove_insert:
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -91,8 +90,7 @@ pub struct MixerCallbacks {
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
     /// Add an aux send from the track to the first available Bus/Return
     /// (Phase 3). A target picker is a follow-up.
-    pub on_add_send:
-        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_add_send: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     /// Remove the named send `(track_id, send_id)`.
     pub on_remove_send:
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -439,7 +437,10 @@ fn insert_chip(
     let open_pair = (track_id_owned, slot_id);
 
     div()
-        .id(gpui::SharedString::from(format!("insert-chip-{}", id_owned)))
+        .id(gpui::SharedString::from(format!(
+            "insert-chip-{}",
+            id_owned
+        )))
         .flex()
         .flex_row()
         .items_center()
@@ -573,12 +574,7 @@ fn send_chip(
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
-        .child(
-            div()
-                .truncate()
-                .flex_1()
-                .child(format!("→ {target_name}")),
-        )
+        .child(div().truncate().flex_1().child(format!("→ {target_name}")))
         .child(
             div()
                 .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))
@@ -597,7 +593,10 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
     let track_id_owned = track_id.to_string();
     let on_add = callbacks.on_add_send.clone();
     div()
-        .id(gpui::SharedString::from(format!("send-add-{}", track_id_owned)))
+        .id(gpui::SharedString::from(format!(
+            "send-add-{}",
+            track_id_owned
+        )))
         .flex()
         .items_center()
         .justify_center()
@@ -760,10 +759,7 @@ fn fader_area(
                             on_vol_change,
                         )),
                 )
-                .child(meter_surface(
-                    track.meter_level_l,
-                    track.meter_level_r,
-                )),
+                .child(meter_surface(track.meter_level_l, track.meter_level_r)),
         )
 }
 
@@ -945,23 +941,23 @@ fn master_strip(
                 .h(px(SEC_PAN_H))
                 .border_b(px(1.0))
                 .border_color(Colors::divider())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .min_w(px(46.0))
-                .px(px(6.0))
-                .h(px(14.0))
-                .rounded_sm()
-                .bg(Colors::slot_bg())
-                .border(px(1.0))
-                .border_color(Colors::with_alpha(accent, 0.55)) // Approved: dynamic accent border highlight
-                .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_secondary())
-                .child("STEREO")
-        )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .min_w(px(46.0))
+                        .px(px(6.0))
+                        .h(px(14.0))
+                        .rounded_sm()
+                        .bg(Colors::slot_bg())
+                        .border(px(1.0))
+                        .border_color(Colors::with_alpha(accent, 0.55)) // Approved: dynamic accent border highlight
+                        .text_size(px(9.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_secondary())
+                        .child("STEREO"),
+                )
                 .child(
                     div()
                         .text_size(px(7.5))
@@ -1006,10 +1002,7 @@ fn master_strip(
                                     on_change,
                                 )),
                         )
-                        .child(meter_surface(
-                            master.meter_level_l,
-                            master.meter_level_r,
-                        )),
+                        .child(meter_surface(master.meter_level_l, master.meter_level_r)),
                 ),
         )
         .child(

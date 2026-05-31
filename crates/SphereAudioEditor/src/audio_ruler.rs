@@ -1,6 +1,6 @@
 //! Beat/time ruler for the audio editor waveform view.
 
-use gpui::{div, px, IntoElement, ParentElement, Styled};
+use gpui::{IntoElement, ParentElement, Styled, div, px};
 
 use crate::AudioEditorTheme;
 
@@ -46,12 +46,7 @@ pub fn audio_ruler(
                 .h_full()
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h(px(6.0))
-                        .bg(theme.border_subtle),
-                )
+                .child(div().w(px(1.0)).h(px(6.0)).bg(theme.border_subtle))
                 .child(
                     div()
                         .ml(px(3.0))

@@ -64,8 +64,7 @@ pub fn track_lane(
             let seconds_per_beat = state.seconds_per_beat();
             let pixels_per_second = state.viewport.pixels_per_second;
             let clip_left = state.beats_to_x(clip.start_beat);
-            let clip_width =
-                (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
+            let clip_width = (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
             if clip_left + clip_width < 0.0 || clip_left > viewport_w {
                 return None;
             }
@@ -137,8 +136,7 @@ pub fn track_lane(
                 let x: f32 = event.position.x.into();
                 let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
                 let click_beat = state_ref.x_to_beats(click_x);
-                let snapped_sec =
-                    state_ref.snap_time(click_beat * state_ref.seconds_per_beat());
+                let snapped_sec = state_ref.snap_time(click_beat * state_ref.seconds_per_beat());
                 let snapped_beat = snapped_sec / state_ref.seconds_per_beat();
 
                 if active_tool == TimelineTool::Pen {

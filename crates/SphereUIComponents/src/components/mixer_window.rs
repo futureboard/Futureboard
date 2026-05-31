@@ -149,7 +149,10 @@ pub fn open_mixer_window(
     options.is_resizable = true;
     options.is_minimizable = true;
     options.window_background = WindowBackgroundAppearance::Opaque;
-    options.window_min_size = Some(size(px(MIXER_WINDOW_MIN_WIDTH), px(MIXER_WINDOW_MIN_HEIGHT)));
+    options.window_min_size = Some(size(
+        px(MIXER_WINDOW_MIN_WIDTH),
+        px(MIXER_WINDOW_MIN_HEIGHT),
+    ));
 
     cx.open_window(options, move |_window, cx| {
         cx.new(|cx| MixerWindow::new(snapshot, callbacks, on_close, on_mixer_scroll, cx))

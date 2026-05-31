@@ -48,9 +48,7 @@ impl InsertValidation {
             Self::InstrumentOnEffectTrack => {
                 Some("Instrument plug-ins require an instrument or MIDI track.")
             }
-            Self::InstrumentOnInvalidTrack => {
-                Some("This track cannot host instrument plug-ins.")
-            }
+            Self::InstrumentOnInvalidTrack => Some("This track cannot host instrument plug-ins."),
             Self::UnsupportedFormat => Some("This plug-in format is not supported for insert yet."),
         }
     }

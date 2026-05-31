@@ -71,7 +71,7 @@
         "vite": "^8.0.12",
       },
     },
-    "extentions/template": {
+    "extensions/template": {
       "name": "futureboard-extension-template",
       "version": "0.1.0",
       "devDependencies": {
@@ -769,7 +769,7 @@
 
     "function-bind": ["function-bind@1.1.2", "", {}, "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA=="],
 
-    "futureboard-extension-template": ["futureboard-extension-template@workspace:extentions/template"],
+    "futureboard-extension-template": ["futureboard-extension-template@workspace:extensions/template"],
 
     "futureboard-studio-desktop": ["futureboard-studio-desktop@workspace:apps/electron"],
 

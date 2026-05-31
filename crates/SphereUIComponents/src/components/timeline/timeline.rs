@@ -1,11 +1,11 @@
 use crate::assets;
+use crate::components::edit::{normalize_range, ClipSnapshot, EditCommand, EditHistory};
 use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
-use crate::components::edit::{EditCommand, EditHistory, ClipSnapshot, normalize_range};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipState, ClipType, SnapDivision, TimelineState, TimelineTool,
-    TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+    ClipDragItem, ClipState, ClipType, SnapDivision, TimelineState, TimelineTool, TrackDragItem,
+    TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -77,8 +77,7 @@ pub struct Timeline {
     chrome_metrics: TimelineChromeMetrics,
 }
 
-pub type TimelineOpenEditorCb =
-    std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>;
+pub type TimelineOpenEditorCb = std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>;
 
 #[derive(Clone, Debug)]
 pub enum TimelineContextTarget {
@@ -254,7 +253,7 @@ impl Timeline {
 
     fn finish_pen_midi_clip(&mut self, end_beat: f32, cx: &mut gpui::Context<Self>) {
         use crate::components::timeline::timeline_state::{
-            DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS, TrackType,
+            TrackType, DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS,
         };
         let Some((track_id, start_beat)) = self.pen_clip_draw.take() else {
             return;
@@ -269,20 +268,21 @@ impl Timeline {
             return;
         }
 
-        let (clip_start, mut length) = if let Some((range_start, range_end)) = self.state.arrangement_range {
-            let (lo, hi) = normalize_range(range_start, range_end);
-            (lo, (hi - lo).max(MIN_MIDI_CLIP_BEATS))
-        } else {
-            let (lo, hi) = normalize_range(start_beat, end_beat);
-            let mut len = (hi - lo).max(DEFAULT_MIDI_CLIP_BEATS);
-            if self.state.snap_to_grid {
-                let step = self.state.midi_snap_step_beats();
-                len = ((len / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
+        let (clip_start, mut length) =
+            if let Some((range_start, range_end)) = self.state.arrangement_range {
+                let (lo, hi) = normalize_range(range_start, range_end);
+                (lo, (hi - lo).max(MIN_MIDI_CLIP_BEATS))
             } else {
-                len = len.max(MIN_MIDI_CLIP_BEATS);
-            }
-            (lo, len)
-        };
+                let (lo, hi) = normalize_range(start_beat, end_beat);
+                let mut len = (hi - lo).max(DEFAULT_MIDI_CLIP_BEATS);
+                if self.state.snap_to_grid {
+                    let step = self.state.midi_snap_step_beats();
+                    len = ((len / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
+                } else {
+                    len = len.max(MIN_MIDI_CLIP_BEATS);
+                }
+                (lo, len)
+            };
 
         if let Some(clip) = self.state.build_midi_clip(&track_id, clip_start, length) {
             let clip_id = clip.id.clone();
@@ -392,10 +392,7 @@ impl Timeline {
         // 220 — the previous constant was stale whenever the bottom
         // panel was resized or hidden, which left the timeline either
         // too short (blank bottom area) or too tall (overflowing).
-        let used_v = APP_CHROME_HEIGHT
-            + RULER_HEIGHT
-            + m.bottom_panel_height
-            + m.status_bar_height;
+        let used_v = APP_CHROME_HEIGHT + RULER_HEIGHT + m.bottom_panel_height + m.status_bar_height;
         let track_view_h = (window_h - used_v).max(TRACK_HEIGHT);
         let content_w = self.timeline_content_width();
         let content_h = self.state.tracks.len() as f32 * TRACK_HEIGHT;
@@ -501,7 +498,12 @@ impl Timeline {
             .import_audio_at(path_key.clone(), clip_name, drop_x, drop_y);
         self.mark_project_changed(cx);
         self.mark_media_changed(cx);
-        super::audio_import::spawn_timeline_import(path.to_path_buf(), cx.entity().clone(), None, cx);
+        super::audio_import::spawn_timeline_import(
+            path.to_path_buf(),
+            cx.entity().clone(),
+            None,
+            cx,
+        );
         true
     }
 }
@@ -651,24 +653,22 @@ impl Render for Timeline {
             this.begin_erase_at(beat, Some(clip_id.clone()), cx);
         });
 
-        let on_edit_mouse_move = cx.listener(
-            |this, event: &gpui::MouseMoveEvent, _window, cx| {
-                if event.pressed_button == Some(gpui::MouseButton::Right)
-                    && this.erase_clip_drag.is_some()
-                {
-                    let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-                    this.update_erase_clip_drag(beat, cx);
-                } else if event.pressed_button == Some(gpui::MouseButton::Left)
-                    && this.range_select_drag.is_some()
-                {
-                    let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-                    if let Some((start, _)) = this.range_select_drag {
-                        this.state.arrangement_range = Some(normalize_range(start, beat));
-                        cx.notify();
-                    }
+        let on_edit_mouse_move = cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+            if event.pressed_button == Some(gpui::MouseButton::Right)
+                && this.erase_clip_drag.is_some()
+            {
+                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                this.update_erase_clip_drag(beat, cx);
+            } else if event.pressed_button == Some(gpui::MouseButton::Left)
+                && this.range_select_drag.is_some()
+            {
+                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                if let Some((start, _)) = this.range_select_drag {
+                    this.state.arrangement_range = Some(normalize_range(start, beat));
+                    cx.notify();
                 }
-            },
-        );
+            }
+        });
 
         let on_pen_mouse_up = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
             let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
@@ -676,8 +676,7 @@ impl Render for Timeline {
                 this.finish_pen_midi_clip(beat, cx);
                 return;
             }
-            if this.state.active_tool == TimelineTool::Pointer && this.range_select_drag.is_some()
-            {
+            if this.state.active_tool == TimelineTool::Pointer && this.range_select_drag.is_some() {
                 this.finish_range_select(beat, cx);
                 return;
             }
@@ -691,8 +690,7 @@ impl Render for Timeline {
                 this.finish_pen_midi_clip(beat, cx);
                 return;
             }
-            if this.state.active_tool == TimelineTool::Pointer && this.range_select_drag.is_some()
-            {
+            if this.state.active_tool == TimelineTool::Pointer && this.range_select_drag.is_some() {
                 this.finish_range_select(beat, cx);
                 return;
             }
@@ -1108,16 +1106,22 @@ impl Render for Timeline {
             .on_mouse_up_out(gpui::MouseButton::Middle, on_middle_pan_end_out)
             .on_mouse_up(gpui::MouseButton::Left, on_pen_mouse_up)
             .on_mouse_up_out(gpui::MouseButton::Left, on_pen_mouse_up_out)
-            .on_mouse_up(gpui::MouseButton::Right, cx.listener(|this, _ev, _w, cx| {
-                if this.erase_clip_drag.is_some() {
-                    this.finish_erase_clip_drag(cx);
-                }
-            }))
-            .on_mouse_up_out(gpui::MouseButton::Right, cx.listener(|this, _ev, _w, cx| {
-                if this.erase_clip_drag.is_some() {
-                    this.finish_erase_clip_drag(cx);
-                }
-            }))
+            .on_mouse_up(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _ev, _w, cx| {
+                    if this.erase_clip_drag.is_some() {
+                        this.finish_erase_clip_drag(cx);
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _ev, _w, cx| {
+                    if this.erase_clip_drag.is_some() {
+                        this.finish_erase_clip_drag(cx);
+                    }
+                }),
+            )
             .on_scroll_wheel(on_ctrl_wheel_zoom)
             // 1. Timeline Ruler
             .child(timeline_ruler(

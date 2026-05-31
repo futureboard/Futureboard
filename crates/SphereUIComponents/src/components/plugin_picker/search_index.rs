@@ -12,10 +12,7 @@ pub struct PluginSearchIndex {
 
 impl PluginSearchIndex {
     pub fn from_plugins(plugins: Vec<RegistryPlugin>) -> Self {
-        let search_text = plugins
-            .iter()
-            .map(build_search_text)
-            .collect::<Vec<_>>();
+        let search_text = plugins.iter().map(build_search_text).collect::<Vec<_>>();
         Self {
             plugins,
             search_text,

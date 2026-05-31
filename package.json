@@ -7,7 +7,7 @@
     "packages/*",
     "crates/*",
     "plugins/*",
-    "extentions/template"
+    "extensions/template"
   ],
   "scripts": {
     "dev:web":      "bun run --cwd apps/web dev",
@@ -32,7 +32,7 @@
 
     "build:wasm": "bun run --cwd apps/web build:audio:wasm",
 
-    "build:audio:plugins": "cargo check -p sphere-audio-plugins && cargo check --manifest-path extentions/template/Cargo.toml && bun install --cwd extentions/template && bun run --cwd extentions/template typecheck",
+    "build:audio:plugins": "cargo check -p sphere-audio-plugins && cargo check --manifest-path extensions/template/Cargo.toml && bun install --cwd extensions/template && bun run --cwd extensions/template typecheck",
 
     "build:web": "bun run --cwd apps/web build",
 

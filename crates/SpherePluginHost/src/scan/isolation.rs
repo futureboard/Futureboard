@@ -38,7 +38,9 @@ pub fn locate_scanner_binary() -> Result<PathBuf, PluginScanError> {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(PluginScanError::ScannerBinaryMissing(path.display().to_string()));
+        return Err(PluginScanError::ScannerBinaryMissing(
+            path.display().to_string(),
+        ));
     }
 
     if let Ok(current_exe) = std::env::current_exe() {
@@ -215,7 +217,11 @@ fn run_subprocess_scan(request: IsolatedScanRequest) -> IsolatedScanOutcome {
         command.arg("--path").arg(path);
     }
 
-    let output = match command.stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+    let output = match command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
         Ok(output) => output,
         Err(error) => {
             let scan_error = PluginScanError::ScannerLaunchFailed(error.to_string());
@@ -242,11 +248,7 @@ fn run_subprocess_scan(request: IsolatedScanRequest) -> IsolatedScanOutcome {
         let error = PluginScanError::AudioUnitScannerCrashed { exit_code };
         scan_finished(request.format, 0, 0, 1);
         return IsolatedScanOutcome {
-            payload: ScanResultPayload::process_crash(
-                request.format,
-                exit_code,
-                error.message(),
-            ),
+            payload: ScanResultPayload::process_crash(request.format, exit_code, error.message()),
             error: Some(error),
         };
     }

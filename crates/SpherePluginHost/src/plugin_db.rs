@@ -387,11 +387,7 @@ pub fn read_all(conn: &Connection) -> rusqlite::Result<Vec<PluginCatalogEntry>> 
 /// milliseconds since epoch. `0` if the table is empty.
 pub fn last_scan_ms(conn: &Connection) -> rusqlite::Result<i64> {
     let raw: Option<String> = conn
-        .query_row(
-            "SELECT MAX(last_scanned_at) FROM plugins",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT MAX(last_scanned_at) FROM plugins", [], |r| r.get(0))
         .optional()?
         .flatten();
     Ok(parse_iso8601_to_ms(raw.as_deref()).unwrap_or(0))
@@ -399,7 +395,10 @@ pub fn last_scan_ms(conn: &Connection) -> rusqlite::Result<i64> {
 
 /// Upsert every row in `entries` inside a single transaction. Existing rows
 /// keyed by `id` are replaced (favorite flag is preserved).
-pub fn upsert_plugins(conn: &mut Connection, entries: &[PluginCatalogEntry]) -> rusqlite::Result<()> {
+pub fn upsert_plugins(
+    conn: &mut Connection,
+    entries: &[PluginCatalogEntry],
+) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare(

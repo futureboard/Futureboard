@@ -106,16 +106,14 @@ impl MappedWavSource {
                 let v = self.read_channel(frame, 0);
                 (v, v)
             }
-            _ => (
-                self.read_channel(frame, 0),
-                self.read_channel(frame, 1),
-            ),
+            _ => (self.read_channel(frame, 0), self.read_channel(frame, 1)),
         }
     }
 
     #[inline]
     fn read_channel(&self, frame: usize, channel: usize) -> f32 {
-        let offset = self.data_start + frame * self.bytes_per_frame + channel * self.bytes_per_sample;
+        let offset =
+            self.data_start + frame * self.bytes_per_frame + channel * self.bytes_per_sample;
         decode_wav_sample(&self.mmap, offset, &self.fmt).unwrap_or(0.0)
     }
 }
@@ -134,11 +132,7 @@ pub fn open_clip_audio_source(path: &str) -> Result<ClipAudioSource, String> {
         let mapped = Arc::new(MappedWavSource::open(p)?);
         eprintln!(
             "[SphereAudio] mmap WAV '{}': {} bytes, {} frames @ {}Hz {} ch",
-            path,
-            file_size,
-            mapped.frames,
-            mapped.sample_rate,
-            mapped.channels
+            path, file_size, mapped.frames, mapped.sample_rate, mapped.channels
         );
         return Ok(ClipAudioSource::MappedWav(mapped));
     }

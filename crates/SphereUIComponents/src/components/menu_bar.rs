@@ -154,17 +154,13 @@ pub fn menu_picker_dropdown(
         .top_0()
         .left_0()
         .size_full()
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .on_mouse_down(gpui::MouseButton::Left, {
-                    let on_close = on_close.clone();
-                    move |_, window, cx| on_close(&(), window, cx)
-                }),
-        )
+        .child(div().absolute().top_0().left_0().size_full().on_mouse_down(
+            gpui::MouseButton::Left,
+            {
+                let on_close = on_close.clone();
+                move |_, window, cx| on_close(&(), window, cx)
+            },
+        ))
         .child(
             div()
                 .absolute()

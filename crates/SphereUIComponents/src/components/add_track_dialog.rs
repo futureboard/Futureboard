@@ -8,14 +8,14 @@ use gpui::{
 };
 
 use crate::assets;
-use crate::components::text_input::{
-    bind_mouse_selection, text_field_with_callbacks, TextInputCallbacks, TextInputState,
-};
 use crate::components::controls::{
     fb_button, fb_form_row, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
-use crate::components::title_bar::external_window_titlebar_with_icon;
+use crate::components::text_input::{
+    bind_mouse_selection, text_field_with_callbacks, TextInputCallbacks, TextInputState,
+};
 use crate::components::timeline::timeline_state::TrackType;
+use crate::components::title_bar::external_window_titlebar_with_icon;
 use crate::theme::{self, Colors};
 
 const MAX_TRACK_COUNT: u32 = 128;
@@ -281,7 +281,11 @@ fn select_box(text: impl Into<String>) -> impl IntoElement {
         .text_size(px(11.0))
         .text_color(Colors::text_secondary())
         .child(text)
-        .child(icon(assets::ICON_CHEVRON_DOWN_PATH, 10.0, Colors::text_faint()))
+        .child(icon(
+            assets::ICON_CHEVRON_DOWN_PATH,
+            10.0,
+            Colors::text_faint(),
+        ))
 }
 
 fn check_row(
@@ -331,7 +335,10 @@ fn check_row(
     row
 }
 
-fn count_stepper(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
+fn count_stepper(
+    state: &AddTrackDialogState,
+    callbacks: &AddTrackDialogCallbacks,
+) -> impl IntoElement {
     let down = callbacks.on_count_delta.clone();
     let up = callbacks.on_count_delta.clone();
     div()
@@ -370,7 +377,12 @@ fn count_stepper(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallback
 
 fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
     let tabs = AddTrackKind::visible_tabs(state.selected_kind);
-    let mut row = div().flex().flex_row().gap(px(4.0)).px(px(12.0)).py(px(8.0));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .gap(px(4.0))
+        .px(px(12.0))
+        .py(px(8.0));
     for (i, kind) in tabs.iter().enumerate() {
         let active = state.selected_kind == *kind;
         let supported = kind_supported(*kind, state);
@@ -482,7 +494,10 @@ fn color_row(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -
         ))
 }
 
-fn type_fields(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> gpui::AnyElement {
+fn type_fields(
+    state: &AddTrackDialogState,
+    callbacks: &AddTrackDialogCallbacks,
+) -> gpui::AnyElement {
     let show_asc = state.count > 1;
     match state.selected_kind {
         AddTrackKind::Audio => {
@@ -855,7 +870,8 @@ impl Render for AddTrackWindow {
                         this.state.input_label = kind.default_input().to_string();
                         this.state.track_name =
                             format!("{} {}", kind.default_name_stem(), this.state.next_number);
-                        this.track_name_input.set_value(this.state.track_name.clone());
+                        this.track_name_input
+                            .set_value(this.state.track_name.clone());
                         this.track_name_input.select_all();
                         add_track_debug(&format!("selected kind={}", kind.tab_label()));
                         cx.notify();
@@ -1028,7 +1044,10 @@ pub fn open_add_track_window(
     options.is_resizable = true;
     options.is_minimizable = false;
     options.window_background = WindowBackgroundAppearance::Transparent;
-    options.window_min_size = Some(size(px(ADD_TRACK_WINDOW_MIN_WIDTH), px(ADD_TRACK_WINDOW_MIN_HEIGHT)));
+    options.window_min_size = Some(size(
+        px(ADD_TRACK_WINDOW_MIN_WIDTH),
+        px(ADD_TRACK_WINDOW_MIN_HEIGHT),
+    ));
 
     cx.open_window(options, |_window, cx| {
         cx.new(|cx| AddTrackWindow::new(state, on_confirm_request, cx))

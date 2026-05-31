@@ -260,7 +260,8 @@ impl RuntimeProject {
                 Some(existing) => {
                     eprintln!(
                         "[SphereAudio] clip '{}' — cache hit: '{path}' ({} frames)",
-                        clip.id, existing.frames()
+                        clip.id,
+                        existing.frames()
                     );
                     loaded_from_cache += 1;
                     Arc::clone(existing)
@@ -411,8 +412,7 @@ impl RuntimeProject {
                 });
             }
 
-            let midi_instrument_insert_ix =
-                find_midi_instrument_insert_ix(&inserts, &t.track_type);
+            let midi_instrument_insert_ix = find_midi_instrument_insert_ix(&inserts, &t.track_type);
 
             tracks.push(RuntimeTrack {
                 id: t.id.clone(),
@@ -531,7 +531,11 @@ impl RuntimeProject {
                         target_idx,
                         send.level,
                         send.enabled,
-                        if accepted { "ACCEPT" } else { "REJECT(cycle-unsafe)" }
+                        if accepted {
+                            "ACCEPT"
+                        } else {
+                            "REJECT(cycle-unsafe)"
+                        }
                     );
                 }
             }
@@ -543,8 +547,7 @@ impl RuntimeProject {
         } else {
             0.0
         };
-        let (midi_clips, midi_tracks) =
-            build_midi_runtime(&snapshot.midi_clips, samples_per_beat);
+        let (midi_clips, midi_tracks) = build_midi_runtime(&snapshot.midi_clips, samples_per_beat);
 
         if midi_engine_debug_enabled() {
             let total_events: usize = midi_clips.iter().map(|c| c.events.len()).sum();
@@ -586,9 +589,7 @@ impl RuntimeProject {
         self.all_notes_off("seek/play");
         for mt in &mut self.midi_tracks {
             // Binary search: first event with sample >= position.
-            mt.cursor = mt
-                .events
-                .partition_point(|ev| ev.sample < position_sample);
+            mt.cursor = mt.events.partition_point(|ev| ev.sample < position_sample);
         }
         if midi_engine_debug_enabled() {
             eprintln!(
@@ -686,7 +687,11 @@ impl RuntimeProject {
                 let be = block_end as f64 / spb;
                 eprintln!(
                     "[DAUx MIDI] block beat={:.3}..{:.3} track={} events={} active={}",
-                    bs, be, mt.track_id, scheduled, mt.active.len()
+                    bs,
+                    be,
+                    mt.track_id,
+                    scheduled,
+                    mt.active.len()
                 );
             }
             if debug && scheduled > 0 {
@@ -898,20 +903,14 @@ impl RuntimeProject {
 }
 
 /// First native VST3 insert that should receive scheduled MIDI for this track.
-fn find_midi_instrument_insert_ix(
-    inserts: &[RuntimeInsert],
-    track_type: &str,
-) -> Option<usize> {
-    inserts
-        .iter()
-        .enumerate()
-        .find_map(|(ix, insert)| {
-            if insert_accepts_midi_events(insert, track_type) {
-                Some(ix)
-            } else {
-                None
-            }
-        })
+fn find_midi_instrument_insert_ix(inserts: &[RuntimeInsert], track_type: &str) -> Option<usize> {
+    inserts.iter().enumerate().find_map(|(ix, insert)| {
+        if insert_accepts_midi_events(insert, track_type) {
+            Some(ix)
+        } else {
+            None
+        }
+    })
 }
 
 #[inline]
@@ -940,11 +939,7 @@ fn insert_accepts_midi_events(insert: &RuntimeInsert, track_type: &str) -> bool 
         .unwrap_or(false)
 }
 
-fn push_all_notes_off_for_track(
-    project: &mut RuntimeProject,
-    track_id: &str,
-    active: &[(u8, u8)],
-) {
+fn push_all_notes_off_for_track(project: &mut RuntimeProject, track_id: &str, active: &[(u8, u8)]) {
     let Some(ti) = project.tracks.iter().position(|t| t.id == track_id) else {
         return;
     };
@@ -1153,8 +1148,14 @@ mod midi_tests {
         let evs = &p.midi_tracks[0].events;
         assert_eq!(evs.len(), 2);
         // absolute start beat = 4 + 0 = 4 → 96000 sa; end beat 5 → 120000 sa.
-        let on = evs.iter().find(|e| e.kind == RuntimeMidiEventKind::NoteOn).unwrap();
-        let off = evs.iter().find(|e| e.kind == RuntimeMidiEventKind::NoteOff).unwrap();
+        let on = evs
+            .iter()
+            .find(|e| e.kind == RuntimeMidiEventKind::NoteOn)
+            .unwrap();
+        let off = evs
+            .iter()
+            .find(|e| e.kind == RuntimeMidiEventKind::NoteOff)
+            .unwrap();
         assert_eq!(on.sample, 96_000);
         assert_eq!(off.sample, 120_000);
         assert_eq!(on.pitch, 60);

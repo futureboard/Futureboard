@@ -1,6 +1,8 @@
 use crate::assets;
 use crate::components::sidebar::SIDEBAR_WIDTH;
-use crate::components::timeline::timeline_state::{GridLineLevel, TimelineState, HEADER_WIDTH, RULER_HEIGHT};
+use crate::components::timeline::timeline_state::{
+    GridLineLevel, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
+};
 use crate::theme::Colors;
 use gpui::{
     div, px, svg, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
@@ -221,7 +223,10 @@ pub fn timeline_ruler(
                         .bottom_0()
                         .w(px(1.0))
                         .h(px(tick_h))
-                        .bg(Colors::with_alpha(Colors::timeline_ruler_tick(), tick_alpha))
+                        .bg(Colors::with_alpha(
+                            Colors::timeline_ruler_tick(),
+                            tick_alpha,
+                        ))
                 }))
                 // Labels: emitted as siblings of the ticks (not children of a
                 // 1 px-wide tick div, which previously made labels wrap one
@@ -230,7 +235,9 @@ pub fn timeline_ruler(
                 .children(lines.iter().filter(|l| l.show_label).map(|line| {
                     let label = state.format_bar_beat(line.beat);
                     let (font_weight, text_color) = match line.level {
-                        GridLineLevel::Bar => (gpui::FontWeight::BOLD, Colors::timeline_ruler_text()),
+                        GridLineLevel::Bar => {
+                            (gpui::FontWeight::BOLD, Colors::timeline_ruler_text())
+                        }
                         _ => (gpui::FontWeight::NORMAL, Colors::text_muted()),
                     };
                     div()

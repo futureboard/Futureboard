@@ -1,0 +1,100 @@
+name: CI
+
+# Quality gates for the primary maintained surface (Rust/GPUI native) plus the
+# secondary web surface. Build/packaging of release artifacts lives in
+# build-desktop.yml / daily-build.yml — this workflow only checks correctness.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-fmt:
+    name: Rust format
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+  rust-clippy-test:
+    name: Rust clippy + tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize submodules (audio SDKs + shared icons)
+        run: bash .github/workflows/submodules-init.sh
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential pkg-config libarchive-tools fakeroot rpm \
+            libopenjp2-tools libasound2-dev \
+            libgtk-4-dev libglib2.0-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-xfixes0-dev libxcb-shape0-dev \
+            libxcb-render-util0-dev libxcb-composite0-dev \
+            libxi-dev libgl1-mesa-dev libfontconfig1-dev \
+            libssl-dev
+
+      - name: Setup Rust (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ci-cargo-${{ runner.os }}-
+
+      - name: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  web:
+    name: Web typecheck + lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install JS workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck web app
+        run: bun run --cwd apps/web typecheck
+
+      - name: Lint web app
+        run: bun run --cwd apps/web lint

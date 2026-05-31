@@ -78,8 +78,8 @@ fn native_au_to_descriptor(entry: NativePluginInfo) -> Result<PluginDescriptor, 
     } else {
         entry.category
     };
-    let is_instrument = category.eq_ignore_ascii_case("instrument")
-        || category.eq_ignore_ascii_case("generator");
+    let is_instrument =
+        category.eq_ignore_ascii_case("instrument") || category.eq_ignore_ascii_case("generator");
     Ok(PluginDescriptor {
         id,
         format: "AU".into(),

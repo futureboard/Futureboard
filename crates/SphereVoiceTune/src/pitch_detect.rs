@@ -52,7 +52,10 @@ pub fn detect_pitch_yin(
     for tau in tau_min..tau_max {
         if d_prime[tau] < threshold {
             // Check if it is a local minimum
-            if tau + 1 < tau_max && d_prime[tau] < d_prime[tau - 1] && d_prime[tau] < d_prime[tau + 1] {
+            if tau + 1 < tau_max
+                && d_prime[tau] < d_prime[tau - 1]
+                && d_prime[tau] < d_prime[tau + 1]
+            {
                 opt_tau = Some(tau);
                 break;
             }

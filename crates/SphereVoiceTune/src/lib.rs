@@ -14,15 +14,15 @@ pub mod types;
 mod tests;
 
 pub use analysis::VoiceTuneAnalyzer;
-pub use correction::{update_note_correction, VoiceCorrectionParams};
+pub use correction::{VoiceCorrectionParams, update_note_correction};
 pub use error::VoiceTuneError;
 pub use formant::FormantConfig;
 pub use note_model::{hz_to_midi_cents, midi_to_hz};
 pub use offline::OfflineVoiceRenderer;
-pub use pitch_detect::{detect_pitch_yin, calculate_rms};
+pub use pitch_detect::{calculate_rms, detect_pitch_yin};
 pub use render_plan::generate_render_plan;
 pub use segmentation::segment_notes;
-pub use timing::{apply_timing_offset, TimingCorrection};
+pub use timing::{TimingCorrection, apply_timing_offset};
 pub use types::{
     PitchFrame, VoiceNote, VoiceTuneAnalysisConfig, VoiceTuneDocument, VoiceTuneRenderPlan,
 };

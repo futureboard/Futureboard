@@ -1,6 +1,6 @@
 //! Waveform peak drawing — min/max columns only, no PCM buffers.
 
-use gpui::{div, px, IntoElement, ParentElement, Styled};
+use gpui::{IntoElement, ParentElement, Styled, div, px};
 
 use crate::AudioEditorTheme;
 

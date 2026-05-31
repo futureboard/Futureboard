@@ -32,7 +32,7 @@ out/
 # Rust / Cargo
 target/
 **/target/
-extentions/**/target/
+extensions/**/target/
 Cargo.lock.bak
 
 # Rust analyzer / flycheck

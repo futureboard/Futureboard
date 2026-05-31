@@ -87,10 +87,8 @@ pub mod icons {
     pub const PLAYHEAD_HANDLE: &str = r#"<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"><polygon points="0,0 12,0 6,12" fill="currentColor"/></svg>"#;
 
     // Plug-in format brand marks
-    pub const PLUGIN_CLAP: &str =
-        include_str!("../../../packages/shared/icons/plugins/clap.svg");
-    pub const PLUGIN_VST3: &str =
-        include_str!("../../../packages/shared/icons/plugins/vst3.svg");
+    pub const PLUGIN_CLAP: &str = include_str!("../../../packages/shared/icons/plugins/clap.svg");
+    pub const PLUGIN_VST3: &str = include_str!("../../../packages/shared/icons/plugins/vst3.svg");
 }
 
 // SVG virtual path constants

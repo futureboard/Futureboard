@@ -1,9 +1,9 @@
-use crate::types::{VoiceTuneAnalysisConfig, VoiceNote};
 use crate::analysis::VoiceTuneAnalyzer;
-use crate::pitch_detect::detect_pitch_yin;
-use crate::note_model::{hz_to_midi_cents, midi_to_hz};
 use crate::correction::update_note_correction;
+use crate::note_model::{hz_to_midi_cents, midi_to_hz};
+use crate::pitch_detect::detect_pitch_yin;
 use crate::render_plan::generate_render_plan;
+use crate::types::{VoiceNote, VoiceTuneAnalysisConfig};
 
 fn generate_sine_wave(
     frequency: f64,
@@ -28,16 +28,17 @@ fn test_pitch_detection_sine_wave() {
     // 2048 samples of pure A4 sine wave
     let samples = generate_sine_wave(freq, sample_rate, 2048.0 / sample_rate as f64, 0.8);
 
-    let (detected_freq, confidence) = detect_pitch_yin(
-        &samples,
-        sample_rate,
-        60.0,
-        800.0,
-        0.35,
-    );
+    let (detected_freq, confidence) = detect_pitch_yin(&samples, sample_rate, 60.0, 800.0, 0.35);
 
-    assert!(confidence > 0.8, "Confidence should be high for pure sine wave");
-    assert!((detected_freq - freq).abs() < 2.0, "Detected frequency {} should be close to 440.0", detected_freq);
+    assert!(
+        confidence > 0.8,
+        "Confidence should be high for pure sine wave"
+    );
+    assert!(
+        (detected_freq - freq).abs() < 2.0,
+        "Detected frequency {} should be close to 440.0",
+        detected_freq
+    );
 }
 
 #[test]
@@ -71,9 +72,15 @@ fn test_unvoiced_low_energy_regions_ignored() {
     let config = VoiceTuneAnalysisConfig::default();
     let doc = VoiceTuneAnalyzer::analyze_mono(&silence, sample_rate, &config).unwrap();
 
-    assert!(doc.notes.is_empty(), "Silent buffer should produce zero notes");
+    assert!(
+        doc.notes.is_empty(),
+        "Silent buffer should produce zero notes"
+    );
     for frame in doc.pitch_frames {
-        assert_eq!(frame.frequency_hz, 0.0, "Frequency should be 0.0 in silence");
+        assert_eq!(
+            frame.frequency_hz, 0.0,
+            "Frequency should be 0.0 in silence"
+        );
         assert!(frame.confidence < config.voiced_threshold);
     }
 }
@@ -107,21 +114,17 @@ fn test_note_segmentation_stable_tones() {
     assert!((note1.end_time - 0.4).abs() < 0.1);
 
     let note2 = &doc.notes[1];
-    assert_eq!(note2.detected_midi_note, 72, "Second note should be C5 (72)");
+    assert_eq!(
+        note2.detected_midi_note, 72,
+        "Second note should be C5 (72)"
+    );
     assert!((note2.start_time - 0.6).abs() < 0.1);
     assert!((note2.end_time - 1.0).abs() < 0.1);
 }
 
 #[test]
 fn test_correction_parameter_model() {
-    let mut note = VoiceNote::new(
-        "note_1".to_string(),
-        0.0,
-        1.0,
-        440.0,
-        0.9,
-        0.5,
-    );
+    let mut note = VoiceNote::new("note_1".to_string(), 0.0, 1.0, 440.0, 0.9, 0.5);
 
     assert_eq!(note.corrected_midi_note, 69);
     assert_eq!(note.pitch_offset_cents, 0.0);
@@ -152,22 +155,8 @@ fn test_correction_parameter_model() {
 
 #[test]
 fn test_render_plan_generation() {
-    let note1 = VoiceNote::new(
-        "note_1".to_string(),
-        0.0,
-        1.0,
-        440.0,
-        0.9,
-        0.5,
-    );
-    let mut note2 = VoiceNote::new(
-        "note_2".to_string(),
-        1.0,
-        2.0,
-        523.25,
-        0.9,
-        0.5,
-    );
+    let note1 = VoiceNote::new("note_1".to_string(), 0.0, 1.0, 440.0, 0.9, 0.5);
+    let mut note2 = VoiceNote::new("note_2".to_string(), 1.0, 2.0, 523.25, 0.9, 0.5);
 
     // Edit note2
     note2.corrected_midi_note = 73;
@@ -175,7 +164,11 @@ fn test_render_plan_generation() {
     let notes = vec![note1, note2];
     let plan = generate_render_plan(&notes, "auto-tune");
 
-    assert_eq!(plan.note_edits.len(), 1, "Only edited notes should be in the plan");
+    assert_eq!(
+        plan.note_edits.len(),
+        1,
+        "Only edited notes should be in the plan"
+    );
     assert_eq!(plan.note_edits[0].id, "note_2");
     assert_eq!(plan.correction_mode, "auto-tune");
     assert!(plan.offline_instructions.contains("1 modified notes"));

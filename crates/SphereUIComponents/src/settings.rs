@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use crate::paths::FutureboardPaths;
 use gpui::AppContext;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectDefaults {
@@ -126,7 +126,10 @@ pub struct MidiHardwareSettings {
 impl Default for MidiHardwareSettings {
     fn default() -> Self {
         Self {
-            enabled_inputs: vec!["Keyboard Controller".to_string(), "Midi Device 2".to_string()],
+            enabled_inputs: vec![
+                "Keyboard Controller".to_string(),
+                "Midi Device 2".to_string(),
+            ],
             enabled_outputs: vec!["Synth Out".to_string()],
             clock_sync: true,
         }
@@ -362,9 +365,7 @@ impl Default for ClapPluginSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            paths: vec![
-                "C:\\Program Files\\Common Files\\CLAP".to_string(),
-            ],
+            paths: vec!["C:\\Program Files\\Common Files\\CLAP".to_string()],
         }
     }
 }
@@ -505,7 +506,7 @@ impl SettingsModel {
         let path = FutureboardPaths::resolve().settings_file;
         let mut settings = Self::load_from_path(&path);
         settings.validate_and_clamp();
-        
+
         cx.new(|_cx| Self {
             current: settings,
             path,
@@ -515,21 +516,19 @@ impl SettingsModel {
     fn load_from_path(path: &Path) -> SettingsSchema {
         if path.exists() {
             match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    match serde_json::from_str::<SettingsSchema>(&content) {
-                        Ok(schema) => schema,
-                        Err(e) => {
-                            eprintln!("[settings] failed to parse settings.json: {e}. backing up.");
-                            let backup_path = path.with_extension("json.backup");
-                            let _ = std::fs::rename(path, &backup_path);
-                            let default_schema = SettingsSchema::default();
-                            if let Ok(json) = serde_json::to_string_pretty(&default_schema) {
-                                let _ = std::fs::write(path, json);
-                            }
-                            default_schema
+                Ok(content) => match serde_json::from_str::<SettingsSchema>(&content) {
+                    Ok(schema) => schema,
+                    Err(e) => {
+                        eprintln!("[settings] failed to parse settings.json: {e}. backing up.");
+                        let backup_path = path.with_extension("json.backup");
+                        let _ = std::fs::rename(path, &backup_path);
+                        let default_schema = SettingsSchema::default();
+                        if let Ok(json) = serde_json::to_string_pretty(&default_schema) {
+                            let _ = std::fs::write(path, json);
                         }
+                        default_schema
                     }
-                }
+                },
                 Err(e) => {
                     eprintln!("[settings] failed to read settings.json: {e}");
                     SettingsSchema::default()
@@ -550,7 +549,7 @@ impl SettingsModel {
     pub fn save_to_disk(&self) {
         let path = self.path.clone();
         let schema = self.current.clone();
-        
+
         std::thread::spawn(move || {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -600,12 +599,12 @@ mod tests {
     #[test]
     fn test_validation_clamping() {
         let mut schema = SettingsSchema::default();
-        
+
         // Invalid tempo
         schema.general.project_defaults.tempo = 10.0;
         schema.validate_and_clamp();
         assert_eq!(schema.general.project_defaults.tempo, 20.0);
-        
+
         schema.general.project_defaults.tempo = 1200.0;
         schema.validate_and_clamp();
         assert_eq!(schema.general.project_defaults.tempo, 999.0);
@@ -637,22 +636,21 @@ mod tests {
         if path.exists() {
             let _ = std::fs::remove_file(&path);
         }
-        
+
         // Write invalid JSON
         std::fs::write(&path, "{ invalid json ... }").unwrap();
-        
+
         // Load it
         let schema = SettingsModel::load_from_path(&path);
-        
+
         // Should have backed up and loaded defaults
         assert_eq!(schema.general.project_defaults.tempo, 120.0);
-        
+
         let backup_path = path.with_extension("json.backup");
         assert!(backup_path.exists());
-        
+
         // Clean up
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&backup_path);
     }
 }
-

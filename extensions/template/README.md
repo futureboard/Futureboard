@@ -2,8 +2,6 @@
 
 This folder is a VSCode-style extension template for Futureboard Studio.
 
-> Note: the repository currently uses the historical folder name `extentions/`.
-
 ## Files
 
 - `sphere-extension.json` — extension manifest, similar in spirit to VSCode `package.json` contributions.

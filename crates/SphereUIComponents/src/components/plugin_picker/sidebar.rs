@@ -119,7 +119,8 @@ pub fn plugin_filter_sidebar(
     if !vendors.is_empty() {
         col = col.child(sidebar_section_label("Vendors"));
         for (i, vendor) in vendors.iter().enumerate() {
-            let active_vendor = matches!(active, PickerFilter::Vendor(v) if v.eq_ignore_ascii_case(vendor));
+            let active_vendor =
+                matches!(active, PickerFilter::Vendor(v) if v.eq_ignore_ascii_case(vendor));
             col = col.child(sidebar_item(
                 ("pp-filter-vendor", i),
                 vendor.clone(),
@@ -175,49 +176,49 @@ fn sidebar_item(
     value: PickerFilter,
 ) -> impl IntoElement {
     let label = label.into();
-    div()
-        .px(px(4.0))
-        .child(
-            div()
-                .id(id)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .w_full()
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded_md()
-                .when(active, |el| el.bg(Colors::accent_muted()))
-                .when(!active, |el| el.hover(|s| s.bg(Colors::surface_control_hover())))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(move |_, window, cx| cb(&value, window, cx))
-                .child(
+    div().px(px(4.0)).child(
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .w_full()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded_md()
+            .when(active, |el| el.bg(Colors::accent_muted()))
+            .when(!active, |el| {
+                el.hover(|s| s.bg(Colors::surface_control_hover()))
+            })
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_click(move |_, window, cx| cb(&value, window, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(11.0))
+                    .text_color(if active {
+                        Colors::accent_primary()
+                    } else {
+                        Colors::text_dim()
+                    })
+                    .truncate()
+                    .child(label),
+            )
+            .when_some(count, |el, n| {
+                el.child(
                     div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .text_size(px(11.0))
+                        .text_size(px(10.0))
                         .text_color(if active {
                             Colors::accent_primary()
                         } else {
-                            Colors::text_dim()
+                            Colors::text_faint()
                         })
-                        .truncate()
-                        .child(label),
+                        .child(format!("{n}")),
                 )
-                .when_some(count, |el, n| {
-                    el.child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(if active {
-                                Colors::accent_primary()
-                            } else {
-                                Colors::text_faint()
-                            })
-                            .child(format!("{n}")),
-                    )
-                }),
-        )
+            }),
+    )
 }
 
 fn sidebar_section_label(label: &'static str) -> impl IntoElement {

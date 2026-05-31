@@ -250,11 +250,7 @@ pub(crate) fn best_available_samples_per_peak_in_entry(
         return desired_samples_per_peak;
     }
 
-    let mut available: Vec<usize> = entry
-        .chunks
-        .keys()
-        .map(|(spp, _)| *spp as usize)
-        .collect();
+    let mut available: Vec<usize> = entry.chunks.keys().map(|(spp, _)| *spp as usize).collect();
     if let Some(preview) = &entry.preview {
         available.extend(preview.lods.iter().map(|lod| lod.samples_per_peak));
     }
@@ -285,7 +281,9 @@ pub fn try_begin_import(path_key: &str) -> bool {
         return false;
     };
     if let Some(entry) = cache.get(path_key) {
-        if entry.preview.is_some() || (entry.chunks_ready > 0 && entry.chunks_ready >= entry.chunks_total) {
+        if entry.preview.is_some()
+            || (entry.chunks_ready > 0 && entry.chunks_ready >= entry.chunks_total)
+        {
             return false;
         }
         if matches!(
@@ -313,28 +311,32 @@ pub fn try_begin_import(path_key: &str) -> bool {
 
 pub fn set_import_state(path_key: &str, state: AudioImportState) {
     if let Ok(mut cache) = file_cache().lock() {
-        let entry = cache.entry(path_key.to_string()).or_insert_with(|| FileEntry {
-            import: state.clone(),
-            meta: None,
-            chunks_total: 0,
-            chunks_ready: 0,
-            chunks: HashMap::new(),
-            preview: None,
-        });
+        let entry = cache
+            .entry(path_key.to_string())
+            .or_insert_with(|| FileEntry {
+                import: state.clone(),
+                meta: None,
+                chunks_total: 0,
+                chunks_ready: 0,
+                chunks: HashMap::new(),
+                preview: None,
+            });
         entry.import = state;
     }
 }
 
 pub fn begin_peak_build(path_key: &str, meta: Arc<WaveformFileMeta>, chunks_total: usize) {
     if let Ok(mut cache) = file_cache().lock() {
-        let entry = cache.entry(path_key.to_string()).or_insert_with(|| FileEntry {
-            import: AudioImportState::GeneratingPeaks { progress: 0.0 },
-            meta: None,
-            chunks_total: 0,
-            chunks_ready: 0,
-            chunks: HashMap::new(),
-            preview: None,
-        });
+        let entry = cache
+            .entry(path_key.to_string())
+            .or_insert_with(|| FileEntry {
+                import: AudioImportState::GeneratingPeaks { progress: 0.0 },
+                meta: None,
+                chunks_total: 0,
+                chunks_ready: 0,
+                chunks: HashMap::new(),
+                preview: None,
+            });
         entry.meta = Some(Arc::clone(&meta));
         entry.chunks_total = chunks_total;
         entry.chunks_ready = 0;
@@ -343,14 +345,17 @@ pub fn begin_peak_build(path_key: &str, meta: Arc<WaveformFileMeta>, chunks_tota
     }
 }
 
-pub fn install_chunk(path_key: &str, samples_per_peak: u32, chunk_index: u32, peaks: Arc<Vec<WaveformPeak>>) {
+pub fn install_chunk(
+    path_key: &str,
+    samples_per_peak: u32,
+    chunk_index: u32,
+    peaks: Arc<Vec<WaveformPeak>>,
+) {
     if let Ok(mut cache) = file_cache().lock() {
         let Some(entry) = cache.get_mut(path_key) else {
             return;
         };
-        entry
-            .chunks
-            .insert((samples_per_peak, chunk_index), peaks);
+        entry.chunks.insert((samples_per_peak, chunk_index), peaks);
         let primary = entry
             .meta
             .as_ref()

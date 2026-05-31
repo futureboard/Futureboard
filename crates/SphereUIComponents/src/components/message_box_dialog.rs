@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::components::controls::{fb_button, FbButtonKind};
@@ -130,7 +130,12 @@ fn clamp_index(index: Option<usize>, len: usize) -> Option<usize> {
     index.filter(|&i| i < len)
 }
 
-fn button_style(index: usize, label: &str, options: &MessageBoxOptions, len: usize) -> MessageBoxButtonStyle {
+fn button_style(
+    index: usize,
+    label: &str,
+    options: &MessageBoxOptions,
+    len: usize,
+) -> MessageBoxButtonStyle {
     if clamp_index(Some(options.default_id), len) == Some(index) {
         return MessageBoxButtonStyle::Primary;
     }
@@ -203,13 +208,19 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
                         .text_color(Colors::text_primary())
                         .child(options.message.clone()),
                 )
-                .children(options.detail.as_ref().filter(|d| !d.is_empty()).map(|detail| {
-                    div()
-                        .text_size(px(11.0))
-                        .line_height(px(16.0))
-                        .text_color(Colors::text_muted())
-                        .child(detail.clone())
-                })),
+                .children(
+                    options
+                        .detail
+                        .as_ref()
+                        .filter(|d| !d.is_empty())
+                        .map(|detail| {
+                            div()
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .text_color(Colors::text_muted())
+                                .child(detail.clone())
+                        }),
+                ),
         );
 
     let mut footer = div()
@@ -364,18 +375,14 @@ impl Render for MessageBoxWindow {
                 }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
-            .child(external_window_titlebar(
-                title,
-                "message-box-close",
-                {
-                    let target = target.clone();
-                    move |window, cx| {
-                        let _ = target.update(cx, |this, cx| {
-                            this.finish(this.cancel_response_index(), window, cx);
-                        });
-                    }
-                },
-            ))
+            .child(external_window_titlebar(title, "message-box-close", {
+                let target = target.clone();
+                move |window, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.finish(this.cancel_response_index(), window, cx);
+                    });
+                }
+            }))
             .child(message_box_body(
                 &self.options,
                 Arc::new({

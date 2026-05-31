@@ -662,22 +662,25 @@ pub fn text_field_with_callbacks(
                 );
             }
         })
-        .on_mouse_up(MouseButton::Left, move |event: &MouseUpEvent, window, cx| {
-            if disabled {
-                return;
-            }
-            if let Some(cb) = on_mouse_up.as_ref() {
-                let x: f32 = event.position.x.into();
-                cb(
-                    &TextInputMouseEvent {
-                        phase: TextInputMousePhase::Up,
-                        x,
-                    },
-                    window,
-                    cx,
-                );
-            }
-        })
+        .on_mouse_up(
+            MouseButton::Left,
+            move |event: &MouseUpEvent, window, cx| {
+                if disabled {
+                    return;
+                }
+                if let Some(cb) = on_mouse_up.as_ref() {
+                    let x: f32 = event.position.x.into();
+                    cb(
+                        &TextInputMouseEvent {
+                            phase: TextInputMousePhase::Up,
+                            x,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
         .on_mouse_down(MouseButton::Right, move |event, window, cx| {
             if disabled {
                 return;
@@ -698,7 +701,10 @@ fn text_segment(text: String, selected: bool) -> impl IntoElement {
         .overflow_hidden()
         .truncate()
         .rounded_sm()
-        .when(selected, |d| d.bg(Colors::with_alpha(Colors::accent_primary(), 0.25)).px(px(2.0)))
+        .when(selected, |d| {
+            d.bg(Colors::with_alpha(Colors::accent_primary(), 0.25))
+                .px(px(2.0))
+        })
         .text_size(px(12.0))
         .text_color(Colors::text_primary())
         .child(text)

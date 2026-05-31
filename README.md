@@ -23,13 +23,6 @@
 
 <br />
 
-<!-- Banner: Markdown syntax alternative -->
-
-<!-- ![Futureboard Studio banner](packages/assets/banner.png) -->
-
-<br />
-<br />
-
 **Futureboard Studio** is currently in **pre-alpha**.
 Expect rapid changes, experimental systems, unfinished workflows, and audio/plugin chaos with style.
 
@@ -541,9 +534,3 @@ MIT License.
 See [LICENSE](LICENSE) for the full license text.
 
 ---
-
-<div align="center">
-
-Made with Rust, audio chaos, and unreasonable optimism.
-
-</div>

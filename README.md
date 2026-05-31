@@ -1,13 +1,13 @@
-<img width="2111" height="684" alt="banner_ft" src="https://github.com/user-attachments/assets/aa5916cb-1e47-4fe8-a6c3-43099a38ee95" />
+<div align="center">
 
-# Futureboard Studio
+<!-- Banner: HTML syntax -->
 
-**Futureboard Studio** is a Digital Audio Workstation (DAW) whose primary maintained surface is a native Rust application built on **GPUI** (the rendering framework behind the Zed editor), driving an in-process Rust audio engine. Secondary **web/Electron** surfaces (referred to as _Futureboard Lite / Express_) share layout and engine concepts via a WebAssembly DSP core but are not the focus of day-to-day development.
+<img width="2111" height="684" alt="Futureboard Studio banner" src="packages/assets/banner.png" />
 
-> [!WARNING]
-> **Pre-alpha.** Futureboard Studio is under active, early development. Expect breaking changes, incomplete features, missing persistence guarantees, and rough edges. It is **not** ready for production work — do not trust it with irreplaceable projects. There are no stable releases yet; nightly builds are snapshots for testing only. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the surfaces and crates fit together.
+**A modern open-source Digital Audio Workstation built with Rust, GPUI, TypeScript, WebAssembly, and native audio/plugin infrastructure.**
 
 <!-- Badges -->
+
 [![CI](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml/badge.svg)](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml)
 [![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-f59e0b.svg)](ARCHITECTURE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
@@ -21,94 +21,213 @@
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-0ea5e9)](#-getting-started)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
+<br />
+
+<!-- Banner: Markdown syntax alternative -->
+
+<!-- ![Futureboard Studio banner](packages/assets/banner.png) -->
+
+<br />
+<br />
+
+**Futureboard Studio** is currently in **pre-alpha**.
+Expect rapid changes, experimental systems, unfinished workflows, and audio/plugin chaos with style.
+
+[Architecture](#-architectural-overview) ·
+[Getting Started](#-getting-started) ·
+[Build](#-building-the-native-app) ·
+[Debugging](#-debugging--diagnostics) ·
+[Contributing](#-contributing)
+
+</div>
+
 ---
 
-## 📑 Table of Contents
+## Preview
+
+<!-- Image Grid: HTML syntax -->
+
+<table>
+  <tr>
+    <td width="25%" align="center">
+      <img src="packages/assets/preview_midi_editor.png" alt="Futureboard Studio MIDI editor" />
+      <br />
+      <sub>MIDI Editor</sub>
+    </td>
+    <td width="25%" align="center">
+      <img src="packages/assets/preview_mixer.png" alt="Futureboard Studio mixer" />
+      <br />
+      <sub>Mixer</sub>
+    </td>
+    <td width="25%" align="center">
+      <img src="packages/assets/preview_mainwindow.png" alt="Futureboard Studio workspace preview" />
+      <br />
+      <sub>Workspace</sub>
+    </td>
+  </tr>
+</table>
+
+<!-- Image Grid: Markdown syntax alternative -->
+
+<!--
+| Main Window | MIDI Editor | Mixer | Workspace |
+| --- | --- | --- | --- |
+| ![Main Window](packages/assets/preview_mainwindow.png) | ![MIDI Editor](packages/assets/preview_midi_editor.png) | ![Mixer](packages/assets/preview_mixer.png) | ![Workspace](packages/assets/preview_mainwindow.png) |
+-->
+
+---
+
+> [!WARNING]
+> **Pre-alpha.** Futureboard Studio is under active, early development. Expect breaking changes, incomplete features, missing persistence guarantees, and rough edges.
+>
+> It is **not** ready for production work. Do not trust it with irreplaceable projects yet.
+>
+> There are no stable releases at the moment; nightly builds are snapshots for testing only. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the surfaces and crates fit together.
+
+---
+
+## Table of Contents
 
 - [Architectural Overview](#-architectural-overview)
-- [Core Engines & Frameworks](#️-core-engines--frameworks-crates)
-- [Additional Packages & Extensions](#️-additional-packages--extensions)
+- [Core Engines & Frameworks](#-core-engines--frameworks)
+- [Additional Packages & Extensions](#-additional-packages--extensions)
 - [Getting Started](#-getting-started)
 - [Building the Native App](#-building-the-native-app)
-- [npm / Bun Scripts Reference](#-bun-scripts-reference)
+- [Bun Scripts Reference](#-bun-scripts-reference)
 - [Debugging & Diagnostics](#-debugging--diagnostics)
 - [Contributing](#-contributing)
 - [License](#-license)
 
 ---
 
-## 🚀 Architectural Overview
+## Architectural Overview
 
-Futureboard Studio is split into modular directories targeting different runtime environments. The **native** app is the primary maintained surface; the others are secondary or in-progress.
+Futureboard Studio is a Digital Audio Workstation whose primary maintained surface is a native Rust application built on **GPUI**, the rendering framework behind the Zed editor.
 
-### 📱 Applications (`apps/`)
+It drives an in-process Rust audio engine and is designed around native performance, modern UI rendering, plugin hosting, and cross-platform audio workflows.
 
-- **Native Version (`apps/native`)** — _Primary, actively maintained_
-  - A high-performance desktop shell built on Rust using the **GPUI** framework (the layout/rendering engine behind the Zed editor).
-  - Integrates natively with our Rust direct audio engine without Electron or browser-engine overhead.
-  - This is **Futureboard Studio** proper and the surface new development targets first.
-- **Web Version (`apps/web`)** — _Secondary (Futureboard Lite)_
-  - An interactive React + TypeScript + Vite single-page application.
-  - Leverages the WASM AudioWorklet DSP core for audio processing in sandboxed web environments.
-  - Tracks the native app's concepts but lags it in feature coverage.
-- **Electron Version (`apps/electron`)** — _Secondary / legacy (Futureboard Express)_
-  - A desktop wrapper linking the React-based frontend with native audio components via an N-API control bridge.
-  - Maintained as reference; not the recommended desktop path (use the native app instead).
-- **Server Module (`apps/server`)**
-  - Collaboration stream sync and file hosting server.
+Secondary **web** and **Electron** surfaces share layout and engine concepts through a WebAssembly DSP core, but the native application is the main development target.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full surface/engine/crate breakdown.
+### Applications
 
----
+#### Native Version — `apps/native`
 
-## ⚙️ Core Engines & Frameworks (`crates/`)
+The primary Futureboard Studio desktop application.
 
-The core DAW logic, DSP, and user interface kit are written in modular Rust and C++ crates:
+- Built with Rust
+- Uses GPUI for native desktop UI
+- Integrates directly with the Rust audio engine
+- Avoids Electron/browser overhead
+- Main target for new development
 
-- [SphereWebAudioCore](crates/SphereWebAudioCore)
-  - **Purpose**: Web WASM Audio core.
-  - **Details**: Provides the web-compatible implementation of the DAW’s transport, flat audio graph (tracks → master), mixer, and meters, compiled to WebAssembly for browser runs.
-- [SphereDirectAudioEngine](crates/SphereDirectAudioEngine)
-  - **Purpose**: Native DAUx engine.
-  - **Details**: Low-latency direct audio engine for desktop builds. Interfaces directly with cpal and system-level API targets (WASAPI with exclusive mode + MMCSS on Windows, CoreAudio on macOS, ALSA on Linux). Exposes a C/Rust native API as well as an N-API/Node wrapper for JavaScript IPC.
-- [SphereUIComponents](crates/SphereUIComponents)
-  - **Purpose**: Native UI Kit & CoreUI.
-  - **Details**: Futureboard Studio's shared desktop components and styling system built in Rust utilizing **GPUI** and Skia.
-- [SpherePluginHost](crates/SpherePluginHost)
-  - **Purpose**: Plugin hosting wrapper.
-  - **Details**: Connects raw SDK interfaces in C++ (`external/vst3sdk`, `external/clap`) with the Rust ecosystem to allow scanning and hosting of native VST3 and CLAP plugins. The native plugin editor is embedded directly into the GPUI window (no separate floating editor).
-- [SphereAudioPlugins](crates/SphereAudioPlugins)
-  - **Purpose**: Built-in audio plugin DSP.
-  - **Details**: Contains the realtime-safe DSP code and parameters for stock insert effects (EQ, compression, delay).
+#### Web Version — `apps/web`
 
----
+The browser-based surface.
 
-## 🛠️ Additional Packages & Extensions
+- Built with React, TypeScript, and Vite
+- Uses the WASM AudioWorklet DSP core
+- Useful for experiments, layout work, and web-compatible workflows
+- Tracks the native app conceptually, but may lag in feature coverage
 
-- [plugins/](plugins/) — Web/React UI and DSP editors for stock plugins (e.g., `Equz8`, `FB2AComp`, `UltraVerb`).
-- [modules/](modules/) — High-level companion processors (e.g., `NoiseRemover`, `StemExtractor`).
-- [extensions/](extensions/) — Extension templates (`template`, `template-react`, `template-vue`) for building customizable DAW extensions.
-- [packages/shared/](packages/shared/) — Shared fonts, icons, menus, and layout manifests.
-- [external/](external/) — Vendored SDKs and native dependencies (`vst3sdk`, `clap`, `yoga`, `ARA_SDK`) pulled in as git submodules.
+#### Electron Version — `apps/electron`
+
+The legacy/secondary desktop wrapper.
+
+- Uses the React frontend
+- Bridges to native audio components via N-API
+- Kept as a reference surface
+- Not the recommended long-term desktop path
+
+#### Server Module — `apps/server`
+
+The collaboration and file hosting backend.
+
+- Sync infrastructure
+- Project/file hosting
+- Collaboration foundations
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full surface, engine, and crate breakdown.
 
 ---
 
-## 📦 Getting Started
+## Core Engines & Frameworks
+
+The core DAW logic, DSP, and user interface systems are split into modular Rust and C++ crates.
+
+### `crates/SphereWebAudioCore`
+
+**Purpose:** Web WASM audio core.
+
+Provides the web-compatible implementation of the DAW transport, flat audio graph, mixer, meters, and DSP runtime. It is compiled to WebAssembly for browser-based playback and processing.
+
+### `crates/SphereDirectAudioEngine`
+
+**Purpose:** Native direct audio engine.
+
+A low-latency audio engine for desktop builds. It targets native system audio APIs and exposes both native Rust/C APIs and JavaScript-facing wrappers where needed.
+
+Current audio backend targets include:
+
+- WASAPI on Windows
+- CoreAudio on macOS
+- ALSA on Linux
+
+### `crates/SphereUIComponents`
+
+**Purpose:** Native UI kit and shared CoreUI.
+
+Contains Futureboard Studio's desktop components, styling system, layout primitives, and shared UI foundations built around GPUI.
+
+### `crates/SpherePluginHost`
+
+**Purpose:** Native plugin hosting.
+
+Connects native plugin SDKs with the Rust ecosystem. It is responsible for scanning, loading, and hosting plugin formats such as VST3 and CLAP.
+
+Supported or planned plugin formats:
+
+- VST3
+- CLAP
+- VST2 legacy compatibility
+- Audio Units on macOS
+
+### `crates/SphereAudioPlugins`
+
+**Purpose:** Built-in stock plugin DSP.
+
+Contains real-time-safe DSP code and parameters for stock insert effects such as EQ, compression, delay, and other Futureboard-native processors.
+
+---
+
+## Additional Packages & Extensions
+
+- [`plugins/`](plugins/) — Web/React UI and DSP editors for stock plugins
+- [`modules/`](modules/) — High-level companion processors such as noise removal and stem extraction
+- [`extensions/`](extensions/) — Extension templates for building custom DAW extensions
+- [`packages/shared/`](packages/shared/) — Shared fonts, icons, menus, and layout manifests
+- [`packages/assets/`](packages/assets/) — README images, banners, previews, and branding assets
+- [`external/`](external/) — Vendored SDKs and native dependencies
+
+---
+
+## Getting Started
 
 ### Prerequisites
 
 You need the following installed:
 
-| Tool | Version | Used for |
-|---|---|---|
-| [Bun](https://bun.sh) | latest | JS/TS package manager, bundler and task runner |
-| [Rust](https://rustup.rs) | 1.78+ (edition 2024) | Native app, audio engine, WASM DSP |
-| `wasm32-unknown-unknown` target | — | Web audio core (`rustup target add wasm32-unknown-unknown`) |
-| [CMake](https://cmake.org) | 3.20+ | Compiling the C++ plugin host + VST3 SDK |
-| A C++ toolchain | — | MSVC (Windows), Xcode CLT (macOS), GCC/Clang (Linux) |
+| Tool                       | Version              | Used for                                        |
+| -------------------------- | -------------------- | ----------------------------------------------- |
+| [Bun](https://bun.sh)      | latest               | JS/TS package manager, bundler, and task runner |
+| [Rust](https://rustup.rs)  | 1.78+ / edition 2024 | Native app, audio engine, WASM DSP              |
+| `wasm32-unknown-unknown`   | —                    | Web audio core target                           |
+| [CMake](https://cmake.org) | 3.20+                | C++ plugin host and SDK builds                  |
+| C++ toolchain              | —                    | MSVC, Xcode CLT, GCC, or Clang                  |
 
 > [!IMPORTANT]
-> This repository uses **git submodules** for vendored SDKs (`external/vst3sdk`, `external/clap`, …). Clone with `--recursive`, or run `git submodule update --init --recursive` after cloning.
+> This repository uses **git submodules** for vendored SDKs such as `external/vst3sdk`, `external/clap`, and related native dependencies.
+>
+> Clone with `--recursive`, or initialize submodules after cloning.
 
 ### Clone
 
@@ -129,6 +248,12 @@ git submodule update --init --recursive
 bun install
 ```
 
+### Add the WebAssembly Rust target
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
 ### Run the Web Version
 
 ```bash
@@ -139,7 +264,12 @@ bun run dev:web
 
 ```bash
 bun run dev:native
-# equivalent to: cargo run -p futureboard_native
+```
+
+Equivalent cargo command:
+
+```bash
+cargo run -p futureboard_native
 ```
 
 ### Run the Collaboration Server
@@ -150,24 +280,55 @@ bun run dev:server
 
 ---
 
-## 🖥️ Building the Native App
+## Building the Native App
 
-The native desktop client is a Rust binary (`futureboard_native`) that links the GPUI UI kit, the direct audio engine, and the C++ VST3/CLAP plugin host. CMake and a C++ toolchain are required because the plugin host SDKs are compiled from source.
+The native desktop client is a Rust binary that links the GPUI UI kit, the direct audio engine, and the native plugin host.
 
-### Debug build & run
+CMake and a C++ toolchain are required because parts of the plugin host and SDK bridge are compiled from native source.
+
+### Debug build
 
 ```bash
-bun run build:native:debug   # cargo build -p futureboard_native
-bun run dev:native           # cargo run -p futureboard_native
+bun run build:native:debug
+```
+
+Equivalent cargo command:
+
+```bash
+cargo build -p futureboard_native
+```
+
+### Debug run
+
+```bash
+bun run dev:native
+```
+
+Equivalent cargo command:
+
+```bash
+cargo run -p futureboard_native
 ```
 
 ### Release build
 
 ```bash
-bun run build:native         # cargo build --release -p futureboard_native
+bun run build:native
 ```
 
-The optimized binary is emitted to `target/release/futureboard_native` (`.exe` on Windows).
+Equivalent cargo command:
+
+```bash
+cargo build --release -p futureboard_native
+```
+
+The optimized binary is emitted to:
+
+```text
+target/release/futureboard_native
+```
+
+On Windows, the binary will use the `.exe` extension.
 
 ### Package distributable bundles
 
@@ -178,68 +339,118 @@ bun run bundle:native:mac
 # macOS .app + .dmg installer
 bun run bundle:native:mac:dmg
 
-# Windows portable/installer layout
+# Windows portable / installer layout
 bun run bundle:native:win
 ```
 
-Packaging scripts live in [`packaging/native/`](packaging/native).
+Packaging scripts live in:
 
-### Platform notes
+```text
+packaging/native/
+```
 
-- **Windows** — Uses WASAPI (exclusive mode + MMCSS) for low-latency audio. Build with the MSVC toolchain (`rustup default stable-msvc`). The VST3 native editor is embedded as a `WS_CHILD` inside the GPUI window.
-- **macOS** — Uses CoreAudio. Requires Xcode Command Line Tools (`xcode-select --install`).
-- **Linux** — Uses ALSA. Install ALSA dev headers (e.g. `sudo apt install libasound2-dev`) plus the usual GPUI system deps.
-
-### Build everything (WASM + native + electron)
+### Build everything
 
 ```bash
 bun run build:all
 ```
 
----
-
-## 🧰 Bun Scripts Reference
-
-| Script | Description |
-|---|---|
-| `dev:web` | Run the React web app (Vite dev server) |
-| `dev:native` | Build & run the native GPUI client |
-| `dev:server` | Run the collaboration sync server |
-| `dev:electron` | Run web + Electron (legacy) concurrently |
-| `build:web` | Production build of the web app |
-| `build:wasm` | Compile the WASM audio core for the web |
-| `build:native` | Release build of the native client |
-| `build:native:debug` | Debug build of the native client |
-| `build:audio:plugins` | Check stock plugin crate + extension template |
-| `bundle:native:mac` / `:mac:dmg` / `win` | Package native distributables |
-| `cargo:check` / `cargo:build` / `cargo:release` | Workspace cargo build variants |
-| `cargo:test` | Run the Rust workspace test suite |
-| `cargo:clippy` / `cargo:fmt` / `cargo:fmt:check` | Lint & format Rust code |
-| `check` | `cargo:check` + web lint |
-| `lint` | `cargo:clippy` + web lint |
-| `fmt` | `cargo fmt --all` |
+This is intended to build the major project surfaces, including WASM, native, and Electron-related outputs.
 
 ---
 
-## 🔍 Debugging & Diagnostics
+## Platform Notes
 
-Several subsystems expose verbose logging behind environment variables (set to `1` to enable):
+### Windows
 
-| Variable | Logs |
-|---|---|
-| `FUTUREBOARD_PLUGIN_DEBUG` | Insert add/set/remove/bypass mutations and engine-sync per-insert details |
-| `FUTUREBOARD_PLUGIN_VIEW_DEBUG` | Native plugin editor lifecycle: open → host region → child HWND → IPlugView attach/resize/detach (`[plugin-view]` / `[vst3-editor-audit]`) |
-| `FUTUREBOARD_ROUTING_DEBUG` | Send/return/bus routing graph at build time (nodes, sends, cycle ACCEPT/REJECT) |
-| `GPUI_DISABLE_DIRECT_COMPOSITION` | Set automatically to `1` on Windows at native boot so native plugin UI can composite with GPUI |
-| `FUTUREBOARD_PLUGIN_EDITOR_MODE` | `tool` (default): `OwnedToolWindowFallback` — borderless owned overlay aligned to the content region (no taskbar/Alt+Tab); `child`: `ChildHwndEmbed` under the GPUI HWND |
+- Uses WASAPI as the current native Windows audio backend
+- Exclusive mode and MMCSS are planned/used for lower latency paths
+- Build with the MSVC Rust toolchain
 
-Example (PowerShell):
-
-```powershell
-$env:FUTUREBOARD_PLUGIN_VIEW_DEBUG=1; cargo run -p futureboard_native
+```bash
+rustup default stable-msvc
 ```
 
-Example (bash):
+### macOS
+
+- Uses CoreAudio
+- Requires Xcode Command Line Tools
+
+```bash
+xcode-select --install
+```
+
+### Linux
+
+- Uses ALSA currently
+- PipeWire/JACK support may be added later
+- Requires ALSA development headers
+
+Debian/Ubuntu example:
+
+```bash
+sudo apt install libasound2-dev
+```
+
+Arch Linux example:
+
+```bash
+sudo pacman -S alsa-lib
+```
+
+---
+
+## Bun Scripts Reference
+
+| Script                  | Description                                     |
+| ----------------------- | ----------------------------------------------- |
+| `dev:web`               | Run the React web app with Vite                 |
+| `dev:native`            | Build and run the native GPUI client            |
+| `dev:server`            | Run the collaboration sync server               |
+| `dev:electron`          | Run web and Electron concurrently               |
+| `build:web`             | Production build of the web app                 |
+| `build:wasm`            | Compile the WASM audio core                     |
+| `build:native`          | Release build of the native client              |
+| `build:native:debug`    | Debug build of the native client                |
+| `build:audio:plugins`   | Check stock plugin crate and extension template |
+| `bundle:native:mac`     | Package macOS `.app` bundle                     |
+| `bundle:native:mac:dmg` | Package macOS `.dmg` installer                  |
+| `bundle:native:win`     | Package Windows distributable                   |
+| `cargo:check`           | Run cargo check                                 |
+| `cargo:build`           | Run cargo build                                 |
+| `cargo:release`         | Run cargo release build                         |
+| `cargo:test`            | Run Rust workspace tests                        |
+| `cargo:clippy`          | Run Rust clippy                                 |
+| `cargo:fmt`             | Format Rust code                                |
+| `cargo:fmt:check`       | Check Rust formatting                           |
+| `check`                 | Run combined checks                             |
+| `lint`                  | Run lint tasks                                  |
+| `fmt`                   | Format project code                             |
+
+---
+
+## Debugging & Diagnostics
+
+Several subsystems expose verbose logging through environment variables.
+
+Set any variable to `1` to enable it.
+
+| Variable                          | Logs                                                           |
+| --------------------------------- | -------------------------------------------------------------- |
+| `FUTUREBOARD_PLUGIN_DEBUG`        | Insert add/set/remove/bypass mutations and engine-sync details |
+| `FUTUREBOARD_PLUGIN_VIEW_DEBUG`   | Native plugin editor lifecycle and view attachment             |
+| `FUTUREBOARD_ROUTING_DEBUG`       | Send, return, and bus routing graph diagnostics                |
+| `GPUI_DISABLE_DIRECT_COMPOSITION` | Windows composition workaround for native plugin UI            |
+| `FUTUREBOARD_PLUGIN_EDITOR_MODE`  | Plugin editor mode selection                                   |
+
+### PowerShell example
+
+```powershell
+$env:FUTUREBOARD_PLUGIN_VIEW_DEBUG=1
+cargo run -p futureboard_native
+```
+
+### Bash example
 
 ```bash
 FUTUREBOARD_PLUGIN_VIEW_DEBUG=1 cargo run -p futureboard_native
@@ -247,12 +458,92 @@ FUTUREBOARD_PLUGIN_VIEW_DEBUG=1 cargo run -p futureboard_native
 
 ---
 
-## 🤝 Contributing
+## Repository Layout
 
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the development rules, real-time audio safety constraints, UI/theming guidelines, and the pre-PR submission checklist. UI work should also follow [DESIGN.md](DESIGN.md) and [AGENTS.md](AGENTS.md).
+```text
+Futureboard
+├─ apps/
+│  ├─ native/
+│  ├─ web/
+│  ├─ electron/
+│  └─ server/
+│
+├─ crates/
+│  ├─ SphereDirectAudioEngine/
+│  ├─ SphereWebAudioCore/
+│  ├─ SphereUIComponents/
+│  ├─ SpherePluginHost/
+│  └─ SphereAudioPlugins/
+│
+├─ packages/
+│  ├─ assets/
+│  └─ shared/
+│
+├─ plugins/
+├─ modules/
+├─ extensions/
+├─ external/
+└─ packaging/
+```
 
 ---
 
-## 📄 License
+## Roadmap
 
-MIT License. See [LICENSE](LICENSE) for the full license text.
+Futureboard Studio is moving toward a usable native DAW foundation.
+
+Current priorities include:
+
+- Stable native GPUI application shell
+- Real audio clip editing
+- Timeline drawing and selection workflows
+- MIDI editor improvements
+- Mixer routing
+- Native plugin hosting stabilization
+- VST3 editor embedding
+- CLAP plugin support
+- Project file format
+- Automation lanes
+- Audio export
+- Cross-platform packaging
+- Documentation and contributor onboarding
+
+---
+
+## Contributing
+
+Contributions are welcome.
+
+You can help by:
+
+- Reporting bugs
+- Testing builds
+- Improving documentation
+- Fixing UI issues
+- Improving plugin hosting
+- Working on audio engine features
+- Adding platform support
+- Improving build and packaging scripts
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+UI work should also follow:
+
+- [DESIGN.md](DESIGN.md)
+- [AGENTS.md](AGENTS.md)
+
+---
+
+## License
+
+MIT License.
+
+See [LICENSE](LICENSE) for the full license text.
+
+---
+
+<div align="center">
+
+Made with Rust, audio chaos, and unreasonable optimism.
+
+</div>

@@ -329,6 +329,7 @@ impl Default for ScanOptions {
 
 /// Incremental scan progress (bundle discovery → metadata → registration).
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ScanProgress {
     Started {
         bundle_total: usize,
@@ -673,7 +674,7 @@ impl PluginRegistry {
             && options
                 .formats_only
                 .as_ref()
-                .is_none_or(|formats| formats.iter().any(|format| *format == PluginFormat::Au));
+                .is_none_or(|formats| formats.contains(&PluginFormat::Au));
 
         let mut au_cache_state = load_au_cache_state();
         let au_scan_available = cfg!(target_os = "macos");

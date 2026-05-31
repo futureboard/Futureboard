@@ -17,7 +17,7 @@ pub fn track_lane(
     on_add_clip: std::sync::Arc<
         dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
-    on_track_context_menu: Option<
+    _on_track_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_clip_context_menu: Option<

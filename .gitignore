@@ -30,7 +30,8 @@ out/
 *.local
 
 # Rust / Cargo
-target/
+target/**
+target.**
 **/target/
 extensions/**/target/
 Cargo.lock.bak

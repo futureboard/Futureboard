@@ -5,6 +5,7 @@ use napi_derive::napi;
 
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct HostStatus {
     pub available: bool,
     pub backend: String,

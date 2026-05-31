@@ -58,10 +58,11 @@ pub use crate::native::{
 };
 pub use crate::vst3_processor::{Vst3MidiEvent, Vst3MidiEventKind, Vst3RuntimeProcessor};
 
-use std::sync::Arc;
-
 #[cfg(feature = "napi")]
 use napi_derive::napi;
+
+#[cfg(feature = "napi")]
+use std::sync::Arc;
 
 #[cfg(feature = "napi")]
 use engine::EngineInner;

@@ -68,9 +68,9 @@ pub fn detect_pitch_yin(
         None => {
             let mut min_val = f64::MAX;
             let mut min_tau = 0;
-            for t in tau_min..tau_max {
-                if d_prime[t] < min_val {
-                    min_val = d_prime[t];
+            for (t, &value) in d_prime.iter().enumerate().take(tau_max).skip(tau_min) {
+                if value < min_val {
+                    min_val = value;
                     min_tau = t;
                 }
             }

@@ -8,10 +8,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    div, px, App, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Window, WindowHandle,
 };
+#[cfg(target_os = "windows")]
+use gpui::{size, AppContext, Point, WindowBackgroundAppearance, WindowBounds, WindowKind};
 
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};

@@ -1,8 +1,7 @@
 use super::{
     AutomationLane, AutomationPoint, ClipSource, FutureboardProject, InputMonitorMode, MidiNote,
     PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer,
-    ProjectPluginInstance, ProjectSend, ProjectSettings, ProjectTrack, ProjectTrackType,
-    TrackRouting,
+    ProjectPluginInstance, ProjectSend, ProjectTrack, ProjectTrackType, TrackRouting,
 };
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;

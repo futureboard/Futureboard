@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::plugin_db::PluginScanStatus;
-use crate::registry::{default_preset_root, PluginStatus, RegistryPlugin};
+use crate::registry::{default_preset_root, RegistryPlugin};
 
 const PRESET_MAGIC: &[u8; 5] = b"FBPST";
 

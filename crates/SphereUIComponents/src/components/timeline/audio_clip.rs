@@ -3,7 +3,6 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
 use crate::theme::Colors;
-use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, AppContext, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window,

@@ -52,11 +52,11 @@ pub fn segment_notes(
         let mut smoothed_midi = vec![0.0; raw_midi.len()];
         let window_size = 5;
         let half_win = window_size / 2;
-        for i in 0..raw_midi.len() {
+        for (i, smoothed) in smoothed_midi.iter_mut().enumerate() {
             let start = i.saturating_sub(half_win);
             let end = (i + half_win + 1).min(raw_midi.len());
             let sum: f64 = raw_midi[start..end].iter().sum();
-            smoothed_midi[i] = sum / (end - start) as f64;
+            *smoothed = sum / (end - start) as f64;
         }
 
         // Group adjacent frames by their rounded smoothed MIDI note value.

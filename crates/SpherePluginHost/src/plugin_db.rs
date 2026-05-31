@@ -459,6 +459,7 @@ pub fn upsert_plugins(
 }
 
 /// Record a scan run summary.
+#[allow(clippy::too_many_arguments)]
 pub fn record_scan_run(
     conn: &Connection,
     id: &str,

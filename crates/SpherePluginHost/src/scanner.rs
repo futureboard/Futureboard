@@ -48,6 +48,7 @@ pub fn scan_clap_paths(paths: &[String]) -> Result<Vec<PluginInfo>, String> {
     scan_paths_for_format(paths, PluginFormat::Clap)
 }
 
+#[allow(dead_code)]
 pub fn scan_audio_plugin_paths(paths: &[String]) -> Result<Vec<PluginInfo>, String> {
     let mut plugins = scan_paths_for_format(paths, PluginFormat::Vst3)?;
     plugins.append(&mut scan_paths_for_format(paths, PluginFormat::Clap)?);
@@ -104,7 +105,7 @@ fn scan_paths_for_format(
 }
 
 fn sort_and_dedup(plugins: &mut Vec<PluginInfo>) {
-    plugins.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    plugins.sort_by_key(|plugin| plugin.name.to_lowercase());
     // Deduplicate by stable id (path + classId hash) so multi-class modules
     // like WaveShell keep all their plugin entries — only true duplicates
     // (same classId from the same module scanned twice) are removed.

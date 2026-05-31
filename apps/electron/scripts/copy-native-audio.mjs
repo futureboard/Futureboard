@@ -54,7 +54,7 @@ if (!sourcePath) {
   console.error(
     `[copy-native-audio] ERROR: Built addon not found at any of:\n` +
     sourceCandidates.map((p) => `  ${p}`).join("\n") +
-    `\n\n  Run: cd crates/SphereDirectAudioEngine && cargo build${isDebug ? "" : " --release"}`
+    `\n\n  Run: cd crates/SphereDirectAudioEngine && cargo build${isDebug ? "" : " --release"} --lib --features napi`
   );
   process.exit(1);
 }

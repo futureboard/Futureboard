@@ -22,7 +22,7 @@ use crate::components::slider::slider;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputAction, TextInputCallbacks, TextInputState,
 };
-use crate::components::timeline::render::{list_available_gpu_devices, GpuDeviceInfo};
+use crate::components::timeline::render::list_available_gpu_devices;
 use crate::components::title_bar::external_window_titlebar;
 use crate::overlay::{
     compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor, settings_form_column,
@@ -473,9 +473,9 @@ fn build_settings_content(
     state: &SettingsDialogState,
     schema: &SettingsSchema,
     callbacks: &SettingsDialogCallbacks,
-    available_inputs: &[String],
-    available_outputs: &[String],
-    available_backends: &[String],
+    _available_inputs: &[String],
+    _available_outputs: &[String],
+    _available_backends: &[String],
 ) -> (Vec<gpui::AnyElement>, Vec<gpui::AnyElement>) {
     let query = state.search_query.trim().to_lowercase();
     let is_match = |label: &str, keywords: &[&str]| {
@@ -784,7 +784,6 @@ fn build_settings_content(
                 || is_match("Sample Rate", &["sample", "rate", "hz"])
                 || is_match("Buffer Size", &["buffer", "latency"])))
     {
-        let on_update = callbacks.on_update_setting.clone();
         let open_combo = callbacks.open_hardware_combo;
         let on_toggle = callbacks.on_toggle_hardware_combo.clone();
 

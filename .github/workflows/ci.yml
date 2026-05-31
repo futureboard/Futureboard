@@ -75,6 +75,11 @@ jobs:
       - name: cargo clippy --workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: cargo clippy N-API addons
+        run: |
+          cargo clippy -p sphere-direct-audio-engine --lib --features napi -- -D warnings
+          cargo clippy -p sphere-plugin-host --lib --features napi -- -D warnings
+
       - name: cargo test --workspace
         run: cargo test --workspace
 

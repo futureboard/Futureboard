@@ -1,6 +1,8 @@
 use gpui::Context;
 
-use crate::components::timeline::timeline_state::{self, TrackType};
+use crate::components::timeline::timeline_state;
+#[cfg(debug_assertions)]
+use crate::components::timeline::timeline_state::TrackType;
 
 use super::StudioLayout;
 impl StudioLayout {

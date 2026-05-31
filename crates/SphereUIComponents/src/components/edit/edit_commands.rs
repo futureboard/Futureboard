@@ -1,8 +1,6 @@
 //! Undo/redo edit commands — all timeline mutations go through here.
 
-use crate::components::timeline::timeline_state::{
-    ClipState, ClipType, MidiNoteState, TimelineState,
-};
+use crate::components::timeline::timeline_state::{ClipState, MidiNoteState, TimelineState};
 
 /// Snapshot of a clip plus its owning track for undo/redo.
 #[derive(Debug, Clone)]

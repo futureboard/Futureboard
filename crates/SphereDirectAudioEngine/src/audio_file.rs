@@ -550,6 +550,7 @@ fn decode_frame_count(
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "napi"), allow(dead_code))]
 pub struct WavPeakResult {
     pub sample_rate: u32,
     pub channel_count: u32,
@@ -559,6 +560,7 @@ pub struct WavPeakResult {
     pub peaks: Vec<i32>,
 }
 
+#[cfg_attr(not(feature = "napi"), allow(dead_code))]
 pub fn generate_wav_peaks_from_path(
     path: &str,
     samples_per_peak: u32,
@@ -1000,6 +1002,7 @@ fn read_i32_le(bytes: &[u8], offset: usize) -> Result<i32, String> {
     Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+#[cfg_attr(not(feature = "napi"), allow(dead_code))]
 fn read_wav_pcm_sample(bytes: &[u8], offset: usize, bits_per_sample: u16) -> Result<f32, String> {
     let fmt = WavFmt {
         audio_format: 1,
@@ -1010,6 +1013,7 @@ fn read_wav_pcm_sample(bytes: &[u8], offset: usize, bits_per_sample: u16) -> Res
     decode_wav_sample(bytes, offset, &fmt)
 }
 
+#[cfg_attr(not(feature = "napi"), allow(dead_code))]
 fn reset_peak_min_max(min: &mut [f32], max: &mut [f32]) {
     for i in 0..min.len() {
         min[i] = 1.0;
@@ -1017,6 +1021,7 @@ fn reset_peak_min_max(min: &mut [f32], max: &mut [f32]) {
     }
 }
 
+#[cfg_attr(not(feature = "napi"), allow(dead_code))]
 fn write_i16_peak_i32(
     peaks: &mut [i32],
     peak_index: usize,
@@ -1031,6 +1036,7 @@ fn write_i16_peak_i32(
     }
 }
 
+#[cfg_attr(not(feature = "napi"), allow(dead_code))]
 fn clamp_i16_as_i32(value: f32) -> i32 {
     (value.clamp(-1.0, 1.0) * 32767.0)
         .round()

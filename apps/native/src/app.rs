@@ -58,7 +58,7 @@ pub fn setup(cx: &mut App) {
                 options.focus = false;
                 cx.open_window(options, move |window, cx| {
                     boot::log("build StudioLayout");
-                    let layout = cx.new(|cx| StudioLayout::new(cx));
+                    let layout = cx.new(StudioLayout::new);
                     boot::log("StudioLayout built");
                     // Reveal main + close splash once the first frame is painted.
                     window.on_next_frame(move |window, cx| {

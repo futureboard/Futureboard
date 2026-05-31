@@ -142,7 +142,7 @@ impl MidiEditorWindow {
 }
 
 impl Render for MidiEditorWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.title_for_clip(cx);
         let status = self.status_line(cx);
 

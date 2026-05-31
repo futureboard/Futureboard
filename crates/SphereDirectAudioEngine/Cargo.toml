@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "sphere-audio-test"
 path = "src/bin/sphere_audio_test.rs"
+required-features = ["audio-test-bin"]
 
 # ── Runtime dependencies ──────────────────────────────────────────────────────
 [dependencies]
@@ -72,8 +73,12 @@ cc = "1"
 pkg-config = "0.3"
 
 [features]
-# Default build of this crate is the Electron/Node addon.
-default = ["napi"]
+# Default build is native/rlib-safe for Studio workspace builds.
+default = []
 
 # Build the N-API surface (`SphereDirectAudioEngine` JS class, Js* types).
 napi = ["dep:napi", "dep:napi-derive"]
+
+# Opt-in standalone CLI target. Workspace builds skip this so the binary does
+# not try to link N-API symbols outside a Node/Electron host.
+audio-test-bin = []

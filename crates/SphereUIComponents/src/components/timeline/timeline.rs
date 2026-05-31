@@ -4,8 +4,8 @@ use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipState, ClipType, SnapDivision, TimelineState, TimelineTool, TrackDragItem,
-    TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+    ClipDragItem, SnapDivision, TimelineState, TimelineTool, TrackDragItem, TrackType,
+    HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -268,7 +268,7 @@ impl Timeline {
             return;
         }
 
-        let (clip_start, mut length) =
+        let (clip_start, length) =
             if let Some((range_start, range_end)) = self.state.arrangement_range {
                 let (lo, hi) = normalize_range(range_start, range_end);
                 (lo, (hi - lo).max(MIN_MIDI_CLIP_BEATS))

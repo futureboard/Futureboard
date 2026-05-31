@@ -8,7 +8,7 @@ pub fn hz_to_midi_cents(hz: f64) -> (u8, f64) {
     // MIDI note formula: d = 12 * log2(freq / 440) + 69
     let midi_f = 12.0 * (hz / 440.0).log2() + 69.0;
     let midi = midi_f.round();
-    let midi_u8 = midi.max(0.0).min(127.0) as u8;
+    let midi_u8 = midi.clamp(0.0, 127.0) as u8;
     let target_hz = midi_to_hz(midi_u8);
     let cents = 1200.0 * (hz / target_hz).log2();
     (midi_u8, cents)

@@ -29,7 +29,7 @@ use crate::components::{BottomPanelResizeDrag, BottomPanelState};
 use crate::overlay::{project_title_anchor, titlebar_label_anchor};
 use crate::paths::FutureboardPaths;
 use crate::project::recent::RecentProjectsStore;
-use crate::settings::{GlobalSettingsModel, SettingsModel, SettingsSchema};
+use crate::settings::{GlobalSettingsModel, SettingsModel};
 use crate::theme::{self, Colors};
 use sphere_plugin_host::load_au_cache_state;
 

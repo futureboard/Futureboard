@@ -79,11 +79,37 @@ jobs:
         run: cargo test --workspace
 
   web:
-    name: Web typecheck + lint
+    name: Web WASM build + typecheck + lint
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Initialize submodules
+        run: bash .github/workflows/submodules-init.sh
+
+      - name: Setup Rust for WebAudio WASM
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust + wasm-pack
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/wasm-pack
+            target
+          key: ci-web-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ci-web-wasm-${{ runner.os }}-
+
+      - name: Install wasm-pack
+        run: |
+          if ! command -v wasm-pack >/dev/null 2>&1; then
+            cargo install wasm-pack --locked
+          fi
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -92,6 +118,9 @@ jobs:
 
       - name: Install JS workspace dependencies
         run: bun install --frozen-lockfile
+
+      - name: Build WebAudio WASM
+        run: bun run --cwd apps/web build:audio:wasm
 
       - name: Typecheck web app
         run: bun run --cwd apps/web typecheck

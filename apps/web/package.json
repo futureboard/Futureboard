@@ -7,6 +7,7 @@
     "dev": "vite",
     "build:audio:wasm": "node scripts/build-wasm-audio.mjs",
     "build:audio:wasm:debug": "node scripts/build-wasm-audio.mjs --debug",
+    "typecheck": "bun run build:audio:wasm && tsc -b",
     "build": "bun run build:audio:wasm && tsc -b && vite build",
     "build:electron": "bun run build:audio:wasm && tsc -b && vite build --base=/",
     "build:audio:wasm:prod": "curl https://sh.rustup.rs -sSf | sh -s -- -y && export PATH=\"$HOME/.cargo/bin:$PATH\" && rustup target add wasm32-unknown-unknown && cargo install wasm-pack --locked && bun run build:audio:wasm",

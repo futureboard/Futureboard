@@ -1,0 +1,493 @@
+use gpui::{px, Bounds, Context, Window};
+
+use std::sync::Arc;
+
+use crate::components::add_track_dialog::{
+    open_add_track_window, AddTrackDialogState, AddTrackKind,
+};
+use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
+use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate};
+use crate::components::timeline::timeline_state::{self, ClipType, CreateTrackOptions, TrackType};
+use crate::components::{external_mixer_debug, open_mixer_window};
+
+use super::helpers::{cleaned_track_name, numbered_name_stem};
+use super::{ContextTarget, OpenPopover, StudioLayout};
+impl StudioLayout {
+    pub(super) fn open_add_track_external_window(
+        &mut self,
+        kind: AddTrackKind,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut track_count = 0;
+        let mut has_master_track = false;
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            track_count = timeline.state.tracks.len();
+            has_master_track = timeline
+                .state
+                .tracks
+                .iter()
+                .any(|track| track.track_type == TrackType::Master);
+        });
+
+        self.open_add_track_external_window_with_context(
+            kind,
+            track_count,
+            has_master_track,
+            owner_bounds,
+            cx,
+        );
+    }
+
+    /// Opens/activates the Add Track external window without reading/updating the Timeline.
+    ///
+    /// This is critical for callbacks originating from Timeline events: Timeline may already be
+    /// mid-update, and calling `self.timeline.update(...)` would panic (GPUI re-entrancy guard).
+    pub(super) fn open_add_track_external_window_with_context(
+        &mut self,
+        kind: AddTrackKind,
+        track_count: usize,
+        has_master_track: bool,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        // If window is already open, activate and refresh its context.
+        if let Some(handle) = self.add_track_window.clone() {
+            if handle
+                .update(cx, |win, window, _cx| {
+                    win.set_context(kind, track_count, has_master_track);
+                    window.activate_window();
+                })
+                .is_ok()
+            {
+                return;
+            }
+            self.add_track_window = None;
+        }
+
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+        self.open_popover = None;
+        self.text_context_menu = None;
+
+        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        });
+
+        let layout = cx.entity().clone();
+        let on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static> =
+            Arc::new(move |dialog, _name, cx| {
+                let Some(track_type) = dialog.selected_kind.native_track_type() else {
+                    return;
+                };
+                let _ = layout.update(cx, |this, cx| {
+                    this.mark_dirty();
+                    let _ = this.timeline.update(cx, |timeline, cx| {
+                        let count = dialog.count.clamp(1, 128) as usize;
+                        let base_name =
+                            cleaned_track_name(&dialog.track_name, dialog.selected_kind);
+                        let mut selected_track_id = None;
+                        let mut created_ids = Vec::new();
+                        for i in 0..count {
+                            let name = if count == 1 {
+                                base_name.clone()
+                            } else {
+                                format!(
+                                    "{} {}",
+                                    numbered_name_stem(&base_name),
+                                    dialog.next_number + i
+                                )
+                            };
+                            let color_ix = if dialog.auto_color {
+                                dialog.base_track_count + i
+                            } else {
+                                dialog.color_index + i
+                            };
+                            let id = timeline.state.create_track(CreateTrackOptions {
+                                track_type,
+                                name,
+                                color: timeline.state.track_color_for_index(color_ix),
+                                volume: timeline_state::volume::db_to_norm(0.0),
+                                pan: 0.0,
+                                armed: dialog.selected_kind == AddTrackKind::Audio
+                                    && dialog.arm_track,
+                                input_monitor: dialog.selected_kind == AddTrackKind::Audio
+                                    && dialog.monitor_mode != "off",
+                            });
+                            created_ids.push(id.clone());
+                            selected_track_id = Some(id);
+                        }
+                        if let Some(id) = selected_track_id {
+                            timeline.state.select_track(&id);
+                        }
+                        crate::components::add_track_dialog::add_track_debug(&format!(
+                            "created tracks kind={} count={} ids={:?}",
+                            dialog.selected_kind.tab_label(),
+                            count,
+                            created_ids
+                        ));
+                        cx.notify();
+                    });
+                    cx.notify();
+                });
+            });
+
+        match open_add_track_window(
+            owner_bounds,
+            kind,
+            track_count,
+            has_master_track,
+            on_confirm_request,
+            cx,
+        ) {
+            Ok(handle) => self.add_track_window = Some(handle),
+            Err(err) => eprintln!("[add-track] failed to open window: {err}"),
+        }
+    }
+
+    pub(super) fn open_settings_dialog(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        // If window is already open, activate it
+        if let Some(handle) = self.settings_window.clone() {
+            if handle
+                .update(cx, |_settings, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.settings_window = None;
+        }
+
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+        self.open_popover = None;
+        self.project_switcher.is_open = false;
+        self.text_context_menu = None;
+
+        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        });
+        let settings = self.settings.clone();
+        let owner = cx.entity().clone();
+
+        let mut available_inputs = if let Some(ref engine) = self.audio_engine {
+            engine
+                .list_input_devices()
+                .into_iter()
+                .map(|d| d.name)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let schema = self.settings.read(cx).current.clone();
+        if !available_inputs.contains(&schema.hardware.audio.device_in)
+            && !schema.hardware.audio.device_in.is_empty()
+        {
+            available_inputs.push(schema.hardware.audio.device_in.clone());
+        }
+        if available_inputs.is_empty() {
+            available_inputs.push("Built-in Microphone".to_string());
+        }
+
+        let mut available_outputs = if let Some(ref engine) = self.audio_engine {
+            engine
+                .list_output_devices()
+                .into_iter()
+                .map(|d| d.name)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if !available_outputs.contains(&schema.hardware.audio.device_out)
+            && !schema.hardware.audio.device_out.is_empty()
+        {
+            available_outputs.push(schema.hardware.audio.device_out.clone());
+        }
+        if available_outputs.is_empty() {
+            available_outputs.push("Speakers (Realtek)".to_string());
+        }
+
+        let available_backends = vec![
+            "WASAPI Exclusive".to_string(),
+            "WASAPI Shared".to_string(),
+            "ASIO".to_string(),
+        ];
+
+        let on_update: OnSettingUpdate = Arc::new(move |updater, cx| {
+            let updater = updater.clone();
+            let _ = owner.update(cx, |this, cx| {
+                let _ = this.settings.update(cx, |settings, cx| {
+                    settings.update_setting(move |s| updater(s), cx);
+                });
+                this.sync_settings_to_systems(cx);
+                cx.notify();
+            });
+        });
+
+        match open_settings_window(
+            owner_bounds,
+            settings,
+            available_inputs,
+            available_outputs,
+            available_backends,
+            on_update,
+            cx,
+        ) {
+            Ok(handle) => self.settings_window = Some(handle),
+            Err(err) => eprintln!("[settings] failed to open settings window: {err}"),
+        }
+    }
+
+    pub(super) fn close_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.settings_window.take() {
+            let _ = handle.update(cx, |_settings, window, _cx| window.remove_window());
+        }
+        self.text_context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn open_mixer_external_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        external_mixer_debug("external mixer open requested");
+        self.pending_mixer_external_open = Some(owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        }));
+        self.schedule_pending_mixer_external_open(cx);
+        cx.notify();
+    }
+
+    pub(super) fn schedule_pending_mixer_external_open(&mut self, cx: &mut Context<Self>) {
+        if self.pending_mixer_external_open.is_none() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(0))
+                .await;
+            let _ = this.update(cx, |layout, cx| {
+                layout.flush_pending_mixer_external_open(cx)
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn flush_pending_mixer_external_open(&mut self, cx: &mut Context<Self>) {
+        let Some(owner_bounds) = self.pending_mixer_external_open.take() else {
+            return;
+        };
+
+        self.prune_mixer_window(cx);
+        if let Some(handle) = self.mixer_window.clone() {
+            if handle
+                .update(cx, |_mixer, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                self.panels.mixer_docked = false;
+                self.push_mixer_snapshot_to_window(cx);
+                cx.notify();
+                return;
+            }
+            self.mixer_window = None;
+        }
+
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+        self.open_popover = None;
+        self.panels.mixer_docked = false;
+
+        let snapshot = self.build_mixer_snapshot(cx);
+        let callbacks = self.build_mixer_callbacks(cx.entity().clone());
+        let owner = cx.entity().clone();
+        let on_close: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
+            std::sync::Arc::new(move |_window, cx| {
+                let _ = owner.update(cx, |layout, cx| layout.close_mixer_window(cx));
+            });
+        let scroll_owner = cx.entity().clone();
+        let on_mixer_scroll: std::sync::Arc<
+            dyn Fn(f32, &mut Window, &mut gpui::App) + Send + Sync,
+        > = std::sync::Arc::new(move |new_x: f32, _w, cx| {
+            let _ = scroll_owner.update(cx, |layout, cx| {
+                if layout.set_mixer_scroll_x(new_x, cx) {
+                    layout.push_mixer_snapshot_to_window(cx);
+                }
+            });
+        });
+
+        match open_mixer_window(
+            owner_bounds,
+            snapshot,
+            callbacks,
+            on_close,
+            on_mixer_scroll,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.mixer_window = Some(handle);
+                cx.notify();
+            }
+            Err(err) => {
+                eprintln!("[mixer] failed to open external mixer window: {err}");
+                self.panels.mixer_docked = true;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn close_mixer_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.mixer_window.take() {
+            let _ = handle.update(cx, |_mixer, window, _cx| window.remove_window());
+        }
+        cx.notify();
+    }
+
+    pub(super) fn prune_mixer_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.mixer_window.clone() else {
+            return;
+        };
+        if handle.update(cx, |_mixer, _window, _cx| ()).is_err() {
+            self.mixer_window = None;
+        }
+    }
+
+    pub(crate) fn open_midi_editor_external_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_midi_clip_id(cx).is_none() {
+            return;
+        }
+        self.pending_midi_editor_open = Some(owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        }));
+        self.schedule_pending_midi_editor_open(cx);
+        cx.notify();
+    }
+
+    pub(super) fn schedule_pending_midi_editor_open(&mut self, cx: &mut Context<Self>) {
+        if self.pending_midi_editor_open.is_none() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(0))
+                .await;
+            let _ = this.update(cx, |layout, cx| layout.flush_pending_midi_editor_open(cx));
+        })
+        .detach();
+    }
+
+    pub(super) fn flush_pending_midi_editor_open(&mut self, cx: &mut Context<Self>) {
+        let Some(owner_bounds) = self.pending_midi_editor_open.take() else {
+            return;
+        };
+
+        if let Some(OpenPopover::Context {
+            target: ContextTarget::Clip(clip_id),
+            ..
+        }) = self.open_popover.as_ref()
+        {
+            let clip_id = clip_id.clone();
+            if self
+                .timeline
+                .read(cx)
+                .state
+                .find_clip(&clip_id)
+                .is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }))
+            {
+                self.select_midi_clip(&clip_id, cx);
+            }
+        }
+
+        self.prune_midi_editor_window(cx);
+        if let Some(handle) = self.midi_editor_window.clone() {
+            if handle
+                .update(cx, |_w, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                midi_editor_debug("focus existing window");
+                if let Some(clip_id) = self.selected_midi_clip_id(cx) {
+                    if let Some((track, clip)) = self.timeline.read(cx).state.find_clip(&clip_id) {
+                        midi_editor_debug(&format!(
+                            "switch target clip clip={} track={}",
+                            clip.name, track.name
+                        ));
+                    }
+                }
+                cx.notify();
+                return;
+            }
+            self.midi_editor_window = None;
+        }
+
+        let clip_label = self
+            .selected_midi_clip_id(cx)
+            .and_then(|id| self.timeline.read(cx).state.find_clip(&id))
+            .map(|(t, c)| (c.name.clone(), t.name.clone()));
+        if let Some((clip_name, track_name)) = clip_label.as_ref() {
+            midi_editor_debug(&format!("open window clip={clip_name} track={track_name}"));
+        } else {
+            midi_editor_debug("open window (no MIDI clip selected)");
+        }
+
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+
+        let timeline = self.timeline.clone();
+        let piano_roll = self.piano_roll_floating.clone();
+        let owner = cx.entity().clone();
+        let on_close: Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
+            Arc::new(move |_window, cx| {
+                let _ = owner.update(cx, |layout, cx| layout.close_midi_editor_window(cx));
+            });
+        let dispatch_owner = cx.entity().clone();
+        let dispatch_command: Arc<dyn Fn(&'static str, &mut gpui::App) + Send + Sync> =
+            Arc::new(move |command_id, cx| {
+                let _ = dispatch_owner.update(cx, |layout, cx| {
+                    layout.dispatch_command_id(command_id, cx);
+                    cx.notify();
+                });
+            });
+
+        match open_midi_editor_window(
+            owner_bounds,
+            timeline,
+            piano_roll,
+            on_close,
+            dispatch_command,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.midi_editor_window = Some(handle);
+                cx.notify();
+            }
+            Err(err) => eprintln!("[midi-editor] failed to open window: {err}"),
+        }
+    }
+
+    pub(crate) fn close_midi_editor_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.midi_editor_window.take() {
+            let _ = handle.update(cx, |_w, window, _cx| window.remove_window());
+        }
+        cx.notify();
+    }
+
+    pub(super) fn prune_midi_editor_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.midi_editor_window.clone() else {
+            return;
+        };
+        if handle.update(cx, |_w, _window, _cx| ()).is_err() {
+            self.midi_editor_window = None;
+        }
+    }
+}

@@ -78,7 +78,7 @@ impl AudioPluginDspState {
             let gain = param_f32(params, &format!("{prefix}Gain"), 0.0).clamp(-18.0, 18.0);
             let q = param_f32(params, &format!("{prefix}Q"), 1.0).clamp(0.1, 12.0);
             let Some(filter) =
-                Biquad::from_eq_band(&band_type, freq, gain, q, self.sample_rate as f32)
+                Biquad::from_eq_band(band_type, freq, gain, q, self.sample_rate as f32)
             else {
                 continue;
             };

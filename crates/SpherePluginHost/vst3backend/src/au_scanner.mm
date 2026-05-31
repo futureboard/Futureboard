@@ -117,33 +117,29 @@ static std::string bundle_path_for_component(AudioComponent component) {
   if (component == nullptr) {
     return {};
   }
-  CFURLRef url = nullptr;
-  if (AudioComponentCopyComponentInfo(component, nullptr, &url, nullptr, nullptr) != noErr ||
-      url == nullptr) {
-    return {};
-  }
-  CFStringRef path = CFURLCopyFileSystemPath(url, kCFURLPOSIXPathStyle);
-  CFRelease(url);
-  if (path == nullptr) {
-    return {};
-  }
-  std::string result = cf_string_to_utf8(path);
-  CFRelease(path);
-  return result;
+  // `AudioComponentCopyComponentInfo` is not declared by all macOS SDKs used
+  // in CI. Keep scanning compatible by using the stable component identifier as
+  // the registry path fallback; validation/loading uses the component id.
+  return {};
 }
 
 static std::string version_for_component(AudioComponent component) {
   if (component == nullptr) {
     return {};
   }
-  CFStringRef version = nullptr;
-  if (AudioComponentCopyComponentInfo(component, nullptr, nullptr, &version, nullptr) != noErr ||
-      version == nullptr) {
+  UInt32 version = 0;
+  if (AudioComponentGetVersion(component, &version) != noErr || version == 0) {
     return {};
   }
-  std::string result = cf_string_to_utf8(version);
-  CFRelease(version);
-  return result;
+  char buffer[32];
+  std::snprintf(
+      buffer,
+      sizeof(buffer),
+      "%u.%u.%u",
+      static_cast<unsigned>((version >> 16) & 0xFFFF),
+      static_cast<unsigned>((version >> 8) & 0xFF),
+      static_cast<unsigned>(version & 0xFF));
+  return std::string(buffer);
 }
 
 static void append_entry(std::vector<AuScanEntry>& entries, AudioComponent component) {

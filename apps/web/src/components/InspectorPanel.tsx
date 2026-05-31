@@ -1290,7 +1290,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
       setProcessorUsed(null);
     }
     void activeAudioEngine.rescheduleIfPlaying();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [clip.fileId, proc.speedRatio, proc.pitchSemitones, proc.preservePitch, proc.mode, proc.quality]);
 
   const isModified = draft.speedRatio !== 1 || draft.pitchSemitones !== 0;

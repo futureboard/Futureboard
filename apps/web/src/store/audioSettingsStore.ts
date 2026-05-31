@@ -40,7 +40,9 @@ function load(): AudioDeviceSettings {
 }
 
 function save(s: AudioDeviceSettings) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch { }
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {
+    // Ignore unavailable storage.
+  }
 }
 
 type AudioSettingsStore = AudioDeviceSettings & {

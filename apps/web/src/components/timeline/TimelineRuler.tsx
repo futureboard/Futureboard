@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useUIStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { C, HEADER_WIDTH, RULER_HEIGHT } from "../../theme";
@@ -38,7 +38,10 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
   const [gridOpen, setGridOpen] = useState(false);
   const { pixelsPerSecond, scrollX, loopEnabled, loopStart, loopEnd, setLoopStart, setLoopEnd, arrangementGridDivision, setArrangementGridDivision } = useUIStore();
   const { bpm, timeSignature } = useProjectStore((s) => s.project);
-  const timeSig: TimeSignature = timeSignature ?? { numerator: 4, denominator: 4 };
+  const timeSig: TimeSignature = useMemo(
+    () => timeSignature ?? { numerator: 4, denominator: 4 },
+    [timeSignature],
+  );
 
   // Divisions whose grid step is wide enough to be meaningful at the current zoom.
   // The currently selected division is always included so it stays accessible.

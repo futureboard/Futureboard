@@ -218,7 +218,7 @@ export function MidiEditorPanel({
     if (!el) return;
     el.scrollTop = Math.max(0, pitchToY(60) - el.clientHeight / 2);
   // pitchToY is stable (depends only on constants), so empty deps is fine
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, []);
 
   // ── Viewport width measurement ────────────────────────────────────────────
@@ -311,7 +311,11 @@ export function MidiEditorPanel({
     } else if (e.shiftKey || e.ctrlKey || e.metaKey) {
       // Shift or Ctrl/Cmd: toggle this note in/out of the selection
       const next = new Set(selIdsRef.current);
-      next.has(note.id) ? next.delete(note.id) : next.add(note.id);
+      if (next.has(note.id)) {
+        next.delete(note.id);
+      } else {
+        next.add(note.id);
+      }
       setSelIds(next);
       affectedIds = [note.id];
     } else if (selIdsRef.current.has(note.id)) {

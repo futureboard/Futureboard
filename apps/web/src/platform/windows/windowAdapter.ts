@@ -73,7 +73,9 @@ export const electronWindowAdapter: ExternalWindowAdapter = {
   async closeExternalWindow(id) {
     const bridge = (window as unknown as { dawElectron?: { windows?: { closeExternal?: (id: string) => Promise<void> } } }).dawElectron?.windows;
     if (bridge?.closeExternal) {
-      try { await bridge.closeExternal(id); return; } catch {}
+      try { await bridge.closeExternal(id); return; } catch {
+        // Fall back to the in-app window store below.
+      }
     }
     useWindowStore.getState().closeWindow(id);
   },
@@ -81,7 +83,9 @@ export const electronWindowAdapter: ExternalWindowAdapter = {
   async focusExternalWindow(id) {
     const bridge = (window as unknown as { dawElectron?: { windows?: { focusExternal?: (id: string) => Promise<void> } } }).dawElectron?.windows;
     if (bridge?.focusExternal) {
-      try { await bridge.focusExternal(id); return; } catch {}
+      try { await bridge.focusExternal(id); return; } catch {
+        // Fall back to the in-app window store below.
+      }
     }
     useWindowStore.getState().focusWindow(id);
   },

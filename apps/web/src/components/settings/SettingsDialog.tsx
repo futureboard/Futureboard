@@ -1101,8 +1101,10 @@ export function SettingsDialog({ windowId, initialTab = "general", external = fa
     (s) => s.windows.find((w) => w.id === windowId)?.payload?.initialTab as SettingsTab | undefined,
   );
   useEffect(() => {
-    if (payloadTab && payloadTab !== activeTab) setActiveTab(payloadTab);
-  }, [payloadTab]); // intentionally excludes activeTab to avoid loop
+    if (payloadTab) {
+      setActiveTab((current) => (payloadTab !== current ? payloadTab : current));
+    }
+  }, [payloadTab]);
 
   // Clear the pending tab request once we've acted on it so repeated menu presses work
   useEffect(() => {

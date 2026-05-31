@@ -171,6 +171,7 @@ export function ProjectWizard({ windowId, external = false }: Props) {
   });
   const [isCreating, setIsCreating] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
+  const set = (patch: Partial<WizardState>) => setState((s) => ({ ...s, ...patch }));
 
   // Pre-fill the project location with the OS default path on Electron
   useEffect(() => {
@@ -180,8 +181,6 @@ export function ProjectWizard({ windowId, external = false }: Props) {
       .catch(() => { /* ignore — dialog will default correctly */ });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const set = (patch: Partial<WizardState>) => setState((s) => ({ ...s, ...patch }));
 
   const applyTemplate = (t: Template) => set({ template: t, ...TEMPLATE_PRESETS[t] });
 
@@ -334,7 +333,6 @@ export function ProjectWizard({ windowId, external = false }: Props) {
             <FieldLabel>Project Name</FieldLabel>
             <input
               ref={nameRef}
-              // eslint-disable-next-line jsx-a11y/no-autofocus
               autoFocus
               value={state.name}
               onChange={(e) => { setNameTouched(true); set({ name: e.target.value }); }}

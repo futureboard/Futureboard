@@ -39,7 +39,7 @@ function parseMidiEvent(e: MIDIMessageEvent): MidiEventLog | null {
   if (status === 0xf8 || status === 0xfe) return null;
 
   let type: MidiEventType = "other";
-  let label = "";
+  let label: string;
 
   if (cmd === 0x90 && d2 > 0) {
     type  = "note-on";
@@ -114,7 +114,7 @@ export function useMidiInput(track: DawTrack | null): {
       for (const unsub of unsubs) unsub();
     };
     // midiInputs identity changes when devices connect/disconnect → resubscribe.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [isListening, trackId, inputId, midiInputs]);
 
   return { events, isListening, clearEvents: () => setEvents([]) };

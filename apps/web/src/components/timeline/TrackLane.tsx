@@ -80,7 +80,7 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
       if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
       return next;
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [track.clips, selectedClipIds, pixelsPerSecond]);
 
   const selected = selectedTrackId === track.id || selectedTrackIds.includes(track.id);

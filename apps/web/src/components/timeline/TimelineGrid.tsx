@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useUIStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { HEADER_WIDTH } from "../../theme";
@@ -33,7 +33,10 @@ export function TimelineGrid() {
   const pixelsPerSecond = useUIStore((s) => s.pixelsPerSecond);
   const gridDivision = useUIStore((s) => s.arrangementGridDivision);
   const { bpm, timeSignature } = useProjectStore((s) => s.project);
-  const timeSig: TimeSignature = timeSignature ?? { numerator: 4, denominator: 4 };
+  const timeSig: TimeSignature = useMemo(
+    () => timeSignature ?? { numerator: 4, denominator: 4 },
+    [timeSignature],
+  );
   stateRef.current = { pixelsPerSecond, bpm, timeSig, gridDivision };
 
   useEffect(() => {

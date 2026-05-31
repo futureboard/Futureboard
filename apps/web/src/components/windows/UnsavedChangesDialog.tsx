@@ -58,7 +58,6 @@ export function UnsavedChangesDialog({ windowId: _ }: Props) {
         <button
           className="px-3 py-1.5 text-[11px] bg-daw-surface hover:bg-white/10 text-daw-text border border-daw-border rounded"
           onClick={handleCancel}
-          // eslint-disable-next-line jsx-a11y/no-autofocus
           autoFocus
         >
           Cancel

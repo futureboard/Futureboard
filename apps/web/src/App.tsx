@@ -385,9 +385,11 @@ export default function App() {
   // Dev debug helper — only installed in development builds.
   useEffect(() => {
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).__futureboardAudioDebug = {
-        ...(window as any).__futureboardAudioDebug,
+      const debugWindow = window as Window & {
+        __futureboardAudioDebug?: Record<string, unknown>;
+      };
+      debugWindow.__futureboardAudioDebug = {
+        ...debugWindow.__futureboardAudioDebug,
         testTsPitch: async (semitones = 12) => {
           const _semitones = semitones;
           const sine = new Float32Array(44100).map((_, i) => Math.sin(i * 0.01));

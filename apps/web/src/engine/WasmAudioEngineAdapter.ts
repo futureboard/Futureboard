@@ -17,6 +17,24 @@ const wasmUrl = new URL("./wasm-pkg/futureboard_core_bg.wasm", import.meta.url).
 // @ts-ignore
 const processorUrl = new URL("./WasmAudioProcessor.worklet.js", import.meta.url).href;
 
+type WasmMeterUpdate = {
+  track_id: string;
+  left: number;
+  right: number;
+};
+
+type WasmEngineEvent = {
+  type: string;
+  time_seconds?: number;
+  beat?: number;
+  meters?: WasmMeterUpdate[];
+};
+
+type WasmEngineCommand = {
+  type: string;
+  [key: string]: unknown;
+};
+
 export class WasmAudioEngineAdapter implements AudioEngineAdapter {
   private _ctx: AudioContext | null = null;
   private _worklet: AudioWorkletNode | null = null;
@@ -112,7 +130,7 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
     }
   }
 
-  private _handleEvent(event: any) {
+  private _handleEvent(event: WasmEngineEvent) {
     switch (event.type) {
       case "TransportPosition":
         // New struct API sends beat + time_seconds; old JSON API sent only time_seconds.
@@ -132,7 +150,7 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
         this._notifyTransport();
         break;
       case "MeterUpdate":
-        for (const m of event.meters) {
+        for (const m of event.meters ?? []) {
           for (const cb of this._meterCallbacks) {
             cb(m.track_id === "master" ? "master" : m.track_id, { l: m.left, r: m.right });
           }
@@ -149,7 +167,7 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
     for (const cb of this._transportCallbacks) cb(state);
   }
 
-  private _sendCommand(command: any) {
+  private _sendCommand(command: WasmEngineCommand) {
     if (this._worklet) {
       this._worklet.port.postMessage({ type: "command", payload: command });
     }
@@ -255,7 +273,7 @@ export class WasmAudioEngineAdapter implements AudioEngineAdapter {
   addInsertDevice(_trackId: TrackId, _device: InsertDevice): void {}
   removeInsertDevice(_trackId: TrackId, _deviceId: string): void {}
   setInsertEnabled(_trackId: TrackId, _deviceId: string, _enabled: boolean): void {}
-  setInsertParam(_trackId: TrackId, _deviceId: string, _param: string, _value: any): void {}
+  setInsertParam(_trackId: TrackId, _deviceId: string, _param: string, _value: unknown): void {}
 
   // ── Metering ───────────────────────────────────────────────────────────────
   subscribeMeters(callback: MeterCallback): () => void {

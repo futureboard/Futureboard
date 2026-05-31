@@ -331,9 +331,7 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
     let finalInputId: string | undefined;
     let finalInputChannel: number | "stereo" | undefined;
 
-    if (inputValue === "none") {
-      finalInputType = "none";
-    } else if (inputValue === "ch:stereo") {
+    if (inputValue === "ch:stereo") {
       finalInputType = "audio-channel"; finalInputChannel = "stereo";
     } else if (inputValue.startsWith("ch:")) {
       finalInputType = "audio-channel";
@@ -343,8 +341,6 @@ export function AddTrackDialog({ onClose, external }: { onClose: () => void; ext
       finalInputType = "midi-device";
     } else if (inputValue.startsWith("midi:")) {
       finalInputType = "midi-device"; finalInputId = inputValue.slice(5);
-    } else {
-      finalInputType = "none";
     }
 
     const midiChannelValue: number | "stereo" | undefined =

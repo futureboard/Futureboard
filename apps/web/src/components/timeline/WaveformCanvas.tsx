@@ -342,15 +342,6 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Cleanup canvas pixel tracking on unmount ─────────────────────────────────
-  useEffect(() => {
-    return () => {
-      hideTile(tile0Ref.current);
-      hideTile(tile1Ref.current);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // ── Status overlay logic ─────────────────────────────────────────────────────
   const isReady     = status === "ready" || (!status && !!levelMeta);
   const showLoading = !isReady && (

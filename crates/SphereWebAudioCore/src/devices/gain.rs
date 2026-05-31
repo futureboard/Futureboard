@@ -21,6 +21,12 @@ impl GainDevice {
     }
 }
 
+impl Default for GainDevice {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioDevice for GainDevice {
     fn device_type(&self) -> &str {
         "gain"

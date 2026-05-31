@@ -21,6 +21,12 @@ impl PanDevice {
     }
 }
 
+impl Default for PanDevice {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioDevice for PanDevice {
     fn device_type(&self) -> &str {
         "pan"

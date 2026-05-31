@@ -20,12 +20,12 @@ pub fn resample_linear(input: &[f32], speed_ratio: f32) -> Vec<f32> {
     let mut output = vec![0.0_f32; out_len];
     let last_idx = input.len() - 1;
 
-    for i in 0..out_len {
+    for (i, sample) in output.iter_mut().enumerate() {
         let src_pos = i as f32 * ratio;
         let lo = (src_pos.floor() as usize).min(last_idx);
         let hi = (lo + 1).min(last_idx);
         let frac = src_pos - lo as f32;
-        output[i] = input[lo] + (input[hi] - input[lo]) * frac;
+        *sample = input[lo] + (input[hi] - input[lo]) * frac;
     }
 
     output

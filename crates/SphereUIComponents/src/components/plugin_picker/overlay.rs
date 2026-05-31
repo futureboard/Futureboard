@@ -21,7 +21,9 @@ use crate::components::plugin_picker::search_index::PluginSearchIndex;
 use crate::components::plugin_picker::sidebar::plugin_filter_sidebar;
 use crate::components::plugin_picker::state::{CatalogStatus, PluginPickerState};
 use crate::components::plugin_picker::PluginPickerCallbacks;
-use crate::components::text_input::{text_field_with_callbacks, TextInputCallbacks, TextInputState};
+use crate::components::text_input::{
+    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+};
 use crate::theme::Colors;
 use sphere_plugin_host::RegistryPlugin;
 
@@ -47,13 +49,8 @@ pub fn plugin_picker_overlay(
 
     let empty_index = PluginSearchIndex::from_plugins(Vec::new());
     let index_ref = index.unwrap_or(&empty_index);
-    let filter_result = compute_filter_result(
-        index_ref,
-        &state.query,
-        &state.filters,
-        prefs,
-        debug,
-    );
+    let filter_result =
+        compute_filter_result(index_ref, &state.query, &state.filters, prefs, debug);
     let visible_count = filter_result.indices.len();
     let total = index_ref.len();
 
@@ -127,9 +124,10 @@ pub fn plugin_picker_overlay(
         footer_label,
         can_add,
         stub_enabled,
-        state.selected_id.clone().or_else(|| {
-            selected_plugin.map(|p| p.id.clone())
-        }),
+        state
+            .selected_id
+            .clone()
+            .or_else(|| selected_plugin.map(|p| p.id.clone())),
         on_pick_add,
         on_pick_stub,
     );
@@ -347,18 +345,31 @@ fn empty_state_body(
             "No plugins found.".to_string(),
             Some("Scan plugins in Plugin Manager.".to_string()),
         ),
-        CatalogStatus::Ready if matches!(state.filters.sidebar, crate::components::plugin_picker::state::PickerFilter::Favorites) => (
-            "No favorites yet.".to_string(),
-            Some("Star a plug-in to add it here.".to_string()),
-        ),
-        CatalogStatus::Ready if matches!(state.filters.sidebar, crate::components::plugin_picker::state::PickerFilter::RecentlyUsed) => (
-            "No recently used plug-ins yet.".to_string(),
-            Some("Inserted plug-ins will appear here.".to_string()),
-        ),
-        CatalogStatus::Ready if !state.query.is_empty() => (
-            "No plugins match this search.".to_string(),
-            None,
-        ),
+        CatalogStatus::Ready
+            if matches!(
+                state.filters.sidebar,
+                crate::components::plugin_picker::state::PickerFilter::Favorites
+            ) =>
+        {
+            (
+                "No favorites yet.".to_string(),
+                Some("Star a plug-in to add it here.".to_string()),
+            )
+        }
+        CatalogStatus::Ready
+            if matches!(
+                state.filters.sidebar,
+                crate::components::plugin_picker::state::PickerFilter::RecentlyUsed
+            ) =>
+        {
+            (
+                "No recently used plug-ins yet.".to_string(),
+                Some("Inserted plug-ins will appear here.".to_string()),
+            )
+        }
+        CatalogStatus::Ready if !state.query.is_empty() => {
+            ("No plugins match this search.".to_string(), None)
+        }
         CatalogStatus::Ready if au_scan_error.is_some() => (
             "AudioUnit unavailable.".to_string(),
             Some("VST3 and CLAP plug-ins are still available.".to_string()),
@@ -400,7 +411,11 @@ fn empty_state_body(
         })
 }
 
-fn recovery_actions(on_retry: VoidCb, on_open_manager: VoidCb, on_rebuild: VoidCb) -> impl IntoElement {
+fn recovery_actions(
+    on_retry: VoidCb,
+    on_open_manager: VoidCb,
+    on_rebuild: VoidCb,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_row()

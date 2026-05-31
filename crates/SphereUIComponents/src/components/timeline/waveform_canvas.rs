@@ -1,13 +1,12 @@
 use super::timeline_state::{AudioImportState, ClipState, ClipType, TimelineState};
 use super::waveform_cache::{self, WaveformDisplayStatus, WaveformPeak};
 use crate::theme::Colors;
-use gpui::{div, px, IntoElement, ParentElement, Styled};
+use gpui::{
+    canvas, div, fill, point, px, size, Bounds, IntoElement, ParentElement, Pixels, Styled,
+};
 
-const MAX_VISIBLE_WIDTH: f32 = 2048.0;
-/// One bar per CSS pixel column where possible; capped to keep GPUI element
-/// count bounded until GPUI canvas is available in the default renderer.
-const MAX_PIXEL_COLUMNS: usize = 1024;
-
+/// One bar per visible CSS pixel column. No hard cap on number of bars —
+/// the visible-range clamp naturally bounds it by viewport width.
 pub fn waveform_canvas(
     clip: &ClipState,
     color: gpui::Rgba,
@@ -26,7 +25,8 @@ pub fn waveform_canvas(
                 return import_status_canvas(&clip.audio_import, false, None);
             };
             match waveform_cache::display_status_from_entry(entry) {
-                WaveformDisplayStatus::Ready { meta } | WaveformDisplayStatus::Partial { meta, .. } => {
+                WaveformDisplayStatus::Ready { meta }
+                | WaveformDisplayStatus::Partial { meta, .. } => {
                     let pixels_per_second = state.viewport.pixels_per_second;
                     draw_chunk_waveform_locked(
                         entry,
@@ -45,11 +45,7 @@ pub fn waveform_canvas(
                 }
                 WaveformDisplayStatus::Error(message) => {
                     waveform_cache::record_timeline_render(1, 0, false);
-                    import_status_canvas(
-                        &AudioImportState::Failed { message },
-                        true,
-                        None,
-                    )
+                    import_status_canvas(&AudioImportState::Failed { message }, true, None)
                 }
             }
         }),
@@ -60,7 +56,7 @@ pub fn waveform_canvas(
                 clip.duration_beats,
                 state.bpm,
             );
-            draw_preview_waveform(preview.as_ref(), color, clip_left, clip_width)
+            draw_preview_waveform(preview.as_ref(), color, state, clip_left, clip_width)
         }
     }
 }
@@ -129,7 +125,9 @@ fn import_status_canvas(
         )
 }
 
-/// Draw waveform while `entry` is already locked — one mutex acquisition per clip.
+/// One min/max bar per visible CSS pixel column. Bars are computed once and
+/// drawn from a single GPUI `canvas` element via `paint_quad` — no per-pixel
+/// child elements, no `MAX_VISIBLE_WIDTH` cap.
 fn draw_chunk_waveform_locked(
     entry: &waveform_cache::FileEntry,
     meta: &waveform_cache::WaveformFileMeta,
@@ -140,74 +138,80 @@ fn draw_chunk_waveform_locked(
     clip_width: f32,
     pixels_per_second: f32,
 ) -> gpui::Div {
+    // Visible portion of the clip in clip-local pixels.
+    let viewport_w = state.viewport.viewport_width.max(1.0);
     let visible_start = (-clip_left).max(0.0);
-    let visible_end = clip_width.min(visible_start + MAX_VISIBLE_WIDTH);
-    let visible_w = (visible_end - visible_start).max(1.0);
+    let visible_end = clip_width
+        .min((viewport_w - clip_left).max(visible_start))
+        .max(visible_start);
+    let visible_w = (visible_end - visible_start).max(0.0);
 
-    let num_cols = (visible_w.ceil() as usize).clamp(8, MAX_PIXEL_COLUMNS);
+    if visible_w < 1.0 {
+        waveform_cache::record_timeline_render(1, 0, true);
+        return empty_canvas();
+    }
+
+    let num_cols = (visible_w.ceil() as usize).max(1);
     waveform_cache::record_timeline_render(1, num_cols, true);
     crate::perf::count("peak_points_drawn", num_cols as u64);
 
-    let desired_spp = waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate);
+    let desired_spp =
+        waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate);
     let spp = waveform_cache::best_available_samples_per_peak_in_entry(entry, desired_spp);
     let src_start = clip.offset_beats.max(0.0) as f64 * state.seconds_per_beat() as f64;
     let clip_dur = (clip.duration_beats as f64 * state.seconds_per_beat() as f64).max(1e-6);
-    let first_peak = time_to_peak_index(src_start, meta.sample_rate, spp);
-    let last_peak = time_to_peak_index(src_start + clip_dur, meta.sample_rate, spp);
-    let chunk_start = first_peak / waveform_cache::CHUNK_PEAKS;
-    let chunk_end = last_peak / waveform_cache::CHUNK_PEAKS;
-    crate::perf::count(
-        "visible_waveform_chunks",
-        chunk_end.saturating_sub(chunk_start).saturating_add(1) as u64,
-    );
 
     let h = 48.0_f32;
     let center = h / 2.0;
+    let clip_w = clip_width.max(1.0) as f64;
+
+    // Precompute bars: (x_in_canvas, top, height).
+    let mut bars: Vec<(f32, f32, f32)> = Vec::with_capacity(num_cols);
+    for col in 0..num_cols {
+        let x0 = visible_start + col as f32;
+        let x1 = x0 + 1.0;
+        let frac0 = ((x0 as f64) / clip_w).clamp(0.0, 1.0);
+        let frac1 = ((x1 as f64) / clip_w).clamp(0.0, 1.0);
+        let t0 = src_start + frac0 * clip_dur;
+        let t1 = src_start + frac1 * clip_dur;
+        let p0 = time_to_peak_index(t0, meta.sample_rate, spp);
+        let p1 = time_to_peak_index(t1, meta.sample_rate, spp).max(p0);
+        let WaveformPeak { min, max } =
+            waveform_cache::aggregate_peak_range_in_entry(entry, spp, p0, p1 + 1);
+        if min == 0.0 && max == 0.0 {
+            continue;
+        }
+        let mn = min.max(-1.0);
+        let mx = max.min(1.0);
+        let top = center - mx * center;
+        let bottom = center - mn * center;
+        let bar_h = (bottom - top).max(1.0);
+        bars.push((x0, top, bar_h));
+    }
+
     let mut waveform_color = color;
     waveform_color.a = 0.72;
 
-    let bar_elements: Vec<_> = (0..num_cols)
-        .filter_map(|col| {
-            let x0 = visible_start + (col as f32 / num_cols as f32) * visible_w;
-            let x1 = visible_start + ((col + 1) as f32 / num_cols as f32) * visible_w;
-            if x1 <= visible_start || x0 >= visible_end {
-                return None;
+    let element = canvas(
+        |_bounds, _window, _cx| {},
+        move |bounds: Bounds<Pixels>, (), window, _cx| {
+            for (x, top, bh) in &bars {
+                let r = Bounds::new(
+                    bounds.origin + point(px(*x), px(*top)),
+                    size(px(1.0), px(bh.max(1.0))),
+                );
+                window.paint_quad(fill(r, waveform_color));
             }
-
-            let frac0 = ((x0 / clip_width.max(1.0)) as f64).clamp(0.0, 1.0);
-            let frac1 = ((x1 / clip_width.max(1.0)) as f64).clamp(0.0, 1.0);
-            let t0 = src_start + frac0 * clip_dur;
-            let t1 = src_start + frac1 * clip_dur;
-            let p0 = time_to_peak_index(t0, meta.sample_rate, spp);
-            let p1 = time_to_peak_index(t1, meta.sample_rate, spp).max(p0);
-            let WaveformPeak { min, max } =
-                waveform_cache::aggregate_peak_range_in_entry(entry, spp, p0, p1 + 1);
-            if min == 0.0 && max == 0.0 {
-                return None;
-            }
-            let mn = min.max(-1.0);
-            let mx = max.min(1.0);
-            let top = center - mx * center;
-            let bottom = center - mn * center;
-            let bar_h = (bottom - top).max(1.0);
-
-            Some(
-                div()
-                    .absolute()
-                    .left(px(x0.round()))
-                    .top(px(top))
-                    .w(px(1.0))
-                    .h(px(bar_h))
-                    .bg(waveform_color),
-            )
-        })
-        .collect();
+        },
+    )
+    .absolute()
+    .inset_0();
 
     div()
         .relative()
         .size_full()
         .overflow_hidden()
-        .children(bar_elements)
+        .child(element)
 }
 
 fn time_to_peak_index(time_sec: f64, sample_rate: u32, samples_per_peak: usize) -> usize {
@@ -218,51 +222,68 @@ fn time_to_peak_index(time_sec: f64, sample_rate: u32, samples_per_peak: usize) 
 fn draw_preview_waveform(
     preview: &waveform_cache::WaveformPreview,
     color: gpui::Rgba,
+    state: &TimelineState,
     clip_left: f32,
     clip_width: f32,
 ) -> gpui::Div {
+    let viewport_w = state.viewport.viewport_width.max(1.0);
     let visible_start = (-clip_left).max(0.0);
-    let visible_end = clip_width.min(visible_start + MAX_VISIBLE_WIDTH);
-    let visible_w = (visible_end - visible_start).max(1.0);
+    let visible_end = clip_width
+        .min((viewport_w - clip_left).max(visible_start))
+        .max(visible_start);
+    let visible_w = (visible_end - visible_start).max(0.0);
+    if visible_w < 1.0 {
+        return empty_canvas();
+    }
     let samples_per_pixel = (preview.total_frames.max(1) as f32 / clip_width.max(1.0)).max(1.0);
     let Some(lod) = waveform_cache::pick_lod(preview, samples_per_pixel) else {
         return empty_canvas();
     };
-    let num_cols = (visible_w.ceil() as usize).clamp(8, MAX_PIXEL_COLUMNS);
+
+    let num_cols = (visible_w.ceil() as usize).max(1);
     let h = 48.0_f32;
     let center = h / 2.0;
+    let total_peaks = lod.peaks.len().max(1);
+    let clip_w = clip_width.max(1.0);
+
+    let mut bars: Vec<(f32, f32, f32)> = Vec::with_capacity(num_cols);
+    for col in 0..num_cols {
+        let x0 = visible_start + col as f32;
+        let x1 = x0 + 1.0;
+        let frac0 = (x0 / clip_w).max(0.0);
+        let frac1 = (x1 / clip_w).min(1.0);
+        let p0 = (frac0 * total_peaks as f32).floor() as usize;
+        let p1 = (frac1 * total_peaks as f32).ceil() as usize;
+        let end = p1.min(total_peaks).max(p0 + 1);
+        let agg = aggregate_slice(&lod.peaks[p0..end]);
+        let top = center - agg.max.min(1.0) * center;
+        let bottom = center - agg.min.max(-1.0) * center;
+        bars.push((x0, top, (bottom - top).max(1.0)));
+    }
+
     let mut waveform_color = color;
     waveform_color.a = 0.72;
-    let total_peaks = lod.peaks.len().max(1);
 
-    let bars: Vec<_> = (0..num_cols)
-        .filter_map(|col| {
-            let x0 = visible_start + (col as f32 / num_cols as f32) * visible_w;
-            let frac0 = (x0 / clip_width.max(1.0)).max(0.0);
-            let frac1 = ((x0 + visible_w / num_cols as f32) / clip_width.max(1.0)).min(1.0);
-            let p0 = (frac0 * total_peaks as f32).floor() as usize;
-            let p1 = (frac1 * total_peaks as f32).ceil() as usize;
-            let end = p1.min(total_peaks).max(p0 + 1);
-            let agg = aggregate_slice(&lod.peaks[p0..end]);
-            let top = center - agg.max.min(1.0) * center;
-            let bottom = center - agg.min.max(-1.0) * center;
-            Some(
-                div()
-                    .absolute()
-                    .left(px(x0.round()))
-                    .top(px(top))
-                    .w(px(1.0))
-                    .h(px((bottom - top).max(1.0)))
-                    .bg(waveform_color),
-            )
-        })
-        .collect();
+    let element = canvas(
+        |_b, _w, _cx| {},
+        move |bounds: Bounds<Pixels>, (), window, _cx| {
+            for (x, top, bh) in &bars {
+                let r = Bounds::new(
+                    bounds.origin + point(px(*x), px(*top)),
+                    size(px(1.0), px(bh.max(1.0))),
+                );
+                window.paint_quad(fill(r, waveform_color));
+            }
+        },
+    )
+    .absolute()
+    .inset_0();
 
     div()
         .relative()
         .size_full()
         .overflow_hidden()
-        .children(bars)
+        .child(element)
 }
 
 fn aggregate_slice(peaks: &[waveform_cache::WaveformPeak]) -> waveform_cache::WaveformPeak {

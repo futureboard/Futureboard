@@ -203,7 +203,9 @@ pub fn discover_plugin_bundles(roots: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 fn discover_bundles_recursive(current: &Path, found: &mut Vec<PathBuf>) {
-    if is_plugin_bundle(current, PluginFormat::Vst3) || is_plugin_bundle(current, PluginFormat::Clap) {
+    if is_plugin_bundle(current, PluginFormat::Vst3)
+        || is_plugin_bundle(current, PluginFormat::Clap)
+    {
         found.push(current.to_path_buf());
         return;
     }
@@ -215,7 +217,9 @@ fn discover_bundles_recursive(current: &Path, found: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if is_plugin_bundle(&path, PluginFormat::Vst3) || is_plugin_bundle(&path, PluginFormat::Clap) {
+        if is_plugin_bundle(&path, PluginFormat::Vst3)
+            || is_plugin_bundle(&path, PluginFormat::Clap)
+        {
             found.push(path);
             continue;
         }

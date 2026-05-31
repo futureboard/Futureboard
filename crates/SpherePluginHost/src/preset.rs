@@ -188,8 +188,8 @@ pub fn read_preset_file(preset_path: &Path) -> Result<RegistryPlugin, String> {
     if bytes.len() < meta_end {
         return Err("Preset metadata truncated".to_string());
     }
-    let parsed: PresetMetadataOwned = serde_json::from_slice(&bytes[meta_start..meta_end])
-        .map_err(|e| e.to_string())?;
+    let parsed: PresetMetadataOwned =
+        serde_json::from_slice(&bytes[meta_start..meta_end]).map_err(|e| e.to_string())?;
 
     let pm = parsed.plugin_metadata;
     let format = PluginFormat::from_str_lossy(&pm.format);
@@ -198,7 +198,12 @@ pub fn read_preset_file(preset_path: &Path) -> Result<RegistryPlugin, String> {
         _ => PluginKind::Effect,
     };
     let category = if pm.category.is_empty() {
-        display_category(format, &pm.category, pm.raw_category.as_deref(), pm.sub_categories.as_deref())
+        display_category(
+            format,
+            &pm.category,
+            pm.raw_category.as_deref(),
+            pm.sub_categories.as_deref(),
+        )
     } else {
         pm.category.clone()
     };
@@ -253,7 +258,9 @@ pub fn load_cached_plugins() -> Vec<RegistryPlugin> {
 }
 
 fn collect_pst_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

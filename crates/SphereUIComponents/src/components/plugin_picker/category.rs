@@ -77,7 +77,11 @@ pub fn normalize_category(plugin: &RegistryPlugin) -> NormalizedCategory {
     if hay.contains("distortion") || hay.contains("saturation") || hay.contains("overdrive") {
         return NormalizedCategory::Distortion;
     }
-    if hay.contains("modulation") || hay.contains("chorus") || hay.contains("phaser") || hay.contains("flanger") {
+    if hay.contains("modulation")
+        || hay.contains("chorus")
+        || hay.contains("phaser")
+        || hay.contains("flanger")
+    {
         return NormalizedCategory::Modulation;
     }
     if hay.contains("analyzer") || hay.contains("meter") || hay.contains("spectrum") {

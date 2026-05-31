@@ -20,7 +20,9 @@ pub use insert::{validate_insert, InsertValidation, PluginInsertTarget};
 pub use overlay::{page_size_for_height, plugin_picker_overlay, visible_plugin_id_at};
 pub use prefs::PluginPickerPrefs;
 pub use search_index::PluginSearchIndex;
-pub use state::{CatalogStatus, PickerFilter, PluginFilterState, PluginPickerLoadState, PluginPickerState};
+pub use state::{
+    CatalogStatus, PickerFilter, PluginFilterState, PluginPickerLoadState, PluginPickerState,
+};
 
 use std::sync::Arc;
 

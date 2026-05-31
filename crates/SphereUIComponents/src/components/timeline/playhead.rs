@@ -58,26 +58,20 @@ pub fn playhead_body_overlay_at(x: f32) -> impl IntoElement {
     .inset_0()
     .into_any_element();
 
-    div()
-        .absolute()
-        .inset_0()
-        .child(line)
+    div().absolute().inset_0().child(line)
 }
 
 pub fn playhead_head_overlay_at(x: f32) -> impl IntoElement {
     let color = Colors::timeline_playhead();
     let y = 2.0; // keep the head inside the ruler strip
-    div()
-        .absolute()
-        .inset_0()
-        .child(
-            svg()
-                .path(crate::assets::ICON_PLAYHEAD_HANDLE_PATH)
-                .absolute()
-                .top(px(y))
-                .left(px(x - 5.5))
-                .w(px(12.0))
-                .h(px(12.0))
-                .text_color(color),
-        )
+    div().absolute().inset_0().child(
+        svg()
+            .path(crate::assets::ICON_PLAYHEAD_HANDLE_PATH)
+            .absolute()
+            .top(px(y))
+            .left(px(x - 5.5))
+            .w(px(12.0))
+            .h(px(12.0))
+            .text_color(color),
+    )
 }

@@ -72,12 +72,7 @@ impl MidiEditorWindow {
 
     fn title_for_clip(&self, cx: &Context<Self>) -> String {
         let tl = self.timeline.read(cx);
-        let clip_id = tl
-            .state
-            .selection
-            .selected_clip_ids
-            .first()
-            .cloned();
+        let clip_id = tl.state.selection.selected_clip_ids.first().cloned();
         let Some(clip_id) = clip_id else {
             return "MIDI Editor".to_string();
         };
@@ -112,7 +107,11 @@ impl MidiEditorWindow {
         let Some(clip_id) = tl.state.selection.selected_clip_ids.first() else {
             return "No clip · grid —".to_string();
         };
-        let notes = tl.state.midi_clip_notes(clip_id).map(|n| n.len()).unwrap_or(0);
+        let notes = tl
+            .state
+            .midi_clip_notes(clip_id)
+            .map(|n| n.len())
+            .unwrap_or(0);
         let sel = self.piano_roll.read(cx).selected_note_count();
         let grid = self.piano_roll.read(cx).grid_label();
         format!("{notes} notes · {sel} selected · grid {grid}")
@@ -163,12 +162,10 @@ impl Render for MidiEditorWindow {
                     "Close this window or select another MIDI clip in the arrangement.",
                 )
             }
-            None => {
-                empty_state(
-                    "No MIDI clip selected",
-                    "Select or create a MIDI clip to edit.",
-                )
-            }
+            None => empty_state(
+                "No MIDI clip selected",
+                "Select or create a MIDI clip to edit.",
+            ),
         };
 
         let on_close = self.on_close.clone();
@@ -297,9 +294,7 @@ pub fn open_midi_editor_window(
     ));
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| {
-            MidiEditorWindow::new(timeline, piano_roll, on_close, dispatch_command, cx)
-        })
+        cx.new(|cx| MidiEditorWindow::new(timeline, piano_roll, on_close, dispatch_command, cx))
     })
     .map_err(|e| e.to_string())
 }

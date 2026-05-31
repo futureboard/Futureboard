@@ -126,7 +126,10 @@ fn bool_badge(label: &'static str, active: bool, accent: gpui::Rgba) -> impl Int
     let (bg, fg) = if active {
         (accent, Colors::text_inverse().into())
     } else {
-        (Colors::with_alpha(Colors::text_primary(), 0.05), Colors::text_secondary())
+        (
+            Colors::with_alpha(Colors::text_primary(), 0.05),
+            Colors::text_secondary(),
+        )
     };
     div()
         .flex()

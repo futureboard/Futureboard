@@ -401,21 +401,19 @@ impl From<&TimelineState> for FutureboardProject {
                         .enumerate()
                         .map(|(idx, slot)| {
                             use crate::components::timeline::timeline_state::InsertPluginFormat;
-                            let plugin = slot.plugin_id.as_ref().map(|pid| {
-                                ProjectPluginInstance {
-                                    instance_id: slot.id.clone(),
-                                    format: match slot.plugin_format {
-                                        Some(InsertPluginFormat::Vst3) => PluginFormat::Vst3,
-                                        Some(InsertPluginFormat::Clap) => PluginFormat::Clap,
-                                        Some(InsertPluginFormat::Au) => PluginFormat::Au,
-                                        Some(InsertPluginFormat::Lv2) => PluginFormat::Lv2,
-                                        _ => PluginFormat::Unknown,
-                                    },
-                                    plugin_path: slot.plugin_path.clone(),
-                                    plugin_uid: pid.clone(),
-                                    display_name: slot.display_name.clone(),
-                                    state: PluginStateBlob::default(),
-                                }
+                            let plugin = slot.plugin_id.as_ref().map(|pid| ProjectPluginInstance {
+                                instance_id: slot.id.clone(),
+                                format: match slot.plugin_format {
+                                    Some(InsertPluginFormat::Vst3) => PluginFormat::Vst3,
+                                    Some(InsertPluginFormat::Clap) => PluginFormat::Clap,
+                                    Some(InsertPluginFormat::Au) => PluginFormat::Au,
+                                    Some(InsertPluginFormat::Lv2) => PluginFormat::Lv2,
+                                    _ => PluginFormat::Unknown,
+                                },
+                                plugin_path: slot.plugin_path.clone(),
+                                plugin_uid: pid.clone(),
+                                display_name: slot.display_name.clone(),
+                                state: PluginStateBlob::default(),
                             });
                             ProjectInsert {
                                 id: slot.id.clone(),
@@ -443,8 +441,8 @@ impl From<&TimelineState> for FutureboardProject {
 /// Apply a loaded `FutureboardProject` back onto an existing `TimelineState`.
 pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
     use crate::components::timeline::timeline_state::{
-        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiNoteState, SendSlotState,
-        TrackState,
+        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiNoteState,
+        SendSlotState, TrackState,
     };
 
     tl.bpm = project.settings.bpm as f32;

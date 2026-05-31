@@ -12,8 +12,8 @@
 //! which lays out as a fraction of parent height.
 
 use gpui::{
-    div, px, relative, App, AppContext, DragMoveEvent, Empty, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    div, px, relative, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::theme::Colors;

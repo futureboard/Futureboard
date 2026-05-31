@@ -67,11 +67,7 @@ pub fn build_waveform_view_model(
                 WaveformViewModel {
                     ready,
                     columns,
-                    status_label: if ready {
-                        String::new()
-                    } else {
-                        label
-                    },
+                    status_label: if ready { String::new() } else { label },
                     is_error: false,
                     show_progress: !ready && show_progress,
                 }
@@ -158,7 +154,10 @@ pub fn audio_editor_theme() -> sphere_audio_editor::AudioEditorTheme {
 
 pub fn selected_audio_clip<'a>(
     state: &'a TimelineState,
-) -> Option<(&'a crate::components::timeline::timeline_state::TrackState, &'a ClipState)> {
+) -> Option<(
+    &'a crate::components::timeline::timeline_state::TrackState,
+    &'a ClipState,
+)> {
     let clip_id = state.selection.selected_clip_ids.first()?;
     let (track, clip) = state.find_clip(clip_id)?;
     match clip.clip_type {
@@ -167,7 +166,9 @@ pub fn selected_audio_clip<'a>(
     }
 }
 
-pub fn clip_type_hint_for_selection(state: &TimelineState) -> Option<sphere_audio_editor::ClipTypeHint> {
+pub fn clip_type_hint_for_selection(
+    state: &TimelineState,
+) -> Option<sphere_audio_editor::ClipTypeHint> {
     let clip_id = state.selection.selected_clip_ids.first()?;
     let (_, clip) = state.find_clip(clip_id)?;
     match clip.clip_type {

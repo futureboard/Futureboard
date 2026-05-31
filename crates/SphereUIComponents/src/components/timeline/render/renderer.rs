@@ -21,10 +21,7 @@ pub trait TimelineRenderer: Send {
     fn backend_name(&self) -> &'static str;
 
     /// Render the scrollable arrangement body (grid region width × height).
-    fn render_arrangement(
-        &mut self,
-        snapshot: &TimelineRenderSnapshot,
-    ) -> TimelineRenderOutput;
+    fn render_arrangement(&mut self, snapshot: &TimelineRenderSnapshot) -> TimelineRenderOutput;
 }
 
 /// Active backend for arrangement rendering.
@@ -39,8 +36,7 @@ pub enum TimelineRendererBackend {
 /// The thread-local renderer construction in `timeline_surface.rs` reads
 /// this on first use. `FUTUREBOARD_WGPU_TIMELINE=1` continues to win as
 /// a developer override.
-static PREFERRED_BACKEND: std::sync::OnceLock<TimelineRendererBackend> =
-    std::sync::OnceLock::new();
+static PREFERRED_BACKEND: std::sync::OnceLock<TimelineRendererBackend> = std::sync::OnceLock::new();
 
 /// Called once at app startup with the user's saved Renderer choice.
 /// Settings UI is gated on a restart marker, so we never mutate this
@@ -78,7 +74,9 @@ pub fn create_timeline_renderer(backend: TimelineRendererBackend) -> Box<dyn Tim
             Box::new(super::gpui_paint::GpuiPaintTimelineRenderer::new())
         }
         #[cfg(feature = "gpu-renderer")]
-        TimelineRendererBackend::Wgpu => Box::new(super::wgpu_renderer::WgpuTimelineRenderer::new()),
+        TimelineRendererBackend::Wgpu => {
+            Box::new(super::wgpu_renderer::WgpuTimelineRenderer::new())
+        }
     }
 }
 

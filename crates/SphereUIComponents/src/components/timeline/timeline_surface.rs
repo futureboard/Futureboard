@@ -4,13 +4,13 @@ use std::cell::RefCell;
 
 use gpui::IntoElement;
 
-use crate::components::timeline::render::{
-    gpui_paint, renderer::TimelineRenderOutput, snapshot::TimelineRenderSnapshot,
-    snapshot::SnapshotBuildOptions, create_timeline_renderer_with_fallback, TimelineRenderer,
-    TimelineRendererBackend,
-};
 #[cfg(feature = "gpu-renderer")]
 use crate::components::timeline::render::GpuiPaintTimelineRenderer;
+use crate::components::timeline::render::{
+    create_timeline_renderer_with_fallback, gpui_paint, renderer::TimelineRenderOutput,
+    snapshot::SnapshotBuildOptions, snapshot::TimelineRenderSnapshot, TimelineRenderer,
+    TimelineRendererBackend,
+};
 use crate::components::timeline::timeline_state::TimelineState;
 
 thread_local! {

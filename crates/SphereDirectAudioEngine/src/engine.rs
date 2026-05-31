@@ -651,7 +651,12 @@ impl EngineInner {
             .tracks
             .iter_mut()
             .find(|track| track.id == track_id)
-            .and_then(|track| track.inserts.iter_mut().find(|insert| insert.id == insert_id))
+            .and_then(|track| {
+                track
+                    .inserts
+                    .iter_mut()
+                    .find(|insert| insert.id == insert_id)
+            })
             .and_then(|insert| insert.vst3.as_ref().cloned())
     }
 
@@ -805,7 +810,11 @@ impl EngineInner {
         let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
         let position_samples = self.shared.position_samples.load(Ordering::Relaxed);
 
-        let ready_clips = runtime.clips.iter().filter(|c| c.source.frames() > 0).count() as u32;
+        let ready_clips = runtime
+            .clips
+            .iter()
+            .filter(|c| c.source.frames() > 0)
+            .count() as u32;
         let clip_summaries: Vec<String> = runtime
             .clips
             .iter()
@@ -905,11 +914,7 @@ impl EngineInner {
                 track.inserts.iter().map(move |insert| {
                     let native = insert.kind.eq_ignore_ascii_case("native-plugin");
                     let ready = if native {
-                        insert
-                            .vst3
-                            .as_ref()
-                            .map(|p| p.is_ready())
-                            .unwrap_or(false)
+                        insert.vst3.as_ref().map(|p| p.is_ready()).unwrap_or(false)
                     } else {
                         true
                     };
@@ -2383,7 +2388,7 @@ where
 #[cfg(test)]
 mod routing_tests {
     use super::*;
-    use crate::runtime::{RuntimeProject, RuntimeSend, RuntimeTrack, RuntimePreviewMode};
+    use crate::runtime::{RuntimePreviewMode, RuntimeProject, RuntimeSend, RuntimeTrack};
     use std::sync::Arc;
 
     fn track(id: &str, ty: &str, sends: Vec<RuntimeSend>) -> RuntimeTrack {
@@ -2441,8 +2446,12 @@ mod routing_tests {
 
         accumulate_sends(&mut p, 0, frames, false);
 
-        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| (v - 0.5).abs() < 1e-6));
-        assert!(p.tracks[1].recv_r[..frames].iter().all(|&v| (v + 1.0).abs() < 1e-6));
+        assert!(p.tracks[1].recv_l[..frames]
+            .iter()
+            .all(|&v| (v - 0.5).abs() < 1e-6));
+        assert!(p.tracks[1].recv_r[..frames]
+            .iter()
+            .all(|&v| (v + 1.0).abs() < 1e-6));
     }
 
     #[test]
@@ -2465,7 +2474,9 @@ mod routing_tests {
 
         // Pre-fader phase: now it routes.
         accumulate_sends(&mut p, 0, frames, true);
-        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| (v - 1.0).abs() < 1e-6));
+        assert!(p.tracks[1].recv_l[..frames]
+            .iter()
+            .all(|&v| (v - 1.0).abs() < 1e-6));
     }
 
     #[test]
@@ -2502,7 +2513,9 @@ mod routing_tests {
         accumulate_sends(&mut p, 0, frames, false); // early → late: forward, accepted
         accumulate_sends(&mut p, 1, frames, false); // late → early: backward, rejected
 
-        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| (v - 1.0).abs() < 1e-6));
+        assert!(p.tracks[1].recv_l[..frames]
+            .iter()
+            .all(|&v| (v - 1.0).abs() < 1e-6));
         assert!(p.tracks[0].recv_l[..frames].iter().all(|&v| v == 0.0));
     }
 }

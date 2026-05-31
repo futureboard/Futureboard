@@ -20,8 +20,8 @@ pub use renderer::{
     TimelineRenderOutput, TimelineRenderer, TimelineRendererBackend,
 };
 pub use snapshot::{
-    BarShadeSnapshot, GridLineSnapshot, PlayheadSnapshot, RenderClipSnapshot, RenderLaneSnapshot,
-    RenderClipKind, SelectionSnapshot, SnapshotBuildOptions, TimelineRenderSnapshot,
+    BarShadeSnapshot, GridLineSnapshot, PlayheadSnapshot, RenderClipKind, RenderClipSnapshot,
+    RenderLaneSnapshot, SelectionSnapshot, SnapshotBuildOptions, TimelineRenderSnapshot,
     VisibleBeatRange, VisibleTrackRange, WaveformChunkHandle, WaveformReadyKind,
 };
 pub use viewport::TimelineViewport;

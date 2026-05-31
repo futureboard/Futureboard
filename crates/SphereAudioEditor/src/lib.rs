@@ -7,9 +7,9 @@ mod editor_kind;
 mod waveform_view;
 
 pub use audio_editor::{
-    audio_editor_panel, default_wheel_handler, empty_audio_editor, AudioEditorTheme,
-    AudioEditorViewModel,
+    AudioEditorTheme, AudioEditorViewModel, audio_editor_panel, default_wheel_handler,
+    empty_audio_editor,
 };
 pub use audio_editor_state::AudioEditorState;
-pub use editor_kind::{editor_kind_for_clip, ClipEditorKind, ClipTypeHint};
+pub use editor_kind::{ClipEditorKind, ClipTypeHint, editor_kind_for_clip};
 pub use waveform_view::{WaveformColumn, WaveformViewModel};

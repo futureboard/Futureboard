@@ -17,7 +17,11 @@ impl GpuiPaintTimelineRenderer {
         Self
     }
 
-    fn paint_grid(snapshot: &TimelineRenderSnapshot, bounds: Bounds<Pixels>, window: &mut gpui::Window) {
+    fn paint_grid(
+        snapshot: &TimelineRenderSnapshot,
+        bounds: Bounds<Pixels>,
+        window: &mut gpui::Window,
+    ) {
         let grid_height = snapshot.viewport.height;
         let grid_width = snapshot.viewport.width;
 
@@ -51,10 +55,7 @@ impl TimelineRenderer for GpuiPaintTimelineRenderer {
         "gpui-paint"
     }
 
-    fn render_arrangement(
-        &mut self,
-        snapshot: &TimelineRenderSnapshot,
-    ) -> TimelineRenderOutput {
+    fn render_arrangement(&mut self, snapshot: &TimelineRenderSnapshot) -> TimelineRenderOutput {
         let _s = crate::perf::PerfScope::enter("GpuiPaintTimelineRenderer");
         crate::perf::count("grid_lines", snapshot.grid_lines.len() as u64);
         crate::perf::count("visible_clips", snapshot.clips.len() as u64);

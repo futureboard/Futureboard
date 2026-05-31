@@ -40,9 +40,10 @@ impl TimelineGpuPreference {
             Some("lowpower") | Some("low-power") | Some("low") | Some("integrated") => {
                 Self::LowPower
             }
-            Some("highperformance") | Some("high-performance") | Some("high") | Some("discrete") => {
-                Self::HighPerformance
-            }
+            Some("highperformance")
+            | Some("high-performance")
+            | Some("high")
+            | Some("discrete") => Self::HighPerformance,
             _ => Self::Auto,
         }
     }
@@ -123,10 +124,7 @@ pub fn list_available_gpu_devices() -> Vec<GpuDeviceInfo> {
     match result {
         Ok(devices) => {
             if gpu_debug_enabled() {
-                eprintln!(
-                    "[gpu-renderer] enumerated {} adapter(s)",
-                    devices.len()
-                );
+                eprintln!("[gpu-renderer] enumerated {} adapter(s)", devices.len());
                 for d in &devices {
                     eprintln!(
                         "[gpu-renderer]   id={} name={} backend={:?} type={:?}",
@@ -168,10 +166,11 @@ pub struct WgpuTimelineRenderer {
 impl WgpuTimelineRenderer {
     pub fn new() -> Self {
         let preference = TimelineGpuPreference::from_env();
-        let selected_device_id = PREFERRED_DEVICE_ID
-            .get()
-            .cloned()
-            .and_then(|s| if s.is_empty() { None } else { Some(s) });
+        let selected_device_id =
+            PREFERRED_DEVICE_ID
+                .get()
+                .cloned()
+                .and_then(|s| if s.is_empty() { None } else { Some(s) });
         Self::with_preference_and_device(preference, selected_device_id)
     }
 

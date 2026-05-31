@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    div, px, svg, App, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, Window,
 };
 
 use crate::assets;

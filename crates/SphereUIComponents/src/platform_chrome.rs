@@ -4,7 +4,7 @@
 //! here. UI code should call [`PlatformChromePolicy::current()`] instead of
 //! scattering platform conditionals.
 
-use gpui::{px, point, Point, Pixels, TitlebarOptions, WindowDecorations, WindowOptions};
+use gpui::{point, px, Pixels, Point, TitlebarOptions, WindowDecorations, WindowOptions};
 
 /// Shared titlebar height across platforms (matches GPUI chrome layout).
 pub const TITLEBAR_HEIGHT_PX: f32 = 32.0;

@@ -1,5 +1,7 @@
 use crate::theme::Colors;
-use gpui::{canvas, div, fill, px, Bounds, IntoElement, ParentElement, Pixels, Point, Size, Styled};
+use gpui::{
+    canvas, div, fill, px, Bounds, IntoElement, ParentElement, Pixels, Point, Size, Styled,
+};
 
 /// Segment thresholds shared by every meter variant (fraction of full scale).
 const METER_GREEN_TOP: f32 = 0.70;
@@ -38,7 +40,13 @@ pub fn meter_surface(level_l: f32, level_r: f32) -> impl IntoElement {
 /// Paint one channel bar (rail + level segments) at `x_offset` from the canvas
 /// origin, filling the canvas height bottom-up. Quads are emitted directly into
 /// the GPUI scene for the current frame.
-fn paint_meter_bar(canvas_bounds: Bounds<Pixels>, x_offset: f32, width: f32, level: f32, window: &mut gpui::Window) {
+fn paint_meter_bar(
+    canvas_bounds: Bounds<Pixels>,
+    x_offset: f32,
+    width: f32,
+    level: f32,
+    window: &mut gpui::Window,
+) {
     let origin_x = f32::from(canvas_bounds.origin.x) + x_offset;
     let origin_y = f32::from(canvas_bounds.origin.y);
     let h = f32::from(canvas_bounds.size.height).max(0.0);

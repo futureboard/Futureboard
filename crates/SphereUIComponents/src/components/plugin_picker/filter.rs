@@ -117,9 +117,7 @@ fn is_failed_plugin(plugin: &RegistryPlugin) -> bool {
     !plugin.scan_status.is_usable()
         || matches!(
             plugin.scan_status,
-            PluginScanStatus::Failed
-                | PluginScanStatus::Crashed
-                | PluginScanStatus::MetadataOnly
+            PluginScanStatus::Failed | PluginScanStatus::Crashed | PluginScanStatus::MetadataOnly
         )
 }
 

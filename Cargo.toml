@@ -5,10 +5,20 @@ members = [
     "crates/*",
 ]
 exclude = [
-    "extentions",
-    "extentions/template",
-    "extentions/template-react",
-    "extentions/template-vue",
+    # JS/Rust extension templates — built independently, not part of the workspace.
+    "extensions",
+    "extensions/template",
+    "extensions/template-react",
+    "extensions/template-vue",
+    # Quarantined experimental/placeholder crates (no implementation yet).
+    # See ARCHITECTURE.md → "Experimental crates policy". Promote back into the
+    # workspace by removing the corresponding line once a crate has real content.
+    "crates/SphereEncoder",
+    "crates/SphereExtensionHost",
+    "crates/SphereMediaUtils",
+    "crates/SphereNoiseRemover",
+    "crates/SphereSettings",
+    "crates/SphereStemExtractor",
 ]
 
 [workspace.package]

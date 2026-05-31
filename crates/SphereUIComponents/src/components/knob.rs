@@ -28,8 +28,8 @@
 use std::f32::consts::PI;
 
 use gpui::{
-    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::theme::Colors;

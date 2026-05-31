@@ -47,11 +47,7 @@ mod macos {
     pub(super) fn install(cx: &mut App) {
         cx.on_action(|action: &RunMenuCommand, cx: &mut App| {
             let command_id = action.command_id.to_string();
-            if let Some(dispatcher) = super::dispatcher_slot()
-                .lock()
-                .ok()
-                .and_then(|g| g.clone())
-            {
+            if let Some(dispatcher) = super::dispatcher_slot().lock().ok().and_then(|g| g.clone()) {
                 dispatcher(&command_id, cx);
             } else {
                 eprintln!("[macos-menu] no dispatcher for command {command_id}");
@@ -97,12 +93,7 @@ mod macos {
                 let name = item.label.clone().unwrap_or_else(|| item.id.clone());
                 // Ensure the action payload owns its command id ('static).
                 let command_id: SharedString = command.to_string().into();
-                Some(GpuiMenuItem::action(
-                    name,
-                    RunMenuCommand {
-                        command_id,
-                    },
-                ))
+                Some(GpuiMenuItem::action(name, RunMenuCommand { command_id }))
             }
         }
     }

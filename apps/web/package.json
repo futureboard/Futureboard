@@ -12,6 +12,7 @@
     "build:audio:wasm:prod": "curl https://sh.rustup.rs -sSf | sh -s -- -y && export PATH=\"$HOME/.cargo/bin:$PATH\" && rustup target add wasm32-unknown-unknown && cargo install wasm-pack --locked && bun run build:audio:wasm",
     "vercel-build": "bun run build:audio:wasm:prod && tsc -b && vite build",
     "lint": "eslint .",
+    "typecheck": "tsc -b",
     "preview": "vite preview"
   },
   "dependencies": {

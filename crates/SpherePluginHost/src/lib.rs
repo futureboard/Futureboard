@@ -6,38 +6,41 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(non_snake_case)]
 
+pub mod au_scanner;
+pub mod editor_quirk;
 #[cfg(feature = "napi")]
 mod editor_window;
 /// Plain-Rust facade over the editor C ABI — always built so the native
 /// binary can drive the IPlugView lifecycle without N-API.
 pub mod native_editor;
-pub mod editor_quirk;
 pub mod plugin_db;
 pub mod preset;
 pub mod registry;
 pub mod scan;
-pub mod au_scanner;
 mod scanner;
 mod types;
 
-pub use preset::{clear_all_presets, clear_plugin_cache, ensure_preset_folders, load_cached_plugins, read_preset_file, register_plugin, validate_plugin_for_registration, write_preset};
-pub use registry::{
-    classify_kind, default_preset_root, default_scan_paths, display_category,
-    native_host_status, registry_plugin_from_scan, CatalogLoad, NativeHostStatus, PluginFormat,
-    PluginKind, PluginRegistry, PluginScanFailure, PluginStatus, RegistryPlugin,
-    RegistryScanResult, ScanOptions, ScanProgress,
+pub use editor_quirk::{
+    detect_plugin_editor_runtime, match_quirk, PluginEditorHostMode, PluginEditorQuirk,
+    PluginEditorRuntimeKind,
 };
 pub use plugin_db::{
     database_dir, database_exists, database_path, open_database, open_database_readonly,
     PluginCatalog, PluginCatalogEntry, PluginScanStatus,
 };
+pub use preset::{
+    clear_all_presets, clear_plugin_cache, ensure_preset_folders, load_cached_plugins,
+    read_preset_file, register_plugin, validate_plugin_for_registration, write_preset,
+};
+pub use registry::{
+    classify_kind, default_preset_root, default_scan_paths, display_category, native_host_status,
+    registry_plugin_from_scan, CatalogLoad, NativeHostStatus, PluginFormat, PluginKind,
+    PluginRegistry, PluginScanFailure, PluginStatus, RegistryPlugin, RegistryScanResult,
+    ScanOptions, ScanProgress,
+};
 pub use scan::{
     load_au_cache_state, save_au_cache_state, AuScanCacheState, FormatCacheStatus,
     PluginDescriptor, PluginScanError, PluginScanFormat, ScanResultPayload,
-};
-pub use editor_quirk::{
-    detect_plugin_editor_runtime, match_quirk, PluginEditorHostMode, PluginEditorQuirk,
-    PluginEditorRuntimeKind,
 };
 pub use scanner::{discover_plugin_bundles, scan_plugin_bundle};
 

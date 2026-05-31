@@ -110,7 +110,9 @@ pub enum PluginScanError {
 impl PluginScanError {
     pub fn message(&self) -> String {
         match self {
-            Self::UnsupportedPlatform => "AudioUnit scanning is unavailable on this platform.".into(),
+            Self::UnsupportedPlatform => {
+                "AudioUnit scanning is unavailable on this platform.".into()
+            }
             Self::AudioUnitUnavailable => "AudioUnit scanning is unavailable.".into(),
             Self::AudioUnitEnumerationFailed(reason) => {
                 format!("AudioUnit enumeration failed: {reason}")
@@ -130,7 +132,9 @@ impl PluginScanError {
             Self::ScannerBinaryMissing(path) => {
                 format!("Plugin scanner binary not found: {path}")
             }
-            Self::ScannerLaunchFailed(reason) => format!("Failed to launch plugin scanner: {reason}"),
+            Self::ScannerLaunchFailed(reason) => {
+                format!("Failed to launch plugin scanner: {reason}")
+            }
             Self::ScannerOutputInvalid(reason) => format!("Invalid scanner output: {reason}"),
             Self::PathMissing(path) => format!("Scan path does not exist: {path}"),
             Self::NativeScanFailed(reason) => reason.clone(),

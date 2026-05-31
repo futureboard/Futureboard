@@ -14,6 +14,12 @@ use crate::components;
 use crate::components::add_track_dialog::{
     open_add_track_window, AddTrackDialogState, AddTrackKind, AddTrackWindow,
 };
+use crate::components::context_menu::ContextMenuEntry;
+use crate::components::file_browser::{read_directory, FileBrowserState};
+use crate::components::midi_editor_window::{
+    midi_editor_debug, open_midi_editor_window, MidiEditorWindow,
+};
+use crate::components::mixer_panel::MixerCallbacks;
 use crate::components::plugin_editor_window::PluginEditorWindow;
 use crate::components::plugin_manager::{open_plugin_manager_window, PluginManagerWindow};
 use crate::components::plugin_picker::{
@@ -22,22 +28,11 @@ use crate::components::plugin_picker::{
     CatalogStatus as PluginCatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
     PluginPickerState, PluginSearchIndex, STUB_PLUGIN_ID,
 };
-use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
-use crate::components::context_menu::ContextMenuEntry;
-use crate::components::file_browser::{read_directory, FileBrowserState};
-use crate::components::mixer_panel::MixerCallbacks;
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::project_wizard::{
     open_project_wizard_window, ProjectCreateCallback, ProjectWizardResult, ProjectWizardWindow,
 };
-use crate::components::midi_editor_window::{
-    midi_editor_debug, open_midi_editor_window, MidiEditorWindow,
-};
-use crate::components::{external_mixer_debug, open_mixer_window, MixerSnapshot, MixerWindow};
-use crate::components::settings_dialog::{
-    OnSettingUpdate, SettingsWindow, open_settings_window,
-};
-use crate::settings::{SettingsModel, SettingsSchema, GlobalSettingsModel};
+use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate, SettingsWindow};
 use crate::components::text_input::{
     text_input_context_entries, TextInputAction, TextInputCallbacks, TextInputState,
 };
@@ -45,14 +40,17 @@ use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, TimelineState, TrackState, TrackType,
 };
+use crate::components::{external_mixer_debug, open_mixer_window, MixerSnapshot, MixerWindow};
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
+use crate::overlay::{project_title_anchor, titlebar_label_anchor, OverlayAnchor};
 use crate::paths::FutureboardPaths;
 use crate::project::{
     apply_to_timeline, io::load_project, io::save_project, now_secs, recent::RecentProjectsStore,
     FutureboardProject,
 };
-use crate::overlay::{project_title_anchor, titlebar_label_anchor, OverlayAnchor};
+use crate::settings::{GlobalSettingsModel, SettingsModel, SettingsSchema};
 use crate::theme::{self, Colors};
+use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
 
 use DAUx::types::{
     EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineMidiClipSnapshot,
@@ -66,10 +64,7 @@ const USE_DEMO_PROJECT: bool = false;
 
 /// Notify a satellite window's root view without calling `Entity::update` (which
 /// can re-enter the main studio entity and trip GPUI's lease checks).
-pub(crate) fn notify_window_root<T: gpui::Render>(
-    app: &mut gpui::App,
-    handle: &WindowHandle<T>,
-) {
+pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &WindowHandle<T>) {
     if let Ok(entity) = handle.entity(app) {
         app.notify(entity.entity_id());
     }
@@ -403,9 +398,7 @@ impl StudioLayout {
                 #[cfg(feature = "gpu-renderer")]
                 crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::Wgpu,
                 #[cfg(not(feature = "gpu-renderer"))]
-                crate::settings::RenderMode::GpuAcceleration => {
-                    TimelineRendererBackend::GpuiPaint
-                }
+                crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::GpuiPaint,
             };
             set_preferred_backend(chosen);
             // Saved GPU device id (empty string == Auto).
@@ -631,11 +624,8 @@ impl StudioLayout {
                 cx.focus_handle(),
             )
             .with_placeholder("Search projects..."),
-            browser_search_input: TextInputState::new(
-                "browser-search-input",
-                cx.focus_handle(),
-            )
-            .with_placeholder("Search..."),
+            browser_search_input: TextInputState::new("browser-search-input", cx.focus_handle())
+                .with_placeholder("Search..."),
             plugin_picker: PluginPickerState::closed(),
             plugin_picker_search_input: TextInputState::new(
                 "plugin-picker-search-input",
@@ -1219,12 +1209,7 @@ impl StudioLayout {
         self.set_native_bpm_inner(bpm, true, cx);
     }
 
-    fn set_native_bpm_inner(
-        &mut self,
-        bpm: f32,
-        commit_to_engine: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_native_bpm_inner(&mut self, bpm: f32, commit_to_engine: bool, cx: &mut Context<Self>) {
         let bpm = bpm.clamp(components::BPM_MIN, components::BPM_MAX);
         let changed = self.timeline.update(cx, |timeline, cx| {
             if (timeline.state.bpm - bpm).abs() > 0.005 {
@@ -1316,7 +1301,10 @@ impl StudioLayout {
 
             "browser:import" => {
                 let path = match &self.open_popover {
-                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    Some(OpenPopover::Context {
+                        target: ContextTarget::Browser(path),
+                        ..
+                    }) => path.clone(),
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1337,7 +1325,8 @@ impl StudioLayout {
                                 .and_then(|n| n.to_str())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| "Imported Audio".to_string());
-                            t.state.import_audio_to_selected_or_new_track(path_key, name);
+                            t.state
+                                .import_audio_to_selected_or_new_track(path_key, name);
                             cx.notify();
                         });
                         let _ = layout.update(cx, |this, cx| {
@@ -1361,7 +1350,10 @@ impl StudioLayout {
             }
             "browser:reveal" => {
                 let path = match &self.open_popover {
-                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    Some(OpenPopover::Context {
+                        target: ContextTarget::Browser(path),
+                        ..
+                    }) => path.clone(),
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1370,7 +1362,10 @@ impl StudioLayout {
             }
             "browser:refresh" => {
                 let path = match &self.open_popover {
-                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    Some(OpenPopover::Context {
+                        target: ContextTarget::Browser(path),
+                        ..
+                    }) => path.clone(),
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1386,7 +1381,10 @@ impl StudioLayout {
             }
             "browser:copy-path" => {
                 let path = match &self.open_popover {
-                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    Some(OpenPopover::Context {
+                        target: ContextTarget::Browser(path),
+                        ..
+                    }) => path.clone(),
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1396,7 +1394,10 @@ impl StudioLayout {
             }
             "browser:open" => {
                 let path = match &self.open_popover {
-                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    Some(OpenPopover::Context {
+                        target: ContextTarget::Browser(path),
+                        ..
+                    }) => path.clone(),
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1475,7 +1476,9 @@ impl StudioLayout {
             "track:add-plugin" => {
                 self.open_add_track_external_window(AddTrackKind::Plugin, owner_bounds, cx)
             }
-            "track:add-bus" => self.open_add_track_external_window(AddTrackKind::Bus, owner_bounds, cx),
+            "track:add-bus" => {
+                self.open_add_track_external_window(AddTrackKind::Bus, owner_bounds, cx)
+            }
             "track:add-return" => {
                 self.open_add_track_external_window(AddTrackKind::Return, owner_bounds, cx)
             }
@@ -1511,10 +1514,9 @@ impl StudioLayout {
             "midi:open-editor" | "editor:open-midi-window" => {
                 self.open_midi_editor_external_window(owner_bounds, cx)
             }
-            "midi:select-all"
-            | "midi:delete-selected"
-            | "midi:quantize"
-            | "midi:fit-notes" => self.dispatch_midi_editor_menu_command(command_id, cx),
+            "midi:select-all" | "midi:delete-selected" | "midi:quantize" | "midi:fit-notes" => {
+                self.dispatch_midi_editor_menu_command(command_id, cx)
+            }
 
             // ── Transport extras (shared menu IDs) ───────────────────────
             "transport:go-to-end" => {
@@ -1742,8 +1744,9 @@ impl StudioLayout {
         };
 
         let path = plugin_path.filter(|p| !p.trim().is_empty());
-        let editable =
-            plugin_format == Some(InsertPluginFormat::Vst3) && path.is_some() && plugin_id.is_some();
+        let editable = plugin_format == Some(InsertPluginFormat::Vst3)
+            && path.is_some()
+            && plugin_id.is_some();
         if !editable {
             if debug {
                 eprintln!(
@@ -1818,7 +1821,6 @@ impl StudioLayout {
         }
         sphere_plugin_host::native_editor::detach_all_embedded_editors();
     }
-
 
     /// Kick off a background SQLite load of the plug-in catalog. The picker
     /// opens instantly with a skeleton; this task replaces the skeleton once
@@ -1913,18 +1915,14 @@ impl StudioLayout {
 
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
         let started = std::time::Instant::now();
-        let track_info = self.timeline.read(cx).state.find_track(track_id).map(|track| {
-            (
-                track.name.clone(),
-                track.track_type,
-                track.inserts.len(),
-            )
-        });
-        let (track_name, track_type, next_slot) = track_info.unwrap_or((
-            track_id.to_string(),
-            TrackType::Audio,
-            0,
-        ));
+        let track_info = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(track_id)
+            .map(|track| (track.name.clone(), track.track_type, track.inserts.len()));
+        let (track_name, track_type, next_slot) =
+            track_info.unwrap_or((track_id.to_string(), TrackType::Audio, 0));
         self.plugin_picker = PluginPickerState::open_for(
             track_id,
             &track_name,
@@ -2175,7 +2173,8 @@ impl StudioLayout {
                 });
                 self.project_path = Some(path.clone());
                 self.project_folder = path.parent().map(|p| p.to_path_buf());
-                self.file_browser.set_project_folder(self.project_folder.clone());
+                self.file_browser
+                    .set_project_folder(self.project_folder.clone());
                 self.project_switcher.current_project.name = project.name.clone();
                 self.project_switcher.current_project.path = Some(path.clone());
                 self.project_switcher.current_project.is_dirty = false;
@@ -2313,7 +2312,6 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
-
         // If window is already open, activate and refresh its context.
         if let Some(handle) = self.add_track_window.clone() {
             if handle
@@ -2339,9 +2337,7 @@ impl StudioLayout {
         });
 
         let layout = cx.entity().clone();
-        let on_confirm_request: Arc<
-            dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static,
-        > =
+        let on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static> =
             Arc::new(move |dialog, _name, cx| {
                 let Some(track_type) = dialog.selected_kind.native_track_type() else {
                     return;
@@ -2350,7 +2346,8 @@ impl StudioLayout {
                     this.mark_dirty();
                     let _ = this.timeline.update(cx, |timeline, cx| {
                         let count = dialog.count.clamp(1, 128) as usize;
-                        let base_name = cleaned_track_name(&dialog.track_name, dialog.selected_kind);
+                        let base_name =
+                            cleaned_track_name(&dialog.track_name, dialog.selected_kind);
                         let mut selected_track_id = None;
                         let mut created_ids = Vec::new();
                         for i in 0..count {
@@ -2374,7 +2371,8 @@ impl StudioLayout {
                                 color: timeline.state.track_color_for_index(color_ix),
                                 volume: timeline_state::volume::db_to_norm(0.0),
                                 pan: 0.0,
-                                armed: dialog.selected_kind == AddTrackKind::Audio && dialog.arm_track,
+                                armed: dialog.selected_kind == AddTrackKind::Audio
+                                    && dialog.arm_track,
                                 input_monitor: dialog.selected_kind == AddTrackKind::Audio
                                     && dialog.monitor_mode != "off",
                             });
@@ -2470,7 +2468,11 @@ impl StudioLayout {
         let owner = cx.entity().clone();
 
         let mut available_inputs = if let Some(ref engine) = self.audio_engine {
-            engine.list_input_devices().into_iter().map(|d| d.name).collect::<Vec<_>>()
+            engine
+                .list_input_devices()
+                .into_iter()
+                .map(|d| d.name)
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
@@ -2485,7 +2487,11 @@ impl StudioLayout {
         }
 
         let mut available_outputs = if let Some(ref engine) = self.audio_engine {
-            engine.list_output_devices().into_iter().map(|d| d.name).collect::<Vec<_>>()
+            engine
+                .list_output_devices()
+                .into_iter()
+                .map(|d| d.name)
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
@@ -2597,10 +2603,7 @@ impl StudioLayout {
         let Some(handle) = self.mixer_window.clone() else {
             return;
         };
-        if handle
-            .update(cx, |_mixer, _window, _cx| ())
-            .is_err()
-        {
+        if handle.update(cx, |_mixer, _window, _cx| ()).is_err() {
             self.mixer_window = None;
         }
     }
@@ -2651,7 +2654,9 @@ impl StudioLayout {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(0))
                 .await;
-            let _ = this.update(cx, |layout, cx| layout.flush_pending_mixer_external_open(cx));
+            let _ = this.update(cx, |layout, cx| {
+                layout.flush_pending_mixer_external_open(cx)
+            });
         })
         .detach();
     }
@@ -2688,14 +2693,15 @@ impl StudioLayout {
                 let _ = owner.update(cx, |layout, cx| layout.close_mixer_window(cx));
             });
         let scroll_owner = cx.entity().clone();
-        let on_mixer_scroll: std::sync::Arc<dyn Fn(f32, &mut Window, &mut gpui::App) + Send + Sync> =
-            std::sync::Arc::new(move |new_x: f32, _w, cx| {
-                let _ = scroll_owner.update(cx, |layout, cx| {
-                    if layout.set_mixer_scroll_x(new_x, cx) {
-                        layout.push_mixer_snapshot_to_window(cx);
-                    }
-                });
+        let on_mixer_scroll: std::sync::Arc<
+            dyn Fn(f32, &mut Window, &mut gpui::App) + Send + Sync,
+        > = std::sync::Arc::new(move |new_x: f32, _w, cx| {
+            let _ = scroll_owner.update(cx, |layout, cx| {
+                if layout.set_mixer_scroll_x(new_x, cx) {
+                    layout.push_mixer_snapshot_to_window(cx);
+                }
             });
+        });
 
         match open_mixer_window(
             owner_bounds,
@@ -2836,9 +2842,7 @@ impl StudioLayout {
             .and_then(|id| self.timeline.read(cx).state.find_clip(&id))
             .map(|(t, c)| (c.name.clone(), t.name.clone()));
         if let Some((clip_name, track_name)) = clip_label.as_ref() {
-            midi_editor_debug(&format!(
-                "open window clip={clip_name} track={track_name}"
-            ));
+            midi_editor_debug(&format!("open window clip={clip_name} track={track_name}"));
         } else {
             midi_editor_debug("open window (no MIDI clip selected)");
         }
@@ -2931,7 +2935,7 @@ impl StudioLayout {
 
     fn sync_audio_engine_settings(&mut self, cx: &mut Context<Self>) {
         let schema = self.settings.read(cx).current.clone();
-        
+
         let mut rebuild = false;
         if let Some(ref engine) = self.audio_engine {
             let config = engine.config();
@@ -2951,7 +2955,7 @@ impl StudioLayout {
 
         if rebuild {
             eprintln!("[audio] settings changed, rebuilding audio engine stream...");
-            
+
             // Stop and release active engine
             if let Some(mut engine) = self.audio_engine.take() {
                 let _ = engine.stop();
@@ -2979,7 +2983,7 @@ impl StudioLayout {
                                 "[audio] settings sync: stream rebuilt and started. backend={} sr={} buf={}",
                                 stats.backend_name, stats.sample_rate, stats.buffer_size
                             );
-                            
+
                             // Re-bind timeline callbacks
                             let seek_engine = engine.clone();
                             let param_engine = engine.clone();
@@ -3280,7 +3284,8 @@ impl StudioLayout {
                                     .and_then(|n| n.to_str())
                                     .map(|s| s.to_string())
                                     .unwrap_or_else(|| "Imported Audio".to_string());
-                                t.state.import_audio_to_selected_or_new_track(path_key, name);
+                                t.state
+                                    .import_audio_to_selected_or_new_track(path_key, name);
                                 cx.notify();
                             });
                             let _ = layout.update(cx, |this, cx| {
@@ -3381,11 +3386,9 @@ impl StudioLayout {
 
         match key {
             "enter" => {
-                if let Some(id) = visible_plugin_id_at(
-                    &self.plugin_picker,
-                    &index,
-                    &self.plugin_picker_prefs,
-                ) {
+                if let Some(id) =
+                    visible_plugin_id_at(&self.plugin_picker, &index, &self.plugin_picker_prefs)
+                {
                     self.apply_picked_insert(&id, cx);
                 }
                 return true;
@@ -3434,11 +3437,7 @@ impl StudioLayout {
             }
             "pageup" => {
                 let page = page_size_for_height(self.plugin_picker_prefs.window_height);
-                move_highlight(
-                    &mut self.plugin_picker,
-                    -(page as isize),
-                    visible_len,
-                );
+                move_highlight(&mut self.plugin_picker, -(page as isize), visible_len);
                 sync_selection_from_highlight(
                     &mut self.plugin_picker,
                     &index,
@@ -3504,7 +3503,8 @@ impl StudioLayout {
                 self.project_switcher.selected_index = 0;
             }
             TextMenuTarget::BrowserSearch => {
-                self.file_browser.set_filter(&self.browser_search_input.value);
+                self.file_browser
+                    .set_filter(&self.browser_search_input.value);
             }
             TextMenuTarget::PluginPickerSearch => {
                 self.plugin_picker.query = self.plugin_picker_search_input.value.clone();
@@ -3535,10 +3535,8 @@ impl StudioLayout {
     /// though its element is no longer rendered. That orphaned focus is exactly
     /// what silently killed every keyboard shortcut — see `reclaim` in render.
     fn keyboard_text_capture_live(&self, window: &Window) -> bool {
-        (self.project_switcher.is_open
-            && self.project_switcher_search_input.is_focused(window))
-            || (self.plugin_picker.is_open
-                && self.plugin_picker_search_input.is_focused(window))
+        (self.project_switcher.is_open && self.project_switcher_search_input.is_focused(window))
+            || (self.plugin_picker.is_open && self.plugin_picker_search_input.is_focused(window))
             || self.browser_search_input.is_focused(window)
     }
 
@@ -3560,8 +3558,8 @@ impl StudioLayout {
             ContextTarget::Clip(clip_id) => {
                 let clip_info = self.timeline.read(cx).state.find_clip(clip_id);
                 let exists = clip_info.is_some();
-                let is_midi = clip_info
-                    .is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }));
+                let is_midi =
+                    clip_info.is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }));
                 let mut entries = Vec::new();
                 if is_midi {
                     entries.push(ContextMenuEntry::item(
@@ -3575,7 +3573,9 @@ impl StudioLayout {
                     entries.push(ContextMenuEntry::Separator);
                 }
                 entries.push(ContextMenuEntry::disabled_item("Rename", "clip:rename"));
-                entries.push(ContextMenuEntry::item("Duplicate", "clip:duplicate").with_shortcut("Ctrl+D"));
+                entries.push(
+                    ContextMenuEntry::item("Duplicate", "clip:duplicate").with_shortcut("Ctrl+D"),
+                );
                 entries.push(ContextMenuEntry::danger_item("Delete", "clip:delete"));
                 entries.push(ContextMenuEntry::Separator);
                 entries.push(ContextMenuEntry::item(
@@ -3618,10 +3618,17 @@ impl StudioLayout {
                             entries.push(ContextMenuEntry::item("Refresh", "browser:refresh"));
                         } else {
                             entries.push(ContextMenuEntry::item("Open", "browser:open"));
-                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item(
+                                "Reveal in Explorer/Finder",
+                                "browser:reveal",
+                            ));
                             entries.push(ContextMenuEntry::item("Refresh", "browser:refresh"));
-                            entries.push(ContextMenuEntry::disabled_item("New Folder", "browser:new-folder"));
-                            entries.push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
+                            entries.push(ContextMenuEntry::disabled_item(
+                                "New Folder",
+                                "browser:new-folder",
+                            ));
+                            entries
+                                .push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
                             entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
                         }
                     } else {
@@ -3630,18 +3637,31 @@ impl StudioLayout {
                             .and_then(|s| s.to_str())
                             .map(|s| s.to_ascii_lowercase())
                             .unwrap_or_default();
-                        
+
                         if is_supported_audio_ext(&ext) {
-                            entries.push(ContextMenuEntry::item("Import to Timeline", "browser:import"));
-                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item(
+                                "Import to Timeline",
+                                "browser:import",
+                            ));
+                            entries.push(ContextMenuEntry::item(
+                                "Reveal in Explorer/Finder",
+                                "browser:reveal",
+                            ));
                             entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
-                            entries.push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
+                            entries
+                                .push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
                         } else if ext == "fbproj" {
                             entries.push(ContextMenuEntry::item("Open Project", "project:open"));
-                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item(
+                                "Reveal in Explorer/Finder",
+                                "browser:reveal",
+                            ));
                             entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
                         } else {
-                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item(
+                                "Reveal in Explorer/Finder",
+                                "browser:reveal",
+                            ));
                             entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
                         }
                     }
@@ -3988,10 +4008,7 @@ impl StudioLayout {
         _path_key: String,
     ) {
         components::timeline::audio_import::spawn_timeline_import_from_layout(
-            path,
-            timeline,
-            owner,
-            cx,
+            path, timeline, owner, cx,
         );
     }
 
@@ -4023,7 +4040,9 @@ impl StudioLayout {
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
             let id = id.clone();
             let v = *v;
-            external_mixer_debug(&format!("mixer command dispatched set_volume id={id} v={v:.3}"));
+            external_mixer_debug(&format!(
+                "mixer command dispatched set_volume id={id} v={v:.3}"
+            ));
             timeline_vol.update(cx, |t, cx| {
                 t.state.set_track_volume(&id, v);
                 cx.notify();
@@ -4045,7 +4064,9 @@ impl StudioLayout {
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
             let id = id.clone();
             let v = *v;
-            external_mixer_debug(&format!("mixer command dispatched set_pan id={id} v={v:.3}"));
+            external_mixer_debug(&format!(
+                "mixer command dispatched set_pan id={id} v={v:.3}"
+            ));
             timeline_pan.update(cx, |t, cx| {
                 t.state.set_track_pan(&id, v);
                 cx.notify();
@@ -4205,9 +4226,7 @@ impl StudioLayout {
         // Phase 2b: opens the registry-driven picker overlay. The insert slot
         // is created only when the user picks a plugin (see
         // `apply_picked_insert`). No audio thread interaction.
-        let on_add_insert: std::sync::Arc<
-            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
-        > = {
+        let on_add_insert: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> = {
             let this = owner.clone();
             std::sync::Arc::new(move |track_id: &String, window, cx| {
                 let track_id = track_id.clone();
@@ -4271,9 +4290,7 @@ impl StudioLayout {
         // add_send auto-targets the first eligible Bus/Return (a target picker
         // is a follow-up). Both flip `engine_project_dirty` so the next audio
         // sync carries the send list down to the runtime.
-        let on_add_send: std::sync::Arc<
-            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
-        > = {
+        let on_add_send: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> = {
             let this = owner.clone();
             std::sync::Arc::new(move |track_id: &String, _w, cx| {
                 let track_id = track_id.clone();
@@ -4895,17 +4912,14 @@ impl Render for StudioLayout {
                         let _ = this.update(cx, |this, cx| {
                             if let Some(index) = this.plugin_search_index.as_ref() {
                                 let result = compute_filter_result(
-                                        index,
-                                        &this.plugin_picker.query,
-                                        &this.plugin_picker.filters,
-                                        &this.plugin_picker_prefs,
-                                        std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG")
-                                            .is_some(),
-                                    );
+                                    index,
+                                    &this.plugin_picker.query,
+                                    &this.plugin_picker.filters,
+                                    &this.plugin_picker_prefs,
+                                    std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some(),
+                                );
                                 if let Some(highlight) = result.indices.iter().position(|&idx| {
-                                    index
-                                        .plugin_at(idx)
-                                        .is_some_and(|p| p.id == plugin_id)
+                                    index.plugin_at(idx).is_some_and(|p| p.id == plugin_id)
                                 }) {
                                     this.plugin_picker.highlighted_index = highlight;
                                 }
@@ -5691,8 +5705,6 @@ fn reveal_path(path: &std::path::Path) {
         } else {
             path
         };
-        let _ = std::process::Command::new("xdg-open")
-            .arg(parent)
-            .spawn();
+        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
     }
 }

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use crate::types::{PitchFrame, VoiceTuneAnalysisConfig, VoiceTuneDocument};
 use crate::error::VoiceTuneError;
-use crate::pitch_detect::{detect_pitch_yin, calculate_rms};
+use crate::pitch_detect::{calculate_rms, detect_pitch_yin};
 use crate::segmentation::segment_notes;
+use crate::types::{PitchFrame, VoiceTuneAnalysisConfig, VoiceTuneDocument};
+use std::collections::HashMap;
 
 pub struct VoiceTuneAnalyzer;
 

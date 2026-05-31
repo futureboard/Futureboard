@@ -19,7 +19,9 @@ use gpui::{
 
 use crate::assets;
 use crate::components::file_browser::{BrowserNodeKind, BrowserVisibleNode, FileBrowserState};
-use crate::components::text_input::{text_field_with_callbacks, TextInputCallbacks, TextInputState, TextInputContextCb};
+use crate::components::text_input::{
+    text_field_with_callbacks, TextInputCallbacks, TextInputContextCb, TextInputState,
+};
 use crate::theme::Colors;
 
 pub const SIDEBAR_WIDTH: f32 = 272.0;
@@ -125,13 +127,11 @@ pub fn sidebar(
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())
-        .child(
-            text_field_with_callbacks(
-                search_input,
-                search_focused,
-                search_callbacks,
-            )
-        );
+        .child(text_field_with_callbacks(
+            search_input,
+            search_focused,
+            search_callbacks,
+        ));
 
     let selected_label = state
         .selected

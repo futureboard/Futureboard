@@ -70,7 +70,10 @@ fn try_load_disk_cache(cache_key: &str) -> Option<Arc<WaveformPreview>> {
         return None;
     }
     if import_debug() {
-        eprintln!("[audio-import] disk cache HIT key={cache_key} path={}", path.display());
+        eprintln!(
+            "[audio-import] disk cache HIT key={cache_key} path={}",
+            path.display()
+        );
     }
     Some(Arc::new(envelope.preview))
 }
@@ -88,7 +91,10 @@ fn save_disk_cache(cache_key: &str, preview: &WaveformPreview) {
     if let Ok(json) = serde_json::to_vec(&envelope) {
         let _ = std::fs::write(&path, json);
         if import_debug() {
-            eprintln!("[audio-import] disk cache WRITE key={cache_key} path={}", path.display());
+            eprintln!(
+                "[audio-import] disk cache WRITE key={cache_key} path={}",
+                path.display()
+            );
         }
     }
 }
@@ -136,7 +142,10 @@ fn install_preview_chunks_progressive(
     });
     let chunks_total = lod.peaks.len().div_ceil(CHUNK_PEAKS);
     waveform_cache::begin_peak_build(path_key, Arc::clone(&meta), chunks_total);
-    waveform_cache::set_import_state(path_key, AudioImportState::GeneratingPeaks { progress: 0.0 });
+    waveform_cache::set_import_state(
+        path_key,
+        AudioImportState::GeneratingPeaks { progress: 0.0 },
+    );
     throttled_timeline_notify(timeline, cx, true);
 
     let spp = lod.samples_per_peak as u32;
@@ -176,12 +185,9 @@ fn install_preview_chunks_progressive(
 }
 
 /// Throttled UI refresh: ≤10 Hz unless `force` (state transition).
-pub fn throttled_timeline_notify(
-    timeline: &WeakEntity<Timeline>,
-    cx: &mut AsyncApp,
-    force: bool,
-) {
-    let throttle = NOTIFY_THROTTLE.get_or_init(|| Mutex::new(Instant::now() - Duration::from_secs(1)));
+pub fn throttled_timeline_notify(timeline: &WeakEntity<Timeline>, cx: &mut AsyncApp, force: bool) {
+    let throttle =
+        NOTIFY_THROTTLE.get_or_init(|| Mutex::new(Instant::now() - Duration::from_secs(1)));
     let mut last = throttle.lock().expect("notify throttle");
     if !force && last.elapsed() < Duration::from_millis(100) {
         return;
@@ -213,8 +219,14 @@ fn run_peak_job(path: &Path, path_key: &str) -> Result<Arc<WaveformPreview>, Str
         }
     }
 
-    waveform_cache::set_import_state(path_key, AudioImportState::GeneratingPeaks { progress: 0.0 });
-    eprintln!("[audio-import] peak cache scanning path={} size={file_size} bytes", path.display());
+    waveform_cache::set_import_state(
+        path_key,
+        AudioImportState::GeneratingPeaks { progress: 0.0 },
+    );
+    eprintln!(
+        "[audio-import] peak cache scanning path={} size={file_size} bytes",
+        path.display()
+    );
 
     let peaks = DAUx::generate_audio_peaks(path).map_err(|e| e.to_string())?;
     let preview: WaveformPreview = peaks.into();
@@ -256,18 +268,18 @@ pub async fn run_import_pipeline(
     let layout_weak = layout.clone();
 
     // ── Probe metadata ───────────────────────────────────────────────
-        waveform_cache::set_import_state(&key, AudioImportState::Probing);
-        throttled_timeline_notify(&timeline_probe, cx, true);
+    waveform_cache::set_import_state(&key, AudioImportState::Probing);
+    throttled_timeline_notify(&timeline_probe, cx, true);
 
-        let meta_path = path_for_job.clone();
-        let probe = cx
-            .background_executor()
-            .spawn(async move { DAUx::probe_audio_file(&meta_path) })
-            .await;
+    let meta_path = path_for_job.clone();
+    let probe = cx
+        .background_executor()
+        .spawn(async move { DAUx::probe_audio_file(&meta_path) })
+        .await;
 
-        match probe {
-            Ok(info) => {
-                eprintln!(
+    match probe {
+        Ok(info) => {
+            eprintln!(
                     "[audio-import] metadata read path={} sr={} ch={} frames={} duration={:.3}s size={}",
                     key,
                     info.sample_rate,
@@ -276,98 +288,94 @@ pub async fn run_import_pipeline(
                     info.duration_seconds,
                     std::fs::metadata(&path_for_job).map(|m| m.len()).unwrap_or(0)
                 );
-                let format = info.format.as_str().to_string();
-                let path_key = key.clone();
-                let layout_for_meta = layout_weak.clone();
-                let _ = timeline_probe.update(cx, move |timeline, cx| {
-                    let changed = timeline.state.update_audio_clip_metadata(
-                        &path_key,
-                        &format,
-                        info.sample_rate,
-                        info.channels,
-                        info.total_frames,
-                        info.duration_seconds,
-                    );
-                    timeline
-                        .state
-                        .set_audio_import_for_path(&path_key, AudioImportState::Decoding { progress: 0.0 });
-                    if changed {
-                        eprintln!("[audio-import] clip metadata updated path={path_key}");
-                        if let Some(owner) = layout_for_meta.as_ref() {
-                            let _ = owner.update(cx, |this, cx| {
-                                this.mark_engine_media_dirty();
-                                this.schedule_audio_project_sync(cx, false, "audio_import_probe");
-                            });
-                        }
-                    }
-                });
-                throttled_timeline_notify(&timeline_probe, cx, true);
-            }
-            Err(error) => {
-                eprintln!(
-                    "[audio-import] metadata read failed path={} error={}",
-                    key, error
-                );
-                waveform_cache::install_failed(&key, error.to_string());
-                let path_key = key.clone();
-                let _ = timeline_probe.update(cx, move |timeline, cx| {
-                    timeline.state.set_audio_import_for_path(
-                        &path_key,
-                        AudioImportState::Failed {
-                            message: "metadata read failed".to_string(),
-                        },
-                    );
-                    cx.notify();
-                });
-                throttled_timeline_notify(&timeline_probe, cx, true);
-                return;
-            }
-        }
-
-        // ── Peak generation (streaming for WAV, off UI thread) ─────────────
-        eprintln!("[audio-import] peak cache started path={key}");
-        waveform_cache::set_import_state(&key, AudioImportState::GeneratingPeaks { progress: 0.0 });
-        throttled_timeline_notify(&timeline_peaks, cx, true);
-
-        let decode_path = path_for_job.clone();
-        let path_key = key.clone();
-        let path_key_for_job = path_key.clone();
-        let result = cx
-            .background_executor()
-            .spawn(async move { run_peak_job(&decode_path, &path_key_for_job) })
-            .await;
-
-        match result {
-            Ok(preview) => {
-                install_preview_chunks_progressive(
+            let format = info.format.as_str().to_string();
+            let path_key = key.clone();
+            let layout_for_meta = layout_weak.clone();
+            let _ = timeline_probe.update(cx, move |timeline, cx| {
+                let changed = timeline.state.update_audio_clip_metadata(
                     &path_key,
-                    preview,
-                    &timeline_peaks,
-                    cx,
+                    &format,
+                    info.sample_rate,
+                    info.channels,
+                    info.total_frames,
+                    info.duration_seconds,
                 );
-                let _ = timeline_peaks.update(cx, move |timeline, cx| {
-                    timeline
-                        .state
-                        .set_audio_import_for_path(&path_key, AudioImportState::Ready);
-                    cx.notify();
-                });
-                throttled_timeline_notify(&timeline_peaks, cx, true);
-            }
-            Err(message) => {
-                eprintln!("[audio-import] peak cache failed path={path_key} error={message}");
-                waveform_cache::install_failed(&path_key, message.clone());
-                let _ = timeline_peaks.update(cx, move |timeline, cx| {
-                    timeline.state.set_audio_import_for_path(
-                        &path_key,
-                        AudioImportState::Failed {
-                            message: message.clone(),
-                        },
-                    );
-                    cx.notify();
-                });
-                throttled_timeline_notify(&timeline_peaks, cx, true);
-            }
+                timeline.state.set_audio_import_for_path(
+                    &path_key,
+                    AudioImportState::Decoding { progress: 0.0 },
+                );
+                if changed {
+                    eprintln!("[audio-import] clip metadata updated path={path_key}");
+                    if let Some(owner) = layout_for_meta.as_ref() {
+                        let _ = owner.update(cx, |this, cx| {
+                            this.mark_engine_media_dirty();
+                            this.schedule_audio_project_sync(cx, false, "audio_import_probe");
+                        });
+                    }
+                }
+            });
+            throttled_timeline_notify(&timeline_probe, cx, true);
         }
+        Err(error) => {
+            eprintln!(
+                "[audio-import] metadata read failed path={} error={}",
+                key, error
+            );
+            waveform_cache::install_failed(&key, error.to_string());
+            let path_key = key.clone();
+            let _ = timeline_probe.update(cx, move |timeline, cx| {
+                timeline.state.set_audio_import_for_path(
+                    &path_key,
+                    AudioImportState::Failed {
+                        message: "metadata read failed".to_string(),
+                    },
+                );
+                cx.notify();
+            });
+            throttled_timeline_notify(&timeline_probe, cx, true);
+            return;
+        }
+    }
+
+    // ── Peak generation (streaming for WAV, off UI thread) ─────────────
+    eprintln!("[audio-import] peak cache started path={key}");
+    waveform_cache::set_import_state(&key, AudioImportState::GeneratingPeaks { progress: 0.0 });
+    throttled_timeline_notify(&timeline_peaks, cx, true);
+
+    let decode_path = path_for_job.clone();
+    let path_key = key.clone();
+    let path_key_for_job = path_key.clone();
+    let result = cx
+        .background_executor()
+        .spawn(async move { run_peak_job(&decode_path, &path_key_for_job) })
+        .await;
+
+    match result {
+        Ok(preview) => {
+            install_preview_chunks_progressive(&path_key, preview, &timeline_peaks, cx);
+            let _ = timeline_peaks.update(cx, move |timeline, cx| {
+                timeline
+                    .state
+                    .set_audio_import_for_path(&path_key, AudioImportState::Ready);
+                cx.notify();
+            });
+            throttled_timeline_notify(&timeline_peaks, cx, true);
+        }
+        Err(message) => {
+            eprintln!("[audio-import] peak cache failed path={path_key} error={message}");
+            waveform_cache::install_failed(&path_key, message.clone());
+            let _ = timeline_peaks.update(cx, move |timeline, cx| {
+                timeline.state.set_audio_import_for_path(
+                    &path_key,
+                    AudioImportState::Failed {
+                        message: message.clone(),
+                    },
+                );
+                cx.notify();
+            });
+            throttled_timeline_notify(&timeline_peaks, cx, true);
+        }
+    }
 }
 
 /// Timeline drop import entry point.

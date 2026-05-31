@@ -920,8 +920,7 @@ impl TimelineState {
         };
         const MIN_LABEL_SPACING_PX: f32 = 46.0;
         const MAX_GRID_LINES_BASE: usize = 1200;
-        let max_grid_lines =
-            (MAX_GRID_LINES_BASE as f32 * power.grid_line_budget_scale()) as usize;
+        let max_grid_lines = (MAX_GRID_LINES_BASE as f32 * power.grid_line_budget_scale()) as usize;
 
         let ppb = self.pixels_per_beat().max(0.0001);
         let bpb = self.beats_per_bar();
@@ -1191,7 +1190,9 @@ impl TimelineState {
             return 0.25;
         }
         match self.grid_division {
-            SnapDivision::Auto => self.get_grid_sub_beats(self.viewport.pixels_per_second * self.seconds_per_beat()),
+            SnapDivision::Auto => {
+                self.get_grid_sub_beats(self.viewport.pixels_per_second * self.seconds_per_beat())
+            }
             SnapDivision::Bar1 => bpb,
             other => other.step_beats(bpb),
         }
@@ -1221,8 +1222,8 @@ impl TimelineState {
             .map(|n| n.start.max(0.0) + n.duration.max(MIN_NOTE_BEATS))
             .fold(0.0f32, f32::max);
         let min_len = DEFAULT_MIDI_CLIP_BEATS.max(MIN_MIDI_CLIP_BEATS);
-        let needed = snap_up_beats(max_note_end.max(min_len), snap_beats.max(1.0 / 32.0))
-            .max(min_len);
+        let needed =
+            snap_up_beats(max_note_end.max(min_len), snap_beats.max(1.0 / 32.0)).max(min_len);
         if needed > clip.duration_beats + 1.0e-4 {
             let old = clip.duration_beats;
             clip.duration_beats = needed;
@@ -1255,7 +1256,12 @@ impl TimelineState {
     /// Create an empty MIDI clip on `track_id` at `start_beat` (snapped by the
     /// caller if desired). Returns the new clip id, or `None` if the track is
     /// missing. The clip is selected so the editor can pick it up immediately.
-    pub fn create_midi_clip(&mut self, track_id: &str, start_beat: f32, length_beats: f32) -> Option<String> {
+    pub fn create_midi_clip(
+        &mut self,
+        track_id: &str,
+        start_beat: f32,
+        length_beats: f32,
+    ) -> Option<String> {
         let clip = self.build_midi_clip(track_id, start_beat, length_beats)?;
         let clip_id = clip.id.clone();
         if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
@@ -1330,7 +1336,11 @@ impl TimelineState {
 
     /// Clips intersecting a beat range on any track.
     pub fn clips_intersecting_beats(&self, start: f32, end: f32) -> Vec<String> {
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let mut ids = Vec::new();
         for track in &self.tracks {
             for clip in &track.clips {
@@ -1388,7 +1398,12 @@ impl TimelineState {
         if midi_debug_enabled() {
             eprintln!(
                 "[midi] add_note clip={} id={} pitch={} start={:.3} dur={:.3} vel={}",
-                clip_id, id, pitch.min(127), start, duration, velocity.clamp(1, 127)
+                clip_id,
+                id,
+                pitch.min(127),
+                start,
+                duration,
+                velocity.clamp(1, 127)
             );
         }
         Some(id)
@@ -1572,10 +1587,7 @@ impl TimelineState {
         let slot_id = format!("insert-{}-{}", track.id, track.inserts.len() + 1);
         let slot = InsertSlotState::empty(&slot_id);
         if plugin_debug_enabled() {
-            eprintln!(
-                "[plugin] add_insert track={} slot_id={}",
-                track_id, slot_id
-            );
+            eprintln!("[plugin] add_insert track={} slot_id={}", track_id, slot_id);
         }
         track.inserts.push(slot);
         Some(slot_id)
@@ -1620,7 +1632,10 @@ impl TimelineState {
         };
         track.inserts.retain(|i| i.id != insert_id);
         if plugin_debug_enabled() {
-            eprintln!("[plugin] remove_insert track={} slot={}", track_id, insert_id);
+            eprintln!(
+                "[plugin] remove_insert track={} slot={}",
+                track_id, insert_id
+            );
         }
     }
 
@@ -1678,9 +1693,10 @@ impl TimelineState {
             .find(|t| t.id == track_id)
             .map(|t| t.sends.iter().map(|s| s.target_track_id.clone()).collect())
             .unwrap_or_default();
-        let target = self.tracks.iter().find(|t| {
-            t.id != track_id && t.track_type.is_routing() && !existing.contains(&t.id)
-        })?;
+        let target = self
+            .tracks
+            .iter()
+            .find(|t| t.id != track_id && t.track_type.is_routing() && !existing.contains(&t.id))?;
         let target_id = target.id.clone();
         let target_name = target.name.clone();
 

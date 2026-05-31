@@ -261,7 +261,11 @@ fn matches_substring(haystack: &str, needle: Option<&str>) -> bool {
 /// Match a plug-in against the quirk table. `vendor` and `name` are optional —
 /// scanner/registry data may not always include them. Returns the matching
 /// quirk's *clone* (or the generic default).
-pub fn match_quirk(plugin_path: &Path, name: Option<&str>, vendor: Option<&str>) -> PluginEditorQuirk {
+pub fn match_quirk(
+    plugin_path: &Path,
+    name: Option<&str>,
+    vendor: Option<&str>,
+) -> PluginEditorQuirk {
     let path_lc = plugin_path.to_string_lossy().to_ascii_lowercase();
     let name_lc = name.unwrap_or("").to_ascii_lowercase();
     let vendor_lc = vendor.unwrap_or("").to_ascii_lowercase();
@@ -319,7 +323,10 @@ mod tests {
         assert_eq!(PluginEditorRuntimeKind::WebView2.as_str(), "WebView2");
         assert_eq!(PluginEditorRuntimeKind::Cef.as_str(), "Cef");
         assert_eq!(PluginEditorRuntimeKind::Chromium.as_str(), "Chromium");
-        assert_eq!(PluginEditorRuntimeKind::BrowserUnknown.as_str(), "BrowserUnknown");
+        assert_eq!(
+            PluginEditorRuntimeKind::BrowserUnknown.as_str(),
+            "BrowserUnknown"
+        );
         assert_eq!(PluginEditorRuntimeKind::Native.as_str(), "Native");
     }
 }

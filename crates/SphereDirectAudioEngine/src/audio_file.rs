@@ -147,7 +147,8 @@ fn generate_peaks_in_memory(
         )));
     }
 
-    let lods = peaks_from_interleaved_buffer(&buffer.samples, buffer.channels, buffer.frames as u64);
+    let lods =
+        peaks_from_interleaved_buffer(&buffer.samples, buffer.channels, buffer.frames as u64);
     Ok(AudioPeakFile {
         source_path: info.path.clone(),
         sample_rate: info.sample_rate,
@@ -193,9 +194,8 @@ fn generate_wav_peaks_streaming(
     let mut file = File::open(path).map_err(|e| {
         SphereAudioError::NativeError(format!("Cannot open '{}': {e}", path.display()))
     })?;
-    let (fmt, data_start, data_len) = read_wav_header(&mut file).map_err(|e| {
-        SphereAudioError::NativeError(format!("WAV header read failed: {e}"))
-    })?;
+    let (fmt, data_start, data_len) = read_wav_header(&mut file)
+        .map_err(|e| SphereAudioError::NativeError(format!("WAV header read failed: {e}")))?;
 
     let bytes_per_sample = match fmt.bits_per_sample {
         8 => 1usize,
@@ -210,9 +210,7 @@ fn generate_wav_peaks_streaming(
     };
     let bytes_per_frame = fmt.channels * bytes_per_sample;
     if bytes_per_frame == 0 || data_len < bytes_per_frame as u64 {
-        return Err(SphereAudioError::NativeError(
-            "empty WAV data".to_string(),
-        ));
+        return Err(SphereAudioError::NativeError("empty WAV data".to_string()));
     }
 
     let frames = data_len / bytes_per_frame as u64;
@@ -948,12 +946,14 @@ pub(crate) fn wav_data_layout(bytes: &[u8]) -> Result<(WavFmt, usize, usize), St
 /// Decode one interleaved sample from WAV bytes at `offset`.
 pub(crate) fn decode_wav_sample(bytes: &[u8], offset: usize, fmt: &WavFmt) -> Result<f32, String> {
     let value = match (fmt.audio_format, fmt.bits_per_sample) {
-        (1, 8) => (bytes
-            .get(offset)
-            .copied()
-            .ok_or_else(|| "unexpected EOF".to_string())? as f32
-            - 128.0)
-            / 128.0,
+        (1, 8) => {
+            (bytes
+                .get(offset)
+                .copied()
+                .ok_or_else(|| "unexpected EOF".to_string())? as f32
+                - 128.0)
+                / 128.0
+        }
         (1, 16) => read_i16_le(bytes, offset)? as f32 / 32_768.0,
         (1, 24) => read_i24_le(bytes, offset)? as f32 / 8_388_608.0,
         (1, 32) => read_i32_le(bytes, offset)? as f32 / 2_147_483_648.0,

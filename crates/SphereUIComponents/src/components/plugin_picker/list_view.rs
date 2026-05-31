@@ -13,7 +13,9 @@ use crate::components::plugin_format_badge::plugin_format_badge;
 use crate::components::plugin_picker::category::normalized_category_label;
 use crate::components::plugin_picker::insert::is_insertable;
 use crate::theme::Colors;
-use sphere_plugin_host::{PluginFormat, PluginKind, PluginScanStatus, PluginStatus, RegistryPlugin};
+use sphere_plugin_host::{
+    PluginFormat, PluginKind, PluginScanStatus, PluginStatus, RegistryPlugin,
+};
 
 pub const ROW_HEIGHT: f32 = 38.0;
 
@@ -165,7 +167,9 @@ pub fn plugin_row(
                 .border_l(px(2.0))
                 .border_color(Colors::accent_primary())
         })
-        .when(!highlighted, |el| el.hover(|s| s.bg(Colors::surface_hover())))
+        .when(!highlighted, |el| {
+            el.hover(|s| s.bg(Colors::surface_hover()))
+        })
         .when(!insertable, |el| el.opacity(0.55))
         .cursor(if insertable {
             gpui::CursorStyle::PointingHand
@@ -213,18 +217,17 @@ pub fn plugin_row(
         .child(col_category_cell(category))
         .child(col_format_cell(fmt))
         .when_some(status, |el, label| {
-            el.child(
-                div()
-                    .flex_shrink_0()
-                    .child(status_badge(label, true)),
-            )
+            el.child(div().flex_shrink_0().child(status_badge(label, true)))
         })
 }
 
 fn kind_icon_for(kind: PluginKind) -> (&'static str, gpui::Rgba) {
     match kind {
         PluginKind::Instrument => (assets::ICON_MUSIC_PATH, Colors::accent_primary()),
-        PluginKind::Effect => (assets::ICON_SLIDERS_HORIZONTAL_PATH, Colors::status_success()),
+        PluginKind::Effect => (
+            assets::ICON_SLIDERS_HORIZONTAL_PATH,
+            Colors::status_success(),
+        ),
     }
 }
 
@@ -293,16 +296,13 @@ pub fn skeleton_row(index: usize) -> impl IntoElement {
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .child(
-            div()
-                .w(px(COL_ICON))
-                .flex_shrink_0()
-                .child(
-                    div()
-                        .w(px(12.0))
-                        .h(px(12.0))
-                        .rounded_sm()
-                        .bg(Colors::with_alpha(Colors::text_primary(), alpha)),
-                ),
+            div().w(px(COL_ICON)).flex_shrink_0().child(
+                div()
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .rounded_sm()
+                    .bg(Colors::with_alpha(Colors::text_primary(), alpha)),
+            ),
         )
         .child(div().w(px(COL_FAVORITE)).flex_shrink_0())
         .child(

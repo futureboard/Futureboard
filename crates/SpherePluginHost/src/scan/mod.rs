@@ -5,7 +5,7 @@ pub mod isolation;
 pub mod log;
 pub mod types;
 
-pub use cache::{AuScanCacheState, FormatCacheStatus, load_au_cache_state, save_au_cache_state};
+pub use cache::{load_au_cache_state, save_au_cache_state, AuScanCacheState, FormatCacheStatus};
 pub use isolation::{
     locate_scanner_binary, run_isolated_format_scan, run_isolated_plugin_validation,
     IsolatedScanOutcome, IsolatedScanRequest, ScannerBinaryLocation,

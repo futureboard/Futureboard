@@ -3,30 +3,6 @@
 version = 4
 
 [[package]]
-name = "SphereFBEncoder"
-version = "0.1.0"
-
-[[package]]
-name = "SphereFBExtentionHost"
-version = "0.1.0"
-
-[[package]]
-name = "SphereFBMediaUtils"
-version = "0.1.0"
-
-[[package]]
-name = "SphereFBNoiseRemover"
-version = "0.1.0"
-
-[[package]]
-name = "SphereFBSettings"
-version = "0.1.0"
-
-[[package]]
-name = "SphereFBStemExtractor"
-version = "0.1.0"
-
-[[package]]
 name = "SphereFBVoiceTune"
 version = "0.1.0"
 dependencies = [

@@ -56,9 +56,7 @@ pub use crate::native::{
     AudioBackend, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo,
     EngineInsertStatus, EngineStats, DEFAULT_BUFFER_SIZE, DEFAULT_SAMPLE_RATE,
 };
-pub use crate::vst3_processor::{
-    Vst3MidiEvent, Vst3MidiEventKind, Vst3RuntimeProcessor,
-};
+pub use crate::vst3_processor::{Vst3MidiEvent, Vst3MidiEventKind, Vst3RuntimeProcessor};
 
 use std::sync::Arc;
 

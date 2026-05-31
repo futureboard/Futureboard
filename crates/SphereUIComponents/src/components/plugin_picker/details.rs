@@ -4,7 +4,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::plugin_picker::category::normalized_category_label;
-use crate::components::plugin_picker::insert::{validate_insert, InsertValidation, PluginInsertTarget};
+use crate::components::plugin_picker::insert::{
+    validate_insert, InsertValidation, PluginInsertTarget,
+};
 use crate::components::plugin_picker::list_view::{format_badge, scan_status_label};
 use crate::theme::Colors;
 use sphere_plugin_host::{PluginKind, RegistryPlugin};
@@ -65,11 +67,7 @@ pub fn plugin_details_panel(
                 .when_some(plugin.error_message.as_deref(), |panel, error| {
                     panel.child(detail_row("Error", error))
                 })
-                .child(
-                    div()
-                        .pt(px(4.0))
-                        .child(format_badge(plugin.format)),
-                )
+                .child(div().pt(px(4.0)).child(format_badge(plugin.format)))
                 .when(validation != InsertValidation::Ok, |panel| {
                     panel.child(
                         div()

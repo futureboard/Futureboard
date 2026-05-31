@@ -4,10 +4,13 @@ use std::borrow::Cow;
 
 /// Asset path for the boot splash image, resolvable via `gpui::img(...)`.
 pub const SPLASH_IMAGE_PATH: &str = "images/splash.png";
+/// Futureboard application icon/logo from packages/assets, resolvable via `gpui::img(...)`.
+pub const APP_LOGO_PATH: &str = "images/app.png";
 
 /// Splash PNG, embedded at compile time so it ships inside the binary (no
 /// runtime file dependency on the source tree / install layout).
 static SPLASH_PNG: &[u8] = include_bytes!("../../../packages/shared/images/splash.png");
+static APP_LOGO_PNG: &[u8] = include_bytes!("../../../packages/assets/app.png");
 
 pub struct EmbeddedAssets;
 
@@ -27,6 +30,9 @@ impl AssetSource for EmbeddedAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path == SPLASH_IMAGE_PATH {
             return Ok(Some(Cow::Borrowed(SPLASH_PNG)));
+        }
+        if path == APP_LOGO_PATH {
+            return Ok(Some(Cow::Borrowed(APP_LOGO_PNG)));
         }
         let bytes = match path {
             assets::ICON_PLAY_PATH => Some(assets::icons::PLAY.as_bytes()),
@@ -92,6 +98,8 @@ impl AssetSource for EmbeddedAssets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let all_paths = [
+            APP_LOGO_PATH,
+            SPLASH_IMAGE_PATH,
             assets::ICON_PLAY_PATH,
             assets::ICON_PAUSE_PATH,
             assets::ICON_SQUARE_PATH,

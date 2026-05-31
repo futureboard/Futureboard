@@ -54,7 +54,8 @@ impl AudioEditorHost {
         };
 
         let selection_range = self.state.selection_range.or_else(|| {
-            tl.state.arrangement_range.map(|(a, b)| {
+            tl.state.arrangement_range.as_ref().map(|range| {
+                let (a, b) = range.as_f32_range();
                 let lo = (a - clip.start_beat).max(0.0);
                 let hi = (b - clip.start_beat).min(clip.duration_beats);
                 (lo.min(hi), lo.max(hi))

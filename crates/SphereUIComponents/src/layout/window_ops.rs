@@ -7,8 +7,11 @@ use crate::components::add_track_dialog::{
 };
 use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
 use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate};
-use crate::components::timeline::timeline_state::{self, ClipType, CreateTrackOptions, TrackType};
+use crate::components::timeline::timeline_state::{
+    self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackType,
+};
 use crate::components::{external_mixer_debug, open_mixer_window};
+use sphere_plugin_host::{PluginFormat as RegistryPluginFormat, PluginKind};
 
 use super::helpers::{cleaned_track_name, numbered_name_stem};
 use super::{ContextTarget, OpenPopover, StudioLayout};
@@ -75,7 +78,32 @@ impl StudioLayout {
             size: gpui::size(px(1400.0), px(900.0)),
         });
 
+        if self.available_plugins.is_none()
+            || !matches!(
+                self.plugin_catalog_status,
+                crate::components::plugin_picker::CatalogStatus::Ready
+            )
+        {
+            self.arm_catalog_load(cx);
+        }
+        let instrument_plugins: Vec<sphere_plugin_host::RegistryPlugin> = self
+            .available_plugins
+            .as_ref()
+            .map(|plugins| {
+                plugins
+                    .iter()
+                    .filter(|plugin| {
+                        plugin.kind == PluginKind::Instrument
+                            && plugin.supports_insert()
+                            && plugin.scan_status.is_usable()
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let layout = cx.entity().clone();
+        let instrument_registry = instrument_plugins.clone();
         let on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static> =
             Arc::new(move |dialog, _name, cx| {
                 let Some(track_type) = dialog.selected_kind.native_track_type() else {
@@ -115,6 +143,43 @@ impl StudioLayout {
                                 input_monitor: dialog.selected_kind == AddTrackKind::Audio
                                     && dialog.monitor_mode != "off",
                             });
+                            if dialog.selected_kind == AddTrackKind::Instrument {
+                                if let Some(plugin_id) = dialog.instrument_plugin_id.as_deref() {
+                                    if let Some(reg) =
+                                        instrument_registry.iter().find(|p| p.id == plugin_id)
+                                    {
+                                        if let Some(slot_id) = timeline.state.add_insert(&id) {
+                                            let format = match reg.format {
+                                                RegistryPluginFormat::Vst3 => {
+                                                    InsertPluginFormat::Vst3
+                                                }
+                                                RegistryPluginFormat::Clap => {
+                                                    InsertPluginFormat::Clap
+                                                }
+                                                RegistryPluginFormat::Au => InsertPluginFormat::Au,
+                                                RegistryPluginFormat::Lv2 => {
+                                                    InsertPluginFormat::Lv2
+                                                }
+                                                RegistryPluginFormat::Unknown => {
+                                                    InsertPluginFormat::Unknown
+                                                }
+                                            };
+                                            let plugin_uid = reg
+                                                .class_id
+                                                .clone()
+                                                .unwrap_or_else(|| reg.id.clone());
+                                            timeline.state.set_insert_plugin(
+                                                &id,
+                                                &slot_id,
+                                                plugin_uid,
+                                                Some(reg.path.clone()),
+                                                format,
+                                                reg.name.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             created_ids.push(id.clone());
                             selected_track_id = Some(id);
                         }
@@ -138,6 +203,7 @@ impl StudioLayout {
             kind,
             track_count,
             has_master_track,
+            instrument_plugins,
             on_confirm_request,
             cx,
         ) {

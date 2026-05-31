@@ -69,6 +69,24 @@ impl PluginPickerState {
         next_slot_index: usize,
         show_details: bool,
     ) -> Self {
+        Self::open_for_with_filter(
+            track_id,
+            track_name,
+            track_type,
+            next_slot_index,
+            show_details,
+            PickerFilter::All,
+        )
+    }
+
+    pub fn open_for_with_filter(
+        track_id: &str,
+        track_name: &str,
+        track_type: TrackType,
+        next_slot_index: usize,
+        show_details: bool,
+        sidebar_filter: PickerFilter,
+    ) -> Self {
         Self {
             is_open: true,
             insert_target: PluginInsertTarget {
@@ -77,7 +95,10 @@ impl PluginPickerState {
                 track_type,
                 next_slot_index,
             },
-            filters: PluginFilterState::default(),
+            filters: PluginFilterState {
+                sidebar: sidebar_filter,
+                ..PluginFilterState::default()
+            },
             query: String::new(),
             selected_id: None,
             highlighted_index: 0,

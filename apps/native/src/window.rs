@@ -1,10 +1,8 @@
-use gpui::{
-    px, size, App, Bounds, Point, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowKind, WindowOptions,
-};
+use gpui::{px, size, App, Bounds, Point, WindowBounds, WindowOptions};
 
 use sphere_ui_components::platform_chrome;
-use sphere_ui_components::splash::{SPLASH_HEIGHT, SPLASH_WIDTH};
+pub const WELCOME_WIDTH: f32 = 1180.0;
+pub const WELCOME_HEIGHT: f32 = 820.0;
 
 pub fn studio_window_options() -> WindowOptions {
     let mut options = platform_chrome::studio_window_options();
@@ -15,12 +13,8 @@ pub fn studio_window_options() -> WindowOptions {
     options
 }
 
-/// Borderless, fixed-size splash window centered on the primary display.
-pub fn splash_window_options(cx: &App) -> WindowOptions {
-    let splash_size = size(px(SPLASH_WIDTH), px(SPLASH_HEIGHT));
-
-    // Center on the primary display; fall back to a reasonable offset if the
-    // display list is unavailable.
+pub fn welcome_window_options(cx: &App) -> WindowOptions {
+    let welcome_size = size(px(WELCOME_WIDTH), px(WELCOME_HEIGHT));
     let origin = cx
         .primary_display()
         .map(|display| {
@@ -30,30 +24,21 @@ pub fn splash_window_options(cx: &App) -> WindowOptions {
             let dw = f32::from(b.size.width);
             let dh = f32::from(b.size.height);
             Point {
-                x: px(ox + (dw - SPLASH_WIDTH).max(0.0) / 2.0),
-                y: px(oy + (dh - SPLASH_HEIGHT).max(0.0) / 2.0),
+                x: px(ox + (dw - WELCOME_WIDTH).max(0.0) / 2.0),
+                y: px(oy + (dh - WELCOME_HEIGHT).max(0.0) / 2.0),
             }
         })
         .unwrap_or(Point {
-            x: px(420.0),
-            y: px(260.0),
+            x: px(260.0),
+            y: px(100.0),
         });
 
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin,
-            size: splash_size,
-        })),
-        // Borderless: no OS titlebar, app draws the artwork edge-to-edge.
-        titlebar: None,
-        focus: true,
-        show: true,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        kind: WindowKind::PopUp,
-        window_background: WindowBackgroundAppearance::Opaque,
-        window_decorations: Some(WindowDecorations::Client),
-        ..Default::default()
-    }
+    let mut options = platform_chrome::studio_window_options();
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
+        origin,
+        size: welcome_size,
+    }));
+    options.show = true;
+    options.focus = true;
+    options
 }

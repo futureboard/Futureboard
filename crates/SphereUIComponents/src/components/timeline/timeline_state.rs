@@ -417,6 +417,68 @@ pub struct TimelineSelection {
     pub selected_clip_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineRangeSelection {
+    pub start_beat: f64,
+    pub end_beat: f64,
+    pub track_ids: Vec<String>,
+}
+
+impl TimelineRangeSelection {
+    pub fn new(start_beat: f64, end_beat: f64, track_ids: Vec<String>) -> Self {
+        let (start_beat, end_beat) = if start_beat <= end_beat {
+            (start_beat, end_beat)
+        } else {
+            (end_beat, start_beat)
+        };
+        Self {
+            start_beat,
+            end_beat,
+            track_ids,
+        }
+    }
+
+    pub fn as_f32_range(&self) -> (f32, f32) {
+        (self.start_beat as f32, self.end_beat as f32)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackLayout {
+    pub track_ids: Vec<TrackId>,
+    pub track_height: f32,
+    pub scroll_y: f32,
+}
+
+impl TrackLayout {
+    pub fn from_tracks(tracks: &[TrackState], scroll_y: f32) -> Self {
+        Self {
+            track_ids: tracks.iter().map(|track| track.id.clone()).collect(),
+            track_height: TRACK_HEIGHT,
+            scroll_y,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapSettings {
+    pub enabled: bool,
+    pub division: SnapDivision,
+    pub beats_per_bar: f64,
+    pub auto_step_beats: f64,
+}
+
+impl SnapSettings {
+    pub fn from_timeline(state: &TimelineState) -> Self {
+        Self {
+            enabled: state.snap_to_grid,
+            division: state.grid_division,
+            beats_per_bar: state.beats_per_bar() as f64,
+            auto_step_beats: state.get_grid_sub_beats(state.pixels_per_beat()) as f64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapDivision {
     Auto,
@@ -506,8 +568,9 @@ pub struct TimelineState {
     /// drags the viewport; can be re-enabled from the Follow button.
     pub follow_playhead: bool,
     pub auto_scroll_mode: AutoScrollMode,
-    /// Arrangement time-range selection in beats `(start, end)`.
-    pub arrangement_range: Option<(f32, f32)>,
+    /// Arrangement time-range selection in beats. UI-only; never marks the
+    /// project or engine dirty by itself.
+    pub arrangement_range: Option<TimelineRangeSelection>,
 }
 
 impl Default for TimelineState {
@@ -772,6 +835,52 @@ pub const TRACK_HEIGHT: f32 = 76.0;
 pub const RULER_HEIGHT: f32 = 30.0;
 pub type TrackId = String;
 
+pub fn beat_to_x(beat: f64, viewport: &TimelineViewport) -> f32 {
+    ((beat.max(0.0) as f32) * viewport.pixels_per_beat - viewport.scroll_x).round()
+}
+
+pub fn x_to_beat(x: f32, viewport: &TimelineViewport) -> f64 {
+    ((x + viewport.scroll_x) / viewport.pixels_per_beat.max(0.0001)).max(0.0) as f64
+}
+
+pub fn snap_beat(beat: f64, snap: SnapSettings) -> f64 {
+    if !snap.enabled || snap.division == SnapDivision::Off {
+        return beat.max(0.0);
+    }
+    let step = match snap.division {
+        SnapDivision::Auto => snap.auto_step_beats,
+        SnapDivision::Bar1 => snap.beats_per_bar,
+        other => other.step_beats(snap.beats_per_bar as f32) as f64,
+    };
+    if step <= 0.0 {
+        return beat.max(0.0);
+    }
+    ((beat / step).round() * step).max(0.0)
+}
+
+pub fn track_at_y(y: f32, layout: &TrackLayout) -> Option<TrackId> {
+    if layout.track_height <= 0.0 {
+        return None;
+    }
+    let index = ((y + layout.scroll_y).max(0.0) / layout.track_height).floor() as usize;
+    layout.track_ids.get(index).cloned()
+}
+
+pub fn clip_rect(
+    clip: &ClipState,
+    viewport: &TimelineViewport,
+    layout: &TrackLayout,
+) -> gpui::Bounds<gpui::Pixels> {
+    let x = beat_to_x(clip.start_beat as f64, viewport);
+    let w =
+        ((clip.duration_beats.max(0.0) as f64 * viewport.pixels_per_beat as f64) as f32).max(1.0);
+    let y = -layout.scroll_y;
+    gpui::bounds(
+        gpui::point(gpui::px(x), gpui::px(y)),
+        gpui::size(gpui::px(w), gpui::px(layout.track_height)),
+    )
+}
+
 impl TimelineState {
     pub fn seconds_per_beat(&self) -> f32 {
         60.0 / self.bpm.max(1.0)
@@ -806,11 +915,11 @@ impl TimelineState {
     }
 
     pub fn beats_to_x(&self, beats: f32) -> f32 {
-        self.time_to_content_x(beats * self.seconds_per_beat())
+        beat_to_x(beats as f64, &self.viewport)
     }
 
     pub fn x_to_beats(&self, x: f32) -> f32 {
-        self.seconds_to_beats(self.content_x_to_time(x) as f64)
+        x_to_beat(x, &self.viewport) as f32
     }
 
     pub fn beat_to_x(&self, beat: f32) -> f32 {
@@ -818,13 +927,14 @@ impl TimelineState {
     }
 
     pub fn x_to_beat(&self, x: f32) -> f64 {
-        self.x_to_beats(x) as f64
+        x_to_beat(x, &self.viewport)
     }
 
     pub fn lane_y_to_track_id(&self, y: f32) -> Option<TrackId> {
-        self.track_index_at_y(y)
-            .and_then(|index| self.tracks.get(index))
-            .map(|track| track.id.clone())
+        track_at_y(
+            y,
+            &TrackLayout::from_tracks(&self.tracks, self.viewport.scroll_y),
+        )
     }
 
     pub fn update_viewport_size(&mut self, width: f32, height: f32) {
@@ -1142,8 +1252,33 @@ impl TimelineState {
 
     /// Snap a beat value to the current grid (or return it unchanged when snap is off).
     pub fn snap_beats(&self, beats: f32) -> f32 {
-        let snapped_sec = self.snap_time(beats * self.seconds_per_beat());
-        snapped_sec / self.seconds_per_beat()
+        snap_beat(beats as f64, SnapSettings::from_timeline(self)) as f32
+    }
+
+    pub fn selected_range_track_ids(&self) -> Vec<String> {
+        self.selection
+            .selected_track_id
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    }
+
+    pub fn track_ids_between(&self, a: &str, b: &str) -> Vec<String> {
+        let Some(a_index) = self.tracks.iter().position(|track| track.id == a) else {
+            return Vec::new();
+        };
+        let Some(b_index) = self.tracks.iter().position(|track| track.id == b) else {
+            return vec![a.to_string()];
+        };
+        let (lo, hi) = if a_index <= b_index {
+            (a_index, b_index)
+        } else {
+            (b_index, a_index)
+        };
+        self.tracks[lo..=hi]
+            .iter()
+            .map(|track| track.id.clone())
+            .collect()
     }
 
     /// Create a new audio track with auto-assigned id/color.

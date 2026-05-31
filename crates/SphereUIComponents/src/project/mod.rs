@@ -1,8 +1,10 @@
 pub mod format;
 pub mod io;
 pub mod recent;
+pub mod template;
 
 pub use format::{decode_project, encode_project, ProjectError, PROJECT_MAGIC, PROJECT_VERSION};
+pub use template::ProjectTemplate;
 pub use io::{
     create_project_folder, default_projects_dir, load_project, sanitize_project_name, save_project,
     PROJECT_FILE_EXT,

@@ -17,10 +17,19 @@ pub fn plugin_format_badge(format: PluginFormat) -> AnyElement {
 }
 
 fn format_icon_badge(path: &'static str) -> AnyElement {
-    svg()
-        .path(path)
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
         .w(px(FORMAT_ICON_SIZE))
         .h(px(FORMAT_ICON_SIZE))
+        .child(
+            svg()
+                .path(path)
+                .w(px(FORMAT_ICON_SIZE))
+                .h(px(FORMAT_ICON_SIZE))
+                .text_color(Colors::text_primary()),
+        )
         .into_any_element()
 }
 

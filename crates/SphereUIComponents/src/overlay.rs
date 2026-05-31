@@ -46,7 +46,7 @@ pub struct OverlaySize {
     pub height: f32,
 }
 
-/// Layout of the value column in settings / wizard form rows.
+/// Layout of the value column in settings form rows.
 #[derive(Debug, Clone, Copy)]
 pub struct FormColumnLayout {
     pub value_left: f32,
@@ -61,23 +61,6 @@ pub fn settings_form_column(window: &Window) -> FormColumnLayout {
     let w: f32 = window.bounds().size.width.into();
     let left = SIDEBAR + CONTENT_PAD + LABEL + GAP;
     let width = (w - left - CONTENT_PAD).max(120.0);
-    FormColumnLayout {
-        value_left: left,
-        value_width: width,
-    }
-}
-
-pub fn wizard_form_column(window: &Window) -> FormColumnLayout {
-    const OUTER_PAD: f32 = 16.0;
-    const LEFT_COL: f32 = 540.0;
-    const COL_GAP: f32 = 16.0;
-    const INNER_PAD: f32 = 14.0;
-    const LABEL: f32 = 86.0;
-    const GAP: f32 = 10.0;
-    let w: f32 = window.bounds().size.width.into();
-    let left = OUTER_PAD + LEFT_COL + COL_GAP + INNER_PAD + LABEL + GAP;
-    let right_panel = w - OUTER_PAD - LEFT_COL - COL_GAP - OUTER_PAD;
-    let width = (right_panel - INNER_PAD * 2.0 - LABEL - GAP).max(120.0);
     FormColumnLayout {
         value_left: left,
         value_width: width,

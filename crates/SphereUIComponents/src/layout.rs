@@ -16,8 +16,8 @@ use crate::components::plugin_picker::{
     CatalogStatus as PluginCatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
     PluginPickerState, PluginSearchIndex,
 };
+use crate::components::message_box_dialog::MessageBoxWindow;
 use crate::components::project_switcher::ProjectSwitcherState;
-use crate::components::project_wizard::ProjectWizardWindow;
 use crate::components::settings_dialog::SettingsWindow;
 use crate::components::text_input::{
     text_input_context_entries, TextInputCallbacks, TextInputState,
@@ -50,6 +50,7 @@ mod window_ops;
 
 use engine_snapshot::volume_norm_to_linear;
 use frame_diagnostics::FrameDiagnostics;
+use project_ops::LifecycleAction;
 use helpers::{
     find_clip_summary, is_supported_audio_ext, is_text_input_key, key_debug, normalize_command_id,
     reveal_path, should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
@@ -57,9 +58,11 @@ use helpers::{
 pub use studio_state::{ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility};
 use studio_state::{TextContextMenu, TextMenuTarget, TransportCommand};
 
-/// Flip to `true` to seed the studio with demo tracks/clips at startup.
-/// Production builds must keep this `false` — the real app starts empty.
-const USE_DEMO_PROJECT: bool = false;
+/// Demo content is opt-in only. The real runtime starts empty and renders
+/// project state loaded or created by the user.
+fn use_demo_project() -> bool {
+    std::env::var_os("FUTUREBOARD_DEMO_PROJECT").is_some_and(|value| value == "1")
+}
 
 /// Notify a satellite window's root view without calling `Entity::update` (which
 /// can re-enter the main studio entity and trip GPUI's lease checks).
@@ -187,8 +190,17 @@ pub struct StudioLayout {
     project_folder: Option<PathBuf>,
     /// Persistent recent-projects list backed by `<AppData>/Futureboard Studio/recent.json`.
     recent_projects: RecentProjectsStore,
-    /// External borderless New Project utility window, if it is currently alive.
-    project_wizard_window: Option<WindowHandle<ProjectWizardWindow>>,
+    /// Handle to this workspace's own window. Set by the app layer right after
+    /// the window opens so `close_project` can close it when returning to
+    /// Welcome. `None` until wired (e.g. in tests / headless contexts).
+    self_window: Option<WindowHandle<StudioLayout>>,
+    /// App-level hook that re-opens the Welcome window. Invoked by
+    /// `do_close_project`. The app layer owns Welcome window construction, so
+    /// the studio crate stays decoupled from native window options.
+    on_request_welcome: Option<Arc<dyn Fn(&mut gpui::App) + 'static>>,
+    /// Live unsaved-changes guard dialog (Save / Don't Save / Cancel), if one
+    /// is currently shown. Tracked so New/Open/Close/Quit don't stack dialogs.
+    unsaved_guard_window: Option<WindowHandle<MessageBoxWindow>>,
 }
 
 impl StudioLayout {
@@ -288,7 +300,7 @@ impl StudioLayout {
         crate::boot::log("audio engine handle ready");
 
         let timeline = cx.new(|_| {
-            if USE_DEMO_PROJECT {
+            if use_demo_project() {
                 components::timeline::Timeline::with_demo_content()
             } else {
                 components::timeline::Timeline::new()
@@ -493,8 +505,24 @@ impl StudioLayout {
             project_path: None,
             project_folder: None,
             recent_projects: RecentProjectsStore::load(),
-            project_wizard_window: None,
+            self_window: None,
+            on_request_welcome: None,
+            unsaved_guard_window: None,
         }
+    }
+
+    /// Wire this layout to its own window handle so `close_project` can close
+    /// the workspace window when returning to Welcome.
+    pub fn set_self_window(&mut self, handle: WindowHandle<StudioLayout>) {
+        self.self_window = Some(handle);
+    }
+
+    /// Wire the app-level "return to Welcome" hook used by `close_project`.
+    pub fn set_request_welcome_callback(
+        &mut self,
+        callback: Arc<dyn Fn(&mut gpui::App) + 'static>,
+    ) {
+        self.on_request_welcome = Some(callback);
     }
 }
 
@@ -504,7 +532,7 @@ impl StudioLayout {
     /// IDs (e.g. `transport:play-pause`). Unknown IDs are logged once
     /// and then ignored — this is the contract that lets future menu
     /// entries appear in the chrome without crashing the dispatcher.
-    pub(crate) fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
+    pub fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
         self.dispatch_command_id_from_bounds(command_id, None, cx);
     }
 
@@ -649,10 +677,22 @@ impl StudioLayout {
             "view:reset-zoom" => self.reset_timeline_zoom(cx),
 
             // ── Project / track / edit commands available in native shell ─
+            // New Project no longer opens a modal wizard — it drops straight
+            // into a fresh, empty, unsaved workspace. All four lifecycle
+            // entry points share one unsaved-changes guard (Save / Don't Save /
+            // Cancel) before replacing or unloading the current project.
             "project:new" | "project:new-from-template" => {
-                self.open_project_wizard(owner_bounds, cx)
+                self.guard_dirty_then(LifecycleAction::NewProject, owner_bounds, cx)
             }
-            "project:open" => self.cmd_open_project(cx),
+            "project:close" => {
+                self.guard_dirty_then(LifecycleAction::CloseProject, owner_bounds, cx)
+            }
+            // Quit the whole application — distinct from `project:close`, which
+            // only unloads the session and returns to Welcome.
+            "app:quit" => self.guard_dirty_then(LifecycleAction::Quit, owner_bounds, cx),
+            "project:open" => {
+                self.guard_dirty_then(LifecycleAction::OpenProject, owner_bounds, cx)
+            }
             "project:save" => self.cmd_save_project(cx),
             "project:save-as" => self.cmd_save_project_as(cx),
             "project:save-copy" => self.cmd_save_project_copy(cx),

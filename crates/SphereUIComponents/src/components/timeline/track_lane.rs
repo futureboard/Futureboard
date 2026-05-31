@@ -25,7 +25,7 @@ pub fn track_lane(
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
     on_range_start: Option<
-        std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+        std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_erase_start: Option<
         std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -144,7 +144,7 @@ pub fn track_lane(
                 } else {
                     on_select(&track_id_select, window, cx);
                     if let Some(start_range) = on_range_start.as_ref() {
-                        start_range(&snapped_beat, window, cx);
+                        start_range(&(track_id_select.clone(), snapped_beat), window, cx);
                     }
                 }
             },

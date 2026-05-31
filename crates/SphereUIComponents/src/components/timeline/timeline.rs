@@ -4,8 +4,8 @@ use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, SnapDivision, TimelineState, TimelineTool, TrackDragItem, TrackType,
-    HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+    ClipDragItem, SnapDivision, TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem,
+    TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -63,8 +63,8 @@ pub struct Timeline {
     clip_drag_target_track_index: Option<usize>,
     /// Pen-tool click-drag: `(track_id, start_beat)` until mouse-up creates the clip.
     pen_clip_draw: Option<(String, f32)>,
-    /// Pointer-tool range select drag in beats.
-    range_select_drag: Option<(f32, f32)>,
+    /// Pointer-tool range select drag: `(start_beat, current_beat, start_track_id)`.
+    range_select_drag: Option<(f32, f32, String)>,
     /// Right-drag erase: clip ids already queued for deletion this gesture.
     erase_clip_drag: Option<HashSet<String>>,
     /// Live preview of clip ids marked for erase (mirrors `erase_clip_drag`).
@@ -268,21 +268,21 @@ impl Timeline {
             return;
         }
 
-        let (clip_start, length) =
-            if let Some((range_start, range_end)) = self.state.arrangement_range {
-                let (lo, hi) = normalize_range(range_start, range_end);
-                (lo, (hi - lo).max(MIN_MIDI_CLIP_BEATS))
+        let (clip_start, length) = if let Some(range) = self.state.arrangement_range.as_ref() {
+            let (range_start, range_end) = range.as_f32_range();
+            let (lo, hi) = normalize_range(range_start, range_end);
+            (lo, (hi - lo).max(MIN_MIDI_CLIP_BEATS))
+        } else {
+            let (lo, hi) = normalize_range(start_beat, end_beat);
+            let mut len = (hi - lo).max(DEFAULT_MIDI_CLIP_BEATS);
+            if self.state.snap_to_grid {
+                let step = self.state.midi_snap_step_beats();
+                len = ((len / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
             } else {
-                let (lo, hi) = normalize_range(start_beat, end_beat);
-                let mut len = (hi - lo).max(DEFAULT_MIDI_CLIP_BEATS);
-                if self.state.snap_to_grid {
-                    let step = self.state.midi_snap_step_beats();
-                    len = ((len / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
-                } else {
-                    len = len.max(MIN_MIDI_CLIP_BEATS);
-                }
-                (lo, len)
-            };
+                len = len.max(MIN_MIDI_CLIP_BEATS);
+            }
+            (lo, len)
+        };
 
         if let Some(clip) = self.state.build_midi_clip(&track_id, clip_start, length) {
             let clip_id = clip.id.clone();
@@ -303,11 +303,22 @@ impl Timeline {
     }
 
     fn finish_range_select(&mut self, end_beat: f32, cx: &mut gpui::Context<Self>) {
-        let Some((start, _)) = self.range_select_drag.take() else {
+        let Some((start, _, start_track_id)) = self.range_select_drag.take() else {
             return;
         };
         let (lo, hi) = normalize_range(start, end_beat);
-        self.state.arrangement_range = Some((lo, hi));
+        let track_ids = self
+            .state
+            .arrangement_range
+            .as_ref()
+            .map(|range| range.track_ids.clone())
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| {
+                self.state
+                    .track_ids_between(&start_track_id, &start_track_id)
+            });
+        self.state.arrangement_range =
+            Some(TimelineRangeSelection::new(lo as f64, hi as f64, track_ids));
         cx.notify();
     }
 
@@ -629,10 +640,14 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_range_start = cx.listener(|this, beat: &f32, _window, cx| {
+        let on_range_start = cx.listener(|this, (track_id, beat): &(String, f32), _window, cx| {
             if this.state.active_tool == TimelineTool::Pointer {
-                this.range_select_drag = Some((*beat, *beat));
-                this.state.arrangement_range = Some((*beat, *beat));
+                this.range_select_drag = Some((*beat, *beat, track_id.clone()));
+                this.state.arrangement_range = Some(TimelineRangeSelection::new(
+                    *beat as f64,
+                    *beat as f64,
+                    vec![track_id.clone()],
+                ));
                 cx.notify();
             }
         });
@@ -663,8 +678,19 @@ impl Render for Timeline {
                 && this.range_select_drag.is_some()
             {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-                if let Some((start, _)) = this.range_select_drag {
-                    this.state.arrangement_range = Some(normalize_range(start, beat));
+                if let Some((start, _, ref start_track_id)) = this.range_select_drag {
+                    let (lo, hi) = normalize_range(start, beat);
+                    let lane_y = Self::track_area_y_from_window(event.position);
+                    let current_track_id = this
+                        .state
+                        .lane_y_to_track_id(lane_y)
+                        .unwrap_or_else(|| start_track_id.clone());
+                    this.state.arrangement_range = Some(TimelineRangeSelection::new(
+                        lo as f64,
+                        hi as f64,
+                        this.state
+                            .track_ids_between(start_track_id, &current_track_id),
+                    ));
                     cx.notify();
                 }
             }
@@ -819,7 +845,7 @@ impl Render for Timeline {
             dyn Fn(&TimelineTool, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_select_tool);
         let on_range_start: std::sync::Arc<
-            dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static,
+            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_range_start);
         let on_erase_start: std::sync::Arc<
             dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static,

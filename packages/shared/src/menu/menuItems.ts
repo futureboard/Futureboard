@@ -51,6 +51,7 @@ export const APP_MENUS: AppMenuGroup[] = [
         accelerator: "Ctrl+Shift+N",
         icon: "layout-template",
         action: "project:new-from-template",
+        description: "Start a new project from a template",
       },
       {
         id: "file.open_project",
@@ -219,6 +220,7 @@ export const APP_MENUS: AppMenuGroup[] = [
         accelerator: "Ctrl+W",
         icon: "x",
         action: "project:close",
+        description: "Close the current project and return to the welcome screen",
       },
       {
         id: "file.quit",
@@ -227,6 +229,7 @@ export const APP_MENUS: AppMenuGroup[] = [
         icon: "power",
         role: "quit",
         action: "app:quit",
+        description: "Exit Futureboard Studio",
       },
     ],
   },

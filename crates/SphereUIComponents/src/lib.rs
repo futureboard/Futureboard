@@ -47,3 +47,13 @@ pub mod project;
 pub mod settings;
 pub mod splash;
 pub mod theme;
+pub mod welcome;
+
+pub fn ui_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("FUTUREBOARD_UI_DEBUG")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}

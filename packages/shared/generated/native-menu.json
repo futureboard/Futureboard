@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-05-30T07:33:49.861Z",
+  "generatedAt": "2026-05-31T18:56:54.891Z",
   "menus": [
     {
       "id": "file",
@@ -33,7 +33,7 @@
           "visible": true,
           "checked": false,
           "danger": false,
-          "description": null,
+          "description": "Start a new project from a template",
           "children": []
         },
         {
@@ -405,7 +405,7 @@
           "visible": true,
           "checked": false,
           "danger": false,
-          "description": null,
+          "description": "Close the current project and return to the welcome screen",
           "children": []
         },
         {
@@ -420,7 +420,7 @@
           "visible": true,
           "checked": false,
           "danger": false,
-          "description": null,
+          "description": "Exit Futureboard Studio",
           "children": []
         }
       ]

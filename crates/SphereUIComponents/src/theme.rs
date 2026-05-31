@@ -41,6 +41,51 @@ pub mod menu {
 pub struct Colors;
 
 impl Colors {
+    // Startup / welcome window
+    pub fn surface_startup_bg() -> Rgba {
+        rgb(0x16181C)
+    }
+
+    pub fn surface_startup_window() -> Rgba {
+        rgb(0x1B1D22)
+    }
+
+    pub fn surface_startup_panel() -> Rgba {
+        rgb(0x1E2025)
+    }
+
+    pub fn surface_startup_elevated() -> Rgba {
+        rgb(0x23262C)
+    }
+
+    pub fn border_startup() -> Rgba {
+        rgb(0x33363D)
+    }
+
+    pub fn border_startup_soft() -> Rgba {
+        rgb(0x25272D)
+    }
+
+    pub fn text_startup() -> Rgba {
+        rgb(0xD7DAE0)
+    }
+
+    pub fn text_startup_strong() -> Rgba {
+        rgb(0xF0F2F5)
+    }
+
+    pub fn text_startup_muted() -> Rgba {
+        rgb(0x9BA1AD)
+    }
+
+    pub fn text_startup_faint() -> Rgba {
+        rgba(0xFFFFFF55)
+    }
+
+    pub fn accent_startup() -> Rgba {
+        rgb(0x72D7D7)
+    }
+
     // Backgrounds — JetBrains Fleet Dark inspired palette
     pub fn surface_base() -> Rgba {
         rgb(0x1E1F22)

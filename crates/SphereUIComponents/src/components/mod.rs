@@ -10,6 +10,7 @@ pub mod edit;
 mod editor_panel;
 pub mod fader;
 pub mod file_browser;
+pub mod form;
 mod icon;
 mod icon_button;
 pub mod knob;
@@ -27,7 +28,6 @@ pub mod plugin_format_badge;
 pub mod plugin_manager;
 pub mod plugin_picker;
 pub mod project_switcher;
-pub mod project_wizard;
 pub mod settings_dialog;
 pub mod settings_layout;
 mod sidebar;
@@ -71,10 +71,6 @@ pub use piano_roll::PianoRoll;
 pub use plugin_manager::{
     open_plugin_manager_window, FilterCounts, PluginManagerDialogState, PluginManagerWindow,
     SidebarFilter, SortDir, SortKey,
-};
-pub use project_wizard::{
-    open_project_wizard_window, ProjectCreateCallback, ProjectTemplate, ProjectWizardResult,
-    ProjectWizardState, ProjectWizardWindow,
 };
 pub use settings_dialog::{
     open_settings_window, settings_dialog, HardwareCombo, OnSettingUpdate, SettingsDialogCallbacks,

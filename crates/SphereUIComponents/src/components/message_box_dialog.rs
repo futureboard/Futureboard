@@ -14,15 +14,23 @@ use gpui::{
 #[cfg(target_os = "windows")]
 use gpui::{size, AppContext, Point, WindowBackgroundAppearance, WindowBounds, WindowKind};
 
-use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
 
-pub const MESSAGE_BOX_WIDTH: f32 = 400.0;
-const BODY_PAD: f32 = 16.0;
-const FOOTER_H: f32 = 46.0;
-const MESSAGE_LINE_H: f32 = 20.0;
-const DETAIL_LINE_H: f32 = 36.0;
+pub const MESSAGE_BOX_WIDTH: f32 = 440.0;
+const BODY_PAD_X: f32 = 18.0;
+const BODY_PAD_Y: f32 = 16.0;
+const FOOTER_PAD_X: f32 = 16.0;
+const FOOTER_PAD_Y: f32 = 12.0;
+const BUTTON_H: f32 = 32.0;
+const BUTTON_MIN_W: f32 = 100.0;
+const FOOTER_H: f32 = BUTTON_H + FOOTER_PAD_Y * 2.0;
+/// Vertical room reserved for the message — enough for up to two wrapped lines
+/// at the 13px / 19px line-height used below, so the fixed-size window doesn't
+/// clip the copy.
+const MESSAGE_BLOCK_H: f32 = 46.0;
+const DETAIL_LINE_H: f32 = 34.0;
+const WARNING_TOKEN_SIZE: f32 = 30.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MessageBoxKind {
@@ -113,11 +121,11 @@ enum MessageBoxButtonStyle {
 }
 
 fn message_box_height(options: &MessageBoxOptions) -> f32 {
-    let mut h = TITLEBAR_HEIGHT + BODY_PAD + MESSAGE_LINE_H + FOOTER_H;
+    let mut h = TITLEBAR_HEIGHT + BODY_PAD_Y + MESSAGE_BLOCK_H + BODY_PAD_Y + FOOTER_H;
     if options.detail.as_ref().is_some_and(|d| !d.is_empty()) {
         h += DETAIL_LINE_H;
     }
-    h + BODY_PAD
+    h
 }
 
 fn normalized_buttons(options: &MessageBoxOptions) -> Vec<String> {
@@ -166,61 +174,123 @@ fn kind_glyph(kind: MessageBoxKind) -> &'static str {
     }
 }
 
+/// A calm, flat footer button. Only the primary action is filled; the
+/// destructive and neutral actions are ghost/outline so the hierarchy reads
+/// softly rather than as three competing solid blocks.
+fn message_box_button(
+    index: usize,
+    label: String,
+    style: MessageBoxButtonStyle,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    // (background, border, text, hover background)
+    let (bg, border, text, hover_bg) = match style {
+        MessageBoxButtonStyle::Primary => (
+            Colors::accent_primary(),
+            Colors::border_accent(),
+            Colors::on_accent(),
+            Colors::accent_primary(),
+        ),
+        MessageBoxButtonStyle::Destructive => (
+            Colors::with_alpha(Colors::status_error(), 0.0), // transparent
+            Colors::with_alpha(Colors::status_error(), 0.45),
+            Colors::status_error(),
+            Colors::with_alpha(Colors::status_error(), 0.10),
+        ),
+        MessageBoxButtonStyle::Default => (
+            Colors::with_alpha(Colors::surface_base(), 0.0), // transparent (ghost)
+            Colors::border_subtle(),
+            Colors::text_secondary(),
+            Colors::surface_control_hover(),
+        ),
+    };
+
+    div()
+        .id(("message-box-btn", index))
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(BUTTON_H))
+        .min_w(px(BUTTON_MIN_W))
+        .px(px(14.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(border)
+        .bg(bg)
+        .text_size(px(12.5))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(text)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(move |s| s.bg(hover_bg))
+        .on_click(on_click)
+        .child(label)
+}
+
 fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> impl IntoElement {
     let buttons = normalized_buttons(options);
     let len = buttons.len();
     let accent = kind_accent(options.kind);
     let glyph = kind_glyph(options.kind);
 
-    let content_row = div()
+    // Body: warning token + message, top-aligned.
+    let content = div()
         .flex()
-        .flex_row()
-        .gap(px(12.0))
-        .px(px(BODY_PAD))
-        .pt(px(4.0))
+        .flex_1()
+        .px(px(BODY_PAD_X))
+        .py(px(BODY_PAD_Y))
         .child(
             div()
-                .flex_shrink_0()
-                .w(px(32.0))
-                .h(px(32.0))
-                .rounded_lg()
-                .border(px(1.0))
-                .border_color(Colors::with_alpha(accent, 0.35))
-                .bg(Colors::with_alpha(accent, 0.12))
                 .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(14.0))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(accent)
-                .child(glyph),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
+                .flex_row()
+                .items_start()
+                .gap(px(13.0))
+                .child(
+                    // Soft amber warning token — a low-contrast tinted circle
+                    // rather than a hard boxed badge.
+                    div()
+                        .flex_shrink_0()
+                        .w(px(WARNING_TOKEN_SIZE))
+                        .h(px(WARNING_TOKEN_SIZE))
+                        .rounded_full()
+                        .border(px(1.0))
+                        .border_color(Colors::with_alpha(accent, 0.35))
+                        .bg(Colors::with_alpha(accent, 0.10))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(15.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(accent)
+                        .child(glyph),
+                )
                 .child(
                     div()
-                        .text_size(px(12.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_primary())
-                        .child(options.message.clone()),
-                )
-                .children(
-                    options
-                        .detail
-                        .as_ref()
-                        .filter(|d| !d.is_empty())
-                        .map(|detail| {
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(
                             div()
-                                .text_size(px(11.0))
-                                .line_height(px(16.0))
-                                .text_color(Colors::text_muted())
-                                .child(detail.clone())
-                        }),
+                                .text_size(px(13.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .line_height(px(19.0))
+                                .text_color(Colors::text_primary())
+                                .child(options.message.clone()),
+                        )
+                        .children(
+                            options
+                                .detail
+                                .as_ref()
+                                .filter(|d| !d.is_empty())
+                                .map(|detail| {
+                                    div()
+                                        .text_size(px(11.5))
+                                        .line_height(px(16.0))
+                                        .text_color(Colors::text_muted())
+                                        .child(detail.clone())
+                                }),
+                        ),
                 ),
         );
 
@@ -231,7 +301,8 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
         .items_center()
         .gap(px(8.0))
         .h(px(FOOTER_H))
-        .px(px(BODY_PAD))
+        .px(px(FOOTER_PAD_X))
+        .py(px(FOOTER_PAD_Y))
         .border_t(px(1.0))
         .border_color(Colors::border_subtle());
 
@@ -239,54 +310,17 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
         let style = button_style(index, label, options, len);
         let on_response = on_response.clone();
         let label = label.clone();
-        let btn_id = ("message-box-btn", index);
         let on_click = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
             on_response(MessageBoxResult { response: index }, window, cx);
         };
-        footer = match style {
-            MessageBoxButtonStyle::Primary => footer.child(fb_button(
-                btn_id,
-                label,
-                FbButtonKind::Primary,
-                true,
-                on_click,
-            )),
-            MessageBoxButtonStyle::Default => footer.child(fb_button(
-                btn_id,
-                label,
-                FbButtonKind::Default,
-                true,
-                on_click,
-            )),
-            MessageBoxButtonStyle::Destructive => footer.child(
-                div()
-                    .id(btn_id)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(30.0))
-                    .min_w(px(76.0))
-                    .px(px(12.0))
-                    .rounded_md()
-                    .border(px(1.0))
-                    .border_color(Colors::with_alpha(Colors::status_error(), 0.45))
-                    .bg(Colors::with_alpha(Colors::status_error(), 0.12))
-                    .text_size(px(11.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(Colors::status_error())
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .hover(|s| s.bg(Colors::with_alpha(Colors::status_error(), 0.2)))
-                    .on_click(on_click)
-                    .child(label),
-            ),
-        };
+        footer = footer.child(message_box_button(index, label, style, on_click));
     }
 
     div()
         .flex()
         .flex_col()
         .flex_1()
-        .child(content_row)
+        .child(content)
         .child(footer)
 }
 
@@ -360,7 +394,7 @@ impl Render for MessageBoxWindow {
             .font_family(theme::FONT_FAMILY)
             .bg(Colors::surface_base())
             .overflow_hidden()
-            .rounded_lg()
+            .rounded_md()
             .border(px(1.0))
             .border_color(Colors::border_subtle())
             .shadow(vec![gpui::BoxShadow {

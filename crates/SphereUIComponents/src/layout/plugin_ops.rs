@@ -265,12 +265,13 @@ impl StudioLayout {
             .map(|track| (track.name.clone(), track.track_type, track.inserts.len()));
         let (track_name, track_type, next_slot) =
             track_info.unwrap_or((track_id.to_string(), TrackType::Audio, 0));
-        self.plugin_picker = PluginPickerState::open_for(
+        self.plugin_picker = PluginPickerState::open_for_with_filter(
             track_id,
             &track_name,
             track_type,
             next_slot,
             self.plugin_picker_prefs.show_details,
+            crate::components::plugin_picker::PickerFilter::Effects,
         );
         self.plugin_picker_search_input.set_value("");
         self.plugin_picker.query = String::new();

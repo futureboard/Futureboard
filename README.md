@@ -8,23 +8,26 @@
 
 <!-- Badges -->
 
-[![CI](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml/badge.svg)](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml)
-[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-f59e0b.svg)](ARCHITECTURE.md)
-[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-ce422b?logo=rust&logoColor=white)](https://rustup.rs)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![Bun](https://img.shields.io/badge/Bun-runtime-fbf0df?logo=bun&logoColor=black)](https://bun.sh)
-[![WebAssembly](https://img.shields.io/badge/WebAssembly-DSP-654ff0?logo=webassembly&logoColor=white)](https://webassembly.org)
-[![GPUI](https://img.shields.io/badge/UI-GPUI-1f6feb)](https://www.gpui.rs)
-[![VST3](https://img.shields.io/badge/Plugins-VST3-ff7a00)](https://steinbergmedia.github.io/vst3_dev_portal/)
-[![CLAP](https://img.shields.io/badge/Plugins-CLAP-8957e5)](https://cleveraudio.org)
-[![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-0ea5e9)](#-getting-started)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+<div align="center">
+
+[![CI](https://img.shields.io/github/actions/workflow/status/futureboard/Futureboard/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github&logoColor=white&color=22c55e&labelColor=0f172a)](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml)
+[![Status](https://img.shields.io/badge/status-pre--alpha-f59e0b?style=for-the-badge&labelColor=0f172a)](ARCHITECTURE.md)
+[![License](https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&labelColor=0f172a)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-38bdf8?style=for-the-badge&labelColor=0f172a)](CONTRIBUTING.md)
+
+[![Rust](https://img.shields.io/badge/Rust-2024-f97316?style=for-the-badge&logo=rust&logoColor=white&labelColor=0f172a)](https://rustup.rs)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3b82f6?style=for-the-badge&logo=typescript&logoColor=white&labelColor=0f172a)](https://www.typescriptlang.org)
+[![Bun](https://img.shields.io/badge/Bun-runtime-fbf0df?style=for-the-badge&logo=bun&logoColor=black&labelColor=0f172a)](https://bun.sh)
+[![WebAssembly](https://img.shields.io/badge/WebAssembly-DSP-7c3aed?style=for-the-badge&logo=webassembly&logoColor=white&labelColor=0f172a)](https://webassembly.org)
+
+[![GPUI](https://img.shields.io/badge/UI-GPUI-06b6d4?style=for-the-badge&labelColor=0f172a)](https://www.gpui.rs)
+[![VST3](https://img.shields.io/badge/Plugins-VST3-f97316?style=for-the-badge&labelColor=0f172a)](https://steinbergmedia.github.io/vst3_dev_portal/)
+[![CLAP](https://img.shields.io/badge/Plugins-CLAP-a855f7?style=for-the-badge&labelColor=0f172a)](https://cleveraudio.org)
+[![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Web-14b8a6?style=for-the-badge&labelColor=0f172a)](#-getting-started)
+
+</div>
 
 <br />
-
-**Futureboard Studio** is currently in **pre-alpha**.
-Expect rapid changes, experimental systems, unfinished workflows, and audio/plugin chaos with style.
 
 [Architecture](#-architectural-overview) ·
 [Getting Started](#-getting-started) ·

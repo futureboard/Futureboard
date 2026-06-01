@@ -8,6 +8,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
 use crate::components;
 use crate::components::add_track_dialog::{AddTrackKind, AddTrackWindow};
 use crate::components::file_browser::FileBrowserState;
+use crate::components::message_box_dialog::MessageBoxWindow;
 use crate::components::midi_editor_window::MidiEditorWindow;
 use crate::components::plugin_editor_window::PluginEditorWindow;
 use crate::components::plugin_manager::PluginManagerWindow;
@@ -16,7 +17,6 @@ use crate::components::plugin_picker::{
     CatalogStatus as PluginCatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
     PluginPickerState, PluginSearchIndex,
 };
-use crate::components::message_box_dialog::MessageBoxWindow;
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::settings_dialog::SettingsWindow;
 use crate::components::text_input::{
@@ -39,6 +39,7 @@ mod engine_snapshot;
 mod frame_diagnostics;
 mod helpers;
 mod input_ops;
+mod inspector_ops;
 mod mixer_ops;
 mod plugin_ops;
 mod project_ops;
@@ -50,11 +51,11 @@ mod window_ops;
 
 use engine_snapshot::volume_norm_to_linear;
 use frame_diagnostics::FrameDiagnostics;
-use project_ops::LifecycleAction;
 use helpers::{
     find_clip_summary, is_supported_audio_ext, is_text_input_key, key_debug, normalize_command_id,
     reveal_path, should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
 };
+use project_ops::LifecycleAction;
 pub use studio_state::{ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility};
 use studio_state::{TextContextMenu, TextMenuTarget, TransportCommand};
 
@@ -96,6 +97,19 @@ pub struct StudioLayout {
     project_switcher: ProjectSwitcherState,
     project_switcher_search_input: TextInputState,
     browser_search_input: TextInputState,
+    /// Inspector track-name edit field. Hosted here (not in the stateless
+    /// inspector render fn) so it owns a real focus handle and routes keys
+    /// through the same machinery as the other main-window text fields.
+    inspector_name_input: TextInputState,
+    /// Track id the `inspector_name_input` is currently editing. When the
+    /// selected track changes, render reloads the field from the new track's
+    /// name (see `studio_render`). `None` when no track is selected.
+    inspector_name_bound: Option<String>,
+    inspector_clip_name_input: TextInputState,
+    inspector_clip_name_bound: Option<String>,
+    /// UI-only selected plugin insert `(track_id, insert_id)` driving the
+    /// Plugin Insert inspector target. Pure selection — never marks dirty.
+    selected_insert: Option<(String, String)>,
     /// Phase 2b insert plugin picker overlay state.
     plugin_picker: PluginPickerState,
     plugin_picker_search_input: TextInputState,
@@ -201,6 +215,9 @@ pub struct StudioLayout {
     /// Live unsaved-changes guard dialog (Save / Don't Save / Cancel), if one
     /// is currently shown. Tracked so New/Open/Close/Quit don't stack dialogs.
     unsaved_guard_window: Option<WindowHandle<MessageBoxWindow>>,
+    /// Active keyboard shortcut profile. The default profile is bundled; other
+    /// profiles load from `<app dir>/Keymaps/<id>.json`. Drives `shortcut_command_id`.
+    active_keymap: crate::keymap::Keymap,
 }
 
 impl StudioLayout {
@@ -457,6 +474,16 @@ impl StudioLayout {
             .with_placeholder("Search projects..."),
             browser_search_input: TextInputState::new("browser-search-input", cx.focus_handle())
                 .with_placeholder("Search..."),
+            inspector_name_input: TextInputState::new("inspector-name-input", cx.focus_handle())
+                .with_placeholder("Track name"),
+            inspector_name_bound: None,
+            inspector_clip_name_input: TextInputState::new(
+                "inspector-clip-name-input",
+                cx.focus_handle(),
+            )
+            .with_placeholder("Clip name"),
+            inspector_clip_name_bound: None,
+            selected_insert: None,
             plugin_picker: PluginPickerState::closed(),
             plugin_picker_search_input: TextInputState::new(
                 "plugin-picker-search-input",
@@ -508,7 +535,29 @@ impl StudioLayout {
             self_window: None,
             on_request_welcome: None,
             unsaved_guard_window: None,
+            active_keymap: crate::keymap::Keymap::bundled_default(),
         }
+    }
+
+    /// Switch the active keyboard shortcut profile. `"default"` restores the
+    /// bundled map; any other id loads `<app dir>/Keymaps/<id>.json`. A missing
+    /// or invalid profile file leaves the current map untouched. Returns the
+    /// active profile id after the call.
+    pub fn set_keymap_profile(&mut self, id: &str) -> &str {
+        match crate::keymap::Keymap::load_profile(id) {
+            Some(map) => self.active_keymap = map,
+            None => {
+                if crate::keymap::shortcut_debug_enabled() {
+                    eprintln!("[shortcut] profile id={id} unavailable — keeping current map");
+                }
+            }
+        }
+        self.active_keymap.id.as_str()
+    }
+
+    /// Id of the active keyboard shortcut profile (for the preferences UI).
+    pub fn active_keymap_id(&self) -> &str {
+        &self.active_keymap.id
     }
 
     /// Wire this layout to its own window handle so `close_project` can close
@@ -690,9 +739,7 @@ impl StudioLayout {
             // Quit the whole application — distinct from `project:close`, which
             // only unloads the session and returns to Welcome.
             "app:quit" => self.guard_dirty_then(LifecycleAction::Quit, owner_bounds, cx),
-            "project:open" => {
-                self.guard_dirty_then(LifecycleAction::OpenProject, owner_bounds, cx)
-            }
+            "project:open" => self.guard_dirty_then(LifecycleAction::OpenProject, owner_bounds, cx),
             "project:save" => self.cmd_save_project(cx),
             "project:save-as" => self.cmd_save_project_as(cx),
             "project:save-copy" => self.cmd_save_project_copy(cx),
@@ -759,7 +806,20 @@ impl StudioLayout {
             "track:arm" => self.toggle_selected_track_arm(cx),
             "mixer:reset-volume" => self.reset_selected_track_volume(cx),
             "mixer:reset-pan" => self.reset_selected_track_pan(cx),
-            "edit:delete" | "clip:delete" => self.delete_selected_clip_or_track(cx),
+            "edit:delete" | "clip:delete" | "automation:delete-selected-points" => {
+                self.delete_selected_clip_or_track(cx)
+            }
+            // Automation editor commands. select-all / deselect are automation
+            // aware so they act on points when the selected track is in
+            // Automation mode, and fall through harmlessly otherwise.
+            "edit:select-all" | "automation:select-all-points" => {
+                self.select_all_automation_points(cx)
+            }
+            "edit:deselect-all" | "automation:clear-selection" => {
+                self.clear_automation_selection(cx)
+            }
+            "automation:toggle-mode" => self.toggle_selected_track_automation_mode(cx),
+            "automation:cycle-target" => self.cycle_selected_track_automation_target(cx),
             "edit:undo" => {
                 let _ = self.timeline.update(cx, |timeline, cx| {
                     timeline.undo_edit(cx);
@@ -773,6 +833,31 @@ impl StudioLayout {
                 self.mark_dirty();
             }
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
+
+            // ── Tools — switch the active timeline tool. UI-only; never dirties
+            // the engine. The piano roll owns its own tool keys when focused.
+            "tools:select-pointer"
+            | "tools:select-pen"
+            | "tools:select-cut"
+            | "tools:select-glue"
+            | "tools:select-time"
+            | "tools:select-automation" => {
+                use components::timeline::timeline_state::TimelineTool;
+                let tool = match command_id {
+                    "tools:select-pen" => TimelineTool::Pen,
+                    "tools:select-cut" => TimelineTool::Cut,
+                    "tools:select-glue" => TimelineTool::Glue,
+                    "tools:select-time" => TimelineTool::Time,
+                    "tools:select-automation" => TimelineTool::Automation,
+                    _ => TimelineTool::Pointer,
+                };
+                let _ = self.timeline.update(cx, |timeline, cx| {
+                    if timeline.state.active_tool != tool {
+                        timeline.state.active_tool = tool;
+                        cx.notify();
+                    }
+                });
+            }
 
             "editor:open-bottom" => self.open_midi_editor_bottom_panel(cx),
             "midi:open-editor" | "editor:open-midi-window" => {
@@ -1000,37 +1085,25 @@ impl StudioLayout {
     /// Text-input guarding is N/A here because GPUI delivers key events
     /// only when nothing focusable consumes them; if/when text inputs
     /// land in the studio surface, gate this on `event.bubble_phase`.
-    fn shortcut_command_id(event: &KeyDownEvent) -> Option<&'static str> {
-        if event.is_held {
-            return None;
+    /// Resolve a key event to a command id under the active shortcut profile.
+    /// Profiles are data-driven (`packages/keymaps/*.json`); `Ctrl+E` keeps a
+    /// special case for opening the MIDI editor since that command has no menu
+    /// accelerator in the bundled map.
+    fn shortcut_command_id(&self, event: &KeyDownEvent) -> Option<String> {
+        if let Some(command) = self.active_keymap.command_for_event(event) {
+            return Some(command.to_string());
         }
-        let key = event.keystroke.key.as_str();
+        // Fallback: Ctrl/Cmd+E opens the MIDI editor (not in the menu manifest).
         let mods = event.keystroke.modifiers;
-
-        // Ctrl/Cmd shortcuts (no alt, no function)
-        if (mods.control || mods.platform) && !mods.alt && !mods.function {
-            return match key {
-                "s" | "S" if mods.shift => Some("project:save-as"),
-                "s" | "S" => Some("project:save"),
-                "o" | "O" => Some("project:open"),
-                "n" | "N" => Some("project:new"),
-                "e" | "E" => Some("midi:open-editor"),
-                _ => None,
-            };
+        let key = event.keystroke.key.as_str();
+        if (mods.control || mods.platform)
+            && !mods.alt
+            && !mods.function
+            && matches!(key, "e" | "E")
+        {
+            return Some("midi:open-editor".to_string());
         }
-
-        if mods.control || mods.alt || mods.platform || mods.function {
-            return None;
-        }
-        match key {
-            "space" => Some("transport:play-pause"),
-            "enter" | "numpad_enter" => Some("transport:stop"),
-            "l" | "L" => Some("transport:toggle-loop"),
-            "k" | "K" => Some("transport:toggle-metronome"),
-            "r" | "R" => Some("transport:record"),
-            "home" => Some("transport:go-to-start"),
-            _ => None,
-        }
+        None
     }
 
     fn spawn_timeline_audio_import_jobs(

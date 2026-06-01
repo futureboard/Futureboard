@@ -100,8 +100,17 @@ pub(super) fn build_engine_project_snapshot(
             muted: track.muted,
             solo: track.solo,
             armed: track.armed,
-            preview_mode: "stereo".to_string(),
-            output_track_id: None,
+            preview_mode: match track.routing.audio_format {
+                timeline_state::TrackAudioFormat::Mono => "mono",
+                timeline_state::TrackAudioFormat::Stereo => "stereo",
+            }
+            .to_string(),
+            output_track_id: match &track.routing.output {
+                timeline_state::TrackOutputRouting::Bus { bus_id } => Some(bus_id.clone()),
+                timeline_state::TrackOutputRouting::Main
+                | timeline_state::TrackOutputRouting::None
+                | timeline_state::TrackOutputRouting::HardwareOutput { .. } => None,
+            },
             inserts: build_engine_inserts(track),
             sends: build_engine_sends(track),
         })
@@ -189,7 +198,11 @@ pub(super) fn build_engine_project_snapshot(
                             start_beat: n.start.max(0.0) as f64,
                             length_beats: n.duration.max(0.0) as f64,
                             velocity: n.velocity.clamp(1, 127),
-                            channel: 0,
+                            channel: track
+                                .routing
+                                .midi_channel
+                                .map(|ch| ch.saturating_sub(1).min(15))
+                                .unwrap_or(0),
                         })
                         .collect(),
                 })

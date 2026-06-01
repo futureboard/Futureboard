@@ -457,6 +457,8 @@ struct SphereDauxVst3Processor {
   bool embed_geometry_valid{false};
   RECT embed_last_applied{};      // last applied window rect (screen for tool)
   int  embed_host_x{0}, embed_host_y{0}, embed_host_w{0}, embed_host_h{0};
+  int  embed_content_w{0}, embed_content_h{0};
+  bool embed_resize_in_progress{false};
   // Bundled browser/WebView runtime — active only while an editor is open.
   // One DLL-directory cookie per native runtime dir we added to the search path.
   std::vector<DLL_DIRECTORY_COOKIE> plugin_browser_dll_cookies;
@@ -753,6 +755,28 @@ inline bool daux_view_rect_equal(const Steinberg::ViewRect& a, const Steinberg::
   return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
 }
 
+inline int daux_view_rect_width(const Steinberg::ViewRect& r) {
+  return static_cast<int>(r.right - r.left);
+}
+
+inline int daux_view_rect_height(const Steinberg::ViewRect& r) {
+  return static_cast<int>(r.bottom - r.top);
+}
+
+inline Steinberg::ViewRect daux_local_view_rect(int width, int height) {
+  return Steinberg::ViewRect{
+      0,
+      0,
+      static_cast<Steinberg::int32>(width),
+      static_cast<Steinberg::int32>(height),
+  };
+}
+
+bool daux_embed_apply_content_size(SphereDauxVst3Processor* p,
+                                   int content_w,
+                                   int content_h,
+                                   const char* reason);
+
 // IPlugFrame for VST3 editor hosting. Mirrors the SDK editorhost sample:
 // plugView->setFrame(this) BEFORE plugView->attached(...). WebView2/CEF editors
 // (UAD Native et al.) require a valid frame to bootstrap and call resizeView().
@@ -785,51 +809,47 @@ class PluginEditorFrame final : public Steinberg::IPlugFrame {
       return Steinberg::kInternalError;
     }
     if (daux_view_rect_equal(current, *newSize)) {
+      const int w = daux_view_rect_width(*newSize);
+      const int h = daux_view_rect_height(*newSize);
+      const bool applied = (w > 0 && h > 0)
+                               ? daux_embed_apply_content_size(owner_, w, h, "resizeView.no-op")
+                               : false;
       if (debug) {
         std::fprintf(stderr,
-                     "[vst3-editor] resizeView accepted (no-op) rect=(%d,%d,%d,%d)\n",
+                     "[vst3-frame] resizeView requested=(%d,%d,%d,%d) content=%dx%d\n",
                      newSize->left,
                      newSize->top,
                      newSize->right,
-                     newSize->bottom);
+                     newSize->bottom,
+                     w,
+                     h);
+        std::fprintf(stderr,
+                     "[vst3-frame] resizeView applied=%dx%d changed=%d\n",
+                     w,
+                     h,
+                     applied ? 1 : 0);
+        std::fprintf(stderr, "[vst3-editor] resizeView accepted (no-op)\n");
       }
       return Steinberg::kResultTrue;
     }
 
+    const int w = daux_view_rect_width(*newSize);
+    const int h = daux_view_rect_height(*newSize);
     if (debug) {
       std::fprintf(stderr,
-                   "[vst3-editor] resizeView requested rect=(%d,%d,%d,%d) size=%dx%d\n",
+                   "[vst3-frame] resizeView requested=(%d,%d,%d,%d) content=%dx%d\n",
                    newSize->left,
                    newSize->top,
                    newSize->right,
                    newSize->bottom,
-                   newSize->right - newSize->left,
-                   newSize->bottom - newSize->top);
+                   w,
+                   h);
     }
 
     resize_recursion_guard_ = true;
-    const int w = newSize->right - newSize->left;
-    const int h = newSize->bottom - newSize->top;
-    HWND host = owner_->editor_attach_hwnd;
-    if (host && IsWindow(host) && w > 0 && h > 0) {
-      SetWindowPos(host, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-      owner_->embed_host_w = w;
-      owner_->embed_host_h = h;
-      // Keep the daux-owned top-level shell (non-embed mode) in sync too.
-      if (owner_->editor_hwnd && IsWindow(owner_->editor_hwnd) && !owner_->embed_mode) {
-        RECT wr{0, 0, w, h};
-        AdjustWindowRectEx(&wr,
-                           static_cast<DWORD>(GetWindowLongPtrW(owner_->editor_hwnd, GWL_STYLE)),
-                           FALSE,
-                           static_cast<DWORD>(GetWindowLongPtrW(owner_->editor_hwnd, GWL_EXSTYLE)));
-        SetWindowPos(owner_->editor_hwnd,
-                     nullptr,
-                     0,
-                     0,
-                     wr.right - wr.left,
-                     wr.bottom - wr.top,
-                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-      }
+    bool applied = false;
+    if (w > 0 && h > 0) {
+      applied = daux_embed_apply_content_size(owner_, w, h, "resizeView");
     }
     resize_recursion_guard_ = false;
 
@@ -839,14 +859,27 @@ class PluginEditorFrame final : public Steinberg::IPlugFrame {
       return Steinberg::kInternalError;
     }
     if (!daux_view_rect_equal(after, *newSize)) {
-      const auto on_size_res = view->onSize(newSize);
+      auto local = daux_local_view_rect(w, h);
+      const auto on_size_res = view->onSize(&local);
       if (debug) {
         std::fprintf(stderr,
-                     "[vst3-editor] resizeView onSize result=0x%x\n",
-                     static_cast<unsigned>(on_size_res));
+                     "[vst3-editor] onSize result=0x%x rect=(%d,%d,%d,%d)\n",
+                     static_cast<unsigned>(on_size_res),
+                     local.left,
+                     local.top,
+                     local.right,
+                     local.bottom);
       }
     }
-    if (debug) std::fprintf(stderr, "[vst3-editor] resizeView accepted\n");
+    if (debug) {
+      std::fprintf(stderr,
+                   "[vst3-frame] resizeView applied=%dx%d changed=%d\n",
+                   w,
+                   h,
+                   applied ? 1 : 0);
+      std::fprintf(stderr,
+                   "[vst3-editor] resizeView accepted\n");
+    }
     return Steinberg::kResultOk;
   }
 
@@ -1812,6 +1845,84 @@ bool daux_embed_sync_geometry(SphereDauxVst3Processor* p, int x, int y, int w, i
   return true;
 }
 
+bool daux_embed_apply_content_size(SphereDauxVst3Processor* p,
+                                   int content_w,
+                                   int content_h,
+                                   const char* reason) {
+  if (!p || content_w <= 0 || content_h <= 0) return false;
+  if (p->embed_resize_in_progress) return false;
+
+  const int header_h = std::max(0, p->embed_host_y);
+  const int shell_client_w = std::max(content_w, p->embed_host_x + content_w);
+  const int shell_client_h = header_h + content_h;
+  const bool debug = daux_embed_debug() || daux_vst3_editor_debug();
+  bool changed = false;
+
+  p->embed_resize_in_progress = true;
+
+  if (p->embed_mode && p->editor_parent_hwnd && IsWindow(p->editor_parent_hwnd)) {
+    RECT client{};
+    GetClientRect(p->editor_parent_hwnd, &client);
+    const int current_w = client.right - client.left;
+    const int current_h = client.bottom - client.top;
+    if (current_w != shell_client_w || current_h != shell_client_h) {
+      SetWindowPos(p->editor_parent_hwnd,
+                   nullptr,
+                   0,
+                   0,
+                   shell_client_w,
+                   shell_client_h,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      changed = true;
+    }
+  } else if (p->editor_hwnd && IsWindow(p->editor_hwnd)) {
+    RECT wr{0, 0, content_w, content_h};
+    AdjustWindowRectEx(&wr,
+                       static_cast<DWORD>(GetWindowLongPtrW(p->editor_hwnd, GWL_STYLE)),
+                       FALSE,
+                       static_cast<DWORD>(GetWindowLongPtrW(p->editor_hwnd, GWL_EXSTYLE)));
+    const int shell_w = wr.right - wr.left;
+    const int shell_h = wr.bottom - wr.top;
+    RECT win{};
+    GetWindowRect(p->editor_hwnd, &win);
+    if ((win.right - win.left) != shell_w || (win.bottom - win.top) != shell_h) {
+      SetWindowPos(p->editor_hwnd,
+                   nullptr,
+                   0,
+                   0,
+                   shell_w,
+                   shell_h,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      changed = true;
+    }
+  }
+
+  if (p->editor_attach_hwnd && IsWindow(p->editor_attach_hwnd)) {
+    const bool host_changed =
+        daux_embed_sync_geometry(p, 0, header_h, content_w, content_h, false);
+    changed = changed || host_changed;
+  }
+
+  p->embed_content_w = content_w;
+  p->embed_content_h = content_h;
+  p->embed_resize_in_progress = false;
+
+  if (debug) {
+    std::fprintf(stderr,
+                 "[plugin-view] auto_size plugin=%dx%d shell=%dx%d content=(0,%d,%d,%d) reason=%s changed=%d\n",
+                 content_w,
+                 content_h,
+                 shell_client_w,
+                 shell_client_h,
+                 header_h,
+                 content_w,
+                 content_h,
+                 reason ? reason : "unknown",
+                 changed ? 1 : 0);
+  }
+  return changed;
+}
+
 bool daux_embed_has_visible_ui(SphereDauxVst3Processor* p) {
   if (!p || !p->editor_attach_hwnd || !IsWindow(p->editor_attach_hwnd)) return false;
   if (!IsWindowVisible(p->editor_attach_hwnd)) return false;
@@ -1849,6 +1960,9 @@ void SphereDauxVst3Processor::close_embed_editor(const char* reason) {
   editor_parent_hwnd = nullptr;
   embed_mode = false;
   embed_geometry_valid = false;
+  embed_content_w = 0;
+  embed_content_h = 0;
+  embed_resize_in_progress = false;
   editor_handle = 0;
   daux_plugin_browser_runtime_release(this);
   std::fprintf(stderr,
@@ -2608,7 +2722,38 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   // synchronous resizeView() calls (common for WebView/CEF editors) land on a
   // valid window. Cleared on the failure path below.
   processor->editor_attach_hwnd = host;
+  processor->editor_parent_hwnd = parent;
+  processor->embed_host_kind = kind;
+  processor->embed_mode = true;
+  processor->embed_host_x = x;
+  processor->embed_host_y = y;
+  processor->embed_host_w = width;
+  processor->embed_host_h = height;
   daux_editor_install_frame(processor);
+
+  Steinberg::ViewRect preferred{};
+  int editor_w = width;
+  int editor_h = height;
+  const auto get_size_result = processor->editor_view->getSize(&preferred);
+  if (get_size_result == Steinberg::kResultTrue || get_size_result == Steinberg::kResultOk) {
+    const int preferred_w = daux_view_rect_width(preferred);
+    const int preferred_h = daux_view_rect_height(preferred);
+    if (preferred_w > 0 && preferred_h > 0) {
+      editor_w = preferred_w;
+      editor_h = preferred_h;
+    }
+  }
+  std::fprintf(
+      stderr,
+      "[vst3-editor] getSize result=0x%x width=%d height=%d rect=(%d,%d,%d,%d)\n",
+      static_cast<unsigned>(get_size_result),
+      editor_w,
+      editor_h,
+      preferred.left,
+      preferred.top,
+      preferred.right,
+      preferred.bottom);
+  daux_embed_apply_content_size(processor, editor_w, editor_h, "createView.getSize");
 
   const auto attach_res =
       processor->editor_view->attached(reinterpret_cast<void*>(host), Steinberg::kPlatformTypeHWND);
@@ -2621,6 +2766,11 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     daux_editor_clear_frame(processor);
     processor->editor_view = nullptr;
     processor->editor_attach_hwnd = nullptr;
+    processor->editor_parent_hwnd = nullptr;
+    processor->embed_mode = false;
+    processor->embed_geometry_valid = false;
+    processor->embed_content_w = 0;
+    processor->embed_content_h = 0;
     daux_plugin_browser_runtime_release(processor);
     DestroyWindow(host);
     if (daux_plugin_is_browser_based(processor->plugin_path)) {
@@ -2644,8 +2794,19 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   processor->embed_geometry_valid = false;
   processor->editor_handle = g_next_editor_handle.fetch_add(1);
 
-  daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug());
-  resize_editor_view(processor);
+  daux_embed_apply_content_size(processor, editor_w, editor_h, "attached");
+  {
+    auto local = daux_local_view_rect(editor_w, editor_h);
+    const auto on_size_res = processor->editor_view->onSize(&local);
+    std::fprintf(
+        stderr,
+        "[vst3-editor] onSize result=0x%x rect=(%d,%d,%d,%d)\n",
+        static_cast<unsigned>(on_size_res),
+        local.left,
+        local.top,
+        local.right,
+        local.bottom);
+  }
   if (kind == 1) daux_embed_apply_tool_styles(host, parent);
 
   // Phase 2: enumerate plug-in-created child windows. For Chromium/CEF/WebView
@@ -2730,6 +2891,15 @@ extern "C" void sphere_daux_vst3_embed_set_bounds(
     SphereDauxVst3Processor* processor, int x, int y, int width, int height) {
 #ifdef _WIN32
   if (!processor || !processor->embed_mode) return;
+  if (processor->embed_content_w > 0 && processor->embed_content_h > 0) {
+    if (daux_embed_apply_content_size(processor,
+                                      processor->embed_content_w,
+                                      processor->embed_content_h,
+                                      "set_bounds")) {
+      resize_editor_view(processor);
+    }
+    return;
+  }
   if (daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug())) {
     resize_editor_view(processor);
   }
@@ -2790,6 +2960,22 @@ extern "C" int sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor* process
 #else
   (void)processor;
   return -1;
+#endif
+}
+
+extern "C" int sphere_daux_vst3_embed_content_size(
+    SphereDauxVst3Processor* processor, int* out_width, int* out_height) {
+#ifdef _WIN32
+  if (!processor || !processor->embed_mode) return 0;
+  if (processor->embed_content_w <= 0 || processor->embed_content_h <= 0) return 0;
+  if (out_width) *out_width = processor->embed_content_w;
+  if (out_height) *out_height = processor->embed_content_h;
+  return 1;
+#else
+  (void)processor;
+  (void)out_width;
+  (void)out_height;
+  return 0;
 #endif
 }
 

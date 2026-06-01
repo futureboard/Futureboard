@@ -50,8 +50,8 @@ pub use audio_editor_host::AudioEditorHost;
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use combo_box::{combo_box_menu, combo_box_trigger, ComboBoxOption};
 pub use controls::{
-    fb_button, fb_field_label, fb_form_row, fb_section_label, fb_segmented_button,
-    fb_stepper_button, FbButtonKind,
+    fb_button, fb_checkbox, fb_color_swatch, fb_field_label, fb_form_row, fb_section_header,
+    fb_section_label, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
 pub use editor_panel::ClipEditorPanel;
 pub use fader::fader;
@@ -66,7 +66,7 @@ pub use message_box_dialog::{
 pub use midi_editor_window::{open_midi_editor_window, MidiEditorTarget, MidiEditorWindow};
 pub use mixer_panel::mixer_panel;
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
-pub use panel::right_panel;
+pub use panel::{inspector_debug, inspector_debug_enabled, right_panel};
 pub use piano_roll::PianoRoll;
 pub use plugin_manager::{
     open_plugin_manager_window, FilterCounts, PluginManagerDialogState, PluginManagerWindow,

@@ -85,6 +85,44 @@ impl Render for StudioLayout {
 
         let panel_state = self.bottom_panel_state;
         let mixer_callbacks = self.build_mixer_callbacks(cx.entity().clone());
+        let inspector_callbacks = self.build_inspector_callbacks(cx.entity().clone());
+
+        // Reconcile the Inspector name field with the current track selection.
+        // Only reload when the bound track actually changes, so typing into the
+        // field for the *selected* track is never clobbered mid-edit.
+        if self.inspector_name_bound.as_deref() != selected_track_id.as_deref() {
+            match selected_track_id
+                .as_deref()
+                .and_then(|tid| tracks.iter().find(|t| t.id == tid))
+            {
+                Some(t) => {
+                    self.inspector_name_input.set_value(t.name.clone());
+                    self.inspector_name_bound = Some(t.id.clone());
+                }
+                None => {
+                    self.inspector_name_input.set_value("");
+                    self.inspector_name_bound = None;
+                }
+            }
+        }
+        let inspector_name_focused = self.inspector_name_input.is_focused(window);
+        if self.inspector_clip_name_bound.as_deref() != selected_clip_id.as_deref() {
+            match selected_clip_id.as_deref().and_then(|cid| {
+                tracks
+                    .iter()
+                    .find_map(|t| t.clips.iter().find(|c| c.id == cid))
+            }) {
+                Some(c) => {
+                    self.inspector_clip_name_input.set_value(c.name.clone());
+                    self.inspector_clip_name_bound = Some(c.id.clone());
+                }
+                None => {
+                    self.inspector_clip_name_input.set_value("");
+                    self.inspector_clip_name_bound = None;
+                }
+            }
+        }
+        let inspector_clip_name_focused = self.inspector_clip_name_input.is_focused(window);
 
         crate::perf::count("tracks", tracks.len() as u64);
 
@@ -755,13 +793,14 @@ impl Render for StudioLayout {
             .size_full()
             .relative()
             .bg(Colors::surface_base())
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             .capture_key_down(move |event, window, cx| {
                 let handled = shortcut_target.update(cx, |this, cx| {
                     let handled = this.handle_settings_dialog_key(event, window, cx)
                         || this.handle_add_track_dialog_key(event, window, cx)
                         || this.handle_plugin_picker_key(event, window, cx)
                         || this.handle_project_switcher_key(event, window, cx)
+                        || this.handle_inspector_key(event, window, cx)
                         || this.handle_browser_key(event, window, cx);
                     if handled {
                         cx.notify();
@@ -807,12 +846,13 @@ impl Render for StudioLayout {
                     });
                     return;
                 }
-                if let Some(command_id) = Self::shortcut_command_id(event) {
+                let command_id = shortcut_target.read(cx).shortcut_command_id(event);
+                if let Some(command_id) = command_id {
                     // Transport shortcuts go through the same dispatcher as the
                     // chrome Play button (transport:play-pause → PlayPause), so
                     // Spacebar and the button are always one command. Only the
                     // focus gate differs between them.
-                    let is_transport = transport_command_from_id(command_id).is_some();
+                    let is_transport = transport_command_from_id(&command_id).is_some();
                     if is_transport && !should_handle_global_transport_shortcut(&focus) {
                         if key_debug() {
                             eprintln!(
@@ -825,7 +865,7 @@ impl Render for StudioLayout {
                         eprintln!("[key] dispatched command={command_id}");
                     }
                     let _ = shortcut_target.update(cx, |this, cx| {
-                        this.dispatch_command_id_from_bounds(command_id, Some(window.bounds()), cx);
+                        this.dispatch_command_id_from_bounds(&command_id, Some(window.bounds()), cx);
                         cx.notify();
                     });
                 }
@@ -878,6 +918,11 @@ impl Render for StudioLayout {
                             selected_track_id.as_deref(),
                             selected_clip_id.as_deref(),
                             find_clip_summary(&tracks, selected_clip_id.as_deref()),
+                            &self.inspector_name_input,
+                            inspector_name_focused,
+                            &self.inspector_clip_name_input,
+                            inspector_clip_name_focused,
+                            &inspector_callbacks,
                         )
                     });
                 }

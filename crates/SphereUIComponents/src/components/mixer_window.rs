@@ -86,7 +86,7 @@ impl Render for MixerWindow {
             .flex()
             .flex_col()
             .size_full()
-            .font_family(crate::theme::FONT_FAMILY)
+            .font(crate::theme::ui_font())
             .bg(Colors::surface_window())
             .overflow_hidden()
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))

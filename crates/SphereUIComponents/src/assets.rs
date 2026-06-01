@@ -1,11 +1,11 @@
 // Embedded fonts — loaded from packages/shared/fonts via include_bytes!
 //
-// Native uses the Inter Variable TTF as its single text source. The variable
-// font carries every weight (and the `opsz` axis) in one file, so we only
-// embed and register this one binary; `theme::FONT_FAMILY` ("Inter Variable
-// Text") resolves to it.
+// Native embeds Inter as the primary UI font and Google Sans as fallback for
+// Thai glyph coverage. The fallback relationship is configured in `theme`.
 pub const INTER_VARIABLE: &[u8] =
     include_bytes!("../../../packages/shared/fonts/InterVariable.ttf");
+pub const GOOGLE_SANS_VARIABLE: &[u8] =
+    include_bytes!("../../../packages/shared/fonts/GoogleSans-VariableFont.ttf");
 
 pub struct SvgIcon {
     pub name: &'static str,
@@ -146,12 +146,13 @@ pub const ICON_PLAYHEAD_HANDLE_PATH: &str = "icons/playhead_handle.svg";
 pub const ICON_PLUGIN_CLAP_PATH: &str = "icons/plugins/clap.svg";
 pub const ICON_PLUGIN_VST3_PATH: &str = "icons/plugins/vst3.svg";
 
-/// Registers the embedded Inter Variable font with the platform's text
-/// system. Native uses a single family — `theme::FONT_FAMILY` resolves to
-/// "Inter Variable Text".
+/// Registers embedded UI fonts with the platform's text system.
 pub fn register_fonts(cx: &mut gpui::App) {
     use std::borrow::Cow;
     cx.text_system()
-        .add_fonts(vec![Cow::Borrowed(INTER_VARIABLE)])
+        .add_fonts(vec![
+            Cow::Borrowed(INTER_VARIABLE),
+            Cow::Borrowed(GOOGLE_SANS_VARIABLE),
+        ])
         .expect("failed to load fonts");
 }

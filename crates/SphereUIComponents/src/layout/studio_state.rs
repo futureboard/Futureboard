@@ -28,6 +28,10 @@ pub(super) enum TextMenuTarget {
     ProjectSwitcherSearch,
     BrowserSearch,
     PluginPickerSearch,
+    /// The Inspector's track-name edit field.
+    InspectorName,
+    /// The Inspector's clip-name edit field.
+    InspectorClipName,
 }
 
 #[derive(Debug, Clone, Copy)]

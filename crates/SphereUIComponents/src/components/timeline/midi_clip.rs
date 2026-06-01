@@ -1,5 +1,6 @@
 use crate::components::timeline::timeline_state::{
-    midi_debug_enabled, ClipDragItem, ClipState, ClipType, TimelineState, TRACK_HEIGHT,
+    midi_debug_enabled, ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType, TimelineState,
+    TRACK_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
@@ -109,6 +110,22 @@ pub fn midi_clip(
     let ctx_cb = on_context_menu.clone();
     let clip_for_erase = clip.id.clone();
 
+    // Edge-resize drag payloads. The opposite edge stays fixed; the timeline
+    // root resolves the new length from the live cursor (see `resize_clip`).
+    let resize_left = ClipResizeDrag {
+        clip_id: clip.id.clone(),
+        edge: ClipEdge::Left,
+        start_beat: clip.start_beat,
+        duration_beats: clip.duration_beats,
+    };
+    let resize_right = ClipResizeDrag {
+        clip_id: clip.id.clone(),
+        edge: ClipEdge::Right,
+        start_beat: clip.start_beat,
+        duration_beats: clip.duration_beats,
+    };
+    const RESIZE_HANDLE_W: f32 = 6.0;
+
     div()
         .absolute()
         .left(px(left))
@@ -216,5 +233,36 @@ pub fn midi_clip(
                         .text_color(Colors::text_muted())
                         .child(format!("{:.1} bt", clip.duration_beats)),
                 ),
+        )
+        // Left/right edge resize handles (absolute, on top). Each starts a
+        // typed `ClipResizeDrag`; `stop_propagation` keeps the body move-drag
+        // and track re-select from also firing on an edge grab.
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .h_full()
+                .w(px(RESIZE_HANDLE_W))
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .id(("midi-clip-resize-l", id_num))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_drag(resize_left, |drag, _offset, _window, cx| {
+                    cx.new(|_| drag.clone())
+                }),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .h_full()
+                .w(px(RESIZE_HANDLE_W))
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .id(("midi-clip-resize-r", id_num))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_drag(resize_right, |drag, _offset, _window, cx| {
+                    cx.new(|_| drag.clone())
+                }),
         )
 }

@@ -20,7 +20,8 @@ fn settings_icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoE
 }
 
 /// Sidebar group label (GENERAL, STUDIO, …).
-pub fn settings_nav_group_header(title: &'static str) -> impl IntoElement {
+pub fn settings_nav_group_header(title: impl Into<String>) -> impl IntoElement {
+    let title = title.into();
     div()
         .pt(px(10.0))
         .pb(px(4.0))
@@ -34,12 +35,13 @@ pub fn settings_nav_group_header(title: &'static str) -> impl IntoElement {
 /// Compact sidebar category row.
 pub fn settings_nav_item(
     id: impl Into<gpui::ElementId>,
-    label: &'static str,
+    label: impl Into<String>,
     icon_path: &'static str,
     active: bool,
     search_hit: bool,
     on_select: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label = label.into();
     div()
         .id(id)
         .flex()
@@ -96,7 +98,12 @@ pub fn settings_nav_item(
 }
 
 /// Content area page header (category title + optional description).
-pub fn settings_page_header(title: &'static str, description: &'static str) -> impl IntoElement {
+pub fn settings_page_header(
+    title: impl Into<String>,
+    description: impl Into<String>,
+) -> impl IntoElement {
+    let title = title.into();
+    let description = description.into();
     div()
         .flex()
         .flex_col()
@@ -133,7 +140,8 @@ pub fn settings_section_card() -> Div {
 }
 
 /// Section title inside a card.
-pub fn settings_section_title(title: &'static str) -> impl IntoElement {
+pub fn settings_section_title(title: impl Into<String>) -> impl IntoElement {
+    let title = title.into();
     div()
         .pb(px(4.0))
         .border_b(px(1.0))
@@ -144,14 +152,16 @@ pub fn settings_section_title(title: &'static str) -> impl IntoElement {
         .child(title)
 }
 
-pub fn settings_section_hint(text: &'static str) -> impl IntoElement {
+pub fn settings_section_hint(text: impl Into<String>) -> impl IntoElement {
+    let text = text.into();
     div()
         .text_size(px(9.5))
         .text_color(Colors::text_faint())
         .child(text)
 }
 
-pub fn settings_field_label(label: &'static str) -> impl IntoElement {
+pub fn settings_field_label(label: impl Into<String>) -> impl IntoElement {
+    let label = label.into();
     div()
         .w(px(SETTINGS_LABEL_WIDTH))
         .flex_shrink_0()
@@ -162,7 +172,7 @@ pub fn settings_field_label(label: &'static str) -> impl IntoElement {
 }
 
 /// DAW-aligned label + control row.
-pub fn settings_daw_row(label: &'static str, child: impl IntoElement) -> impl IntoElement {
+pub fn settings_daw_row(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -175,10 +185,11 @@ pub fn settings_daw_row(label: &'static str, child: impl IntoElement) -> impl In
 
 /// DAW-aligned label + control row, with optional description under the label.
 pub fn settings_daw_row_with_description(
-    label: &'static str,
+    label: impl Into<String>,
     description: Option<&'static str>,
     child: impl IntoElement,
 ) -> impl IntoElement {
+    let label = label.into();
     div()
         .flex()
         .flex_row()

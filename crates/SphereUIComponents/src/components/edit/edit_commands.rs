@@ -80,6 +80,9 @@ impl EditCommand {
                         notes.push(note.clone());
                     }
                 }
+                // A note drawn past the clip end auto-expands the clip so it is
+                // always contained. Applies to redo too.
+                state.expand_clip_to_contain_notes(clip_id);
             }
             EditCommand::DeleteMidiNotes { clip_id, notes } => {
                 let ids: Vec<u64> = notes.iter().map(|n| n.id).collect();

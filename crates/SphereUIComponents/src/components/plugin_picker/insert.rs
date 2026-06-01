@@ -3,18 +3,29 @@
 use crate::components::timeline::timeline_state::TrackType;
 use sphere_plugin_host::{PluginKind, PluginStatus, RegistryPlugin};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginInsertKind {
+    Instrument,
+    Effect,
+}
+
 #[derive(Debug, Clone)]
 pub struct PluginInsertTarget {
     pub track_id: String,
     pub track_name: String,
     pub track_type: TrackType,
     pub next_slot_index: usize,
+    pub desired_kind: PluginInsertKind,
 }
 
 impl PluginInsertTarget {
     pub fn label(&self) -> String {
+        let kind = match self.desired_kind {
+            PluginInsertKind::Instrument => "Instrument",
+            PluginInsertKind::Effect => "Effect",
+        };
         format!(
-            "Insert into: {} / Insert Slot {}",
+            "Insert into: {} / {kind} Slot {}",
             self.track_name,
             self.next_slot_index + 1
         )
@@ -73,6 +84,9 @@ pub fn validate_insert(plugin: &RegistryPlugin, target: &PluginInsertTarget) -> 
 
     match plugin.kind {
         PluginKind::Instrument => {
+            if target.desired_kind == PluginInsertKind::Effect {
+                return InsertValidation::InstrumentOnEffectTrack;
+            }
             if !target.accepts_instrument() {
                 if target.accepts_effect() {
                     return InsertValidation::InstrumentOnEffectTrack;
@@ -81,6 +95,9 @@ pub fn validate_insert(plugin: &RegistryPlugin, target: &PluginInsertTarget) -> 
             }
         }
         PluginKind::Effect => {
+            if target.desired_kind == PluginInsertKind::Instrument {
+                return InsertValidation::InstrumentOnInvalidTrack;
+            }
             if !target.accepts_effect() {
                 return InsertValidation::InstrumentOnInvalidTrack;
             }

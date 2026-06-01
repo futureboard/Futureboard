@@ -370,6 +370,8 @@ impl StudioLayout {
             TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &mut self.plugin_picker_search_input,
+            TextMenuTarget::InspectorName => &mut self.inspector_name_input,
+            TextMenuTarget::InspectorClipName => &mut self.inspector_clip_name_input,
         }
     }
 
@@ -378,6 +380,8 @@ impl StudioLayout {
             TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &self.plugin_picker_search_input,
+            TextMenuTarget::InspectorName => &self.inspector_name_input,
+            TextMenuTarget::InspectorClipName => &self.inspector_clip_name_input,
         }
     }
 
@@ -390,6 +394,16 @@ impl StudioLayout {
             TextMenuTarget::BrowserSearch => {
                 self.file_browser
                     .set_filter(&self.browser_search_input.value);
+            }
+            TextMenuTarget::InspectorName => {
+                // No-op here: committing the name to the bound track requires a
+                // `Context` (the timeline is an entity), so the live commit lives
+                // in `handle_inspector_key` / `commit_inspector_name`, which have
+                // `cx`. This keeps `sync_text_input_target` `cx`-free like the
+                // other arms.
+            }
+            TextMenuTarget::InspectorClipName => {
+                // Same as InspectorName: clip rename commits need `Context`.
             }
             TextMenuTarget::PluginPickerSearch => {
                 self.plugin_picker.query = self.plugin_picker_search_input.value.clone();
@@ -409,6 +423,104 @@ impl StudioLayout {
         self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
             || self.plugin_picker_search_input.is_focused(window)
+            || self.inspector_name_input.is_focused(window)
+            || self.inspector_clip_name_input.is_focused(window)
+    }
+
+    /// Route a key to the Inspector's track-name field when it owns focus.
+    /// Returns `true` if consumed. Mirrors `handle_browser_key`'s text tail:
+    /// the field edits in place and the new value is live-committed to the
+    /// bound track via [`commit_inspector_name`] so TrackHeader/Mixer follow.
+    pub(super) fn handle_inspector_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let track_name_focused = self.inspector_name_input.is_focused(window);
+        let clip_name_focused = self.inspector_clip_name_input.is_focused(window);
+        if !track_name_focused && !clip_name_focused {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        let action = if clip_name_focused {
+            self.inspector_clip_name_input
+                .handle_key_with_clipboard(event, Some(cx))
+        } else {
+            self.inspector_name_input
+                .handle_key_with_clipboard(event, Some(cx))
+        };
+        match action {
+            TextInputAction::Pass => false,
+            TextInputAction::Cancel => {
+                // Esc: drop focus back to the studio surface; reload happens on
+                // next render because the bound name is unchanged.
+                self.focus_handle.focus(window);
+                cx.notify();
+                true
+            }
+            _ => {
+                if clip_name_focused {
+                    self.commit_inspector_clip_name(cx);
+                } else {
+                    self.commit_inspector_name(cx);
+                }
+                if matches!(action, TextInputAction::Submit) {
+                    self.focus_handle.focus(window);
+                }
+                cx.notify();
+                true
+            }
+        }
+    }
+
+    /// Commit the Inspector name field's current value to the bound track.
+    /// Marks the project dirty only on a real change (rename_track returns
+    /// whether the stored name changed). Never marks the engine dirty — a name
+    /// is project metadata only.
+    pub(super) fn commit_inspector_name(&mut self, cx: &mut Context<Self>) {
+        let Some(track_id) = self.inspector_name_bound.clone() else {
+            return;
+        };
+        let new_name = self.inspector_name_input.value.clone();
+        let changed = self.timeline.update(cx, |t, cx| {
+            let changed = t.state.rename_track(&track_id, &new_name);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            crate::components::inspector_debug(&format!(
+                "edit track name track={track_id} new={new_name}"
+            ));
+            self.mark_dirty();
+            self.push_mixer_snapshot_to_window(cx);
+        }
+    }
+
+    pub(super) fn commit_inspector_clip_name(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.inspector_clip_name_bound.clone() else {
+            return;
+        };
+        let new_name = self.inspector_clip_name_input.value.clone();
+        let changed = self.timeline.update(cx, |t, cx| {
+            let changed = t.state.rename_clip(&clip_id, &new_name);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            crate::components::inspector_debug(&format!(
+                "edit clip name clip={clip_id} new={new_name}"
+            ));
+            self.mark_dirty();
+            self.mark_engine_media_dirty();
+            self.schedule_audio_project_sync(cx, false, "inspector_clip_name");
+        }
     }
 
     /// Whether a *live* main-window text field currently owns the keyboard —
@@ -423,6 +535,8 @@ impl StudioLayout {
         (self.project_switcher.is_open && self.project_switcher_search_input.is_focused(window))
             || (self.plugin_picker.is_open && self.plugin_picker_search_input.is_focused(window))
             || self.browser_search_input.is_focused(window)
+            || self.inspector_name_input.is_focused(window)
+            || self.inspector_clip_name_input.is_focused(window)
     }
 
     pub(super) fn context_entries(
@@ -483,6 +597,13 @@ impl StudioLayout {
                     .as_ref()
                     .map(|t| (t.muted, t.solo, t.armed))
                     .unwrap_or((false, false, false));
+                let automation_on = track
+                    .as_ref()
+                    .map(|t| {
+                        t.lane_mode
+                            == crate::components::timeline::timeline_state::TrackLaneMode::Automation
+                    })
+                    .unwrap_or(false);
                 vec![
                     ContextMenuEntry::disabled_item("Rename Track", "track:rename"),
                     ContextMenuEntry::disabled_item("Duplicate Track", "track:duplicate"),
@@ -491,6 +612,13 @@ impl StudioLayout {
                     ContextMenuEntry::checked_item("Mute", "track:mute", muted),
                     ContextMenuEntry::checked_item("Solo", "track:solo", solo),
                     ContextMenuEntry::checked_item("Arm", "track:arm", armed),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::checked_item(
+                        "Automation Mode",
+                        "automation:toggle-mode",
+                        automation_on,
+                    ),
+                    ContextMenuEntry::item("Cycle Automation Target", "automation:cycle-target"),
                 ]
             }
             ContextTarget::Browser(path_opt) => {

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    deferred, div, px, svg, App, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::assets;
@@ -38,6 +38,17 @@ impl SelectOption {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectMenuPlacement {
+    Below,
+    Above,
+}
+
+/// Paint priority for the deferred select menu. Kept above ordinary deferred
+/// content (priority 0) so the dropdown always sits over sibling form rows,
+/// the dialog footer, and any scroll container that would otherwise clip it.
+const SELECT_MENU_PRIORITY: usize = 100;
+
 pub fn select(
     id: &'static str,
     selected_id: Option<&str>,
@@ -45,6 +56,30 @@ pub fn select(
     options: Vec<SelectOption>,
     open: bool,
     disabled: bool,
+    on_toggle: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+    on_change: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    select_with_placement(
+        id,
+        selected_id,
+        placeholder,
+        options,
+        open,
+        disabled,
+        SelectMenuPlacement::Below,
+        on_toggle,
+        on_change,
+    )
+}
+
+pub fn select_with_placement(
+    id: &'static str,
+    selected_id: Option<&str>,
+    placeholder: impl Into<String>,
+    options: Vec<SelectOption>,
+    open: bool,
+    disabled: bool,
+    placement: SelectMenuPlacement,
     on_toggle: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
     on_change: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
@@ -123,111 +158,159 @@ pub fn select(
                 ),
         )
         .when(open && !disabled, move |root| {
-            root.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .top(px(31.0))
-                    .max_h(px(180.0))
-                    .rounded_md()
-                    .border(px(1.0))
-                    .border_color(Colors::border_subtle())
-                    .bg(Colors::surface_card())
-                    .shadow(vec![gpui::BoxShadow {
-                        color: Colors::surface_overlay().into(),
-                        offset: gpui::point(px(0.0), px(8.0)),
-                        blur_radius: px(20.0),
-                        spread_radius: px(0.0),
-                    }])
-                    .p(px(4.0))
-                    .id("select-menu")
-                    .overflow_y_scroll()
-                    .occlude()
-                    .children(options.into_iter().enumerate().map(move |(index, option)| {
-                        let active = selected_id == Some(option.id.as_str());
-                        let disabled = option.disabled;
-                        let value = option.id.clone();
-                        let on_change = on_change.clone();
-                        div()
-                            .id(("select-option", index))
-                            .min_h(px(if option.description.is_some() {
-                                34.0
+            if crate::ui_debug_enabled() {
+                eprintln!(
+                    "[ui-popup] render kind=select id={id} placement={placement:?} z=overlay"
+                );
+            }
+            let mut menu = div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .max_h(px(144.0))
+                .rounded_md()
+                .border(px(1.0))
+                .border_color(Colors::border_default())
+                .bg(Colors::surface_panel_raised())
+                .shadow(vec![gpui::BoxShadow {
+                    color: Colors::surface_overlay().into(),
+                    offset: gpui::point(
+                        px(0.0),
+                        px(if placement == SelectMenuPlacement::Above {
+                            -8.0
+                        } else {
+                            10.0
+                        }),
+                    ),
+                    blur_radius: px(24.0),
+                    spread_radius: px(0.0),
+                }])
+                .p(px(4.0))
+                .id((gpui::ElementId::from(id), "menu"))
+                .overflow_y_scroll()
+                .occlude()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _window, cx| {
+                    cx.stop_propagation();
+                });
+            menu = match placement {
+                SelectMenuPlacement::Below => menu.top(px(31.0)),
+                SelectMenuPlacement::Above => menu.bottom(px(31.0)),
+            };
+            let menu =
+                menu.children(options.into_iter().enumerate().map(move |(index, option)| {
+                    let active = selected_id == Some(option.id.as_str());
+                    let disabled = option.disabled;
+                    let value = option.id.clone();
+                    let on_change = on_change.clone();
+                    div()
+                        .id(("select-option", index))
+                        .min_h(px(if option.description.is_some() {
+                            34.0
+                        } else {
+                            24.0
+                        }))
+                        .w_full()
+                        .rounded_md()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .bg(if active {
+                            Colors::accent_muted()
+                        } else {
+                            gpui::transparent_black().into()
+                        })
+                        .opacity(if disabled { 0.45 } else { 1.0 })
+                        .cursor(if disabled {
+                            gpui::CursorStyle::Arrow
+                        } else {
+                            gpui::CursorStyle::PointingHand
+                        })
+                        .hover(|s| {
+                            if disabled {
+                                s
                             } else {
-                                24.0
-                            }))
-                            .w_full()
-                            .rounded_md()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
-                            .bg(if active {
-                                Colors::accent_muted()
-                            } else {
-                                gpui::transparent_black().into()
-                            })
-                            .opacity(if disabled { 0.45 } else { 1.0 })
-                            .cursor(if disabled {
-                                gpui::CursorStyle::Arrow
-                            } else {
-                                gpui::CursorStyle::PointingHand
-                            })
-                            .hover(|s| {
-                                if disabled {
-                                    s
-                                } else {
-                                    s.bg(Colors::surface_control_hover())
+                                s.bg(Colors::surface_control_hover())
+                            }
+                        })
+                        .on_click(move |_, window, cx| {
+                            if !disabled {
+                                cx.stop_propagation();
+                                if crate::ui_debug_enabled() {
+                                    eprintln!("[ui-select] selected id={id} value={value}");
+                                    eprintln!("[ui-select] close id={id} reason=option_selected");
                                 }
-                            })
-                            .on_click(move |_, window, cx| {
-                                if !disabled {
-                                    on_change(&value, window, cx);
-                                }
-                            })
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(1.0))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(10.5))
-                                            .font_weight(if active {
-                                                gpui::FontWeight::SEMIBOLD
-                                            } else {
-                                                gpui::FontWeight::NORMAL
-                                            })
-                                            .text_color(if active {
-                                                Colors::text_primary()
-                                            } else {
-                                                Colors::text_secondary()
-                                            })
-                                            .child(option.label),
-                                    )
-                                    .children(option.description.map(|description| {
-                                        div()
-                                            .truncate()
-                                            .text_size(px(9.0))
-                                            .text_color(Colors::text_faint())
-                                            .child(description)
-                                    })),
-                            )
-                            .children(active.then(|| {
-                                svg()
-                                    .path(assets::ICON_CHECK_PATH)
-                                    .w(px(11.0))
-                                    .h(px(11.0))
-                                    .flex_shrink_0()
-                                    .text_color(Colors::accent_primary())
-                            }))
-                    })),
-            )
+                                on_change(&value, window, cx);
+                            }
+                        })
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(10.5))
+                                        .font_weight(if active {
+                                            gpui::FontWeight::SEMIBOLD
+                                        } else {
+                                            gpui::FontWeight::NORMAL
+                                        })
+                                        .text_color(if active {
+                                            Colors::text_primary()
+                                        } else {
+                                            Colors::text_secondary()
+                                        })
+                                        .child(option.label),
+                                )
+                                .children(option.description.map(|description| {
+                                    div()
+                                        .truncate()
+                                        .text_size(px(9.0))
+                                        .text_color(Colors::text_faint())
+                                        .child(description)
+                                })),
+                        )
+                        .children(active.then(|| {
+                            svg()
+                                .path(assets::ICON_CHECK_PATH)
+                                .w(px(11.0))
+                                .h(px(11.0))
+                                .flex_shrink_0()
+                                .text_color(Colors::accent_primary())
+                        }))
+                }));
+            // Defer the menu so it paints after every sibling row and the
+            // dialog footer, and escapes any parent scroll container's clip.
+            // Layout still resolves against the relative() wrapper above, so
+            // the menu keeps the trigger's width and chosen placement.
+            root.child(deferred(menu).with_priority(SELECT_MENU_PRIORITY))
+        })
+}
+
+/// Full-window click-catcher that dismisses an open [`select`] when the user
+/// clicks anywhere outside the menu. Render this once at the dialog root (the
+/// element that fills the window) whenever any select is open, e.g.
+/// `.children(open_select.is_some().then(|| select_dismiss_backdrop(cb)))`.
+///
+/// The deferred select menu paints above this layer and `.occlude()`s its own
+/// clicks, so only genuine outside clicks reach the backdrop. This is the
+/// reusable counterpart to the in-component menu fix — no per-dialog overlay
+/// plumbing required beyond a single state flag and this one line.
+pub fn select_dismiss_backdrop(
+    on_dismiss: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .id("select-dismiss-backdrop")
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            on_dismiss(&(), window, cx);
         })
 }

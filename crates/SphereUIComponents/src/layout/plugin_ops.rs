@@ -2,7 +2,7 @@ use gpui::{px, Bounds, Context, Window};
 
 use crate::components::plugin_manager::open_plugin_manager_window;
 use crate::components::plugin_picker::{
-    ensure_default_highlight, PluginPickerState, STUB_PLUGIN_ID,
+    ensure_default_highlight, PickerFilter, PluginInsertKind, PluginPickerState, STUB_PLUGIN_ID,
 };
 use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
 
@@ -253,6 +253,17 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_insert_picker_for(track_id, None, PluginInsertKind::Effect, window, cx);
+    }
+
+    pub(super) fn open_insert_picker_for(
+        &mut self,
+        track_id: &str,
+        slot_index: Option<usize>,
+        desired_kind: PluginInsertKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::components::timeline::timeline_state::TrackType;
 
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
@@ -265,13 +276,25 @@ impl StudioLayout {
             .map(|track| (track.name.clone(), track.track_type, track.inserts.len()));
         let (track_name, track_type, next_slot) =
             track_info.unwrap_or((track_id.to_string(), TrackType::Audio, 0));
+        let target_slot = slot_index.unwrap_or_else(|| {
+            if track_type == TrackType::Instrument && desired_kind == PluginInsertKind::Effect {
+                next_slot.max(1)
+            } else {
+                next_slot
+            }
+        });
+        let filter = match desired_kind {
+            PluginInsertKind::Instrument => PickerFilter::Instruments,
+            PluginInsertKind::Effect => PickerFilter::Effects,
+        };
         self.plugin_picker = PluginPickerState::open_for_with_filter(
             track_id,
             &track_name,
             track_type,
-            next_slot,
+            target_slot,
             self.plugin_picker_prefs.show_details,
-            crate::components::plugin_picker::PickerFilter::Effects,
+            filter,
+            desired_kind,
         );
         self.plugin_picker_search_input.set_value("");
         self.plugin_picker.query = String::new();
@@ -311,6 +334,8 @@ impl StudioLayout {
         use sphere_plugin_host::PluginFormat as RegFmt;
 
         let track_id = self.plugin_picker.insert_target.track_id.clone();
+        let target_slot_index = self.plugin_picker.insert_target.next_slot_index;
+        let desired_kind = self.plugin_picker.insert_target.desired_kind;
         if track_id.is_empty() {
             self.plugin_picker = PluginPickerState::closed();
             cx.notify();
@@ -358,10 +383,13 @@ impl StudioLayout {
                 )
             });
 
-        let new_slot_id = self
-            .timeline
-            .update(cx, |timeline, _cx| timeline.state.add_insert(&track_id));
+        let new_slot_id = self.timeline.update(cx, |timeline, _cx| {
+            timeline
+                .state
+                .ensure_insert_slot_at(&track_id, target_slot_index)
+        });
         if let Some(slot_id) = new_slot_id {
+            let log_display_name = display_name.clone();
             self.timeline.update(cx, |timeline, _cx| {
                 timeline.state.set_insert_plugin(
                     &track_id,
@@ -374,6 +402,18 @@ impl StudioLayout {
             });
             self.mark_dirty();
             self.engine_project_dirty = true;
+            if std::env::var_os("FUTUREBOARD_INSPECTOR_DEBUG").is_some()
+                || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_DEBUG").is_some()
+            {
+                let kind = match desired_kind {
+                    PluginInsertKind::Instrument => "Instrument",
+                    PluginInsertKind::Effect => "Effect",
+                };
+                eprintln!(
+                    "[inspector] insert apply track={} slot={} kind={} plugin={}",
+                    track_id, target_slot_index, kind, log_display_name
+                );
+            }
             if plugin_id != STUB_PLUGIN_ID {
                 self.plugin_picker_prefs.record_recent(plugin_id);
             }

@@ -177,7 +177,7 @@ impl Render for MidiEditorWindow {
             .flex_col()
             .size_full()
             .relative()
-            .font_family(crate::theme::FONT_FAMILY)
+            .font(crate::theme::ui_font())
             .bg(Colors::surface_window())
             .overflow_hidden()
             // Keep focus on a 0×0 child — not the root. Root `track_focus` adds a

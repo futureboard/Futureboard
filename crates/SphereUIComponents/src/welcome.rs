@@ -138,7 +138,7 @@ impl Render for WelcomeWindow {
             .flex()
             .flex_col()
             .size_full()
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             .bg(Colors::surface_startup_bg())
             .child(startup_titlebar(window, self.route.clone()))
             .child(content)

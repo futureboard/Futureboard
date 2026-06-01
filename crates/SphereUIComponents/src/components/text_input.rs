@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, ClipboardItem, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Styled, Window,
+    div, point, px, relative, App, Bounds, ClipboardItem, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, GlobalElementId, InteractiveElement, IntoElement,
+    KeyDownEvent, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    Style, Styled, UTF16Selection, Window,
 };
 
 use crate::components::context_menu::ContextMenuEntry;
@@ -14,6 +16,8 @@ pub const TEXT_INPUT_CUT: &str = "text-input:cut";
 pub const TEXT_INPUT_COPY: &str = "text-input:copy";
 pub const TEXT_INPUT_PASTE: &str = "text-input:paste";
 pub const TEXT_INPUT_SELECT_ALL: &str = "text-input:select-all";
+const TEXT_INPUT_PAD_X: f32 = 9.0;
+const TEXT_INPUT_CHAR_W: f32 = 7.0;
 
 pub type TextInputContextCb = Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>;
 pub type TextInputMouseCb = Arc<dyn Fn(&TextInputMouseEvent, &mut Window, &mut App) + 'static>;
@@ -34,7 +38,7 @@ pub enum TextInputMousePhase {
 #[derive(Debug, Clone, Copy)]
 pub struct TextInputMouseEvent {
     pub phase: TextInputMousePhase,
-    /// X position in the input's local coordinate space (best-effort; treated as local).
+    /// X position in the input's local coordinate space.
     pub x: f32,
 }
 
@@ -58,6 +62,7 @@ pub struct TextInputState {
     pub read_only: bool,
     pub is_password: bool,
     mouse_selecting: bool,
+    marked_range: Option<Range<usize>>,
 }
 
 impl TextInputState {
@@ -73,6 +78,7 @@ impl TextInputState {
             read_only: false,
             is_password: false,
             mouse_selecting: false,
+            marked_range: None,
         }
     }
 
@@ -85,6 +91,7 @@ impl TextInputState {
         self.value = v.into();
         self.cursor = self.char_count();
         self.clear_selection();
+        self.unmark_text();
     }
 
     pub fn set_disabled(&mut self, disabled: bool) {
@@ -109,6 +116,10 @@ impl TextInputState {
 
     pub fn clear_selection(&mut self) {
         self.selection_anchor = None;
+    }
+
+    pub fn unmark_text(&mut self) {
+        self.marked_range = None;
     }
 
     pub fn has_selection(&self) -> bool {
@@ -148,6 +159,7 @@ impl TextInputState {
         if extend {
             self.move_cursor_to(idx, true);
         } else {
+            self.unmark_text();
             self.cursor = idx;
             self.selection_anchor = Some(idx);
         }
@@ -171,12 +183,8 @@ impl TextInputState {
     }
 
     fn cursor_from_x(&self, x: f32) -> usize {
-        // Matches text field padding in `text_field_with_callbacks`.
-        const PAD_X: f32 = 9.0;
-        // Heuristic average glyph width at 12px Inter.
-        const CHAR_W: f32 = 7.0;
-        let local = (x - PAD_X).max(0.0);
-        let idx = (local / CHAR_W).round() as isize;
+        let local = (x - TEXT_INPUT_PAD_X).max(0.0);
+        let idx = (local / TEXT_INPUT_CHAR_W).round() as isize;
         idx.clamp(0, self.char_count() as isize) as usize
     }
 
@@ -329,6 +337,125 @@ impl TextInputState {
         self.value.chars().count()
     }
 
+    fn char_to_utf16(&self, char_idx: usize) -> usize {
+        self.value
+            .chars()
+            .take(char_idx.min(self.char_count()))
+            .map(char::len_utf16)
+            .sum()
+    }
+
+    fn char_from_utf16(&self, utf16_idx: usize) -> usize {
+        let mut utf16_count = 0usize;
+        let mut char_count = 0usize;
+        for ch in self.value.chars() {
+            let next = utf16_count + ch.len_utf16();
+            if next > utf16_idx {
+                break;
+            }
+            utf16_count = next;
+            char_count += 1;
+        }
+        char_count
+    }
+
+    fn range_to_utf16(&self, range: Range<usize>) -> Range<usize> {
+        self.char_to_utf16(range.start)..self.char_to_utf16(range.end)
+    }
+
+    fn range_from_utf16(&self, range: Range<usize>) -> Range<usize> {
+        let start = self.char_from_utf16(range.start);
+        let end = self.char_from_utf16(range.end);
+        start.min(end)..start.max(end)
+    }
+
+    pub fn text_for_utf16_range(
+        &self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+    ) -> Option<String> {
+        let range = self.range_from_utf16(range_utf16);
+        actual_range.replace(self.range_to_utf16(range.clone()));
+        Some(self.slice_chars(range))
+    }
+
+    pub fn selected_text_range_utf16(&self, ignore_disabled_input: bool) -> Option<UTF16Selection> {
+        if self.disabled && !ignore_disabled_input {
+            return None;
+        }
+        let anchor = self.selection_anchor.unwrap_or(self.cursor);
+        let range = anchor.min(self.cursor)..anchor.max(self.cursor);
+        Some(UTF16Selection {
+            range: self.range_to_utf16(range),
+            reversed: anchor > self.cursor,
+        })
+    }
+
+    pub fn marked_text_range_utf16(&self) -> Option<Range<usize>> {
+        self.marked_range
+            .as_ref()
+            .map(|range| self.range_to_utf16(range.clone()))
+    }
+
+    pub fn replace_text_in_utf16_range(&mut self, range_utf16: Option<Range<usize>>, text: &str) {
+        if self.disabled || self.read_only {
+            return;
+        }
+        let range = range_utf16
+            .map(|range| self.range_from_utf16(range))
+            .or_else(|| self.marked_range.clone())
+            .or_else(|| self.selection_range())
+            .unwrap_or(self.cursor..self.cursor);
+        self.replace_char_range(range.clone(), text);
+        self.cursor = range.start + text.chars().count();
+        self.selection_anchor = None;
+        self.marked_range = None;
+    }
+
+    pub fn replace_and_mark_text_in_utf16_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        text: &str,
+        selected_range_utf16: Option<Range<usize>>,
+    ) {
+        if self.disabled || self.read_only {
+            return;
+        }
+        let range = range_utf16
+            .map(|range| self.range_from_utf16(range))
+            .or_else(|| self.marked_range.clone())
+            .or_else(|| self.selection_range())
+            .unwrap_or(self.cursor..self.cursor);
+        let start = range.start;
+        let text_chars = text.chars().count();
+        self.replace_char_range(range, text);
+        self.marked_range = (text_chars > 0).then_some(start..start + text_chars);
+
+        if let Some(selected_range_utf16) = selected_range_utf16 {
+            let selected = char_range_from_utf16_text(text, selected_range_utf16);
+            self.cursor = start + selected.end.min(text_chars);
+            self.selection_anchor =
+                (selected.start != selected.end).then_some(start + selected.start.min(text_chars));
+        } else {
+            self.cursor = start + text_chars;
+            self.selection_anchor = None;
+        }
+    }
+
+    pub fn bounds_for_utf16_range(
+        &self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+    ) -> Option<Bounds<Pixels>> {
+        let range = self.range_from_utf16(range_utf16);
+        let left = bounds.left() + px(TEXT_INPUT_PAD_X + range.start as f32 * TEXT_INPUT_CHAR_W);
+        let right = bounds.left() + px(TEXT_INPUT_PAD_X + range.end as f32 * TEXT_INPUT_CHAR_W);
+        Some(Bounds::from_corners(
+            point(left, bounds.top()),
+            point(right.max(left + px(1.0)), bounds.bottom()),
+        ))
+    }
+
     fn display_value(&self) -> String {
         if self.is_password {
             "•".repeat(self.char_count())
@@ -366,16 +493,22 @@ impl TextInputState {
             self.clear_selection();
             return false;
         };
-        let start_byte = self.byte_at_char(range.start);
-        let end_byte = self.byte_at_char(range.end);
-        self.value.replace_range(start_byte..end_byte, "");
+        self.unmark_text();
+        self.replace_char_range(range.clone(), "");
         self.cursor = range.start;
         self.clear_selection();
         true
     }
 
+    fn replace_char_range(&mut self, range: Range<usize>, text: &str) {
+        let start_byte = self.byte_at_char(range.start);
+        let end_byte = self.byte_at_char(range.end);
+        self.value.replace_range(start_byte..end_byte, text);
+    }
+
     fn insert_str(&mut self, text: &str) {
         self.delete_selection();
+        self.unmark_text();
         let byte_pos = self.byte_at_char(self.cursor);
         self.value.insert_str(byte_pos, text);
         self.cursor += text.chars().count();
@@ -385,6 +518,7 @@ impl TextInputState {
         if self.delete_selection() || self.cursor == 0 {
             return;
         }
+        self.unmark_text();
         let start = self.byte_at_char(self.cursor - 1);
         let end = self.byte_at_char(self.cursor);
         self.value.replace_range(start..end, "");
@@ -395,6 +529,7 @@ impl TextInputState {
         if self.delete_selection() || self.cursor >= self.char_count() {
             return;
         }
+        self.unmark_text();
         let start = self.byte_at_char(self.cursor);
         let end = self.byte_at_char(self.cursor + 1);
         self.value.replace_range(start..end, "");
@@ -407,6 +542,7 @@ impl TextInputState {
                 self.selection_anchor = Some(self.cursor);
             }
         } else {
+            self.unmark_text();
             self.clear_selection();
         }
         self.cursor = position;
@@ -449,6 +585,26 @@ fn printable_text(key: &str) -> Option<&str> {
     }
 }
 
+fn char_range_from_utf16_text(text: &str, range: Range<usize>) -> Range<usize> {
+    fn char_from_utf16(text: &str, utf16_idx: usize) -> usize {
+        let mut utf16_count = 0usize;
+        let mut char_count = 0usize;
+        for ch in text.chars() {
+            let next = utf16_count + ch.len_utf16();
+            if next > utf16_idx {
+                break;
+            }
+            utf16_count = next;
+            char_count += 1;
+        }
+        char_count
+    }
+
+    let start = char_from_utf16(text, range.start);
+    let end = char_from_utf16(text, range.end);
+    start.min(end)..start.max(end)
+}
+
 pub fn text_input_context_entries(
     state: &TextInputState,
     clipboard_has_text: bool,
@@ -478,10 +634,20 @@ pub fn bind_mouse_selection<T: gpui::Render>(
     target: gpui::Entity<T>,
     get: impl Fn(&mut T) -> &mut TextInputState + Send + Sync + 'static,
 ) -> TextInputCallbacks {
+    bind_mouse_selection_with_offset(target, get, 0.0)
+}
+
+/// Same as [`bind_mouse_selection`], with a known window-local x offset for
+/// text fields nested in labeled form rows.
+pub fn bind_mouse_selection_with_offset<T: gpui::Render>(
+    target: gpui::Entity<T>,
+    get: impl Fn(&mut T) -> &mut TextInputState + Send + Sync + 'static,
+    local_x_offset: f32,
+) -> TextInputCallbacks {
     TextInputCallbacks {
         on_context_menu: None,
         on_mouse: Some(Arc::new(move |event: &TextInputMouseEvent, _w, cx| {
-            let x = event.x;
+            let x = event.x - local_x_offset;
             let phase = event.phase;
             let _ = target.update(cx, |this, cx| {
                 let input = get(this);
@@ -523,6 +689,41 @@ pub fn text_field_with_callbacks(
     focused: bool,
     callbacks: TextInputCallbacks,
 ) -> impl IntoElement {
+    text_field_inner(state, focused, callbacks, None)
+}
+
+pub fn text_field_with_callbacks_and_ime<V: EntityInputHandler>(
+    state: &TextInputState,
+    focused: bool,
+    callbacks: TextInputCallbacks,
+    ime_target: Entity<V>,
+) -> impl IntoElement {
+    text_field_inner(
+        state,
+        focused,
+        callbacks,
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .child(TextInputImeLayer {
+                    target: ime_target,
+                    focus_handle: state.focus_handle.clone(),
+                })
+                .into_any_element(),
+        ),
+    )
+}
+
+fn text_field_inner(
+    state: &TextInputState,
+    focused: bool,
+    callbacks: TextInputCallbacks,
+    ime_layer: Option<gpui::AnyElement>,
+) -> impl IntoElement {
     let fh_click = state.focus_handle.clone();
     let fh_right = state.focus_handle.clone();
     let fh_track = state.focus_handle.clone();
@@ -536,6 +737,7 @@ pub fn text_field_with_callbacks(
     let on_mouse_down = callbacks.on_mouse.clone();
     let on_mouse_move = callbacks.on_mouse.clone();
     let on_mouse_up = callbacks.on_mouse.clone();
+    let on_mouse_up_out = callbacks.on_mouse.clone();
 
     let border = if focused {
         Colors::border_focus()
@@ -584,6 +786,25 @@ pub fn text_field_with_callbacks(
             .when(cursor == range.end && focused, |d| d.child(caret()))
             .child(text_segment(after, false))
             .into_any_element()
+    } else if let Some(range) = state.marked_range.clone() {
+        let before: String = value.chars().take(range.start).collect();
+        let marked: String = value
+            .chars()
+            .skip(range.start)
+            .take(range.end - range.start)
+            .collect();
+        let after: String = value.chars().skip(range.end).collect();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_w_0()
+            .overflow_hidden()
+            .child(text_segment(before, false))
+            .child(text_segment(marked, true))
+            .when(focused, |d| d.child(caret()))
+            .child(text_segment(after, false))
+            .into_any_element()
     } else {
         let before: String = value.chars().take(cursor).collect();
         let after: String = value.chars().skip(cursor).collect();
@@ -601,6 +822,7 @@ pub fn text_field_with_callbacks(
 
     div()
         .id(state.element_id)
+        .relative()
         .track_focus(&fh_track)
         .flex()
         .flex_row()
@@ -630,6 +852,7 @@ pub fn text_field_with_callbacks(
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             if !disabled {
                 fh_click.focus(window);
+                cx.stop_propagation();
                 if let Some(cb) = on_mouse_down.as_ref() {
                     let x: f32 = event.position.x.into();
                     cb(
@@ -645,9 +868,6 @@ pub fn text_field_with_callbacks(
         })
         .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
             if disabled {
-                return;
-            }
-            if event.pressed_button != Some(MouseButton::Left) {
                 return;
             }
             if let Some(cb) = on_mouse_move.as_ref() {
@@ -681,6 +901,25 @@ pub fn text_field_with_callbacks(
                 }
             },
         )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            move |event: &MouseUpEvent, window, cx| {
+                if disabled {
+                    return;
+                }
+                if let Some(cb) = on_mouse_up_out.as_ref() {
+                    let x: f32 = event.position.x.into();
+                    cb(
+                        &TextInputMouseEvent {
+                            phase: TextInputMousePhase::Up,
+                            x,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
         .on_mouse_down(MouseButton::Right, move |event, window, cx| {
             if disabled {
                 return;
@@ -693,6 +932,7 @@ pub fn text_field_with_callbacks(
             }
         })
         .child(content)
+        .children(ime_layer)
 }
 
 fn text_segment(text: String, selected: bool) -> impl IntoElement {
@@ -717,4 +957,71 @@ fn caret() -> impl IntoElement {
         .h(px(15.0))
         .bg(Colors::accent_primary())
         .rounded_sm()
+}
+
+struct TextInputImeLayer<V: EntityInputHandler> {
+    target: Entity<V>,
+    focus_handle: FocusHandle,
+}
+
+impl<V: EntityInputHandler> IntoElement for TextInputImeLayer<V> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<V: EntityInputHandler> Element for TextInputImeLayer<V> {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.0).into();
+        style.size.height = relative(1.0).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.handle_input(
+            &self.focus_handle,
+            ElementInputHandler::new(bounds, self.target.clone()),
+            cx,
+        );
+    }
 }

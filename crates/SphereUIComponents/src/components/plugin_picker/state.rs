@@ -1,6 +1,6 @@
 //! Plugin picker state, filters, and catalog load status.
 
-use crate::components::plugin_picker::insert::PluginInsertTarget;
+use crate::components::plugin_picker::insert::{PluginInsertKind, PluginInsertTarget};
 use crate::components::timeline::timeline_state::TrackType;
 use sphere_plugin_host::PluginFormat;
 
@@ -53,6 +53,7 @@ impl PluginPickerState {
                 track_name: String::new(),
                 track_type: TrackType::Audio,
                 next_slot_index: 0,
+                desired_kind: PluginInsertKind::Effect,
             },
             filters: PluginFilterState::default(),
             query: String::new(),
@@ -76,6 +77,7 @@ impl PluginPickerState {
             next_slot_index,
             show_details,
             PickerFilter::All,
+            PluginInsertKind::Effect,
         )
     }
 
@@ -86,6 +88,7 @@ impl PluginPickerState {
         next_slot_index: usize,
         show_details: bool,
         sidebar_filter: PickerFilter,
+        desired_kind: PluginInsertKind,
     ) -> Self {
         Self {
             is_open: true,
@@ -94,6 +97,7 @@ impl PluginPickerState {
                 track_name: track_name.to_string(),
                 track_type,
                 next_slot_index,
+                desired_kind,
             },
             filters: PluginFilterState {
                 sidebar: sidebar_filter,

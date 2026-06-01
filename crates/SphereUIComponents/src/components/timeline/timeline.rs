@@ -4,8 +4,8 @@ use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, SnapDivision, TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem,
-    TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+    ClipDragItem, ClipResizeDrag, SnapDivision, TimelineRangeSelection, TimelineState,
+    TimelineTool, TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -69,6 +69,10 @@ pub struct Timeline {
     erase_clip_drag: Option<HashSet<String>>,
     /// Live preview of clip ids marked for erase (mirrors `erase_clip_drag`).
     erase_preview_ids: HashSet<String>,
+    /// In-flight automation point move. Mutated live; committed once on release.
+    automation_drag: Option<crate::components::timeline::timeline_state::AutomationPointDrag>,
+    /// In-flight automation marquee (rubber-band) selection. UI-only.
+    automation_marquee: Option<crate::components::timeline::timeline_state::AutomationMarquee>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     on_context_menu: Option<TimelineContextMenuCb>,
     /// Invoked when the user double-clicks a MIDI clip — `StudioLayout` uses it
@@ -118,6 +122,14 @@ impl Render for ScrollbarDrag {
     }
 }
 
+// Clip edge-resize uses GPUI's drag system with no visible drag image, so the
+// payload renders as `Empty` (same as the scrollbar thumb drag).
+impl Render for ClipResizeDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 impl Timeline {
     /// Clean empty-project Timeline — the real runtime entry point.
     pub fn new() -> Self {
@@ -136,6 +148,8 @@ impl Timeline {
             range_select_drag: None,
             erase_clip_drag: None,
             erase_preview_ids: HashSet::new(),
+            automation_drag: None,
+            automation_marquee: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -161,6 +175,8 @@ impl Timeline {
             range_select_drag: None,
             erase_clip_drag: None,
             erase_preview_ids: HashSet::new(),
+            automation_drag: None,
+            automation_marquee: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -357,6 +373,174 @@ impl Timeline {
             self.erase_clip_drag.as_mut().unwrap().insert(id);
         }
         self.update_erase_clip_drag(beat, cx);
+    }
+
+    // ── Automation lane interaction ──────────────────────────────────────────
+    // Add/select/move/marquee/delete of automation points. Selection + marquee
+    // are UI-only; point add/move commit dirty exactly once on mouse release.
+
+    /// Map a window-space y to a lane-local automation value for `track_id`.
+    fn automation_value_from_window_y(&self, track_id: &str, window_y: f32) -> f32 {
+        use crate::components::timeline::timeline_state::automation_y_to_value;
+        let index = self
+            .state
+            .tracks
+            .iter()
+            .position(|t| t.id == track_id)
+            .unwrap_or(0);
+        let local_y = (window_y - APP_CHROME_HEIGHT - RULER_HEIGHT + self.state.viewport.scroll_y)
+            - index as f32 * TRACK_HEIGHT;
+        automation_y_to_value(local_y, TRACK_HEIGHT)
+    }
+
+    /// Mouse-down inside an automation lane: hit-test a point (select + begin
+    /// move), else add a point (Pen) or start a marquee (Pointer).
+    fn begin_automation_interaction(
+        &mut self,
+        track_id: &str,
+        beat: f32,
+        value: f32,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::timeline::timeline_state::{
+            AutomationMarquee, AutomationPointDrag, TrackLaneMode, AUTOMATION_LANE_PAD,
+        };
+        self.state.select_track(track_id);
+        if self.state.track_lane_mode(track_id) != TrackLaneMode::Automation {
+            return;
+        }
+        let target = self.state.active_automation_target(track_id);
+        let Some(lane_id) = self.state.ensure_automation_lane(track_id, target) else {
+            return;
+        };
+
+        let ppb = self.state.viewport.pixels_per_beat.max(1.0);
+        let usable = (TRACK_HEIGHT - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
+        let beat_tol = 8.0 / ppb;
+        let value_tol = 8.0 / usable;
+
+        if let Some(point_id) = self
+            .state
+            .automation_point_at(track_id, &lane_id, beat, value, beat_tol, value_tol)
+        {
+            // Select (UI-only) and begin a move drag.
+            self.state
+                .select_automation_point(track_id, &lane_id, point_id, additive);
+            self.automation_drag = Some(AutomationPointDrag {
+                track_id: track_id.to_string(),
+                lane_id,
+                point_id,
+                moved: false,
+            });
+            cx.notify();
+            return;
+        }
+
+        match self.state.active_tool {
+            TimelineTool::Pen | TimelineTool::Automation => {
+                // Add a point and begin dragging it. The commit happens once on
+                // release (moved=true), so a plain click still persists the add.
+                if !additive {
+                    self.state.clear_automation_selection(track_id);
+                }
+                if let Some(point_id) = self
+                    .state
+                    .add_automation_point(track_id, &lane_id, beat, value)
+                {
+                    self.state
+                        .select_automation_point(track_id, &lane_id, point_id, false);
+                    self.automation_drag = Some(AutomationPointDrag {
+                        track_id: track_id.to_string(),
+                        lane_id,
+                        point_id,
+                        moved: true,
+                    });
+                }
+                cx.notify();
+            }
+            _ => {
+                // Pointer (and other tools): rubber-band marquee selection.
+                if !additive {
+                    self.state.clear_automation_selection(track_id);
+                }
+                self.automation_marquee = Some(AutomationMarquee {
+                    track_id: track_id.to_string(),
+                    lane_id,
+                    start_beat: beat,
+                    start_value: value,
+                    cur_beat: beat,
+                    cur_value: value,
+                    additive,
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    /// Live update during an automation drag or marquee. Returns true if a
+    /// gesture was active and consumed the move.
+    fn update_automation_interaction(
+        &mut self,
+        window_x: f32,
+        window_y: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(drag) = self.automation_drag.clone() {
+            let beat = self.snap_beat(self.beat_from_window_x(window_x)).max(0.0);
+            let value = self.automation_value_from_window_y(&drag.track_id, window_y);
+            self.state.move_automation_point(
+                &drag.track_id,
+                &drag.lane_id,
+                drag.point_id,
+                beat,
+                value,
+            );
+            if let Some(d) = self.automation_drag.as_mut() {
+                d.moved = true;
+            }
+            cx.notify();
+            return true;
+        }
+        if let Some(mut m) = self.automation_marquee.clone() {
+            let beat = self.beat_from_window_x(window_x).max(0.0);
+            let value = self.automation_value_from_window_y(&m.track_id, window_y);
+            m.cur_beat = beat;
+            m.cur_value = value;
+            self.state.marquee_select_automation(
+                &m.track_id,
+                &m.lane_id,
+                m.start_beat,
+                beat,
+                m.start_value,
+                value,
+                m.additive,
+            );
+            self.automation_marquee = Some(m);
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// Commit an automation gesture on mouse release. Point moves/adds dirty the
+    /// project exactly once; marquee selection is UI-only. Returns true if a
+    /// gesture was active.
+    fn finish_automation_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut handled = false;
+        if let Some(drag) = self.automation_drag.take() {
+            if drag.moved {
+                self.mark_project_changed(cx);
+            }
+            handled = true;
+        }
+        if self.automation_marquee.take().is_some() {
+            handled = true;
+        }
+        if handled {
+            cx.notify();
+        }
+        handled
     }
 
     fn timeline_content_width(&self) -> f32 {
@@ -590,6 +774,14 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        // Automation mode toggle is UI-only: it selects the track and flips the
+        // lane edit mode but never marks the project/engine dirty on its own.
+        let on_toggle_automation = cx.listener(|this, track_id: &String, _window, cx| {
+            this.state.select_track(track_id);
+            this.state.toggle_track_lane_mode(track_id);
+            cx.notify();
+        });
+
         let on_delete_track = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.tracks.retain(|t| t.id != *track_id);
             if this.state.selection.selected_track_id.as_ref() == Some(track_id) {
@@ -669,6 +861,16 @@ impl Render for Timeline {
         });
 
         let on_edit_mouse_move = cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+            if event.pressed_button == Some(gpui::MouseButton::Left)
+                && (this.automation_drag.is_some() || this.automation_marquee.is_some())
+            {
+                this.update_automation_interaction(
+                    event.position.x.into(),
+                    event.position.y.into(),
+                    cx,
+                );
+                return;
+            }
             if event.pressed_button == Some(gpui::MouseButton::Right)
                 && this.erase_clip_drag.is_some()
             {
@@ -697,6 +899,9 @@ impl Render for Timeline {
         });
 
         let on_pen_mouse_up = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
+            if this.finish_automation_interaction(cx) {
+                return;
+            }
             let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
             if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
                 this.finish_pen_midi_clip(beat, cx);
@@ -711,6 +916,9 @@ impl Render for Timeline {
             }
         });
         let on_pen_mouse_up_out = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
+            if this.finish_automation_interaction(cx) {
+                return;
+            }
             let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
             if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
                 this.finish_pen_midi_clip(beat, cx);
@@ -819,6 +1027,9 @@ impl Render for Timeline {
         let on_toggle_input: std::sync::Arc<
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_toggle_input);
+        let on_toggle_automation: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_toggle_automation);
         let on_delete_track: std::sync::Arc<
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_delete_track);
@@ -891,12 +1102,33 @@ impl Render for Timeline {
                 >
         });
 
+        let on_automation_down =
+            cx.listener(|this, payload: &(String, f32, f32, bool), _window, cx| {
+                let (track_id, beat, value, additive) =
+                    (payload.0.clone(), payload.1, payload.2, payload.3);
+                this.begin_automation_interaction(&track_id, beat, value, additive, cx);
+            });
+        let on_automation_down: crate::components::timeline::track_lane::AutomationDownCallback =
+            std::sync::Arc::new(on_automation_down);
+
+        // Cycle the automation target (in-lane target chip). Committed edit —
+        // changes the focused lane and which lane persists.
+        let on_automation_cycle = cx.listener(|this, track_id: &String, _window, cx| {
+            if this.state.cycle_automation_target(track_id).is_some() {
+                this.mark_project_changed(cx);
+                cx.notify();
+            }
+        });
+        let on_automation_cycle: crate::components::timeline::track_lane::AutomationCycleCallback =
+            std::sync::Arc::new(on_automation_cycle);
+
         let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
             on_select_track: on_select_track.clone(),
             on_toggle_mute: on_toggle_mute.clone(),
             on_toggle_solo: on_toggle_solo.clone(),
             on_toggle_arm: on_toggle_arm.clone(),
             on_toggle_input: on_toggle_input.clone(),
+            on_toggle_automation: on_toggle_automation.clone(),
             on_delete_track: on_delete_track.clone(),
             on_volume_change: on_volume_change.clone(),
             on_context_menu: on_track_context_menu.clone(),
@@ -983,6 +1215,21 @@ impl Render for Timeline {
             this.clip_drag_origin = None;
             this.clip_drag_target_track_index = None;
             this.last_drag_position = None;
+            cx.notify();
+        });
+
+        // Clip edge-resize: live-mutate the clip bounds on every drag move (no
+        // dirty), then commit once on drop. `resize_clip` snaps internally.
+        let on_clip_resize_move = cx.listener(
+            |this, event: &gpui::DragMoveEvent<ClipResizeDrag>, _window, cx| {
+                let drag = event.drag(cx).clone();
+                let beat = this.beat_from_window_x(event.event.position.x.into());
+                this.state.resize_clip(&drag.clip_id, drag.edge, beat);
+                cx.notify();
+            },
+        );
+        let on_clip_resize_drop = cx.listener(|this, _drag: &ClipResizeDrag, _window, cx| {
+            this.mark_project_changed(cx);
             cx.notify();
         });
 
@@ -1116,6 +1363,8 @@ impl Render for Timeline {
             .on_drop::<BrowserDragItem>(on_browser_file_dropped)
             .on_drag_move::<ClipDragItem>(on_clip_drag_move)
             .on_drop::<ClipDragItem>(on_clip_dropped)
+            .on_drag_move::<ClipResizeDrag>(on_clip_resize_move)
+            .on_drop::<ClipResizeDrag>(on_clip_resize_drop)
             .on_drag_move::<TrackDragItem>(on_track_drag_move)
             .on_drop::<TrackDragItem>(on_track_dropped)
             .on_mouse_down(gpui::MouseButton::Middle, on_middle_pan_start)
@@ -1171,12 +1420,28 @@ impl Render for Timeline {
                 Some(on_erase_start.clone()),
                 Some(on_erase_clip.clone()),
                 Some(&self.erase_preview_ids),
+                Some(on_automation_down.clone()),
+                Some(on_automation_cycle.clone()),
+                self.automation_marquee.as_ref(),
             )))
             // 3. Playhead Overlay (frontmost timeline pass)
             // Render after ruler + content so grid/ruler/content never cover it.
             // Split into:
             // - head overlay (ruler strip only)
             // - body overlay (content strip only)
+            // 2b. Arrangement range-selection overlay (UI-only). Drawn above the
+            // lane content but below the playhead/tools so it never hides the
+            // playhead. Follows zoom/scroll via the same lane coordinate space.
+            .children(arrangement_range_overlay(state).map(|overlay| {
+                div()
+                    .absolute()
+                    .left(px(HEADER_WIDTH))
+                    .right_0()
+                    .top(px(RULER_HEIGHT))
+                    .bottom_0()
+                    .overflow_hidden()
+                    .child(overlay)
+            }))
             .child(
                 div()
                     .absolute()
@@ -1496,4 +1761,50 @@ fn horizontal_scrollbar(
                 .bg(Colors::with_alpha(Colors::text_primary(), 0.2)),
         )
         .into_any_element()
+}
+
+/// Translucent arrangement range-selection rectangle. Pure render of
+/// `state.arrangement_range` — UI-only, follows zoom/scroll, and never touches
+/// the engine or marks the project dirty. Spans the affected tracks vertically
+/// and the selected beat span horizontally. Non-interactive so it does not
+/// intercept lane drags. Returns `None` when no range is active.
+fn arrangement_range_overlay(state: &TimelineState) -> Option<gpui::AnyElement> {
+    let range = state.arrangement_range.as_ref()?;
+    let (start_beat, end_beat) = range.as_f32_range();
+    let (lo, hi) = normalize_range(start_beat, end_beat);
+    let x_lo = state.beats_to_x(lo);
+    let width = (state.beats_to_x(hi) - x_lo).max(1.0);
+
+    // Vertical span follows the affected track ids; an empty set covers the
+    // whole lane area (e.g. a horizontal-only time range).
+    let (y_top, height) = {
+        let mut min_idx = usize::MAX;
+        let mut max_idx = 0usize;
+        for (idx, track) in state.tracks.iter().enumerate() {
+            if range.track_ids.iter().any(|id| id == &track.id) {
+                min_idx = min_idx.min(idx);
+                max_idx = max_idx.max(idx);
+            }
+        }
+        if min_idx == usize::MAX {
+            (0.0_f32, state.viewport.track_area_height.max(0.0))
+        } else {
+            let top = min_idx as f32 * TRACK_HEIGHT - state.viewport.scroll_y;
+            let h = ((max_idx - min_idx + 1) as f32) * TRACK_HEIGHT;
+            (top, h)
+        }
+    };
+
+    Some(
+        div()
+            .absolute()
+            .left(px(x_lo))
+            .top(px(y_top))
+            .w(px(width))
+            .h(px(height))
+            .bg(Colors::with_alpha(Colors::accent_primary(), 0.14))
+            .border(px(1.0))
+            .border_color(Colors::with_alpha(Colors::accent_primary(), 0.7))
+            .into_any_element(),
+    )
 }

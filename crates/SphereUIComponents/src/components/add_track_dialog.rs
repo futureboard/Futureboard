@@ -1,24 +1,33 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, size, svg, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    div, px, size, svg, App, AppContext, Bounds, Context, Entity, EntityInputHandler, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render,
+    StatefulInteractiveElement, Styled, UTF16Selection, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::assets;
 use crate::components::controls::{fb_button, fb_form_row, fb_stepper_button, FbButtonKind};
-use crate::components::form::{select, SelectOption};
+use crate::components::form::{
+    select_dismiss_backdrop, select_with_placement, SelectMenuPlacement, SelectOption,
+};
 use crate::components::text_input::{
-    bind_mouse_selection, text_field_with_callbacks, TextInputCallbacks, TextInputState,
+    bind_mouse_selection_with_offset, text_field_with_callbacks_and_ime, TextInputCallbacks,
+    TextInputState,
 };
 use crate::components::timeline::timeline_state::TrackType;
 use crate::components::title_bar::external_window_titlebar_with_icon;
+use crate::i18n::I18n;
 use crate::theme::{self, Colors};
 use sphere_plugin_host::{PluginFormat, RegistryPlugin};
 
 const MAX_TRACK_COUNT: u32 = 128;
+const FORM_LABEL_WIDTH: f32 = 86.0;
+const FORM_GAP: f32 = 10.0;
+const BODY_PAD_X: f32 = 14.0;
+const NAME_INPUT_X_OFFSET: f32 = BODY_PAD_X + FORM_LABEL_WIDTH + FORM_GAP;
 
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type KindCb = Arc<dyn Fn(&AddTrackKind, &mut Window, &mut App) + 'static>;
@@ -59,6 +68,36 @@ pub enum AddTrackSelectId {
 impl AddTrackKind {
     pub fn label(self) -> &'static str {
         self.default_name_stem()
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Audio => "add-track.kind.audio",
+            Self::Instrument => "add-track.kind.instrument",
+            Self::Midi => "add-track.kind.midi",
+            Self::Plugin => "add-track.kind.plugin",
+            Self::Bus => "add-track.kind.bus",
+            Self::Return => "add-track.kind.return",
+            Self::Group => "add-track.kind.group",
+            Self::Master => "add-track.kind.master",
+            Self::Automation => "add-track.kind.automation",
+            Self::Folder => "add-track.kind.folder",
+        }
+    }
+
+    pub fn description_key(self) -> &'static str {
+        match self {
+            Self::Audio => "add-track.description.audio",
+            Self::Instrument => "add-track.description.instrument",
+            Self::Midi => "add-track.description.midi",
+            Self::Plugin => "add-track.description.plugin",
+            Self::Bus => "add-track.description.bus",
+            Self::Return => "add-track.description.return",
+            Self::Group => "add-track.description.group",
+            Self::Master => "add-track.description.master",
+            Self::Automation => "add-track.description.automation",
+            Self::Folder => "add-track.description.folder",
+        }
     }
 
     pub fn tab_label(self) -> &'static str {
@@ -307,6 +346,10 @@ fn select_box(text: impl Into<String>) -> impl IntoElement {
         ))
 }
 
+fn locked_select_box(text: impl Into<String>) -> impl IntoElement {
+    select_box(text).into_any_element()
+}
+
 fn select_options(values: &[&'static str]) -> Vec<SelectOption> {
     values
         .iter()
@@ -346,19 +389,46 @@ fn add_track_select_open(open_select: Option<AddTrackSelectId>, id: AddTrackSele
     open_select == Some(id)
 }
 
+fn add_track_select(
+    id: &'static str,
+    selected_id: Option<&str>,
+    placeholder: impl Into<String>,
+    options: Vec<SelectOption>,
+    open: bool,
+    placement: SelectMenuPlacement,
+    on_toggle: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+    on_change: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    select_with_placement(
+        id,
+        selected_id,
+        placeholder,
+        options,
+        open,
+        false,
+        placement,
+        on_toggle,
+        on_change,
+    )
+}
+
 fn check_row(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<String>,
     checked: bool,
     enabled: bool,
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label = label.into();
     let mut row = div()
         .id(id)
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
+        .min_h(px(24.0))
+        .px(px(2.0))
+        .rounded_md()
         .child(
             div()
                 .w(px(12.0))
@@ -374,7 +444,8 @@ fn check_row(
                     Colors::accent_primary()
                 } else {
                     Colors::surface_input()
-                }),
+                })
+                .children(checked.then(|| icon(assets::ICON_CHECK_PATH, 9.0, Colors::on_accent()))),
         )
         .child(
             div()
@@ -433,7 +504,11 @@ fn count_stepper(
         ))
 }
 
-fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
+fn type_tabs(
+    state: &AddTrackDialogState,
+    callbacks: &AddTrackDialogCallbacks,
+    i18n: I18n,
+) -> impl IntoElement {
     let tabs = AddTrackKind::visible_tabs(state.selected_kind);
     let mut row = div()
         .flex()
@@ -449,13 +524,13 @@ fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -
         let mut tab = div()
             .id(("add-track-tab", i))
             .flex()
-            .flex_col()
+            .flex_row()
             .items_center()
             .justify_center()
-            .gap(px(3.0))
-            .min_w(px(72.0))
-            .px(px(8.0))
-            .py(px(6.0))
+            .gap(px(6.0))
+            .h(px(30.0))
+            .min_w(px(86.0))
+            .px(px(10.0))
             .rounded_md()
             .border(px(1.0))
             .border_color(if active {
@@ -471,7 +546,7 @@ fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -
             .opacity(if supported { 1.0 } else { 0.42 })
             .child(icon(
                 kind.icon(),
-                14.0,
+                13.0,
                 if active {
                     Colors::accent_primary()
                 } else {
@@ -480,7 +555,7 @@ fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -
             ))
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(10.5))
                     .font_weight(if active {
                         gpui::FontWeight::SEMIBOLD
                     } else {
@@ -491,7 +566,7 @@ fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -
                     } else {
                         Colors::text_muted()
                     })
-                    .child(kind.tab_label()),
+                    .child(i18n.tr(kind.label_key())),
             );
         if supported {
             tab = tab
@@ -504,18 +579,27 @@ fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -
     row
 }
 
-fn color_row(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
+fn color_row(
+    state: &AddTrackDialogState,
+    callbacks: &AddTrackDialogCallbacks,
+    i18n: I18n,
+) -> impl IntoElement {
     let auto_cb = callbacks.on_auto_color.clone();
     let auto_on = state.auto_color;
-    let mut swatches = div().flex().flex_row().gap(px(5.0)).flex_wrap();
+    let mut swatches = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .flex_wrap();
     for i in 0..Colors::TRACK_COLORS.len() {
         let cb = callbacks.on_color_index.clone();
         let active = !auto_on && i == state.color_index;
         let color = track_color(i);
         let mut sw = div()
             .id(("add-track-color", i))
-            .w(px(18.0))
-            .h(px(18.0))
+            .w(px(16.0))
+            .h(px(16.0))
             .rounded_full()
             .border(px(2.0))
             .border_color(color)
@@ -538,18 +622,127 @@ fn color_row(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -
         }
         swatches = swatches.child(sw);
     }
+    div().child(fb_form_row(
+        i18n.tr("add-track.field.color"),
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(10.0))
+            .child(swatches)
+            .child(check_row(
+                "add-track-auto-color",
+                i18n.tr("add-track.option.auto-color"),
+                auto_on,
+                true,
+                move |_, w, cx| auto_cb(&!auto_on, w, cx),
+            )),
+    ))
+}
+
+fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
     div()
         .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(fb_form_row("Color", swatches))
-        .child(check_row(
-            "add-track-auto-color",
-            "Auto Color",
-            auto_on,
-            true,
-            move |_, w, cx| auto_cb(&!auto_on, w, cx),
-        ))
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .px(px(BODY_PAD_X))
+        .py(px(10.0))
+        .border_b(px(1.0))
+        .border_color(Colors::divider())
+        .bg(Colors::surface_panel_alt())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(9.0))
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(26.0))
+                        .h(px(26.0))
+                        .rounded_md()
+                        .border(px(1.0))
+                        .border_color(Colors::border_subtle())
+                        .bg(Colors::surface_input())
+                        .child(icon(
+                            state.selected_kind.icon(),
+                            14.0,
+                            Colors::accent_primary(),
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_primary())
+                                .child(i18n.tr(state.selected_kind.label_key())),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(10.0))
+                                .text_color(Colors::text_faint())
+                                .child(i18n.tr(state.selected_kind.description_key())),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .px(px(8.0))
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .rounded_md()
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_input())
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_secondary())
+                .child(if state.count == 1 {
+                    "1 track".to_string()
+                } else {
+                    format!("{} tracks", state.count)
+                }),
+        )
+}
+
+fn form_panel(child: impl IntoElement) -> impl IntoElement {
+    div()
+        .rounded_lg()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_panel_alt())
+        .p(px(10.0))
+        .child(child)
+}
+
+fn disabled_hint(text: &'static str) -> impl IntoElement {
+    div()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .px(px(9.0))
+        .py(px(7.0))
+        .text_size(px(10.0))
+        .text_color(Colors::text_faint())
+        .child(text)
 }
 
 fn type_fields(
@@ -557,6 +750,7 @@ fn type_fields(
     callbacks: &AddTrackDialogCallbacks,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
+    i18n: I18n,
 ) -> gpui::AnyElement {
     let show_asc = state.count > 1;
     match state.selected_kind {
@@ -579,7 +773,7 @@ fn type_fields(
                 .gap(px(6.0))
                 .child(fb_form_row(
                     "Format",
-                    select(
+                    add_track_select(
                         "add-track-format-select",
                         Some(match state.audio_format {
                             AudioFormat::Mono => "mono",
@@ -587,11 +781,11 @@ fn type_fields(
                         }),
                         "Select format...",
                         vec![
-                            SelectOption::new("mono", "Mono"),
-                            SelectOption::new("stereo", "Stereo"),
+                            SelectOption::new("mono", i18n.tr("add-track.channel.mono")),
+                            SelectOption::new("stereo", i18n.tr("add-track.channel.stereo")),
                         ],
                         add_track_select_open(open_select, AddTrackSelectId::AudioFormat),
-                        false,
+                        SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| {
                             toggle_format(&AddTrackSelectId::AudioFormat, w, cx)
                         }),
@@ -607,7 +801,7 @@ fn type_fields(
                 ))
                 .child(fb_form_row(
                     "FX Chain",
-                    select_box(
+                    locked_select_box(
                         state
                             .fx_chain
                             .clone()
@@ -615,27 +809,27 @@ fn type_fields(
                     ),
                 ))
                 .child(fb_form_row(
-                    "Input",
-                    select(
+                    i18n.tr("add-track.routing.input"),
+                    add_track_select(
                         "add-track-input-select",
                         Some(state.input_label.as_str()),
                         "Select input...",
                         select_options(&["System Input (Stereo)", "Input 1", "Input 2", "None"]),
                         add_track_select_open(open_select, AddTrackSelectId::Input),
-                        false,
+                        SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| toggle_input(&AddTrackSelectId::Input, w, cx)),
                         Arc::new(move |value, w, cx| input_cb(value, w, cx)),
                     ),
                 ))
                 .child(fb_form_row(
-                    "Output",
-                    select(
+                    i18n.tr("add-track.routing.output"),
+                    add_track_select(
                         "add-track-output-select",
                         Some(state.output_label.as_str()),
                         "Select output...",
                         select_options(&["Main", "Bus A", "None"]),
                         add_track_select_open(open_select, AddTrackSelectId::Output),
-                        false,
+                        SelectMenuPlacement::Above,
                         Arc::new(move |_, w, cx| toggle_output(&AddTrackSelectId::Output, w, cx)),
                         Arc::new(move |value, w, cx| output_cb(value, w, cx)),
                     ),
@@ -658,7 +852,7 @@ fn type_fields(
                 })
                 .child(check_row(
                     "add-track-arm",
-                    "Arm for recording",
+                    i18n.tr("add-track.arm"),
                     arm_on,
                     true,
                     move |_, w, cx| arm_cb(&!arm_on, w, cx),
@@ -680,13 +874,13 @@ fn type_fields(
                 .gap(px(6.0))
                 .child(fb_form_row(
                     "Instrument",
-                    select(
+                    add_track_select(
                         "add-track-instrument-plugin-select",
                         state.instrument_plugin_id.as_deref().or(Some("")),
                         "Select instrument...",
                         instrument_plugin_options(instrument_plugins),
                         add_track_select_open(open_select, AddTrackSelectId::InstrumentPlugin),
-                        false,
+                        SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| {
                             toggle_instrument(&AddTrackSelectId::InstrumentPlugin, w, cx)
                         }),
@@ -694,27 +888,32 @@ fn type_fields(
                     ),
                 ))
                 .child(fb_form_row(
-                    "MIDI Input",
-                    select(
+                    i18n.tr("add-track.routing.midi-in"),
+                    add_track_select(
                         "add-track-instrument-input-select",
                         Some(state.input_label.as_str()),
                         "Select MIDI input...",
-                        select_options(&["All MIDI Inputs", "MIDI Input 1", "MIDI Input 2", "None"]),
+                        select_options(&[
+                            "All MIDI Inputs",
+                            "MIDI Input 1",
+                            "MIDI Input 2",
+                            "None",
+                        ]),
                         add_track_select_open(open_select, AddTrackSelectId::Input),
-                        false,
+                        SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| toggle_input(&AddTrackSelectId::Input, w, cx)),
                         Arc::new(move |value, w, cx| input_cb(value, w, cx)),
                     ),
                 ))
                 .child(fb_form_row(
-                    "Output",
-                    select(
+                    i18n.tr("add-track.routing.output"),
+                    add_track_select(
                         "add-track-instrument-output-select",
                         Some(state.output_label.as_str()),
                         "Select output...",
                         select_options(&["Main", "Bus A", "None"]),
                         add_track_select_open(open_select, AddTrackSelectId::Output),
-                        false,
+                        SelectMenuPlacement::Above,
                         Arc::new(move |_, w, cx| toggle_output(&AddTrackSelectId::Output, w, cx)),
                         Arc::new(move |value, w, cx| output_cb(value, w, cx)),
                     ),
@@ -745,22 +944,30 @@ fn type_fields(
                 .flex_col()
                 .gap(px(6.0))
                 .child(fb_form_row(
-                    "MIDI Input",
-                    select(
+                    i18n.tr("add-track.routing.midi-in"),
+                    add_track_select(
                         "add-track-midi-input-select",
                         Some(state.input_label.as_str()),
                         "Select MIDI input...",
-                        select_options(&["All MIDI Inputs", "MIDI Input 1", "MIDI Input 2", "None"]),
+                        select_options(&[
+                            "All MIDI Inputs",
+                            "MIDI Input 1",
+                            "MIDI Input 2",
+                            "None",
+                        ]),
                         add_track_select_open(open_select, AddTrackSelectId::Input),
-                        false,
+                        SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| toggle_input(&AddTrackSelectId::Input, w, cx)),
                         Arc::new(move |value, w, cx| input_cb(value, w, cx)),
                     ),
                 ))
-                .child(fb_form_row("MIDI Output", select_box("None".to_string())))
                 .child(fb_form_row(
-                    "Channel",
-                    select(
+                    "MIDI Output",
+                    locked_select_box("None".to_string()),
+                ))
+                .child(fb_form_row(
+                    i18n.tr("add-track.routing.channel"),
+                    add_track_select(
                         "add-track-midi-channel-select",
                         Some(state.midi_channel_label.as_str()),
                         "Select channel...",
@@ -784,7 +991,7 @@ fn type_fields(
                             "Channel 16",
                         ]),
                         add_track_select_open(open_select, AddTrackSelectId::MidiChannel),
-                        false,
+                        SelectMenuPlacement::Above,
                         Arc::new(move |_, w, cx| {
                             toggle_channel(&AddTrackSelectId::MidiChannel, w, cx)
                         }),
@@ -792,14 +999,14 @@ fn type_fields(
                     ),
                 ))
                 .child(fb_form_row(
-                    "Output",
-                    select(
+                    i18n.tr("add-track.routing.output"),
+                    add_track_select(
                         "add-track-midi-output-select",
                         Some(state.output_label.as_str()),
                         "Select output...",
                         select_options(&["Main", "Bus A", "None"]),
                         add_track_select_open(open_select, AddTrackSelectId::Output),
-                        false,
+                        SelectMenuPlacement::Above,
                         Arc::new(move |_, w, cx| toggle_output(&AddTrackSelectId::Output, w, cx)),
                         Arc::new(move |value, w, cx| output_cb(value, w, cx)),
                     ),
@@ -819,15 +1026,10 @@ fn type_fields(
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(fb_form_row("Target", select_box("None".to_string())))
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(Colors::text_faint())
-                    .child(
-                        "Automation lanes on existing tracks — dedicated automation tracks coming soon.",
-                    ),
-            )
+            .child(fb_form_row("Target", locked_select_box("None".to_string())))
+            .child(disabled_hint(
+                "Automation lanes on existing tracks. Dedicated automation tracks are coming soon.",
+            ))
             .into_any_element(),
         AddTrackKind::Folder => {
             let pack = callbacks.on_pack_folder.clone();
@@ -843,19 +1045,19 @@ fn type_fields(
                     true,
                     move |_, w, cx| pack(&!pack_on, w, cx),
                 ))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(Colors::text_faint())
-                        .child("Folder tracks for grouping — creation coming soon."),
-                )
+                .child(disabled_hint(
+                    "Folder track creation is not available in Native yet.",
+                ))
                 .into_any_element()
         }
         AddTrackKind::Bus | AddTrackKind::Return => div()
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(fb_form_row("Output", select_box("Main".to_string())))
+            .child(fb_form_row(
+                i18n.tr("add-track.routing.output"),
+                select_box("Main".to_string()),
+            ))
             .into_any_element(),
         _ => div()
             .text_size(px(10.0))
@@ -871,17 +1073,22 @@ pub fn add_track_dialog_body(
     track_name_input: &TextInputState,
     track_name_focused: bool,
     track_name_callbacks: TextInputCallbacks,
+    track_name_ime_target: Entity<AddTrackWindow>,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
     callbacks: AddTrackDialogCallbacks,
+    i18n: I18n,
 ) -> gpui::Div {
     let confirm = callbacks.on_confirm.clone();
     let cancel = callbacks.on_close.clone();
     let valid = state.is_valid();
     let ok_label = if state.count == 1 {
-        "OK".to_string()
+        i18n.tr("add-track.button.add-one")
     } else {
-        format!("OK ×{}", state.count)
+        i18n.tr_vars(
+            "add-track.button.add-many",
+            &[("count", state.count.to_string())],
+        )
     };
 
     div()
@@ -889,46 +1096,65 @@ pub fn add_track_dialog_body(
         .flex_col()
         .flex_1()
         .min_h_0()
-        .child(type_tabs(state, &callbacks))
+        .bg(Colors::surface_base())
+        .child(div().flex_shrink_0().child(dialog_intro(state, i18n)))
         .child(
             div()
+                .flex_shrink_0()
+                .child(type_tabs(state, &callbacks, i18n)),
+        )
+        .child(
+            div()
+                .id("add-track-body-scroll")
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h_0()
-                .overflow_hidden()
-                .px(px(12.0))
-                .py(px(10.0))
-                .gap(px(8.0))
-                .child(fb_form_row(
-                    "Name",
-                    text_field_with_callbacks(
-                        track_name_input,
-                        track_name_focused,
-                        track_name_callbacks,
-                    ),
+                .overflow_y_scroll()
+                .px(px(BODY_PAD_X))
+                .pb(px(12.0))
+                .gap(px(10.0))
+                .child(form_panel(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(fb_form_row(
+                            i18n.tr("add-track.field.name"),
+                            text_field_with_callbacks_and_ime(
+                                track_name_input,
+                                track_name_focused,
+                                track_name_callbacks,
+                                track_name_ime_target,
+                            ),
+                        ))
+                        .child(fb_form_row(
+                            i18n.tr("add-track.field.count"),
+                            count_stepper(state, &callbacks),
+                        ))
+                        .child(color_row(state, &callbacks, i18n)),
                 ))
-                .child(fb_form_row("Count", count_stepper(state, &callbacks)))
-                .child(color_row(state, &callbacks))
-                .child(type_fields(
+                .child(form_panel(type_fields(
                     state,
                     &callbacks,
                     open_select,
                     instrument_plugins,
-                )),
+                    i18n,
+                ))),
         )
         .child(
             div()
+                .flex_shrink_0()
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .h(px(44.0))
-                .px(px(12.0))
+                .h(px(46.0))
+                .px(px(BODY_PAD_X))
                 .border_t(px(1.0))
                 .border_color(Colors::border_subtle())
-                .bg(Colors::surface_panel())
+                .bg(Colors::surface_titlebar())
                 .child(
                     div()
                         .text_size(px(10.0))
@@ -944,7 +1170,7 @@ pub fn add_track_dialog_body(
                         .gap(px(8.0))
                         .child(fb_button(
                             "add-track-cancel",
-                            "Cancel",
+                            i18n.tr("add-track.button.cancel"),
                             FbButtonKind::Default,
                             true,
                             move |_, w, cx| cancel(&(), w, cx),
@@ -963,13 +1189,14 @@ pub fn add_track_dialog_body(
                 ),
         )
 }
-pub const ADD_TRACK_WINDOW_WIDTH: f32 = 520.0;
-pub const ADD_TRACK_WINDOW_HEIGHT: f32 = 520.0;
+pub const ADD_TRACK_WINDOW_WIDTH: f32 = 560.0;
+pub const ADD_TRACK_WINDOW_HEIGHT: f32 = 460.0;
 pub const ADD_TRACK_WINDOW_MIN_WIDTH: f32 = 480.0;
 pub const ADD_TRACK_WINDOW_MIN_HEIGHT: f32 = 440.0;
 
 pub struct AddTrackWindow {
     pub state: AddTrackDialogState,
+    language: String,
     track_name_input: TextInputState,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: Vec<RegistryPlugin>,
@@ -981,6 +1208,7 @@ pub struct AddTrackWindow {
 impl AddTrackWindow {
     pub fn new(
         initial_state: AddTrackDialogState,
+        language: impl Into<String>,
         instrument_plugins: Vec<RegistryPlugin>,
         on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
         cx: &mut Context<Self>,
@@ -990,6 +1218,7 @@ impl AddTrackWindow {
         track_name_input.select_all();
         Self {
             state: initial_state,
+            language: language.into(),
             track_name_input,
             open_select: None,
             instrument_plugins,
@@ -1002,7 +1231,8 @@ impl AddTrackWindow {
         let mut dialog = AddTrackDialogState::open_for(track_count, has_master);
         dialog.selected_kind = kind;
         dialog.input_label = kind.default_input().to_string();
-        dialog.track_name = format!("{} {}", kind.default_name_stem(), dialog.next_number);
+        let i18n = I18n::new(&self.language);
+        dialog.track_name = format!("{} {}", i18n.tr(kind.label_key()), dialog.next_number);
         dialog.instrument_plugin_id = None;
         dialog.instrument_plugin_name = None;
         add_track_debug(&format!(
@@ -1064,10 +1294,102 @@ impl AddTrackWindow {
     }
 }
 
+impl EntityInputHandler for AddTrackWindow {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        self.track_name_input
+            .text_for_utf16_range(range, actual_range)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        self.track_name_input
+            .selected_text_range_utf16(ignore_disabled_input)
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.track_name_input.marked_text_range_utf16()
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.track_name_input.unmark_text();
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.track_name_input
+            .replace_text_in_utf16_range(range, text);
+        self.state.track_name = self.track_name_input.value.clone();
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.track_name_input.replace_and_mark_text_in_utf16_range(
+            range,
+            new_text,
+            new_selected_range,
+        );
+        self.state.track_name = self.track_name_input.value.clone();
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        self.track_name_input
+            .bounds_for_utf16_range(range_utf16, bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 impl Render for AddTrackWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let i18n = I18n::new(&self.language);
         let target = cx.entity().clone();
         let search_focused = self.track_name_input.is_focused(window);
+        // Snapshot the open select for this frame. The dismiss backdrop (below)
+        // sits above the form and resets `open_select` first on a click, so the
+        // trigger must decide open-vs-close against the frame it was drawn for —
+        // otherwise re-clicking the active trigger would reopen it.
+        let open_select_at_render = self.open_select;
 
         let callbacks = AddTrackDialogCallbacks {
             on_close: Arc::new(|_: &(), window: &mut Window, _cx: &mut App| window.remove_window()),
@@ -1084,8 +1406,9 @@ impl Render for AddTrackWindow {
                     let _ = target.update(cx, |this, cx| {
                         this.state.selected_kind = kind;
                         this.state.input_label = kind.default_input().to_string();
+                        let i18n = I18n::new(&this.language);
                         this.state.track_name =
-                            format!("{} {}", kind.default_name_stem(), this.state.next_number);
+                            format!("{} {}", i18n.tr(kind.label_key()), this.state.next_number);
                         this.open_select = None;
                         this.track_name_input
                             .set_value(this.state.track_name.clone());
@@ -1199,16 +1522,20 @@ impl Render for AddTrackWindow {
                 move |select_id: &AddTrackSelectId, _w, cx| {
                     let select_id = *select_id;
                     let _ = target.update(cx, |this, cx| {
-                        this.open_select = if this.open_select == Some(select_id) {
+                        this.open_select = if open_select_at_render == Some(select_id) {
                             None
                         } else {
                             Some(select_id)
                         };
                         if crate::ui_debug_enabled() {
-                            eprintln!(
-                                "[ui] select_toggle id={select_id:?} open={:?}",
-                                this.open_select
-                            );
+                            match this.open_select {
+                                Some(open) => {
+                                    eprintln!("[ui-select] open id={open:?}")
+                                }
+                                None => {
+                                    eprintln!("[ui-select] close id={select_id:?} reason=toggle")
+                                }
+                            }
                         }
                         cx.notify();
                     });
@@ -1270,11 +1597,30 @@ impl Render for AddTrackWindow {
             }),
         };
 
+        // Click-catcher that dismisses the open Select when the user clicks
+        // anywhere outside its (deferred) menu. Rendered at the dialog root so
+        // it spans the whole window; the menu paints above it and occludes its
+        // own clicks. See `select_dismiss_backdrop`.
+        let dismiss_backdrop = self.open_select.is_some().then(|| {
+            let target = target.clone();
+            let on_dismiss: VoidCb = Arc::new(move |_: &(), _w: &mut Window, cx: &mut App| {
+                let _ = target.update(cx, |this, cx| {
+                    if this.open_select.take().is_some() {
+                        if crate::ui_debug_enabled() {
+                            eprintln!("[ui-select] close reason=click_outside");
+                        }
+                        cx.notify();
+                    }
+                });
+            });
+            select_dismiss_backdrop(on_dismiss)
+        });
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             .bg(Colors::surface_base())
             .overflow_hidden()
             .capture_key_down({
@@ -1286,7 +1632,7 @@ impl Render for AddTrackWindow {
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar_with_icon(
                 Some(assets::ICON_PLUS_PATH),
-                "Add Tracks",
+                i18n.tr("add-track.title"),
                 "add-track-window-close",
                 move |window, _cx| window.remove_window(),
             ))
@@ -1294,11 +1640,18 @@ impl Render for AddTrackWindow {
                 &self.state,
                 &self.track_name_input,
                 search_focused,
-                bind_mouse_selection(cx.entity().clone(), |this| &mut this.track_name_input),
+                bind_mouse_selection_with_offset(
+                    cx.entity().clone(),
+                    |this| &mut this.track_name_input,
+                    NAME_INPUT_X_OFFSET,
+                ),
+                cx.entity().clone(),
                 self.open_select,
                 &self.instrument_plugins,
                 callbacks,
+                i18n,
             ))
+            .children(dismiss_backdrop)
     }
 }
 
@@ -1307,6 +1660,7 @@ pub fn open_add_track_window(
     kind: AddTrackKind,
     track_count: usize,
     has_master_track: bool,
+    language: impl Into<String>,
     instrument_plugins: Vec<RegistryPlugin>,
     on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
     cx: &mut App,
@@ -1320,10 +1674,12 @@ pub fn open_add_track_window(
         y: px(parent_y + ((parent_h - ADD_TRACK_WINDOW_HEIGHT) / 2.0).max(24.0)),
     };
 
+    let language = language.into();
+    let i18n = I18n::new(&language);
     let mut state = AddTrackDialogState::open_for(track_count, has_master_track);
     state.selected_kind = kind;
     state.input_label = kind.default_input().to_string();
-    state.track_name = format!("{} {}", kind.default_name_stem(), state.next_number);
+    state.track_name = format!("{} {}", i18n.tr(kind.label_key()), state.next_number);
     add_track_debug(&format!(
         "open window kind={} track_count={}",
         kind.tab_label(),
@@ -1345,7 +1701,9 @@ pub fn open_add_track_window(
     ));
 
     cx.open_window(options, |_window, cx| {
-        cx.new(|cx| AddTrackWindow::new(state, instrument_plugins, on_confirm_request, cx))
+        cx.new(|cx| {
+            AddTrackWindow::new(state, language, instrument_plugins, on_confirm_request, cx)
+        })
     })
     .map_err(|e| e.to_string())
 }

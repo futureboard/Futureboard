@@ -84,6 +84,11 @@ pub struct MixerCallbacks {
     /// Toggle bypass on the named insert slot.
     pub on_toggle_insert_bypass:
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Reorder the named insert slot within the chain. `(track_id, insert_id,
+    /// up)` — `up = true` moves it one position earlier, `false` later.
+    pub on_move_insert: std::sync::Arc<
+        dyn Fn(&(String, String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     /// User clicked the slot chip — Phase 4 will open the native plugin
     /// editor; Phase 1 logs the request.
     pub on_open_insert_editor:
@@ -105,6 +110,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
     let noop_master = Arc::new(|_: &f32, _: &mut Window, _: &mut App| {});
     let noop_insert_pair = Arc::new(|_: &(String, String), _: &mut Window, _: &mut App| {});
+    let noop_insert_move = Arc::new(|_: &(String, String, bool), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
         on_volume_change: noop_vol,
@@ -118,6 +124,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_add_insert: noop_track.clone(),
         on_remove_insert: noop_insert_pair.clone(),
         on_toggle_insert_bypass: noop_insert_pair.clone(),
+        on_move_insert: noop_insert_move,
         on_open_insert_editor: noop_insert_pair.clone(),
         on_add_send: noop_track,
         on_remove_send: noop_insert_pair,
@@ -418,6 +425,8 @@ fn insert_chip(
     let on_open = callbacks.on_open_insert_editor.clone();
     let on_bypass = callbacks.on_toggle_insert_bypass.clone();
     let on_remove = callbacks.on_remove_insert.clone();
+    let on_move_up = callbacks.on_move_insert.clone();
+    let on_move_down = callbacks.on_move_insert.clone();
 
     let (bg, text) = match &slot.load_status {
         InsertLoadStatus::Ready if !bypassed => (Colors::accent_muted(), Colors::text_primary()),
@@ -434,6 +443,8 @@ fn insert_chip(
     let id_owned = slot_id.clone();
     let bypass_pair = (track_id_owned.clone(), slot_id.clone());
     let remove_pair = (track_id_owned.clone(), slot_id.clone());
+    let move_up_tuple = (track_id_owned.clone(), slot_id.clone(), true);
+    let move_down_tuple = (track_id_owned.clone(), slot_id.clone(), false);
     let open_pair = (track_id_owned, slot_id);
 
     div()
@@ -479,6 +490,42 @@ fn insert_chip(
                 })
                 .occlude(),
         )
+        // Reorder up ▲.
+        .child(
+            div()
+                .id(gpui::SharedString::from(format!(
+                    "insert-up-{}",
+                    move_up_tuple.1
+                )))
+                .text_size(px(8.0))
+                .text_color(Colors::text_faint())
+                .px(px(1.0))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.text_color(Colors::text_primary()))
+                .child("▲")
+                .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                    on_move_up(&move_up_tuple, w, cx);
+                })
+                .occlude(),
+        )
+        // Reorder down ▼.
+        .child(
+            div()
+                .id(gpui::SharedString::from(format!(
+                    "insert-down-{}",
+                    move_down_tuple.1
+                )))
+                .text_size(px(8.0))
+                .text_color(Colors::text_faint())
+                .px(px(1.0))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.text_color(Colors::text_primary()))
+                .child("▼")
+                .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                    on_move_down(&move_down_tuple, w, cx);
+                })
+                .occlude(),
+        )
         // Remove ×.
         .child(
             div()
@@ -489,6 +536,7 @@ fn insert_chip(
                 .text_size(px(10.0))
                 .text_color(Colors::text_faint())
                 .px(px(2.0))
+                .cursor(gpui::CursorStyle::PointingHand)
                 .child("×")
                 .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
                     on_remove(&remove_pair, w, cx);

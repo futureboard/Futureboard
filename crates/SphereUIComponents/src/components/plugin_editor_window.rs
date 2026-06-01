@@ -115,6 +115,7 @@ pub struct PluginEditorWindow {
     /// Logged the "host region mounted" line once bounds first went non-zero.
     host_mounted_logged: bool,
     last_region: Option<(i32, i32, i32, i32)>,
+    editor_content_size: Option<(i32, i32)>,
     /// Editor quirk resolved from the plug-in path + name at construction.
     /// Drives the delayed-ready ramp and informs failure messaging.
     quirk: PluginEditorQuirk,
@@ -157,6 +158,7 @@ impl PluginEditorWindow {
             tick_scheduled: false,
             host_mounted_logged: false,
             last_region: None,
+            editor_content_size: None,
             quirk,
             focus_handle: cx.focus_handle(),
         }
@@ -169,12 +171,20 @@ impl PluginEditorWindow {
     /// Physical-pixel host region under the GPUI window: full client width, from
     /// just below the header to the bottom. Win32 child coords are physical, so
     /// logical sizes are scaled by the window DPI factor.
-    fn host_region(window: &Window) -> EmbedRegion {
+    fn host_region_for(&self, window: &Window) -> EmbedRegion {
         let scale = window.scale_factor().max(0.5);
         let viewport = window.viewport_size();
         let w: f32 = viewport.width.into();
         let h: f32 = viewport.height.into();
         let header_px = HEADER_H * scale;
+        if let Some((content_w, content_h)) = self.editor_content_size {
+            return EmbedRegion {
+                x: 0,
+                y: header_px.round() as i32,
+                width: content_w.max(1),
+                height: content_h.max(1),
+            };
+        }
         EmbedRegion {
             x: 0,
             y: header_px.round() as i32,
@@ -286,7 +296,7 @@ impl PluginEditorWindow {
         }
 
         // Phase 7: require real (>0) content bounds before attaching.
-        let region = Self::host_region(window);
+        let region = self.host_region_for(window);
         if region.width <= 0 || region.height <= 0 {
             self.note_waiting("host bounds not ready (0x0)", cx);
             return;
@@ -330,7 +340,7 @@ impl PluginEditorWindow {
             self.note_waiting("native parent handle lost before attach", cx);
             return;
         };
-        let region = Self::host_region(window);
+        let region = self.host_region_for(window);
         if region.width <= 0 || region.height <= 0 {
             self.status = PluginEditorStatus::WaitingForHostHandle;
             self.note_waiting("host bounds not ready before attach", cx);
@@ -344,10 +354,20 @@ impl PluginEditorWindow {
         {
             Some(handle) => {
                 self.embed_handle = Some(handle);
-                self.last_region = Some((region.x, region.y, region.width, region.height));
+                let applied_region = self.apply_native_auto_size(window).unwrap_or(region);
+                self.last_region = Some((
+                    applied_region.x,
+                    applied_region.y,
+                    applied_region.width,
+                    applied_region.height,
+                ));
                 // Re-apply bounds + z-order after attach (plugins may resize the host).
-                self.processor
-                    .embed_set_bounds(region.x, region.y, region.width, region.height);
+                self.processor.embed_set_bounds(
+                    applied_region.x,
+                    applied_region.y,
+                    applied_region.width,
+                    applied_region.height,
+                );
                 self.processor.embed_refresh();
                 // Record the single presentation mode the host selected so we
                 // never drive both a child-HWND embed and a tool-window overlay.
@@ -401,6 +421,30 @@ impl PluginEditorWindow {
         cx.notify();
     }
 
+    fn apply_native_auto_size(&mut self, window: &mut Window) -> Option<EmbedRegion> {
+        let (content_w, content_h) = self.processor.embed_content_size()?;
+        self.editor_content_size = Some((content_w, content_h));
+
+        let scale = window.scale_factor().max(0.5);
+        let shell_w = (content_w as f32 / scale).max(EDITOR_WINDOW_MIN_WIDTH);
+        let shell_h = ((content_h as f32 / scale) + HEADER_H).max(EDITOR_WINDOW_MIN_HEIGHT);
+        window.resize(size(px(shell_w), px(shell_h)));
+
+        let region = self.host_region_for(window);
+        if plugin_view_debug() {
+            eprintln!(
+                "[plugin-view] auto_size plugin=\"{}\" shell={:.0}x{:.0} content={}x{} editor_id={}",
+                self.display_name,
+                shell_w,
+                shell_h,
+                region.width,
+                region.height,
+                self.editor_id()
+            );
+        }
+        Some(region)
+    }
+
     /// User-initiated retry from the failure panel: tear down any partial state
     /// and restart the lifecycle from `Opening`.
     fn retry(&mut self, cx: &mut Context<Self>) {
@@ -412,6 +456,7 @@ impl PluginEditorWindow {
         self.wait_ticks = 0;
         self.host_mounted_logged = false;
         self.last_region = None;
+        self.editor_content_size = None;
         if plugin_view_debug() {
             eprintln!(
                 "[plugin-view] retry requested editor_id={}",
@@ -505,7 +550,7 @@ impl PluginEditorWindow {
         self.schedule_ready_probe(probe_index + 1, cx);
     }
 
-    fn sync_region(&mut self, window: &Window) {
+    fn sync_region(&mut self, window: &mut Window) {
         if !matches!(
             self.status,
             PluginEditorStatus::Attached(_) | PluginEditorStatus::ProbingReady { .. }
@@ -515,7 +560,28 @@ impl PluginEditorWindow {
         if self.embed_handle.is_none() || !self.processor.embed_is_valid() {
             return;
         }
-        let region = Self::host_region(window);
+        if let Some(plugin_size) = self.processor.embed_content_size() {
+            if self.editor_content_size != Some(plugin_size) {
+                self.editor_content_size = Some(plugin_size);
+                let scale = window.scale_factor().max(0.5);
+                let shell_w = (plugin_size.0 as f32 / scale).max(EDITOR_WINDOW_MIN_WIDTH);
+                let shell_h =
+                    ((plugin_size.1 as f32 / scale) + HEADER_H).max(EDITOR_WINDOW_MIN_HEIGHT);
+                window.resize(size(px(shell_w), px(shell_h)));
+                if plugin_view_debug() {
+                    eprintln!(
+                        "[plugin-view] auto_size plugin=\"{}\" shell={:.0}x{:.0} content={}x{} editor_id={}",
+                        self.display_name,
+                        shell_w,
+                        shell_h,
+                        plugin_size.0,
+                        plugin_size.1,
+                        self.editor_id()
+                    );
+                }
+            }
+        }
+        let region = self.host_region_for(window);
         let tuple = (region.x, region.y, region.width, region.height);
         // Only push an explicit resize when our client-relative region actually
         // changed (Part D — ignore resize events if the rect is unchanged).
@@ -720,7 +786,7 @@ impl Render for PluginEditorWindow {
         let mut root = div()
             .relative()
             .size_full()
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             .overflow_hidden()
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar(

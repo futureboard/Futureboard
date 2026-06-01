@@ -1,13 +1,22 @@
-use gpui::{rgb, rgba, Rgba};
+use gpui::{font, rgb, rgba, Font, FontFallbacks, Rgba};
 
-/// Single font family used across the native app — Inter Variable.
-/// The variable TTF (`InterVariable.ttf`) registers under the family name
-/// "Inter Variable Text" in GPUI's text system.
+/// Primary Latin/UI font family used across the native app.
 pub const FONT_FAMILY: &str = "Inter Variable Text";
+
+/// Thai-capable fallback registered from `packages/shared/fonts`.
+pub const THAI_FONT_FAMILY: &str = "Google Sans";
 
 /// Alias kept for callsites that want an explicit "display" name. Points at
 /// the same variable family.
 pub const DISPLAY_FONT_FAMILY: &str = FONT_FAMILY;
+
+pub fn ui_font() -> Font {
+    let mut font = font(FONT_FAMILY);
+    font.fallbacks = Some(FontFallbacks::from_fonts(
+        vec![THAI_FONT_FAMILY.to_string()],
+    ));
+    font
+}
 
 /// Recommended text sizes. Kept here so individual components don't drift.
 pub mod text {

@@ -16,7 +16,7 @@ mod state;
 
 pub use category::{normalize_category, normalized_category_label, NormalizedCategory};
 pub use filter::{compute_filter_result, FilterCounts, FilterResult};
-pub use insert::{validate_insert, InsertValidation, PluginInsertTarget};
+pub use insert::{validate_insert, InsertValidation, PluginInsertKind, PluginInsertTarget};
 pub use overlay::{page_size_for_height, plugin_picker_overlay, visible_plugin_id_at};
 pub use prefs::PluginPickerPrefs;
 pub use search_index::PluginSearchIndex;

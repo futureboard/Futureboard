@@ -1,13 +1,17 @@
 use super::{
-    AutomationLane, AutomationPoint, ClipSource, FutureboardProject, InputMonitorMode, MidiNote,
-    PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer,
-    ProjectPluginInstance, ProjectSend, ProjectTrack, ProjectTrackType, TrackRouting,
+    AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
+    InputMonitorMode, MidiNote, PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip,
+    ProjectInsert, ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectTrack,
+    ProjectTrackAudioFormat, ProjectTrackInputRouting, ProjectTrackMidiInputRouting,
+    ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
 };
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 
 pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
-pub const PROJECT_VERSION: u32 = 1;
+/// On-disk format version. v3 adds persisted track routing fields. v1/v2 files
+/// still load with stable per-track routing defaults.
+pub const PROJECT_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -317,10 +321,18 @@ fn encode_automation_lane(w: &mut FbWriter, lane: &AutomationLane) {
     w.write_str(&lane.id);
     w.write_str(&lane.parameter_name);
     w.write_bool(lane.visible);
+    // Target descriptor + enabled (v2).
+    w.write_u8(lane.target.tag);
+    w.write_str(&lane.target.insert_id);
+    w.write_str(&lane.target.parameter_id);
+    w.write_str(&lane.target.parameter_name);
+    w.write_str(&lane.target.send_id);
+    w.write_bool(lane.enabled);
     w.write_u32(lane.points.len() as u32);
     for p in &lane.points {
         w.write_f32(p.beat);
         w.write_f32(p.value);
+        w.write_u8(p.curve); // v2
     }
 }
 
@@ -379,6 +391,63 @@ fn encode_track_type(w: &mut FbWriter, t: ProjectTrackType) {
     });
 }
 
+fn encode_track_input_routing(w: &mut FbWriter, input: &ProjectTrackInputRouting) {
+    match input {
+        ProjectTrackInputRouting::None => w.write_u8(0),
+        ProjectTrackInputRouting::AllInputs => w.write_u8(1),
+        ProjectTrackInputRouting::AudioDeviceChannel { device_id, channel } => {
+            w.write_u8(2);
+            w.write_str(device_id);
+            w.write_u32(*channel);
+        }
+        ProjectTrackInputRouting::MidiDevice { device_id } => {
+            w.write_u8(3);
+            w.write_str(device_id);
+        }
+    }
+}
+
+fn encode_track_output_routing(w: &mut FbWriter, output: &ProjectTrackOutputRouting) {
+    match output {
+        ProjectTrackOutputRouting::Main => w.write_u8(0),
+        ProjectTrackOutputRouting::Bus { bus_id } => {
+            w.write_u8(1);
+            w.write_str(bus_id);
+        }
+        ProjectTrackOutputRouting::HardwareOutput { device_id, channel } => {
+            w.write_u8(2);
+            w.write_str(device_id);
+            w.write_u32(*channel);
+        }
+        ProjectTrackOutputRouting::None => w.write_u8(3),
+    }
+}
+
+fn encode_track_audio_format(w: &mut FbWriter, audio_format: ProjectTrackAudioFormat) {
+    w.write_u8(match audio_format {
+        ProjectTrackAudioFormat::Mono => 0,
+        ProjectTrackAudioFormat::Stereo => 1,
+    });
+}
+
+fn encode_track_midi_input_routing(w: &mut FbWriter, input: &ProjectTrackMidiInputRouting) {
+    match input {
+        ProjectTrackMidiInputRouting::None => w.write_u8(0),
+        ProjectTrackMidiInputRouting::AllInputs => w.write_u8(1),
+        ProjectTrackMidiInputRouting::MidiDevice { device_id } => {
+            w.write_u8(2);
+            w.write_str(device_id);
+        }
+    }
+}
+
+fn routing_output_bus_id(output: &ProjectTrackOutputRouting) -> Option<String> {
+    match output {
+        ProjectTrackOutputRouting::Bus { bus_id } => Some(bus_id.clone()),
+        _ => None,
+    }
+}
+
 fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     w.write_str(&t.id);
     w.write_str(&t.name);
@@ -391,7 +460,13 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     w.write_bool(t.record_arm);
     encode_input_monitor(w, t.input_monitor);
     // routing
-    w.write_opt_str(&t.routing.output_bus);
+    encode_track_input_routing(w, &t.routing.input);
+    encode_track_output_routing(w, &t.routing.output);
+    encode_track_audio_format(w, t.routing.audio_format);
+    encode_track_midi_input_routing(w, &t.routing.midi_input);
+    w.write_opt_u8(&t.routing.midi_channel.map(|ch| ch.clamp(1, 16)));
+    let output_bus = routing_output_bus_id(&t.routing.output);
+    w.write_opt_str(&output_bus);
     w.write_u32(t.routing.sends.len() as u32);
     for s in &t.routing.sends {
         w.write_str(&s.id);
@@ -539,21 +614,43 @@ fn decode_insert(r: &mut FbReader) -> Result<ProjectInsert, ProjectError> {
     })
 }
 
-fn decode_automation_lane(r: &mut FbReader) -> Result<AutomationLane, ProjectError> {
+fn decode_automation_lane(r: &mut FbReader, version: u32) -> Result<AutomationLane, ProjectError> {
     let id = r.read_str()?;
     let parameter_name = r.read_str()?;
     let visible = r.read_bool()?;
+    let (target, enabled) = if version >= 2 {
+        let tag = r.read_u8()?;
+        let insert_id = r.read_str()?;
+        let parameter_id = r.read_str()?;
+        let target_param_name = r.read_str()?;
+        let send_id = r.read_str()?;
+        let enabled = r.read_bool()?;
+        (
+            AutomationTargetDesc {
+                tag,
+                insert_id,
+                parameter_id,
+                parameter_name: target_param_name,
+                send_id,
+            },
+            enabled,
+        )
+    } else {
+        (AutomationTargetDesc::default(), true)
+    };
     let count = r.read_u32()? as usize;
     let mut points = Vec::with_capacity(count);
     for _ in 0..count {
-        points.push(AutomationPoint {
-            beat: r.read_f32()?,
-            value: r.read_f32()?,
-        });
+        let beat = r.read_f32()?;
+        let value = r.read_f32()?;
+        let curve = if version >= 2 { r.read_u8()? } else { 0 };
+        points.push(AutomationPoint { beat, value, curve });
     }
     Ok(AutomationLane {
         id,
         parameter_name,
+        target,
+        enabled,
         visible,
         points,
     })
@@ -634,7 +731,76 @@ fn decode_input_monitor(r: &mut FbReader) -> Result<InputMonitorMode, ProjectErr
     })
 }
 
-fn decode_track(r: &mut FbReader) -> Result<ProjectTrack, ProjectError> {
+fn decode_track_input_routing(r: &mut FbReader) -> Result<ProjectTrackInputRouting, ProjectError> {
+    Ok(match r.read_u8()? {
+        0 => ProjectTrackInputRouting::None,
+        1 => ProjectTrackInputRouting::AllInputs,
+        2 => ProjectTrackInputRouting::AudioDeviceChannel {
+            device_id: r.read_str()?,
+            channel: r.read_u32()?,
+        },
+        3 => ProjectTrackInputRouting::MidiDevice {
+            device_id: r.read_str()?,
+        },
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown track input routing {t}"
+            )))
+        }
+    })
+}
+
+fn decode_track_output_routing(
+    r: &mut FbReader,
+) -> Result<ProjectTrackOutputRouting, ProjectError> {
+    Ok(match r.read_u8()? {
+        0 => ProjectTrackOutputRouting::Main,
+        1 => ProjectTrackOutputRouting::Bus {
+            bus_id: r.read_str()?,
+        },
+        2 => ProjectTrackOutputRouting::HardwareOutput {
+            device_id: r.read_str()?,
+            channel: r.read_u32()?,
+        },
+        3 => ProjectTrackOutputRouting::None,
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown track output routing {t}"
+            )))
+        }
+    })
+}
+
+fn decode_track_audio_format(r: &mut FbReader) -> Result<ProjectTrackAudioFormat, ProjectError> {
+    Ok(match r.read_u8()? {
+        0 => ProjectTrackAudioFormat::Mono,
+        1 => ProjectTrackAudioFormat::Stereo,
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown track audio format {t}"
+            )))
+        }
+    })
+}
+
+fn decode_track_midi_input_routing(
+    r: &mut FbReader,
+) -> Result<ProjectTrackMidiInputRouting, ProjectError> {
+    Ok(match r.read_u8()? {
+        0 => ProjectTrackMidiInputRouting::None,
+        1 => ProjectTrackMidiInputRouting::AllInputs,
+        2 => ProjectTrackMidiInputRouting::MidiDevice {
+            device_id: r.read_str()?,
+        },
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown track MIDI input routing {t}"
+            )))
+        }
+    })
+}
+
+fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectError> {
     let id = r.read_str()?;
     let name = r.read_str()?;
     let track_type = decode_track_type(r)?;
@@ -646,7 +812,24 @@ fn decode_track(r: &mut FbReader) -> Result<ProjectTrack, ProjectError> {
     let record_arm = r.read_bool()?;
     let input_monitor = decode_input_monitor(r)?;
 
+    let mut routing = if version >= 3 {
+        TrackRouting {
+            input: decode_track_input_routing(r)?,
+            output: decode_track_output_routing(r)?,
+            audio_format: decode_track_audio_format(r)?,
+            midi_input: decode_track_midi_input_routing(r)?,
+            midi_channel: r.read_opt_u8()?.map(|ch| ch.clamp(1, 16)),
+            sends: Vec::new(),
+        }
+    } else {
+        TrackRouting::default_for_track_type(track_type)
+    };
     let output_bus = r.read_opt_str()?;
+    if version < 3 {
+        if let Some(bus_id) = output_bus {
+            routing.output = ProjectTrackOutputRouting::Bus { bus_id };
+        }
+    }
     let send_count = r.read_u32()? as usize;
     let mut sends = Vec::with_capacity(send_count);
     for _ in 0..send_count {
@@ -663,7 +846,7 @@ fn decode_track(r: &mut FbReader) -> Result<ProjectTrack, ProjectError> {
             gain_db,
         });
     }
-    let routing = TrackRouting { output_bus, sends };
+    routing.sends = sends;
 
     let insert_count = r.read_u32()? as usize;
     let mut inserts = Vec::with_capacity(insert_count);
@@ -674,7 +857,7 @@ fn decode_track(r: &mut FbReader) -> Result<ProjectTrack, ProjectError> {
     let lane_count = r.read_u32()? as usize;
     let mut automation_lanes = Vec::with_capacity(lane_count);
     for _ in 0..lane_count {
-        automation_lanes.push(decode_automation_lane(r)?);
+        automation_lanes.push(decode_automation_lane(r, version)?);
     }
 
     let clip_count = r.read_u32()? as usize;
@@ -713,7 +896,7 @@ fn decode_asset(r: &mut FbReader) -> Result<ProjectAsset, ProjectError> {
     })
 }
 
-fn decode_body(body: &[u8]) -> Result<FutureboardProject, ProjectError> {
+fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectError> {
     let mut r = FbReader::new(body);
 
     let id = r.read_str()?;
@@ -732,7 +915,7 @@ fn decode_body(body: &[u8]) -> Result<FutureboardProject, ProjectError> {
     let track_count = r.read_u32()? as usize;
     let mut tracks = Vec::with_capacity(track_count);
     for _ in 0..track_count {
-        tracks.push(decode_track(&mut r)?);
+        tracks.push(decode_track(&mut r, version)?);
     }
 
     let asset_count = r.read_u32()? as usize;
@@ -770,9 +953,10 @@ pub fn decode_project(data: &[u8]) -> Result<FutureboardProject, ProjectError> {
         return Err(ProjectError::InvalidMagic);
     }
 
-    // Version
+    // Version — accept any released version up to the current one so older
+    // projects keep loading. Newer-than-known files are rejected.
     let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-    if version != PROJECT_VERSION {
+    if version == 0 || version > PROJECT_VERSION {
         return Err(ProjectError::UnsupportedVersion(version));
     }
 
@@ -794,5 +978,5 @@ pub fn decode_project(data: &[u8]) -> Result<FutureboardProject, ProjectError> {
         });
     }
 
-    decode_body(body)
+    decode_body(body, version)
 }

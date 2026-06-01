@@ -1729,7 +1729,7 @@ impl Render for PluginManagerWindow {
             .flex_col()
             .size_full()
             .relative()
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             .bg(Colors::surface_window())
             .overflow_hidden()
             .capture_key_down({

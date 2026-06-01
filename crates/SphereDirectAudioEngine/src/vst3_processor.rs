@@ -135,6 +135,11 @@ extern "C" {
     fn sphere_daux_vst3_embed_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_embed_has_visible_ui(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_embed_host_kind(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_embed_content_size(
+        processor: *mut SphereDauxVst3Processor,
+        out_width: *mut i32,
+        out_height: *mut i32,
+    ) -> i32;
 }
 
 #[derive(Debug)]
@@ -545,6 +550,21 @@ impl Vst3RuntimeProcessor {
             return -1;
         }
         unsafe { sphere_daux_vst3_embed_host_kind(self.inner.raw) }
+    }
+
+    pub fn embed_content_size(&self) -> Option<(i32, i32)> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        let mut width = 0;
+        let mut height = 0;
+        let ok =
+            unsafe { sphere_daux_vst3_embed_content_size(self.inner.raw, &mut width, &mut height) };
+        if ok != 0 && width > 0 && height > 0 {
+            Some((width, height))
+        } else {
+            None
+        }
     }
 }
 

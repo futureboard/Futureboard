@@ -24,6 +24,7 @@ use crate::components::text_input::{
 };
 use crate::components::timeline::render::list_available_gpu_devices;
 use crate::components::title_bar::external_window_titlebar;
+use crate::i18n::{I18n, Locale};
 use crate::overlay::{
     compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor, settings_form_column,
     OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
@@ -49,21 +50,21 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    pub fn label(self) -> &'static str {
+    pub fn label_key(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Audio => "Audio",
-            Self::Midi => "MIDI",
-            Self::Recording => "Recording",
-            Self::Playback => "Playback",
-            Self::Editing => "Editing",
-            Self::Appearance => "Appearance",
-            Self::Plugins => "Plugins",
-            Self::FilesMedia => "Files & Media",
-            Self::Shortcuts => "Key Commands",
-            Self::Performance => "Performance",
-            Self::Advanced => "Advanced",
-            Self::About => "About",
+            Self::General => "settings.tab.general",
+            Self::Audio => "settings.tab.audio",
+            Self::Midi => "settings.tab.midi",
+            Self::Recording => "settings.tab.recording",
+            Self::Playback => "settings.tab.playback",
+            Self::Editing => "settings.tab.editing",
+            Self::Appearance => "settings.tab.appearance",
+            Self::Plugins => "settings.tab.plugins",
+            Self::FilesMedia => "settings.tab.files-media",
+            Self::Shortcuts => "settings.tab.shortcuts",
+            Self::Performance => "settings.tab.performance",
+            Self::Advanced => "settings.tab.advanced",
+            Self::About => "settings.tab.about",
         }
     }
 
@@ -85,37 +86,43 @@ impl SettingsTab {
         }
     }
 
-    pub fn page_description(self) -> &'static str {
+    pub fn page_description_key(self) -> &'static str {
         match self {
-            Self::General => "Application behavior, project defaults, and autosave.",
-            Self::Audio => "Driver, devices, sample rate, buffer size, and latency.",
-            Self::Midi => "MIDI ports, clock, and external sync.",
-            Self::Recording => "Record format, monitoring, and metronome.",
-            Self::Playback => "Transport, looping, and playback behavior.",
-            Self::Editing => "Mouse, grid snap, and undo history.",
-            Self::Appearance => "Theme, timeline, mixer, and metering display.",
-            Self::Plugins => "Scan paths, formats, and plugin hosting.",
-            Self::FilesMedia => "Projects, samples, recordings, and cache locations.",
-            Self::Shortcuts => "Keyboard commands and shortcut conflicts.",
-            Self::Performance => "Engine load, buffering, and UI responsiveness.",
-            Self::Advanced => "Experimental options and developer tools.",
-            Self::About => "Version, licenses, and credits.",
+            Self::General => "settings.tab.general.description",
+            Self::Audio => "settings.tab.audio.description",
+            Self::Midi => "settings.tab.midi.description",
+            Self::Recording => "settings.tab.recording.description",
+            Self::Playback => "settings.tab.playback.description",
+            Self::Editing => "settings.tab.editing.description",
+            Self::Appearance => "settings.tab.appearance.description",
+            Self::Plugins => "settings.tab.plugins.description",
+            Self::FilesMedia => "settings.tab.files-media.description",
+            Self::Shortcuts => "settings.tab.shortcuts.description",
+            Self::Performance => "settings.tab.performance.description",
+            Self::Advanced => "settings.tab.advanced.description",
+            Self::About => "settings.tab.about.description",
         }
     }
 
     pub fn nav_groups() -> &'static [(&'static str, &'static [Self])] {
         &[
-            ("General", &[Self::General]),
+            ("settings.nav.general", &[Self::General]),
             (
-                "Studio",
+                "settings.nav.studio",
                 &[Self::Audio, Self::Midi, Self::Recording, Self::Playback],
             ),
             (
-                "Workflow",
+                "settings.nav.workflow",
                 &[Self::Editing, Self::Plugins, Self::FilesMedia],
             ),
-            ("Interface", &[Self::Appearance, Self::Shortcuts]),
-            ("System", &[Self::Performance, Self::Advanced, Self::About]),
+            (
+                "settings.nav.interface",
+                &[Self::Appearance, Self::Shortcuts],
+            ),
+            (
+                "settings.nav.system",
+                &[Self::Performance, Self::Advanced, Self::About],
+            ),
         ]
     }
 
@@ -316,6 +323,18 @@ fn settings_header(title: &'static str, _icon_path: &'static str) -> impl IntoEl
     settings_section_title(title)
 }
 
+fn settings_i18n_header(i18n: I18n, key: &str, _icon_path: &'static str) -> impl IntoElement {
+    settings_section_title(i18n.tr(key))
+}
+
+fn locale_label(i18n: I18n, locale: Locale) -> String {
+    i18n.tr(locale.language_key())
+}
+
+fn selected_locale_label(i18n: I18n, language_code: &str) -> String {
+    locale_label(i18n, Locale::from_code(language_code))
+}
+
 /// Performance > Rendering section. Renderer and GPU Device choices are
 /// "restart required" — applied at next launch by `WgpuTimelineRenderer`
 /// construction. We deliberately don't hot-swap the renderer at runtime
@@ -477,6 +496,7 @@ fn build_settings_content(
     _available_outputs: &[String],
     _available_backends: &[String],
 ) -> (Vec<gpui::AnyElement>, Vec<gpui::AnyElement>) {
+    let i18n = I18n::new(&schema.general.language);
     let query = state.search_query.trim().to_lowercase();
     let is_match = |label: &str, keywords: &[&str]| {
         if query.is_empty() {
@@ -488,7 +508,7 @@ fn build_settings_content(
 
     let mut sidebar_items: Vec<gpui::AnyElement> = Vec::new();
     let mut nav_index = 0usize;
-    for (group_title, tabs) in SettingsTab::nav_groups() {
+    for (group_key, tabs) in SettingsTab::nav_groups() {
         let visible_tabs: Vec<SettingsTab> = tabs
             .iter()
             .copied()
@@ -497,7 +517,7 @@ fn build_settings_content(
         if visible_tabs.is_empty() {
             continue;
         }
-        sidebar_items.push(settings_nav_group_header(group_title).into_any_element());
+        sidebar_items.push(settings_nav_group_header(i18n.tr(group_key)).into_any_element());
         for tab in visible_tabs {
             let active = state.active_tab == tab && query.is_empty();
             let search_hit = !query.is_empty();
@@ -507,7 +527,7 @@ fn build_settings_content(
             sidebar_items.push(
                 settings_nav_item(
                     ("settings-tab", idx),
-                    tab.label(),
+                    i18n.tr(tab.label_key()),
                     tab.icon(),
                     active,
                     search_hit,
@@ -531,20 +551,25 @@ fn build_settings_content(
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
             settings_section_card()
-                .child(settings_header("Application", assets::ICON_FILE_PATH))
-                .child(settings_daw_row("Language", {
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.application",
+                    assets::ICON_FILE_PATH,
+                ))
+                .child(settings_daw_row(i18n.tr("settings.field.language"), {
                     let open_combo = callbacks.open_hardware_combo;
                     let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+                    let selected = selected_locale_label(i18n, &schema.general.language);
                     hardware_select(
                         HardwareCombo::Language,
                         "settings-general-language",
-                        &schema.general.language,
+                        &selected,
                         open_combo,
                         on_toggle,
                     )
                 }))
                 .child(settings_daw_row(
-                    "Start Wizard",
+                    i18n.tr("settings.field.start-wizard"),
                     div()
                         .flex()
                         .flex_row()
@@ -561,11 +586,11 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Show welcome wizard project templates on launch"),
+                                .child(i18n.tr("settings.show-start-screen")),
                         ),
                 ))
                 .child(settings_daw_row(
-                    "Update Check",
+                    i18n.tr("settings.field.update-check"),
                     div()
                         .flex()
                         .flex_row()
@@ -582,7 +607,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Automatically check for software updates"),
+                                .child(i18n.tr("settings.check-updates")),
                         ),
                 ))
                 .into_any_element(),
@@ -598,9 +623,13 @@ fn build_settings_content(
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
             settings_section_card()
-                .child(settings_header("Autosave & Backup", assets::ICON_FILE_PATH))
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.autosave-backup",
+                    assets::ICON_FILE_PATH,
+                ))
                 .child(settings_daw_row(
-                    "Autosave",
+                    i18n.tr("settings.field.autosave"),
                     div()
                         .flex()
                         .flex_row()
@@ -617,21 +646,22 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Automatically save projects periodically"),
+                                .child(i18n.tr("settings.autosave.enabled")),
                         ),
                 ))
-                .child(settings_daw_row("Interval", {
+                .child(settings_daw_row(i18n.tr("settings.field.interval"), {
                     let open_combo = callbacks.open_hardware_combo;
                     let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+                    let interval = schema.general.autosave.interval_minutes;
                     hardware_select(
                         HardwareCombo::AutosaveInterval,
                         "settings-general-autosave-interval",
-                        &format!("{} min", schema.general.autosave.interval_minutes),
+                        &i18n.tr_vars("settings.interval.minutes", &[("n", interval.to_string())]),
                         open_combo,
                         on_toggle,
                     )
                 }))
-                .child(settings_daw_row("Max Backups", {
+                .child(settings_daw_row(i18n.tr("settings.field.max-backups"), {
                     let open_combo = callbacks.open_hardware_combo;
                     let on_toggle = callbacks.on_toggle_hardware_combo.clone();
                     hardware_select(
@@ -647,9 +677,13 @@ fn build_settings_content(
 
         sections.push(
             settings_section_card()
-                .child(settings_header("Notifications", assets::ICON_FILE_PATH))
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.notifications",
+                    assets::ICON_FILE_PATH,
+                ))
                 .child(settings_daw_row(
-                    "Warnings",
+                    i18n.tr("settings.field.warnings"),
                     div()
                         .flex()
                         .flex_row()
@@ -672,11 +706,11 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Show warnings on critical errors or file conflicts"),
+                                .child(i18n.tr("settings.notifications.warnings")),
                         ),
                 ))
                 .child(settings_daw_row(
-                    "System Notifications",
+                    i18n.tr("settings.field.system-notifications"),
                     div()
                         .flex()
                         .flex_row()
@@ -699,7 +733,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Send OS system notifications on export finished"),
+                                .child(i18n.tr("settings.notifications.system")),
                         ),
                 ))
                 .into_any_element(),
@@ -712,12 +746,16 @@ fn build_settings_content(
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
             settings_section_card()
-                .child(settings_header("Project Defaults", assets::ICON_FILE_PATH))
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.project-defaults",
+                    assets::ICON_FILE_PATH,
+                ))
                 .child(settings_section_hint(
-                    "Default values applied when creating a new session.",
+                    i18n.tr("settings.project-defaults.hint"),
                 ))
                 .child(settings_daw_row(
-                    "Default Tempo",
+                    i18n.tr("settings.field.default-tempo"),
                     div()
                         .flex()
                         .flex_row()
@@ -768,7 +806,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("BPM"),
+                                .child(i18n.tr("settings.bpm")),
                         ),
                 ))
                 .into_any_element(),
@@ -817,36 +855,50 @@ fn build_settings_content(
 
         sections.push(
             settings_section_card()
-                .child(settings_header("Audio Engine", assets::ICON_MIC_PATH))
-                .child(settings_daw_row("Backend", driver_select))
-                .child(settings_daw_row("Input Device", input_select))
-                .child(settings_daw_row("Output Device", output_select))
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.audio-engine",
+                    assets::ICON_MIC_PATH,
+                ))
                 .child(settings_daw_row(
-                    "Driver Status",
-                    settings_status_badge("Ready", true),
+                    i18n.tr("settings.field.backend"),
+                    driver_select,
+                ))
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.input-device"),
+                    input_select,
+                ))
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.output-device"),
+                    output_select,
+                ))
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.driver-status"),
+                    settings_status_badge(i18n.tr("settings.driver-status.ready"), true),
                 ))
                 .into_any_element(),
         );
 
         sections.push(
             settings_section_card()
-                .child(settings_header(
-                    "Sample Rate & Buffer",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.sample-rate-buffer",
                     assets::ICON_MIC_PATH,
                 ))
-                .child(settings_daw_row("Sample Rate", {
+                .child(settings_daw_row(i18n.tr("settings.field.sample-rate"), {
                     let open_combo = callbacks.open_hardware_combo;
                     let on_toggle = callbacks.on_toggle_hardware_combo.clone();
                     let sr = schema.general.project_defaults.sample_rate;
                     hardware_select(
                         HardwareCombo::SampleRate,
                         "settings-audio-sample-rate",
-                        &format!("{} Hz", sr),
+                        &i18n.tr_vars("settings.sample-rate.hz", &[("rate", sr.to_string())]),
                         open_combo,
                         on_toggle,
                     )
                 }))
-                .child(settings_daw_row("Buffer Size", {
+                .child(settings_daw_row(i18n.tr("settings.field.buffer-size"), {
                     let open_combo = callbacks.open_hardware_combo;
                     let on_toggle = callbacks.on_toggle_hardware_combo.clone();
                     let buf = schema.general.project_defaults.buffer_size;
@@ -859,12 +911,13 @@ fn build_settings_content(
                     )
                 }))
                 .child(settings_daw_row(
-                    "Round-trip Latency",
-                    settings_value_readout(format!("~{buffer_ms:.1} ms")),
+                    i18n.tr("settings.field.round-trip-latency"),
+                    settings_value_readout(i18n.tr_vars(
+                        "settings.latency.approx",
+                        &[("ms", format!("{buffer_ms:.1}"))],
+                    )),
                 ))
-                .child(settings_section_hint(
-                    "Lower buffer sizes reduce latency but increase CPU load.",
-                ))
+                .child(settings_section_hint(i18n.tr("settings.buffer.hint")))
                 .into_any_element(),
         );
     }
@@ -881,9 +934,13 @@ fn build_settings_content(
         let up = on_update.clone();
         sections.push(
             settings_section_card()
-                .child(settings_header("MIDI Devices", assets::ICON_LINK_PATH))
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.midi-devices",
+                    assets::ICON_LINK_PATH,
+                ))
                 .child(settings_daw_row(
-                    "MIDI Inputs",
+                    i18n.tr("settings.field.midi-inputs"),
                     div()
                         .flex()
                         .flex_col()
@@ -924,7 +981,7 @@ fn build_settings_content(
                                     div()
                                         .text_size(px(10.5))
                                         .text_color(Colors::text_primary())
-                                        .child("Keyboard Controller"),
+                                        .child(i18n.tr("settings.midi.keyboard-controller")),
                                 )
                         })
                         .child({
@@ -957,12 +1014,12 @@ fn build_settings_content(
                                     div()
                                         .text_size(px(10.5))
                                         .text_color(Colors::text_primary())
-                                        .child("Midi Device 2"),
+                                        .child(i18n.tr("settings.midi.device-2")),
                                 )
                         }),
                 ))
                 .child(settings_daw_row(
-                    "MIDI Outputs",
+                    i18n.tr("settings.field.midi-outputs"),
                     div().flex().flex_col().gap(px(6.0)).child({
                         let enabled = schema
                             .hardware
@@ -993,12 +1050,12 @@ fn build_settings_content(
                                 div()
                                     .text_size(px(10.5))
                                     .text_color(Colors::text_primary())
-                                    .child("Synth Out"),
+                                    .child(i18n.tr("settings.midi.synth-out")),
                             )
                     }),
                 ))
                 .child(settings_daw_row(
-                    "MIDI Clock Sync",
+                    i18n.tr("settings.field.midi-clock-sync"),
                     div()
                         .flex()
                         .flex_row()
@@ -1019,7 +1076,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Send MIDI clock to output devices"),
+                                .child(i18n.tr("settings.midi.clock-sync")),
                         ),
                 ))
                 .into_any_element(),
@@ -1034,13 +1091,17 @@ fn build_settings_content(
         );
         sections.push(
             settings_section_card()
-                .child(settings_header(
-                    "Sync & External Clock",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.sync-external-clock",
                     assets::ICON_CLOCK_PATH,
                 ))
-                .child(settings_daw_row("Clock Source", clock_select))
                 .child(settings_daw_row(
-                    "LTC Reader",
+                    i18n.tr("settings.field.clock-source"),
+                    clock_select,
+                ))
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.ltc-reader"),
                     div()
                         .flex()
                         .flex_row()
@@ -1061,7 +1122,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Enable linear timecode (LTC) reader on input"),
+                                .child(i18n.tr("settings.ltc.enable")),
                         ),
                 ))
                 .into_any_element(),
@@ -2102,7 +2163,9 @@ fn build_settings_content(
         if !hint.is_empty() {
             sections.push(
                 settings_section_card()
-                    .child(settings_section_title(state.active_tab.label()))
+                    .child(settings_section_title(
+                        i18n.tr(state.active_tab.label_key()),
+                    ))
                     .child(settings_section_hint(hint))
                     .child(
                         div()
@@ -2127,7 +2190,7 @@ fn build_settings_content(
                 .child(if query.is_empty() {
                     format!(
                         "The {} panel is not fully wired in Native yet.",
-                        state.active_tab.label()
+                        i18n.tr(state.active_tab.label_key())
                     )
                 } else {
                     format!("No settings match \"{}\"", query)
@@ -2149,6 +2212,7 @@ pub fn settings_dialog(
     available_outputs: &[String],
     available_backends: &[String],
 ) -> impl IntoElement {
+    let i18n = I18n::new(&schema.general.language);
     let close_backdrop = callbacks.on_close.clone();
     let close_button = callbacks.on_close.clone();
 
@@ -2222,7 +2286,7 @@ pub fn settings_dialog(
                                 .text_size(px(11.5))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_primary())
-                                .child("Preferences"),
+                                .child(i18n.tr("settings.title")),
                         )
                         .child(
                             div()
@@ -2287,7 +2351,6 @@ const SETTINGS_WIDTH: f32 = SETTINGS_WINDOW_WIDTH;
 const SETTINGS_HEIGHT: f32 = SETTINGS_WINDOW_HEIGHT;
 const COMBO_MENU_ESTIMATE_HEIGHT: f32 = 148.0;
 const CLOCK_SOURCE_OPTIONS: &[&str] = &["Internal", "MIDI"];
-const LANGUAGE_OPTIONS: &[&str] = &["en", "fr"];
 const AUTOSAVE_INTERVAL_OPTIONS: &[u32] = &[1, 2, 3, 5, 10, 15, 30, 60];
 const AUTOSAVE_MAX_BACKUPS_OPTIONS: &[u32] = &[1, 2, 3, 5, 10, 20, 50, 99];
 const SAMPLE_RATE_OPTIONS: &[u32] = &[44100, 48000, 88200, 96000];
@@ -2319,6 +2382,7 @@ fn hardware_combo_overlay(
     on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
     close_target: Entity<SettingsWindow>,
 ) -> impl IntoElement {
+    let i18n = I18n::new(&schema.general.language);
     let position = combo_menu_position(anchor, window);
     let close_target = close_target.clone();
     let experimental_asio = std::env::var("FUTUREBOARD_EXPERIMENTAL_ASIO")
@@ -2410,8 +2474,11 @@ fn hardware_combo_overlay(
             .into_any_element()
         }
         HardwareCombo::Language => {
-            let selected = schema.general.language.clone();
-            let options: Vec<String> = LANGUAGE_OPTIONS.iter().map(|s| s.to_string()).collect();
+            let selected = selected_locale_label(i18n, &schema.general.language);
+            let options: Vec<String> = Locale::ALL
+                .iter()
+                .map(|locale| locale_label(i18n, *locale))
+                .collect();
             let up = on_update;
             combo_box_string_menu(
                 "settings-general-language-menu",
@@ -2419,8 +2486,15 @@ fn hardware_combo_overlay(
                 &selected,
                 &options,
                 Arc::new(move |value, window, cx| {
+                    let locale_code = Locale::ALL
+                        .iter()
+                        .find(|locale| locale_label(i18n, **locale) == value)
+                        .copied()
+                        .unwrap_or(Locale::EnUs)
+                        .code()
+                        .to_string();
                     up(
-                        Arc::new(move |s| s.general.language = value.clone()),
+                        Arc::new(move |s| s.general.language = locale_code.clone()),
                         window,
                         cx,
                     );
@@ -2695,6 +2769,8 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let schema = self.settings.read(cx).current.clone();
+        let i18n = I18n::new(&schema.general.language);
+        self.search_input.placeholder = Some(i18n.tr("search.settings.placeholder"));
         let target = cx.entity().clone();
         let on_update = self.on_update.clone();
         let search_focused = self.search_input.is_focused(window);
@@ -2806,7 +2882,7 @@ impl Render for SettingsWindow {
             .flex_col()
             .size_full()
             .relative()
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             .bg(Colors::surface_window())
             .overflow_hidden()
             .capture_key_down({
@@ -2817,7 +2893,7 @@ impl Render for SettingsWindow {
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar(
-                "Preferences",
+                i18n.tr("settings.title"),
                 "settings-window-close",
                 {
                     let target = sw_target.clone();
@@ -2875,8 +2951,8 @@ impl Render for SettingsWindow {
                                             .justify_between()
                                             .gap(px(12.0))
                                             .child(settings_page_header(
-                                                self.active_tab.label(),
-                                                self.active_tab.page_description(),
+                                                i18n.tr(self.active_tab.label_key()),
+                                                i18n.tr(self.active_tab.page_description_key()),
                                             ))
                                             .child(div().w(px(208.0)).flex_shrink_0().child(
                                                 text_field_with_callbacks(

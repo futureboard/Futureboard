@@ -41,7 +41,7 @@ impl Render for SplashWindow {
             .size_full()
             .overflow_hidden()
             .bg(Colors::surface_base())
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             // Splash artwork fills the window.
             .child(
                 img(SharedString::from(SPLASH_IMAGE_PATH))

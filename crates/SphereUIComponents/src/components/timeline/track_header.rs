@@ -9,7 +9,8 @@ use crate::components::fader::db_value_pill;
 use crate::components::knob::format_pan_label;
 use crate::components::slider::slider;
 use crate::components::timeline::timeline_state::{
-    volume, TimelineState, TrackDragItem, TrackState, TrackType, HEADER_WIDTH, TRACK_HEIGHT,
+    volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
+    TRACK_HEIGHT,
 };
 use crate::components::timeline::vu_meter::vu_meter_with_levels;
 use crate::theme::Colors;
@@ -30,6 +31,8 @@ pub struct TrackHeaderCallbacks {
     pub on_toggle_solo: TrackCallback,
     pub on_toggle_arm: TrackCallback,
     pub on_toggle_input: TrackCallback,
+    /// Toggle the track between Clip and Automation edit mode.
+    pub on_toggle_automation: TrackCallback,
     pub on_delete_track: TrackCallback,
     pub on_volume_change: VolumeCallback,
     pub on_context_menu: Option<TrackContextCallback>,
@@ -148,17 +151,32 @@ pub fn track_header(
     let _s = crate::perf::PerfScope::enter("TrackHeader");
     let track_id = track.id.clone();
     let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
+    let is_automation = track.lane_mode == TrackLaneMode::Automation;
     let is_dragging = state.dragging_track_id.as_deref() == Some(track.id.as_str());
     let is_drop_target =
         state.drag_target_index == Some(index) || state.drag_target_index == Some(index + 1);
     let header_bg = if is_dragging {
         Colors::with_alpha(Colors::text_primary(), 0.07)
+    } else if is_automation {
+        // Subtle accent tint so the active automation track is obvious even
+        // when it isn't the selected track.
+        Colors::with_alpha(Colors::accent_primary(), 0.10)
     } else if is_selected {
         Colors::surface_raised()
     } else if is_drop_target && state.dragging_track_id.is_some() {
         Colors::with_alpha(Colors::text_primary(), 0.05)
     } else {
         Colors::surface_panel()
+    };
+    // In automation mode the sub-label shows the active target instead of the
+    // clip count so the user can see what they are editing at a glance.
+    let sub_label = if is_automation {
+        format!(
+            "AUTO · {}",
+            state.active_automation_target(&track.id).display_name()
+        )
+    } else {
+        format!("CH {:02} · {} clips", index + 1, track.clips.len())
     };
 
     let id_num = {
@@ -206,6 +224,14 @@ pub fn track_header(
         let cb = callbacks.on_toggle_input.clone();
         move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
             cb(&input_id, window, cx);
+        }
+    };
+
+    let automation_id = track_id.clone();
+    let on_automation = {
+        let cb = callbacks.on_toggle_automation.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&automation_id, window, cx);
         }
     };
 
@@ -332,12 +358,12 @@ pub fn track_header(
                                         .child(
                                             div()
                                                 .text_size(px(8.5))
-                                                .text_color(Colors::text_muted())
-                                                .child(format!(
-                                                    "CH {:02} · {} clips",
-                                                    index + 1,
-                                                    track.clips.len()
-                                                )),
+                                                .text_color(if is_automation {
+                                                    Colors::accent_primary()
+                                                } else {
+                                                    Colors::text_muted()
+                                                })
+                                                .child(sub_label),
                                         ),
                                 ),
                         )
@@ -388,6 +414,17 @@ pub fn track_header(
                                     Colors::accent_primary(),
                                     Colors::text_inverse(),
                                     on_input,
+                                ))
+                                // Automation mode toggle — switches the lane
+                                // between Clip and Automation editing.
+                                .child(pill_button(
+                                    ("auto-btn", id_num).into(),
+                                    "A",
+                                    None,
+                                    is_automation,
+                                    Colors::accent_primary(),
+                                    Colors::text_inverse(),
+                                    on_automation,
                                 ))
                                 .child(pill_button(
                                     ("del-btn", id_num).into(),

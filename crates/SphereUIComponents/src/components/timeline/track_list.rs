@@ -1,10 +1,14 @@
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::timeline::automation_lane::automation_lane;
-use crate::components::timeline::timeline_state::{TimelineState, HEADER_WIDTH, TRACK_HEIGHT};
+use crate::components::timeline::timeline_state::{
+    AutomationMarquee, TimelineState, HEADER_WIDTH, TRACK_HEIGHT,
+};
 use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
-use crate::components::timeline::track_lane::track_lane;
+use crate::components::timeline::track_lane::{
+    track_lane, AutomationCycleCallback, AutomationDownCallback,
+};
 use crate::theme::Colors;
 
 /// Rows above/below the visible viewport that are kept rendered to prevent
@@ -36,6 +40,9 @@ pub fn track_list(
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
+    on_automation_down: Option<AutomationDownCallback>,
+    on_automation_cycle: Option<AutomationCycleCallback>,
+    automation_marquee: Option<&AutomationMarquee>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackList");
     let grid_width = state.viewport.viewport_width.max(1.0);
@@ -122,6 +129,9 @@ pub fn track_list(
                         on_erase_start.clone(),
                         on_erase_clip.clone(),
                         erase_preview_ids,
+                        on_automation_down.clone(),
+                        on_automation_cycle.clone(),
+                        automation_marquee,
                     )),
             )
             .children(

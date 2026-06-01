@@ -4,12 +4,12 @@ pub mod recent;
 pub mod template;
 
 pub use format::{decode_project, encode_project, ProjectError, PROJECT_MAGIC, PROJECT_VERSION};
-pub use template::ProjectTemplate;
 pub use io::{
     create_project_folder, default_projects_dir, load_project, sanitize_project_name, save_project,
     PROJECT_FILE_EXT,
 };
 pub use recent::{RecentProject, RecentProjectsStore};
+pub use template::ProjectTemplate;
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -117,17 +117,75 @@ pub struct ProjectInsert {
 
 // ── Track routing ─────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectTrackInputRouting {
+    None,
+    AllInputs,
+    AudioDeviceChannel { device_id: String, channel: u32 },
+    MidiDevice { device_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectTrackOutputRouting {
+    Main,
+    Bus { bus_id: String },
+    HardwareOutput { device_id: String, channel: u32 },
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectTrackAudioFormat {
+    Mono,
+    Stereo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectTrackMidiInputRouting {
+    None,
+    AllInputs,
+    MidiDevice { device_id: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct TrackRouting {
-    pub output_bus: Option<String>,
+    pub input: ProjectTrackInputRouting,
+    pub output: ProjectTrackOutputRouting,
+    pub audio_format: ProjectTrackAudioFormat,
+    pub midi_input: ProjectTrackMidiInputRouting,
+    pub midi_channel: Option<u8>,
     pub sends: Vec<ProjectSend>,
 }
 
 impl Default for TrackRouting {
     fn default() -> Self {
         Self {
-            output_bus: None,
+            input: ProjectTrackInputRouting::None,
+            output: ProjectTrackOutputRouting::Main,
+            audio_format: ProjectTrackAudioFormat::Stereo,
+            midi_input: ProjectTrackMidiInputRouting::None,
+            midi_channel: None,
             sends: Vec::new(),
+        }
+    }
+}
+
+impl TrackRouting {
+    pub fn default_for_track_type(track_type: ProjectTrackType) -> Self {
+        match track_type {
+            ProjectTrackType::Audio => Self::default(),
+            ProjectTrackType::Instrument => Self {
+                midi_input: ProjectTrackMidiInputRouting::AllInputs,
+                ..Self::default()
+            },
+            ProjectTrackType::Midi => Self {
+                output: ProjectTrackOutputRouting::None,
+                midi_input: ProjectTrackMidiInputRouting::AllInputs,
+                ..Self::default()
+            },
+            ProjectTrackType::Bus
+            | ProjectTrackType::Return
+            | ProjectTrackType::Group
+            | ProjectTrackType::Master => Self::default(),
         }
     }
 }
@@ -149,12 +207,32 @@ pub struct ProjectSend {
 pub struct AutomationPoint {
     pub beat: f32,
     pub value: f32,
+    /// [`AutomationCurve`](crate::components::timeline::timeline_state::AutomationCurve)
+    /// tag. Persisted from project version 2 onward; defaults to Linear (0)
+    /// when loading older files.
+    pub curve: u8,
+}
+
+/// Flattened automation target descriptor for persistence. `tag` matches
+/// `AutomationTarget::to_tag`; the descriptor strings are only meaningful for
+/// the plugin/send variants and are empty otherwise.
+#[derive(Debug, Clone, Default)]
+pub struct AutomationTargetDesc {
+    pub tag: u8,
+    pub insert_id: String,
+    pub parameter_id: String,
+    pub parameter_name: String,
+    pub send_id: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct AutomationLane {
     pub id: String,
     pub parameter_name: String,
+    /// Persisted from project version 2 onward; derived from `parameter_name`
+    /// for older files.
+    pub target: AutomationTargetDesc,
+    pub enabled: bool,
     pub points: Vec<AutomationPoint>,
     pub visible: bool,
 }
@@ -357,12 +435,15 @@ impl From<&TimelineState> for FutureboardProject {
                     .map(|al| AutomationLane {
                         id: al.id.clone(),
                         parameter_name: al.name.clone(),
+                        target: target_to_desc(&al.target),
+                        enabled: al.enabled,
                         points: al
                             .points
                             .iter()
                             .map(|p| AutomationPoint {
                                 beat: p.beat,
                                 value: p.value,
+                                curve: p.curve.to_tag(),
                             })
                             .collect(),
                         visible: al.visible,
@@ -384,7 +465,11 @@ impl From<&TimelineState> for FutureboardProject {
                         InputMonitorMode::Off
                     },
                     routing: TrackRouting {
-                        output_bus: None,
+                        input: timeline_input_to_project(&t.routing.input),
+                        output: timeline_output_to_project(&t.routing.output),
+                        audio_format: timeline_audio_format_to_project(t.routing.audio_format),
+                        midi_input: timeline_midi_input_to_project(&t.routing.midi_input),
+                        midi_channel: t.routing.midi_channel.map(|ch| ch.clamp(1, 16)),
                         sends: t
                             .sends
                             .iter()
@@ -513,14 +598,19 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 .map(|al| AutomationLaneState {
                     id: al.id.clone(),
                     name: al.parameter_name.clone(),
+                    target: desc_to_target(&al.target, &al.parameter_name),
+                    enabled: al.enabled,
                     visible: al.visible,
                     points: al
                         .points
                         .iter()
-                        .map(|p| TlAutoPoint {
-                            beat: p.beat,
-                            value: p.value,
-                        })
+                        .map(|p| TlAutoPoint::with_curve(
+                            p.beat,
+                            p.value,
+                            crate::components::timeline::timeline_state::AutomationCurve::from_tag(
+                                p.curve,
+                            ),
+                        ))
                         .collect(),
                 })
                 .collect();
@@ -589,9 +679,185 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 meter_level_r: 0.0,
                 clips,
                 automation_lanes,
+                lane_mode: crate::components::timeline::timeline_state::TrackLaneMode::Clips,
+                selected_automation_target: None,
                 inserts,
                 sends,
+                routing: project_routing_to_timeline(&pt.routing, track_type),
             }
         })
         .collect();
+}
+
+fn timeline_input_to_project(
+    input: &crate::components::timeline::timeline_state::TrackInputRouting,
+) -> ProjectTrackInputRouting {
+    use crate::components::timeline::timeline_state::TrackInputRouting as T;
+    match input {
+        T::None => ProjectTrackInputRouting::None,
+        T::AllInputs => ProjectTrackInputRouting::AllInputs,
+        T::AudioDeviceChannel { device_id, channel } => {
+            ProjectTrackInputRouting::AudioDeviceChannel {
+                device_id: device_id.clone(),
+                channel: *channel,
+            }
+        }
+        T::MidiDevice { device_id } => ProjectTrackInputRouting::MidiDevice {
+            device_id: device_id.clone(),
+        },
+    }
+}
+
+fn timeline_output_to_project(
+    output: &crate::components::timeline::timeline_state::TrackOutputRouting,
+) -> ProjectTrackOutputRouting {
+    use crate::components::timeline::timeline_state::TrackOutputRouting as T;
+    match output {
+        T::Main => ProjectTrackOutputRouting::Main,
+        T::Bus { bus_id } => ProjectTrackOutputRouting::Bus {
+            bus_id: bus_id.clone(),
+        },
+        T::HardwareOutput { device_id, channel } => ProjectTrackOutputRouting::HardwareOutput {
+            device_id: device_id.clone(),
+            channel: *channel,
+        },
+        T::None => ProjectTrackOutputRouting::None,
+    }
+}
+
+fn timeline_audio_format_to_project(
+    audio_format: crate::components::timeline::timeline_state::TrackAudioFormat,
+) -> ProjectTrackAudioFormat {
+    match audio_format {
+        crate::components::timeline::timeline_state::TrackAudioFormat::Mono => {
+            ProjectTrackAudioFormat::Mono
+        }
+        crate::components::timeline::timeline_state::TrackAudioFormat::Stereo => {
+            ProjectTrackAudioFormat::Stereo
+        }
+    }
+}
+
+fn timeline_midi_input_to_project(
+    input: &crate::components::timeline::timeline_state::TrackMidiInputRouting,
+) -> ProjectTrackMidiInputRouting {
+    use crate::components::timeline::timeline_state::TrackMidiInputRouting as T;
+    match input {
+        T::None => ProjectTrackMidiInputRouting::None,
+        T::AllInputs => ProjectTrackMidiInputRouting::AllInputs,
+        T::MidiDevice { device_id } => ProjectTrackMidiInputRouting::MidiDevice {
+            device_id: device_id.clone(),
+        },
+    }
+}
+
+fn project_routing_to_timeline(
+    routing: &TrackRouting,
+    track_type: TlTrackType,
+) -> crate::components::timeline::timeline_state::TrackRoutingState {
+    use crate::components::timeline::timeline_state::{
+        TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
+        TrackRoutingState,
+    };
+    let mut state = TrackRoutingState::for_track_type(track_type);
+    state.input = match &routing.input {
+        ProjectTrackInputRouting::None => TrackInputRouting::None,
+        ProjectTrackInputRouting::AllInputs => TrackInputRouting::AllInputs,
+        ProjectTrackInputRouting::AudioDeviceChannel { device_id, channel } => {
+            TrackInputRouting::AudioDeviceChannel {
+                device_id: device_id.clone(),
+                channel: *channel,
+            }
+        }
+        ProjectTrackInputRouting::MidiDevice { device_id } => TrackInputRouting::MidiDevice {
+            device_id: device_id.clone(),
+        },
+    };
+    state.output = match &routing.output {
+        ProjectTrackOutputRouting::Main => TrackOutputRouting::Main,
+        ProjectTrackOutputRouting::Bus { bus_id } => TrackOutputRouting::Bus {
+            bus_id: bus_id.clone(),
+        },
+        ProjectTrackOutputRouting::HardwareOutput { device_id, channel } => {
+            TrackOutputRouting::HardwareOutput {
+                device_id: device_id.clone(),
+                channel: *channel,
+            }
+        }
+        ProjectTrackOutputRouting::None => TrackOutputRouting::None,
+    };
+    state.audio_format = match routing.audio_format {
+        ProjectTrackAudioFormat::Mono => TrackAudioFormat::Mono,
+        ProjectTrackAudioFormat::Stereo => TrackAudioFormat::Stereo,
+    };
+    state.midi_input = match &routing.midi_input {
+        ProjectTrackMidiInputRouting::None => TrackMidiInputRouting::None,
+        ProjectTrackMidiInputRouting::AllInputs => TrackMidiInputRouting::AllInputs,
+        ProjectTrackMidiInputRouting::MidiDevice { device_id } => {
+            TrackMidiInputRouting::MidiDevice {
+                device_id: device_id.clone(),
+            }
+        }
+    };
+    state.midi_channel = routing.midi_channel.map(|ch| ch.clamp(1, 16));
+    state
+}
+
+/// Flatten an [`AutomationTarget`] into its persisted descriptor.
+fn target_to_desc(
+    target: &crate::components::timeline::timeline_state::AutomationTarget,
+) -> AutomationTargetDesc {
+    use crate::components::timeline::timeline_state::AutomationTarget as T;
+    let mut desc = AutomationTargetDesc {
+        tag: target.to_tag(),
+        ..Default::default()
+    };
+    match target {
+        T::PluginParameter {
+            insert_id,
+            parameter_id,
+            parameter_name,
+        } => {
+            desc.insert_id = insert_id.clone();
+            desc.parameter_id = parameter_id.clone();
+            desc.parameter_name = parameter_name.clone();
+        }
+        T::SendLevel { send_id } => desc.send_id = send_id.clone(),
+        _ => {}
+    }
+    desc
+}
+
+/// Rebuild an [`AutomationTarget`] from a persisted descriptor. Falls back to
+/// deriving from `parameter_name` when the descriptor is from an older file
+/// (tag 0 with no plugin/send descriptor strings).
+fn desc_to_target(
+    desc: &AutomationTargetDesc,
+    parameter_name: &str,
+) -> crate::components::timeline::timeline_state::AutomationTarget {
+    use crate::components::timeline::timeline_state::AutomationTarget as T;
+    match desc.tag {
+        1 => T::TrackPan,
+        2 => T::TrackMute,
+        3 => T::PluginParameter {
+            insert_id: desc.insert_id.clone(),
+            parameter_id: desc.parameter_id.clone(),
+            parameter_name: if desc.parameter_name.is_empty() {
+                parameter_name.to_string()
+            } else {
+                desc.parameter_name.clone()
+            },
+        },
+        4 => T::SendLevel {
+            send_id: desc.send_id.clone(),
+        },
+        // tag 0: TrackVolume, or a legacy file — derive from the lane name.
+        _ => {
+            if desc.insert_id.is_empty() && desc.send_id.is_empty() {
+                T::from_legacy_name(parameter_name)
+            } else {
+                T::TrackVolume
+            }
+        }
+    }
 }

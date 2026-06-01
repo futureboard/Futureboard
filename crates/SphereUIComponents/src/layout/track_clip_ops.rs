@@ -52,12 +52,72 @@ impl StudioLayout {
 
     pub(super) fn delete_selected_clip_or_track(&mut self, cx: &mut Context<Self>) {
         let _ = self.timeline.update(cx, |timeline, cx| {
+            use crate::components::timeline::timeline_state::TrackLaneMode;
+            // Automation mode: Delete removes selected automation points first
+            // (committed once), and never falls through to clip/track deletion.
+            if let Some(track_id) = timeline.state.selection.selected_track_id.clone() {
+                if timeline.state.track_lane_mode(&track_id) == TrackLaneMode::Automation
+                    && timeline.state.selected_automation_point_count(&track_id) > 0
+                {
+                    if timeline.state.delete_selected_automation_points(&track_id) > 0 {
+                        timeline.mark_project_changed(cx);
+                        cx.notify();
+                    }
+                    return;
+                }
+            }
             if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
                 timeline.delete_clip_command(&id, cx);
             } else if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline.state.delete_track(&id);
                 timeline.mark_project_changed(cx);
                 cx.notify();
+            }
+        });
+        self.mark_dirty();
+    }
+
+    pub(super) fn toggle_selected_track_automation_mode(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                timeline.state.toggle_track_lane_mode(&id);
+                cx.notify();
+            }
+        });
+    }
+
+    pub(super) fn select_all_automation_points(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            use crate::components::timeline::timeline_state::TrackLaneMode;
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                if timeline.state.track_lane_mode(&id) != TrackLaneMode::Automation {
+                    return;
+                }
+                if let Some(lane_id) = timeline.state.active_automation_lane_id(&id) {
+                    timeline.state.select_all_automation_points(&id, &lane_id);
+                    cx.notify();
+                }
+            }
+        });
+    }
+
+    pub(super) fn clear_automation_selection(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                if timeline.state.clear_automation_selection(&id) {
+                    cx.notify();
+                }
+            }
+        });
+    }
+
+    pub(super) fn cycle_selected_track_automation_target(&mut self, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                if timeline.state.cycle_automation_target(&id).is_some() {
+                    timeline.mark_project_changed(cx);
+                    cx.notify();
+                }
             }
         });
         self.mark_dirty();

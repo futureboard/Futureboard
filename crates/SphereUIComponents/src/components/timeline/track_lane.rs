@@ -1,12 +1,26 @@
 use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::audio_clip::audio_clip;
+use crate::components::timeline::automation_lane::automation_overlay;
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
-    ClipType, TimelineState, TimelineTool, TrackState, HEADER_WIDTH, TRACK_HEIGHT,
+    automation_y_to_value, AutomationMarquee, ClipType, TimelineState, TimelineTool, TrackLaneMode,
+    TrackState, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
+
+/// Top chrome height above the timeline ruler — mirrors `timeline.rs` so the
+/// automation lane can map a window-space click into a lane-local value.
+const APP_CHROME_HEIGHT: f32 = 36.0;
+
+/// Automation lane mouse-down payload: `(track_id, beat, value_norm, additive)`.
+pub type AutomationDownCallback =
+    std::sync::Arc<dyn Fn(&(String, f32, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static>;
+
+/// Cycle the automation target for a track (fired by the in-lane target chip).
+pub type AutomationCycleCallback =
+    std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
 
 pub fn track_lane(
     track: &TrackState,
@@ -34,6 +48,9 @@ pub fn track_lane(
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
+    on_automation_down: Option<AutomationDownCallback>,
+    on_automation_cycle: Option<AutomationCycleCallback>,
+    automation_marquee: Option<&AutomationMarquee>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackLane");
     let track_id = track.id.clone();
@@ -121,6 +138,78 @@ pub fn track_lane(
         hasher.finish() as usize
     };
 
+    let is_automation = track.lane_mode == TrackLaneMode::Automation;
+
+    // In automation mode the clips are dimmed background context and a
+    // full-lane interaction layer captures point edits so clip handlers never
+    // fire. The automation line/points overlay is drawn on top.
+    let automation_layers = is_automation.then(|| {
+        let overlay = automation_overlay(track, state, TRACK_HEIGHT, automation_marquee);
+        let interaction = on_automation_down.clone().map(|cb| {
+            let state_auto = state.clone();
+            let track_id_auto = track.id.clone();
+            div()
+                .absolute()
+                .inset_0()
+                .id(("automation-hit", id_num))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |event: &gpui::MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        let wx: f32 = event.position.x.into();
+                        let wy: f32 = event.position.y.into();
+                        let lane_x = wx - SIDEBAR_WIDTH - HEADER_WIDTH;
+                        let raw_beat = state_auto.x_to_beats(lane_x);
+                        let snapped_sec =
+                            state_auto.snap_time(raw_beat * state_auto.seconds_per_beat());
+                        let beat = (snapped_sec / state_auto.seconds_per_beat()).max(0.0);
+                        let local_y = (wy - APP_CHROME_HEIGHT - RULER_HEIGHT
+                            + state_auto.viewport.scroll_y)
+                            - track_index as f32 * TRACK_HEIGHT;
+                        let value = automation_y_to_value(local_y, TRACK_HEIGHT);
+                        let additive = event.modifiers.shift || event.modifiers.control;
+                        cb(&(track_id_auto.clone(), beat, value, additive), window, cx);
+                    },
+                )
+        });
+        // Clickable target chip (top-left). Sits above the interaction layer so
+        // clicking it cycles the target instead of adding a point.
+        let target_name = state.active_automation_target(&track.id).display_name();
+        let cycle_chip = on_automation_cycle.clone().map(|cb| {
+            let tid = track.id.clone();
+            div()
+                .absolute()
+                .left(px(4.0))
+                .top(px(4.0))
+                .id(("automation-target", id_num))
+                .flex()
+                .items_center()
+                .gap(px(3.0))
+                .px(px(6.0))
+                .py(px(1.0))
+                .rounded_sm()
+                .bg(Colors::with_alpha(Colors::surface_base(), 0.85))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.6))
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::accent_primary())
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.bg(Colors::with_alpha(Colors::accent_primary(), 0.18)))
+                .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+                    cx.stop_propagation();
+                    cb(&tid, window, cx);
+                })
+                .child(format!("AUTO · {}", target_name))
+        });
+        div()
+            .absolute()
+            .inset_0()
+            .child(overlay)
+            .children(interaction)
+            .children(cycle_chip)
+    });
+
     div()
         .flex_1()
         .h(px(TRACK_HEIGHT))
@@ -165,5 +254,13 @@ pub fn track_lane(
                 },
             )
         })
-        .children(clip_elements)
+        // Clips: full strength in Clip mode, dimmed background in Automation mode.
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .when(is_automation, |this| this.opacity(0.28))
+                .children(clip_elements),
+        )
+        .children(automation_layers)
 }

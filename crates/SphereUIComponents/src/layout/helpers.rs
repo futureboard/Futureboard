@@ -124,14 +124,27 @@ pub(super) fn find_clip_summary<'a>(
     let id = clip_id?;
     for t in tracks {
         if let Some(c) = t.clips.iter().find(|c| c.id == id) {
+            let (kind, source_path, note_count) = match &c.clip_type {
+                crate::components::timeline::timeline_state::ClipType::Audio {
+                    source_path,
+                    ..
+                } => ("Audio", source_path.as_deref(), None),
+                crate::components::timeline::timeline_state::ClipType::Midi { notes } => {
+                    ("MIDI", None, Some(notes.len()))
+                }
+            };
             return Some(crate::components::panel::SelectedClipSummary {
+                clip_id: &c.id,
+                track_id: &t.id,
                 name: &c.name,
                 start_beat: c.start_beat,
                 duration_beats: c.duration_beats,
-                kind: match &c.clip_type {
-                    crate::components::timeline::timeline_state::ClipType::Audio { .. } => "Audio",
-                    crate::components::timeline::timeline_state::ClipType::Midi { .. } => "MIDI",
-                },
+                muted: c.muted,
+                gain: c.gain,
+                source_duration_seconds: c.source_duration_seconds,
+                source_path,
+                note_count,
+                kind,
                 track_name: &t.name,
             });
         }

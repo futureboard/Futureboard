@@ -327,6 +327,30 @@ impl StudioLayout {
                 });
             })
         };
+        let on_move_insert: std::sync::Arc<
+            dyn Fn(&(String, String, bool), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(
+                move |(track_id, insert_id, up): &(String, String, bool), _w, cx| {
+                    let track_id = track_id.clone();
+                    let insert_id = insert_id.clone();
+                    let up = *up;
+                    let _ = this.update(cx, |this, cx| {
+                        let moved = this.timeline.update(cx, |timeline, _cx| {
+                            timeline.state.move_insert(&track_id, &insert_id, up)
+                        });
+                        // Only commit + resync the engine when the order actually
+                        // changed (boundary clicks are a no-op, not a dirty edit).
+                        if moved {
+                            this.mark_dirty();
+                            this.engine_project_dirty = true;
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+        };
         // Phase 4: open the GPUI-hosted native plugin editor window.
         let on_open_insert_editor: std::sync::Arc<
             dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
@@ -392,6 +416,7 @@ impl StudioLayout {
             on_add_insert,
             on_remove_insert,
             on_toggle_insert_bypass,
+            on_move_insert,
             on_open_insert_editor,
             on_add_send,
             on_remove_send,

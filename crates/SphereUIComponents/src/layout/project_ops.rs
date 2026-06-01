@@ -74,11 +74,7 @@ impl StudioLayout {
     /// TODO: richer template presets (default inserts, sends, routing, master
     /// chain) once the template/preset system lands. For now templates only set
     /// tempo, time signature, and an initial track layout.
-    pub fn new_project_from_template(
-        &mut self,
-        template: ProjectTemplate,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn new_project_from_template(&mut self, template: ProjectTemplate, cx: &mut Context<Self>) {
         self.reset_project(cx);
 
         let (ts_num, ts_den) = template.time_signature();
@@ -188,9 +184,9 @@ impl StudioLayout {
                 let _ = owner.update(cx, |this, cx| {
                     this.unsaved_guard_window = None;
                     match result.response {
-                        0 => this.save_project_then(action, cx), // Save
+                        0 => this.save_project_then(action, cx),    // Save
                         1 => this.run_lifecycle_action(action, cx), // Don't Save
-                        _ => {}                                   // Cancel / Esc / close
+                        _ => {}                                     // Cancel / Esc / close
                     }
                 });
             });

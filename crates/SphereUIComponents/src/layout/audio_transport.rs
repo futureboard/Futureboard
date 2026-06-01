@@ -97,6 +97,9 @@ impl StudioLayout {
                     cx.notify();
                 }
             });
+            // Block-rate automation evaluation (scaffolding). Cheap; only does
+            // real work under the automation debug flag for now.
+            self.evaluate_block_automation(cx, interpolated.max(0.0));
         } else {
             let _ = self.timeline.update(cx, |timeline, cx| {
                 if timeline.state.transport.playing {
@@ -113,6 +116,48 @@ impl StudioLayout {
         // playhead. Otherwise we'd be limited to engine-snapshot cadence
         // and the readout would stutter at ~10-20 Hz.
         state_changed || was_playing
+    }
+
+    /// Block-rate automation evaluation scaffolding. Evaluates each track's
+    /// Volume/Pan automation lane at the current playhead beat. Engine
+    /// application — pushing the value into the realtime parameter queue — is
+    /// the next phase; doing it here at 60 Hz unconditionally would both spam
+    /// the engine and fight the UI fader, so for now we only trace under
+    /// `FUTUREBOARD_AUTOMATION_DEBUG`. The evaluation itself is real (see
+    /// [`evaluate_automation`]) so the wiring point is ready for the param
+    /// queue without faking any data.
+    pub(super) fn evaluate_block_automation(&self, cx: &mut Context<Self>, beat: f32) {
+        use crate::components::timeline::timeline_state::{
+            automation_debug_enabled, evaluate_automation, AutomationTarget,
+        };
+        if !automation_debug_enabled() {
+            return;
+        }
+        let timeline = self.timeline.read(cx);
+        for track in &timeline.state.tracks {
+            for lane in &track.automation_lanes {
+                if lane.points.is_empty()
+                    || !matches!(
+                        lane.target,
+                        AutomationTarget::TrackVolume | AutomationTarget::TrackPan
+                    )
+                {
+                    continue;
+                }
+                let value =
+                    evaluate_automation(&lane.points, beat as f64, lane.target.default_value());
+                eprintln!(
+                    "[automation] evaluate track={} beat={:.3} value={:.3} target={}",
+                    track.id,
+                    beat,
+                    value,
+                    lane.target.display_name()
+                );
+                // TODO(engine): push `value` into the realtime parameter queue
+                // for `track.id` (volume/pan) — lock-free, no allocations on the
+                // audio-control path — instead of only tracing here.
+            }
+        }
     }
 
     pub(super) fn interpolated_playhead_beat(&self, bpm: f32) -> f32 {

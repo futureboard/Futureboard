@@ -17,13 +17,15 @@ use gpui::{size, AppContext, Point, WindowBackgroundAppearance, WindowBounds, Wi
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
 
-pub const MESSAGE_BOX_WIDTH: f32 = 440.0;
+pub const MESSAGE_BOX_WIDTH: f32 = 460.0;
 const BODY_PAD_X: f32 = 18.0;
 const BODY_PAD_Y: f32 = 16.0;
 const FOOTER_PAD_X: f32 = 16.0;
-const FOOTER_PAD_Y: f32 = 12.0;
-const BUTTON_H: f32 = 32.0;
-const BUTTON_MIN_W: f32 = 100.0;
+const FOOTER_PAD_Y: f32 = 10.0;
+const BUTTON_H: f32 = 27.0;
+/// Compact native-control min width. Wider labels (e.g. "Don't Save") grow past
+/// this from their own content + padding rather than forcing every button up.
+const BUTTON_MIN_W: f32 = 84.0;
 const FOOTER_H: f32 = BUTTON_H + FOOTER_PAD_Y * 2.0;
 /// Vertical room reserved for the message — enough for up to two wrapped lines
 /// at the 13px / 19px line-height used below, so the fixed-size window doesn't
@@ -212,8 +214,8 @@ fn message_box_button(
         .justify_center()
         .h(px(BUTTON_H))
         .min_w(px(BUTTON_MIN_W))
-        .px(px(14.0))
-        .rounded_md()
+        .px(px(13.0))
+        .rounded(px(6.0))
         .border(px(1.0))
         .border_color(border)
         .bg(bg)
@@ -243,6 +245,8 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
                 .flex()
                 .flex_row()
                 .items_start()
+                .w_full()
+                .min_w_0()
                 .gap(px(13.0))
                 .child(
                     // Soft amber warning token — a low-contrast tinted circle
@@ -278,19 +282,15 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
                                 .text_color(Colors::text_primary())
                                 .child(options.message.clone()),
                         )
-                        .children(
-                            options
-                                .detail
-                                .as_ref()
-                                .filter(|d| !d.is_empty())
-                                .map(|detail| {
-                                    div()
-                                        .text_size(px(11.5))
-                                        .line_height(px(16.0))
-                                        .text_color(Colors::text_muted())
-                                        .child(detail.clone())
-                                }),
-                        ),
+                        .children(options.detail.as_ref().filter(|d| !d.is_empty()).map(
+                            |detail| {
+                                div()
+                                    .text_size(px(11.5))
+                                    .line_height(px(16.0))
+                                    .text_color(Colors::text_muted())
+                                    .child(detail.clone())
+                            },
+                        )),
                 ),
         );
 
@@ -391,7 +391,7 @@ impl Render for MessageBoxWindow {
             .flex()
             .flex_col()
             .size_full()
-            .font_family(theme::FONT_FAMILY)
+            .font(theme::ui_font())
             .bg(Colors::surface_base())
             .overflow_hidden()
             .rounded_md()

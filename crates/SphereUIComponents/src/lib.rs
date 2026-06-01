@@ -36,6 +36,8 @@ pub mod assets;
 pub mod boot;
 pub mod components;
 pub mod embedded_assets;
+pub mod i18n;
+pub mod keymap;
 pub mod layout;
 pub mod menu;
 pub mod native_macos_menu;

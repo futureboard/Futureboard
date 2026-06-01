@@ -1011,24 +1011,16 @@ impl PianoRoll {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        let clip_len = self.timeline.read(cx).state.clip_duration_beats(&clip_id);
-        let Some(clip_len) = clip_len else {
-            return;
-        };
         let (lo, hi) = normalize_range(start_beat, end_beat);
         let step = self.step_beats().max(MIN_NOTE_BEATS);
         let mut duration = (hi - lo).max(step);
         if self.snap_on {
             duration = ((duration / step).ceil() * step).max(MIN_NOTE_BEATS);
         }
-        let Some((start, duration)) =
-            crate::components::timeline::timeline_state::TimelineState::clamp_note_to_clip_bounds(
-                lo, duration, clip_len,
-            )
-        else {
-            return;
-        };
-        let note = MidiNoteState::new(pitch, start, duration, 100);
+        // Do not clamp the note into the current clip length — a note drawn past
+        // the clip end auto-expands the clip (see `CreateMidiNote::execute`).
+        // `MidiNoteState::new` clamps start >= 0, pitch 0..=127, dur >= MIN.
+        let note = MidiNoteState::new(pitch, lo, duration, 100);
         let id = note.id;
         self.run_edit_command(EditCommand::CreateMidiNote { clip_id, note }, cx);
         self.selection = HashSet::from([id]);
@@ -1216,6 +1208,156 @@ impl PianoRoll {
         self.selection.clear();
     }
 
+    fn note_inspector_snapshot(&self, cx: &Context<Self>, clip_id: &str) -> NoteInspectorSnapshot {
+        let selected = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| self.selection.contains(&note.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        NoteInspectorSnapshot { selected }
+    }
+
+    fn selected_note_ids(&self) -> Vec<u64> {
+        self.selection.iter().copied().collect()
+    }
+
+    fn nudge_selected_pitch(&mut self, semitones: i32, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let ids = self.selected_note_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let will_change = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes.iter().any(|note| {
+                    ids.contains(&note.id)
+                        && note.pitch != (note.pitch as i32 + semitones).clamp(0, 127) as u8
+                })
+            })
+            .unwrap_or(false);
+        if !will_change {
+            return;
+        }
+        self.with_timeline(cx, |tl, _| {
+            tl.state.transpose_midi_notes(&clip_id, &ids, semitones);
+        });
+    }
+
+    fn nudge_selected_start(&mut self, delta_beats: f32, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let ids = self.selected_note_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let updates: Vec<(u64, f32, u8)> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| ids.contains(&note.id))
+                    .filter_map(|note| {
+                        let new_start = (note.start + delta_beats).max(0.0);
+                        ((note.start - new_start).abs() > 1.0e-4)
+                            .then_some((note.id, new_start, note.pitch))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if updates.is_empty() {
+            return;
+        }
+        self.with_timeline(cx, |tl, _| {
+            tl.state.move_midi_notes(&clip_id, &updates);
+        });
+    }
+
+    fn nudge_selected_length(&mut self, delta_beats: f32, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let ids = self.selected_note_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let updates: Vec<(u64, f32)> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| ids.contains(&note.id))
+                    .filter_map(|note| {
+                        let duration = (note.duration + delta_beats).max(MIN_NOTE_BEATS);
+                        ((note.duration - duration).abs() > 1.0e-4).then_some((note.id, duration))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if updates.is_empty() {
+            return;
+        }
+        self.with_timeline(cx, |tl, _| {
+            for (id, duration) in updates {
+                tl.state.set_midi_note_length(&clip_id, id, duration);
+            }
+        });
+    }
+
+    fn nudge_selected_velocity(&mut self, delta: i16, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let ids = self.selected_note_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let updates: Vec<(u64, u8)> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| ids.contains(&note.id))
+                    .filter_map(|note| {
+                        let velocity = (note.velocity as i16 + delta).clamp(1, 127) as u8;
+                        (note.velocity != velocity).then_some((note.id, velocity))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if updates.is_empty() {
+            return;
+        }
+        self.with_timeline(cx, |tl, _| {
+            for (id, velocity) in updates {
+                tl.state.set_midi_note_velocity(&clip_id, id, velocity);
+            }
+        });
+    }
+
     fn on_wheel(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let (dx, dy) = match event.delta {
             gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
@@ -1242,6 +1384,62 @@ struct DisplayNote {
     start: f32,
     duration: f32,
     velocity: u8,
+}
+
+#[derive(Clone)]
+struct NoteInspectorSnapshot {
+    selected: Vec<MidiNoteState>,
+}
+
+impl NoteInspectorSnapshot {
+    fn count(&self) -> usize {
+        self.selected.len()
+    }
+
+    fn pitch_label(&self) -> String {
+        uniform_u8(&self.selected, |n| n.pitch)
+            .map(|pitch| format!("{} ({})", note_name(pitch as i32), pitch))
+            .unwrap_or_else(|| "Mixed".to_string())
+    }
+
+    fn start_label(&self) -> String {
+        uniform_f32(&self.selected, |n| n.start)
+            .map(format_beats)
+            .unwrap_or_else(|| "Mixed".to_string())
+    }
+
+    fn length_label(&self) -> String {
+        uniform_f32(&self.selected, |n| n.duration)
+            .map(format_beats)
+            .unwrap_or_else(|| "Mixed".to_string())
+    }
+
+    fn velocity_label(&self) -> String {
+        uniform_u8(&self.selected, |n| n.velocity)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "Mixed".to_string())
+    }
+
+    fn end_label(&self) -> String {
+        if self.selected.len() == 1 {
+            let note = &self.selected[0];
+            format_beats(note.start + note.duration)
+        } else {
+            let Some(first) = self.selected.first() else {
+                return "--".to_string();
+            };
+            let (min_start, max_end) = self.selected.iter().fold(
+                (first.start, first.start + first.duration),
+                |(min_start, max_end), note| {
+                    (
+                        min_start.min(note.start),
+                        max_end.max(note.start + note.duration),
+                    )
+                },
+            );
+            format!("{}..{}", format_beats(min_start), format_beats(max_end))
+        }
+    }
 }
 
 impl PianoRoll {
@@ -1685,6 +1883,7 @@ impl PianoRoll {
         let draw_preview = self.build_draw_note_preview();
         let erase_overlay = self.build_erase_overlay();
         let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
+        let note_inspector = self.render_note_inspector(cx, clip_id);
         let grid_cursor = if self.tool == PianoTool::Draw {
             gpui::CursorStyle::Crosshair
         } else {
@@ -1809,6 +2008,179 @@ impl PianoRoll {
                             .children(vel_bars),
                     ),
             )
+            .child(note_inspector)
+    }
+
+    fn render_note_inspector(&self, cx: &mut Context<Self>, clip_id: &str) -> impl IntoElement {
+        let snapshot = self.note_inspector_snapshot(cx, clip_id);
+        let count = snapshot.count();
+        let step = self.grid_res.beats().max(MIN_NOTE_BEATS);
+        let fine_step = (step * 0.25).max(MIN_NOTE_BEATS);
+
+        let mut content: Vec<gpui::AnyElement> = Vec::new();
+        content.push(note_inspector_label("NOTE INSPECTOR").into_any_element());
+
+        if count == 0 {
+            content.push(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_muted())
+                    .line_height(px(15.0))
+                    .child("Select notes in the piano roll to edit pitch, timing, and velocity.")
+                    .into_any_element(),
+            );
+        } else if count == 1 {
+            let note = &snapshot.selected[0];
+            content.push(note_value_row("Pitch", snapshot.pitch_label()).into_any_element());
+            content.push(note_value_row("Start", format_beats(note.start)).into_any_element());
+            content.push(note_value_row("Length", format_beats(note.duration)).into_any_element());
+            content.push(
+                note_value_row("End", format_beats(note.start + note.duration)).into_any_element(),
+            );
+            content.push(note_value_row("Velocity", note.velocity.to_string()).into_any_element());
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-pitch-down",
+                        "-1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(-1, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-pitch-up",
+                        "+1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(1, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-start-down",
+                        "-Start",
+                        cx.listener(move |this, _, _w, cx| this.nudge_selected_start(-step, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-start-up",
+                        "+Start",
+                        cx.listener(move |this, _, _w, cx| this.nudge_selected_start(step, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-len-down",
+                        "-Len",
+                        cx.listener(move |this, _, _w, cx| {
+                            this.nudge_selected_length(-fine_step, cx)
+                        }),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-len-up",
+                        "+Len",
+                        cx.listener(move |this, _, _w, cx| {
+                            this.nudge_selected_length(fine_step, cx)
+                        }),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-vel-down",
+                        "Vel -5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(-5, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-vel-up",
+                        "Vel +5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(5, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+        } else {
+            content.push(note_value_row("Selected", count.to_string()).into_any_element());
+            content.push(note_value_row("Pitch", snapshot.pitch_label()).into_any_element());
+            content.push(note_value_row("Range", snapshot.end_label()).into_any_element());
+            content.push(note_value_row("Start", snapshot.start_label()).into_any_element());
+            content.push(note_value_row("Length", snapshot.length_label()).into_any_element());
+            content.push(note_value_row("Velocity", snapshot.velocity_label()).into_any_element());
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-trans-down",
+                        "-1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(-1, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-trans-up",
+                        "+1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(1, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-vel-down",
+                        "Vel -5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(-5, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-vel-up",
+                        "Vel +5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(5, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-quantize",
+                        "Quantize",
+                        cx.listener(|this, _, _w, cx| this.quantize_selection(cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-delete",
+                        "Delete",
+                        cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+        }
+
+        div()
+            .w(px(216.0))
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .p(px(8.0))
+            .border_l(px(1.0))
+            .border_color(Colors::panel_border())
+            .bg(Colors::surface_panel())
+            .children(content)
     }
 
     fn track_color_for_clip(&self, cx: &Context<Self>, clip_id: &str) -> gpui::Rgba {
@@ -2342,4 +2714,93 @@ fn tool_btn(
         .cursor(gpui::CursorStyle::PointingHand)
         .on_click(move |ev, w, cx| on_click(ev, w, cx))
         .child(label.to_string())
+}
+
+fn note_inspector_label(label: &str) -> impl IntoElement {
+    div()
+        .text_size(px(9.0))
+        .text_color(Colors::text_muted())
+        .font_weight(gpui::FontWeight::BOLD)
+        .child(label.to_string())
+}
+
+fn note_value_row(label: &str, value: String) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .min_h(px(22.0))
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(Colors::text_muted())
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(10.0))
+                .text_color(Colors::text_primary())
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(value),
+        )
+}
+
+fn note_button_row(children: Vec<gpui::AnyElement>) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(4.0))
+        .children(children)
+}
+
+fn note_action_button(
+    id: &'static str,
+    label: &str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(22.0))
+        .min_w(px(54.0))
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .text_size(px(10.0))
+        .text_color(Colors::text_secondary())
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_raised())
+        .hover(|s| s.bg(Colors::surface_hover()))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_click(move |ev, w, cx| on_click(ev, w, cx))
+        .child(label.to_string())
+}
+
+fn uniform_u8(notes: &[MidiNoteState], f: impl Fn(&MidiNoteState) -> u8) -> Option<u8> {
+    let first = notes.first().map(&f)?;
+    if notes.iter().all(|note| f(note) == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn uniform_f32(notes: &[MidiNoteState], f: impl Fn(&MidiNoteState) -> f32) -> Option<f32> {
+    let first = notes.first().map(&f)?;
+    if notes.iter().all(|note| (f(note) - first).abs() <= 1.0e-4) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn format_beats(value: f32) -> String {
+    format!("{:.3}", value.max(0.0))
 }

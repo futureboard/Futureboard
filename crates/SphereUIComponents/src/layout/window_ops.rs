@@ -103,6 +103,7 @@ impl StudioLayout {
             .unwrap_or_default();
 
         let layout = cx.entity().clone();
+        let language = self.settings.read(cx).current.general.language.clone();
         let instrument_registry = instrument_plugins.clone();
         let on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static> =
             Arc::new(move |dialog, _name, cx| {
@@ -203,6 +204,7 @@ impl StudioLayout {
             kind,
             track_count,
             has_master_track,
+            language,
             instrument_plugins,
             on_confirm_request,
             cx,

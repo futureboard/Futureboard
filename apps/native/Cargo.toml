@@ -9,27 +9,45 @@ name = "futureboard_native"
 path = "src/main.rs"
 
 [dependencies]
-# NOTE: `default-features = false` is used to opt out of gpui's `windows-manifest`
-# feature. gpui ships its own `RT_MANIFEST` (ID 1) and we embed our own custom
-# manifest via `apps/shared/app.rc` (DPI awareness, OS compat list, app identity).
-# Leaving both enabled produces a CVT1100 "duplicate resource" linker error on
-# Windows (LNK1123). We re-enable the remaining default features so non-Windows
-# targets (font-kit, wayland, x11) behave exactly as before.
-gpui = { version = "0.2.2", default-features = false, features = [
-    "font-kit",
-    "wayland",
-    "x11",
-] }
-sphere_ui_components = { path = "../../crates/SphereUIComponents" }
-# Native audio engine. The crate also exposes an N-API surface for Electron;
-# we only use its `native` facade from here (no NAPI calls in this binary).
-# IMPORTANT: disable the `napi` feature so the standalone native binary does
-# not link against Node's `napi_*` symbols (Linux CI link failure).
-sphere-direct-audio-engine = { path = "../../crates/SphereDirectAudioEngine", default-features = false }
+# GPUI core.
+#
+# The root workspace should define gpui with:
+#   default-features = false
+#   features = ["font-kit"]
+#
+# Do NOT enable wayland/x11 here globally, otherwise Windows builds may pull
+# Linux-only dependencies into the graph.
+gpui.workspace = true
+
+sphere_ui_components.workspace = true
+
+# Native audio engine.
+#
+# The workspace dependency should keep:
+#   default-features = false
+#
+# This prevents the standalone native binary from linking against Node/N-API
+# symbols. Electron can enable N-API from its own crate/build path instead.
+sphere-direct-audio-engine.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows GPUI backend.
+gpui_windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS GPUI backend.
+gpui_macos.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux GPUI backend.
+#
+# wayland/x11 are Linux-only, so enable them only here.
+gpui = { workspace = true, features = ["wayland", "x11"] }
+gpui_linux.workspace = true
 
 [features]
 default = ["gpu-renderer"]
 gpu-renderer = ["sphere_ui_components/gpu-renderer"]
 
 [build-dependencies]
-embed-resource = "3.0"
+embed-resource.workspace = true

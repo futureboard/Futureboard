@@ -4,6 +4,7 @@ use crate::components::timeline::timeline_state::{
 };
 
 use DAUx::types::{
+    EngineAutomationLaneSnapshot, EngineAutomationPointSnapshot, EngineAutomationTargetSnapshot,
     EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineMidiClipSnapshot,
     EngineMidiControllerLane, EngineMidiControllerPoint, EngineMidiNoteSnapshot,
     EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot, EngineTrackSnapshot,
@@ -97,6 +98,50 @@ fn build_engine_sends(track: &TrackState) -> Vec<EngineSendSnapshot> {
         .collect()
 }
 
+fn build_engine_automation_lanes(track: &TrackState) -> Vec<EngineAutomationLaneSnapshot> {
+    track
+        .automation_lanes
+        .iter()
+        .map(|lane| {
+            let mut target = EngineAutomationTargetSnapshot {
+                tag: lane.target.to_tag(),
+                ..Default::default()
+            };
+            match &lane.target {
+                timeline_state::AutomationTarget::PluginParameter {
+                    insert_id,
+                    parameter_id,
+                    parameter_name,
+                } => {
+                    target.insert_id = insert_id.clone();
+                    target.parameter_id = parameter_id.clone();
+                    target.parameter_name = parameter_name.clone();
+                }
+                timeline_state::AutomationTarget::SendLevel { send_id } => {
+                    target.send_id = send_id.clone();
+                }
+                _ => {}
+            }
+
+            EngineAutomationLaneSnapshot {
+                id: lane.id.clone(),
+                name: lane.name.clone(),
+                target,
+                enabled: lane.enabled,
+                points: lane
+                    .points
+                    .iter()
+                    .map(|point| EngineAutomationPointSnapshot {
+                        beat: point.beat.max(0.0) as f64,
+                        value: point.value.clamp(0.0, 1.0),
+                        curve: point.curve.to_tag(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
 pub(super) fn build_engine_project_snapshot(
     state: &TimelineState,
     sample_rate: u32,
@@ -125,6 +170,7 @@ pub(super) fn build_engine_project_snapshot(
             },
             inserts: build_engine_inserts(track),
             sends: build_engine_sends(track),
+            automation_lanes: build_engine_automation_lanes(track),
         })
         .collect();
 
@@ -140,6 +186,7 @@ pub(super) fn build_engine_project_snapshot(
         output_track_id: None,
         inserts: Vec::new(),
         sends: Vec::new(),
+        automation_lanes: Vec::new(),
     });
 
     let clips = state

@@ -402,6 +402,7 @@ impl Render for MessageBoxWindow {
                 offset: gpui::point(px(0.0), px(12.0)),
                 blur_radius: px(36.0),
                 spread_radius: px(0.0),
+                inset: false,
             }])
             .capture_key_down({
                 let target = target.clone();

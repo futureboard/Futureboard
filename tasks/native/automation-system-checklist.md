@@ -114,20 +114,20 @@ Planning status: checklist only. No implementation code is implied.
 
 ## Playback Read Mode
 
-- [ ] Build runtime automation lane snapshot.
+- [x] Build runtime automation lane snapshot.
 - [ ] Resolve target IDs to runtime handles.
-- [ ] Evaluate hold curves.
-- [ ] Evaluate linear curves.
+- [x] Evaluate hold curves.
+- [x] Evaluate linear curves.
 - [ ] Smooth/bezier/exponential/log curves planned.
-- [ ] Apply track volume.
-- [ ] Apply track pan.
-- [ ] Apply track mute.
+- [x] Apply track volume.
+- [x] Apply track pan.
+- [x] Apply track mute.
 - [ ] Apply send gain.
 - [ ] Apply master volume.
 - [ ] Apply master pan.
 - [ ] Apply plugin parameter values.
-- [ ] Skip unresolved targets.
-- [ ] Skip read-disabled lanes.
+- [x] Skip unresolved targets.
+- [x] Skip read-disabled lanes.
 - [ ] No audio-thread allocation.
 - [ ] No audio-thread locks.
 - [ ] No audio-thread string lookup.
@@ -215,7 +215,7 @@ Planning status: checklist only. No implementation code is implied.
 ## Engine Checklist
 
 - [ ] Runtime target handle table.
-- [ ] Runtime automation snapshots.
+- [x] Runtime automation snapshots.
 - [ ] Runtime tempo map snapshot.
 - [ ] Command queue for snapshot updates.
 - [ ] Mixer parameter dispatch.
@@ -224,7 +224,7 @@ Planning status: checklist only. No implementation code is implied.
 - [ ] No allocation in audio callback.
 - [ ] No lock in audio callback.
 - [ ] No project state read in audio callback.
-- [ ] Deterministic evaluator tests.
+- [x] Deterministic evaluator tests.
 
 ## QA Checklist
 

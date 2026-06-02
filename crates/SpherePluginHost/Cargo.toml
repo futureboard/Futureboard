@@ -14,16 +14,16 @@ path = "src/bin/futureboard_plugin_scanner.rs"
 required-features = ["plugin-scanner-bin"]
 
 [dependencies]
-napi        = { version = "2", features = ["napi4"], optional = true }
-napi-derive = { version = "2", optional = true }
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-dirs        = "5"
-rusqlite    = { version = "0.31", features = ["bundled"] }
+napi        = { workspace = true, optional = true }
+napi-derive = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true
 
 [build-dependencies]
-cc = "1"
-napi-build = "2"
+cc.workspace = true
+napi-build.workspace = true
 
 [features]
 # Default build is native/rlib-safe for Studio workspace builds.

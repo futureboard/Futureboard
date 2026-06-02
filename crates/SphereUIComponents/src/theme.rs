@@ -6,16 +6,42 @@ pub const FONT_FAMILY: &str = "Inter Variable Text";
 /// Thai-capable fallback registered from `packages/shared/fonts`.
 pub const THAI_FONT_FAMILY: &str = "Google Sans";
 
+/// Preferred Windows UI Thai font. Using a Thai-capable font as the primary
+/// family avoids per-glyph fallback splitting Thai base glyphs and marks.
+pub const WINDOWS_THAI_UI_FONT_FAMILY: &str = "Leelawadee UI";
+pub const WINDOWS_THAI_FALLBACK_FONT_FAMILY: &str = "Noto Sans Thai";
+
 /// Alias kept for callsites that want an explicit "display" name. Points at
 /// the same variable family.
 pub const DISPLAY_FONT_FAMILY: &str = FONT_FAMILY;
 
 pub fn ui_font() -> Font {
     let mut font = font(FONT_FAMILY);
-    font.fallbacks = Some(FontFallbacks::from_fonts(
-        vec![THAI_FONT_FAMILY.to_string()],
-    ));
+    font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+        WINDOWS_THAI_UI_FONT_FAMILY.to_string(),
+        WINDOWS_THAI_FALLBACK_FONT_FAMILY.to_string(),
+        THAI_FONT_FAMILY.to_string(),
+    ]));
     font
+}
+
+pub fn ui_font_for_language(language_code: &str) -> Font {
+    let normalized = language_code.trim().replace('_', "-").to_ascii_lowercase();
+    if normalized == "th" || normalized.starts_with("th-") {
+        let family = if cfg!(target_os = "windows") {
+            WINDOWS_THAI_UI_FONT_FAMILY
+        } else {
+            THAI_FONT_FAMILY
+        };
+        let mut font = font(family);
+        font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            WINDOWS_THAI_FALLBACK_FONT_FAMILY.to_string(),
+            THAI_FONT_FAMILY.to_string(),
+            FONT_FAMILY.to_string(),
+        ]));
+        return font;
+    }
+    ui_font()
 }
 
 /// Recommended text sizes. Kept here so individual components don't drift.

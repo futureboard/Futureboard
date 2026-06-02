@@ -98,6 +98,7 @@ pub fn combo_box_menu<T: Copy + PartialEq + 'static>(
             offset: gpui::point(px(0.0), px(10.0)),
             blur_radius: px(28.0),
             spread_radius: px(0.0),
+            inset: false,
         }])
         .p(px(4.0))
         .id(id)
@@ -172,6 +173,7 @@ pub fn combo_box_string_menu(
             offset: gpui::point(px(0.0), px(6.0)),
             blur_radius: px(18.0),
             spread_radius: px(0.0),
+            inset: false,
         }])
         .p(px(4.0))
         .id(id)

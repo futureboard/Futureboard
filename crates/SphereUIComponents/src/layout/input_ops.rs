@@ -250,7 +250,7 @@ impl StudioLayout {
         }
 
         if (modifiers.control || modifiers.platform) && key.eq_ignore_ascii_case("f") {
-            self.plugin_picker_search_input.focus_handle.focus(window);
+            self.plugin_picker_search_input.focus_handle.focus(window, cx);
             cx.notify();
             return true;
         }
@@ -457,7 +457,7 @@ impl StudioLayout {
             TextInputAction::Cancel => {
                 // Esc: drop focus back to the studio surface; reload happens on
                 // next render because the bound name is unchanged.
-                self.focus_handle.focus(window);
+                self.focus_handle.focus(window, cx);
                 cx.notify();
                 true
             }
@@ -468,7 +468,7 @@ impl StudioLayout {
                     self.commit_inspector_name(cx);
                 }
                 if matches!(action, TextInputAction::Submit) {
-                    self.focus_handle.focus(window);
+                    self.focus_handle.focus(window, cx);
                 }
                 cx.notify();
                 true

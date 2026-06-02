@@ -1252,6 +1252,7 @@ pub fn render_project_sample(
     let mut out_l = 0.0f32;
     let mut out_r = 0.0f32;
     let master_index = runtime.tracks.iter().position(|t| t.track_type == "master");
+    let beat = sample_to_beat(runtime, project_sample);
 
     for clip_index in 0..runtime.clips.len() {
         let clip = &runtime.clips[clip_index];
@@ -1278,7 +1279,9 @@ pub fn render_project_sample(
             continue;
         }
         let has_solo = runtime.has_solo;
-        if runtime.tracks[track_index].muted || (has_solo && !runtime.tracks[track_index].solo) {
+        if effective_track_muted(&runtime.tracks[track_index], beat)
+            || (has_solo && !runtime.tracks[track_index].solo)
+        {
             continue;
         }
 
@@ -1295,7 +1298,8 @@ pub fn render_project_sample(
 
         let output_track_id = runtime.tracks[track_index].output_track_id.clone();
         let sends = runtime.tracks[track_index].sends.clone();
-        let (track_l, track_r) = apply_track_chain(l, r, &mut runtime.tracks[track_index]);
+        let (track_l, track_r) =
+            apply_track_chain_at_beat(l, r, &mut runtime.tracks[track_index], beat);
         let (track_l, track_r) =
             apply_preview_mode(track_l, track_r, runtime.tracks[track_index].preview_mode);
         runtime.accumulate_track_meter(track_index, track_l, track_r);
@@ -1305,8 +1309,12 @@ pub fn render_project_sample(
             .filter(|id| !is_master_output(id))
         {
             if let Some(target_index) = runtime.tracks.iter().position(|t| t.id == target_id) {
-                let (bus_l, bus_r) =
-                    apply_track_chain(track_l, track_r, &mut runtime.tracks[target_index]);
+                let (bus_l, bus_r) = apply_track_chain_at_beat(
+                    track_l,
+                    track_r,
+                    &mut runtime.tracks[target_index],
+                    beat,
+                );
                 let (bus_l, bus_r) =
                     apply_preview_mode(bus_l, bus_r, runtime.tracks[target_index].preview_mode);
                 runtime.accumulate_track_meter(target_index, bus_l, bus_r);
@@ -1333,13 +1341,15 @@ pub fn render_project_sample(
                 continue;
             };
             let return_track = &runtime.tracks[return_track_index];
-            if return_track.muted || (runtime.has_solo && !return_track.solo) {
+            if effective_track_muted(return_track, beat) || (runtime.has_solo && !return_track.solo)
+            {
                 continue;
             }
-            let (send_l, send_r) = apply_track_chain(
+            let (send_l, send_r) = apply_track_chain_at_beat(
                 track_l * send.level,
                 track_r * send.level,
                 &mut runtime.tracks[return_track_index],
+                beat,
             );
             let (send_l, send_r) = apply_preview_mode(
                 send_l,
@@ -1354,8 +1364,8 @@ pub fn render_project_sample(
 
     // ── Master bus: apply master track inserts on the summed output ──
     if let Some(m_idx) = master_index {
-        let muted =
-            runtime.tracks[m_idx].muted || (runtime.has_solo && !runtime.tracks[m_idx].solo);
+        let muted = effective_track_muted(&runtime.tracks[m_idx], beat)
+            || (runtime.has_solo && !runtime.tracks[m_idx].solo);
         if !muted {
             let master = &mut runtime.tracks[m_idx];
             for insert in &mut master.inserts {
@@ -1396,6 +1406,19 @@ fn two_mut<T>(v: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
     }
 }
 
+#[inline]
+fn sample_to_beat(runtime: &RuntimeProject, sample: u64) -> f64 {
+    sample as f64 / runtime.samples_per_beat.max(1.0)
+}
+
+#[inline]
+fn effective_track_muted(track: &RuntimeTrack, beat: f64) -> bool {
+    track
+        .automation_values_at_beat(beat)
+        .muted
+        .unwrap_or(track.muted)
+}
+
 /// Apply a track's fader (volume / pan / preview mode) to its `block_*`
 /// (which already holds the post-insert signal), write the post-fader result
 /// back into `block_*`, sum it into the interleaved master output, and
@@ -1406,12 +1429,16 @@ fn apply_fader_and_sum(
     frames: usize,
     output: &mut [f32],
     channels: usize,
+    beat: f64,
 ) {
-    let (pan_l, pan_r) = pan_gains(track.pan);
+    let automation = track.automation_values_at_beat(beat);
+    let volume = automation.volume.unwrap_or(track.volume);
+    let pan = automation.pan.unwrap_or(track.pan);
+    let (pan_l, pan_r) = pan_gains(pan);
     for frame_idx in 0..frames {
         let (l, r) = apply_preview_mode(
-            track.block_l[frame_idx] * track.volume * pan_l,
-            track.block_r[frame_idx] * track.volume * pan_r,
+            track.block_l[frame_idx] * volume * pan_l,
+            track.block_r[frame_idx] * volume * pan_r,
             track.preview_mode,
         );
         track.block_l[frame_idx] = l;
@@ -1437,11 +1464,18 @@ fn process_track_block(
     frames: usize,
     output: &mut [f32],
     channels: usize,
+    beat: f64,
 ) {
     apply_track_chain_block(&mut runtime.tracks[track_index], frames);
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
-    apply_fader_and_sum(&mut runtime.tracks[track_index], frames, output, channels);
+    apply_fader_and_sum(
+        &mut runtime.tracks[track_index],
+        frames,
+        output,
+        channels,
+        beat,
+    );
     // Post-fader sends tap the post-fader signal now in block_*.
     accumulate_sends(runtime, track_index, frames, false);
 }
@@ -1514,6 +1548,7 @@ pub fn render_project_block_interleaved(
     if frames == 0 {
         return 0;
     }
+    let block_beat = sample_to_beat(runtime, base_sample);
     for frame in output.chunks_mut(channels) {
         frame[0] = 0.0;
         frame[1] = 0.0;
@@ -1546,7 +1581,7 @@ pub fn render_project_block_interleaved(
         let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip.track_id) else {
             continue;
         };
-        if runtime.tracks[track_index].muted
+        if effective_track_muted(&runtime.tracks[track_index], block_beat)
             || (runtime.has_solo && !runtime.tracks[track_index].solo)
         {
             continue;
@@ -1588,7 +1623,7 @@ pub fn render_project_block_interleaved(
         if is_routing_type(&runtime.tracks[track_index].track_type) {
             continue;
         }
-        if runtime.tracks[track_index].muted
+        if effective_track_muted(&runtime.tracks[track_index], block_beat)
             || (runtime.has_solo && !runtime.tracks[track_index].solo)
         {
             continue;
@@ -1646,7 +1681,7 @@ pub fn render_project_block_interleaved(
                 first_clip
             );
         }
-        process_track_block(runtime, track_index, frames, output, channels);
+        process_track_block(runtime, track_index, frames, output, channels, block_beat);
     }
 
     // ── Pass 2: routing tracks (bus / return) ───────────────────────────
@@ -1661,7 +1696,7 @@ pub fn render_project_block_interleaved(
         if !is_routing_type(&runtime.tracks[track_index].track_type) {
             continue;
         }
-        if runtime.tracks[track_index].muted {
+        if effective_track_muted(&runtime.tracks[track_index], block_beat) {
             continue;
         }
         {
@@ -1669,13 +1704,13 @@ pub fn render_project_block_interleaved(
             track.block_l[..frames].copy_from_slice(&track.recv_l[..frames]);
             track.block_r[..frames].copy_from_slice(&track.recv_r[..frames]);
         }
-        process_track_block(runtime, track_index, frames, output, channels);
+        process_track_block(runtime, track_index, frames, output, channels, block_beat);
     }
 
     // ── Master bus: apply master track inserts on the summed output ──
     if let Some(m_idx) = master_index {
-        let muted =
-            runtime.tracks[m_idx].muted || (runtime.has_solo && !runtime.tracks[m_idx].solo);
+        let muted = effective_track_muted(&runtime.tracks[m_idx], block_beat)
+            || (runtime.has_solo && !runtime.tracks[m_idx].solo);
         if !muted {
             let master = &mut runtime.tracks[m_idx];
             // Copy summed output into master scratch buffer.
@@ -1717,7 +1752,12 @@ pub fn is_master_output(output: &str) -> bool {
 }
 
 #[inline]
-pub fn apply_track_chain(mut l: f32, mut r: f32, track: &mut RuntimeTrack) -> (f32, f32) {
+pub fn apply_track_chain_at_beat(
+    mut l: f32,
+    mut r: f32,
+    track: &mut RuntimeTrack,
+    beat: f64,
+) -> (f32, f32) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
         track.callback_insert_log_done = true;
         eprintln!(
@@ -1731,8 +1771,11 @@ pub fn apply_track_chain(mut l: f32, mut r: f32, track: &mut RuntimeTrack) -> (f
         l = processed.0;
         r = processed.1;
     }
-    let (pan_l, pan_r) = pan_gains(track.pan);
-    (l * track.volume * pan_l, r * track.volume * pan_r)
+    let automation = track.automation_values_at_beat(beat);
+    let volume = automation.volume.unwrap_or(track.volume);
+    let pan = automation.pan.unwrap_or(track.pan);
+    let (pan_l, pan_r) = pan_gains(pan);
+    (l * volume * pan_l, r * volume * pan_r)
 }
 
 pub fn apply_track_chain_block(track: &mut RuntimeTrack, frames: usize) {
@@ -2394,7 +2437,10 @@ where
 #[cfg(test)]
 mod routing_tests {
     use super::*;
-    use crate::runtime::{RuntimePreviewMode, RuntimeProject, RuntimeSend, RuntimeTrack};
+    use crate::runtime::{
+        volume_db_to_norm, RuntimeAutomationCurve, RuntimeAutomationLane, RuntimeAutomationPoint,
+        RuntimeAutomationTarget, RuntimePreviewMode, RuntimeProject, RuntimeSend, RuntimeTrack,
+    };
     use std::sync::Arc;
 
     fn track(id: &str, ty: &str, sends: Vec<RuntimeSend>) -> RuntimeTrack {
@@ -2410,6 +2456,7 @@ mod routing_tests {
             output_track_id: None,
             inserts: Vec::new(),
             sends,
+            automation_lanes: Vec::new(),
             meter: Arc::new(Default::default()),
             meter_peak_l: 0.0,
             meter_peak_r: 0.0,
@@ -2434,6 +2481,63 @@ mod routing_tests {
             enabled: true,
             pre_fader: false,
         }
+    }
+
+    fn automation_lane(
+        target: RuntimeAutomationTarget,
+        value: f32,
+        enabled: bool,
+    ) -> RuntimeAutomationLane {
+        RuntimeAutomationLane {
+            id: "auto-1".to_string(),
+            name: "Automation".to_string(),
+            target,
+            enabled,
+            points: vec![RuntimeAutomationPoint {
+                beat: 0.0,
+                value,
+                curve: RuntimeAutomationCurve::Linear,
+            }],
+        }
+    }
+
+    #[test]
+    fn track_volume_and_pan_automation_affect_fader_output() {
+        let mut t = track("audio", "audio", vec![]);
+        t.volume = 0.25;
+        t.pan = 0.0;
+        t.automation_lanes = vec![
+            automation_lane(
+                RuntimeAutomationTarget::TrackVolume,
+                volume_db_to_norm(0.0),
+                true,
+            ),
+            automation_lane(RuntimeAutomationTarget::TrackPan, 1.0, true),
+        ];
+
+        let (l, r) = apply_track_chain_at_beat(1.0, 1.0, &mut t, 0.0);
+
+        assert!(l.abs() < 1e-6, "full-right pan should mute left");
+        assert!(
+            (r - 1.0).abs() < 1e-6,
+            "0 dB automation should override base volume"
+        );
+    }
+
+    #[test]
+    fn track_mute_automation_overrides_base_mute_state() {
+        let mut t = track("audio", "audio", vec![]);
+        assert!(!effective_track_muted(&t, 0.0));
+
+        t.automation_lanes = vec![automation_lane(
+            RuntimeAutomationTarget::TrackMute,
+            1.0,
+            true,
+        )];
+        assert!(effective_track_muted(&t, 0.0));
+
+        t.automation_lanes[0].enabled = false;
+        assert!(!effective_track_muted(&t, 0.0));
     }
 
     #[test]

@@ -771,7 +771,7 @@ impl PianoRoll {
         cx: &mut Context<Self>,
     ) {
         cx.stop_propagation();
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let Some((lx, ly)) = self.grid_local(event.position) else {
             // Bounds not captured yet (first frame) — ignore to avoid creating
             // a note at the wrong coordinate.
@@ -808,7 +808,7 @@ impl PianoRoll {
         cx: &mut Context<Self>,
     ) {
         cx.stop_propagation();
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let Some((lx, ly)) = self.grid_local(event.position) else {
             return;
         };
@@ -852,7 +852,7 @@ impl PianoRoll {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let shift = event.modifiers.shift;
         let ctrl = event.modifiers.control || event.modifiers.platform;
         if shift || ctrl {
@@ -890,7 +890,7 @@ impl PianoRoll {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.selection = HashSet::from([id]);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
@@ -921,7 +921,7 @@ impl PianoRoll {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.selection = HashSet::from([id]);
         self.drag = PianoDrag::Velocity {
             id,
@@ -3117,7 +3117,7 @@ impl PianoRoll {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
@@ -3174,7 +3174,7 @@ impl PianoRoll {
 
     /// Begin dragging an existing CC point; snapshot the lane for undo.
     fn begin_cc_move(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };

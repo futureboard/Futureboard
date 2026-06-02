@@ -12,7 +12,9 @@ use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
 
-use crate::types::{EngineClipSnapshot, EngineMidiClipSnapshot, EngineProjectSnapshot};
+use crate::types::{
+    EngineAutomationLaneSnapshot, EngineClipSnapshot, EngineMidiClipSnapshot, EngineProjectSnapshot,
+};
 use crate::vst3_processor::{vst3_midi_debug_enabled, Vst3MidiEvent, Vst3RuntimeProcessor};
 
 /// `FUTUREBOARD_MIDI_ENGINE_DEBUG=1` enables eprintln traces for MIDI runtime
@@ -35,6 +37,7 @@ pub struct RuntimeTrack {
     pub output_track_id: Option<String>,
     pub inserts: Vec<RuntimeInsert>,
     pub sends: Vec<RuntimeSend>,
+    pub automation_lanes: Vec<RuntimeAutomationLane>,
     pub meter: Arc<RuntimeTrackMeter>,
     pub meter_peak_l: f32,
     pub meter_peak_r: f32,
@@ -55,6 +58,153 @@ pub struct RuntimeTrack {
     pub midi_block_events: Vec<Vst3MidiEvent>,
     /// Index into `inserts` of the first instrument-capable native VST3 insert.
     pub midi_instrument_insert_ix: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeAutomationCurve {
+    Linear,
+    Hold,
+    Smooth,
+}
+
+impl RuntimeAutomationCurve {
+    #[inline]
+    fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => Self::Hold,
+            2 => Self::Smooth,
+            _ => Self::Linear,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeAutomationTarget {
+    TrackVolume,
+    TrackPan,
+    TrackMute,
+    PluginParameter {
+        insert_id: String,
+        parameter_id: String,
+    },
+    SendGain {
+        send_id: String,
+    },
+    Unresolved,
+}
+
+impl RuntimeAutomationTarget {
+    fn from_snapshot(lane: &EngineAutomationLaneSnapshot) -> Self {
+        match lane.target.tag {
+            0 => Self::TrackVolume,
+            1 => Self::TrackPan,
+            2 => Self::TrackMute,
+            3 if !lane.target.insert_id.is_empty() && !lane.target.parameter_id.is_empty() => {
+                Self::PluginParameter {
+                    insert_id: lane.target.insert_id.clone(),
+                    parameter_id: lane.target.parameter_id.clone(),
+                }
+            }
+            4 if !lane.target.send_id.is_empty() => Self::SendGain {
+                send_id: lane.target.send_id.clone(),
+            },
+            _ => Self::Unresolved,
+        }
+    }
+
+    #[inline]
+    pub fn default_value(&self) -> f32 {
+        match self {
+            Self::TrackVolume => volume_db_to_norm(0.0),
+            Self::TrackPan => 0.5,
+            Self::TrackMute => 0.0,
+            Self::PluginParameter { .. } => 0.5,
+            Self::SendGain { .. } => 0.0,
+            Self::Unresolved => 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeAutomationPoint {
+    pub beat: f64,
+    pub value: f32,
+    pub curve: RuntimeAutomationCurve,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeAutomationLane {
+    pub id: String,
+    pub name: String,
+    pub target: RuntimeAutomationTarget,
+    pub enabled: bool,
+    pub points: Vec<RuntimeAutomationPoint>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct RuntimeTrackAutomationValues {
+    pub volume: Option<f32>,
+    pub pan: Option<f32>,
+    pub muted: Option<bool>,
+}
+
+impl RuntimeAutomationLane {
+    fn from_snapshot(lane: &EngineAutomationLaneSnapshot) -> Self {
+        let mut points: Vec<RuntimeAutomationPoint> = lane
+            .points
+            .iter()
+            .map(|point| RuntimeAutomationPoint {
+                beat: point.beat.max(0.0),
+                value: point.value.clamp(0.0, 1.0),
+                curve: RuntimeAutomationCurve::from_tag(point.curve),
+            })
+            .collect();
+        points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        Self {
+            id: lane.id.clone(),
+            name: lane.name.clone(),
+            target: RuntimeAutomationTarget::from_snapshot(lane),
+            enabled: lane.enabled,
+            points,
+        }
+    }
+
+    #[inline]
+    pub fn evaluate_normalized(&self, beat: f64) -> Option<f32> {
+        if !self.enabled || matches!(self.target, RuntimeAutomationTarget::Unresolved) {
+            return None;
+        }
+        Some(evaluate_automation_points(
+            &self.points,
+            beat,
+            self.target.default_value(),
+        ))
+    }
+}
+
+impl RuntimeTrack {
+    #[inline]
+    pub fn automation_values_at_beat(&self, beat: f64) -> RuntimeTrackAutomationValues {
+        let mut values = RuntimeTrackAutomationValues::default();
+        for lane in &self.automation_lanes {
+            let Some(value) = lane.evaluate_normalized(beat) else {
+                continue;
+            };
+            match lane.target {
+                RuntimeAutomationTarget::TrackVolume => {
+                    values.volume = Some(volume_norm_to_linear(value));
+                }
+                RuntimeAutomationTarget::TrackPan => {
+                    values.pan = Some((value * 2.0 - 1.0).clamp(-1.0, 1.0));
+                }
+                RuntimeAutomationTarget::TrackMute => {
+                    values.muted = Some(value >= 0.5);
+                }
+                _ => {}
+            }
+        }
+        values
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,6 +592,11 @@ impl RuntimeProject {
                         enabled: send.enabled,
                         pre_fader: send.pre_fader,
                     })
+                    .collect(),
+                automation_lanes: t
+                    .automation_lanes
+                    .iter()
+                    .map(RuntimeAutomationLane::from_snapshot)
                     .collect(),
                 meter: Arc::new(RuntimeTrackMeter::default()),
                 meter_peak_l: 0.0,
@@ -1133,6 +1288,63 @@ fn build_clip_runtime(
     })
 }
 
+/// Evaluate a sorted automation point list without allocating. Empty lanes use
+/// `default`; before/after the authored range, the nearest point is held.
+pub fn evaluate_automation_points(
+    points: &[RuntimeAutomationPoint],
+    beat: f64,
+    default: f32,
+) -> f32 {
+    if points.is_empty() {
+        return default.clamp(0.0, 1.0);
+    }
+    let beat = beat.max(0.0);
+    if beat <= points[0].beat {
+        return points[0].value;
+    }
+    let last = points.len() - 1;
+    if beat >= points[last].beat {
+        return points[last].value;
+    }
+
+    for i in 0..last {
+        let a = &points[i];
+        let b = &points[i + 1];
+        if beat >= a.beat && beat <= b.beat {
+            return match a.curve {
+                RuntimeAutomationCurve::Hold => a.value,
+                RuntimeAutomationCurve::Linear | RuntimeAutomationCurve::Smooth => {
+                    let span = (b.beat - a.beat).max(f64::EPSILON);
+                    let t = ((beat - a.beat) / span).clamp(0.0, 1.0) as f32;
+                    a.value + (b.value - a.value) * t
+                }
+            };
+        }
+    }
+    points[last].value
+}
+
+pub const AUTOMATION_VOLUME_MIN_DB: f32 = -60.0;
+pub const AUTOMATION_VOLUME_MAX_DB: f32 = 6.0;
+
+#[inline]
+pub fn volume_db_to_norm(db: f32) -> f32 {
+    ((db - AUTOMATION_VOLUME_MIN_DB) / (AUTOMATION_VOLUME_MAX_DB - AUTOMATION_VOLUME_MIN_DB))
+        .clamp(0.0, 1.0)
+}
+
+#[inline]
+pub fn volume_norm_to_linear(norm: f32) -> f32 {
+    let norm = norm.clamp(0.0, 1.0);
+    let db =
+        AUTOMATION_VOLUME_MIN_DB + norm * (AUTOMATION_VOLUME_MAX_DB - AUTOMATION_VOLUME_MIN_DB);
+    if norm <= 0.001 || db <= AUTOMATION_VOLUME_MIN_DB + 0.05 {
+        0.0
+    } else {
+        10.0_f32.powf(db / 20.0).clamp(0.0, 2.0)
+    }
+}
+
 #[inline]
 fn seconds_to_samples(seconds: f64, sample_rate: u32) -> u64 {
     (seconds * sample_rate as f64).round().max(0.0) as u64
@@ -1152,8 +1364,8 @@ fn f32_load(v: u32) -> f32 {
 mod midi_tests {
     use super::*;
     use crate::types::{
-        EngineMidiClipSnapshot, EngineMidiControllerLane, EngineMidiControllerPoint,
-        EngineMidiNoteSnapshot,
+        EngineAutomationLaneSnapshot, EngineMidiClipSnapshot, EngineMidiControllerLane,
+        EngineMidiControllerPoint, EngineMidiNoteSnapshot,
     };
 
     // 120 BPM @ 48 kHz → 24000 samples per beat.
@@ -1308,5 +1520,84 @@ mod midi_tests {
         // there — active set should track only the note, not the CC.
         p.schedule_midi_block(96_000, 512);
         assert_eq!(p.midi_tracks[0].active, vec![(0u8, 60u8)]);
+    }
+
+    #[test]
+    fn automation_points_are_sorted_and_clamped_for_runtime() {
+        let lane = RuntimeAutomationLane::from_snapshot(&EngineAutomationLaneSnapshot {
+            id: "lane-1".into(),
+            name: "Volume".into(),
+            target: crate::types::EngineAutomationTargetSnapshot {
+                tag: 0,
+                ..Default::default()
+            },
+            enabled: true,
+            points: vec![
+                crate::types::EngineAutomationPointSnapshot {
+                    beat: 4.0,
+                    value: 2.0,
+                    curve: 0,
+                },
+                crate::types::EngineAutomationPointSnapshot {
+                    beat: -1.0,
+                    value: -0.5,
+                    curve: 1,
+                },
+            ],
+        });
+
+        assert_eq!(lane.points[0].beat, 0.0);
+        assert_eq!(lane.points[0].value, 0.0);
+        assert_eq!(lane.points[1].beat, 4.0);
+        assert_eq!(lane.points[1].value, 1.0);
+    }
+
+    #[test]
+    fn automation_evaluator_handles_linear_and_hold_curves() {
+        let points = vec![
+            RuntimeAutomationPoint {
+                beat: 0.0,
+                value: 0.0,
+                curve: RuntimeAutomationCurve::Linear,
+            },
+            RuntimeAutomationPoint {
+                beat: 4.0,
+                value: 1.0,
+                curve: RuntimeAutomationCurve::Hold,
+            },
+            RuntimeAutomationPoint {
+                beat: 8.0,
+                value: 0.25,
+                curve: RuntimeAutomationCurve::Linear,
+            },
+        ];
+
+        assert_eq!(evaluate_automation_points(&[], 2.0, 0.75), 0.75);
+        assert!((evaluate_automation_points(&points, 2.0, 0.5) - 0.5).abs() < 1e-6);
+        assert!((evaluate_automation_points(&points, 6.0, 0.5) - 1.0).abs() < 1e-6);
+        assert!((evaluate_automation_points(&points, 10.0, 0.5) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn disabled_or_unresolved_automation_lanes_do_not_evaluate() {
+        let mut lane = RuntimeAutomationLane::from_snapshot(&EngineAutomationLaneSnapshot {
+            id: "lane-1".into(),
+            name: "Missing Param".into(),
+            target: crate::types::EngineAutomationTargetSnapshot {
+                tag: 3,
+                ..Default::default()
+            },
+            enabled: true,
+            points: vec![crate::types::EngineAutomationPointSnapshot {
+                beat: 0.0,
+                value: 0.25,
+                curve: 0,
+            }],
+        });
+        assert!(lane.evaluate_normalized(0.0).is_none());
+
+        lane.target = RuntimeAutomationTarget::TrackPan;
+        lane.enabled = false;
+        assert!(lane.evaluate_normalized(0.0).is_none());
     }
 }

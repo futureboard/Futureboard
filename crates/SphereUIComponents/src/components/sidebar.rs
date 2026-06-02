@@ -198,7 +198,7 @@ pub fn sidebar(
             })
             .collect::<Vec<_>>()
     })
-    .track_scroll(scroll)
+    .track_scroll(&scroll)
     .size_full()
     .px(px(2.0))
     .py(px(3.0));
@@ -463,7 +463,7 @@ fn tree_row(
 
 fn scrollbar_thumb(scroll: ScrollHandle) -> impl IntoElement {
     let viewport_h: f32 = scroll.bounds().size.height.into();
-    let max_y: f32 = scroll.max_offset().height.into();
+    let max_y: f32 = scroll.max_offset().y.into();
     let raw_y: f32 = scroll.offset().y.into();
     let offset_y: f32 = -raw_y;
 

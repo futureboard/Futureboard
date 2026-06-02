@@ -97,9 +97,6 @@ impl StudioLayout {
                     cx.notify();
                 }
             });
-            // Block-rate automation evaluation (scaffolding). Cheap; only does
-            // real work under the automation debug flag for now.
-            self.evaluate_block_automation(cx, interpolated.max(0.0));
         } else {
             let _ = self.timeline.update(cx, |timeline, cx| {
                 if timeline.state.transport.playing {

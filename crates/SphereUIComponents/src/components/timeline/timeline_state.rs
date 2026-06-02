@@ -4025,4 +4025,33 @@ mod midi_edit_tests {
         cmd.undo(&mut state);
         assert!(!note(&state, &clip_id, id).muted, "undo unmutes");
     }
+
+    #[test]
+    fn split_midi_note_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 2.0, 100).unwrap();
+        let original = note(&state, &clip_id, id).clone();
+        let left = MidiNoteState::new(60, 0.0, 1.0, 100);
+        let right = MidiNoteState::new(60, 1.0, 1.0, 100);
+        let (left_id, right_id) = (left.id, right.id);
+
+        let cmd = EditCommand::SplitMidiNote {
+            clip_id: clip_id.clone(),
+            original,
+            parts: vec![left, right],
+        };
+        cmd.execute(&mut state);
+        let notes = state.midi_clip_notes(&clip_id).unwrap();
+        assert!(notes.iter().all(|n| n.id != id), "original removed");
+        assert!(notes.iter().any(|n| n.id == left_id), "left part added");
+        assert!(notes.iter().any(|n| n.id == right_id), "right part added");
+
+        cmd.undo(&mut state);
+        let notes = state.midi_clip_notes(&clip_id).unwrap();
+        assert!(notes.iter().any(|n| n.id == id), "undo restores original");
+        assert!(
+            notes.iter().all(|n| n.id != left_id && n.id != right_id),
+            "undo removes both parts"
+        );
+    }
 }

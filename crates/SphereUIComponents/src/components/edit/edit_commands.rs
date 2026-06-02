@@ -75,6 +75,13 @@ pub enum EditCommand {
         prev: Vec<MidiControllerPoint>,
         next: Vec<MidiControllerPoint>,
     },
+    /// Split one note into `parts` (two or more contiguous notes). Atomic so a
+    /// single undo restores the original note and removes every part.
+    SplitMidiNote {
+        clip_id: String,
+        original: MidiNoteState,
+        parts: Vec<MidiNoteState>,
+    },
 }
 
 impl EditCommand {
@@ -95,6 +102,7 @@ impl EditCommand {
             }
             EditCommand::EditMidiNotes { .. } => "Edit MIDI Notes",
             EditCommand::SetControllerPoints { .. } => "Edit CC Lane",
+            EditCommand::SplitMidiNote { .. } => "Split MIDI Note",
         }
     }
 
@@ -158,6 +166,21 @@ impl EditCommand {
             } => {
                 state.set_controller_lane_points(clip_id, *kind, next.clone());
             }
+            EditCommand::SplitMidiNote {
+                clip_id,
+                original,
+                parts,
+            } => {
+                state.delete_midi_notes(clip_id, &[original.id]);
+                if let Some(existing) = state.midi_clip_notes_mut(clip_id) {
+                    for note in parts {
+                        if !existing.iter().any(|n| n.id == note.id) {
+                            existing.push(note.clone());
+                        }
+                    }
+                }
+                state.expand_clip_to_contain_notes(clip_id);
+            }
         }
     }
 
@@ -209,6 +232,20 @@ impl EditCommand {
                 ..
             } => {
                 state.set_controller_lane_points(clip_id, *kind, prev.clone());
+            }
+            EditCommand::SplitMidiNote {
+                clip_id,
+                original,
+                parts,
+            } => {
+                let ids: Vec<u64> = parts.iter().map(|n| n.id).collect();
+                state.delete_midi_notes(clip_id, &ids);
+                if let Some(existing) = state.midi_clip_notes_mut(clip_id) {
+                    if !existing.iter().any(|n| n.id == original.id) {
+                        existing.push(original.clone());
+                    }
+                }
+                state.expand_clip_to_contain_notes(clip_id);
             }
         }
     }

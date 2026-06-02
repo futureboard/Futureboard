@@ -1,0 +1,437 @@
+[workspace]
+members = [
+    ".",
+    "crates/gpui_linux",
+    "crates/gpui_macos",
+    "crates/gpui_macros",
+    "crates/gpui_platform",
+    "crates/gpui_shared_string",
+    "crates/gpui_tokio",
+    "crates/gpui_util",
+    "crates/gpui_web",
+    "crates/gpui_wgpu",
+    "crates/gpui_windows",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+publish = true
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+declare_interior_mutable_const = "deny"
+disallowed_methods = "deny"
+large_enum_variant = "allow"
+let_underscore_future = "allow"
+nonminimal_bool = "allow"
+redundant_clone = "deny"
+single_range_in_vec_init = "allow"
+todo = "deny"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[workspace.lints.clippy.style]
+level = "allow"
+priority = -1
+
+[workspace.lints.rust.unexpected_cfgs]
+level = "allow"
+priority = 0
+
+[workspace.dependencies]
+accesskit = "0.24"
+# accesskit platform adapters must match the accesskit 0.24 core. The standalone
+# pins (macos 0.19 / unix 0.17) lag and resolve their own accesskit 0.21, which
+# clashes with gpui's 0.24 (E0277 handler-trait mismatches). These are the
+# adapter versions that pair with accesskit 0.24 (same set the root workspace
+# uses for this code).
+accesskit_macos = "0.26"
+accesskit_unix = "0.21"
+accesskit_windows = "0.33"
+anyhow = "1.0.86"
+async-channel = "2.3"
+# 0.13 (not 0.11): the gpui_linux file-chooser code uses `ashpd::Uri`, which
+# only exists in ashpd 0.13+. async-io matches gpui's smol-based executor.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification", "open_uri", "file_chooser", "settings", "trash"] }
+backtrace = "0.3"
+bitflags = "2"
+chrono = { version = "0.4", features = ["serde"] }
+cocoa = "=0.26.0"
+cocoa-foundation = "=0.2.0"
+collections = { package = "collections-gpui-standalone", version = "1.4.4" }
+core-foundation = "=0.10.0"
+core-foundation-sys = "0.8.6"
+core-video = { version = "0.4.3", features = ["metal"] }
+criterion = "0.7"
+ctor = "0.4.0"
+derive_more = "0.99.17"
+env_logger = "0.11"
+futures = "0.3"
+futures-concurrency = "7.6"
+gpui = { path = "." }
+gpui_linux = { path = "crates/gpui_linux" }
+gpui_macos = { path = "crates/gpui_macos" }
+gpui_macros = { path = "crates/gpui_macros" }
+gpui_platform = { path = "crates/gpui_platform" }
+gpui_shared_string = { path = "crates/gpui_shared_string" }
+gpui_util = { path = "crates/gpui_util" }
+gpui_web = { path = "crates/gpui_web" }
+gpui_wgpu = { path = "crates/gpui_wgpu" }
+gpui_windows = { path = "crates/gpui_windows" }
+heck = "0.5"
+hdrhistogram = "7"
+http_client = { package = "http_client-gpui-standalone", version = "1.4.4" }
+image = "0.25.1"
+inventory = "0.3.19"
+itertools = "0.14.0"
+libc = "0.2"
+log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+mach2 = "0.4"
+media = { package = "media-gpui-standalone", version = "1.4.4" }
+metal = "0.29"
+objc = "0.2"
+objc2-app-kit = "0.3"
+parking_lot = "0.12.1"
+pollster = "0.4"
+postage = { version = "0.5", features = ["futures-traits"] }
+proc-macro2 = "1"
+profiling = "1"
+proptest = "1.5"
+quote = "1"
+rand = "0.9"
+refineable = { package = "refineable-gpui-standalone", version = "1.4.4" }
+regex = "1.5"
+scheduler = { package = "scheduler-gpui-standalone", version = "1.4.4" }
+scap = { package = "zed-scap", version = "0.0.8-zed", default-features = false }
+schemars = { version = "1.0", features = ["indexmap2"] }
+semver = "1"
+serde = { version = "1.0.221", features = ["derive", "rc"] }
+serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
+slotmap = "1.0.6"
+smallvec = { version = "1.6", features = ["const_generics", "union"] }
+smol = "2.0"
+stacksafe = "0.1"
+strum = { version = "0.27.2", features = ["derive"] }
+sum_tree = { package = "sum_tree-gpui-standalone", version = "1.4.4" }
+syn = { version = "2", features = ["full", "extra-traits"] }
+thiserror = "2.0.12"
+tokio = "1"
+unicode-segmentation = "1.10"
+url = "2"
+util = { package = "util-gpui-standalone", version = "1.4.4" }
+util_macros = { package = "util_macros-gpui-standalone", version = "1.4.4" }
+uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
+wasm-bindgen = "0.2"
+web-time = "1.1.0"
+wgpu = "29"
+windows = { version = "0.62", features = [
+    "Foundation_Numerics",
+    "Storage_Search",
+    "Storage_Streams",
+    "System",
+    "System_Threading",
+    "UI",
+    "UI_ViewManagement",
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectManipulation",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Hlsl",
+    "Win32_Graphics_Imaging",
+    "Win32_Media",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
+
+[package]
+name = "gpui"
+version = "0.2.2"
+edition.workspace = true
+authors = ["Nathan Sobo <nathan@zed.dev>"]
+description = "Zed's GPU-accelerated UI framework"
+repository = "https://github.com/zed-industries/zed"
+publish = true
+license = "Apache-2.0"
+homepage = "https://gpui.rs"
+readme = "README.md"
+keywords = ["desktop", "gui", "immediate"]
+categories = ["gui"]
+
+
+[lints]
+workspace = true
+
+[features]
+default = ["font-kit", "wayland", "x11", "windows-manifest"]
+test-support = [
+    "leak-detection",
+    "collections/test-support",
+    "http_client/test-support",
+    "wayland",
+    "x11",
+    "proptest",
+]
+inspector = ["gpui_macros/inspector"]
+leak-detection = ["backtrace"]
+wayland = [
+    "bitflags",
+]
+x11 = [
+    "scap?/x11",
+]
+screen-capture = [
+    "scap",
+]
+windows-manifest = ["dep:embed-resource"]
+input-latency-histogram = ["dep:hdrhistogram"]
+
+[lib]
+path = "src/gpui.rs"
+doctest = false
+
+[dependencies]
+accesskit.workspace = true
+anyhow.workspace = true
+async-task = "4.7"
+backtrace = { workspace = true, optional = true }
+bitflags = { workspace = true, optional = true }
+
+collections.workspace = true
+ctor.workspace = true
+derive_more.workspace = true
+etagere = "0.2"
+futures.workspace = true
+futures-concurrency.workspace = true
+gpui_macros.workspace = true
+gpui_shared_string.workspace = true
+http_client.workspace = true
+image.workspace = true
+inventory.workspace = true
+itertools.workspace = true
+log.workspace = true
+num_cpus = "1.13"
+parking = "2.0.0"
+parking_lot.workspace = true
+postage.workspace = true
+proptest = { workspace = true, optional = true }
+chrono.workspace = true
+profiling.workspace = true
+rand.workspace = true
+raw-window-handle = "0.6"
+regex.workspace = true
+refineable.workspace = true
+scheduler.workspace = true
+resvg = { version = "0.45.0", default-features = false, features = [
+    "text",
+    "system-fonts",
+    "memmap-fonts",
+    "raster-images"
+] }
+usvg = { version = "0.45.0", default-features = false }
+ttf-parser = "0.25"
+util_macros.workspace = true
+schemars.workspace = true
+seahash = "4.1"
+serde.workspace = true
+serde_json.workspace = true
+slotmap.workspace = true
+smallvec.workspace = true
+async-channel.workspace = true
+stacksafe.workspace = true
+strum.workspace = true
+sum_tree.workspace = true
+taffy = "=0.10.1"
+thiserror.workspace = true
+gpui_util.workspace = true
+hdrhistogram = { workspace = true, optional = true }
+waker-fn = "1.2.0"
+lyon = "1.0"
+pin-project = "1.1.10"
+spin = "0.10.0"
+pollster.workspace = true
+url.workspace = true
+uuid.workspace = true
+web-time.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+uuid = { workspace = true, features = ["js"] }
+
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block = "0.1"
+cocoa.workspace = true
+cocoa-foundation.workspace = true
+core-foundation.workspace = true
+core-foundation-sys.workspace = true
+core-graphics = "0.24"
+core-video.workspace = true
+core-text = "21"
+# WARNING: If you change this, you must also publish a new version of zed-font-kit to crates.io
+font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", version = "0.14.1-zed", optional = true }
+foreign-types = "0.5"
+log.workspace = true
+media.workspace = true
+objc.workspace = true
+objc2 = { version = "0.6", optional = true }
+objc2-metal = { version = "0.3", optional = true }
+mach2.workspace = true
+#TODO: replace with "objc2"
+metal.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))'.dependencies]
+pathfinder_geometry = "0.5"
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies]
+scap = { workspace = true, optional = true }
+
+
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+
+[dev-dependencies]
+backtrace.workspace = true
+collections = { workspace = true, features = ["test-support"] }
+env_logger.workspace = true
+gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
+gpui_util = { workspace = true }
+lyon = { version = "1.0", features = ["extra"] }
+proptest = { workspace = true }
+rand.workspace = true
+scheduler = { workspace = true, features = ["test-support"] }
+unicode-segmentation = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+http_client = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+wasm-bindgen = { workspace = true }
+gpui_web.workspace = true
+
+[build-dependencies]
+embed-resource = { version = "3.0", optional = true }
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+bindgen = "0.71"
+cbindgen = { version = "0.28.0", default-features = false }
+
+[[example]]
+name = "hello_world"
+path = "examples/hello_world.rs"
+
+[[example]]
+name = "move_entity_between_windows"
+path = "examples/move_entity_between_windows.rs"
+
+[[example]]
+name = "image"
+path = "examples/image/image.rs"
+
+[[example]]
+name = "input"
+path = "examples/input.rs"
+
+[[example]]
+name = "on_window_close_quit"
+path = "examples/on_window_close_quit.rs"
+
+[[example]]
+name = "opacity"
+path = "examples/opacity.rs"
+
+[[example]]
+name = "pattern"
+path = "examples/pattern.rs"
+
+[[example]]
+name = "set_menus"
+path = "examples/set_menus.rs"
+
+[[example]]
+name = "shadow"
+path = "examples/shadow.rs"
+
+[[example]]
+name = "svg"
+path = "examples/svg/svg.rs"
+
+[[example]]
+name = "tab_stop"
+path = "examples/tab_stop.rs"
+
+[[example]]
+name = "text"
+path = "examples/text.rs"
+
+[[example]]
+name = "text_wrapper"
+path = "examples/text_wrapper.rs"
+
+[[example]]
+name = "tree"
+path = "examples/tree.rs"
+
+[[example]]
+name = "uniform_list"
+path = "examples/uniform_list.rs"
+
+[[example]]
+name = "window_shadow"
+path = "examples/window_shadow.rs"
+
+[[example]]
+name = "grid_layout"
+path = "examples/grid_layout.rs"
+
+[[example]]
+name = "list_example"
+path = "examples/list_example.rs"
+
+[[example]]
+name = "mouse_pressure"
+path = "examples/mouse_pressure.rs"
+
+[[example]]
+name = "a11y"
+path = "examples/a11y.rs"

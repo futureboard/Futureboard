@@ -180,6 +180,29 @@ pub struct EngineMidiClipSnapshot {
     pub start_beat: f64,
     pub length_beats: f64,
     pub notes: Vec<EngineMidiNoteSnapshot>,
+    /// MIDI controller (CC / pitch-bend / aftertouch) lanes for this clip.
+    #[serde(default)]
+    pub controllers: Vec<EngineMidiControllerLane>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMidiControllerPoint {
+    /// Beat relative to the clip start.
+    pub beat: f64,
+    /// Normalized controller value, `0.0..=1.0`.
+    pub value: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMidiControllerLane {
+    /// VST3 controller number: `0..=127` = MIDI CC, `128` = aftertouch,
+    /// `129` = pitch bend. Matches `Steinberg::Vst::ControllerNumbers`.
+    pub controller: u16,
+    #[serde(default)]
+    pub channel: u8,
+    pub points: Vec<EngineMidiControllerPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +235,8 @@ pub struct EngineTrackSnapshot {
     pub inserts: Vec<EngineInsertSnapshot>,
     #[serde(default)]
     pub sends: Vec<EngineSendSnapshot>,
+    #[serde(default)]
+    pub automation_lanes: Vec<EngineAutomationLaneSnapshot>,
 }
 
 fn default_preview_mode() -> String {
@@ -239,6 +264,49 @@ pub struct EngineSendSnapshot {
     /// (default) taps post-fader. Phase 3.
     #[serde(default)]
     pub pre_fader: bool,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineAutomationTargetSnapshot {
+    /// Matches the native UI AutomationTarget tag:
+    /// 0 volume, 1 pan, 2 mute, 3 plugin parameter, 4 send gain.
+    pub tag: u8,
+    #[serde(default)]
+    pub insert_id: String,
+    #[serde(default)]
+    pub parameter_id: String,
+    #[serde(default)]
+    pub parameter_name: String,
+    #[serde(default)]
+    pub send_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineAutomationPointSnapshot {
+    pub beat: f64,
+    /// Normalized lane value in `0.0..=1.0`.
+    pub value: f32,
+    /// 0 linear, 1 hold, 2 smooth placeholder.
+    #[serde(default)]
+    pub curve: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineAutomationLaneSnapshot {
+    pub id: String,
+    pub name: String,
+    pub target: EngineAutomationTargetSnapshot,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub points: Vec<EngineAutomationPointSnapshot>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

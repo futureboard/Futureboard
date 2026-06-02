@@ -184,6 +184,7 @@ pub fn select_with_placement(
                     ),
                     blur_radius: px(24.0),
                     spread_radius: px(0.0),
+                    inset: false,
                 }])
                 .p(px(4.0))
                 .id((gpui::ElementId::from(id), "menu"))

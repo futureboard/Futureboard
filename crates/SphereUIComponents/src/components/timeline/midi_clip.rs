@@ -43,7 +43,7 @@ pub fn midi_clip(
     // Draw notes inside notes preview area (clip-relative beats, clip bounds).
     let mut note_elements = Vec::new();
     let clip_len = clip.duration_beats;
-    if let ClipType::Midi { notes } = &clip.clip_type {
+    if let ClipType::Midi { notes, .. } = &clip.clip_type {
         let in_bounds: Vec<_> = notes
             .iter()
             .filter(|n| n.start < clip_len && n.start + n.duration > 0.0)

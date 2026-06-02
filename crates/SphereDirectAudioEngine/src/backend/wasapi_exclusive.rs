@@ -540,8 +540,9 @@ unsafe fn resolve_device(
 
 unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
     use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
+    use windows::Win32::Foundation::PROPERTYKEY;
     use windows::Win32::System::Com::STGM_READ;
-    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
     let store: IPropertyStore = match device.OpenPropertyStore(STGM_READ) {
         Ok(s) => s,

@@ -129,7 +129,7 @@ pub(super) fn find_clip_summary<'a>(
                     source_path,
                     ..
                 } => ("Audio", source_path.as_deref(), None),
-                crate::components::timeline::timeline_state::ClipType::Midi { notes } => {
+                crate::components::timeline::timeline_state::ClipType::Midi { notes, .. } => {
                     ("MIDI", None, Some(notes.len()))
                 }
             };

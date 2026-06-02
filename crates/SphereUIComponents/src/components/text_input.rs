@@ -847,11 +847,12 @@ fn text_field_inner(
                 offset: gpui::point(px(0.0), px(0.0)),
                 blur_radius: px(0.0),
                 spread_radius: px(1.0),
+                inset: false,
             }])
         })
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             if !disabled {
-                fh_click.focus(window);
+                fh_click.focus(window, cx);
                 cx.stop_propagation();
                 if let Some(cb) = on_mouse_down.as_ref() {
                     let x: f32 = event.position.x.into();
@@ -924,7 +925,7 @@ fn text_field_inner(
             if disabled {
                 return;
             }
-            fh_right.focus(window);
+            fh_right.focus(window, cx);
             if let Some(callback) = on_context_menu.as_ref() {
                 let x: f32 = event.position.x.into();
                 let y: f32 = event.position.y.into();

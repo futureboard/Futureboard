@@ -33,8 +33,32 @@ fn main() {
     }
 
     boot::log("process setup done");
-    gpui::Application::new()
+    application()
         .with_assets(EmbeddedAssets::new())
         .run(app::setup);
     boot::log("gpui application exited");
+}
+
+/// Builds a GPUI [`Application`] with the correct OS platform backend.
+///
+/// The vendored standalone gpui removed `Application::new()`; the platform must
+/// now be constructed explicitly. We mirror `gpui_platform::current_platform`
+/// here instead of depending on `gpui_platform`, because that crate
+/// force-enables gpui's `windows-manifest` feature, which would embed a second
+/// application manifest and collide (CVT1100) with this binary's own manifest
+/// from `app.rc`.
+fn application() -> gpui::Application {
+    #[cfg(target_os = "windows")]
+    let platform: std::rc::Rc<dyn gpui::Platform> = std::rc::Rc::new(
+        gpui_windows::WindowsPlatform::new(false).expect("failed to initialize Windows platform"),
+    );
+
+    #[cfg(target_os = "macos")]
+    let platform: std::rc::Rc<dyn gpui::Platform> =
+        std::rc::Rc::new(gpui_macos::MacPlatform::new(false));
+
+    #[cfg(target_os = "linux")]
+    let platform: std::rc::Rc<dyn gpui::Platform> = gpui_linux::current_platform(false);
+
+    gpui::Application::with_platform(platform)
 }

@@ -248,6 +248,7 @@ fn panel_shadow() -> Vec<gpui::BoxShadow> {
         offset: gpui::point(px(0.0), px(12.0)),
         blur_radius: px(36.0),
         spread_radius: px(0.0),
+        inset: false,
     }]
 }
 

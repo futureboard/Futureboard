@@ -19,35 +19,25 @@ gpu-renderer = ["dep:pollster", "dep:raw-window-handle", "dep:wgpu"]
 # "duplicate resource" / LNK1123 at link time on Windows due to Cargo feature
 # unification. Other default features (font-kit, wayland, x11) are re-enabled
 # so non-Windows targets keep working unchanged.
-gpui = { version = "0.2.2", default-features = false, features = [
-    "font-kit",
-    "wayland",
-    "x11",
-] }
+gpui.workspace = true
 # Audio decoding + multi-LOD peak generation moved into DAUx
 # (SphereDirectAudioEngine) per PART 5 — the UI no longer carries its
 # own hound / symphonia decoder. Same engine, same LOD ladder, same
 # format coverage as the realtime path.
 # IMPORTANT: UI components are used by the standalone `futureboard_native` app.
 # Disable Node/N-API surfaces so native builds don't try to link against `napi_*`.
-sphere-direct-audio-engine = { path = "../SphereDirectAudioEngine", default-features = false }
-sphere-audio-editor = { path = "../SphereAudioEditor" }
-sphere-plugin-host = { path = "../SpherePluginHost", default-features = false }
+sphere-direct-audio-engine.workspace = true
+sphere-audio-editor.workspace = true
+sphere-plugin-host.workspace = true
 # Cross-platform user directories for the file browser default location.
-dirs = "5"
+dirs.workspace = true
 # Menu manifest is shared with Electron/Web via a generated JSON file.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-pollster = { version = "0.4", optional = true }
-raw-window-handle = { version = "0.6", optional = true }
-wgpu = { version = "29.0.3", default-features = false, features = [
-    "std",
-    "wgsl",
-    "vulkan",
-    "metal",
-    "gles",
-], optional = true }
+serde.workspace = true
+serde_json.workspace = true
+pollster = { workspace = true, optional = true }
+raw-window-handle = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
 # Native file dialogs (open/save/folder picker).
-rfd = "0.15"
+rfd.workspace = true
 # CRC-32/ISO-HDLC checksum for .fbproj binary format.
-crc32fast = "1"
+crc32fast.workspace = true

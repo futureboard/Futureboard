@@ -408,7 +408,7 @@ impl Render for StudioLayout {
                     if this.project_switcher.is_open {
                         this.project_switcher.query.clear();
                         this.project_switcher_search_input.set_value("");
-                        this.project_switcher_search_input.focus_handle.focus(w);
+                        this.project_switcher_search_input.focus_handle.focus(w, cx);
                         this.project_switcher.selected_index = 0;
                     }
                     cx.notify();
@@ -771,7 +771,7 @@ impl Render for StudioLayout {
         // `window.focused().is_none()`: it also recovers from orphaned focus,
         // while never stealing focus from a field the user is actively typing in.
         if !self.focus_handle.is_focused(window) && !self.keyboard_text_capture_live(window) {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
         let focus_holder = self.focus_handle.clone();
 

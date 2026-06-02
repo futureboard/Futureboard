@@ -1,13 +1,26 @@
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::timeline::timeline_state::{
-    self, ClipType, TimelineState, TrackState, TrackType,
+    self, ClipType, MidiControllerKind, TimelineState, TrackState, TrackType,
 };
 
 use DAUx::types::{
+    EngineAutomationLaneSnapshot, EngineAutomationPointSnapshot, EngineAutomationTargetSnapshot,
     EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineMidiClipSnapshot,
-    EngineMidiNoteSnapshot, EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot,
-    EngineTrackSnapshot,
+    EngineMidiControllerLane, EngineMidiControllerPoint, EngineMidiNoteSnapshot,
+    EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot, EngineTrackSnapshot,
 };
+
+/// Map a controller lane kind to its VST3 controller number, or `None` for
+/// kinds with no global controller mapping (poly pressure is per-note and not
+/// yet routed to the engine).
+fn vst3_controller_number(kind: MidiControllerKind) -> Option<u16> {
+    match kind {
+        MidiControllerKind::CC(n) => Some(n as u16),
+        MidiControllerKind::ChannelPressure => Some(128), // kAfterTouch
+        MidiControllerKind::PitchBend => Some(129),       // kPitchBend
+        MidiControllerKind::PolyPressure => None,
+    }
+}
 
 /// Build the DAUx insert descriptors for one track's mixer insert chain
 /// (Phase 2b). Only real, instantiable VST3 plugins are emitted as
@@ -85,6 +98,50 @@ fn build_engine_sends(track: &TrackState) -> Vec<EngineSendSnapshot> {
         .collect()
 }
 
+fn build_engine_automation_lanes(track: &TrackState) -> Vec<EngineAutomationLaneSnapshot> {
+    track
+        .automation_lanes
+        .iter()
+        .map(|lane| {
+            let mut target = EngineAutomationTargetSnapshot {
+                tag: lane.target.to_tag(),
+                ..Default::default()
+            };
+            match &lane.target {
+                timeline_state::AutomationTarget::PluginParameter {
+                    insert_id,
+                    parameter_id,
+                    parameter_name,
+                } => {
+                    target.insert_id = insert_id.clone();
+                    target.parameter_id = parameter_id.clone();
+                    target.parameter_name = parameter_name.clone();
+                }
+                timeline_state::AutomationTarget::SendLevel { send_id } => {
+                    target.send_id = send_id.clone();
+                }
+                _ => {}
+            }
+
+            EngineAutomationLaneSnapshot {
+                id: lane.id.clone(),
+                name: lane.name.clone(),
+                target,
+                enabled: lane.enabled,
+                points: lane
+                    .points
+                    .iter()
+                    .map(|point| EngineAutomationPointSnapshot {
+                        beat: point.beat.max(0.0) as f64,
+                        value: point.value.clamp(0.0, 1.0),
+                        curve: point.curve.to_tag(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
 pub(super) fn build_engine_project_snapshot(
     state: &TimelineState,
     sample_rate: u32,
@@ -113,6 +170,7 @@ pub(super) fn build_engine_project_snapshot(
             },
             inserts: build_engine_inserts(track),
             sends: build_engine_sends(track),
+            automation_lanes: build_engine_automation_lanes(track),
         })
         .collect();
 
@@ -128,6 +186,7 @@ pub(super) fn build_engine_project_snapshot(
         output_track_id: None,
         inserts: Vec::new(),
         sends: Vec::new(),
+        automation_lanes: Vec::new(),
     });
 
     let clips = state
@@ -182,9 +241,18 @@ pub(super) fn build_engine_project_snapshot(
                 if clip.muted {
                     return None;
                 }
-                let ClipType::Midi { notes } = &clip.clip_type else {
+                let ClipType::Midi {
+                    notes,
+                    controller_lanes,
+                } = &clip.clip_type
+                else {
                     return None;
                 };
+                let channel = track
+                    .routing
+                    .midi_channel
+                    .map(|ch| ch.saturating_sub(1).min(15))
+                    .unwrap_or(0);
                 Some(EngineMidiClipSnapshot {
                     id: clip.id.clone(),
                     track_id: track_id.clone(),
@@ -192,17 +260,34 @@ pub(super) fn build_engine_project_snapshot(
                     length_beats: clip.duration_beats.max(0.0) as f64,
                     notes: notes
                         .iter()
+                        // Muted notes stay in the clip but emit no runtime event.
+                        .filter(|n| !n.muted)
                         .map(|n| EngineMidiNoteSnapshot {
                             id: n.id,
                             pitch: n.pitch.min(127),
                             start_beat: n.start.max(0.0) as f64,
                             length_beats: n.duration.max(0.0) as f64,
                             velocity: n.velocity.clamp(1, 127),
-                            channel: track
-                                .routing
-                                .midi_channel
-                                .map(|ch| ch.saturating_sub(1).min(15))
-                                .unwrap_or(0),
+                            channel,
+                        })
+                        .collect(),
+                    controllers: controller_lanes
+                        .iter()
+                        .filter(|lane| !lane.points.is_empty())
+                        .filter_map(|lane| {
+                            let controller = vst3_controller_number(lane.kind)?;
+                            Some(EngineMidiControllerLane {
+                                controller,
+                                channel,
+                                points: lane
+                                    .points
+                                    .iter()
+                                    .map(|p| EngineMidiControllerPoint {
+                                        beat: p.beat.max(0.0) as f64,
+                                        value: p.value.clamp(0.0, 1.0),
+                                    })
+                                    .collect(),
+                            })
                         })
                         .collect(),
                 })
@@ -304,5 +389,85 @@ pub(super) fn volume_norm_to_linear(norm: f32) -> f32 {
         0.0
     } else {
         10.0_f32.powf(db / 20.0).clamp(0.0, 2.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::edit::EditCommand;
+    use crate::components::timeline::timeline_state::{CreateTrackOptions, MidiControllerKind};
+
+    fn instrument_state_with_clip() -> (TimelineState, String) {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Inst".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: false,
+        });
+        let clip = state.build_midi_clip(&track_id, 0.0, 4.0).expect("clip");
+        let clip_id = clip.id.clone();
+        EditCommand::CreateClip { track_id, clip }.execute(&mut state);
+        (state, clip_id)
+    }
+
+    #[test]
+    fn muted_notes_excluded_from_engine_snapshot() {
+        let (mut state, clip_id) = instrument_state_with_clip();
+        let muted = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        let _audible = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).unwrap();
+        state.set_midi_notes_muted(&clip_id, &[muted], true);
+
+        let snap = build_engine_project_snapshot(&state, 48_000);
+        let total: usize = snap.midi_clips.iter().map(|c| c.notes.len()).sum();
+        assert_eq!(total, 1, "muted note must not reach the engine snapshot");
+    }
+
+    #[test]
+    fn cc_lane_reaches_engine_snapshot_with_resolved_controller() {
+        let (mut state, clip_id) = instrument_state_with_clip();
+        state.put_controller_point(&clip_id, MidiControllerKind::CC(11), 0.0, 0.25);
+        state.put_controller_point(&clip_id, MidiControllerKind::CC(11), 2.0, 0.75);
+        // Pitch bend resolves to VST3 controller 129.
+        state.put_controller_point(&clip_id, MidiControllerKind::PitchBend, 1.0, 0.5);
+
+        let snap = build_engine_project_snapshot(&state, 48_000);
+        let clip = snap
+            .midi_clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .expect("midi clip in snapshot");
+        let cc11 = clip
+            .controllers
+            .iter()
+            .find(|l| l.controller == 11)
+            .expect("CC11 lane");
+        assert_eq!(cc11.points.len(), 2);
+        assert!(clip.controllers.iter().any(|l| l.controller == 129));
+    }
+
+    #[test]
+    fn empty_and_poly_pressure_lanes_are_omitted() {
+        let (mut state, clip_id) = instrument_state_with_clip();
+        // Ensure an empty lane and a poly-pressure lane (no global mapping).
+        state.ensure_controller_lane(&clip_id, MidiControllerKind::CC(7));
+        state.put_controller_point(&clip_id, MidiControllerKind::PolyPressure, 0.0, 0.5);
+
+        let snap = build_engine_project_snapshot(&state, 48_000);
+        let clip = snap.midi_clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(
+            clip.controllers.is_empty(),
+            "empty CC7 lane and unmapped poly-pressure lane must be omitted"
+        );
     }
 }

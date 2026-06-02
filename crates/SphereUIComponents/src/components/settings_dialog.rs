@@ -2262,6 +2262,7 @@ pub fn settings_dialog(
                     offset: gpui::point(px(0.0), px(16.0)),
                     blur_radius: px(40.0),
                     spread_radius: px(0.0),
+                    inset: false,
                 }])
                 .on_mouse_down(gpui::MouseButton::Left, |_, _window, cx| {
                     cx.stop_propagation();
@@ -2758,7 +2759,7 @@ impl SettingsWindow {
         match key {
             "escape" => window.remove_window(),
             "f" if ctrl => {
-                self.search_input.focus_handle.focus(window);
+                self.search_input.focus_handle.focus(window, cx);
                 cx.notify();
             }
             _ => {}
@@ -2882,7 +2883,7 @@ impl Render for SettingsWindow {
             .flex_col()
             .size_full()
             .relative()
-            .font(theme::ui_font())
+            .font(theme::ui_font_for_language(&schema.general.language))
             .bg(Colors::surface_window())
             .overflow_hidden()
             .capture_key_down({

@@ -191,6 +191,15 @@ impl Timeline {
         cx.notify();
     }
 
+    /// Record a command whose effect has already been applied to the state
+    /// (e.g. a gesture that mutated `state` live). Pushes it onto the undo
+    /// stack without re-executing, then marks the project changed.
+    pub fn record_executed_command(&mut self, cmd: EditCommand, cx: &mut gpui::Context<Self>) {
+        self.edit_history.push(cmd);
+        self.mark_project_changed(cx);
+        cx.notify();
+    }
+
     pub fn undo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
         if self.edit_history.undo(&mut self.state) {
             self.mark_project_changed(cx);

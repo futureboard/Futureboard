@@ -5,8 +5,4 @@ edition.workspace = true
 description = "Audio clip editor panel for Futureboard Studio"
 
 [dependencies]
-gpui = { version = "0.2.2", default-features = false, features = [
-    "font-kit",
-    "wayland",
-    "x11",
-] }
+gpui.workspace = true

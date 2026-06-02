@@ -1,84 +1,105 @@
 [package]
-name    = "sphere-direct-audio-engine"
+name = "sphere-direct-audio-engine"
 version = "0.1.0"
 edition = "2021"
 description = "SphereDirectAudioEngine — native Rust audio backend for Futureboard Studio"
 
-# ── Library target (N-API native module for Electron) ────────────────────────
-# "cdylib"  → .node addon loaded by Node.js / Electron
-# "rlib"    → static Rust library so [[bin]] targets in this crate can link it
+# ── Library target ───────────────────────────────────────────────────────────
+#
+# rlib:
+#   Used by Futureboard Studio native / GPUI directly.
+#
+# cdylib:
+#   Used when building the Electron / Node.js native addon.
+#
+# NOTE:
+# Cargo cannot feature-gate crate-type directly, so this crate always declares
+# both outputs. The actual N-API Rust code must still be guarded with:
+#
+#   #[cfg(feature = "napi")]
+#
+# so normal native workspace builds do not link against Node/N-API symbols.
 [lib]
-name       = "DAUx"
-crate-type = ["cdylib", "rlib"]
+name = "DAUx"
+crate-type = ["rlib", "cdylib"]
 
-# ── CLI test harness (cargo run --bin sphere-audio-test) ─────────────────────
+# ── CLI test harness ─────────────────────────────────────────────────────────
+#
+# Build manually with:
+#
+#   cargo run -p sphere-direct-audio-engine --bin sphere-audio-test --features audio-test-bin
+#
 [[bin]]
 name = "sphere-audio-test"
 path = "src/bin/sphere_audio_test.rs"
 required-features = ["audio-test-bin"]
 
-# ── Runtime dependencies ──────────────────────────────────────────────────────
+# ── Runtime dependencies ─────────────────────────────────────────────────────
 [dependencies]
-# N-API binding framework (Electron / Node.js native addon)
-napi        = { version = "2", features = ["napi4"], optional = true }
-napi-derive = { version = "2", optional = true }
+# N-API binding framework.
+#
+# Disabled by default so Futureboard Studio native does not link against
+# Electron / Node.js symbols.
+napi = { workspace = true, optional = true }
+napi-derive = { workspace = true, optional = true }
 
-# Cross-platform audio I/O (WASAPI shared on Win, CoreAudio on Mac, ALSA on Linux)
-cpal = "0.15"
+# Cross-platform audio I/O:
+#   Windows → WASAPI
+#   macOS   → CoreAudio
+#   Linux   → ALSA/JACK depending on CPAL backend availability
+cpal.workspace = true
 
-# Lock-free channel for control→audio thread commands
-crossbeam-channel = "0.5"
+# Lock-free/control channel for UI/control thread → audio thread commands.
+crossbeam-channel.workspace = true
 
-# Parking-lot mutexes (panic-safe, no poisoning)
-parking_lot = "0.12"
+# Faster mutexes with no poisoning behavior.
+parking_lot.workspace = true
 
-# JSON for project snapshot serialization
-serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
-sphere-audio-plugins = { path = "../SphereAudioPlugins" }
+# Project snapshot / graph serialization.
+serde.workspace = true
+serde_json.workspace = true
 
-# Multi-format audio decoder (MP3, FLAC, OGG Vorbis, WAV, AIFF).
-# WAV is also decoded by our own hand-written parser (fast, zero deps);
-# symphonia handles the compressed and container formats.
-# Memory-map large WAV files for playback without decoding into RAM.
-memmap2 = "0.9"
+# Plugin/audio graph integration.
+sphere-audio-plugins.workspace = true
 
-symphonia = { version = "0.5", default-features = false, features = [
-    "wav",      # WAV/RIFF container
-    "pcm",      # PCM codec (WAV)
-    "aiff",     # AIFF container
-    "mp3",      # MP3 format + codec (bundle)
-    "flac",     # FLAC format + codec (bundle)
-    "ogg",      # OGG container
-    "vorbis",   # Vorbis codec (for OGG Vorbis)
-] }
+# Memory-map large audio files so huge WAVs do not explode RAM usage.
+memmap2.workspace = true
+
+# Multi-format decoder: MP3, FLAC, OGG/Vorbis, WAV, AIFF, etc.
+symphonia.workspace = true
 
 # ── Windows-only: raw WASAPI exclusive mode + MMCSS ──────────────────────────
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_Media_Audio",
-    "Win32_Media",
-    "Win32_System_Com",
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_Threading",
-    "Win32_Devices_Properties",
-    "Win32_System_Variant",
-    "Win32_UI_Shell_PropertiesSystem",
-]}
+windows.workspace = true
 
+# ── Build dependencies ───────────────────────────────────────────────────────
 [build-dependencies]
-napi-build = "2"
-cc = "1"
-pkg-config = "0.3"
+# Required when building the N-API addon path.
+#
+# IMPORTANT:
+# build.rs should only call napi_build setup when CARGO_FEATURE_NAPI is set.
+napi-build.workspace = true
 
+# Native helper build tooling.
+cc.workspace = true
+pkg-config.workspace = true
+
+# ── Feature flags ────────────────────────────────────────────────────────────
 [features]
-# Default build is native/rlib-safe for Studio workspace builds.
+# Default build is native/rlib-safe for Futureboard Studio.
 default = []
 
-# Build the N-API surface (`SphereDirectAudioEngine` JS class, Js* types).
-napi = ["dep:napi", "dep:napi-derive"]
+# Enable Electron / Node.js native addon surface.
+#
+# Build example:
+#   cargo build -p sphere-direct-audio-engine --features napi
+napi = [
+    "dep:napi",
+    "dep:napi-derive",
+]
 
-# Opt-in standalone CLI target. Workspace builds skip this so the binary does
-# not try to link N-API symbols outside a Node/Electron host.
+# Enable local CLI test binary.
+#
+# Build example:
+#   cargo run -p sphere-direct-audio-engine --bin sphere-audio-test --features audio-test-bin
 audio-test-bin = []

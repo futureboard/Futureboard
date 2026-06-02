@@ -1138,7 +1138,10 @@ impl PianoRoll {
     }
 
     fn on_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.drag, PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. }) {
+        if matches!(
+            self.drag,
+            PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. }
+        ) {
             self.drag = PianoDrag::None;
             self.commit_cc_edit(cx);
             return;
@@ -1449,7 +1452,11 @@ impl PianoRoll {
         self.run_edit_command(EditCommand::CreateMidiNotes { clip_id, notes }, cx);
         self.selection = new_ids.into_iter().collect();
         if midi_debug_enabled() {
-            eprintln!("[midi] paste anchor={:.3} count={}", anchor, self.selection.len());
+            eprintln!(
+                "[midi] paste anchor={:.3} count={}",
+                anchor,
+                self.selection.len()
+            );
         }
         cx.notify();
     }
@@ -1497,7 +1504,11 @@ impl PianoRoll {
         self.run_edit_command(EditCommand::CreateMidiNotes { clip_id, notes }, cx);
         self.selection = new_ids.into_iter().collect();
         if midi_debug_enabled() {
-            eprintln!("[midi] duplicate offset={:.3} count={}", offset, self.selection.len());
+            eprintln!(
+                "[midi] duplicate offset={:.3} count={}",
+                offset,
+                self.selection.len()
+            );
         }
         cx.notify();
     }
@@ -3137,7 +3148,8 @@ impl PianoRoll {
         let tol = (self.step_beats() * 0.5).max(1.0e-3);
         self.timeline.update(cx, |tl, tcx| {
             if erase {
-                tl.state.delete_controller_points_near(&clip_id, kind, beat, tol);
+                tl.state
+                    .delete_controller_points_near(&clip_id, kind, beat, tol);
             } else {
                 tl.state.put_controller_point(&clip_id, kind, beat, value);
             }
@@ -3187,7 +3199,8 @@ impl PianoRoll {
         let (_, cc_h) = self.cc_view_size();
         let value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
         self.timeline.update(cx, |tl, tcx| {
-            tl.state.set_controller_point(&clip_id, kind, id, beat, value);
+            tl.state
+                .set_controller_point(&clip_id, kind, id, beat, value);
             tcx.notify();
         });
     }

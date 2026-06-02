@@ -2239,10 +2239,7 @@ impl TimelineState {
     }
 
     // ── MIDI controller lanes ─────────────────────────────────────────────
-    pub fn midi_clip_controller_lanes(
-        &self,
-        clip_id: &str,
-    ) -> Option<&Vec<MidiControllerLane>> {
+    pub fn midi_clip_controller_lanes(&self, clip_id: &str) -> Option<&Vec<MidiControllerLane>> {
         for track in &self.tracks {
             for clip in &track.clips {
                 if clip.id == clip_id {
@@ -2354,7 +2351,11 @@ impl TimelineState {
         let value = value.clamp(0.0, 1.0);
         if let Some(lanes) = self.controller_lanes_mut(clip_id) {
             if let Some(lane) = lanes.iter_mut().find(|l| l.kind == kind) {
-                if let Some(p) = lane.points.iter_mut().find(|p| (p.beat - beat).abs() < 1.0e-3) {
+                if let Some(p) = lane
+                    .points
+                    .iter_mut()
+                    .find(|p| (p.beat - beat).abs() < 1.0e-3)
+                {
                     p.value = value;
                 } else {
                     lane.points.push(MidiControllerPoint::new(beat, value));

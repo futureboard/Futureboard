@@ -321,6 +321,30 @@ pub(super) fn log_engine_sync_snapshot(
     }
 }
 
+fn track_type_name(track_type: TrackType) -> &'static str {
+    match track_type {
+        TrackType::Audio => "audio",
+        TrackType::Midi => "midi",
+        TrackType::Instrument => "instrument",
+        TrackType::Bus => "bus",
+        TrackType::Return => "return",
+        TrackType::Master => "master",
+    }
+}
+
+pub(super) fn volume_norm_to_linear(norm: f32) -> f32 {
+    let norm = norm.clamp(0.0, 1.0);
+    if norm <= 0.001 {
+        return 0.0;
+    }
+    let db = timeline_state::volume::norm_to_db(norm);
+    if db <= timeline_state::volume::MIN_DB + 0.05 {
+        0.0
+    } else {
+        10.0_f32.powf(db / 20.0).clamp(0.0, 2.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,29 +422,5 @@ mod tests {
             clip.controllers.is_empty(),
             "empty CC7 lane and unmapped poly-pressure lane must be omitted"
         );
-    }
-}
-
-fn track_type_name(track_type: TrackType) -> &'static str {
-    match track_type {
-        TrackType::Audio => "audio",
-        TrackType::Midi => "midi",
-        TrackType::Instrument => "instrument",
-        TrackType::Bus => "bus",
-        TrackType::Return => "return",
-        TrackType::Master => "master",
-    }
-}
-
-pub(super) fn volume_norm_to_linear(norm: f32) -> f32 {
-    let norm = norm.clamp(0.0, 1.0);
-    if norm <= 0.001 {
-        return 0.0;
-    }
-    let db = timeline_state::volume::norm_to_db(norm);
-    if db <= timeline_state::volume::MIN_DB + 0.05 {
-        0.0
-    } else {
-        10.0_f32.powf(db / 20.0).clamp(0.0, 2.0)
     }
 }

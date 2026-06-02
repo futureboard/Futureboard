@@ -41,12 +41,19 @@ priority = 0
 
 [workspace.dependencies]
 accesskit = "0.24"
-accesskit_macos = "0.19"
-accesskit_unix = "0.17"
+# accesskit platform adapters must match the accesskit 0.24 core. The standalone
+# pins (macos 0.19 / unix 0.17) lag and resolve their own accesskit 0.21, which
+# clashes with gpui's 0.24 (E0277 handler-trait mismatches). These are the
+# adapter versions that pair with accesskit 0.24 (same set the root workspace
+# uses for this code).
+accesskit_macos = "0.26"
+accesskit_unix = "0.21"
 accesskit_windows = "0.33"
 anyhow = "1.0.86"
 async-channel = "2.3"
-ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+# 0.13 (not 0.11): the gpui_linux file-chooser code uses `ashpd::Uri`, which
+# only exists in ashpd 0.13+. async-io matches gpui's smol-based executor.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification", "open_uri", "file_chooser", "settings", "trash"] }
 backtrace = "0.3"
 bitflags = "2"
 chrono = { version = "0.4", features = ["serde"] }

@@ -43,7 +43,12 @@ gpui_macos.workspace = true
 #
 # wayland/x11 are Linux-only, so enable them only here.
 gpui = { workspace = true, features = ["wayland", "x11"] }
-gpui_linux.workspace = true
+# The root workspace dep sets `default-features = false` (needed so the macOS /
+# Windows backends don't pull `gpui/default`). For the Linux backend that would
+# strip its `default = ["wayland", "x11"]`, leaving the Wayland/X11 match arms in
+# `gpui_linux::current_platform` compiled out — so on a Wayland/X11 session it
+# falls through to `unreachable!()`. Re-add the features explicitly here.
+gpui_linux = { workspace = true, features = ["wayland", "x11"] }
 
 [features]
 default = ["gpu-renderer"]

@@ -31,6 +31,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
@@ -389,6 +390,9 @@ struct SphereDauxVst3Processor {
   Steinberg::IPtr<Steinberg::Vst::IComponent>       component;
   Steinberg::IPtr<Steinberg::Vst::IAudioProcessor>  processor;
   Steinberg::IPtr<Steinberg::Vst::IEditController>  controller;
+  /// MIDI controller → parameter mapping (queried from `controller`). Null when
+  /// the plugin exposes no IMidiMapping; CC events are then ignored.
+  Steinberg::IPtr<Steinberg::Vst::IMidiMapping>     midi_mapping;
   Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> component_connection;
   Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> controller_connection;
   bool controller_is_component{false};
@@ -623,6 +627,12 @@ struct SphereDauxVst3Processor {
         std::fprintf(stderr,
                      "[DAUx VST3] setComponentHandler not accepted (result=%d) — "
                      "GUI edits may not reach processor\n", (int)ch_res);
+
+      // MIDI controller → parameter mapping (optional). Used to route CC /
+      // pitch-bend / aftertouch input to parameter changes during process().
+      midi_mapping = Steinberg::FUnknownPtr<Steinberg::Vst::IMidiMapping>(controller);
+      std::fprintf(stderr, "[DAUx VST3] IMidiMapping %s\n",
+                   midi_mapping ? "available" : "not exposed");
     }
 
     return true;
@@ -657,36 +667,62 @@ struct SphereDauxVst3Processor {
 
   // ── Thread-safe parameter enqueue (called from audio thread OR GUI thread) ──
 
-  /// Drain pending parameters and optionally fill inputEvents for this block.
+  /// Drain pending parameters, route MIDI CC to parameter changes, and fill
+  /// inputEvents with note on/off for this block.
   void prepare_process_io(const SphereDauxVst3MidiEvent* midi_events,
                           int midi_event_count) {
+    // Parameter changes come from two sources this block: GUI/host edits queued
+    // in `pending_buf`, and CC events mapped via IMidiMapping below.
+    param_changes_obj.reset();
     {
       std::lock_guard<std::mutex> lock(pending_mutex);
-      if (pending_count > 0) {
-        param_changes_obj.reset();
-        for (int i = 0; i < pending_count; ++i) {
-          Steinberg::int32 idx = 0;
-          auto* q = param_changes_obj.addParameterData(pending_buf[i].id, idx);
-          if (q) {
-            Steinberg::int32 dummy = 0;
-            q->addPoint(0, pending_buf[i].value, dummy);
-          }
+      for (int i = 0; i < pending_count; ++i) {
+        Steinberg::int32 idx = 0;
+        auto* q = param_changes_obj.addParameterData(pending_buf[i].id, idx);
+        if (q) {
+          Steinberg::int32 dummy = 0;
+          q->addPoint(0, pending_buf[i].value, dummy);
         }
-        pending_count = 0;
-        process_data.inputParameterChanges = &param_changes_obj;
-      } else {
-        process_data.inputParameterChanges = nullptr;
       }
+      pending_count = 0;
     }
 
     input_events_obj.reset();
-    if (event_input_bus_count > 0 && midi_events && midi_event_count > 0) {
+    int cc_mapped = 0;
+    if (midi_events && midi_event_count > 0) {
       const int n = std::min(midi_event_count, SimpleEventList::kMaxEvents);
       for (int i = 0; i < n; ++i) {
         const auto& m = midi_events[i];
         const auto ch = static_cast<Steinberg::int16>(m.channel & 0x0F);
-        const auto pitch = static_cast<Steinberg::int16>(m.pitch & 0x7F);
         const auto offset = static_cast<Steinberg::int32>(m.sample_offset);
+        if (m.kind == 2) {
+          // ControlChange → parameter change via IMidiMapping. `pitch` carries
+          // the VST3 controller number (not masked to 7 bits: 128/129 are
+          // aftertouch / pitch bend). The block-level value wins (our
+          // SimpleParamValueQueue holds a single point).
+          if (!midi_mapping) {
+            continue;
+          }
+          const auto ctrl = static_cast<Steinberg::Vst::CtrlNumber>(m.pitch);
+          Steinberg::Vst::ParamID pid = 0;
+          if (midi_mapping->getMidiControllerAssignment(0, ch, ctrl, pid) ==
+              Steinberg::kResultOk) {
+            Steinberg::int32 idx = 0;
+            auto* q = param_changes_obj.addParameterData(pid, idx);
+            if (q) {
+              Steinberg::int32 dummy = 0;
+              q->addPoint(offset,
+                          static_cast<Steinberg::Vst::ParamValue>(m.velocity),
+                          dummy);
+              ++cc_mapped;
+            }
+          }
+          continue;
+        }
+        if (event_input_bus_count <= 0) {
+          continue;
+        }
+        const auto pitch = static_cast<Steinberg::int16>(m.pitch & 0x7F);
         if (m.kind == 1) {
           input_events_obj.push_note_on(offset, ch, pitch, m.velocity);
         } else {
@@ -694,13 +730,11 @@ struct SphereDauxVst3Processor {
         }
       }
       input_events_obj.sort_by_sample_offset();
-      process_data.inputEvents = &input_events_obj;
 
       if (daux_vst3_midi_debug()) {
         std::fprintf(stderr,
-                     "[VST3 MIDI] block events=%d eventInputBuses=%d\n",
-                     input_events_obj.count,
-                     event_input_bus_count);
+                     "[VST3 MIDI] block notes=%d cc=%d eventInputBuses=%d\n",
+                     input_events_obj.count, cc_mapped, event_input_bus_count);
         for (int i = 0; i < input_events_obj.count; ++i) {
           const auto& e = input_events_obj.events[i];
           if (e.type == Steinberg::Vst::Event::kNoteOnEvent) {
@@ -717,9 +751,12 @@ struct SphereDauxVst3Processor {
           }
         }
       }
-    } else {
-      process_data.inputEvents = nullptr;
     }
+
+    process_data.inputParameterChanges =
+        (param_changes_obj.count > 0) ? &param_changes_obj : nullptr;
+    process_data.inputEvents =
+        (input_events_obj.count > 0) ? &input_events_obj : nullptr;
   }
 
   /// Add or update a parameter change in the pending queue.

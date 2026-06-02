@@ -14,6 +14,11 @@ pub fn vst3_midi_debug_enabled() -> bool {
 pub enum Vst3MidiEventKind {
     NoteOff = 0,
     NoteOn = 1,
+    /// MIDI controller change. `pitch` carries the VST3 controller number
+    /// (`0..=127` CC, `128` aftertouch, `129` pitch bend) and `velocity` the
+    /// normalized value `0.0..=1.0`. The C++ bridge maps it to a parameter
+    /// change via `IMidiMapping`.
+    ControlChange = 2,
 }
 
 /// C-compatible MIDI event for `sphere_daux_vst3_process_stereo_block_with_midi`.
@@ -47,6 +52,19 @@ impl Vst3MidiEvent {
             channel,
             pitch,
             velocity,
+        }
+    }
+
+    /// A controller change. `controller` is the VST3 controller number; values
+    /// `0..=129` fit in the `pitch` byte. `value` is normalized `0.0..=1.0`.
+    #[inline]
+    pub fn control_change(sample_offset: u32, channel: u8, controller: u16, value: f32) -> Self {
+        Self {
+            sample_offset,
+            kind: Vst3MidiEventKind::ControlChange as u8,
+            channel,
+            pitch: controller as u8,
+            velocity: value,
         }
     }
 }

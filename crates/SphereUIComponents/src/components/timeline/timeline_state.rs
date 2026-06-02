@@ -103,12 +103,14 @@ pub struct MidiNoteState {
     pub duration: f32, // beats
     /// MIDI velocity in 1..=127.
     pub velocity: u8,
+    /// Muted notes remain in clip data but emit no runtime note event.
+    pub muted: bool,
 }
 
 impl MidiNoteState {
     /// Construct a note with a freshly minted transient id. `pitch` is clamped
     /// to 0..=127, `velocity` to 1..=127, and `duration` to at least
-    /// [`MIN_NOTE_BEATS`].
+    /// [`MIN_NOTE_BEATS`]. The note is created unmuted.
     pub fn new(pitch: u8, start: f32, duration: f32, velocity: u8) -> Self {
         Self {
             id: next_midi_note_id(),
@@ -116,8 +118,64 @@ impl MidiNoteState {
             start: start.max(0.0),
             duration: duration.max(MIN_NOTE_BEATS),
             velocity: velocity.clamp(1, 127),
+            muted: false,
         }
     }
+}
+
+/// Source of transient identities for controller points (not serialized;
+/// minted fresh on create and on project load, like [`next_midi_note_id`]).
+fn next_controller_point_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Which MIDI controller stream a lane edits. CC carries its 0..=127 number;
+/// the others are single global streams per channel. `PolyPressure` is modeled
+/// for completeness but deferred — it needs per-note association the editor does
+/// not yet provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiControllerKind {
+    CC(u8),
+    PitchBend,
+    ChannelPressure,
+    PolyPressure,
+}
+
+/// A single point in a controller lane. `value` is normalized `0.0..=1.0` in
+/// state; the UI maps it to the controller's display range (e.g. 0..127 for CC).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MidiControllerPoint {
+    /// Transient identity (not serialized) for editor selection / drag targets.
+    pub id: u64,
+    /// Beats relative to the clip start.
+    pub beat: f32,
+    /// Normalized `0.0..=1.0`.
+    pub value: f32,
+}
+
+impl MidiControllerPoint {
+    /// Construct a point with a freshly minted transient id. `beat` clamps to
+    /// `>= 0`, `value` to `0.0..=1.0`.
+    pub fn new(beat: f32, value: f32) -> Self {
+        Self {
+            id: next_controller_point_id(),
+            beat: beat.max(0.0),
+            value: value.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// One controller lane inside a MIDI clip. Points travel with the clip in
+/// clip-local beats. (Lane create / edit helpers land with the lane editor UI.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct MidiControllerLane {
+    pub kind: MidiControllerKind,
+    pub points: Vec<MidiControllerPoint>,
+    pub visible: bool,
+    pub height: f32,
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +188,8 @@ pub enum ClipType {
     },
     Midi {
         notes: Vec<MidiNoteState>,
+        /// MIDI controller (CC / pitch-bend / pressure) lanes for this clip.
+        controller_lanes: Vec<MidiControllerLane>,
     },
 }
 
@@ -1180,6 +1240,7 @@ impl TimelineState {
                         MidiNoteState::new(64, 6.0, 1.0, 90),
                         MidiNoteState::new(60, 7.0, 1.0, 80),
                     ],
+                    controller_lanes: Vec::new(),
                 },
                 muted: false,
                 audio_import: AudioImportState::default(),
@@ -1822,7 +1883,7 @@ impl TimelineState {
     /// Expand `clip.duration_beats` so every note fits inside the clip, with
     /// optional grid padding. Does not shrink. Returns `true` if length changed.
     pub fn ensure_midi_clip_contains_notes(clip: &mut ClipState, snap_beats: f32) -> bool {
-        let ClipType::Midi { notes } = &clip.clip_type else {
+        let ClipType::Midi { notes, .. } = &clip.clip_type else {
             return false;
         };
         let max_note_end = notes
@@ -1895,7 +1956,7 @@ impl TimelineState {
         for track in &self.tracks {
             for clip in &track.clips {
                 if clip.id == clip_id {
-                    if let ClipType::Midi { notes } = &clip.clip_type {
+                    if let ClipType::Midi { notes, .. } = &clip.clip_type {
                         return Some(notes);
                     }
                 }
@@ -1908,7 +1969,7 @@ impl TimelineState {
         for track in &mut self.tracks {
             for clip in &mut track.clips {
                 if clip.id == clip_id {
-                    if let ClipType::Midi { notes } = &mut clip.clip_type {
+                    if let ClipType::Midi { notes, .. } = &mut clip.clip_type {
                         return Some(notes);
                     }
                 }
@@ -1986,7 +2047,10 @@ impl TimelineState {
             source_duration_seconds: None,
             offset_beats: 0.0,
             gain: 1.0,
-            clip_type: ClipType::Midi { notes: Vec::new() },
+            clip_type: ClipType::Midi {
+                notes: Vec::new(),
+                controller_lanes: Vec::new(),
+            },
             muted: false,
             audio_import: AudioImportState::default(),
         })
@@ -2150,6 +2214,206 @@ impl TimelineState {
         for note in notes.iter_mut() {
             if ids.contains(&note.id) && note.velocity != velocity {
                 note.velocity = velocity;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// Overwrite the mutable fields of existing notes from full snapshots,
+    /// matched by id. Used by the `EditMidiNotes` undo command — the note set is
+    /// not changed, only field values. Auto-expands the clip afterwards.
+    pub fn overwrite_midi_notes(&mut self, clip_id: &str, states: &[MidiNoteState]) {
+        if let Some(notes) = self.midi_clip_notes_mut(clip_id) {
+            for s in states {
+                if let Some(note) = notes.iter_mut().find(|n| n.id == s.id) {
+                    note.pitch = s.pitch;
+                    note.start = s.start;
+                    note.duration = s.duration;
+                    note.velocity = s.velocity;
+                    note.muted = s.muted;
+                }
+            }
+        }
+        self.expand_clip_to_contain_notes(clip_id);
+    }
+
+    // ── MIDI controller lanes ─────────────────────────────────────────────
+    pub fn midi_clip_controller_lanes(
+        &self,
+        clip_id: &str,
+    ) -> Option<&Vec<MidiControllerLane>> {
+        for track in &self.tracks {
+            for clip in &track.clips {
+                if clip.id == clip_id {
+                    if let ClipType::Midi {
+                        controller_lanes, ..
+                    } = &clip.clip_type
+                    {
+                        return Some(controller_lanes);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn controller_lanes_mut(&mut self, clip_id: &str) -> Option<&mut Vec<MidiControllerLane>> {
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if clip.id == clip_id {
+                    if let ClipType::Midi {
+                        controller_lanes, ..
+                    } = &mut clip.clip_type
+                    {
+                        return Some(controller_lanes);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Points of a specific controller lane, if the lane exists.
+    pub fn controller_lane_points(
+        &self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+    ) -> Option<&Vec<MidiControllerPoint>> {
+        self.midi_clip_controller_lanes(clip_id)?
+            .iter()
+            .find(|l| l.kind == kind)
+            .map(|l| &l.points)
+    }
+
+    /// Clone of a lane's points (for undo prev/next snapshots).
+    pub fn controller_points_snapshot(
+        &self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+    ) -> Vec<MidiControllerPoint> {
+        self.controller_lane_points(clip_id, kind)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Ensure a visible lane of `kind` exists. Returns true if newly created.
+    pub fn ensure_controller_lane(&mut self, clip_id: &str, kind: MidiControllerKind) -> bool {
+        let Some(lanes) = self.controller_lanes_mut(clip_id) else {
+            return false;
+        };
+        if lanes.iter().any(|l| l.kind == kind) {
+            return false;
+        }
+        lanes.push(MidiControllerLane {
+            kind,
+            points: Vec::new(),
+            visible: true,
+            height: 80.0,
+            collapsed: false,
+        });
+        true
+    }
+
+    fn sort_lane_points(points: &mut [MidiControllerPoint]) {
+        points.sort_by(|a, b| {
+            a.beat
+                .partial_cmp(&b.beat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    /// Overwrite a lane's points wholesale (used by undo). Creates the lane if
+    /// missing so undo can restore points into a removed lane.
+    pub fn set_controller_lane_points(
+        &mut self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+        mut points: Vec<MidiControllerPoint>,
+    ) {
+        self.ensure_controller_lane(clip_id, kind);
+        Self::sort_lane_points(&mut points);
+        if let Some(lanes) = self.controller_lanes_mut(clip_id) {
+            if let Some(lane) = lanes.iter_mut().find(|l| l.kind == kind) {
+                lane.points = points;
+            }
+        }
+    }
+
+    /// Add or update a point at `beat` (merging within ~1e-3 beats). `value`
+    /// clamps to `0.0..=1.0`. Creates the lane if missing.
+    pub fn put_controller_point(
+        &mut self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+        beat: f32,
+        value: f32,
+    ) {
+        self.ensure_controller_lane(clip_id, kind);
+        let beat = beat.max(0.0);
+        let value = value.clamp(0.0, 1.0);
+        if let Some(lanes) = self.controller_lanes_mut(clip_id) {
+            if let Some(lane) = lanes.iter_mut().find(|l| l.kind == kind) {
+                if let Some(p) = lane.points.iter_mut().find(|p| (p.beat - beat).abs() < 1.0e-3) {
+                    p.value = value;
+                } else {
+                    lane.points.push(MidiControllerPoint::new(beat, value));
+                    Self::sort_lane_points(&mut lane.points);
+                }
+            }
+        }
+    }
+
+    /// Move an existing point (by id) to a new beat/value, re-sorting the lane.
+    /// `beat` clamps to `>= 0`, `value` to `0.0..=1.0`. Returns true if found.
+    pub fn set_controller_point(
+        &mut self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+        id: u64,
+        beat: f32,
+        value: f32,
+    ) -> bool {
+        if let Some(lanes) = self.controller_lanes_mut(clip_id) {
+            if let Some(lane) = lanes.iter_mut().find(|l| l.kind == kind) {
+                if let Some(p) = lane.points.iter_mut().find(|p| p.id == id) {
+                    p.beat = beat.max(0.0);
+                    p.value = value.clamp(0.0, 1.0);
+                    Self::sort_lane_points(&mut lane.points);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Delete points within `tol` beats of `beat`. Returns how many were removed.
+    pub fn delete_controller_points_near(
+        &mut self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+        beat: f32,
+        tol: f32,
+    ) -> usize {
+        if let Some(lanes) = self.controller_lanes_mut(clip_id) {
+            if let Some(lane) = lanes.iter_mut().find(|l| l.kind == kind) {
+                let before = lane.points.len();
+                lane.points.retain(|p| (p.beat - beat).abs() > tol);
+                return before - lane.points.len();
+            }
+        }
+        0
+    }
+
+    /// Set the muted flag on the given note ids. Returns the number changed.
+    pub fn set_midi_notes_muted(&mut self, clip_id: &str, ids: &[u64], muted: bool) -> usize {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return 0;
+        };
+        let mut changed = 0;
+        for note in notes.iter_mut() {
+            if ids.contains(&note.id) && note.muted != muted {
+                note.muted = muted;
                 changed += 1;
             }
         }
@@ -2668,7 +2932,7 @@ impl TimelineState {
         for track in &mut self.tracks {
             if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
                 let min_len = match &clip.clip_type {
-                    ClipType::Midi { notes } => {
+                    ClipType::Midi { notes, .. } => {
                         let last_note_end = notes
                             .iter()
                             .map(|note| note.start.max(0.0) + note.duration.max(MIN_NOTE_BEATS))
@@ -3323,7 +3587,7 @@ impl TimelineState {
         let is_midi = matches!(clip.clip_type, ClipType::Midi { .. });
         let min_len = if is_midi { MIN_MIDI_CLIP_BEATS } else { 0.25 };
         // Clip-local end of the furthest note — the floor for any MIDI shrink.
-        let last_note_end = if let ClipType::Midi { notes } = &clip.clip_type {
+        let last_note_end = if let ClipType::Midi { notes, .. } = &clip.clip_type {
             notes
                 .iter()
                 .map(|n| n.start.max(0.0) + n.duration.max(MIN_NOTE_BEATS))
@@ -3345,14 +3609,14 @@ impl TimelineState {
                 // Keep the right edge fixed; clamp the new start to [0, right-min].
                 let mut new_start = snapped.min(old_right - min_len).max(0.0);
                 // Trimming from the left must not push the earliest note < 0.
-                if let ClipType::Midi { notes } = &clip.clip_type {
+                if let ClipType::Midi { notes, .. } = &clip.clip_type {
                     if let Some(min_local) = notes.iter().map(|n| n.start).reduce(f32::min) {
                         let max_start = (old_start + min_local).max(0.0);
                         new_start = new_start.min(max_start);
                     }
                 }
                 let delta = old_start - new_start;
-                if let ClipType::Midi { notes } = &mut clip.clip_type {
+                if let ClipType::Midi { notes, .. } = &mut clip.clip_type {
                     for note in notes.iter_mut() {
                         note.start = (note.start + delta).max(0.0);
                     }
@@ -3592,5 +3856,172 @@ impl TimelineState {
         eprintln!("[audio-import] bpm={:.3}", self.bpm);
         eprintln!("[audio-import] duration_beats={:.6}", duration_beats);
         eprintln!("[audio-import] bars_4_4={:.6}", bars_4_4);
+    }
+}
+
+#[cfg(test)]
+mod midi_edit_tests {
+    use super::*;
+    use crate::components::edit::EditCommand;
+
+    /// Build an empty state with one MIDI clip and return `(state, clip_id)`.
+    fn state_with_midi_clip() -> (TimelineState, String) {
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Midi,
+            name: "Test".into(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: false,
+        });
+        let clip = state
+            .build_midi_clip(&track_id, 0.0, 4.0)
+            .expect("clip builds");
+        let clip_id = clip.id.clone();
+        EditCommand::CreateClip { track_id, clip }.execute(&mut state);
+        (state, clip_id)
+    }
+
+    fn note(state: &TimelineState, clip_id: &str, id: u64) -> MidiNoteState {
+        state
+            .midi_clip_notes(clip_id)
+            .unwrap()
+            .iter()
+            .find(|n| n.id == id)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn edit_midi_notes_velocity_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+
+        let prev = state.midi_clip_notes(&clip_id).unwrap().clone();
+        state.set_midi_notes_velocity_bulk(&clip_id, &[id], 40);
+        let next = state.midi_clip_notes(&clip_id).unwrap().clone();
+        assert_eq!(note(&state, &clip_id, id).velocity, 40);
+
+        let cmd = EditCommand::EditMidiNotes {
+            clip_id: clip_id.clone(),
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        assert_eq!(note(&state, &clip_id, id).velocity, 100, "undo restores");
+        cmd.execute(&mut state);
+        assert_eq!(note(&state, &clip_id, id).velocity, 40, "redo reapplies");
+    }
+
+    #[test]
+    fn edit_midi_notes_move_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+
+        let prev = state.midi_clip_notes(&clip_id).unwrap().clone();
+        state.move_midi_notes(&clip_id, &[(id, 2.0, 67)]);
+        let next = state.midi_clip_notes(&clip_id).unwrap().clone();
+
+        let cmd = EditCommand::EditMidiNotes {
+            clip_id: clip_id.clone(),
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        let n = note(&state, &clip_id, id);
+        assert_eq!((n.start, n.pitch), (0.0, 60), "undo restores start+pitch");
+        cmd.execute(&mut state);
+        let n = note(&state, &clip_id, id);
+        assert_eq!((n.start, n.pitch), (2.0, 67), "redo reapplies");
+    }
+
+    #[test]
+    fn controller_point_edit_and_undo_roundtrip() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(1);
+        let prev = state.controller_points_snapshot(&clip_id, kind);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.5);
+        state.put_controller_point(&clip_id, kind, 2.0, 0.75);
+        let next = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(next.len(), 2);
+
+        let cmd = EditCommand::SetControllerPoints {
+            clip_id: clip_id.clone(),
+            kind,
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        assert_eq!(
+            state.controller_points_snapshot(&clip_id, kind).len(),
+            0,
+            "undo clears the lane"
+        );
+        cmd.execute(&mut state);
+        assert_eq!(
+            state.controller_points_snapshot(&clip_id, kind).len(),
+            2,
+            "redo restores points"
+        );
+    }
+
+    #[test]
+    fn put_controller_point_merges_within_epsilon() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(7);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.2);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.9);
+        let pts = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(pts.len(), 1, "same-beat edit updates in place");
+        assert_eq!(pts[0].value, 0.9);
+    }
+
+    #[test]
+    fn set_controller_point_moves_in_place() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(1);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.5);
+        let id = state.controller_points_snapshot(&clip_id, kind)[0].id;
+        assert!(state.set_controller_point(&clip_id, kind, id, 3.0, 0.25));
+        let snapshot = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].beat, 3.0);
+        assert_eq!(snapshot[0].value, 0.25);
+        assert_eq!(snapshot[0].id, id, "id is preserved across a move");
+    }
+
+    #[test]
+    fn delete_controller_points_near_removes_in_tolerance() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(11);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.5);
+        state.put_controller_point(&clip_id, kind, 3.0, 0.5);
+        let removed = state.delete_controller_points_near(&clip_id, kind, 1.05, 0.25);
+        assert_eq!(removed, 1);
+        assert_eq!(state.controller_points_snapshot(&clip_id, kind).len(), 1);
+    }
+
+    #[test]
+    fn set_midi_notes_muted_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        assert!(!note(&state, &clip_id, id).muted);
+
+        let cmd = EditCommand::SetMidiNotesMuted {
+            clip_id: clip_id.clone(),
+            prev: vec![(id, false)],
+            muted: true,
+        };
+        cmd.execute(&mut state);
+        assert!(note(&state, &clip_id, id).muted, "execute mutes");
+        cmd.undo(&mut state);
+        assert!(!note(&state, &clip_id, id).muted, "undo unmutes");
     }
 }

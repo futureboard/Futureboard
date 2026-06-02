@@ -29,7 +29,8 @@ use gpui::{
 use crate::components::edit::{normalize_range, EditCommand};
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::{
-    midi_debug_enabled, MidiNoteState, MIN_NOTE_BEATS,
+    midi_debug_enabled, MidiControllerKind, MidiControllerPoint, MidiNoteState, TimelineState,
+    MIN_NOTE_BEATS,
 };
 use crate::theme::Colors;
 
@@ -39,10 +40,30 @@ const PITCH_CNT: i32 = 128;
 const TOTAL_H: f32 = PITCH_CNT as f32 * ROW_H;
 const KEY_W: f32 = 56.0; // piano key lane width
 const VEL_H: f32 = 72.0; // velocity lane height
+const CC_H: f32 = 80.0; // controller (CC) lane height
 const RULER_H: f32 = 18.0; // bar/beat ruler header height
 const RESIZE_ZONE: f32 = 6.0; // px on the right edge that starts a resize
 /// Pixels of movement before an empty-grid press becomes a marquee drag.
 const MARQUEE_DRAG_THRESHOLD: f32 = 4.0;
+
+/// A copied note, stored with timing relative to the earliest note in the
+/// selection so paste/duplicate can re-anchor the group at a new beat.
+#[derive(Clone)]
+struct ClipboardNote {
+    pitch: u8,
+    rel_start: f32,
+    duration: f32,
+    velocity: u8,
+    muted: bool,
+}
+
+thread_local! {
+    /// Process-global MIDI note clipboard. Lives outside any single editor so
+    /// copy in the docked piano roll can paste in the floating one (both run on
+    /// the GPUI main thread). Holds relative timing — not real notes.
+    static MIDI_NOTE_CLIPBOARD: std::cell::RefCell<Vec<ClipboardNote>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// Strength tier of a vertical timing gridline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +230,16 @@ enum PianoDrag {
         current_y: f32,
         erased: HashSet<u64>,
     },
+    /// Paint (left) or erase (right) on the active CC lane. The lane's pre-drag
+    /// points are snapshotted in `cc_edit_prev`; one undo entry on release.
+    CcPaint {
+        erase: bool,
+    },
+    /// Drag an existing CC point (by id) to a new beat/value. Pre-drag points
+    /// are snapshotted in `cc_edit_prev`; one undo entry on release.
+    CcMove {
+        id: u64,
+    },
 }
 
 pub struct PianoRoll {
@@ -232,6 +263,12 @@ pub struct PianoRoll {
     /// Last clip id we ran [`Self::fit_piano_roll_to_notes`] for.
     fitted_clip_id: Option<String>,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The controller lane currently shown/edited in the CC strip.
+    active_cc: MidiControllerKind,
+    /// Bounds of the CC strip, captured at paint for cursor → beat/value mapping.
+    cc_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Lane points snapshotted when a CC paint/erase gesture begins (undo prev).
+    cc_edit_prev: Option<Vec<MidiControllerPoint>>,
     /// Last clip the editor rendered — used to emit the `open_editor` debug log
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
@@ -256,6 +293,9 @@ impl PianoRoll {
             erase_preview_ids: HashSet::new(),
             fitted_clip_id: None,
             grid_bounds: Rc::new(Cell::new(None)),
+            active_cc: MidiControllerKind::CC(1),
+            cc_bounds: Rc::new(Cell::new(None)),
+            cc_edit_prev: None,
             last_editing_clip: None,
             focus: cx.focus_handle(),
         }
@@ -600,28 +640,70 @@ impl PianoRoll {
     }
 
     // ── Mutations through the timeline ────────────────────────────────────
-    fn with_timeline<R>(
+    /// Full snapshots of the given note ids in a clip (undo prev/next state).
+    fn snapshot_notes(&self, cx: &Context<Self>, clip_id: &str, ids: &[u64]) -> Vec<MidiNoteState> {
+        self.timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| ids.contains(&n.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Apply an in-place note transform (move / resize / quantize / transpose /
+    /// nudge / bulk velocity) and record it as one undoable `EditMidiNotes`
+    /// command. Captures full prev/next snapshots of `ids`; a no-op
+    /// (`prev == next`) is dropped without dirtying the project.
+    fn commit_note_transform<F>(&mut self, cx: &mut Context<Self>, ids: &[u64], mutate: F)
+    where
+        F: FnOnce(&mut TimelineState, &str),
+    {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let prev = self.snapshot_notes(cx, &clip_id, ids);
+        self.timeline.update(cx, |tl, tcx| {
+            mutate(&mut tl.state, &clip_id);
+            tcx.notify();
+        });
+        let next = self.snapshot_notes(cx, &clip_id, ids);
+        self.push_note_edit(cx, clip_id, prev, next);
+    }
+
+    /// Record an `EditMidiNotes` command for an already-applied transform,
+    /// skipping no-ops. Logs the commit for the floating-editor debug sink.
+    fn push_note_edit(
         &mut self,
         cx: &mut Context<Self>,
-        f: impl FnOnce(&mut Timeline, &mut Context<Timeline>) -> R,
-    ) -> R {
-        let clip_id = self.editing_clip_id(cx);
-        let log_commit = self.midi_editor_sink;
+        clip_id: String,
+        prev: Vec<MidiNoteState>,
+        next: Vec<MidiNoteState>,
+    ) {
+        if prev == next {
+            return;
+        }
         self.timeline.update(cx, |tl, tcx| {
-            let r = f(tl, tcx);
-            tl.mark_project_changed(tcx);
-            if log_commit {
-                let notes = clip_id
-                    .as_ref()
-                    .and_then(|cid| tl.state.midi_clip_notes(cid).map(|n| n.len()))
-                    .unwrap_or(0);
-                crate::components::midi_editor_window::midi_editor_debug(&format!(
-                    "edit commit notes={notes} engine_dirty=true"
-                ));
-            }
-            tcx.notify();
-            r
-        })
+            tl.record_executed_command(
+                EditCommand::EditMidiNotes {
+                    clip_id,
+                    prev,
+                    next,
+                },
+                tcx,
+            );
+        });
+        if self.midi_editor_sink {
+            crate::components::midi_editor_window::midi_editor_debug("edit command committed");
+        }
     }
 
     /// Mutate the timeline for a *live* gesture (drag in progress): repaint but
@@ -637,26 +719,6 @@ impl PianoRoll {
             tcx.notify();
             r
         })
-    }
-
-    fn mark_project_dirty(&mut self, cx: &mut Context<Self>) {
-        if self.midi_editor_sink {
-            let notes = self
-                .editing_clip_id(cx)
-                .and_then(|cid| {
-                    self.timeline
-                        .read(cx)
-                        .state
-                        .midi_clip_notes(&cid)
-                        .map(|n| n.len())
-                })
-                .unwrap_or(0);
-            crate::components::midi_editor_window::midi_editor_debug(&format!(
-                "edit commit notes={notes} engine_dirty=true"
-            ));
-        }
-        self.timeline
-            .update(cx, |tl, tcx| tl.mark_project_changed(tcx));
     }
 
     fn run_edit_command(&mut self, cmd: EditCommand, cx: &mut Context<Self>) {
@@ -884,6 +946,21 @@ impl PianoRoll {
     }
 
     fn on_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        match self.drag {
+            PianoDrag::CcPaint { erase } => {
+                if let Some((lx, ly)) = self.cc_local(event.position) {
+                    self.cc_paint_at(lx, ly, erase, cx);
+                }
+                return;
+            }
+            PianoDrag::CcMove { id } => {
+                if let Some((lx, ly)) = self.cc_local(event.position) {
+                    self.cc_move_to(id, lx, ly, cx);
+                }
+                return;
+            }
+            _ => {}
+        }
         if event.pressed_button == Some(MouseButton::Right) {
             let Some((lx, ly)) = self.grid_local(event.position) else {
                 return;
@@ -996,6 +1073,7 @@ impl PianoRoll {
             }
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
+            PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } => {}
         }
     }
 
@@ -1060,6 +1138,11 @@ impl PianoRoll {
     }
 
     fn on_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.drag, PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. }) {
+            self.drag = PianoDrag::None;
+            self.commit_cc_edit(cx);
+            return;
+        }
         if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
             self.commit_marquee_select(cx);
             return;
@@ -1104,7 +1187,10 @@ impl PianoRoll {
                 if !changed {
                     return;
                 }
-                self.with_timeline(cx, |tl, _| tl.state.move_midi_notes(&clip_id, &updates));
+                let ids: Vec<u64> = updates.iter().map(|(id, _, _)| *id).collect();
+                self.commit_note_transform(cx, &ids, move |state, cid| {
+                    state.move_midi_notes(cid, &updates)
+                });
             }
             PianoDrag::Resize {
                 id,
@@ -1115,15 +1201,27 @@ impl PianoRoll {
                 if (new_dur - prev_dur).abs() < 0.0001 {
                     return;
                 }
-                self.with_timeline(cx, |tl, _| tl.state.resize_midi_note(&clip_id, id, new_dur));
+                self.commit_note_transform(cx, &[id], move |state, cid| {
+                    state.resize_midi_note(cid, id, new_dur)
+                });
             }
-            PianoDrag::Velocity { .. } => {
-                // Velocity was applied live (silent). Mark dirty once now so
-                // the change is saved / synced.
-                self.mark_project_dirty(cx);
+            PianoDrag::Velocity { id, orig_vel, .. } => {
+                // Velocity was applied live (silent). Reconstruct the pre-drag
+                // state from `orig_vel` and record one undoable edit.
+                let next = self.snapshot_notes(cx, &clip_id, &[id]);
+                let prev: Vec<MidiNoteState> = next
+                    .iter()
+                    .map(|n| {
+                        let mut p = n.clone();
+                        p.velocity = orig_vel;
+                        p
+                    })
+                    .collect();
+                self.push_note_edit(cx, clip_id, prev, next);
             }
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
+            PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } => {}
         }
     }
 
@@ -1150,6 +1248,22 @@ impl PianoRoll {
                 self.selection = all.into_iter().collect();
                 cx.notify();
             }
+            "c" if ctrl => {
+                cx.stop_propagation();
+                self.copy_selection(cx);
+            }
+            "v" if ctrl => {
+                cx.stop_propagation();
+                self.paste_clipboard(cx);
+            }
+            "d" if ctrl => {
+                cx.stop_propagation();
+                self.duplicate_selection(cx);
+            }
+            "m" if !ctrl => {
+                cx.stop_propagation();
+                self.toggle_mute_selection(cx);
+            }
             "escape" => {
                 cx.stop_propagation();
                 if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
@@ -1173,10 +1287,21 @@ impl PianoRoll {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        let ids: Vec<u64> = self.selection.iter().copied().collect();
+        // Empty selection means quantize every note in the clip.
+        let mut ids: Vec<u64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            ids = self
+                .timeline
+                .read(cx)
+                .state
+                .midi_clip_notes(&clip_id)
+                .map(|notes| notes.iter().map(|n| n.id).collect())
+                .unwrap_or_default();
+        }
         let step = self.grid_res.beats();
-        self.with_timeline(cx, |tl, _| {
-            tl.state.quantize_midi_notes(&clip_id, &ids, step);
+        let target_ids = ids.clone();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            state.quantize_midi_notes(cid, &target_ids, step);
         });
     }
 
@@ -1206,6 +1331,175 @@ impl PianoRoll {
         }
         self.run_edit_command(EditCommand::DeleteMidiNotes { clip_id, notes }, cx);
         self.selection.clear();
+    }
+
+    /// Toggle mute on the selection. When the selection is mixed, the gesture
+    /// mutes everything (the common DAW behaviour); when all are already muted
+    /// it unmutes. Routed through an undoable command.
+    fn toggle_mute_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        if self.selection.is_empty() {
+            return;
+        }
+        let prev: Vec<(u64, bool)> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| self.selection.contains(&n.id))
+                    .map(|n| (n.id, n.muted))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if prev.is_empty() {
+            return;
+        }
+        // Unmute only when every selected note is already muted.
+        let muted = !prev.iter().all(|(_, m)| *m);
+        self.run_edit_command(
+            EditCommand::SetMidiNotesMuted {
+                clip_id,
+                prev,
+                muted,
+            },
+            cx,
+        );
+    }
+
+    /// Copy the current selection into the process-global note clipboard,
+    /// storing timing relative to the earliest selected note.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let notes: Vec<MidiNoteState> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| self.selection.contains(&n.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if notes.is_empty() {
+            return;
+        }
+        let min_start = notes.iter().map(|n| n.start).fold(f32::INFINITY, f32::min);
+        let clip: Vec<ClipboardNote> = notes
+            .iter()
+            .map(|n| ClipboardNote {
+                pitch: n.pitch,
+                rel_start: (n.start - min_start).max(0.0),
+                duration: n.duration,
+                velocity: n.velocity,
+                muted: n.muted,
+            })
+            .collect();
+        MIDI_NOTE_CLIPBOARD.with(|cb| *cb.borrow_mut() = clip);
+        if midi_debug_enabled() {
+            eprintln!("[midi] copy notes={}", notes.len());
+        }
+    }
+
+    /// Build notes from the clipboard anchored so the earliest note lands at
+    /// `anchor_beat` (clip-local). Returns an empty vec when the clipboard is
+    /// empty. New notes get fresh transient ids.
+    fn clipboard_notes_at(&self, anchor_beat: f32) -> Vec<MidiNoteState> {
+        MIDI_NOTE_CLIPBOARD.with(|cb| {
+            cb.borrow()
+                .iter()
+                .map(|c| {
+                    let mut note = MidiNoteState::new(
+                        c.pitch,
+                        (anchor_beat + c.rel_start).max(0.0),
+                        c.duration,
+                        c.velocity,
+                    );
+                    note.muted = c.muted;
+                    note
+                })
+                .collect()
+        })
+    }
+
+    /// Paste the clipboard at the playhead (clip-local), falling back to clip
+    /// beat 0 when the playhead is outside the clip. The pasted notes become the
+    /// new selection.
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let (clip_start, _clip_len) = self.clip_meta(cx, &clip_id);
+        let playhead = self.timeline.read(cx).state.transport.playhead_beats;
+        let anchor = self.snap_beats((playhead - clip_start).max(0.0));
+        let notes = self.clipboard_notes_at(anchor);
+        if notes.is_empty() {
+            return;
+        }
+        let new_ids: Vec<u64> = notes.iter().map(|n| n.id).collect();
+        self.run_edit_command(EditCommand::CreateMidiNotes { clip_id, notes }, cx);
+        self.selection = new_ids.into_iter().collect();
+        if midi_debug_enabled() {
+            eprintln!("[midi] paste anchor={:.3} count={}", anchor, self.selection.len());
+        }
+        cx.notify();
+    }
+
+    /// Duplicate the selection in place, offset forward by the selection's beat
+    /// span so the copies sit immediately after the originals. Selects the new
+    /// notes. Does not use the clipboard.
+    fn duplicate_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let src: Vec<MidiNoteState> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| self.selection.contains(&n.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if src.is_empty() {
+            return;
+        }
+        let min_start = src.iter().map(|n| n.start).fold(f32::INFINITY, f32::min);
+        let max_end = src
+            .iter()
+            .map(|n| n.start + n.duration)
+            .fold(0.0_f32, f32::max);
+        // Offset by the span, snapped so duplicates stay grid-aligned.
+        let offset = self.snap_beats(max_end - min_start).max(self.step_beats());
+        let notes: Vec<MidiNoteState> = src
+            .iter()
+            .map(|n| {
+                let mut note =
+                    MidiNoteState::new(n.pitch, n.start + offset, n.duration, n.velocity);
+                note.muted = n.muted;
+                note
+            })
+            .collect();
+        let new_ids: Vec<u64> = notes.iter().map(|n| n.id).collect();
+        self.run_edit_command(EditCommand::CreateMidiNotes { clip_id, notes }, cx);
+        self.selection = new_ids.into_iter().collect();
+        if midi_debug_enabled() {
+            eprintln!("[midi] duplicate offset={:.3} count={}", offset, self.selection.len());
+        }
+        cx.notify();
     }
 
     fn note_inspector_snapshot(&self, cx: &Context<Self>, clip_id: &str) -> NoteInspectorSnapshot {
@@ -1252,8 +1546,9 @@ impl PianoRoll {
         if !will_change {
             return;
         }
-        self.with_timeline(cx, |tl, _| {
-            tl.state.transpose_midi_notes(&clip_id, &ids, semitones);
+        let target_ids = ids.clone();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            state.transpose_midi_notes(cid, &target_ids, semitones);
         });
     }
 
@@ -1285,8 +1580,9 @@ impl PianoRoll {
         if updates.is_empty() {
             return;
         }
-        self.with_timeline(cx, |tl, _| {
-            tl.state.move_midi_notes(&clip_id, &updates);
+        let ids: Vec<u64> = updates.iter().map(|(id, _, _)| *id).collect();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            state.move_midi_notes(cid, &updates);
         });
     }
 
@@ -1317,9 +1613,10 @@ impl PianoRoll {
         if updates.is_empty() {
             return;
         }
-        self.with_timeline(cx, |tl, _| {
+        let ids: Vec<u64> = updates.iter().map(|(id, _)| *id).collect();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
             for (id, duration) in updates {
-                tl.state.set_midi_note_length(&clip_id, id, duration);
+                state.set_midi_note_length(cid, id, duration);
             }
         });
     }
@@ -1351,9 +1648,10 @@ impl PianoRoll {
         if updates.is_empty() {
             return;
         }
-        self.with_timeline(cx, |tl, _| {
+        let ids: Vec<u64> = updates.iter().map(|(id, _)| *id).collect();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
             for (id, velocity) in updates {
-                tl.state.set_midi_note_velocity(&clip_id, id, velocity);
+                state.set_midi_note_velocity(cid, id, velocity);
             }
         });
     }
@@ -1689,6 +1987,7 @@ impl PianoRoll {
         let tool = self.tool;
         let snap_on = self.snap_on;
         let grid_label = self.grid_res.label();
+        let cc_label = cc_kind_label(self.active_cc);
 
         div()
             .flex()
@@ -1749,6 +2048,29 @@ impl PianoRoll {
                 "Del",
                 false,
                 cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
+            ))
+            .child(divider())
+            .child(tool_btn(
+                "pr-mute",
+                "Mute",
+                false,
+                cx.listener(|this, _, _w, cx| this.toggle_mute_selection(cx)),
+            ))
+            .child(tool_btn(
+                "pr-dup",
+                "Dup",
+                false,
+                cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
+            ))
+            .child(divider())
+            .child(tool_btn(
+                "pr-cc",
+                &cc_label,
+                false,
+                cx.listener(|this, _, _w, cx| {
+                    this.active_cc = cc_cycle(this.active_cc);
+                    cx.notify();
+                }),
             ))
             .child(divider())
             .child(tool_btn(
@@ -1884,6 +2206,10 @@ impl PianoRoll {
         let erase_overlay = self.build_erase_overlay();
         let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
         let note_inspector = self.render_note_inspector(cx, clip_id);
+        let cc_label = cc_kind_label(self.active_cc);
+        let cc_lane = self
+            .render_cc_lane(cx, clip_id, start_beat, end_beat, bpb)
+            .into_any_element();
         let grid_cursor = if self.tool == PianoTool::Draw {
             gpui::CursorStyle::Crosshair
         } else {
@@ -1948,6 +2274,21 @@ impl PianoRoll {
                             .text_size(px(8.0))
                             .text_color(Colors::text_muted())
                             .child("VEL"),
+                    )
+                    // CC lane label (aligned to the CC strip on the right).
+                    .child(
+                        div()
+                            .h(px(CC_H))
+                            .w_full()
+                            .border_t(px(1.0))
+                            .border_color(Colors::panel_border())
+                            .bg(Colors::surface_panel())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(9.0))
+                            .text_color(Colors::text_secondary())
+                            .child(cc_label),
                     ),
             )
             // Right: grid + velocity lane.
@@ -2006,7 +2347,9 @@ impl PianoRoll {
                             .bg(Colors::surface_panel_alt())
                             .children(vel_grid)
                             .children(vel_bars),
-                    ),
+                    )
+                    // CC controller lane.
+                    .child(cc_lane),
             )
             .child(note_inspector)
     }
@@ -2110,6 +2453,16 @@ impl PianoRoll {
                 ])
                 .into_any_element(),
             );
+            let mute_label = if note.muted { "Unmute" } else { "Mute" };
+            content.push(
+                note_button_row(vec![note_action_button(
+                    "pr-note-mute",
+                    mute_label,
+                    cx.listener(|this, _, _w, cx| this.toggle_mute_selection(cx)),
+                )
+                .into_any_element()])
+                .into_any_element(),
+            );
         } else {
             content.push(note_value_row("Selected", count.to_string()).into_any_element());
             content.push(note_value_row("Pitch", snapshot.pitch_label()).into_any_element());
@@ -2163,6 +2516,23 @@ impl PianoRoll {
                         "pr-notes-delete",
                         "Delete",
                         cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-mute",
+                        "Mute",
+                        cx.listener(|this, _, _w, cx| this.toggle_mute_selection(cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-duplicate",
+                        "Duplicate",
+                        cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
                     )
                     .into_any_element(),
                 ])
@@ -2508,7 +2878,7 @@ impl PianoRoll {
         let (view_w, view_h) = self.grid_view_size();
         // Collect owned geometry first so the timeline read borrow is released
         // before we build per-note listeners (which borrow `cx` mutably).
-        let geos: Vec<(u64, f32, f32, f32, bool, bool)> = {
+        let geos: Vec<(u64, f32, f32, f32, bool, bool, bool)> = {
             let tl = self.timeline.read(cx);
             let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
                 return Vec::new();
@@ -2531,16 +2901,21 @@ impl PianoRoll {
                         w,
                         self.selection.contains(&d.id),
                         self.erase_preview_ids.contains(&d.id),
+                        n.muted,
                     ))
                 })
                 .collect()
         };
 
         geos.into_iter()
-            .map(|(id, x, y, w, selected, erase_target)| {
+            .map(|(id, x, y, w, selected, erase_target, muted)| {
                 let mut fill = track_color;
                 fill.a = if erase_target {
                     0.45
+                } else if muted {
+                    // Muted notes read as hollow/dim so they stand apart from
+                    // active notes without leaving the grid.
+                    0.18
                 } else if selected {
                     1.0
                 } else {
@@ -2550,6 +2925,8 @@ impl PianoRoll {
                     Colors::status_error()
                 } else if selected {
                     Colors::text_primary()
+                } else if muted {
+                    Colors::with_alpha(Colors::text_muted(), 0.7)
                 } else {
                     Colors::with_alpha(track_color, 0.55)
                 };
@@ -2667,6 +3044,295 @@ impl PianoRoll {
                     .into_any_element()
             })
             .collect()
+    }
+}
+
+// ── CC controller lane ───────────────────────────────────────────────────────
+const CC_PRESETS: [MidiControllerKind; 7] = [
+    MidiControllerKind::CC(1),
+    MidiControllerKind::CC(7),
+    MidiControllerKind::CC(10),
+    MidiControllerKind::CC(11),
+    MidiControllerKind::CC(64),
+    MidiControllerKind::PitchBend,
+    MidiControllerKind::ChannelPressure,
+];
+
+fn cc_kind_label(kind: MidiControllerKind) -> String {
+    match kind {
+        MidiControllerKind::CC(n) => format!("CC{n}"),
+        MidiControllerKind::PitchBend => "Bend".to_string(),
+        MidiControllerKind::ChannelPressure => "Press".to_string(),
+        MidiControllerKind::PolyPressure => "Poly".to_string(),
+    }
+}
+
+fn cc_cycle(kind: MidiControllerKind) -> MidiControllerKind {
+    let idx = CC_PRESETS.iter().position(|k| *k == kind);
+    match idx {
+        Some(i) => CC_PRESETS[(i + 1) % CC_PRESETS.len()],
+        None => CC_PRESETS[0],
+    }
+}
+
+impl PianoRoll {
+    fn cc_view_size(&self) -> (f32, f32) {
+        match self.cc_bounds.get() {
+            Some(b) => (
+                f32::from(b.size.width).max(1.0),
+                f32::from(b.size.height).max(1.0),
+            ),
+            None => (600.0, CC_H),
+        }
+    }
+
+    fn cc_local(&self, window_pos: gpui::Point<Pixels>) -> Option<(f32, f32)> {
+        let b = self.cc_bounds.get()?;
+        let ox: f32 = b.origin.x.into();
+        let oy: f32 = b.origin.y.into();
+        let x: f32 = window_pos.x.into();
+        let y: f32 = window_pos.y.into();
+        Some((x - ox, y - oy))
+    }
+
+    /// Begin a CC paint (`erase = false`) or erase (`erase = true`) gesture:
+    /// ensure the active lane, snapshot its points for undo, and apply the first
+    /// edit at the cursor.
+    fn begin_cc_paint(
+        &mut self,
+        erase: bool,
+        lx: f32,
+        ly: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus);
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        self.timeline.update(cx, |tl, _| {
+            tl.state.ensure_controller_lane(&clip_id, kind);
+        });
+        self.cc_edit_prev = Some(
+            self.timeline
+                .read(cx)
+                .state
+                .controller_points_snapshot(&clip_id, kind),
+        );
+        self.drag = PianoDrag::CcPaint { erase };
+        self.cc_paint_at(lx, ly, erase, cx);
+        cx.notify();
+    }
+
+    /// Apply one CC edit at a local strip coordinate (live, not yet committed).
+    fn cc_paint_at(&mut self, lx: f32, ly: f32, erase: bool, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        let beat = self.snap_beats(self.x_to_beat(lx));
+        let (_, cc_h) = self.cc_view_size();
+        let value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
+        let tol = (self.step_beats() * 0.5).max(1.0e-3);
+        self.timeline.update(cx, |tl, tcx| {
+            if erase {
+                tl.state.delete_controller_points_near(&clip_id, kind, beat, tol);
+            } else {
+                tl.state.put_controller_point(&clip_id, kind, beat, value);
+            }
+            tcx.notify();
+        });
+    }
+
+    /// Hit-test the active lane's points; return the id of one within ~6 px of
+    /// the local strip coordinate.
+    fn cc_point_at(&self, cx: &Context<Self>, clip_id: &str, lx: f32, ly: f32) -> Option<u64> {
+        let (_, cc_h) = self.cc_view_size();
+        let kind = self.active_cc;
+        let tl = self.timeline.read(cx);
+        let points = tl.state.controller_lane_points(clip_id, kind)?;
+        const R: f32 = 6.0;
+        points.iter().find_map(|p| {
+            let x = self.beat_to_x(p.beat);
+            let y = (1.0 - p.value) * (cc_h - 6.0) + 3.0;
+            ((lx - x).abs() <= R && (ly - y).abs() <= R).then_some(p.id)
+        })
+    }
+
+    /// Begin dragging an existing CC point; snapshot the lane for undo.
+    fn begin_cc_move(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        self.cc_edit_prev = Some(
+            self.timeline
+                .read(cx)
+                .state
+                .controller_points_snapshot(&clip_id, kind),
+        );
+        self.drag = PianoDrag::CcMove { id };
+        cx.notify();
+    }
+
+    /// Move the dragged CC point to the cursor (beat snapped, value continuous).
+    fn cc_move_to(&mut self, id: u64, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        let beat = self.snap_beats(self.x_to_beat(lx));
+        let (_, cc_h) = self.cc_view_size();
+        let value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
+        self.timeline.update(cx, |tl, tcx| {
+            tl.state.set_controller_point(&clip_id, kind, id, beat, value);
+            tcx.notify();
+        });
+    }
+
+    /// Commit a finished CC gesture as one undoable command (skips no-ops).
+    fn commit_cc_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(prev) = self.cc_edit_prev.take() else {
+            return;
+        };
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        let next = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_points_snapshot(&clip_id, kind);
+        if prev == next {
+            return;
+        }
+        self.timeline.update(cx, |tl, tcx| {
+            tl.record_executed_command(
+                EditCommand::SetControllerPoints {
+                    clip_id,
+                    kind,
+                    prev,
+                    next,
+                },
+                tcx,
+            );
+        });
+        if self.midi_editor_sink {
+            crate::components::midi_editor_window::midi_editor_debug("edit command committed");
+        }
+    }
+
+    fn build_cc_points(&self, cx: &Context<Self>, clip_id: &str) -> Vec<gpui::AnyElement> {
+        let (view_w, cc_h) = self.cc_view_size();
+        let kind = self.active_cc;
+        let pts: Vec<(f32, f32)> = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_lane_points(clip_id, kind)
+            .map(|ps| ps.iter().map(|p| (p.beat, p.value)).collect())
+            .unwrap_or_default();
+        let accent = Colors::accent_primary();
+        pts.into_iter()
+            .filter_map(|(beat, value)| {
+                let x = self.beat_to_x(beat);
+                if x < -6.0 || x > view_w + 6.0 {
+                    return None;
+                }
+                let y = (1.0 - value) * (cc_h - 6.0) + 3.0;
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(x - 3.0))
+                        .top_0()
+                        .w(px(6.0))
+                        .h_full()
+                        // Stem from the point down to the lane floor.
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(2.0))
+                                .top(px(y))
+                                .w(px(2.0))
+                                .bottom(px(0.0))
+                                .bg(Colors::with_alpha(accent, 0.35)),
+                        )
+                        // Point dot.
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .top(px(y - 3.0))
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded(px(3.0))
+                                .bg(accent),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
+    /// The CC strip (right column) plus its captured bounds + interaction.
+    fn render_cc_lane(
+        &mut self,
+        cx: &mut Context<Self>,
+        clip_id: &str,
+        start_beat: f32,
+        end_beat: f32,
+        bpb: f32,
+    ) -> impl IntoElement {
+        let grid = self.build_velocity_grid(start_beat, end_beat, bpb);
+        let points = self.build_cc_points(cx, clip_id);
+        let cc_bounds = self.cc_bounds.clone();
+        let canvas = canvas(
+            move |bounds, _w, _cx| cc_bounds.set(Some(bounds)),
+            |_b, _r, _w, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+        div()
+            .id("piano-cc")
+            .h(px(CC_H))
+            .w_full()
+            .relative()
+            .overflow_hidden()
+            .border_t(px(1.0))
+            .border_color(Colors::panel_border())
+            .bg(Colors::surface_panel_alt())
+            .cursor(gpui::CursorStyle::Crosshair)
+            .child(canvas)
+            .children(grid)
+            .children(points)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    if let Some((lx, ly)) = this.cc_local(ev.position) {
+                        // Grab an existing point to move it; otherwise paint.
+                        if let Some(cid) = this.editing_clip_id(cx) {
+                            if let Some(id) = this.cc_point_at(cx, &cid, lx, ly) {
+                                this.begin_cc_move(id, window, cx);
+                                return;
+                            }
+                        }
+                        this.begin_cc_paint(false, lx, ly, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    if let Some((lx, ly)) = this.cc_local(ev.position) {
+                        this.begin_cc_paint(true, lx, ly, window, cx);
+                    }
+                }),
+            )
     }
 }
 

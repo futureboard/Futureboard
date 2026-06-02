@@ -36,8 +36,13 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_process_stereo_block(
     float* out_r,
     int frames);
 
-/// MIDI note event for batched delivery via processData.inputEvents.
-/// kind: 0 = NoteOff, 1 = NoteOn. velocity is normalized [0.0, 1.0].
+/// MIDI event for batched delivery via processData.
+/// kind: 0 = NoteOff, 1 = NoteOn, 2 = ControlChange.
+/// For notes: `pitch` is the MIDI key, `velocity` is normalized [0.0, 1.0].
+/// For ControlChange: `pitch` is the VST3 controller number (0..127 = MIDI CC,
+/// 128 = aftertouch, 129 = pitch bend) and `velocity` is the normalized value
+/// [0.0, 1.0]. CC events are routed to parameter changes via IMidiMapping and
+/// are ignored when the plugin exposes no mapping.
 typedef struct SphereDauxVst3MidiEvent {
     unsigned int sample_offset;
     unsigned char kind;

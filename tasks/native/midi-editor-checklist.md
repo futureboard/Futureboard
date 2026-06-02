@@ -6,7 +6,7 @@ Planning status: checklist only. No implementation code is implied.
 
 - [ ] Define stable persisted MIDI note IDs.
 - [ ] Decide runtime compact note handle strategy.
-- [ ] Store note pitch, start, duration, velocity, muted state.
+- [x] Store note pitch, start, duration, velocity, muted state.
 - [ ] Decide whether selected state is persisted or transient only.
 - [ ] Clamp pitch to `0..=127`.
 - [ ] Clamp velocity to `1..=127`.
@@ -15,19 +15,19 @@ Planning status: checklist only. No implementation code is implied.
 - [ ] Sort notes by `(start_beat, pitch, id)`.
 - [ ] Auto-expand MIDI clip when note edits exceed clip end.
 - [ ] Preserve notes when trimming clips.
-- [ ] Add MIDI controller lane model.
-- [ ] Add CC, pitch bend, channel pressure kinds.
-- [ ] Add lane visible/collapsed/height state.
+- [x] Add MIDI controller lane model.
+- [x] Add CC, pitch bend, channel pressure kinds.
+- [x] Add lane visible/collapsed/height state.
 - [ ] Add migration path from current note model.
 
 ## Project Save/Load
 
 - [ ] Serialize notes with stable IDs.
 - [ ] Deserialize notes with validation and clamping.
-- [ ] Serialize note muted state.
-- [ ] Serialize MIDI controller lanes.
-- [ ] Serialize controller points.
-- [ ] Preserve empty visible controller lanes if chosen as project state.
+- [x] Serialize note muted state.
+- [x] Serialize MIDI controller lanes.
+- [x] Serialize controller points.
+- [x] Preserve empty visible controller lanes if chosen as project state.
 - [ ] Migrate old projects with transient note IDs.
 - [ ] Roundtrip MIDI clips without data loss.
 - [ ] Warn on invalid/out-of-range data instead of panicking.
@@ -55,7 +55,7 @@ Planning status: checklist only. No implementation code is implied.
 - [ ] Render playhead synced to transport.
 - [ ] Render loop region awareness.
 - [ ] Render selected notes distinctly.
-- [ ] Render muted notes distinctly.
+- [x] Render muted notes distinctly.
 - [ ] Render note labels only when readable.
 - [ ] Cull notes outside visible beat/pitch range.
 - [ ] Avoid DOM/element spam for dense clips.
@@ -71,14 +71,14 @@ Planning status: checklist only. No implementation code is implied.
 - [ ] Move notes vertically by pitch.
 - [ ] Resize note length.
 - [ ] Delete notes.
-- [ ] Duplicate notes.
-- [ ] Copy/paste notes.
+- [x] Duplicate notes.
+- [x] Copy/paste notes.
 - [ ] Quantize notes.
 - [ ] Quantize preview.
 - [ ] Transpose notes.
 - [ ] Edit note length numerically.
 - [ ] Split notes.
-- [ ] Mute/unmute notes.
+- [x] Mute/unmute notes.
 - [ ] Audition note on click.
 - [ ] Audition note during drag where safe.
 - [ ] Respect snap/grid.
@@ -103,30 +103,30 @@ Planning status: checklist only. No implementation code is implied.
 
 ## CC Control Lanes
 
-- [ ] Add CC1 Mod Wheel lane.
-- [ ] Add CC7 Volume lane.
-- [ ] Add CC10 Pan lane.
-- [ ] Add CC11 Expression lane.
-- [ ] Add CC64 Sustain lane.
+- [x] Add CC1 Mod Wheel lane.
+- [x] Add CC7 Volume lane.
+- [x] Add CC10 Pan lane.
+- [x] Add CC11 Expression lane.
+- [x] Add CC64 Sustain lane.
 - [ ] Add custom CC number lane.
-- [ ] Add Pitch Bend lane.
-- [ ] Add Channel Pressure lane.
-- [ ] Defer Poly Pressure with clear data-model note.
-- [ ] Draw CC points.
+- [x] Add Pitch Bend lane.
+- [x] Add Channel Pressure lane.
+- [x] Defer Poly Pressure with clear data-model note.
+- [x] Draw CC points.
 - [ ] Draw ramps/lines.
-- [ ] Erase points.
+- [x] Erase points.
 - [ ] Select points.
 - [ ] Marquee select points.
-- [ ] Move points.
-- [ ] Delete points.
+- [x] Move points.
+- [x] Delete points.
 - [ ] Resize lane height.
 - [ ] Collapse/expand lane.
 - [ ] Remove lane.
 - [ ] Per-lane value scale.
-- [ ] Snap horizontally when snap is enabled.
-- [ ] Keep value drag continuous vertically.
-- [ ] Save/load lanes and points.
-- [ ] Undo/redo CC edits.
+- [x] Snap horizontally when snap is enabled.
+- [x] Keep value drag continuous vertically.
+- [x] Save/load lanes and points.
+- [x] Undo/redo CC edits.
 
 ## MIDI Tools
 
@@ -147,11 +147,11 @@ Planning status: checklist only. No implementation code is implied.
 
 ## Clipboard
 
-- [ ] Copy selected notes.
-- [ ] Paste notes at playhead.
+- [x] Copy selected notes.
+- [x] Paste notes at playhead.
 - [ ] Paste notes at mouse beat.
-- [ ] Preserve relative timing.
-- [ ] Preserve pitch and velocity.
+- [x] Preserve relative timing.
+- [x] Preserve pitch and velocity.
 - [ ] Copy selected CC points.
 - [ ] Paste CC points into compatible lane.
 - [ ] Reject incompatible paste with clear status text.
@@ -159,34 +159,34 @@ Planning status: checklist only. No implementation code is implied.
 
 ## Undo/Redo
 
-- [ ] Note create command.
-- [ ] Note delete command.
-- [ ] Note move command.
-- [ ] Note resize command.
-- [ ] Note velocity command.
-- [ ] Note mute command.
+- [x] Note create command.
+- [x] Note delete command.
+- [x] Note move command.
+- [x] Note resize command.
+- [x] Note velocity command.
+- [x] Note mute command.
 - [ ] Note split command.
-- [ ] Note duplicate command.
-- [ ] Quantize batch command.
+- [x] Note duplicate command.
+- [x] Quantize batch command.
 - [ ] CC point create command.
 - [ ] CC point delete command.
 - [ ] CC point move command.
 - [ ] CC ramp command.
-- [ ] Batch drag gestures into one undo entry.
+- [x] Batch drag gestures into one undo entry.
 
 ## MIDI Playback
 
-- [ ] Convert notes to runtime note on/off events.
-- [ ] Skip muted notes.
-- [ ] Skip muted clips/tracks.
+- [x] Convert notes to runtime note on/off events.
+- [x] Skip muted notes.
+- [x] Skip muted clips/tracks.
 - [ ] Respect clip bounds.
 - [ ] Handle looped clip playback once clip loops exist.
-- [ ] Send notes to instrument track plugin.
+- [x] Send notes to instrument track plugin.
 - [ ] Add external MIDI output placeholder.
-- [ ] Convert CC points to runtime MIDI controller events.
-- [ ] Initial block-level scheduling documented.
+- [x] Convert CC points to runtime MIDI controller events.
+- [x] Initial block-level scheduling documented.
 - [ ] Sample-accurate scheduling planned.
-- [ ] No audio-thread allocation.
+- [x] No audio-thread allocation.
 
 ## Keyboard Shortcuts
 

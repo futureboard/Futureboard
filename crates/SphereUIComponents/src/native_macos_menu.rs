@@ -61,6 +61,7 @@ mod macos {
             .map(|menu| Menu {
                 name: menu.label.clone().into(),
                 items: convert_items(&menu.items),
+                disabled: false,
             })
             .collect();
 
@@ -83,6 +84,7 @@ mod macos {
                 Some(GpuiMenuItem::submenu(Menu {
                     name: label.into(),
                     items: convert_items(&item.children),
+                    disabled: false,
                 }))
             }
             MenuItemKind::Normal | MenuItemKind::Checkbox | MenuItemKind::Radio => {

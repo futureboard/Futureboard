@@ -50,8 +50,7 @@ fn main() {
 fn application() -> gpui::Application {
     #[cfg(target_os = "windows")]
     let platform: std::rc::Rc<dyn gpui::Platform> = std::rc::Rc::new(
-        gpui_windows::WindowsPlatform::new(false)
-            .expect("failed to initialize Windows platform"),
+        gpui_windows::WindowsPlatform::new(false).expect("failed to initialize Windows platform"),
     );
 
     #[cfg(target_os = "macos")]

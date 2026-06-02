@@ -298,7 +298,9 @@ impl StudioLayout {
         );
         self.plugin_picker_search_input.set_value("");
         self.plugin_picker.query = String::new();
-        self.plugin_picker_search_input.focus_handle.focus(window, cx);
+        self.plugin_picker_search_input
+            .focus_handle
+            .focus(window, cx);
         if let Some(index) = self.plugin_search_index.as_ref() {
             ensure_default_highlight(&mut self.plugin_picker, index, &self.plugin_picker_prefs);
         }

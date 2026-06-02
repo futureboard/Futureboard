@@ -69,7 +69,7 @@ const MAC_PLATFORM_IVAR: &str = "platform";
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
 
-#[ctor(unsafe)]
+#[ctor]
 unsafe fn build_classes() {
     unsafe {
         APP_CLASS = {

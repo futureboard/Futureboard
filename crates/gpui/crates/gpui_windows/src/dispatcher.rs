@@ -1,6 +1,6 @@
 use std::{
-    sync::{Arc, Mutex},
     sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex},
     thread::{ThreadId, current},
     time::{Duration, Instant},
 };

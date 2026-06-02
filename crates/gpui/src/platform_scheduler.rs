@@ -158,7 +158,11 @@ impl Clock for PlatformClock {
     }
 }
 
-#[cfg(all(test, not(target_family = "wasm"), feature = "legacy-spawn-dedicated-tests"))]
+#[cfg(all(
+    test,
+    not(target_family = "wasm"),
+    feature = "legacy-spawn-dedicated-tests"
+))]
 mod tests {
     use super::*;
     use crate::{RunnableVariant, ThreadTaskTimings};

@@ -293,9 +293,7 @@ impl ForegroundExecutor {
         };
 
         #[cfg(any(test, feature = "test-support"))]
-        let inner = {
-            scheduler::ForegroundExecutor::new(session_id, scheduler)
-        };
+        let inner = { scheduler::ForegroundExecutor::new(session_id, scheduler) };
 
         Self {
             inner,

@@ -250,7 +250,9 @@ impl StudioLayout {
         }
 
         if (modifiers.control || modifiers.platform) && key.eq_ignore_ascii_case("f") {
-            self.plugin_picker_search_input.focus_handle.focus(window, cx);
+            self.plugin_picker_search_input
+                .focus_handle
+                .focus(window, cx);
             cx.notify();
             return true;
         }

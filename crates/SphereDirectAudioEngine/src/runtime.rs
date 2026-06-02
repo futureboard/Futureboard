@@ -169,6 +169,9 @@ pub struct RuntimeClip {
 pub enum RuntimeMidiEventKind {
     NoteOff,
     NoteOn,
+    /// MIDI controller change (CC / pitch-bend / aftertouch). Uses
+    /// `cc_number` / `cc_value` rather than `pitch` / `velocity`.
+    ControlChange,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +187,11 @@ pub struct RuntimeMidiEvent {
     pub velocity: u8,
     pub channel: u8,
     pub note_id: u64,
+    /// For `ControlChange`: VST3 controller number (`0..=127` CC, `128`
+    /// aftertouch, `129` pitch bend). Unused for note events.
+    pub cc_number: u16,
+    /// For `ControlChange`: normalized value `0.0..=1.0`. Unused for notes.
+    pub cc_value: f32,
 }
 
 /// Structural per-clip representation, retained for logging / future reuse.
@@ -659,6 +667,12 @@ impl RuntimeProject {
                             RuntimeMidiEventKind::NoteOff => {
                                 Vst3MidiEvent::note_off(offset, ev.channel, ev.pitch, 0.0)
                             }
+                            RuntimeMidiEventKind::ControlChange => Vst3MidiEvent::control_change(
+                                offset,
+                                ev.channel,
+                                ev.cc_number,
+                                ev.cc_value,
+                            ),
                         };
                         self.tracks[ti].midi_block_events.push(midi_ev);
                     } else if vst3_debug {
@@ -677,6 +691,10 @@ impl RuntimeProject {
                         RuntimeMidiEventKind::NoteOff => eprintln!(
                             "[DAUx MIDI] note_off ch={} pitch={} offset={}",
                             ev.channel, ev.pitch, offset
+                        ),
+                        RuntimeMidiEventKind::ControlChange => eprintln!(
+                            "[DAUx MIDI] cc ch={} ctrl={} value={:.3} offset={}",
+                            ev.channel, ev.cc_number, ev.cc_value, offset
                         ),
                     }
                 }
@@ -966,6 +984,8 @@ fn apply_active(active: &mut Vec<(u8, u8)>, ev: &RuntimeMidiEvent) {
         RuntimeMidiEventKind::NoteOff => {
             active.retain(|k| *k != key);
         }
+        // Controller changes carry no sounding-note state.
+        RuntimeMidiEventKind::ControlChange => {}
     }
 }
 
@@ -1002,6 +1022,8 @@ fn build_midi_runtime(
                 velocity,
                 channel,
                 note_id: note.id,
+                cc_number: 0,
+                cc_value: 0.0,
             });
             events.push(RuntimeMidiEvent {
                 sample: off_sample,
@@ -1011,7 +1033,28 @@ fn build_midi_runtime(
                 velocity: 0,
                 channel,
                 note_id: note.id,
+                cc_number: 0,
+                cc_value: 0.0,
             });
+        }
+        // Controller points → ControlChange events (block-level value).
+        for lane in &clip.controllers {
+            let channel = lane.channel.min(15);
+            for point in &lane.points {
+                let abs_beat = clip.start_beat + point.beat.max(0.0);
+                let sample = (abs_beat * samples_per_beat).round().max(0.0) as u64;
+                events.push(RuntimeMidiEvent {
+                    sample,
+                    beat: abs_beat,
+                    kind: RuntimeMidiEventKind::ControlChange,
+                    pitch: 0,
+                    velocity: 0,
+                    channel,
+                    note_id: 0,
+                    cc_number: lane.controller,
+                    cc_value: point.value.clamp(0.0, 1.0),
+                });
+            }
         }
         // Sort by sample; NoteOff before NoteOn at the same sample.
         events.sort_by(|a, b| {
@@ -1108,7 +1151,10 @@ fn f32_load(v: u32) -> f32 {
 #[cfg(test)]
 mod midi_tests {
     use super::*;
-    use crate::types::{EngineMidiClipSnapshot, EngineMidiNoteSnapshot};
+    use crate::types::{
+        EngineMidiClipSnapshot, EngineMidiControllerLane, EngineMidiControllerPoint,
+        EngineMidiNoteSnapshot,
+    };
 
     // 120 BPM @ 48 kHz → 24000 samples per beat.
     const SPB: f64 = 24000.0;
@@ -1127,6 +1173,7 @@ mod midi_tests {
                 velocity: 100,
                 channel: 0,
             }],
+            controllers: Vec::new(),
         }
     }
 
@@ -1209,5 +1256,57 @@ mod midi_tests {
         assert_eq!(p.midi_tracks[0].active.len(), 1);
         p.all_notes_off("stop");
         assert!(p.midi_tracks[0].active.is_empty());
+    }
+
+    #[test]
+    fn controller_points_resolve_to_control_change_events() {
+        let mut clip = clip_with_one_note();
+        clip.controllers = vec![EngineMidiControllerLane {
+            controller: 11,
+            channel: 0,
+            points: vec![
+                EngineMidiControllerPoint {
+                    beat: 0.0,
+                    value: 0.25,
+                },
+                EngineMidiControllerPoint {
+                    beat: 2.0,
+                    value: 0.75,
+                },
+            ],
+        }];
+        let p = project_with(vec![clip]);
+        let cc: Vec<&RuntimeMidiEvent> = p.midi_tracks[0]
+            .events
+            .iter()
+            .filter(|e| e.kind == RuntimeMidiEventKind::ControlChange)
+            .collect();
+        assert_eq!(cc.len(), 2);
+        // First point: abs beat 4.0 → 96000 sa, cc 11, value 0.25.
+        assert_eq!(cc[0].cc_number, 11);
+        assert_eq!(cc[0].sample, 96_000);
+        assert!((cc[0].cc_value - 0.25).abs() < 1e-6);
+        // Second point: abs beat 6.0 → 144000 sa, value 0.75.
+        assert_eq!(cc[1].sample, 144_000);
+        assert!((cc[1].cc_value - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn control_change_does_not_affect_active_notes() {
+        let mut clip = clip_with_one_note();
+        clip.controllers = vec![EngineMidiControllerLane {
+            controller: 1,
+            channel: 0,
+            points: vec![EngineMidiControllerPoint {
+                beat: 0.0,
+                value: 0.5,
+            }],
+        }];
+        let mut p = project_with(vec![clip]);
+        p.reset_midi_playback(0);
+        // Block covering the CC at abs beat 4.0 (96000) but the note also starts
+        // there — active set should track only the note, not the CC.
+        p.schedule_midi_block(96_000, 512);
+        assert_eq!(p.midi_tracks[0].active, vec![(0u8, 60u8)]);
     }
 }

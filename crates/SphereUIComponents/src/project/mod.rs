@@ -62,6 +62,7 @@ pub enum ClipSource {
     },
     Midi {
         notes: Vec<MidiNote>,
+        controller_lanes: Vec<MidiControllerLane>,
     },
     Empty,
 }
@@ -72,6 +73,55 @@ pub struct MidiNote {
     pub start_beats: f32,
     pub duration_beats: f32,
     pub velocity: u8,
+    pub muted: bool,
+}
+
+/// Serialized MIDI controller stream selector. Mirrors
+/// [`timeline_state::MidiControllerKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiControllerKind {
+    CC(u8),
+    PitchBend,
+    ChannelPressure,
+    PolyPressure,
+}
+
+#[derive(Debug, Clone)]
+pub struct MidiControllerPoint {
+    pub beat: f32,
+    /// Normalized `0.0..=1.0`.
+    pub value: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct MidiControllerLane {
+    pub kind: MidiControllerKind,
+    pub points: Vec<MidiControllerPoint>,
+    pub visible: bool,
+    pub height: f32,
+    pub collapsed: bool,
+}
+
+use crate::components::timeline::timeline_state::MidiControllerKind as TlControllerKind;
+
+/// Map a live controller kind to its serialized form.
+fn controller_kind_to_project(k: TlControllerKind) -> MidiControllerKind {
+    match k {
+        TlControllerKind::CC(n) => MidiControllerKind::CC(n),
+        TlControllerKind::PitchBend => MidiControllerKind::PitchBend,
+        TlControllerKind::ChannelPressure => MidiControllerKind::ChannelPressure,
+        TlControllerKind::PolyPressure => MidiControllerKind::PolyPressure,
+    }
+}
+
+/// Map a serialized controller kind back to the live form.
+fn controller_kind_from_project(k: MidiControllerKind) -> TlControllerKind {
+    match k {
+        MidiControllerKind::CC(n) => TlControllerKind::CC(n),
+        MidiControllerKind::PitchBend => TlControllerKind::PitchBend,
+        MidiControllerKind::ChannelPressure => TlControllerKind::ChannelPressure,
+        MidiControllerKind::PolyPressure => TlControllerKind::PolyPressure,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,7 +455,10 @@ impl From<&TimelineState> for FutureboardProject {
                                 asset_id: file_id.clone(),
                                 source_path: source_path.as_deref().map(PathBuf::from),
                             },
-                            ClipType::Midi { notes } => ClipSource::Midi {
+                            ClipType::Midi {
+                                notes,
+                                controller_lanes,
+                            } => ClipSource::Midi {
                                 notes: notes
                                     .iter()
                                     .map(|n| MidiNote {
@@ -413,6 +466,24 @@ impl From<&TimelineState> for FutureboardProject {
                                         start_beats: n.start,
                                         duration_beats: n.duration,
                                         velocity: n.velocity,
+                                        muted: n.muted,
+                                    })
+                                    .collect(),
+                                controller_lanes: controller_lanes
+                                    .iter()
+                                    .map(|lane| MidiControllerLane {
+                                        kind: controller_kind_to_project(lane.kind),
+                                        points: lane
+                                            .points
+                                            .iter()
+                                            .map(|p| MidiControllerPoint {
+                                                beat: p.beat,
+                                                value: p.value,
+                                            })
+                                            .collect(),
+                                        visible: lane.visible,
+                                        height: lane.height,
+                                        collapsed: lane.collapsed,
                                     })
                                     .collect(),
                             },
@@ -528,8 +599,9 @@ impl From<&TimelineState> for FutureboardProject {
 /// Apply a loaded `FutureboardProject` back onto an existing `TimelineState`.
 pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
     use crate::components::timeline::timeline_state::{
-        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiNoteState,
-        SendSlotState, TrackState,
+        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState,
+        MidiControllerLane as TlControllerLane, MidiControllerPoint as TlControllerPoint,
+        MidiNoteState, SendSlotState, TrackState,
     };
 
     tl.bpm = project.settings.bpm as f32;
@@ -565,18 +637,42 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                 .as_ref()
                                 .map(|p| p.to_string_lossy().into_owned()),
                         },
-                        ClipSource::Midi { notes } => ClipType::Midi {
+                        ClipSource::Midi {
+                            notes,
+                            controller_lanes,
+                        } => ClipType::Midi {
                             notes: notes
                                 .iter()
-                                .map(|n| MidiNoteState::new(
-                                    n.pitch,
-                                    n.start_beats,
-                                    n.duration_beats,
-                                    n.velocity,
-                                ))
+                                .map(|n| {
+                                    let mut note = MidiNoteState::new(
+                                        n.pitch,
+                                        n.start_beats,
+                                        n.duration_beats,
+                                        n.velocity,
+                                    );
+                                    note.muted = n.muted;
+                                    note
+                                })
+                                .collect(),
+                            controller_lanes: controller_lanes
+                                .iter()
+                                .map(|lane| TlControllerLane {
+                                    kind: controller_kind_from_project(lane.kind),
+                                    points: lane
+                                        .points
+                                        .iter()
+                                        .map(|p| TlControllerPoint::new(p.beat, p.value))
+                                        .collect(),
+                                    visible: lane.visible,
+                                    height: lane.height,
+                                    collapsed: lane.collapsed,
+                                })
                                 .collect(),
                         },
-                        ClipSource::Empty => ClipType::Midi { notes: Vec::new() },
+                        ClipSource::Empty => ClipType::Midi {
+                            notes: Vec::new(),
+                            controller_lanes: Vec::new(),
+                        },
                     };
                     ClipState {
                         id: pc.id.clone(),

@@ -1,6 +1,8 @@
 //! Undo/redo edit commands — all timeline mutations go through here.
 
-use crate::components::timeline::timeline_state::{ClipState, MidiNoteState, TimelineState};
+use crate::components::timeline::timeline_state::{
+    ClipState, MidiControllerKind, MidiControllerPoint, MidiNoteState, TimelineState,
+};
 
 /// Snapshot of a clip plus its owning track for undo/redo.
 #[derive(Debug, Clone)]
@@ -40,9 +42,38 @@ pub enum EditCommand {
         clip_id: String,
         note: MidiNoteState,
     },
+    /// Batch note insert (paste / duplicate) — one undo entry for the group.
+    CreateMidiNotes {
+        clip_id: String,
+        notes: Vec<MidiNoteState>,
+    },
     DeleteMidiNotes {
         clip_id: String,
         notes: Vec<MidiNoteState>,
+    },
+    /// Set the muted flag on a set of notes. `prev` snapshots each note's
+    /// original muted state so undo restores it exactly.
+    SetMidiNotesMuted {
+        clip_id: String,
+        prev: Vec<(u64, bool)>,
+        muted: bool,
+    },
+    /// In-place transform of a fixed set of notes (move / resize / velocity /
+    /// quantize / transpose / nudge). The note set is unchanged — only field
+    /// values differ — so `prev`/`next` carry full per-id snapshots and
+    /// execute/undo simply overwrite matching notes by id.
+    EditMidiNotes {
+        clip_id: String,
+        prev: Vec<MidiNoteState>,
+        next: Vec<MidiNoteState>,
+    },
+    /// Replace a controller lane's points (draw / erase gesture). One entry per
+    /// gesture; `prev`/`next` are full point snapshots of the lane.
+    SetControllerPoints {
+        clip_id: String,
+        kind: MidiControllerKind,
+        prev: Vec<MidiControllerPoint>,
+        next: Vec<MidiControllerPoint>,
     },
 }
 
@@ -53,7 +84,17 @@ impl EditCommand {
             EditCommand::DeleteClip { .. } => "Delete Clip",
             EditCommand::BatchDeleteClips { .. } => "Delete Clips",
             EditCommand::CreateMidiNote { .. } => "Create MIDI Note",
+            EditCommand::CreateMidiNotes { .. } => "Add MIDI Notes",
             EditCommand::DeleteMidiNotes { .. } => "Delete MIDI Notes",
+            EditCommand::SetMidiNotesMuted { muted, .. } => {
+                if *muted {
+                    "Mute Notes"
+                } else {
+                    "Unmute Notes"
+                }
+            }
+            EditCommand::EditMidiNotes { .. } => "Edit MIDI Notes",
+            EditCommand::SetControllerPoints { .. } => "Edit CC Lane",
         }
     }
 
@@ -84,9 +125,38 @@ impl EditCommand {
                 // always contained. Applies to redo too.
                 state.expand_clip_to_contain_notes(clip_id);
             }
+            EditCommand::CreateMidiNotes { clip_id, notes } => {
+                if let Some(existing) = state.midi_clip_notes_mut(clip_id) {
+                    for note in notes {
+                        if !existing.iter().any(|n| n.id == note.id) {
+                            existing.push(note.clone());
+                        }
+                    }
+                }
+                state.expand_clip_to_contain_notes(clip_id);
+            }
             EditCommand::DeleteMidiNotes { clip_id, notes } => {
                 let ids: Vec<u64> = notes.iter().map(|n| n.id).collect();
                 state.delete_midi_notes(clip_id, &ids);
+            }
+            EditCommand::SetMidiNotesMuted {
+                clip_id,
+                prev,
+                muted,
+            } => {
+                let ids: Vec<u64> = prev.iter().map(|(id, _)| *id).collect();
+                state.set_midi_notes_muted(clip_id, &ids, *muted);
+            }
+            EditCommand::EditMidiNotes { clip_id, next, .. } => {
+                state.overwrite_midi_notes(clip_id, next);
+            }
+            EditCommand::SetControllerPoints {
+                clip_id,
+                kind,
+                next,
+                ..
+            } => {
+                state.set_controller_lane_points(clip_id, *kind, next.clone());
             }
         }
     }
@@ -107,6 +177,10 @@ impl EditCommand {
             EditCommand::CreateMidiNote { clip_id, note } => {
                 state.delete_midi_notes(clip_id, &[note.id]);
             }
+            EditCommand::CreateMidiNotes { clip_id, notes } => {
+                let ids: Vec<u64> = notes.iter().map(|n| n.id).collect();
+                state.delete_midi_notes(clip_id, &ids);
+            }
             EditCommand::DeleteMidiNotes { clip_id, notes } => {
                 if let Some(existing) = state.midi_clip_notes_mut(clip_id) {
                     for note in notes {
@@ -115,6 +189,26 @@ impl EditCommand {
                         }
                     }
                 }
+            }
+            EditCommand::SetMidiNotesMuted { clip_id, prev, .. } => {
+                if let Some(existing) = state.midi_clip_notes_mut(clip_id) {
+                    for (id, was) in prev {
+                        if let Some(note) = existing.iter_mut().find(|n| n.id == *id) {
+                            note.muted = *was;
+                        }
+                    }
+                }
+            }
+            EditCommand::EditMidiNotes { clip_id, prev, .. } => {
+                state.overwrite_midi_notes(clip_id, prev);
+            }
+            EditCommand::SetControllerPoints {
+                clip_id,
+                kind,
+                prev,
+                ..
+            } => {
+                state.set_controller_lane_points(clip_id, *kind, prev.clone());
             }
         }
     }

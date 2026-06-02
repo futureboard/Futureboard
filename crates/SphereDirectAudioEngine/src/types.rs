@@ -180,6 +180,29 @@ pub struct EngineMidiClipSnapshot {
     pub start_beat: f64,
     pub length_beats: f64,
     pub notes: Vec<EngineMidiNoteSnapshot>,
+    /// MIDI controller (CC / pitch-bend / aftertouch) lanes for this clip.
+    #[serde(default)]
+    pub controllers: Vec<EngineMidiControllerLane>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMidiControllerPoint {
+    /// Beat relative to the clip start.
+    pub beat: f64,
+    /// Normalized controller value, `0.0..=1.0`.
+    pub value: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMidiControllerLane {
+    /// VST3 controller number: `0..=127` = MIDI CC, `128` = aftertouch,
+    /// `129` = pitch bend. Matches `Steinberg::Vst::ControllerNumbers`.
+    pub controller: u16,
+    #[serde(default)]
+    pub channel: u8,
+    pub points: Vec<EngineMidiControllerPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

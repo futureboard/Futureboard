@@ -1,17 +1,20 @@
 use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
-    InputMonitorMode, MidiNote, PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip,
-    ProjectInsert, ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectTrack,
-    ProjectTrackAudioFormat, ProjectTrackInputRouting, ProjectTrackMidiInputRouting,
-    ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
+    InputMonitorMode, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNote,
+    PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer,
+    ProjectPluginInstance, ProjectSend, ProjectTrack, ProjectTrackAudioFormat,
+    ProjectTrackInputRouting, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
+    ProjectTrackType, TrackRouting,
 };
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 
 pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
-/// On-disk format version. v3 adds persisted track routing fields. v1/v2 files
-/// still load with stable per-track routing defaults.
-pub const PROJECT_VERSION: u32 = 3;
+/// On-disk format version. v5 adds MIDI controller (CC) lanes per MIDI clip.
+/// v4 adds a per-MIDI-note muted flag. v3 adds persisted track routing fields.
+/// Older files still load: v1/v2 use stable per-track routing defaults,
+/// v1/v2/v3 notes default to unmuted, and pre-v5 MIDI clips have no CC lanes.
+pub const PROJECT_VERSION: u32 = 5;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -341,6 +344,33 @@ fn encode_midi_note(w: &mut FbWriter, n: &MidiNote) {
     w.write_f32(n.start_beats);
     w.write_f32(n.duration_beats);
     w.write_u8(n.velocity);
+    w.write_bool(n.muted); // v4
+}
+
+/// v5: controller kind tag. CC carries its number; the rest are tag-only.
+fn encode_controller_kind(w: &mut FbWriter, kind: MidiControllerKind) {
+    match kind {
+        MidiControllerKind::CC(n) => {
+            w.write_u8(0);
+            w.write_u8(n);
+        }
+        MidiControllerKind::PitchBend => w.write_u8(1),
+        MidiControllerKind::ChannelPressure => w.write_u8(2),
+        MidiControllerKind::PolyPressure => w.write_u8(3),
+    }
+}
+
+/// v5: a controller lane and its points.
+fn encode_controller_lane(w: &mut FbWriter, lane: &MidiControllerLane) {
+    encode_controller_kind(w, lane.kind);
+    w.write_bool(lane.visible);
+    w.write_f32(lane.height);
+    w.write_bool(lane.collapsed);
+    w.write_u32(lane.points.len() as u32);
+    for p in &lane.points {
+        w.write_f32(p.beat);
+        w.write_f32(p.value);
+    }
 }
 
 fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
@@ -361,11 +391,19 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
             w.write_str(asset_id);
             w.write_opt_path(source_path);
         }
-        ClipSource::Midi { notes } => {
+        ClipSource::Midi {
+            notes,
+            controller_lanes,
+        } => {
             w.write_u8(2);
             w.write_u32(notes.len() as u32);
             for n in notes {
                 encode_midi_note(w, n);
+            }
+            // v5: controller lanes follow the notes.
+            w.write_u32(controller_lanes.len() as u32);
+            for lane in controller_lanes {
+                encode_controller_lane(w, lane);
             }
         }
     }
@@ -656,16 +694,54 @@ fn decode_automation_lane(r: &mut FbReader, version: u32) -> Result<AutomationLa
     })
 }
 
-fn decode_midi_note(r: &mut FbReader) -> Result<MidiNote, ProjectError> {
+fn decode_midi_note(r: &mut FbReader, version: u32) -> Result<MidiNote, ProjectError> {
     Ok(MidiNote {
         pitch: r.read_u8()?,
         start_beats: r.read_f32()?,
         duration_beats: r.read_f32()?,
         velocity: r.read_u8()?,
+        // v4 added the muted flag; older files default to unmuted.
+        muted: if version >= 4 { r.read_bool()? } else { false },
     })
 }
 
-fn decode_clip(r: &mut FbReader) -> Result<ProjectClip, ProjectError> {
+fn decode_controller_kind(r: &mut FbReader) -> Result<MidiControllerKind, ProjectError> {
+    Ok(match r.read_u8()? {
+        0 => MidiControllerKind::CC(r.read_u8()?),
+        1 => MidiControllerKind::PitchBend,
+        2 => MidiControllerKind::ChannelPressure,
+        3 => MidiControllerKind::PolyPressure,
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown controller kind tag {t}"
+            )))
+        }
+    })
+}
+
+fn decode_controller_lane(r: &mut FbReader) -> Result<MidiControllerLane, ProjectError> {
+    let kind = decode_controller_kind(r)?;
+    let visible = r.read_bool()?;
+    let height = r.read_f32()?;
+    let collapsed = r.read_bool()?;
+    let count = r.read_u32()? as usize;
+    let mut points = Vec::with_capacity(count);
+    for _ in 0..count {
+        points.push(MidiControllerPoint {
+            beat: r.read_f32()?,
+            value: r.read_f32()?,
+        });
+    }
+    Ok(MidiControllerLane {
+        kind,
+        points,
+        visible,
+        height,
+        collapsed,
+    })
+}
+
+fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectError> {
     let id = r.read_str()?;
     let name = r.read_str()?;
     let start_beat = r.read_f64()?;
@@ -683,9 +759,23 @@ fn decode_clip(r: &mut FbReader) -> Result<ProjectClip, ProjectError> {
             let count = r.read_u32()? as usize;
             let mut notes = Vec::with_capacity(count);
             for _ in 0..count {
-                notes.push(decode_midi_note(r)?);
+                notes.push(decode_midi_note(r, version)?);
             }
-            ClipSource::Midi { notes }
+            // v5: controller lanes follow the notes; older files have none.
+            let controller_lanes = if version >= 5 {
+                let lane_count = r.read_u32()? as usize;
+                let mut lanes = Vec::with_capacity(lane_count);
+                for _ in 0..lane_count {
+                    lanes.push(decode_controller_lane(r)?);
+                }
+                lanes
+            } else {
+                Vec::new()
+            };
+            ClipSource::Midi {
+                notes,
+                controller_lanes,
+            }
         }
         t => {
             return Err(ProjectError::Corrupted(format!(
@@ -863,7 +953,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     let clip_count = r.read_u32()? as usize;
     let mut clips = Vec::with_capacity(clip_count);
     for _ in 0..clip_count {
-        clips.push(decode_clip(r)?);
+        clips.push(decode_clip(r, version)?);
     }
 
     Ok(ProjectTrack {
@@ -979,4 +1069,99 @@ pub fn decode_project(data: &[u8]) -> Result<FutureboardProject, ProjectError> {
     }
 
     decode_body(body, version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(pitch: u8, muted: bool) -> MidiNote {
+        MidiNote {
+            pitch,
+            start_beats: 1.5,
+            duration_beats: 0.5,
+            velocity: 90,
+            muted,
+        }
+    }
+
+    #[test]
+    fn midi_note_muted_roundtrips_v4() {
+        let mut w = FbWriter::new();
+        encode_midi_note(&mut w, &note(60, true));
+        encode_midi_note(&mut w, &note(64, false));
+        let bytes = w.into_bytes();
+
+        let mut r = FbReader::new(&bytes);
+        let a = decode_midi_note(&mut r, PROJECT_VERSION).unwrap();
+        let b = decode_midi_note(&mut r, PROJECT_VERSION).unwrap();
+        assert_eq!(a.pitch, 60);
+        assert!(a.muted);
+        assert_eq!(b.pitch, 64);
+        assert!(!b.muted);
+    }
+
+    #[test]
+    fn pre_v4_notes_decode_unmuted() {
+        // v3 and earlier wrote no muted byte: pitch, start, dur, velocity only.
+        let mut w = FbWriter::new();
+        w.write_u8(72);
+        w.write_f32(0.0);
+        w.write_f32(1.0);
+        w.write_u8(100);
+        let bytes = w.into_bytes();
+
+        let mut r = FbReader::new(&bytes);
+        let n = decode_midi_note(&mut r, 3).unwrap();
+        assert_eq!(n.pitch, 72);
+        assert!(!n.muted, "older files must default to unmuted");
+    }
+
+    #[test]
+    fn controller_lane_roundtrips() {
+        let lane = MidiControllerLane {
+            kind: MidiControllerKind::CC(11),
+            points: vec![
+                MidiControllerPoint {
+                    beat: 0.0,
+                    value: 0.0,
+                },
+                MidiControllerPoint {
+                    beat: 2.5,
+                    value: 1.0,
+                },
+            ],
+            visible: true,
+            height: 72.0,
+            collapsed: false,
+        };
+        let mut w = FbWriter::new();
+        encode_controller_lane(&mut w, &lane);
+        let bytes = w.into_bytes();
+
+        let mut r = FbReader::new(&bytes);
+        let got = decode_controller_lane(&mut r).unwrap();
+        assert_eq!(got.kind, MidiControllerKind::CC(11));
+        assert_eq!(got.points.len(), 2);
+        assert_eq!(got.points[1].beat, 2.5);
+        assert_eq!(got.points[1].value, 1.0);
+        assert_eq!(got.height, 72.0);
+        assert!(got.visible);
+    }
+
+    #[test]
+    fn controller_kind_tags_roundtrip() {
+        for kind in [
+            MidiControllerKind::CC(64),
+            MidiControllerKind::PitchBend,
+            MidiControllerKind::ChannelPressure,
+            MidiControllerKind::PolyPressure,
+        ] {
+            let mut w = FbWriter::new();
+            encode_controller_kind(&mut w, kind);
+            let bytes = w.into_bytes();
+            let mut r = FbReader::new(&bytes);
+            assert_eq!(decode_controller_kind(&mut r).unwrap(), kind);
+        }
+    }
 }

@@ -65,6 +65,52 @@ fn use_demo_project() -> bool {
     std::env::var_os("FUTUREBOARD_DEMO_PROJECT").is_some_and(|value| value == "1")
 }
 
+/// Map the saved Settings renderer choice onto the process-wide timeline
+/// renderer preference. Idempotent — the underlying setters use `OnceLock`, so
+/// it's safe to call at app launch and again when the studio is built.
+fn apply_renderer_preference(schema: &crate::settings::SettingsSchema) {
+    use crate::components::timeline::render::{
+        set_preferred_backend, set_preferred_gpu_device_id, TimelineRendererBackend,
+    };
+    let chosen = match schema.performance.render_mode {
+        crate::settings::RenderMode::CpuRender => TimelineRendererBackend::GpuiPaint,
+        #[cfg(feature = "gpu-renderer")]
+        crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::Wgpu,
+        #[cfg(not(feature = "gpu-renderer"))]
+        crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::GpuiPaint,
+    };
+    set_preferred_backend(chosen);
+    // Saved GPU device id (empty string == Auto).
+    let device_id = match &schema.performance.gpu_device {
+        crate::settings::GpuDevicePreference::Auto => "",
+        crate::settings::GpuDevicePreference::DeviceId(id) => id.as_str(),
+    };
+    set_preferred_gpu_device_id(device_id);
+    if std::env::var_os("FUTUREBOARD_GPU_RENDERER_DEBUG").is_some() {
+        eprintln!(
+            "[gpu-renderer] startup: render_mode={:?} gpu_device={:?}",
+            schema.performance.render_mode, schema.performance.gpu_device
+        );
+    }
+}
+
+/// Load saved settings and apply the renderer preference early — before the
+/// studio window exists — so the GPU renderer can be warmed on the loading
+/// screen instead of stalling the first studio frame. Called at app launch.
+pub fn apply_saved_renderer_preference(cx: &mut gpui::App) {
+    let settings = SettingsModel::load_or_create(cx);
+    let schema = settings.read(cx).current.clone();
+    apply_renderer_preference(&schema);
+}
+
+/// Eagerly initialize the timeline renderer (creating the GPU adapter/device
+/// for the WGPU backend) on the current thread. Call on the main UI thread
+/// during the loading screen, after [`apply_saved_renderer_preference`].
+/// Returns the active backend label for status display.
+pub fn warm_up_renderer() -> &'static str {
+    crate::components::timeline::timeline_surface::warm_up_timeline_renderer()
+}
+
 /// Notify a satellite window's root view without calling `Entity::update` (which
 /// can re-enter the main studio entity and trip GPUI's lease checks).
 pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &WindowHandle<T>) {
@@ -234,34 +280,12 @@ impl StudioLayout {
 
         let schema = settings.read(cx).current.clone();
 
-        // Apply saved Renderer choice — Settings is "* Restart required",
-        // so this only takes effect at process start. The env var
+        // Apply saved Renderer choice — Settings is "* Restart required", so
+        // this only takes effect at process start. Idempotent: the same
+        // preference is also applied at app launch (before the Welcome window)
+        // so the GPU renderer can be warmed on the loading screen. The env var
         // `FUTUREBOARD_WGPU_TIMELINE=1` still wins as a dev override.
-        {
-            use crate::components::timeline::render::{
-                set_preferred_backend, set_preferred_gpu_device_id, TimelineRendererBackend,
-            };
-            let chosen = match schema.performance.render_mode {
-                crate::settings::RenderMode::CpuRender => TimelineRendererBackend::GpuiPaint,
-                #[cfg(feature = "gpu-renderer")]
-                crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::Wgpu,
-                #[cfg(not(feature = "gpu-renderer"))]
-                crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::GpuiPaint,
-            };
-            set_preferred_backend(chosen);
-            // Saved GPU device id (empty string == Auto).
-            let device_id = match &schema.performance.gpu_device {
-                crate::settings::GpuDevicePreference::Auto => "",
-                crate::settings::GpuDevicePreference::DeviceId(id) => id.as_str(),
-            };
-            set_preferred_gpu_device_id(device_id);
-            if std::env::var_os("FUTUREBOARD_GPU_RENDERER_DEBUG").is_some() {
-                eprintln!(
-                    "[gpu-renderer] startup: render_mode={:?} gpu_device={:?}",
-                    schema.performance.render_mode, schema.performance.gpu_device
-                );
-            }
-        }
+        apply_renderer_preference(&schema);
 
         let backend = match schema.hardware.audio.driver_type.as_str() {
             "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,

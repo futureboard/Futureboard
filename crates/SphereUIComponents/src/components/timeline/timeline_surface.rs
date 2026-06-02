@@ -55,6 +55,26 @@ fn with_renderer(snapshot: &TimelineRenderSnapshot) -> gpui::AnyElement {
     })
 }
 
+/// Eagerly construct the thread-local timeline renderer — and, for the WGPU
+/// backend, create the GPU adapter/device — so the first studio frame doesn't
+/// stall on initialization. Call on the main UI thread (the thread that paints
+/// the studio) during the loading screen; subsequent calls are no-ops. Returns
+/// the active backend label for status display.
+///
+/// The renderer preference (CPU vs GPU) must already be applied via
+/// `set_preferred_backend` / `set_preferred_gpu_device_id` before this runs.
+pub fn warm_up_timeline_renderer() -> &'static str {
+    TIMELINE_RENDERER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let preferred = TimelineRendererBackend::from_env();
+            let (renderer, backend) = create_timeline_renderer_with_fallback(preferred);
+            *slot = Some((backend, renderer));
+        }
+        slot.as_ref().expect("renderer slot").0.label()
+    })
+}
+
 /// Scrollable arrangement grid layer (behind track lanes / clips).
 pub fn timeline_surface(
     state: &TimelineState,

@@ -16,6 +16,12 @@ pub fn setup(cx: &mut App) {
     assets::register_fonts(cx);
     boot::log("fonts registered");
 
+    // Apply the saved renderer preference now (before any window) so the GPU
+    // renderer can be warmed during the loading screen rather than stalling the
+    // first studio frame.
+    sphere_ui_components::layout::apply_saved_renderer_preference(cx);
+    boot::log("renderer preference applied");
+
     // Launch flow: Splash / Loading -> Welcome.
     open_welcome_window(cx, false);
 }
@@ -56,7 +62,6 @@ fn open_welcome_window(cx: &mut App, skip_splash: bool) {
             "Loading shared assets",
             "Loading recent projects",
             "Preparing native workspace",
-            "Ready",
         ] {
             executor.timer(Duration::from_millis(150)).await;
             let _ = welcome.update(cx, |welcome, _window, cx| {
@@ -64,6 +69,24 @@ fn open_welcome_window(cx: &mut App, skip_splash: bool) {
                 cx.notify();
             });
         }
+
+        // Warm the GPU renderer here — on the loading screen — so the first
+        // studio frame doesn't stall on adapter/device creation. The warm-up
+        // runs on the main thread (inside the window update) and reuses the
+        // same thread-local renderer the studio paints with.
+        executor.timer(Duration::from_millis(120)).await;
+        let _ = welcome.update(cx, |welcome, _window, cx| {
+            welcome.set_loading_status("Initializing GPU renderer");
+            welcome.set_gpu_status("Initializing");
+            cx.notify();
+        });
+        let _ = welcome.update(cx, |welcome, _window, cx| {
+            let backend = sphere_ui_components::layout::warm_up_renderer();
+            welcome.set_gpu_status(format!("Ready · {backend}"));
+            welcome.set_loading_status("Ready");
+            cx.notify();
+        });
+
         executor.timer(Duration::from_millis(120)).await;
         let _ = welcome.update(cx, |welcome, _window, cx| {
             welcome.show_welcome();

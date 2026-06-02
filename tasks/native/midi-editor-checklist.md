@@ -34,64 +34,64 @@ Planning status: checklist only. No implementation code is implied.
 
 ## Editor Shell
 
-- [ ] Bottom-panel MIDI editor opens selected MIDI clip.
-- [ ] Floating MIDI editor opens the same selected clip.
-- [ ] Editor focus prevents Space from toggling transport while typing.
-- [ ] Toolbar exposes active tool.
-- [ ] Toolbar exposes snap toggle/value.
-- [ ] Toolbar exposes quantize value.
-- [ ] Toolbar exposes fit/zoom controls.
-- [ ] Toolbar avoids fake enabled actions.
-- [ ] UI uses Futureboard dark compact theme tokens.
-- [ ] No Bootstrap/web form styling.
+- [x] Bottom-panel MIDI editor opens selected MIDI clip.
+- [x] Floating MIDI editor opens the same selected clip.
+- [x] Editor focus prevents Space from toggling transport while typing.
+- [x] Toolbar exposes active tool.
+- [x] Toolbar exposes snap toggle/value.
+- [x] Toolbar exposes quantize value.
+- [x] Toolbar exposes fit/zoom controls.
+- [x] Toolbar avoids fake enabled actions.
+- [x] UI uses Futureboard dark compact theme tokens.
+- [x] No Bootstrap/web form styling.
 
 ## Piano Roll Rendering
 
-- [ ] Render ruler aligned to arrangement beat math.
-- [ ] Render piano keyboard lane.
-- [ ] Render pitch rows.
-- [ ] Render beat/bar/subdivision grid.
-- [ ] Render clip bounds.
-- [ ] Render playhead synced to transport.
-- [ ] Render loop region awareness.
-- [ ] Render selected notes distinctly.
+- [x] Render ruler aligned to arrangement beat math.
+- [x] Render piano keyboard lane.
+- [x] Render pitch rows.
+- [x] Render beat/bar/subdivision grid.
+- [x] Render clip bounds.
+- [x] Render playhead synced to transport.
+- [x] Render loop region awareness.
+- [x] Render selected notes distinctly.
 - [x] Render muted notes distinctly.
-- [ ] Render note labels only when readable.
-- [ ] Cull notes outside visible beat/pitch range.
-- [ ] Avoid DOM/element spam for dense clips.
-- [ ] Prepare WGPU render snapshot shape.
+- [x] Render note labels only when readable.
+- [x] Cull notes outside visible beat/pitch range.
+- [x] Avoid DOM/element spam for dense clips.
+- [x] Prepare WGPU render snapshot shape.
 
 ## Note Editing
 
-- [ ] Draw note.
-- [ ] Select note.
-- [ ] Multi-select notes.
-- [ ] Marquee select notes.
-- [ ] Move notes horizontally.
-- [ ] Move notes vertically by pitch.
-- [ ] Resize note length.
-- [ ] Delete notes.
+- [x] Draw note.
+- [x] Select note.
+- [x] Multi-select notes.
+- [x] Marquee select notes.
+- [x] Move notes horizontally.
+- [x] Move notes vertically by pitch.
+- [x] Resize note length.
+- [x] Delete notes.
 - [x] Duplicate notes.
 - [x] Copy/paste notes.
-- [ ] Quantize notes.
-- [ ] Quantize preview.
-- [ ] Transpose notes.
-- [ ] Edit note length numerically.
-- [ ] Split notes.
+- [x] Quantize notes.
+- [x] Quantize preview.
+- [x] Transpose notes.
+- [x] Edit note length numerically.
+- [x] Split notes.
 - [x] Mute/unmute notes.
 - [ ] Audition note on click.
 - [ ] Audition note during drag where safe.
-- [ ] Respect snap/grid.
-- [ ] Support modifier behavior for additive selection and constrained edits.
-- [ ] Mark project dirty once per committed edit.
-- [ ] Do not mark dirty for selection-only changes.
+- [x] Respect snap/grid.
+- [x] Support modifier behavior for additive selection and constrained edits.
+- [x] Mark project dirty once per committed edit.
+- [x] Do not mark dirty for selection-only changes.
 
 ## Velocity Lane
 
 - [ ] Render velocity bars under piano roll.
 - [ ] Highlight selected notes' velocity bars.
-- [ ] Drag one note velocity.
-- [ ] Drag multiple selected note velocities.
+- [x] Drag one note velocity.
+- [x] Drag multiple selected note velocities.
 - [ ] Support velocity scaling.
 - [ ] Support velocity ramp tool.
 - [ ] Keep vertical drag snap-free.
@@ -113,7 +113,7 @@ Planning status: checklist only. No implementation code is implied.
 - [x] Add Channel Pressure lane.
 - [x] Defer Poly Pressure with clear data-model note.
 - [x] Draw CC points.
-- [ ] Draw ramps/lines.
+- [x] Draw ramps/lines.
 - [x] Erase points.
 - [ ] Select points.
 - [ ] Marquee select points.
@@ -130,32 +130,32 @@ Planning status: checklist only. No implementation code is implied.
 
 ## MIDI Tools
 
-- [ ] Draw tool.
-- [ ] Select tool.
-- [ ] Erase tool.
-- [ ] Split tool.
-- [ ] Velocity tool.
-- [ ] CC draw tool.
+- [x] Draw tool.
+- [x] Select tool.
+- [x] Erase tool.
+- [x] Split tool.
+- [x] Velocity tool.
+- [x] CC draw tool.
 - [ ] Audition tool.
-- [ ] Mute tool.
-- [ ] Quantize command.
+- [x] Mute tool.
+- [x] Quantize command.
 - [ ] Humanize command later.
 - [ ] Legato command later.
-- [ ] Transpose command.
-- [ ] Duplicate command.
+- [x] Transpose command.
+- [x] Duplicate command.
 - [ ] Scale/key guide later.
 
 ## Clipboard
 
 - [x] Copy selected notes.
 - [x] Paste notes at playhead.
-- [ ] Paste notes at mouse beat.
+- [x] Paste notes at mouse beat.
 - [x] Preserve relative timing.
 - [x] Preserve pitch and velocity.
 - [ ] Copy selected CC points.
 - [ ] Paste CC points into compatible lane.
 - [ ] Reject incompatible paste with clear status text.
-- [ ] Clipboard data versioned internally.
+- [x] Clipboard data versioned internally.
 
 ## Undo/Redo
 
@@ -165,13 +165,13 @@ Planning status: checklist only. No implementation code is implied.
 - [x] Note resize command.
 - [x] Note velocity command.
 - [x] Note mute command.
-- [ ] Note split command.
+- [x] Note split command.
 - [x] Note duplicate command.
 - [x] Quantize batch command.
-- [ ] CC point create command.
-- [ ] CC point delete command.
-- [ ] CC point move command.
-- [ ] CC ramp command.
+- [x] CC point create command.
+- [x] CC point delete command.
+- [x] CC point move command.
+- [x] CC ramp command.
 - [x] Batch drag gestures into one undo entry.
 
 ## MIDI Playback

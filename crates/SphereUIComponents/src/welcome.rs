@@ -61,6 +61,7 @@ pub struct WelcomeWindow {
     version: SharedString,
     route: StartupRoute,
     loading_status: SharedString,
+    gpu_status: SharedString,
     active_nav: StartupNav,
     recent_projects: Vec<RecentProject>,
     selected: Option<WelcomeSelection>,
@@ -75,6 +76,7 @@ impl WelcomeWindow {
             version: version.into(),
             route: StartupRoute::Splash,
             loading_status: SharedString::from("Loading Futureboard Studio"),
+            gpu_status: SharedString::from("Pending"),
             active_nav: StartupNav::Welcome,
             recent_projects: recent.entries().iter().take(7).cloned().collect(),
             selected: Some(WelcomeSelection::Start(0)),
@@ -84,6 +86,10 @@ impl WelcomeWindow {
 
     pub fn set_loading_status(&mut self, status: impl Into<SharedString>) {
         self.loading_status = status.into();
+    }
+
+    pub fn set_gpu_status(&mut self, status: impl Into<SharedString>) {
+        self.gpu_status = status.into();
     }
 
     pub fn show_welcome(&mut self) {
@@ -200,7 +206,10 @@ impl WelcomeWindow {
                                     .child(format!("v{}", self.version)),
                             ),
                     )
-                    .child(loading_rows(self.loading_status.clone())),
+                    .child(loading_rows(
+                        self.loading_status.clone(),
+                        self.gpu_status.clone(),
+                    )),
             )
             .child(status_bar(
                 "Startup",
@@ -895,7 +904,7 @@ fn recent_row(
         )
 }
 
-fn loading_rows(status: SharedString) -> impl IntoElement {
+fn loading_rows(status: SharedString, gpu_status: SharedString) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -904,6 +913,7 @@ fn loading_rows(status: SharedString) -> impl IntoElement {
         .child(loading_row("Assets", "Ready"))
         .child(loading_row("Recent Projects", "Loaded"))
         .child(loading_row("Audio System", "Deferred"))
+        .child(loading_row("GPU Renderer", gpu_status))
         .child(loading_row("Workspace", status))
 }
 

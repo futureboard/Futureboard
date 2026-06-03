@@ -213,6 +213,9 @@ where
     // f32 scratch buffer for shared render kernel.
     let mut f32_scratch: Vec<f32> = Vec::new();
 
+    // Separate handle for the error callback (the data callback moves `shared`).
+    let err_shared = Arc::clone(&shared);
+
     let stream = device
         .build_output_stream::<T, _, _>(
             config,
@@ -256,6 +259,12 @@ where
             move |err| {
                 eprintln!("[DAUx cpal] Stream error: {err}");
                 glitch_counter.fetch_add(1, Ordering::Relaxed);
+                // Device vanished mid-stream (unplug / default-device change):
+                // flag it so the control thread can surface DeviceLost and
+                // attempt recovery.
+                if matches!(err, cpal::StreamError::DeviceNotAvailable) {
+                    err_shared.device_lost.store(true, Ordering::Relaxed);
+                }
             },
             None,
         )

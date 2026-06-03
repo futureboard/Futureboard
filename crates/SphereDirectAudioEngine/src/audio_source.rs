@@ -11,12 +11,16 @@ use crate::audio_file::{
     decode_wav_sample, load_audio_file, wav_data_layout, AudioFileBuffer, WavFmt,
     MAX_IN_MEMORY_DECODE_BYTES, STREAMING_WAV_THRESHOLD_BYTES,
 };
+use crate::streaming_source::StreamingSource;
 
 /// Playback source for one media file referenced by runtime clips.
 #[derive(Debug, Clone)]
 pub enum ClipAudioSource {
     InMemory(Arc<AudioFileBuffer>),
     MappedWav(Arc<MappedWavSource>),
+    /// Large compressed file streamed from disk through a background decoder
+    /// thread + ring buffer (Phase F). See [`crate::streaming_source`].
+    Streaming(Arc<StreamingSource>),
 }
 
 impl ClipAudioSource {
@@ -25,6 +29,7 @@ impl ClipAudioSource {
         match self {
             Self::InMemory(buffer) => buffer.sample_rate,
             Self::MappedWav(mapped) => mapped.sample_rate,
+            Self::Streaming(source) => source.sample_rate(),
         }
     }
 
@@ -33,6 +38,8 @@ impl ClipAudioSource {
         match self {
             Self::InMemory(buffer) => buffer.channels,
             Self::MappedWav(mapped) => mapped.channels,
+            // The streaming ring is always downmixed to stereo.
+            Self::Streaming(_) => 2,
         }
     }
 
@@ -41,12 +48,19 @@ impl ClipAudioSource {
         match self {
             Self::InMemory(buffer) => buffer.frames,
             Self::MappedWav(mapped) => mapped.frames,
+            Self::Streaming(source) => source.frames(),
         }
     }
 
     #[inline]
     pub fn is_mapped(&self) -> bool {
         matches!(self, Self::MappedWav(_))
+    }
+
+    /// True for the disk-streaming variant (used by diagnostics / logging).
+    #[inline]
+    pub fn is_streaming(&self) -> bool {
+        matches!(self, Self::Streaming(_))
     }
 }
 
@@ -138,9 +152,10 @@ pub fn open_clip_audio_source(path: &str) -> Result<ClipAudioSource, String> {
     }
 
     if file_size > MAX_IN_MEMORY_DECODE_BYTES && !matches!(ext.as_str(), "wav" | "wave") {
-        return Err(format!(
-            "file too large ({file_size} bytes) for in-memory decode — convert to WAV for streaming import"
-        ));
+        // Too large to decode into memory and not PCM-mappable: stream it from
+        // disk through a background decoder + ring buffer (Phase F).
+        let source = StreamingSource::open(path)?;
+        return Ok(ClipAudioSource::Streaming(Arc::new(source)));
     }
 
     let buffer = Arc::new(load_audio_file(path)?);
@@ -165,11 +180,18 @@ pub fn read_frame_stereo(source: &ClipAudioSource, frame: usize) -> (f32, f32) {
             }
         }
         ClipAudioSource::MappedWav(mapped) => mapped.read_frame_stereo(frame),
+        ClipAudioSource::Streaming(source) => source.read_frame_stereo(frame),
     }
 }
 
 #[inline]
 pub fn sample_source_stereo(source: &ClipAudioSource, pos: f64) -> (f32, f32) {
+    // The streaming ring does its own windowed interpolation + underrun
+    // accounting, so route straight to it.
+    if let ClipAudioSource::Streaming(streaming) = source {
+        return streaming.read_interp(pos);
+    }
+
     if pos < 0.0 || source.frames() == 0 {
         return (0.0, 0.0);
     }

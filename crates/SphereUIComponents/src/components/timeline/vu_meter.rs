@@ -21,7 +21,13 @@ const METER_YELLOW_TOP: f32 = 0.90;
 /// CPU bytes — i.e. a per-frame GPU→CPU readback, which is slower than letting
 /// GPUI rasterize the quads. This is also why the timeline's offscreen wgpu
 /// renderer discards its texture and falls back to GPUI paint.)
-pub fn meter_surface(level_l: f32, level_r: f32) -> impl IntoElement {
+pub fn meter_surface(
+    level_l: f32,
+    level_r: f32,
+    hold_l: f32,
+    hold_r: f32,
+    clip: bool,
+) -> impl IntoElement {
     let bar_w = 5.0_f32;
     let gap = 1.0_f32;
     let total_w = bar_w * 2.0 + gap;
@@ -29,12 +35,29 @@ pub fn meter_surface(level_l: f32, level_r: f32) -> impl IntoElement {
         canvas(
             |_bounds, _window, _cx| (),
             move |bounds, _state, window, _cx| {
-                paint_meter_bar(bounds, 0.0, bar_w, level_l, window);
-                paint_meter_bar(bounds, bar_w + gap, bar_w, level_r, window);
+                paint_meter_bar(bounds, 0.0, bar_w, level_l, hold_l, window);
+                paint_meter_bar(bounds, bar_w + gap, bar_w, level_r, hold_r, window);
+                if clip {
+                    paint_clip_cap(bounds, total_w, window);
+                }
             },
         )
         .size_full(),
     )
+}
+
+/// Paint a clip-indicator cap across the top of the meter (both bars) when a
+/// channel reached 0 dBFS. Latched/released by the meter poll.
+fn paint_clip_cap(canvas_bounds: Bounds<Pixels>, width: f32, window: &mut gpui::Window) {
+    let cap_h = 3.0_f32;
+    let rect = Bounds {
+        origin: canvas_bounds.origin,
+        size: Size {
+            width: px(width),
+            height: px(cap_h),
+        },
+    };
+    window.paint_quad(fill(rect, Colors::status_error()));
 }
 
 /// Paint one channel bar (rail + level segments) at `x_offset` from the canvas
@@ -45,6 +68,7 @@ fn paint_meter_bar(
     x_offset: f32,
     width: f32,
     level: f32,
+    hold: f32,
     window: &mut gpui::Window,
 ) {
     let origin_x = f32::from(canvas_bounds.origin.x) + x_offset;
@@ -96,6 +120,14 @@ fn paint_meter_bar(
             rect(bottom - green_h - yellow_h - red_h, red_h),
             Colors::meter_high(),
         ));
+    }
+
+    // Peak-hold tick: a thin bright marker at the held-peak position.
+    let hold_n = hold.clamp(0.0, 1.0);
+    if hold_n > 0.0 {
+        let tick_h = 2.0_f32;
+        let tick_y = (bottom - hold_n * h - tick_h * 0.5).clamp(origin_y, bottom - tick_h);
+        window.paint_quad(fill(rect(tick_y, tick_h), Colors::text_primary()));
     }
 }
 

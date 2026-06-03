@@ -22,6 +22,16 @@ fn command_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_COMMAND_DEBUG").is_some())
 }
 
+/// `FUTUREBOARD_AUDIO_CALLBACK_DEBUG=1` enables the realtime callback's
+/// occasional eprintln traces (graph swap, mute, render-path). Off by default
+/// so the audio thread never formats strings or writes to stdio — see
+/// `tasks/native/audio-system-spec.md` §1 and Phase A finding A.2.2. Cached on
+/// first read so the callback never touches the environment.
+fn callback_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_CALLBACK_DEBUG").is_some())
+}
+
 // ── Per-stream oscillator + local playback state ──────────────────────────────
 
 /// Local (non-shared) state for one audio stream.
@@ -174,14 +184,21 @@ pub fn drain_commands(
     while let Ok(cmd) = cmd_rx.try_recv() {
         match cmd {
             EngineCommand::LoadProject(next_runtime) => {
-                eprintln!(
-                    "[DAUx] LoadProject: {} tracks, {} clips (sr={})",
-                    next_runtime.tracks.len(),
-                    next_runtime.clips.len(),
-                    output_sample_rate,
-                );
-                *runtime = next_runtime;
+                if callback_debug_enabled() {
+                    eprintln!(
+                        "[DAUx] LoadProject: {} tracks, {} clips (sr={})",
+                        next_runtime.tracks.len(),
+                        next_runtime.clips.len(),
+                        output_sample_rate,
+                    );
+                }
+                // Swap in the new graph and retire the old one to the
+                // background dropper — never run its destructor on this
+                // realtime thread (frees buffers / munmaps sources / destroys
+                // VST3 handles). See `crate::graveyard`.
+                let old = std::mem::replace(runtime, next_runtime);
                 runtime.sample_rate = output_sample_rate;
+                crate::graveyard::retire(old);
             }
             EngineCommand::SetTestTone { enabled, frequency } => {
                 local.osc_on = enabled;
@@ -244,7 +261,9 @@ pub fn drain_commands(
                 runtime.update_track_pan(&track_id, value);
             }
             EngineCommand::SetTrackMute { track_id, muted } => {
-                eprintln!("[DAUx] SetTrackMute track={track_id} muted={muted}");
+                if callback_debug_enabled() {
+                    eprintln!("[DAUx] SetTrackMute track={track_id} muted={muted}");
+                }
                 runtime.update_track_mute(&track_id, muted);
             }
             EngineCommand::SetTrackSolo { track_id, solo } => {
@@ -302,12 +321,14 @@ pub fn fill_output_f32(
         frames = render_project_block_interleaved(runtime, base_sample, master_vol, data, channels);
         if !local.render_path_logged {
             local.render_path_logged = true;
-            eprintln!(
-                "[SphereAudio callback] renderPath=daux-block frames={} channels={} tracks={}",
-                frames,
-                channels,
-                runtime.tracks.len()
-            );
+            if callback_debug_enabled() {
+                eprintln!(
+                    "[SphereAudio callback] renderPath=daux-block frames={} channels={} tracks={}",
+                    frames,
+                    channels,
+                    runtime.tracks.len()
+                );
+            }
         }
         if gen_tone {
             for frame in data.chunks_mut(channels) {

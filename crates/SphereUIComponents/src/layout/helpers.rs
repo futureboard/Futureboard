@@ -117,6 +117,29 @@ pub(super) fn smooth_meter_value(current: &mut f32, target: f32) -> bool {
     changed
 }
 
+/// Update a peak-hold value: jump up instantly to a higher level, otherwise
+/// release slowly so the held peak lingers above the decaying meter bar
+/// (≈0.012 per poll tick → ≈1 s to fall a third of full scale at 30 Hz).
+pub(super) fn update_meter_hold(hold: &mut f32, level: f32) {
+    let level = level.clamp(0.0, 1.0);
+    *hold = if level >= *hold {
+        level
+    } else {
+        (*hold - 0.012).max(level)
+    };
+}
+
+/// Latch / release the clip indicator. Sets it when either channel's raw
+/// (pre-clamp) peak reached 0 dBFS, and clears it once the held peak has
+/// fallen back below 0.6 (≈1 s after the last overload, via the hold release).
+pub(super) fn update_meter_clip(clip: &mut bool, raw_peak_l: f64, raw_peak_r: f64, hold_max: f32) {
+    if raw_peak_l >= 1.0 || raw_peak_r >= 1.0 {
+        *clip = true;
+    } else if hold_max < 0.6 {
+        *clip = false;
+    }
+}
+
 pub(super) fn find_clip_summary<'a>(
     tracks: &'a [TrackState],
     clip_id: Option<&str>,

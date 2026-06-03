@@ -312,6 +312,14 @@ pub struct RuntimeClip {
     pub offset_seconds: f64,
     pub gain: f32,
     pub speed_ratio: f32,
+    /// Clip-level mute — a muted clip is skipped entirely during render.
+    pub muted: bool,
+    /// Linear fade lengths in output samples, resolved from the snapshot's
+    /// fade durations at build time. `0` means no fade. Clamped so
+    /// `fade_in + fade_out <= duration_samples`. Curve shaping beyond linear is
+    /// a placeholder (see `clip_fade_gain`).
+    pub fade_in_samples: u64,
+    pub fade_out_samples: u64,
     pub source: Arc<ClipAudioSource>,
 }
 
@@ -1276,14 +1284,33 @@ fn build_clip_runtime(
         .unwrap_or(1.0)
         .clamp(0.01, 16.0);
 
+    let duration_samples = seconds_to_samples(duration_seconds, output_sample_rate).max(1);
+
+    // Resolve fade durations (seconds) → output samples. Clamp so the two
+    // fades never overlap or exceed the clip length.
+    let (fade_in_samples, fade_out_samples) = clip
+        .fades
+        .as_ref()
+        .map(|f| {
+            let fi = seconds_to_samples(f.in_duration.max(0.0), output_sample_rate);
+            let fo = seconds_to_samples(f.out_duration.max(0.0), output_sample_rate);
+            (fi, fo)
+        })
+        .unwrap_or((0, 0));
+    let fade_in_samples = fade_in_samples.min(duration_samples);
+    let fade_out_samples = fade_out_samples.min(duration_samples.saturating_sub(fade_in_samples));
+
     Some(RuntimeClip {
         id: clip.id.clone(),
         track_id: clip.track_id.clone(),
         start_sample: seconds_to_samples(start_seconds.max(0.0), output_sample_rate),
-        duration_samples: seconds_to_samples(duration_seconds, output_sample_rate).max(1),
+        duration_samples,
         offset_seconds: clip.offset_seconds.max(0.0),
         gain: clip.gain.clamp(0.0, 4.0),
         speed_ratio,
+        muted: clip.muted,
+        fade_in_samples,
+        fade_out_samples,
         source,
     })
 }

@@ -217,6 +217,7 @@ pub(super) fn build_engine_project_snapshot(
                     duration_beats: clip.duration_beats.max(0.0) as f64,
                     offset_seconds: state.beats_to_seconds(clip.offset_beats.max(0.0)) as f64,
                     gain: clip.gain.clamp(0.0, 4.0),
+                    muted: clip.muted,
                     fades: None,
                     audio_process: Some(EngineClipAudioProcess {
                         speed_ratio: 1.0,

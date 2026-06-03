@@ -51,6 +51,18 @@ const SEC_PAN_H: f32 = 60.0;
 const SEC_BUTTONS_H: f32 = 24.0;
 const SEC_FOOTER_H: f32 = 22.0;
 
+/// Maximum insert slots per track. Once reached, the trailing empty "+ Add
+/// Insert" slot and the INSERTS header "+" are hidden/disabled.
+const MAX_INSERT_SLOTS: usize = 8;
+
+/// Optional clickable "+" affordance for a [`section_header`]. `None` renders
+/// the inert decorative plus (used by SENDS and the master strip); `Some`
+/// renders an interactive, hit-tested plus that runs `on_click`.
+struct HeaderPlus {
+    id: gpui::SharedString,
+    on_click: std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
+}
+
 /// Bundle of mixer interactions hooked up from the layout. Closures land in
 /// the same TimelineState mutation methods used by the TrackHeader so the two
 /// views can never disagree.
@@ -175,13 +187,60 @@ fn mixer_sub_header(track_count: usize) -> impl IntoElement {
 
 // ─── Section header ──────────────────────────────────────────────────────────
 
-fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
+fn section_header(
+    label: &'static str,
+    accent: gpui::Rgba,
+    plus: Option<HeaderPlus>,
+) -> impl IntoElement {
     let icon_path = match label {
         "INSERTS" => Some(assets::ICON_PLUG_PATH),
         "SENDS" => Some(assets::ICON_ROUTE_PATH),
         _ => None,
     };
     let soft_accent = Colors::with_alpha(accent, 0.55); // Approved: dynamic accent decoration alpha
+
+    // The trailing "+" — interactive when `plus` is Some, otherwise an inert
+    // decorative glyph. Interactive variant carries its own id + occlude so the
+    // strip's track-select mouse handler can't swallow the click.
+    let plus_el: gpui::AnyElement = match plus {
+        Some(HeaderPlus { id, on_click }) => div()
+            .id(id)
+            .w(px(12.0))
+            .h(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(|s| s.bg(Colors::surface_control_hover()))
+            .child(
+                svg()
+                    .path(assets::ICON_PLUS_PATH)
+                    .w(px(9.0))
+                    .h(px(9.0))
+                    .text_color(Colors::text_muted()),
+            )
+            .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                on_click(w, cx);
+            })
+            .occlude()
+            .into_any_element(),
+        None => div()
+            .w(px(12.0))
+            .h(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .child(
+                svg()
+                    .path(assets::ICON_PLUS_PATH)
+                    .w(px(9.0))
+                    .h(px(9.0))
+                    .text_color(Colors::text_faint()),
+            )
+            .into_any_element(),
+    };
 
     div()
         .flex()
@@ -213,22 +272,7 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
                         .child(label),
                 ),
         )
-        .child(
-            div()
-                .w(px(12.0))
-                .h(px(12.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .child(
-                    svg()
-                        .path(assets::ICON_PLUS_PATH)
-                        .w(px(9.0))
-                        .h(px(9.0))
-                        .text_color(Colors::text_faint()),
-                ),
-        )
+        .child(plus_el)
 }
 
 fn empty_slot() -> impl IntoElement {
@@ -545,7 +589,14 @@ fn insert_chip(
         )
 }
 
-fn add_insert_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoElement {
+/// Trailing empty insert slot. Clicking it opens the plugin picker for the
+/// next available slot (`next_slot`) on this track. `next_slot` is used for
+/// debug logging only — the picker appends to the track's insert chain.
+fn add_insert_button(
+    track_id: &str,
+    next_slot: usize,
+    callbacks: &MixerCallbacks,
+) -> impl IntoElement {
     let track_id_owned = track_id.to_string();
     let on_add = callbacks.on_add_insert.clone();
     div()
@@ -567,8 +618,11 @@ fn add_insert_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEle
         .text_color(Colors::slot_empty_text())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
-        .child("+")
+        .child("+ Add Insert")
         .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+            eprintln!(
+                "[mixer] empty insert slot + clicked track={track_id_owned} slot={next_slot}"
+            );
             on_add(&track_id_owned, w, cx);
         })
         .occlude()
@@ -579,19 +633,45 @@ fn inserts_section(
     _index: usize,
     callbacks: &MixerCallbacks,
 ) -> impl IntoElement {
+    let used = track.inserts.len();
+    let at_max = used >= MAX_INSERT_SLOTS;
+
     let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
     for slot in &track.inserts {
         chips = chips.child(insert_chip(&track.id, slot, callbacks));
     }
-    chips = chips.child(add_insert_button(&track.id, callbacks));
+    // Requirement: always render one trailing empty slot after the last insert,
+    // until MAX_INSERT_SLOTS is reached.
+    if !at_max {
+        chips = chips.child(add_insert_button(&track.id, used, callbacks));
+    }
+
+    // Header "+" adds to the next available slot for *this* track; hidden
+    // (inert) once the rack is full.
+    let header_plus = if at_max {
+        None
+    } else {
+        let track_id = track.id.clone();
+        let on_add = callbacks.on_add_insert.clone();
+        Some(HeaderPlus {
+            id: gpui::SharedString::from(format!("insert-header-add-{}", track.id)),
+            on_click: std::sync::Arc::new(move |w, cx| {
+                eprintln!("[mixer] INSERTS header + clicked track={track_id} slot={used}");
+                on_add(&track_id, w, cx);
+            }),
+        })
+    };
 
     div()
         .flex()
         .flex_col()
-        .h(px(SEC_INSERTS_H))
+        // `min_h` (not fixed `h`) so the trailing "+ Add Insert" slot is never
+        // clipped once a plugin chip is present — the fader area (flex_1)
+        // absorbs the difference. This was the root cause of the missing slot.
+        .min_h(px(SEC_INSERTS_H))
         .border_b(px(1.0))
         .border_color(Colors::divider())
-        .child(section_header("INSERTS", track.color))
+        .child(section_header("INSERTS", track.color, header_plus))
         .child(chips)
 }
 
@@ -697,7 +777,7 @@ fn sends_section(
         .h(px(SEC_SENDS_H))
         .border_b(px(1.0))
         .border_color(Colors::divider())
-        .child(section_header("SENDS", track.color))
+        .child(section_header("SENDS", track.color, None))
         .child(chips)
 }
 
@@ -807,7 +887,13 @@ fn fader_area(
                             on_vol_change,
                         )),
                 )
-                .child(meter_surface(track.meter_level_l, track.meter_level_r)),
+                .child(meter_surface(
+                    track.meter_level_l,
+                    track.meter_level_r,
+                    track.meter_peak_hold_l,
+                    track.meter_peak_hold_r,
+                    track.meter_clip,
+                )),
         )
 }
 
@@ -966,7 +1052,7 @@ fn master_strip(
                 .h(px(SEC_INSERTS_H))
                 .border_b(px(1.0))
                 .border_color(Colors::divider())
-                .child(section_header("INSERTS", accent))
+                .child(section_header("INSERTS", accent, None))
                 .child(empty_slot()),
         )
         // Master skips sends, but we keep a same-sized spacer so its rows
@@ -1050,7 +1136,13 @@ fn master_strip(
                                     on_change,
                                 )),
                         )
-                        .child(meter_surface(master.meter_level_l, master.meter_level_r)),
+                        .child(meter_surface(
+                            master.meter_level_l,
+                            master.meter_level_r,
+                            master.meter_peak_hold_l,
+                            master.meter_peak_hold_r,
+                            master.meter_clip,
+                        )),
                 ),
         )
         .child(

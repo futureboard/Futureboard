@@ -61,6 +61,11 @@ pub struct JsDauxStatus {
     pub mmcss_active: bool,
     /// Last backend error (e.g. WASAPI Exclusive failed reason). Cleared on success.
     pub last_error: Option<String>,
+    /// `true` when the device disappeared mid-stream and a recovery is pending.
+    pub device_lost: bool,
+    /// Lifecycle state for the Audio Settings UI: "Closed" | "Ready" |
+    /// "Running" | "DeviceLost".
+    pub device_state: String,
 }
 
 // ── N-API–visible types ────────────────────────────────────────────────────────
@@ -123,6 +128,33 @@ pub struct JsMeterSnapshot {
     pub master_peak_r: f64,
     pub master_rms_l: f64,
     pub master_rms_r: f64,
+}
+
+/// Per-track plugin latency (sum of enabled native-plugin insert latencies).
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
+pub struct JsTrackLatency {
+    pub track_id: String,
+    pub plugin_samples: u32,
+    pub plugin_ms: f64,
+}
+
+/// Latency report for the Audio Settings / mixer UI (Phase V — reporting only;
+/// full plug-in delay compensation is Phase W).
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
+pub struct JsLatencyInfo {
+    pub sample_rate: u32,
+    /// Output buffer size in frames (device/buffer latency basis).
+    pub buffer_frames: u32,
+    pub buffer_ms: f64,
+    /// Per non-master track plugin latency.
+    pub tracks: Vec<JsTrackLatency>,
+    /// Plugin latency on the master track.
+    pub master_samples: u32,
+    pub master_ms: f64,
+    /// Longest per-track plugin latency — the basis for future full PDC.
+    pub max_track_samples: u32,
 }
 
 #[cfg_attr(feature = "napi", napi(object))]
@@ -320,6 +352,10 @@ pub struct EngineClipSnapshot {
     pub duration_beats: f64,
     pub offset_seconds: f64,
     pub gain: f32,
+    /// Clip-level mute. Distinct from track mute — a muted clip is silent even
+    /// on an audible track. Defaulted so older snapshots deserialize.
+    #[serde(default)]
+    pub muted: bool,
     #[serde(default)]
     pub fades: Option<EngineFadeSnapshot>,
     #[serde(default)]
@@ -449,4 +485,7 @@ pub struct JsEngineDebugInfo {
     pub clip_summaries: Vec<String>,
     /// Human-readable summary of inserts, including whether native VST3 processors are active.
     pub insert_summaries: Vec<String>,
+    /// Total disk-stream underruns since process start (Phase F diagnostics).
+    /// A streaming clip read that found its frame outside the buffered window.
+    pub disk_underruns: f64,
 }

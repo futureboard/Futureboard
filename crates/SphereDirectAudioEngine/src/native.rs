@@ -127,6 +127,10 @@ pub struct EngineStats {
     pub last_error: Option<String>,
     pub glitch_count: u64,
     pub estimated_latency_ms: f64,
+    /// `true` when the device was lost mid-stream and recovery is pending.
+    pub device_lost: bool,
+    /// Lifecycle state: "Closed" | "Ready" | "Running" | "DeviceLost".
+    pub device_state: String,
 }
 
 /// Native Rust-facing handle to the engine.
@@ -291,7 +295,47 @@ impl AudioEngine {
             last_error: st.last_error,
             glitch_count: daux.glitch_count as u64,
             estimated_latency_ms: daux.estimated_latency_ms,
+            device_lost: daux.device_lost,
+            device_state: daux.device_state,
         }
+    }
+
+    /// Attempt to recover the audio device after a device-loss event, reusing
+    /// the last-known-good config. Returns `Ok(true)` if recovery ran,
+    /// `Ok(false)` if the device was not lost.
+    pub fn recover_device(&self) -> Result<bool, SphereAudioError> {
+        self.inner.recover_daux()
+    }
+
+    /// Begin an input-level test on `device_id` (or the default input device).
+    /// Poll [`AudioEngine::input_test_level`] for the meter and stop with
+    /// [`AudioEngine::stop_input_test`].
+    pub fn start_input_test(&self, device_id: Option<&str>) -> Result<(), SphereAudioError> {
+        self.inner.start_input_test(device_id.map(str::to_string))
+    }
+
+    /// Peak input level since the last poll, `0.0..=1.0` (0 when inactive).
+    pub fn input_test_level(&self) -> f32 {
+        self.inner.get_input_test_level()
+    }
+
+    /// Stop and release the input-level test stream.
+    pub fn stop_input_test(&self) {
+        self.inner.stop_input_test();
+    }
+
+    /// Whether switching to `config` would require a controlled device restart
+    /// versus the currently-open device.
+    pub fn requires_restart(&self, config: &EngineConfig) -> bool {
+        let daux = JsDauxConfig {
+            backend_id: config.backend.backend_id().to_string(),
+            output_device_id: None,
+            sample_rate: (config.sample_rate > 0).then_some(config.sample_rate),
+            buffer_size: (config.buffer_size > 0).then_some(config.buffer_size),
+            mmcss_priority: false,
+            safe_mode: false,
+        };
+        self.inner.daux_requires_restart(&daux)
     }
 
     /// Build/update the realtime runtime graph from a control-thread project snapshot.
@@ -326,6 +370,13 @@ impl AudioEngine {
     /// Poll meter atomics and runtime track meters for UI display.
     pub fn meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()
+    }
+
+    /// Aggregate latency report: device buffer latency plus per-track and master
+    /// plug-in latency. Reporting only (Phase V); full plug-in delay
+    /// compensation is Phase W.
+    pub fn latency_info(&self) -> crate::types::JsLatencyInfo {
+        self.inner.get_latency_info()
     }
 
     /// Multi-LOD peak summary for any audio format supported by the

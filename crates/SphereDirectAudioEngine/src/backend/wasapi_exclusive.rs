@@ -457,9 +457,12 @@ unsafe fn open_exclusive_stream(
         if wait == WAIT_OBJECT_0 {
             // buf_event signaled — fall through to render below.
         } else {
-            // Index 1 = stop_event. Timeout or other = glitch.
+            // Index 1 = stop_event. Timeout or other = glitch. An unexpected
+            // exit while not stopping means the device went away — flag it for
+            // the control thread to surface DeviceLost and recover.
             if wait.0 != 1 && !stop_flag.load(Ordering::Relaxed) {
                 glitch_counter.fetch_add(1, Ordering::Relaxed);
+                shared.device_lost.store(true, Ordering::Relaxed);
             }
             break;
         }

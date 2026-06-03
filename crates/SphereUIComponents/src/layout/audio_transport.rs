@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::components;
 
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
-use super::helpers::smooth_meter_value;
+use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
 use super::StudioLayout;
 
 impl StudioLayout {
@@ -199,15 +199,32 @@ impl StudioLayout {
                     let next_r = track_meter.peak_r.clamp(0.0, 1.0) as f32;
                     let _ = smooth_meter_value(&mut track.meter_level_l, next_l);
                     let _ = smooth_meter_value(&mut track.meter_level_r, next_r);
+                    update_meter_hold(&mut track.meter_peak_hold_l, track.meter_level_l);
+                    update_meter_hold(&mut track.meter_peak_hold_r, track.meter_level_r);
+                    update_meter_clip(
+                        &mut track.meter_clip,
+                        track_meter.peak_l,
+                        track_meter.peak_r,
+                        track.meter_peak_hold_l.max(track.meter_peak_hold_r),
+                    );
                 }
             }
+            let master = &mut timeline.state.master;
             let _ = smooth_meter_value(
-                &mut timeline.state.master.meter_level_l,
+                &mut master.meter_level_l,
                 meters.master_peak_l.clamp(0.0, 1.0) as f32,
             );
             let _ = smooth_meter_value(
-                &mut timeline.state.master.meter_level_r,
+                &mut master.meter_level_r,
                 meters.master_peak_r.clamp(0.0, 1.0) as f32,
+            );
+            update_meter_hold(&mut master.meter_peak_hold_l, master.meter_level_l);
+            update_meter_hold(&mut master.meter_peak_hold_r, master.meter_level_r);
+            update_meter_clip(
+                &mut master.meter_clip,
+                meters.master_peak_l,
+                meters.master_peak_r,
+                master.meter_peak_hold_l.max(master.meter_peak_hold_r),
             );
         });
     }

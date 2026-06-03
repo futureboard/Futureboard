@@ -50,6 +50,15 @@ fn command_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_COMMAND_DEBUG").is_some())
 }
 
+/// `FUTUREBOARD_AUDIO_CALLBACK_DEBUG=1` enables the realtime callback's
+/// occasional eprintln traces (graph swap, mute, render-path). Off by default
+/// so the audio thread never formats strings or writes to stdio — see
+/// `tasks/native/audio-system-spec.md` §1 and Phase A finding A.2.2.
+fn callback_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_CALLBACK_DEBUG").is_some())
+}
+
 // ── Realtime constants shared with render.rs ──────────────────────────────────
 
 pub const TEST_TONE_AMPLITUDE: f32 = 0.125; // −18 dBFS  (safe default test level)
@@ -86,6 +95,10 @@ pub struct SharedState {
     // DAUx diagnostics (incremented by audio thread, read by control thread)
     pub glitch_count: AtomicU64,
     pub mmcss_active: AtomicBool,
+    /// Set by a backend when the audio device disappears mid-stream (USB
+    /// unplugged, default device changed, exclusive-mode timeout). Read by the
+    /// control thread to surface a DeviceLost state and trigger recovery.
+    pub device_lost: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -103,6 +116,7 @@ impl Default for SharedState {
             sample_rate: AtomicU32::new(44100),
             glitch_count: AtomicU64::new(0),
             mmcss_active: AtomicBool::new(false),
+            device_lost: AtomicBool::new(false),
         }
     }
 }
@@ -175,6 +189,15 @@ impl ActiveStream {
 unsafe impl Send for ActiveStream {}
 unsafe impl Sync for ActiveStream {}
 
+/// Live input-level test stream (Settings "Test Input" button). Holds the
+/// cpal input stream and a shared peak atomic the callback writes and the UI
+/// polls. Stored only inside `EngineInner` and touched only on the control
+/// thread, so it inherits `EngineInner`'s `Send`/`Sync` assertion.
+struct InputTestHandle {
+    _stream: cpal::Stream,
+    peak: Arc<AtomicU32>,
+}
+
 pub struct EngineInner {
     // Shared atomic state
     pub shared: Arc<SharedState>,
@@ -208,6 +231,9 @@ pub struct EngineInner {
 
     // Active recording session (None when not recording).
     recording: Mutex<Option<RecordingSession>>,
+
+    // Live input-level test stream (None when not testing input).
+    input_test: Mutex<Option<InputTestHandle>>,
 }
 
 #[derive(Clone)]
@@ -264,6 +290,7 @@ impl EngineInner {
             glitch_counter: Arc::new(AtomicU64::new(0)),
             daux_config: Mutex::new(DauxDeviceConfig::default()),
             recording: Mutex::new(None),
+            input_test: Mutex::new(None),
         }
     }
 
@@ -794,6 +821,11 @@ impl EngineInner {
                 t.id, t.track_type, track_clips, t.volume, t.pan, t.muted, t.solo
             );
         }
+        // Initialise the graveyard drop-thread on this (control) thread so the
+        // callback's first graph swap is a cheap atomic enqueue, never a
+        // channel allocation + thread spawn on the audio thread.
+        crate::graveyard::prime();
+
         match self.send_command(EngineCommand::LoadProject(runtime)) {
             Ok(()) => eprintln!("[SphereAudio] LoadProject command sent to audio callback"),
             Err(SphereAudioError::EngineNotOpen) => {
@@ -900,6 +932,7 @@ impl EngineInner {
             has_solo: runtime.has_solo,
             clip_summaries,
             insert_summaries,
+            disk_underruns: crate::streaming_source::total_disk_underruns() as f64,
         }
     }
 
@@ -1048,10 +1081,51 @@ impl EngineInner {
             }
         };
 
-        // Clear any previous error on success.
+        // Clear any previous error / device-lost flag on success.
         self.status.lock().last_daux_error = None;
+        self.shared.device_lost.store(false, Ordering::Relaxed);
         *self.active_stream.lock() = Some(stream);
         Ok(())
+    }
+
+    /// Re-open the audio device after a device-loss event using the last-known
+    /// good DAUx config. Returns `Ok(true)` if a recovery was performed,
+    /// `Ok(false)` if no recovery was needed (device not lost). On failure the
+    /// `device_lost` flag stays set so the UI keeps showing DeviceLost.
+    pub fn recover_daux(&self) -> Result<bool, SphereAudioError> {
+        if !self.shared.device_lost.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let cfg = {
+            let prev = self.daux_config.lock().clone();
+            JsDauxConfig {
+                backend_id: prev.backend.id().to_string(),
+                output_device_id: prev.output_device_id.clone(),
+                sample_rate: prev.sample_rate,
+                buffer_size: prev.buffer_size,
+                mmcss_priority: prev.mmcss_priority,
+                safe_mode: prev.safe_mode,
+            }
+        };
+        // `open_daux` clears `device_lost` on success.
+        self.open_daux(cfg)?;
+        Ok(true)
+    }
+
+    /// Whether applying `new` would require a controlled device restart versus
+    /// the currently-open config. In this engine every device-shaping change
+    /// (backend, device, sample rate, buffer size, MMCSS, safe mode) reopens the
+    /// stream, so the UI should mark those settings "restart required".
+    pub fn daux_requires_restart(&self, new: &JsDauxConfig) -> bool {
+        let cur = self.daux_config.lock();
+        let norm = |s: &Option<String>| s.clone().filter(|v| !v.is_empty());
+        let norm_u32 = |v: Option<u32>| v.filter(|&n| n > 0);
+        new.backend_id != cur.backend.id()
+            || norm(&new.output_device_id) != cur.output_device_id
+            || norm_u32(new.sample_rate) != cur.sample_rate
+            || norm_u32(new.buffer_size) != cur.buffer_size
+            || new.mmcss_priority != cur.mmcss_priority
+            || new.safe_mode != cur.safe_mode
     }
 
     /// Safe variant: tries `new_config`, and on failure restores the previous
@@ -1112,12 +1186,159 @@ impl EngineInner {
         }
     }
 
+    /// Start an input-level test on `device_id` (or the default input). Opens a
+    /// capture stream whose callback tracks the running peak; poll it with
+    /// [`Self::get_input_test_level`] and stop with [`Self::stop_input_test`].
+    /// Independent of recording and of the output device.
+    pub fn start_input_test(&self, device_id: Option<String>) -> Result<(), SphereAudioError> {
+        // Replace any existing test stream.
+        *self.input_test.lock() = None;
+
+        let device = crate::recording::find_input_device(device_id.as_deref())?;
+        let default_cfg = device.default_input_config().map_err(|e| {
+            SphereAudioError::NativeError(format!("Input device config error: {e}"))
+        })?;
+        let stream_config = cpal::StreamConfig {
+            channels: default_cfg.channels(),
+            sample_rate: default_cfg.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let peak = Arc::new(AtomicU32::new(0));
+        let cb_peak = Arc::clone(&peak);
+        let stream = device
+            .build_input_stream::<f32, _, _>(
+                &stream_config,
+                move |data: &[f32], _info| {
+                    let mut block_peak = 0.0f32;
+                    for &s in data {
+                        let a = s.abs();
+                        if a > block_peak {
+                            block_peak = a;
+                        }
+                    }
+                    // Keep the running max until the UI polls (swap-resets it).
+                    let mut cur = cb_peak.load(Ordering::Relaxed);
+                    loop {
+                        if block_peak <= f32::from_bits(cur) {
+                            break;
+                        }
+                        match cb_peak.compare_exchange_weak(
+                            cur,
+                            block_peak.to_bits(),
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(c) => cur = c,
+                        }
+                    }
+                },
+                |err| eprintln!("[SphereAudio] Input test stream error: {err}"),
+                None,
+            )
+            .map_err(|e| {
+                SphereAudioError::NativeError(format!("Cannot open input test stream: {e}"))
+            })?;
+        stream
+            .play()
+            .map_err(|e| SphereAudioError::NativeError(format!("Input test play failed: {e}")))?;
+
+        *self.input_test.lock() = Some(InputTestHandle {
+            _stream: stream,
+            peak,
+        });
+        Ok(())
+    }
+
+    /// Read (and reset) the peak input level since the last poll, `0.0..=1.0`.
+    /// Returns `0.0` when no input test is active.
+    pub fn get_input_test_level(&self) -> f32 {
+        self.input_test
+            .lock()
+            .as_ref()
+            .map(|h| f32::from_bits(h.peak.swap(0, Ordering::Relaxed)))
+            .unwrap_or(0.0)
+    }
+
+    /// Stop and release the input-level test stream.
+    pub fn stop_input_test(&self) {
+        *self.input_test.lock() = None;
+    }
+
+    /// Aggregate latency report (Phase V — reporting only).
+    ///
+    /// Sums each track's enabled native-plugin insert latencies (queried from
+    /// the live VST3 processors on the control-side runtime copy) plus the
+    /// device buffer latency. Full plug-in delay compensation is Phase W; this
+    /// is the data the UI displays and the basis (`max_track_samples`) PDC will
+    /// later use.
+    pub fn get_latency_info(&self) -> crate::types::JsLatencyInfo {
+        use crate::types::{JsLatencyInfo, JsTrackLatency};
+        let runtime = self.runtime.lock();
+        let (sample_rate, buffer_frames) = {
+            let st = self.status.lock();
+            (st.sample_rate.max(1), st.buffer_size)
+        };
+        let to_ms = |samples: u32| samples as f64 / sample_rate as f64 * 1000.0;
+
+        let mut tracks = Vec::new();
+        let mut master_samples = 0u32;
+        let mut max_track_samples = 0u32;
+        for track in &runtime.tracks {
+            let mut samples: i64 = 0;
+            for insert in &track.inserts {
+                if !insert.enabled {
+                    continue;
+                }
+                if let Some(vst3) = insert.vst3.as_ref() {
+                    if vst3.is_ready() {
+                        samples += vst3.get_latency_samples().max(0) as i64;
+                    }
+                }
+            }
+            let samples = samples.max(0) as u32;
+            if track.track_type == "master" {
+                master_samples = samples;
+            } else {
+                max_track_samples = max_track_samples.max(samples);
+                tracks.push(JsTrackLatency {
+                    track_id: track.id.clone(),
+                    plugin_samples: samples,
+                    plugin_ms: to_ms(samples),
+                });
+            }
+        }
+
+        JsLatencyInfo {
+            sample_rate,
+            buffer_frames,
+            buffer_ms: to_ms(buffer_frames),
+            tracks,
+            master_samples,
+            master_ms: to_ms(master_samples),
+            max_track_samples,
+        }
+    }
+
     /// Return the current DAUx status (backend, device, latency, glitches).
     pub fn get_daux_status(&self) -> JsDauxStatus {
         let st = self.status.lock().clone();
         let daux_cfg = self.daux_config.lock().clone();
         let glitch_count = self.glitch_counter.load(Ordering::Relaxed) as f64;
         let mmcss_active = self.shared.mmcss_active.load(Ordering::Relaxed);
+        let device_lost = self.shared.device_lost.load(Ordering::Relaxed);
+        let running = self.shared.playing.load(Ordering::Relaxed);
+        let device_state = if device_lost {
+            "DeviceLost"
+        } else if !st.stream_open {
+            "Closed"
+        } else if running {
+            "Running"
+        } else {
+            "Ready"
+        }
+        .to_string();
 
         let backend_id = daux_cfg.backend.id().to_string();
         let backend_name = if let Some(stream) = self.active_stream.lock().as_ref() {
@@ -1142,6 +1363,8 @@ impl EngineInner {
             glitch_count,
             mmcss_active,
             last_error: st.last_daux_error.clone(),
+            device_lost,
+            device_state,
         }
     }
 
@@ -1256,6 +1479,9 @@ pub fn render_project_sample(
 
     for clip_index in 0..runtime.clips.len() {
         let clip = &runtime.clips[clip_index];
+        if clip.muted {
+            continue;
+        }
         let clip_start_sample = clip.start_sample;
         let clip_duration_samples = clip.duration_samples;
         if project_sample < clip_start_sample {
@@ -1270,6 +1496,8 @@ pub fn render_project_sample(
         let clip_offset_seconds = clip.offset_seconds;
         let clip_speed_ratio = clip.speed_ratio;
         let clip_gain = clip.gain;
+        let clip_fade_in = clip.fade_in_samples;
+        let clip_fade_out = clip.fade_out_samples;
         let source = Arc::clone(&clip.source);
 
         let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip_track_id) else {
@@ -1293,8 +1521,10 @@ pub fn render_project_sample(
             continue;
         }
 
-        l *= clip_gain;
-        r *= clip_gain;
+        let fade = clip_fade_gain(rel, clip_duration_samples, clip_fade_in, clip_fade_out);
+        let g = clip_gain * fade;
+        l *= g;
+        r *= g;
 
         let output_track_id = runtime.tracks[track_index].output_track_id.clone();
         let sends = runtime.tracks[track_index].sends.clone();
@@ -1411,6 +1641,28 @@ fn sample_to_beat(runtime: &RuntimeProject, sample: u64) -> f64 {
     sample as f64 / runtime.samples_per_beat.max(1.0)
 }
 
+/// Linear clip-fade gain for a sample at offset `rel` from the clip start.
+///
+/// `1.0` outside both fade regions; ramps `0→1` across the fade-in and `1→0`
+/// across the fade-out. Linear is the current placeholder shape — the snapshot
+/// carries per-fade curve names (`audio-system-plan.md` §6) which a later slice
+/// can map to equal-power / exponential shaping here. Allocation-free.
+#[inline]
+fn clip_fade_gain(rel: u64, duration: u64, fade_in: u64, fade_out: u64) -> f32 {
+    let mut gain = 1.0f32;
+    if fade_in > 0 && rel < fade_in {
+        gain *= rel as f32 / fade_in as f32;
+    }
+    if fade_out > 0 {
+        let fade_out_start = duration.saturating_sub(fade_out);
+        if rel >= fade_out_start {
+            let into = (rel - fade_out_start) as f32;
+            gain *= (1.0 - into / fade_out as f32).max(0.0);
+        }
+    }
+    gain
+}
+
 #[inline]
 fn effective_track_muted(track: &RuntimeTrack, beat: f64) -> bool {
     track
@@ -1421,16 +1673,11 @@ fn effective_track_muted(track: &RuntimeTrack, beat: f64) -> bool {
 
 /// Apply a track's fader (volume / pan / preview mode) to its `block_*`
 /// (which already holds the post-insert signal), write the post-fader result
-/// back into `block_*`, sum it into the interleaved master output, and
-/// accumulate the track meter. No allocation.
+/// back into `block_*`, and accumulate the track meter. Does **not** sum to any
+/// destination — routing is done separately by [`route_main_output`]. No
+/// allocation.
 #[inline]
-fn apply_fader_and_sum(
-    track: &mut RuntimeTrack,
-    frames: usize,
-    output: &mut [f32],
-    channels: usize,
-    beat: f64,
-) {
+fn apply_fader(track: &mut RuntimeTrack, frames: usize, beat: f64) {
     let automation = track.automation_values_at_beat(beat);
     let volume = automation.volume.unwrap_or(track.volume);
     let pan = automation.pan.unwrap_or(track.pan);
@@ -1447,16 +1694,59 @@ fn apply_fader_and_sum(
         track.meter_peak_r = track.meter_peak_r.max(r.abs());
         track.meter_sum_sq_l += l * l;
         track.meter_sum_sq_r += r * r;
-        let out = &mut output[frame_idx * channels..frame_idx * channels + channels];
-        out[0] += l;
-        out[1] += r;
+    }
+}
+
+/// Sum a track's post-fader `block_*` into its output destination.
+///
+/// If `output_track_id` resolves to a routing track (bus/group/return) the
+/// full post-fader signal is added to that track's receive buffer (`recv_*`),
+/// so it is processed in Pass 2; otherwise it sums into the interleaved master
+/// output. Cycle-safe like [`accumulate_sends`]: routing to self, to a
+/// non-routing track, or backward between routing tracks falls back to master.
+/// No allocation.
+#[inline]
+fn route_main_output(
+    runtime: &mut RuntimeProject,
+    src_index: usize,
+    frames: usize,
+    output: &mut [f32],
+    channels: usize,
+) {
+    let target = match runtime.tracks[src_index].output_track_id.as_deref() {
+        Some(id) if !is_master_output(id) => runtime.tracks.iter().position(|t| t.id == id),
+        _ => None,
+    };
+
+    if let Some(t) = target {
+        let src_routing = is_routing_type(&runtime.tracks[src_index].track_type);
+        let accept = t != src_index
+            && is_routing_type(&runtime.tracks[t].track_type)
+            && (!src_routing || t > src_index);
+        if accept {
+            let (src, tgt) = two_mut(&mut runtime.tracks, src_index, t);
+            for f in 0..frames {
+                tgt.recv_l[f] += src.block_l[f];
+                tgt.recv_r[f] += src.block_r[f];
+            }
+            return;
+        }
+    }
+
+    // Default / fallback: sum into the master output.
+    let track = &runtime.tracks[src_index];
+    for f in 0..frames {
+        let out = &mut output[f * channels..f * channels + channels];
+        out[0] += track.block_l[f];
+        out[1] += track.block_r[f];
     }
 }
 
 /// Run a track's input block (already in `block_*`) through its insert chain
-/// then fader, summing to master, with pre-fader and post-fader send taps in
-/// the correct order: pre-fader sends read the post-insert signal, post-fader
-/// sends read the post-fader signal. No allocation.
+/// then fader, route the post-fader signal to its output destination (master or
+/// a bus/group), with pre-fader and post-fader send taps in the correct order:
+/// pre-fader sends read the post-insert signal, post-fader sends read the
+/// post-fader signal. No allocation.
 #[inline]
 fn process_track_block(
     runtime: &mut RuntimeProject,
@@ -1469,15 +1759,11 @@ fn process_track_block(
     apply_track_chain_block(&mut runtime.tracks[track_index], frames);
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
-    apply_fader_and_sum(
-        &mut runtime.tracks[track_index],
-        frames,
-        output,
-        channels,
-        beat,
-    );
+    apply_fader(&mut runtime.tracks[track_index], frames, beat);
     // Post-fader sends tap the post-fader signal now in block_*.
     accumulate_sends(runtime, track_index, frames, false);
+    // Route the post-fader signal to master or the track's output bus.
+    route_main_output(runtime, track_index, frames, output, channels);
 }
 
 /// Add the source track's block (`block_*`, holding either the post-insert or
@@ -1578,6 +1864,9 @@ pub fn render_project_block_interleaved(
 
     for clip_index in 0..runtime.clips.len() {
         let clip = &runtime.clips[clip_index];
+        if clip.muted {
+            continue;
+        }
         let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip.track_id) else {
             continue;
         };
@@ -1605,8 +1894,15 @@ pub fn render_project_block_interleaved(
                 + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip.speed_ratio as f64;
             let source_pos = source_pos_seconds * source.sample_rate() as f64;
             let (mut l, mut r) = sample_source_stereo(&source, source_pos);
-            l *= clip.gain;
-            r *= clip.gain;
+            let fade = clip_fade_gain(
+                rel,
+                clip.duration_samples,
+                clip.fade_in_samples,
+                clip.fade_out_samples,
+            );
+            let g = clip.gain * fade;
+            l *= g;
+            r *= g;
             runtime.tracks[track_index].block_l[frame_idx] += l;
             runtime.tracks[track_index].block_r[frame_idx] += r;
         }
@@ -1628,7 +1924,8 @@ pub fn render_project_block_interleaved(
         {
             continue;
         }
-        if !runtime.tracks[track_index].inserts.is_empty()
+        if callback_debug_enabled()
+            && !runtime.tracks[track_index].inserts.is_empty()
             && !runtime.tracks[track_index].callback_clip_route_log_done
         {
             runtime.tracks[track_index].callback_clip_route_log_done = true;
@@ -1760,11 +2057,13 @@ pub fn apply_track_chain_at_beat(
 ) -> (f32, f32) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
         track.callback_insert_log_done = true;
-        eprintln!(
-            "[SphereAudio callback] track={} inserts={}",
-            track.id,
-            track.inserts.len()
-        );
+        if callback_debug_enabled() {
+            eprintln!(
+                "[SphereAudio callback] track={} inserts={}",
+                track.id,
+                track.inserts.len()
+            );
+        }
     }
     for insert in &mut track.inserts {
         let processed = apply_insert(l, r, insert);
@@ -1781,12 +2080,14 @@ pub fn apply_track_chain_at_beat(
 pub fn apply_track_chain_block(track: &mut RuntimeTrack, frames: usize) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
         track.callback_insert_log_done = true;
-        eprintln!(
-            "[SphereAudio callback] track={} inserts={} blockFrames={}",
-            track.id,
-            track.inserts.len(),
-            frames
-        );
+        if callback_debug_enabled() {
+            eprintln!(
+                "[SphereAudio callback] track={} inserts={} blockFrames={}",
+                track.id,
+                track.inserts.len(),
+                frames
+            );
+        }
     }
     let instrument_ix = track.midi_instrument_insert_ix;
     let midi_events = &track.midi_block_events;
@@ -2127,14 +2428,21 @@ where
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         EngineCommand::LoadProject(next_runtime) => {
-                            eprintln!(
-                                "[SphereAudio callback] LoadProject: {} tracks, {} clips (sr={})",
-                                next_runtime.tracks.len(),
-                                next_runtime.clips.len(),
-                                output_sample_rate,
-                            );
-                            runtime = next_runtime;
+                            if callback_debug_enabled() {
+                                eprintln!(
+                                    "[SphereAudio callback] LoadProject: {} tracks, {} clips (sr={})",
+                                    next_runtime.tracks.len(),
+                                    next_runtime.clips.len(),
+                                    output_sample_rate,
+                                );
+                            }
+                            // Swap in the new graph and retire the old one off
+                            // the realtime thread — its destructor frees
+                            // buffers / munmaps sources / destroys VST3 handles
+                            // and must not run here. See `crate::graveyard`.
+                            let old = std::mem::replace(&mut runtime, next_runtime);
                             runtime.sample_rate = output_sample_rate;
+                            crate::graveyard::retire(old);
                             if crate::runtime::midi_engine_debug_enabled() {
                                 let notes: usize =
                                     runtime.midi_clips.iter().map(|c| c.events.len() / 2).sum();
@@ -2220,7 +2528,9 @@ where
                             runtime.update_track_pan(&track_id, value);
                         }
                         EngineCommand::SetTrackMute { track_id, muted } => {
-                            eprintln!("[SphereAudio callback] SetTrackMute track={track_id} muted={muted}");
+                            if callback_debug_enabled() {
+                                eprintln!("[SphereAudio callback] SetTrackMute track={track_id} muted={muted}");
+                            }
                             runtime.update_track_mute(&track_id, muted);
                         }
                         EngineCommand::SetTrackSolo { track_id, solo } => {
@@ -2289,12 +2599,14 @@ where
                     );
                     if !render_path_logged {
                         render_path_logged = true;
-                        eprintln!(
-                            "[SphereAudio callback] renderPath=legacy-block frames={} channels={} tracks={}",
-                            frames,
-                            ch,
-                            runtime.tracks.len()
-                        );
+                        if callback_debug_enabled() {
+                            eprintln!(
+                                "[SphereAudio callback] renderPath=legacy-block frames={} channels={} tracks={}",
+                                frames,
+                                ch,
+                                runtime.tracks.len()
+                            );
+                        }
                     }
                     if gen_tone {
                         for frame in scratch.chunks_mut(ch) {
@@ -2432,6 +2744,45 @@ where
         .map_err(|e| e.to_string())?;
 
     Ok(stream)
+}
+
+#[cfg(test)]
+mod clip_fade_tests {
+    use super::clip_fade_gain;
+
+    #[test]
+    fn no_fades_is_unity() {
+        assert_eq!(clip_fade_gain(0, 1000, 0, 0), 1.0);
+        assert_eq!(clip_fade_gain(500, 1000, 0, 0), 1.0);
+        assert_eq!(clip_fade_gain(999, 1000, 0, 0), 1.0);
+    }
+
+    #[test]
+    fn fade_in_ramps_zero_to_one() {
+        // 100-sample fade-in over a 1000-sample clip.
+        assert_eq!(clip_fade_gain(0, 1000, 100, 0), 0.0);
+        assert!((clip_fade_gain(50, 1000, 100, 0) - 0.5).abs() < 1e-6);
+        // At/after the fade-in length it is full gain.
+        assert_eq!(clip_fade_gain(100, 1000, 100, 0), 1.0);
+        assert_eq!(clip_fade_gain(900, 1000, 100, 0), 1.0);
+    }
+
+    #[test]
+    fn fade_out_ramps_one_to_zero() {
+        // 100-sample fade-out: starts at sample 900 (duration - fade_out).
+        assert_eq!(clip_fade_gain(899, 1000, 0, 100), 1.0);
+        assert!((clip_fade_gain(900, 1000, 0, 100) - 1.0).abs() < 1e-6);
+        assert!((clip_fade_gain(950, 1000, 0, 100) - 0.5).abs() < 1e-6);
+        assert!(clip_fade_gain(1000, 1000, 0, 100) <= 0.0);
+    }
+
+    #[test]
+    fn fade_in_and_out_combine() {
+        // In the flat middle region both fades are unity.
+        assert!((clip_fade_gain(500, 1000, 100, 100) - 1.0).abs() < 1e-6);
+        // Inside the fade-in region only the fade-in shapes the gain.
+        assert!((clip_fade_gain(25, 1000, 100, 100) - 0.25).abs() < 1e-6);
+    }
 }
 
 #[cfg(test)]
@@ -2627,5 +2978,73 @@ mod routing_tests {
             .iter()
             .all(|&v| (v - 1.0).abs() < 1e-6));
         assert!(p.tracks[0].recv_l[..frames].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn main_output_to_bus_routes_into_bus_receive_not_master() {
+        let frames = 4;
+        let channels = 2;
+        let mut a = track("a", "audio", vec![]);
+        a.output_track_id = Some("bus".to_string());
+        let mut p = RuntimeProject {
+            tracks: vec![a, track("bus", "bus", vec![])],
+            ..Default::default()
+        };
+        p.tracks[0].block_l[..frames].fill(0.8);
+        p.tracks[0].block_r[..frames].fill(-0.4);
+
+        let mut output = vec![0.0f32; frames * channels];
+        route_main_output(&mut p, 0, frames, &mut output, channels);
+
+        // The post-fader block went into the bus receive buffers …
+        assert!(p.tracks[1].recv_l[..frames]
+            .iter()
+            .all(|&v| (v - 0.8).abs() < 1e-6));
+        assert!(p.tracks[1].recv_r[..frames]
+            .iter()
+            .all(|&v| (v + 0.4).abs() < 1e-6));
+        // … and NOT into the master output.
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn main_output_to_master_sums_into_output() {
+        let frames = 4;
+        let channels = 2;
+        let mut p = RuntimeProject {
+            tracks: vec![track("a", "audio", vec![])], // output_track_id = None → master
+            ..Default::default()
+        };
+        p.tracks[0].block_l[..frames].fill(0.5);
+        p.tracks[0].block_r[..frames].fill(0.25);
+
+        let mut output = vec![0.0f32; frames * channels];
+        route_main_output(&mut p, 0, frames, &mut output, channels);
+
+        for f in 0..frames {
+            assert!((output[f * channels] - 0.5).abs() < 1e-6);
+            assert!((output[f * channels + 1] - 0.25).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn main_output_to_non_routing_track_falls_back_to_master() {
+        let frames = 4;
+        let channels = 2;
+        let mut a = track("a", "audio", vec![]);
+        a.output_track_id = Some("b".to_string()); // "b" is a plain audio track
+        let mut p = RuntimeProject {
+            tracks: vec![a, track("b", "audio", vec![])],
+            ..Default::default()
+        };
+        p.tracks[0].block_l[..frames].fill(1.0);
+        p.tracks[0].block_r[..frames].fill(1.0);
+
+        let mut output = vec![0.0f32; frames * channels];
+        route_main_output(&mut p, 0, frames, &mut output, channels);
+
+        // Not a routing target → summed to master, "b" untouched.
+        assert!(output.iter().all(|&v| (v - 1.0).abs() < 1e-6));
+        assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| v == 0.0));
     }
 }

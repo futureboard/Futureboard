@@ -28,9 +28,11 @@ mod dsp;
 pub mod engine;
 pub mod error;
 mod graph;
+mod graveyard;
 pub mod native;
 pub mod recording;
 mod runtime;
+mod streaming_source;
 pub mod types;
 mod vst3_processor;
 
@@ -70,8 +72,9 @@ use engine::EngineInner;
 #[cfg(feature = "napi")]
 use types::{
     EngineProjectSnapshot, JsAudioDeviceInfo, JsAudioFileInfo, JsDauxBackendInfo, JsDauxConfig,
-    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
-    JsRecordingStatus, JsSphereAudioStatus, JsStartRecordingConfig, JsWavPeakResult,
+    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsLatencyInfo, JsMeterSnapshot,
+    JsRecordingResult, JsRecordingStatus, JsSphereAudioStatus, JsStartRecordingConfig,
+    JsWavPeakResult,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -410,6 +413,60 @@ impl SphereDirectAudioEngine {
     #[napi]
     pub fn get_daux_status(&self) -> JsDauxStatus {
         self.inner.get_daux_status()
+    }
+
+    /// Attempt to recover the audio device after a device-loss event, reusing
+    /// the last-known-good config. Returns `true` if a recovery was performed,
+    /// `false` if the device was not lost. Poll `getDauxStatus().deviceLost`
+    /// and call this (e.g. on a "Reconnect" button or an auto-retry timer).
+    #[napi]
+    pub fn recover_daux(&self) -> napi::Result<bool> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.recover_daux().map_err(Into::into)
+        }))
+        .unwrap_or_else(|_| {
+            Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                "internal panic during audio device recovery".to_string(),
+            ))
+        })
+    }
+
+    /// Whether applying `config` would require a controlled device restart
+    /// versus the currently-open device. The Settings UI uses this to mark
+    /// changed fields "restart required" before the user applies them.
+    #[napi]
+    pub fn daux_requires_restart(&self, config: JsDauxConfig) -> bool {
+        self.inner.daux_requires_restart(&config)
+    }
+
+    /// Begin an input-level test on `deviceId` (or the default input device).
+    /// Poll `getInputTestLevel()` for the meter and call `stopInputTest()` when
+    /// done. Independent of recording and the output device.
+    #[napi]
+    pub fn start_input_test(&self, device_id: Option<String>) -> napi::Result<()> {
+        self.inner.start_input_test(device_id).map_err(Into::into)
+    }
+
+    /// Read (and reset) the peak input level since the last poll, `0.0..=1.0`.
+    /// Returns `0.0` when no input test is active.
+    #[napi]
+    pub fn get_input_test_level(&self) -> f64 {
+        self.inner.get_input_test_level() as f64
+    }
+
+    /// Stop and release the input-level test stream.
+    #[napi]
+    pub fn stop_input_test(&self) {
+        self.inner.stop_input_test();
+    }
+
+    /// Aggregate latency report: device buffer latency plus per-track and master
+    /// plug-in latency, for the Audio Settings / mixer UI. Reporting only —
+    /// full plug-in delay compensation is a later phase.
+    #[napi]
+    pub fn get_latency_info(&self) -> JsLatencyInfo {
+        self.inner.get_latency_info()
     }
 
     // ── Debug info ───────────────────────────────────────────────────────────

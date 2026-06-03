@@ -740,6 +740,12 @@ pub struct TrackState {
     /// per track; will be driven by the audio engine when that lands.
     pub meter_level_l: f32,
     pub meter_level_r: f32,
+    /// Held peak levels (slow release) driving the peak-hold tick. UI-only.
+    pub meter_peak_hold_l: f32,
+    pub meter_peak_hold_r: f32,
+    /// Latched clip indicator — set when the engine peak reached/exceeded
+    /// 0 dBFS, auto-cleared once the held peak falls back. UI-only.
+    pub meter_clip: bool,
     pub clips: Vec<ClipState>,
     pub automation_lanes: Vec<AutomationLaneState>,
     /// Per-track edit mode (Clip vs Automation). UI-only; not persisted.
@@ -1021,6 +1027,11 @@ pub struct MasterBusState {
     pub volume: f32,
     pub meter_level_l: f32,
     pub meter_level_r: f32,
+    /// Held peak levels (slow release) for the master peak-hold tick. UI-only.
+    pub meter_peak_hold_l: f32,
+    pub meter_peak_hold_r: f32,
+    /// Latched master clip indicator. UI-only.
+    pub meter_clip: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1085,6 +1096,9 @@ impl Default for TimelineState {
                 volume: volume::db_to_norm(0.0),
                 meter_level_l: 0.0,
                 meter_level_r: 0.0,
+                meter_peak_hold_l: 0.0,
+                meter_peak_hold_r: 0.0,
+                meter_clip: false,
             },
             selection: TimelineSelection {
                 selected_track_id: None,
@@ -1122,6 +1136,9 @@ impl TimelineState {
             input_monitor: false,
             meter_level_l: 0.62,
             meter_level_r: 0.68,
+            meter_peak_hold_l: 0.0,
+            meter_peak_hold_r: 0.0,
+            meter_clip: false,
             clips: vec![
                 ClipState {
                     id: "clip-1".to_string(),
@@ -1186,6 +1203,9 @@ impl TimelineState {
             input_monitor: false,
             meter_level_l: 0.42,
             meter_level_r: 0.48,
+            meter_peak_hold_l: 0.0,
+            meter_peak_hold_r: 0.0,
+            meter_clip: false,
             clips: vec![ClipState {
                 id: "clip-3".to_string(),
                 name: "drums_loop_120.wav".to_string(),
@@ -1222,6 +1242,9 @@ impl TimelineState {
             input_monitor: false,
             meter_level_l: 0.15,
             meter_level_r: 0.12,
+            meter_peak_hold_l: 0.0,
+            meter_peak_hold_r: 0.0,
+            meter_clip: false,
             clips: vec![ClipState {
                 id: "clip-4".to_string(),
                 name: "synth_lead.mid".to_string(),
@@ -1283,6 +1306,9 @@ impl TimelineState {
                 volume: volume::db_to_norm(0.0),
                 meter_level_l: 0.0,
                 meter_level_r: 0.0,
+                meter_peak_hold_l: 0.0,
+                meter_peak_hold_r: 0.0,
+                meter_clip: false,
             },
             selection: TimelineSelection {
                 selected_track_id: Some("track-1".to_string()),
@@ -2486,6 +2512,9 @@ impl TimelineState {
             input_monitor: options.input_monitor,
             meter_level_l: 0.0,
             meter_level_r: 0.0,
+            meter_peak_hold_l: 0.0,
+            meter_peak_hold_r: 0.0,
+            meter_clip: false,
             clips: Vec::new(),
             automation_lanes: Vec::new(),
             lane_mode: TrackLaneMode::Clips,

@@ -2695,7 +2695,7 @@ impl TimelineState {
     /// sync (the engine ignores unknown plugin descriptors gracefully).
     pub fn add_insert(&mut self, track_id: &str) -> Option<String> {
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
-        let slot_id = format!("insert-{}-{}", track.id, track.inserts.len() + 1);
+        let slot_id = Self::next_insert_slot_id(track);
         let slot = InsertSlotState::empty(&slot_id);
         if plugin_debug_enabled() {
             eprintln!("[plugin] add_insert track={} slot_id={}", track_id, slot_id);
@@ -2707,13 +2707,24 @@ impl TimelineState {
     pub fn ensure_insert_slot_at(&mut self, track_id: &str, slot_index: usize) -> Option<String> {
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
         while track.inserts.len() <= slot_index {
-            let slot_id = format!("insert-{}-{}", track.id, track.inserts.len() + 1);
+            let slot_id = Self::next_insert_slot_id(track);
             if plugin_debug_enabled() {
                 eprintln!("[plugin] add_insert track={} slot_id={}", track_id, slot_id);
             }
             track.inserts.push(InsertSlotState::empty(&slot_id));
         }
         track.inserts.get(slot_index).map(|slot| slot.id.clone())
+    }
+
+    fn next_insert_slot_id(track: &TrackState) -> String {
+        let mut suffix = track.inserts.len() + 1;
+        loop {
+            let candidate = format!("insert-{}-{}", track.id, suffix);
+            if track.inserts.iter().all(|slot| slot.id != candidate) {
+                return candidate;
+            }
+            suffix += 1;
+        }
     }
 
     /// Assign a plugin to an insert slot. The caller resolves the

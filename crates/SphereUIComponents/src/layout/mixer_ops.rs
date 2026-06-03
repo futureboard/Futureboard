@@ -353,14 +353,15 @@ impl StudioLayout {
         };
         // Phase 4: open the GPUI-hosted native plugin editor window.
         let on_open_insert_editor: std::sync::Arc<
-            dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
+            dyn Fn(&(String, usize, String), &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = owner.clone();
-            std::sync::Arc::new(move |(track_id, insert_id), window, cx| {
+            std::sync::Arc::new(move |(track_id, insert_index, insert_id), window, cx| {
                 let track_id = track_id.clone();
+                let insert_index = *insert_index;
                 let insert_id = insert_id.clone();
                 let _ = this.update(cx, |this, cx| {
-                    this.open_insert_editor(&track_id, &insert_id, window, cx);
+                    this.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
                 });
             })
         };

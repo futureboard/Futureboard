@@ -21,13 +21,59 @@ impl StudioLayout {
     pub(super) fn open_insert_editor(
         &mut self,
         track_id: &str,
-        insert_id: &str,
+        insert_index: usize,
+        plugin_instance_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use crate::components::timeline::timeline_state::InsertPluginFormat;
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some();
-        let key = (track_id.to_string(), insert_id.to_string());
+
+        let resolved = {
+            let timeline = self.timeline.read(cx);
+            timeline.state.find_track(track_id).and_then(|track| {
+                track.inserts.get(insert_index).map(|slot| {
+                    let insert_found = slot.id == plugin_instance_id;
+                    (
+                        insert_found,
+                        slot.id.clone(),
+                        slot.plugin_id.clone(),
+                        slot.plugin_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        slot.plugin_format,
+                        slot.display_name.clone(),
+                    )
+                })
+            })
+        };
+        let Some((
+            insert_found,
+            resolved_plugin_instance_id,
+            plugin_id,
+            plugin_path,
+            plugin_format,
+            display_name,
+        )) = resolved
+        else {
+            eprintln!(
+                "[plugin-view] open_plugin_editor requested_track_id={} requested_insert_index={} resolved_plugin_instance_id=<none> insert_found=false",
+                track_id, insert_index
+            );
+            return;
+        };
+
+        eprintln!(
+            "[plugin-view] open_plugin_editor requested_track_id={} requested_insert_index={} resolved_plugin_instance_id={} insert_found={}",
+            track_id, insert_index, resolved_plugin_instance_id, insert_found
+        );
+
+        if !insert_found {
+            return;
+        }
+
+        let insert_id = resolved_plugin_instance_id.as_str();
+        let key = (track_id.to_string(), resolved_plugin_instance_id.clone());
 
         // One editor window per insert. If a live editor already exists for this
         // slot, focus/raise it instead of opening (or instantiating) a second
@@ -52,28 +98,6 @@ impl StudioLayout {
             }
             self.open_plugin_editors.remove(&key);
         }
-
-        let descriptor = {
-            let timeline = self.timeline.read(cx);
-            timeline.state.find_track(track_id).and_then(|t| {
-                t.inserts.iter().find(|i| i.id == insert_id).map(|slot| {
-                    (
-                        slot.plugin_id.clone(),
-                        slot.plugin_path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().into_owned()),
-                        slot.plugin_format,
-                        slot.display_name.clone(),
-                    )
-                })
-            })
-        };
-        let Some((plugin_id, plugin_path, plugin_format, display_name)) = descriptor else {
-            if debug {
-                eprintln!("[plugin-view] no slot track={track_id} slot={insert_id}");
-            }
-            return;
-        };
 
         let path = plugin_path.filter(|p| !p.trim().is_empty());
         let editable = plugin_format == Some(InsertPluginFormat::Vst3)

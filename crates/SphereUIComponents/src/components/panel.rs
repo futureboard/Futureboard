@@ -38,6 +38,7 @@ type AudioFormatCb = Arc<dyn Fn(&(String, TrackAudioFormat), &mut Window, &mut A
 type MidiInputCb = Arc<dyn Fn(&(String, TrackMidiInputRouting), &mut Window, &mut App) + 'static>;
 type MidiChannelCb = Arc<dyn Fn(&(String, Option<u8>), &mut Window, &mut App) + 'static>;
 type InsertPairCb = Arc<dyn Fn(&(String, String), &mut Window, &mut App) + 'static>;
+type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) + 'static>;
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
@@ -63,7 +64,7 @@ pub struct InspectorCallbacks {
     pub on_toggle_insert_bypass: InsertPairCb,
     pub on_toggle_insert_enabled: InsertPairCb,
     pub on_move_insert: InsertMoveCb,
-    pub on_open_insert_editor: InsertPairCb,
+    pub on_open_insert_editor: InsertOpenCb,
     pub on_set_clip_start: ClipF32Cb,
     pub on_set_clip_length: ClipF32Cb,
     pub on_open_clip_bottom_editor: StrCb,
@@ -657,6 +658,7 @@ fn insert_action_row(
 ) -> impl IntoElement {
     let track_open = track_id.to_string();
     let slot_open = slot.id.clone();
+    let slot_open_index = slot_index;
     let open = callbacks.on_open_insert_editor.clone();
     let track_replace = track_id.to_string();
     let replace = callbacks.on_open_insert_picker.clone();
@@ -685,7 +687,13 @@ fn insert_action_row(
             "insert-open-editor",
             "Open",
             true,
-            move |_, w, cx| open(&(track_open.clone(), slot_open.clone()), w, cx),
+            move |_, w, cx| {
+                open(
+                    &(track_open.clone(), slot_open_index, slot_open.clone()),
+                    w,
+                    cx,
+                )
+            },
         ))
         .child(compact_action_button(
             "insert-replace",

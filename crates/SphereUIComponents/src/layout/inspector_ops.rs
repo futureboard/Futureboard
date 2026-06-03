@@ -30,6 +30,7 @@ type AudioFormatCb = Arc<dyn Fn(&(String, TrackAudioFormat), &mut Window, &mut A
 type MidiInputCb = Arc<dyn Fn(&(String, TrackMidiInputRouting), &mut Window, &mut App) + 'static>;
 type MidiChannelCb = Arc<dyn Fn(&(String, Option<u8>), &mut Window, &mut App) + 'static>;
 type InsertPairCb = Arc<dyn Fn(&(String, String), &mut Window, &mut App) + 'static>;
+type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) + 'static>;
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
@@ -364,16 +365,17 @@ impl StudioLayout {
         )
     }
 
-    fn open_insert_editor_cb(&self, owner: Entity<Self>) -> InsertPairCb {
+    fn open_insert_editor_cb(&self, owner: Entity<Self>) -> InsertOpenCb {
         Arc::new(
-            move |(track_id, insert_id): &(String, String), window, cx| {
+            move |(track_id, insert_index, insert_id): &(String, usize, String), window, cx| {
                 let track_id = track_id.clone();
+                let insert_index = *insert_index;
                 let insert_id = insert_id.clone();
                 let _ = owner.update(cx, |this, cx| {
                     inspector_debug(&format!(
-                        "insert open_editor track={track_id} insert={insert_id}"
+                        "insert open_editor track={track_id} index={insert_index} insert={insert_id}"
                     ));
-                    this.open_insert_editor(&track_id, &insert_id, window, cx);
+                    this.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
                 });
             },
         )

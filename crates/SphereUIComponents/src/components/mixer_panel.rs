@@ -103,8 +103,9 @@ pub struct MixerCallbacks {
     >,
     /// User clicked the slot chip — Phase 4 will open the native plugin
     /// editor; Phase 1 logs the request.
-    pub on_open_insert_editor:
-        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_open_insert_editor: std::sync::Arc<
+        dyn Fn(&(String, usize, String), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     /// Add an aux send from the track to the first available Bus/Return
     /// (Phase 3). A target picker is a follow-up.
     pub on_add_send: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -122,6 +123,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
     let noop_master = Arc::new(|_: &f32, _: &mut Window, _: &mut App| {});
     let noop_insert_pair = Arc::new(|_: &(String, String), _: &mut Window, _: &mut App| {});
+    let noop_insert_open = Arc::new(|_: &(String, usize, String), _: &mut Window, _: &mut App| {});
     let noop_insert_move = Arc::new(|_: &(String, String, bool), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
@@ -137,7 +139,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_remove_insert: noop_insert_pair.clone(),
         on_toggle_insert_bypass: noop_insert_pair.clone(),
         on_move_insert: noop_insert_move,
-        on_open_insert_editor: noop_insert_pair.clone(),
+        on_open_insert_editor: noop_insert_open.clone(),
         on_add_send: noop_track,
         on_remove_send: noop_insert_pair,
     }
@@ -459,12 +461,14 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
 
 fn insert_chip(
     track_id: &str,
+    insert_index: usize,
     slot: &InsertSlotState,
     callbacks: &MixerCallbacks,
 ) -> impl IntoElement {
     let track_id_owned = track_id.to_string();
     let slot_id = slot.id.clone();
     let display = slot.display_name.clone();
+    let display_for_log = display.clone();
     let bypassed = slot.bypassed;
     let on_open = callbacks.on_open_insert_editor.clone();
     let on_bypass = callbacks.on_toggle_insert_bypass.clone();
@@ -489,7 +493,7 @@ fn insert_chip(
     let remove_pair = (track_id_owned.clone(), slot_id.clone());
     let move_up_tuple = (track_id_owned.clone(), slot_id.clone(), true);
     let move_down_tuple = (track_id_owned.clone(), slot_id.clone(), false);
-    let open_pair = (track_id_owned, slot_id);
+    let open_target = (track_id_owned, insert_index, slot_id);
 
     div()
         .id(gpui::SharedString::from(format!(
@@ -510,7 +514,11 @@ fn insert_chip(
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
         .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
-            on_open(&open_pair, w, cx);
+            eprintln!(
+                "[mixer] insert row clicked track_id={} insert_index={} plugin={} plugin_instance_id={}",
+                open_target.0, open_target.1, display_for_log, open_target.2
+            );
+            on_open(&open_target, w, cx);
         })
         .occlude()
         .child(div().truncate().child(display))
@@ -637,8 +645,8 @@ fn inserts_section(
     let at_max = used >= MAX_INSERT_SLOTS;
 
     let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
-    for slot in &track.inserts {
-        chips = chips.child(insert_chip(&track.id, slot, callbacks));
+    for (insert_index, slot) in track.inserts.iter().enumerate() {
+        chips = chips.child(insert_chip(&track.id, insert_index, slot, callbacks));
     }
     // Requirement: always render one trailing empty slot after the last insert,
     // until MAX_INSERT_SLOTS is reached.

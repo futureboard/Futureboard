@@ -169,7 +169,7 @@ fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
                     window, cx,
                 );
                 let bounds = window.bounds();
-                let _ = studio_entity.update(cx, |studio, cx| {
+                studio_entity.update(cx, |studio, cx| {
                     studio.request_close(PendingCloseAction::QuitApp, Some(bounds), cx);
                 });
                 // Always veto the platform close; confirmed quit runs via `do_quit`.

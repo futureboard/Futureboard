@@ -15,6 +15,14 @@ impl Render for StudioLayout {
         self.frame_diag.tick(reason);
         crate::perf::tick_root_frame(reason_static);
 
+        // Keep the OS window title in sync with the project lifecycle state
+        // (Part G/H), e.g. "Untitled Project — Unsaved" / "My Song — Saved".
+        let title = self.window_title();
+        if self.last_window_title.as_deref() != Some(title.as_str()) {
+            window.set_window_title(&title);
+            self.last_window_title = Some(title);
+        }
+
         let on_tab_click = cx.listener(|this, tab: &components::BottomTab, _window, cx| {
             this.active_bottom_tab = *tab;
             cx.notify();
@@ -86,6 +94,38 @@ impl Render for StudioLayout {
         let panel_state = self.bottom_panel_state;
         let mixer_callbacks = self.build_mixer_callbacks(cx.entity().clone());
         let inspector_callbacks = self.build_inspector_callbacks(cx.entity().clone());
+
+        let inspector_routing_combo_overlay: Option<gpui::AnyElement> =
+            if let (Some(combo), Some(anchor)) = (
+                self.open_inspector_routing_combo,
+                self.inspector_routing_combo_anchor,
+            ) {
+                selected_track_id.as_deref().and_then(|tid| {
+                    tracks.iter().find(|t| t.id == tid).map(|track| {
+                        let close = Arc::new({
+                            let this = cx.entity().clone();
+                            move |cx: &mut gpui::App| {
+                                let _ = this.update(cx, |layout, cx| {
+                                    layout.open_inspector_routing_combo = None;
+                                    layout.inspector_routing_combo_anchor = None;
+                                    cx.notify();
+                                });
+                            }
+                        });
+                        crate::components::panel::inspector_routing_combo_overlay(
+                            track,
+                            combo,
+                            anchor,
+                            window,
+                            &inspector_callbacks,
+                            close,
+                        )
+                        .into_any_element()
+                    })
+                })
+            } else {
+                None
+            };
 
         // Reconcile the Inspector name field with the current track selection.
         // Only reload when the bound track actually changes, so typing into the
@@ -960,6 +1000,7 @@ impl Render for StudioLayout {
             // panel. The dropdown's own backdrop captures click-outside.
             .children(dropdown_overlay)
             .children(popover_overlay)
+            .children(inspector_routing_combo_overlay)
             // Add Track moved to external window.
             .children(settings_overlay)
             .children(plugin_picker_overlay_el)

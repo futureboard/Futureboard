@@ -3,6 +3,9 @@ use gpui::{
     KeyDownEvent, ParentElement, Render, Styled, UniformListScrollHandle, Window, WindowHandle,
 };
 
+pub use crate::shutdown::ShutdownState;
+pub use close_ops::PendingCloseAction;
+
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
 
 use crate::components;
@@ -35,6 +38,7 @@ use sphere_plugin_host::load_au_cache_state;
 
 mod audio_transport;
 mod browser_ops;
+mod close_ops;
 mod engine_snapshot;
 mod frame_diagnostics;
 mod helpers;
@@ -47,6 +51,7 @@ mod recording_ops;
 mod studio_render;
 mod studio_state;
 mod track_clip_ops;
+mod transport_freeze_debug;
 mod transport_ops;
 mod window_ops;
 
@@ -110,6 +115,76 @@ pub fn apply_saved_renderer_preference(cx: &mut gpui::App) {
 /// Returns the active backend label for status display.
 pub fn warm_up_renderer() -> &'static str {
     crate::components::timeline::timeline_surface::warm_up_timeline_renderer()
+}
+
+/// Outcome of an early renderer warm-up: what backend was requested vs. what is
+/// actually active, so the Welcome screen can report "GPU ready" vs. a CPU
+/// fallback honestly (Part A).
+#[derive(Debug, Clone, Copy)]
+pub struct RendererWarmup {
+    pub backend_label: &'static str,
+    /// The user/preference asked for the GPU (WGPU) backend.
+    pub gpu_requested: bool,
+    /// The GPU backend is actually active (adapter/device created OK).
+    pub gpu_active: bool,
+}
+
+impl RendererWarmup {
+    /// Status text for the Welcome renderer row.
+    pub fn status_text(&self) -> &'static str {
+        if self.gpu_active {
+            "GPU ready"
+        } else if self.gpu_requested {
+            "CPU fallback"
+        } else {
+            "CPU render"
+        }
+    }
+}
+
+/// Warm the renderer and report whether the GPU backend was requested and
+/// whether it came up. Logs start/end (and any fallback) under
+/// `FUTUREBOARD_GPU_RENDERER_DEBUG=1`. Non-fatal: a failed GPU init falls back
+/// to CPU paint inside [`warm_up_renderer`].
+pub fn warm_up_renderer_status() -> RendererWarmup {
+    use crate::components::timeline::render::TimelineRendererBackend;
+
+    let preferred = TimelineRendererBackend::from_env();
+    #[cfg(feature = "gpu-renderer")]
+    let gpu_requested = matches!(preferred, TimelineRendererBackend::Wgpu);
+    #[cfg(not(feature = "gpu-renderer"))]
+    let gpu_requested = false;
+
+    let gpu_debug = std::env::var_os("FUTUREBOARD_GPU_RENDERER_DEBUG").is_some();
+    if gpu_debug {
+        eprintln!(
+            "[gpu-renderer] warm-up start (requested backend={})",
+            preferred.label()
+        );
+    }
+
+    let backend_label = warm_up_renderer();
+
+    #[cfg(feature = "gpu-renderer")]
+    let gpu_active = backend_label == TimelineRendererBackend::Wgpu.label();
+    #[cfg(not(feature = "gpu-renderer"))]
+    let gpu_active = false;
+
+    if gpu_debug {
+        if gpu_requested && !gpu_active {
+            eprintln!("[gpu-renderer] warm-up end: GPU requested but fell back to CPU paint");
+        } else {
+            eprintln!(
+                "[gpu-renderer] warm-up end: backend={backend_label} gpu_active={gpu_active}"
+            );
+        }
+    }
+
+    RendererWarmup {
+        backend_label,
+        gpu_requested,
+        gpu_active,
+    }
 }
 
 /// Notify a satellite window's root view without calling `Entity::update` (which
@@ -194,6 +269,8 @@ pub struct StudioLayout {
 
     text_context_menu: Option<TextContextMenu>,
     open_popover: Option<OpenPopover>,
+    open_inspector_routing_combo: Option<crate::components::panel::InspectorRoutingCombo>,
+    inspector_routing_combo_anchor: Option<crate::overlay::OverlayAnchor>,
     audio_engine: Option<DAUx::AudioEngine>,
     audio_running: bool,
     audio_last_error: Option<String>,
@@ -264,9 +341,18 @@ pub struct StudioLayout {
     /// Live unsaved-changes guard dialog (Save / Don't Save / Cancel), if one
     /// is currently shown. Tracked so New/Open/Close/Quit don't stack dialogs.
     unsaved_guard_window: Option<WindowHandle<MessageBoxWindow>>,
+    /// Close/quit action waiting on the unsaved-changes dialog.
+    pending_close_action: Option<close_ops::PendingCloseAction>,
+    /// New/Open lifecycle action waiting on the unsaved-changes dialog.
+    pending_lifecycle_action: Option<project_ops::LifecycleAction>,
     /// Active keyboard shortcut profile. The default profile is bundled; other
     /// profiles load from `<app dir>/Keymaps/<id>.json`. Drives `shortcut_command_id`.
     active_keymap: crate::keymap::Keymap,
+    /// Authoritative project-lifecycle state (Part G). Drives the window title;
+    /// the dirty bit is still tracked on `project_switcher.current_project`.
+    project_state: crate::app_state::ProjectState,
+    /// Last OS window title applied in render, to avoid redundant set calls.
+    last_window_title: Option<String>,
 }
 
 impl StudioLayout {
@@ -473,15 +559,15 @@ impl StudioLayout {
         }
         crate::platform_chrome::register_studio_menu_dispatcher(studio_entity, cx);
 
-        // Close native plugin editors before GPUI/thread-local teardown on exit.
+        // Ordered studio teardown before GPUI/thread-local destruction.
         let _ = cx.on_app_quit(|layout, cx| {
-            layout.shutdown_plugin_editors(cx);
+            layout.shutdown_studio(cx);
             async {}
         });
 
         // settings and paths are loaded and registered at the top of this function
 
-        Self {
+        let mut layout = Self {
             active_bottom_tab: components::BottomTab::Mixer,
             bottom_panel_state: BottomPanelState::default(),
             timeline,
@@ -535,6 +621,8 @@ impl StudioLayout {
 
             text_context_menu: None,
             open_popover: None,
+            open_inspector_routing_combo: None,
+            inspector_routing_combo_anchor: None,
             audio_engine,
             audio_running: initial_audio_running,
             audio_last_error: None,
@@ -564,8 +652,18 @@ impl StudioLayout {
             self_window: None,
             on_request_welcome: None,
             unsaved_guard_window: None,
+            pending_close_action: None,
+            pending_lifecycle_action: None,
             active_keymap: crate::keymap::Keymap::bundled_default(),
+            project_state: crate::app_state::ProjectState::NoProject,
+            last_window_title: None,
+        };
+
+        if layout.audio_engine.is_some() {
+            layout.schedule_audio_project_sync(cx, true, "studio_init");
         }
+
+        layout
     }
 
     /// Switch the active keyboard shortcut profile. `"default"` restores the
@@ -611,10 +709,21 @@ impl StudioLayout {
     /// and then ignored — this is the contract that lets future menu
     /// entries appear in the chrome without crashing the dispatcher.
     pub fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
-        self.dispatch_command_id_from_bounds(command_id, None, cx);
+        let studio_bounds = self.studio_window_bounds(cx);
+        let owner_bounds =
+            crate::window_position::resolve_owner_bounds_with_preferred(None, studio_bounds, cx);
+        self.dispatch_command_id_from_bounds(command_id, owner_bounds, cx);
     }
 
-    fn dispatch_command_id_from_bounds(
+    /// Main workspace window bounds — preferred owner for dialogs on Windows.
+    pub(super) fn studio_window_bounds(&self, cx: &mut gpui::App) -> Option<Bounds<gpui::Pixels>> {
+        self.self_window.as_ref().and_then(|handle| {
+            let bounds = handle.update(cx, |_, window, _| window.bounds()).ok()?;
+            crate::window_position::is_valid_owner_bounds(bounds).then_some(bounds)
+        })
+    }
+
+    pub(super) fn dispatch_command_id_from_bounds(
         &mut self,
         command_id: &str,
         owner_bounds: Option<Bounds<gpui::Pixels>>,
@@ -760,15 +869,21 @@ impl StudioLayout {
             // entry points share one unsaved-changes guard (Save / Don't Save /
             // Cancel) before replacing or unloading the current project.
             "project:new" | "project:new-from-template" => {
-                self.guard_dirty_then(LifecycleAction::NewProject, owner_bounds, cx)
+                self.guard_dirty_then_lifecycle(LifecycleAction::NewProject, owner_bounds, cx)
             }
-            "project:close" => {
-                self.guard_dirty_then(LifecycleAction::CloseProject, owner_bounds, cx)
-            }
+            "project:close" => self.request_close(
+                close_ops::PendingCloseAction::CloseProject,
+                owner_bounds,
+                cx,
+            ),
             // Quit the whole application — distinct from `project:close`, which
             // only unloads the session and returns to Welcome.
-            "app:quit" => self.guard_dirty_then(LifecycleAction::Quit, owner_bounds, cx),
-            "project:open" => self.guard_dirty_then(LifecycleAction::OpenProject, owner_bounds, cx),
+            "app:quit" => {
+                self.request_close(close_ops::PendingCloseAction::QuitApp, owner_bounds, cx)
+            }
+            "project:open" => {
+                self.guard_dirty_then_lifecycle(LifecycleAction::OpenProject, owner_bounds, cx)
+            }
             "project:save" => self.cmd_save_project(cx),
             "project:save-as" => self.cmd_save_project_as(cx),
             "project:save-copy" => self.cmd_save_project_copy(cx),
@@ -972,9 +1087,10 @@ impl StudioLayout {
     fn panel_chrome_state(&self, cx: &mut Context<Self>) -> components::PanelChromeState {
         let make_handler = |command_id: &'static str| {
             let this = cx.entity().clone();
-            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+            Arc::new(move |_: &(), window: &mut Window, cx: &mut gpui::App| {
+                let bounds = window.bounds();
                 let _ = this.update(cx, |this, cx| {
-                    this.dispatch_command_id(command_id, cx);
+                    this.dispatch_command_id_from_bounds(command_id, Some(bounds), cx);
                     cx.notify();
                 });
             })

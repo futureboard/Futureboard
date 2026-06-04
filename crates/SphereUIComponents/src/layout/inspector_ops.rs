@@ -12,11 +12,12 @@ use std::sync::Arc;
 use gpui::{App, Entity, Window};
 
 use crate::components::inspector_debug;
-use crate::components::panel::InspectorCallbacks;
+use crate::components::panel::{InspectorCallbacks, InspectorRoutingCombo};
 use crate::components::plugin_picker::PluginInsertKind;
 use crate::components::timeline::timeline_state::{
     TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
 };
+use crate::overlay::OverlayAnchor;
 
 use super::engine_snapshot::volume_norm_to_linear;
 use super::StudioLayout;
@@ -104,6 +105,25 @@ impl StudioLayout {
         let on_open_clip_external_midi_editor =
             self.open_clip_external_midi_editor_cb(owner.clone());
 
+        let open_routing_combo = self.open_inspector_routing_combo;
+        let owner_routing_combo = owner.clone();
+        let on_toggle_routing_combo: Arc<
+            dyn Fn(InspectorRoutingCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static,
+        > = Arc::new(
+            move |combo: InspectorRoutingCombo, anchor: Option<OverlayAnchor>, _w, cx| {
+                let _ = owner_routing_combo.update(cx, |this, cx| {
+                    if this.open_inspector_routing_combo == Some(combo) {
+                        this.open_inspector_routing_combo = None;
+                        this.inspector_routing_combo_anchor = None;
+                    } else {
+                        this.open_inspector_routing_combo = Some(combo);
+                        this.inspector_routing_combo_anchor = anchor;
+                    }
+                    cx.notify();
+                });
+            },
+        );
+
         let timeline_color = self.timeline.clone();
         let owner_color = owner.clone();
         let on_set_color: ColorCb = Arc::new(move |(id, color): &(String, gpui::Rgba), _w, cx| {
@@ -148,6 +168,8 @@ impl StudioLayout {
             on_set_clip_length,
             on_open_clip_bottom_editor,
             on_open_clip_external_midi_editor,
+            open_routing_combo,
+            on_toggle_routing_combo,
         }
     }
 

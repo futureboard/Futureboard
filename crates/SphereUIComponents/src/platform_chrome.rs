@@ -199,8 +199,11 @@ pub fn register_studio_menu_dispatcher(
     use std::sync::Arc;
 
     crate::native_macos_menu::set_command_dispatcher(Arc::new(move |command_id, app| {
+        let owner_bounds = app
+            .active_window()
+            .and_then(|handle| handle.update(app, |_, window, _| window.bounds()).ok());
         let _ = studio.update(app, |this, cx| {
-            this.dispatch_command_id(command_id, cx);
+            this.dispatch_command_id_from_bounds(command_id, owner_bounds, cx);
             cx.notify();
         });
     }));

@@ -1,4 +1,4 @@
-use gpui::{px, Bounds, Context, Window};
+use gpui::{Bounds, Context, Window};
 
 use crate::components::plugin_manager::open_plugin_manager_window;
 use crate::components::plugin_picker::{
@@ -215,6 +215,9 @@ impl StudioLayout {
                 .spawn(async { sphere_plugin_host::PluginRegistry::load_catalog() })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    return;
+                }
                 match load {
                     CatalogLoad::Loaded { catalog, sqlite_ms } => {
                         let count = catalog.plugins.len();
@@ -468,10 +471,11 @@ impl StudioLayout {
         self.open_popover = None;
         self.text_context_menu = None;
 
-        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
-            origin: gpui::Point::default(),
-            size: gpui::size(px(1400.0), px(900.0)),
-        });
+        let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
+            owner_bounds,
+            self.studio_window_bounds(cx),
+            cx,
+        );
 
         match open_plugin_manager_window(owner_bounds, cx) {
             Ok(handle) => self.plugin_manager_window = Some(handle),

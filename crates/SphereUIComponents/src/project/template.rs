@@ -5,6 +5,8 @@
 //! depending on any wizard UI. This is pure data — track counts, tempo, and
 //! time signature defaults — consumed by `StudioLayout::new_project_from_template`.
 
+use std::path::PathBuf;
+
 /// A starting layout for a brand-new (unsaved) workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectTemplate {
@@ -18,6 +20,17 @@ pub enum ProjectTemplate {
     Mixing,
     /// MIDI-first layout for cues / arrangement sketches.
     Scoring,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectCreateOptions {
+    pub name: String,
+    pub base_dir: PathBuf,
+    pub template: ProjectTemplate,
+    pub sample_rate: u32,
+    pub bpm: f32,
+    pub time_signature_num: u32,
+    pub time_signature_den: u32,
 }
 
 impl ProjectTemplate {

@@ -66,6 +66,8 @@ pub struct FutureboardPaths {
     pub app_data: PathBuf,
     /// `<app_data>/settings.json`
     pub settings_file: PathBuf,
+    /// `<app_data>/studio_window.json` — last main workspace window bounds.
+    pub studio_window_file: PathBuf,
     /// `<app_data>/recent.json`
     pub recent_file: PathBuf,
     /// `<app_data>/indexfile.dat` — SQLite index database.
@@ -124,6 +126,7 @@ impl FutureboardPaths {
         let app_data = config_dir.join(APP_NAME);
 
         let settings_file = app_data.join("settings.json");
+        let studio_window_file = app_data.join("studio_window.json");
         let recent_file = app_data.join("recent.json");
         let index_db = app_data.join("indexfile.dat");
         let logs = app_data.join("Logs");
@@ -153,6 +156,7 @@ impl FutureboardPaths {
             exports,
             app_data,
             settings_file,
+            studio_window_file,
             recent_file,
             index_db,
             logs,
@@ -284,14 +288,14 @@ impl FutureboardPaths {
 /// Resolved subfolder layout for a single Futureboard project.
 ///
 /// Given a project root folder, this struct resolves all standard
-/// subdirectories (Media, Cache, Rendered) and can create them
+/// subdirectories (Assets, Cache, Rendered) and can create them
 /// idempotently.
 ///
 /// ```text
 /// <root>/
-///   Media/Audio/
-///   Media/MIDI/
-///   Media/Samples/
+///   Assets/Audio/
+///   Assets/MIDI/
+///   Assets/Samples/
 ///   Cache/Waveform/
 ///   Cache/Peaks/
 ///   Cache/Processed/
@@ -320,7 +324,7 @@ impl ProjectFolderLayout {
     ///
     /// Pure computation — no filesystem I/O.
     pub fn from_root(root: PathBuf) -> Self {
-        let media = root.join("Media");
+        let media = root.join("Assets");
         let cache = root.join("Cache");
         let rendered = root.join("Rendered");
 

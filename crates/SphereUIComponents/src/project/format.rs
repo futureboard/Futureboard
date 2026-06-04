@@ -1032,6 +1032,25 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
     })
 }
 
+/// Cheaply validate that `data` begins with a supported Futureboard project
+/// header (magic + version) without decoding the body or verifying the
+/// checksum. Returns the on-disk format version. Used for fast pre-load
+/// validation (e.g. the Welcome → Open Project flow) so an invalid pick can be
+/// reported inline without reading/decoding the whole file.
+pub fn peek_project_header(data: &[u8]) -> Result<u32, ProjectError> {
+    if data.len() < 20 {
+        return Err(ProjectError::Corrupted("file too small".into()));
+    }
+    if &data[0..8] != PROJECT_MAGIC {
+        return Err(ProjectError::InvalidMagic);
+    }
+    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    if version == 0 || version > PROJECT_VERSION {
+        return Err(ProjectError::UnsupportedVersion(version));
+    }
+    Ok(version)
+}
+
 /// Decodes a `.fbproj` binary blob into a `FutureboardProject`.
 pub fn decode_project(data: &[u8]) -> Result<FutureboardProject, ProjectError> {
     if data.len() < 20 {
@@ -1147,6 +1166,40 @@ mod tests {
         assert_eq!(got.points[1].value, 1.0);
         assert_eq!(got.height, 72.0);
         assert!(got.visible);
+    }
+
+    #[test]
+    fn peek_header_accepts_encoded_project() {
+        let project = FutureboardProject::new("Peek Test");
+        let bytes = encode_project(&project);
+        let version = peek_project_header(&bytes).expect("valid header");
+        assert_eq!(version, PROJECT_VERSION);
+    }
+
+    #[test]
+    fn peek_header_rejects_bad_magic() {
+        let mut bytes = encode_project(&FutureboardProject::new("X"));
+        bytes[0] = b'Z'; // corrupt the magic
+        assert!(matches!(
+            peek_project_header(&bytes),
+            Err(ProjectError::InvalidMagic)
+        ));
+    }
+
+    #[test]
+    fn peek_header_rejects_future_version() {
+        let mut bytes = encode_project(&FutureboardProject::new("X"));
+        // Bump the version field (bytes 8..12) past the supported max.
+        bytes[8..12].copy_from_slice(&(PROJECT_VERSION + 1).to_le_bytes());
+        assert!(matches!(
+            peek_project_header(&bytes),
+            Err(ProjectError::UnsupportedVersion(_))
+        ));
+    }
+
+    #[test]
+    fn peek_header_rejects_tiny_input() {
+        assert!(peek_project_header(&[0u8; 4]).is_err());
     }
 
     #[test]

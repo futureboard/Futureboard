@@ -6,10 +6,10 @@ pub mod template;
 pub use format::{decode_project, encode_project, ProjectError, PROJECT_MAGIC, PROJECT_VERSION};
 pub use io::{
     create_project_folder, default_projects_dir, load_project, sanitize_project_name, save_project,
-    PROJECT_FILE_EXT,
+    validate_project_file, LEGACY_PROJECT_FILE_EXT, PROJECT_FILE_EXT, SUPPORTED_PROJECT_FILE_EXTS,
 };
 pub use recent::{RecentProject, RecentProjectsStore};
-pub use template::ProjectTemplate;
+pub use template::{ProjectCreateOptions, ProjectTemplate};
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -436,20 +436,16 @@ impl FutureboardProject {
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
 /// Converts a `gpui::Rgba` to a hex color string "#RRGGBB".
+/// Format an `Rgba` as a stable `#RRGGBB` string. Delegates to the canonical
+/// [`crate::color`] helper so there is one color implementation project-wide.
 pub fn rgba_to_hex(c: gpui::Rgba) -> String {
-    let r = (c.r * 255.0).round() as u8;
-    let g = (c.g * 255.0).round() as u8;
-    let b = (c.b * 255.0).round() as u8;
-    format!("#{:02X}{:02X}{:02X}", r, g, b)
+    crate::color::rgba_to_hex(c)
 }
 
-/// Converts a hex color string "#RRGGBB" to `gpui::Rgba`.
+/// Converts a hex color string to `gpui::Rgba`. Unparseable values fall back to
+/// the first default-palette color rather than panicking.
 pub fn hex_to_rgba(hex: &str) -> gpui::Rgba {
-    let s = hex.trim_start_matches('#');
-    let r = u8::from_str_radix(&s.get(0..2).unwrap_or("56"), 16).unwrap_or(0x56);
-    let g = u8::from_str_radix(&s.get(2..4).unwrap_or("C7"), 16).unwrap_or(0xC7);
-    let b = u8::from_str_radix(&s.get(4..6).unwrap_or("C9"), 16).unwrap_or(0xC9);
-    gpui::rgba(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xFF)
+    crate::color::parse_hex_color(hex).unwrap_or_else(|_| crate::color::auto_color_for_index(0))
 }
 
 // ── From TimelineState ────────────────────────────────────────────────────────

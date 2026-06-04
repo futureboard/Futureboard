@@ -1,16 +1,14 @@
 use gpui::{px, size, App, Bounds, Point, WindowBounds, WindowOptions};
 
 use sphere_ui_components::platform_chrome;
+use sphere_ui_components::window_position;
+
 pub const WELCOME_WIDTH: f32 = 1180.0;
 pub const WELCOME_HEIGHT: f32 = 820.0;
 
-pub fn studio_window_options() -> WindowOptions {
-    let mut options = platform_chrome::studio_window_options();
-    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
-        origin: Point::default(),
-        size: size(px(1400.0), px(900.0)),
-    }));
-    options
+/// Main Futureboard Studio workspace window — centered or restored from disk.
+pub fn studio_window_options(cx: &mut App) -> WindowOptions {
+    window_position::studio_window_options(cx)
 }
 
 pub fn welcome_window_options(cx: &App) -> WindowOptions {

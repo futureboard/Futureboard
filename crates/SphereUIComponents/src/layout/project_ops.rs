@@ -1,35 +1,32 @@
-use gpui::{px, size, App, Bounds, Context, Point, Window};
+use gpui::{px, size, Bounds, Context, Point};
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use crate::components::message_box_dialog::{
-    open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
-};
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::timeline::timeline_state::{
     self, CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
 };
 use crate::project::{
-    apply_to_timeline, io::load_project, io::save_project, now_secs, FutureboardProject,
-    ProjectTemplate,
+    apply_to_timeline, io::create_project_folder, io::load_project, io::save_project, now_secs,
+    ClipSource, FutureboardProject, ProjectCreateOptions, ProjectTemplate,
 };
 
 use super::StudioLayout;
 
 /// A project-lifecycle action that must be guarded by the unsaved-changes
-/// prompt. All four entry points (New / Open / Close / Quit) funnel through
-/// [`StudioLayout::guard_dirty_then`] so they share one dirty-project guard.
+/// prompt (New / Open). Close / Quit use [`super::close_ops::PendingCloseAction`].
 #[derive(Debug, Clone, Copy)]
 pub(super) enum LifecycleAction {
     /// Replace the current project with a fresh empty workspace.
     NewProject,
     /// Show the Open Project file picker (replaces the current project).
     OpenProject,
-    /// Unload the session and return to the Welcome window.
-    CloseProject,
-    /// Quit the whole application.
-    Quit,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SaveThenAction {
+    PendingClose,
+    Lifecycle(LifecycleAction),
 }
 
 fn default_owner_bounds() -> Bounds<gpui::Pixels> {
@@ -38,8 +35,60 @@ fn default_owner_bounds() -> Bounds<gpui::Pixels> {
         size: size(px(1400.0), px(900.0)),
     }
 }
+
+fn project_save_path_from_picker(path: PathBuf) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path;
+    };
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(crate::project::io::sanitize_project_name)
+        .unwrap_or_else(|| "Untitled Project".to_string());
+    let already_project_folder = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|folder| folder == stem)
+        .unwrap_or(false);
+    if already_project_folder {
+        path
+    } else {
+        parent
+            .join(&stem)
+            .join(format!("{stem}.{}", crate::project::io::PROJECT_FILE_EXT))
+    }
+}
+
 impl StudioLayout {
+    /// Resolve the directory new projects should default to. Reads the
+    /// user-configured default project directory from settings (falling back to
+    /// the platform default), then best-effort creates it so the save dialog
+    /// opens somewhere that exists. Never panics on a bad/missing path.
+    pub(super) fn default_projects_dir(&self, cx: &Context<Self>) -> PathBuf {
+        let dir = cx
+            .try_global::<crate::settings::GlobalSettingsModel>()
+            .map(|g| g.0.read(cx).current.general.resolved_default_project_dir())
+            .unwrap_or_else(crate::project::io::default_projects_dir);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// Authoritative project lifecycle state (Part G).
+    pub fn project_state(&self) -> &crate::app_state::ProjectState {
+        &self.project_state
+    }
+
+    /// OS window title derived from the lifecycle state + dirty bit, e.g.
+    /// `"Untitled Project — Unsaved"` / `"My Song — Saved"` (Part H).
+    pub fn window_title(&self) -> String {
+        self.project_state.window_title(
+            &self.project_switcher.current_project.name,
+            self.project_switcher.current_project.is_dirty,
+        )
+    }
+
     pub(super) fn reset_project(&mut self, cx: &mut Context<Self>) {
+        self.project_state = crate::app_state::ProjectState::NoProject;
         self.project_path = None;
         self.project_folder = None;
         self.file_browser.set_project_folder(None);
@@ -58,6 +107,7 @@ impl StudioLayout {
     /// blank arrangement that is marked dirty/unsaved.
     pub fn new_empty_project(&mut self, cx: &mut Context<Self>) {
         self.reset_project(cx);
+        self.project_state = crate::app_state::ProjectState::UnsavedWorkspace;
         self.project_switcher.current_project.name = "Untitled Project".to_string();
         self.project_switcher.current_project.path = None;
         self.project_switcher.current_project.is_dirty = false;
@@ -113,6 +163,7 @@ impl StudioLayout {
             cx.notify();
         });
 
+        self.project_state = crate::app_state::ProjectState::UnsavedWorkspace;
         self.project_switcher.current_project.name =
             format!("Untitled {} Project", template.label());
         self.project_switcher.current_project.path = None;
@@ -123,114 +174,92 @@ impl StudioLayout {
         cx.notify();
     }
 
-    // ── Unsaved-changes guard (shared by New / Open / Close / Quit) ─────────────
-
-    /// Request to quit the whole application, going through the unsaved-changes
-    /// guard first. Used by the WCO / OS window close button.
-    pub fn request_quit(
+    /// Create a named project from the Welcome screen. This is the first point
+    /// where disk state is created: it makes the project folder tree, writes the
+    /// `.fbproj`, updates recents, and leaves the workspace in `SavedProject`.
+    pub fn create_saved_project_from_options(
         &mut self,
-        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        options: ProjectCreateOptions,
         cx: &mut Context<Self>,
     ) {
-        self.guard_dirty_then(LifecycleAction::Quit, owner_bounds, cx);
-    }
-
-    /// Shared dirty-project guard. If the current project has no unsaved
-    /// changes, runs `action` immediately. Otherwise shows the Save / Don't
-    /// Save / Cancel message box and only runs `action` once the user confirms
-    /// (Save must also succeed). The project is never unloaded — and transport
-    /// is never stopped — before the user answers.
-    pub(super) fn guard_dirty_then(
-        &mut self,
-        action: LifecycleAction,
-        owner_bounds: Option<Bounds<gpui::Pixels>>,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.project_switcher.current_project.is_dirty {
-            self.run_lifecycle_action(action, cx);
-            return;
-        }
-
-        // A guard is already on screen — focus it instead of stacking another.
-        if let Some(handle) = self.unsaved_guard_window.clone() {
-            if handle
-                .update(cx, |_mb, window, _cx| window.activate_window())
-                .is_ok()
-            {
+        let safe_name = crate::project::io::sanitize_project_name(&options.name);
+        let folder = match create_project_folder(&options.base_dir, &safe_name) {
+            Ok(folder) => folder,
+            Err(e) => {
+                eprintln!("[project] create project folder failed: {e}");
+                self.project_state = crate::app_state::ProjectState::Error(e.to_string());
+                self.project_switcher.current_project.subtitle = format!("Create failed: {e}");
+                cx.notify();
                 return;
             }
-            self.unsaved_guard_window = None;
+        };
+        let final_name = folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| safe_name.clone());
+        let path = folder.join(format!(
+            "{}.{}",
+            final_name,
+            crate::project::io::PROJECT_FILE_EXT
+        ));
+
+        if options.template == ProjectTemplate::Empty {
+            self.new_empty_project(cx);
+        } else {
+            self.new_project_from_template(options.template, cx);
         }
 
-        let owner_bounds = owner_bounds.unwrap_or_else(default_owner_bounds);
-        let options = MessageBoxOptions {
-            kind: MessageBoxKind::Warning,
-            title: "Save Changes?".to_string(),
-            message: "This project has unsaved changes. Do you want to save before closing it?"
-                .to_string(),
-            detail: None,
-            buttons: vec![
-                "Save".to_string(),
-                "Don't Save".to_string(),
-                "Cancel".to_string(),
-            ],
-            default_id: 0,
-            cancel_id: Some(2),
-        };
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.state.bpm = options.bpm;
+            timeline.state.time_signature_num = options.time_signature_num;
+            timeline.state.time_signature_den = options.time_signature_den;
+            cx.notify();
+        });
 
-        let owner = cx.entity().clone();
-        let on_response: Arc<dyn Fn(MessageBoxResult, &mut Window, &mut App) + Send + Sync> =
-            Arc::new(move |result, _window, cx| {
-                let _ = owner.update(cx, |this, cx| {
-                    this.unsaved_guard_window = None;
-                    match result.response {
-                        0 => this.save_project_then(action, cx),    // Save
-                        1 => this.run_lifecycle_action(action, cx), // Don't Save
-                        _ => {}                                     // Cancel / Esc / close
-                    }
-                });
-            });
+        self.project_switcher.current_project.name = final_name;
+        self.project_switcher.current_project.path = Some(path.clone());
+        self.project_folder = Some(folder.clone());
+        self.file_browser.set_project_folder(Some(folder));
 
-        match open_message_box_window(owner_bounds, options, on_response, cx) {
-            Ok(handle) => self.unsaved_guard_window = Some(handle),
-            Err(err) => {
-                // The native message box is Windows-only. Elsewhere (or on
-                // failure) fall back to proceeding without saving rather than
-                // trapping the user — Windows is the supported target.
-                eprintln!("[project] unsaved-changes dialog unavailable: {err}");
-                self.run_lifecycle_action(action, cx);
-            }
+        if self.do_save_project(&path, cx) {
+            self.project_path = Some(path);
+            self.project_switcher.current_project.subtitle = "Saved".to_string();
         }
     }
 
     /// Run a guarded lifecycle action *after* the dirty-project guard has been
     /// satisfied (not dirty, Don't Save, or a successful Save).
-    fn run_lifecycle_action(&mut self, action: LifecycleAction, cx: &mut Context<Self>) {
+    pub(super) fn run_lifecycle_action(&mut self, action: LifecycleAction, cx: &mut Context<Self>) {
         match action {
             LifecycleAction::NewProject => self.new_empty_project(cx),
             LifecycleAction::OpenProject => self.cmd_open_project(cx),
-            LifecycleAction::CloseProject => self.do_close_project(cx),
-            LifecycleAction::Quit => self.do_quit(cx),
         }
     }
 
-    /// Save the current project, then run `action` only if the save succeeds.
-    /// A project that has never been saved routes through Save As; cancelling
-    /// the Save As dialog aborts the action (the project stays open).
-    fn save_project_then(&mut self, action: LifecycleAction, cx: &mut Context<Self>) {
+    /// Save, then run a pending close/quit action if save succeeds.
+    pub(super) fn save_close_then(&mut self, cx: &mut Context<Self>) {
+        self.save_then(SaveThenAction::PendingClose, cx);
+    }
+
+    /// Save, then run a pending New/Open lifecycle action if save succeeds.
+    pub(super) fn save_lifecycle_then(&mut self, action: LifecycleAction, cx: &mut Context<Self>) {
+        self.save_then(SaveThenAction::Lifecycle(action), cx);
+    }
+
+    fn save_then(&mut self, after_save: SaveThenAction, cx: &mut Context<Self>) {
         if let Some(path) = self.project_path.clone() {
-            if self.do_save_project(&path, cx) {
-                self.run_lifecycle_action(action, cx);
-            }
-            // Save failed → keep the project open; the status bar shows the error.
+            self.save_project_in_background_then(path, Some(after_save), cx);
             return;
         }
 
-        // Never-saved project → Save As. Continue only on a successful save.
-        let default_dir = crate::project::io::default_projects_dir();
+        let default_dir = self.default_projects_dir(cx);
         let name = self.project_switcher.current_project.name.clone();
         let entity = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
+            if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                return;
+            }
             let result = rfd::AsyncFileDialog::new()
                 .set_title("Save Project As")
                 .set_directory(&default_dir)
@@ -241,46 +270,55 @@ impl StudioLayout {
                 ))
                 .add_filter(
                     "Futureboard Project",
-                    &[crate::project::io::PROJECT_FILE_EXT],
+                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
                 )
                 .save_file()
                 .await;
             if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
+                let path = project_save_path_from_picker(handle.path().to_path_buf());
                 let _ = entity.update(cx, |this, cx| {
-                    if this.do_save_project(&path, cx) {
-                        this.project_path = Some(path);
-                        this.run_lifecycle_action(action, cx);
+                    if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                        return;
                     }
+                    this.save_project_in_background_then(path, Some(after_save), cx);
+                });
+            } else {
+                let _ = entity.update(cx, |this, _cx| {
+                    this.pending_close_action = None;
+                    this.pending_lifecycle_action = None;
                 });
             }
-            // None → user cancelled Save As → abort the action (project stays open).
         })
         .detach();
     }
 
-    // ── Close / quit (post-confirmation) ────────────────────────────────────────
-
-    /// Quit the whole application. Runs only after the unsaved-changes guard is
-    /// satisfied. Transport is stopped here so it stops *after* confirmation.
-    fn do_quit(&mut self, cx: &mut Context<Self>) {
-        self.stop_native_playback(cx);
-        cx.quit();
+    fn apply_save_then(&mut self, after_save: SaveThenAction, cx: &mut Context<Self>) {
+        match after_save {
+            SaveThenAction::PendingClose => self.perform_pending_close(cx),
+            SaveThenAction::Lifecycle(action) => self.run_lifecycle_action(action, cx),
+        }
     }
+
+    // ── Close project (post-confirmation) ───────────────────────────────────────
 
     /// Unload the current project/session and return the app to the Welcome
     /// screen, keeping the application running. Runs only after the
     /// unsaved-changes guard is satisfied. This is *not* an app quit — the
     /// WCO / OS window close button handles quitting via [`Self::request_quit`].
-    fn do_close_project(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn do_close_project(&mut self, cx: &mut Context<Self>) {
+        if crate::shutdown::ShutdownState::global().is_shutting_down() {
+            return;
+        }
         // 1. Stop transport (safe even when idle — engine pauses). Only reached
         //    after the user has confirmed the close.
         self.stop_native_playback(cx);
 
         // 2. Clear project-specific editor/timeline/mixer state.
         self.reset_project(cx);
-        self.mark_engine_media_dirty();
-        self.schedule_audio_project_sync(cx, true, "close_project");
+        if !crate::shutdown::ShutdownState::global().is_shutting_down() {
+            self.mark_engine_media_dirty();
+            self.schedule_audio_project_sync(cx, true, "close_project");
+        }
 
         // 3. Return to Welcome by opening a fresh welcome window via the
         //    app-level hook. Opening a new window from inside this update is
@@ -300,11 +338,19 @@ impl StudioLayout {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(0))
                     .await;
-                let _ = handle.update(cx, |_studio, window, _cx| window.remove_window());
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    return;
+                }
+                let _ = handle.update(cx, |_studio, window, cx| {
+                    crate::window_position::persist_studio_window_from_window(window, cx);
+                    window.remove_window();
+                });
             })
             .detach();
         }
-        cx.notify();
+        if !crate::shutdown::ShutdownState::global().is_shutting_down() {
+            cx.notify();
+        }
     }
 
     // ── Save / load ───────────────────────────────────────────────────────────
@@ -317,7 +363,7 @@ impl StudioLayout {
 
     pub(super) fn cmd_save_project(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.project_path.clone() {
-            self.do_save_project(&path, cx);
+            self.save_project_in_background(path, cx);
         } else {
             self.cmd_save_project_as(cx);
         }
@@ -328,7 +374,7 @@ impl StudioLayout {
             .project_path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(crate::project::io::default_projects_dir);
+            .unwrap_or_else(|| self.default_projects_dir(cx));
         let name = self.project_switcher.current_project.name.clone();
         let entity = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
@@ -342,15 +388,14 @@ impl StudioLayout {
                 ))
                 .add_filter(
                     "Futureboard Project",
-                    &[crate::project::io::PROJECT_FILE_EXT],
+                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
                 )
                 .save_file()
                 .await;
             if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
+                let path = project_save_path_from_picker(handle.path().to_path_buf());
                 let _ = entity.update(cx, |this, cx| {
-                    this.do_save_project(&path, cx);
-                    this.project_path = Some(path);
+                    this.save_project_in_background(path, cx);
                 });
             }
         })
@@ -362,10 +407,11 @@ impl StudioLayout {
             .project_path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(crate::project::io::default_projects_dir);
+            .unwrap_or_else(|| self.default_projects_dir(cx));
         let name = self.project_switcher.current_project.name.clone();
         let entity = cx.entity().clone();
         let tl_state = self.timeline.read(cx).state.clone();
+        let sample_rate = self.current_audio_sample_rate();
         cx.spawn(async move |_this, cx| {
             let result = rfd::AsyncFileDialog::new()
                 .set_title("Save Copy")
@@ -377,13 +423,14 @@ impl StudioLayout {
                 ))
                 .add_filter(
                     "Futureboard Project",
-                    &[crate::project::io::PROJECT_FILE_EXT],
+                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
                 )
                 .save_file()
                 .await;
             if let Some(handle) = result {
                 let path = handle.path().to_path_buf();
                 let mut project = FutureboardProject::from(&tl_state);
+                project.settings.sample_rate = sample_rate;
                 let _ = entity.update(cx, |_this, _cx| {
                     if let Err(e) = save_project(&mut project, &path) {
                         eprintln!("[project] save copy failed: {e}");
@@ -397,24 +444,149 @@ impl StudioLayout {
     /// Persist the project to `path`. Returns `true` on success so callers
     /// (notably the unsaved-changes guard) can decide whether to continue.
     pub(super) fn do_save_project(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> bool {
-        let tl_state = self.timeline.read(cx).state.clone();
-        let mut project = FutureboardProject::from(&tl_state);
-        project.name = self.project_switcher.current_project.name.clone();
+        let mut project = self.project_snapshot(cx);
         match save_project(&mut project, path) {
             Ok(()) => {
-                self.project_switcher.current_project.is_dirty = false;
-                self.project_switcher.current_project.subtitle = "Saved".to_string();
-                self.project_switcher.current_project.path = Some(path.clone());
-                self.recent_projects
-                    .push(&project.name, path.clone(), now_secs());
-                self.sync_recent_to_switcher();
+                self.finish_project_save(project, path.clone(), cx);
                 true
             }
             Err(e) => {
-                eprintln!("[project] save failed: {e}");
-                self.project_switcher.current_project.subtitle = format!("Save failed: {e}");
+                self.handle_project_save_error(e.to_string(), cx);
                 false
             }
+        }
+    }
+
+    fn save_project_in_background(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.save_project_in_background_then(path, None, cx);
+    }
+
+    fn save_project_in_background_then(
+        &mut self,
+        path: PathBuf,
+        after_save: Option<SaveThenAction>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut project = self.project_snapshot(cx);
+        self.project_switcher.current_project.subtitle = "Saving...".to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let path_for_job = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { save_project(&mut project, &path_for_job).map(|_| project) })
+                .await;
+            let _ = this.update(cx, move |this, cx| match result {
+                Ok(project) => {
+                    this.finish_project_save(project, path, cx);
+                    if let Some(after_save) = after_save {
+                        this.apply_save_then(after_save, cx);
+                    }
+                }
+                Err(e) => this.handle_project_save_error(e.to_string(), cx),
+            });
+        })
+        .detach();
+    }
+
+    fn project_snapshot(&self, cx: &mut Context<Self>) -> FutureboardProject {
+        let tl_state = self.timeline.read(cx).state.clone();
+        let mut project = FutureboardProject::from(&tl_state);
+        project.name = self.project_switcher.current_project.name.clone();
+        project.settings.sample_rate = self.current_audio_sample_rate();
+        project
+    }
+
+    fn finish_project_save(
+        &mut self,
+        project: FutureboardProject,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_timeline_audio_paths_after_save(&project, &path, cx);
+        self.project_state = crate::app_state::ProjectState::SavedProject { path: path.clone() };
+        self.project_path = Some(path.clone());
+        self.project_folder = path.parent().map(PathBuf::from);
+        self.file_browser
+            .set_project_folder(self.project_folder.clone());
+        self.project_switcher.current_project.is_dirty = false;
+        self.project_switcher.current_project.subtitle = "Saved".to_string();
+        self.project_switcher.current_project.path = Some(path.clone());
+        self.recent_projects.push(&project.name, path, now_secs());
+        self.sync_recent_to_switcher();
+        cx.notify();
+    }
+
+    fn handle_project_save_error(&mut self, error: String, cx: &mut Context<Self>) {
+        eprintln!("[project] save failed: {error}");
+        self.project_switcher.current_project.subtitle = format!("Save failed: {error}");
+        cx.notify();
+    }
+
+    fn sync_timeline_audio_paths_after_save(
+        &mut self,
+        project: &FutureboardProject,
+        path: &PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project_root) = path.parent().map(PathBuf::from) else {
+            return;
+        };
+        let updates: std::collections::HashMap<String, String> = project
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter_map(|clip| {
+                let ClipSource::Audio {
+                    source_path: Some(source_path),
+                    ..
+                } = &clip.source
+                else {
+                    return None;
+                };
+                let resolved = if source_path.is_absolute() {
+                    source_path.clone()
+                } else {
+                    project_root.join(source_path)
+                };
+                Some((clip.id.clone(), resolved.to_string_lossy().into_owned()))
+            })
+            .collect();
+
+        if updates.is_empty() {
+            return;
+        }
+
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let mut changed = false;
+            for track in &mut timeline.state.tracks {
+                for clip in &mut track.clips {
+                    let Some(new_path) = updates.get(&clip.id) else {
+                        continue;
+                    };
+                    let crate::components::timeline::timeline_state::ClipType::Audio {
+                        file_id,
+                        source_path,
+                    } = &mut clip.clip_type
+                    else {
+                        continue;
+                    };
+                    if source_path.as_deref() != Some(new_path.as_str()) {
+                        *file_id = new_path.clone();
+                        *source_path = Some(new_path.clone());
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+
+        if changed {
+            self.mark_engine_media_dirty();
+            self.schedule_audio_project_sync(cx, true, "project_save_asset_paths");
         }
     }
 
@@ -423,7 +595,7 @@ impl StudioLayout {
             .project_path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(crate::project::io::default_projects_dir);
+            .unwrap_or_else(|| self.default_projects_dir(cx));
         let entity = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
             let result = rfd::AsyncFileDialog::new()
@@ -431,7 +603,7 @@ impl StudioLayout {
                 .set_directory(&default_dir)
                 .add_filter(
                     "Futureboard Project",
-                    &[crate::project::io::PROJECT_FILE_EXT],
+                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
                 )
                 .pick_file()
                 .await;
@@ -446,11 +618,14 @@ impl StudioLayout {
     }
 
     pub fn load_project_from_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.project_state = crate::app_state::ProjectState::Loading;
         match load_project(&path) {
             Ok(project) => {
                 let _ = self.timeline.update(cx, |timeline, _cx| {
                     apply_to_timeline(&project, &mut timeline.state);
                 });
+                self.project_state =
+                    crate::app_state::ProjectState::SavedProject { path: path.clone() };
                 self.project_path = Some(path.clone());
                 self.project_folder = path.parent().map(|p| p.to_path_buf());
                 self.file_browser
@@ -467,6 +642,8 @@ impl StudioLayout {
             }
             Err(e) => {
                 eprintln!("[project] load failed: {e}");
+                self.project_state = crate::app_state::ProjectState::Error(e.to_string());
+                cx.notify();
             }
         }
     }

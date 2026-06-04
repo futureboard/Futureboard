@@ -4,15 +4,19 @@ use std::time::Duration;
 
 use crate::window::{studio_window_options, welcome_window_options};
 use gpui::{App, AppContext};
+use sphere_ui_components::app_state::StudioRoute;
 use sphere_ui_components::assets;
 use sphere_ui_components::boot;
-use sphere_ui_components::layout::StudioLayout;
-use sphere_ui_components::project::ProjectTemplate;
+use sphere_ui_components::layout::warm_up_renderer_status;
+use sphere_ui_components::layout::{PendingCloseAction, StudioLayout};
+use sphere_ui_components::project::{ProjectCreateOptions, ProjectTemplate};
+use sphere_ui_components::settings::SettingsSchema;
 use sphere_ui_components::welcome::{WelcomeAction, WelcomeCallbacks, WelcomeWindow};
 
 pub fn setup(cx: &mut App) {
+    boot::log("app boot start");
+
     // Fonts must be registered before the first native view renders.
-    boot::log("register fonts");
     assets::register_fonts(cx);
     boot::log("fonts registered");
 
@@ -22,8 +26,28 @@ pub fn setup(cx: &mut App) {
     sphere_ui_components::layout::apply_saved_renderer_preference(cx);
     boot::log("renderer preference applied");
 
-    // Launch flow: Splash / Loading -> Welcome.
-    open_welcome_window(cx, false);
+    // Startup route honors the "Show start screen on launch" preference (Part G).
+    let show_welcome = SettingsSchema::load_from_disk().general.show_start_screen;
+    let route = StudioRoute::from_show_welcome(show_welcome);
+    boot::log(&format!("startup route: {}", route.label()));
+
+    match route {
+        // Launch flow: Splash / Loading -> Welcome (renderer warms during splash).
+        StudioRoute::Welcome => open_welcome_window(cx, false),
+        // Welcome disabled: warm the renderer now, then boot straight into an
+        // empty unsaved workspace. Welcome stays reachable via File → Close
+        // Project.
+        StudioRoute::StudioWorkspace => {
+            let warm = warm_up_renderer_status();
+            boot::log(&format!(
+                "renderer warm (no-welcome): {} [{}]",
+                warm.status_text(),
+                warm.backend_label
+            ));
+            open_studio_for_action(WelcomeAction::OpenEmptyWorkspace, cx);
+            boot::log("workspace entered (welcome disabled)");
+        }
+    }
 }
 
 /// Open (or re-open) the Welcome window. This is the fallback route whenever no
@@ -43,7 +67,7 @@ fn open_welcome_window(cx: &mut App, skip_splash: bool) {
     };
     let welcome = cx
         .open_window(welcome_window_options(cx), |_window, cx| {
-            cx.new(|_| WelcomeWindow::new(env!("CARGO_PKG_VERSION"), callbacks))
+            cx.new(|cx| WelcomeWindow::new(env!("CARGO_PKG_VERSION"), callbacks, cx.focus_handle()))
         })
         .expect("failed to open welcome window");
     boot::log("welcome window shown");
@@ -81,11 +105,12 @@ fn open_welcome_window(cx: &mut App, skip_splash: bool) {
             cx.notify();
         });
         let _ = welcome.update(cx, |welcome, _window, cx| {
-            let backend = sphere_ui_components::layout::warm_up_renderer();
-            welcome.set_gpu_status(format!("Ready · {backend}"));
+            let warm = sphere_ui_components::layout::warm_up_renderer_status();
+            welcome.set_gpu_status(format!("{} · {}", warm.status_text(), warm.backend_label));
             welcome.set_loading_status("Ready");
             cx.notify();
         });
+        boot::log("renderer warm-up complete (welcome)");
 
         executor.timer(Duration::from_millis(120)).await;
         let _ = welcome.update(cx, |welcome, _window, cx| {
@@ -106,6 +131,8 @@ enum WorkspaceInit {
     OpenDialog,
     /// Load a specific recent/existing project file.
     Load(PathBuf),
+    /// Create a named project on disk, then enter the saved workspace.
+    CreateProject(ProjectCreateOptions),
 }
 
 fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
@@ -119,11 +146,14 @@ fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
         WelcomeAction::AudioSession => WorkspaceInit::Template(ProjectTemplate::Recording),
         WelcomeAction::MixTemplate => WorkspaceInit::Template(ProjectTemplate::Mixing),
         WelcomeAction::OpenProject => WorkspaceInit::OpenDialog,
+        WelcomeAction::OpenProjectFile(path) => WorkspaceInit::Load(path),
         WelcomeAction::OpenRecent(path) => WorkspaceInit::Load(path),
+        WelcomeAction::CreateProject(options) => WorkspaceInit::CreateProject(options),
     };
 
+    let studio_options = studio_window_options(cx);
     let studio = cx
-        .open_window(studio_window_options(), |window, cx| {
+        .open_window(studio_options, |window, cx| {
             boot::log("build StudioLayout");
             let layout = cx.new(StudioLayout::new);
             boot::log("StudioLayout built");
@@ -133,12 +163,16 @@ fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
             // GPUI's default close: `request_quit` drives `cx.quit()` only once
             // the user confirms, so Cancel keeps the app open and the close
             // never routes to Welcome.
-            let weak = layout.downgrade();
+            let studio_entity = layout.clone();
             window.on_window_should_close(cx, move |window, cx| {
+                sphere_ui_components::window_position::persist_studio_window_from_window(
+                    window, cx,
+                );
                 let bounds = window.bounds();
-                let _ = weak.update(cx, |studio, cx| {
-                    studio.request_quit(Some(bounds), cx);
+                let _ = studio_entity.update(cx, |studio, cx| {
+                    studio.request_close(PendingCloseAction::QuitApp, Some(bounds), cx);
                 });
+                // Always veto the platform close; confirmed quit runs via `do_quit`.
                 false
             });
 
@@ -159,6 +193,10 @@ fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
             WorkspaceInit::Template(template) => layout.new_project_from_template(template, cx),
             WorkspaceInit::OpenDialog => layout.dispatch_command_id("project:open", cx),
             WorkspaceInit::Load(path) => layout.load_project_from_path(path, cx),
+            WorkspaceInit::CreateProject(options) => {
+                layout.create_saved_project_from_options(options, cx)
+            }
         }
     });
+    boot::log("workspace entered");
 }

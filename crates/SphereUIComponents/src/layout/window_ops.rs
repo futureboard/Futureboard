@@ -1,16 +1,18 @@
-use gpui::{px, Bounds, Context, Window};
+use gpui::{Bounds, Context, Window};
 
 use std::sync::Arc;
 
 use crate::components::add_track_dialog::{
     open_add_track_window, AddTrackDialogState, AddTrackKind,
 };
+use crate::components::combo_box::dedupe_preserve_order;
 use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
 use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate};
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackType,
 };
 use crate::components::{external_mixer_debug, open_mixer_window};
+use crate::window_position::resolve_owner_bounds_with_preferred;
 use sphere_plugin_host::{PluginFormat as RegistryPluginFormat, PluginKind};
 
 use super::helpers::{cleaned_track_name, numbered_name_stem};
@@ -73,10 +75,8 @@ impl StudioLayout {
         self.open_popover = None;
         self.text_context_menu = None;
 
-        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
-            origin: gpui::Point::default(),
-            size: gpui::size(px(1400.0), px(900.0)),
-        });
+        let owner_bounds =
+            resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
 
         if self.available_plugins.is_none()
             || !matches!(
@@ -128,15 +128,22 @@ impl StudioLayout {
                                     dialog.next_number + i
                                 )
                             };
-                            let color_ix = if dialog.auto_color {
-                                dialog.base_track_count + i
+                            // Auto color → generated palette color per track.
+                            // Custom color → the user's chosen color (applied to
+                            // every track created in this batch).
+                            let color = if dialog.auto_color {
+                                timeline
+                                    .state
+                                    .track_color_for_index(dialog.base_track_count + i)
+                            } else if let Some(custom) = dialog.custom_color {
+                                custom
                             } else {
-                                dialog.color_index + i
+                                timeline.state.track_color_for_index(dialog.color_index + i)
                             };
                             let id = timeline.state.create_track(CreateTrackOptions {
                                 track_type,
                                 name,
-                                color: timeline.state.track_color_for_index(color_ix),
+                                color,
                                 volume: timeline_state::volume::db_to_norm(0.0),
                                 pan: 0.0,
                                 armed: dialog.selected_kind == AddTrackKind::Audio
@@ -239,10 +246,8 @@ impl StudioLayout {
         self.project_switcher.is_open = false;
         self.text_context_menu = None;
 
-        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
-            origin: gpui::Point::default(),
-            size: gpui::size(px(1400.0), px(900.0)),
-        });
+        let owner_bounds =
+            resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
         let settings = self.settings.clone();
         let owner = cx.entity().clone();
 
@@ -264,6 +269,7 @@ impl StudioLayout {
         if available_inputs.is_empty() {
             available_inputs.push("Built-in Microphone".to_string());
         }
+        available_inputs = dedupe_preserve_order(&available_inputs);
 
         let mut available_outputs = if let Some(ref engine) = self.audio_engine {
             engine
@@ -282,6 +288,7 @@ impl StudioLayout {
         if available_outputs.is_empty() {
             available_outputs.push("Speakers (Realtek)".to_string());
         }
+        available_outputs = dedupe_preserve_order(&available_outputs);
 
         let available_backends = vec![
             "WASAPI Exclusive".to_string(),
@@ -338,10 +345,9 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         external_mixer_debug("external mixer open requested");
-        self.pending_mixer_external_open = Some(owner_bounds.unwrap_or_else(|| Bounds {
-            origin: gpui::Point::default(),
-            size: gpui::size(px(1400.0), px(900.0)),
-        }));
+        let owner_bounds =
+            resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
+        self.pending_mixer_external_open = owner_bounds;
         self.schedule_pending_mixer_external_open(cx);
         cx.notify();
     }
@@ -362,7 +368,12 @@ impl StudioLayout {
     }
 
     pub(super) fn flush_pending_mixer_external_open(&mut self, cx: &mut Context<Self>) {
-        let Some(owner_bounds) = self.pending_mixer_external_open.take() else {
+        let owner_bounds = resolve_owner_bounds_with_preferred(
+            self.pending_mixer_external_open.take(),
+            self.studio_window_bounds(cx),
+            cx,
+        );
+        let Some(owner_bounds) = owner_bounds else {
             return;
         };
 
@@ -447,10 +458,9 @@ impl StudioLayout {
         if self.selected_midi_clip_id(cx).is_none() {
             return;
         }
-        self.pending_midi_editor_open = Some(owner_bounds.unwrap_or_else(|| Bounds {
-            origin: gpui::Point::default(),
-            size: gpui::size(px(1400.0), px(900.0)),
-        }));
+        let owner_bounds =
+            resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
+        self.pending_midi_editor_open = owner_bounds;
         self.schedule_pending_midi_editor_open(cx);
         cx.notify();
     }
@@ -469,7 +479,12 @@ impl StudioLayout {
     }
 
     pub(super) fn flush_pending_midi_editor_open(&mut self, cx: &mut Context<Self>) {
-        let Some(owner_bounds) = self.pending_midi_editor_open.take() else {
+        let owner_bounds = resolve_owner_bounds_with_preferred(
+            self.pending_midi_editor_open.take(),
+            self.studio_window_bounds(cx),
+            cx,
+        );
+        let Some(owner_bounds) = owner_bounds else {
             return;
         };
 
@@ -541,7 +556,7 @@ impl StudioLayout {
             });
 
         match open_midi_editor_window(
-            owner_bounds,
+            Some(owner_bounds),
             timeline,
             piano_roll,
             on_close,

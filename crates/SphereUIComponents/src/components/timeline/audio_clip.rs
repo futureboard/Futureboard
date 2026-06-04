@@ -117,6 +117,7 @@ pub fn audio_clip(
         .on_mouse_down(
             gpui::MouseButton::Left,
             move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
                 on_select(&clip_id, window, cx);
                 if event.click_count >= 2 {
                     if let Some(open) = open_editor.as_ref() {

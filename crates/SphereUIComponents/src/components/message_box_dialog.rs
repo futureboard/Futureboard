@@ -441,9 +441,7 @@ pub fn open_message_box_window(
     cx: &mut App,
 ) -> Result<WindowHandle<MessageBoxWindow>, String> {
     use crate::window_position::{apply_owner_display, centered_window_bounds};
-    use gpui::{
-        size, AppContext, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    };
+    use gpui::{size, AppContext, WindowBackgroundAppearance, WindowBounds, WindowKind};
 
     let height = message_box_height(&options);
     let window_bounds =

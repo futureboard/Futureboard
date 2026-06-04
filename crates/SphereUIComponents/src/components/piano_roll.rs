@@ -351,6 +351,58 @@ impl PianoRoll {
         self.on_pop_out = handler;
     }
 
+    fn prune_transient_state(&mut self, cx: &Context<Self>, clip_id: Option<&str>) {
+        let Some(clip_id) = clip_id else {
+            self.selection.clear();
+            self.selection_before_marquee.clear();
+            self.erase_preview_ids.clear();
+            self.drag = PianoDrag::None;
+            self.cc_edit_prev = None;
+            self.hover_beat = None;
+            self.fitted_clip_id = None;
+            return;
+        };
+
+        let valid_note_ids: HashSet<u64> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(clip_id)
+            .map(|notes| notes.iter().map(|note| note.id).collect())
+            .unwrap_or_default();
+
+        self.selection.retain(|id| valid_note_ids.contains(id));
+        self.selection_before_marquee
+            .retain(|id| valid_note_ids.contains(id));
+        self.erase_preview_ids
+            .retain(|id| valid_note_ids.contains(id));
+
+        let drag_is_stale = match &mut self.drag {
+            PianoDrag::None
+            | PianoDrag::MarqueeSelect { .. }
+            | PianoDrag::DrawNote { .. }
+            | PianoDrag::CcPaint { .. }
+            | PianoDrag::CcMove { .. }
+            | PianoDrag::CcLine { .. } => false,
+            PianoDrag::Move { prev, .. } => {
+                prev.retain(|(id, _, _)| valid_note_ids.contains(id));
+                prev.is_empty()
+            }
+            PianoDrag::Resize { id, .. } => !valid_note_ids.contains(id),
+            PianoDrag::Velocity { prev, .. } => {
+                prev.retain(|(id, _)| valid_note_ids.contains(id));
+                prev.is_empty()
+            }
+            PianoDrag::EraseNotes { erased, .. } => {
+                erased.retain(|id| valid_note_ids.contains(id));
+                false
+            }
+        };
+        if drag_is_stale {
+            self.drag = PianoDrag::None;
+        }
+    }
+
     pub fn selected_note_count(&self) -> usize {
         self.selection.len()
     }
@@ -2209,6 +2261,7 @@ impl PianoRoll {
 impl Render for PianoRoll {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let clip_id = self.editing_clip_id(cx);
+        self.prune_transient_state(cx, clip_id.as_deref());
 
         if clip_id != self.last_editing_clip {
             if midi_debug_enabled() {

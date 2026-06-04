@@ -748,6 +748,10 @@ cargo clippy -p sphere_ui_components -- -D warnings
   box GPUI imports are now scoped to the Windows-only open path, and plugin
   editor window dimensions are marked intentionally unused for non-Win32
   backends.
+* 2026-06-04: Hardened delete flows for MIDI notes, MIDI clips, and audio clips.
+  PianoRoll now prunes stale note selection/drag state when the edited clip or
+  notes disappear, audio clip selection stops parent lane event propagation, and
+  MIDI note deletion snapshots ids before mutating notes.
 
 ---
 

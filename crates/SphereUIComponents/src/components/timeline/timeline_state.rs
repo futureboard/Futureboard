@@ -2155,6 +2155,10 @@ impl TimelineState {
 
     /// Delete the given note ids from a MIDI clip. Returns how many were removed.
     pub fn delete_midi_notes(&mut self, clip_id: &str, ids: &[u64]) -> usize {
+        if ids.is_empty() {
+            return 0;
+        }
+        let ids: std::collections::HashSet<u64> = ids.iter().copied().collect();
         let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
             return 0;
         };

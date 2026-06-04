@@ -14,10 +14,11 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    div, px, App, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    StatefulInteractiveElement, Styled, Window,
 };
 
+use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
 use crate::components::controls::{
     fb_button, fb_form_row, fb_section_header, fb_segmented_button, FbButtonKind,
 };
@@ -27,7 +28,11 @@ use crate::components::timeline::timeline_state::{
     volume, ClipType, InsertLoadStatus, InsertSlotState, TrackAudioFormat, TrackInputRouting,
     TrackMidiInputRouting, TrackOutputRouting, TrackState, TrackType,
 };
+use crate::overlay::{inspector_combo_menu_position, OverlayAnchor};
 use crate::theme::Colors;
+
+type RoutingComboToggleCb =
+    Arc<dyn Fn(InspectorRoutingCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>;
 
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 type StrF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
@@ -42,6 +47,16 @@ type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) 
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
+
+/// Open routing ComboBox in the Inspector (MIDI Input / Ch / Out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectorRoutingCombo {
+    MidiInput,
+    MidiChannel,
+    MidiOut,
+}
+
+const ROUTING_COMBO_MENU_HEIGHT: f32 = 220.0;
 
 /// Edit callbacks handed to the Inspector. Built by the layout
 /// (`build_inspector_callbacks`) and dispatched to the shared `TimelineState`.
@@ -69,6 +84,8 @@ pub struct InspectorCallbacks {
     pub on_set_clip_length: ClipF32Cb,
     pub on_open_clip_bottom_editor: StrCb,
     pub on_open_clip_external_midi_editor: StrCb,
+    pub open_routing_combo: Option<InspectorRoutingCombo>,
+    pub on_toggle_routing_combo: RoutingComboToggleCb,
 }
 
 /// Width of the docked Inspector column. Mirrors the constant in
@@ -508,51 +525,211 @@ fn output_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl I
         ))
 }
 
+fn midi_input_combo_label(routing: &TrackMidiInputRouting) -> String {
+    match routing {
+        TrackMidiInputRouting::AllInputs => "All".to_string(),
+        TrackMidiInputRouting::None => "None".to_string(),
+        TrackMidiInputRouting::MidiDevice { device_id } => device_id.clone(),
+    }
+}
+
+fn midi_channel_combo_label(channel: Option<u8>) -> String {
+    channel
+        .map(|ch| ch.to_string())
+        .unwrap_or_else(|| "All".to_string())
+}
+
+fn midi_input_options(detected: &[String]) -> Vec<String> {
+    let mut options = vec!["All".to_string(), "None".to_string()];
+    options.extend(detected.iter().cloned());
+    options
+}
+
+fn midi_channel_options() -> Vec<String> {
+    std::iter::once("All".to_string())
+        .chain((1..=16).map(|ch| ch.to_string()))
+        .collect()
+}
+
+fn midi_output_options(detected: &[String]) -> Vec<String> {
+    let mut options = vec!["Main".to_string(), "None".to_string()];
+    options.extend(detected.iter().cloned());
+    options
+}
+
+fn parse_midi_input_option(label: &str) -> TrackMidiInputRouting {
+    match label {
+        "All" => TrackMidiInputRouting::AllInputs,
+        "None" => TrackMidiInputRouting::None,
+        device => TrackMidiInputRouting::MidiDevice {
+            device_id: device.to_string(),
+        },
+    }
+}
+
+fn parse_midi_channel_option(label: &str) -> Option<u8> {
+    if label == "All" {
+        None
+    } else {
+        label.parse::<u8>().ok().map(|ch| ch.clamp(1, 16))
+    }
+}
+
+fn parse_midi_output_option(label: &str) -> TrackOutputRouting {
+    match label {
+        "Main" => TrackOutputRouting::Main,
+        "None" => TrackOutputRouting::None,
+        device => TrackOutputRouting::HardwareOutput {
+            device_id: device.to_string(),
+            channel: 0,
+        },
+    }
+}
+
+fn routing_combo_trigger(
+    trigger_id: &'static str,
+    label: String,
+    combo: InspectorRoutingCombo,
+    open_combo: Option<InspectorRoutingCombo>,
+    on_toggle: RoutingComboToggleCb,
+) -> impl IntoElement {
+    let open = open_combo == Some(combo);
+    let toggle = on_toggle.clone();
+    div().w_full().child(combo_box_trigger(
+        trigger_id,
+        label,
+        open,
+        move |event, window, cx| {
+            let anchor = if open {
+                None
+            } else {
+                Some(OverlayAnchor {
+                    bounds: crate::overlay::inspector_combo_trigger_bounds(
+                        window,
+                        INSPECTOR_WIDTH,
+                        event,
+                    ),
+                })
+            };
+            toggle(combo, anchor, window, cx);
+        },
+    ))
+}
+
 fn midi_input_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
-    let tid_all = track.id.clone();
-    let tid_none = track.id.clone();
-    let cb_all = callbacks.on_set_midi_input.clone();
-    let cb_none = callbacks.on_set_midi_input.clone();
-    // TODO(device-enumeration): populate real MIDI input devices when available.
-    div()
-        .flex()
-        .flex_row()
-        .gap(px(4.0))
-        .child(option_button(
-            "inspector-midi-input-all",
-            "All",
-            track.routing.midi_input == TrackMidiInputRouting::AllInputs,
-            move |_, w, cx| cb_all(&(tid_all.clone(), TrackMidiInputRouting::AllInputs), w, cx),
-        ))
-        .child(option_button(
-            "inspector-midi-input-none",
-            "None",
-            track.routing.midi_input == TrackMidiInputRouting::None,
-            move |_, w, cx| cb_none(&(tid_none.clone(), TrackMidiInputRouting::None), w, cx),
-        ))
+    routing_combo_trigger(
+        "inspector-midi-input-combo",
+        midi_input_combo_label(&track.routing.midi_input),
+        InspectorRoutingCombo::MidiInput,
+        callbacks.open_routing_combo,
+        callbacks.on_toggle_routing_combo.clone(),
+    )
 }
 
 fn midi_channel_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
-    let mut row = div().flex().flex_row().flex_wrap().gap(px(4.0));
-    let tid_all = track.id.clone();
-    let cb_all = callbacks.on_set_midi_channel.clone();
-    row = row.child(option_button(
-        "inspector-midi-channel-all",
-        "All",
-        track.routing.midi_channel.is_none(),
-        move |_, w, cx| cb_all(&(tid_all.clone(), None), w, cx),
-    ));
-    for channel in 1..=16u8 {
-        let tid = track.id.clone();
-        let cb = callbacks.on_set_midi_channel.clone();
-        row = row.child(option_button(
-            ("inspector-midi-channel", channel as usize),
-            channel.to_string(),
-            track.routing.midi_channel == Some(channel),
-            move |_, w, cx| cb(&(tid.clone(), Some(channel)), w, cx),
-        ));
-    }
-    row
+    routing_combo_trigger(
+        "inspector-midi-channel-combo",
+        midi_channel_combo_label(track.routing.midi_channel),
+        InspectorRoutingCombo::MidiChannel,
+        callbacks.open_routing_combo,
+        callbacks.on_toggle_routing_combo.clone(),
+    )
+}
+
+fn midi_output_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
+    routing_combo_trigger(
+        "inspector-midi-output-combo",
+        track.routing.output.label(),
+        InspectorRoutingCombo::MidiOut,
+        callbacks.open_routing_combo,
+        callbacks.on_toggle_routing_combo.clone(),
+    )
+}
+
+type CloseRoutingComboCb = Arc<dyn Fn(&mut App) + 'static>;
+
+/// Dropdown overlay for Inspector MIDI routing ComboBoxes. Rendered above the
+/// main chrome so menus stay anchored to their trigger, not the mount point.
+pub fn inspector_routing_combo_overlay(
+    track: &TrackState,
+    open_combo: InspectorRoutingCombo,
+    anchor: OverlayAnchor,
+    window: &Window,
+    callbacks: &InspectorCallbacks,
+    on_close: CloseRoutingComboCb,
+) -> impl IntoElement {
+    let position =
+        inspector_combo_menu_position(anchor, INSPECTOR_WIDTH, ROUTING_COMBO_MENU_HEIGHT, window);
+    // Placeholder until DAUx exposes MIDI device lists to the UI shell.
+    let detected_midi_inputs: Vec<String> = Vec::new();
+    let detected_midi_outputs: Vec<String> = Vec::new();
+
+    let track_id = track.id.clone();
+    let menu = match open_combo {
+        InspectorRoutingCombo::MidiInput => {
+            let selected = midi_input_combo_label(&track.routing.midi_input);
+            let options = midi_input_options(&detected_midi_inputs);
+            let cb = callbacks.on_set_midi_input.clone();
+            let close = on_close.clone();
+            combo_box_string_menu(
+                "inspector-midi-input-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let routing = parse_midi_input_option(&value);
+                    cb(&(track_id.clone(), routing), window, cx);
+                    close(cx);
+                }),
+            )
+            .into_any_element()
+        }
+        InspectorRoutingCombo::MidiChannel => {
+            let selected = midi_channel_combo_label(track.routing.midi_channel);
+            let options = midi_channel_options();
+            let cb = callbacks.on_set_midi_channel.clone();
+            let close = on_close.clone();
+            combo_box_string_menu(
+                "inspector-midi-channel-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let channel = parse_midi_channel_option(&value);
+                    cb(&(track_id.clone(), channel), window, cx);
+                    close(cx);
+                }),
+            )
+            .into_any_element()
+        }
+        InspectorRoutingCombo::MidiOut => {
+            let selected = track.routing.output.label();
+            let options = midi_output_options(&detected_midi_outputs);
+            let cb = callbacks.on_set_output_routing.clone();
+            let close = on_close.clone();
+            combo_box_string_menu(
+                "inspector-midi-output-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let output = parse_midi_output_option(&value);
+                    cb(&(track_id.clone(), output), window, cx);
+                    close(cx);
+                }),
+            )
+            .into_any_element()
+        }
+    };
+
+    div()
+        .absolute()
+        .inset_0()
+        .id("inspector-routing-combo-overlay")
+        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+            on_close(cx);
+        })
+        .child(menu)
 }
 
 fn routing_section(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
@@ -591,7 +768,10 @@ fn routing_section(track: &TrackState, callbacks: &InspectorCallbacks) -> impl I
                     "MIDI Ch",
                     midi_channel_selector(track, callbacks),
                 ))
-                .child(fb_form_row("MIDI Out", output_selector(track, callbacks)));
+                .child(fb_form_row(
+                    "MIDI Out",
+                    midi_output_selector(track, callbacks),
+                ));
         }
         TrackType::Bus | TrackType::Return | TrackType::Master => {
             section = section.child(fb_form_row("Output", output_selector(track, callbacks)));

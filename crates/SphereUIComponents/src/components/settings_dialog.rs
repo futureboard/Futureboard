@@ -1,22 +1,30 @@
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, size, svg, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Point, Render,
-    StatefulInteractiveElement, Styled, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, StatefulInteractiveElement,
+    Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::assets;
+use crate::components::box_list_view::{
+    box_list_empty_state, box_list_group_label, box_list_icon_button, box_list_item,
+    box_list_item_badge, box_list_item_content, box_list_item_leading_icon, box_list_item_subtitle,
+    box_list_item_title, box_list_item_trailing, box_list_toggle, box_list_view, BoxListBadgeTone,
+};
 use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
 use crate::components::controls::{
     fb_button, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
+use crate::components::settings_components::{
+    settings_restart_footer, settings_row_restart, settings_section,
+};
 use crate::components::settings_layout::{
-    settings_daw_row, settings_nav_group_header, settings_nav_item, settings_page_header,
-    settings_section_card, settings_section_hint, settings_section_title, settings_status_badge,
-    settings_value_readout, SETTINGS_CONTENT_PAD, SETTINGS_SIDEBAR_WIDTH, SETTINGS_WINDOW_HEIGHT,
-    SETTINGS_WINDOW_WIDTH,
+    settings_daw_row, settings_daw_row_with_description, settings_nav_group_header,
+    settings_nav_item, settings_page_header, settings_section_card, settings_section_hint,
+    settings_section_title, settings_status_badge, settings_value_readout, SETTINGS_CONTENT_PAD,
+    SETTINGS_SIDEBAR_WIDTH, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
 };
 use crate::components::slider::slider;
 use crate::components::text_input::{
@@ -25,14 +33,20 @@ use crate::components::text_input::{
 use crate::components::timeline::render::list_available_gpu_devices;
 use crate::components::title_bar::external_window_titlebar;
 use crate::i18n::{I18n, Locale};
+use crate::midi_devices::{
+    enumerate_midi_devices, midi_settings_debug_enabled, resolve_midi_devices, upsert_midi_device,
+};
 use crate::overlay::{
-    compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor, settings_form_column,
-    OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
+    anchor_visible_in_window, compute_overlay_position, external_dialog_overlay_bounds,
+    form_combo_trigger_bounds, refresh_form_anchor, settings_form_column, OverlayAnchor,
+    OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
 };
 use crate::settings::{
-    GpuDevicePreference, RenderMode, SettingsAudioLatencySnapshot, SettingsModel, SettingsSchema,
+    GpuDevicePreference, MidiDeviceDirection, MidiDeviceSetting, RenderMode,
+    SettingsAudioLatencySnapshot, SettingsModel, SettingsSchema,
 };
 use crate::theme::{self, Colors};
+use crate::window_position::{apply_owner_display, centered_window_bounds};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -194,6 +208,7 @@ pub struct SettingsDialogCallbacks {
     pub on_close: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
     pub on_select_tab: Arc<dyn Fn(&SettingsTab, &mut Window, &mut App) + 'static>,
     pub on_update_setting: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+    pub on_refresh_midi: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
     pub open_hardware_combo: Option<HardwareCombo>,
     pub on_toggle_hardware_combo:
         Arc<dyn Fn(HardwareCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>,
@@ -394,13 +409,12 @@ fn performance_section(
         ),
     };
 
-    let mut card = settings_section_card()
-        .child(settings_section_title("Rendering"))
+    let mut card = settings_section("Rendering")
         .child(settings_section_hint(
             "Choose how the timeline is drawn. GPU Acceleration uses WGPU when available; CPU Render forces the GPUI paint fallback (best compatibility).",
         ))
-        .child(settings_daw_row("Renderer *", renderer_row))
-        .child(settings_daw_row("GPU Device *", gpu_device_row))
+        .child(settings_row_restart("Renderer", true, renderer_row))
+        .child(settings_row_restart("GPU Device", true, gpu_device_row))
         .child(settings_daw_row(
             "Status",
             div()
@@ -419,13 +433,7 @@ fn performance_section(
         );
     }
 
-    card.child(
-        div()
-            .pt(px(8.0))
-            .text_size(px(10.0))
-            .text_color(Colors::text_faint())
-            .child("* Restart Futureboard Studio to apply this change."),
-    )
+    card.child(settings_restart_footer())
 }
 
 fn tab_matches_search(
@@ -589,6 +597,260 @@ fn audio_latency_report_section(
     card.child(settings_section_hint(
         i18n.tr("settings.latency.report-hint"),
     ))
+}
+
+fn midi_direction_label(i18n: &I18n, direction: MidiDeviceDirection) -> String {
+    match direction {
+        MidiDeviceDirection::Input => i18n.tr("settings.midi.type.input"),
+        MidiDeviceDirection::Output => i18n.tr("settings.midi.type.output"),
+        MidiDeviceDirection::InputOutput => i18n.tr("settings.midi.type.input-output"),
+    }
+}
+
+fn midi_device_status_label(i18n: &I18n, device: &MidiDeviceSetting) -> (String, BoxListBadgeTone) {
+    if !device.connected {
+        (
+            i18n.tr("settings.midi.status.missing"),
+            BoxListBadgeTone::Warning,
+        )
+    } else if !device.enabled {
+        (
+            i18n.tr("settings.midi.status.disabled"),
+            BoxListBadgeTone::Neutral,
+        )
+    } else {
+        (
+            i18n.tr("settings.midi.status.connected"),
+            BoxListBadgeTone::Success,
+        )
+    }
+}
+
+fn midi_device_icon(direction: MidiDeviceDirection) -> &'static str {
+    match direction {
+        MidiDeviceDirection::Input => assets::ICON_MIC_PATH,
+        MidiDeviceDirection::Output => assets::ICON_VOLUME_2_PATH,
+        MidiDeviceDirection::InputOutput => assets::ICON_ROUTE_PATH,
+    }
+}
+
+fn midi_device_list_row(
+    row_index: usize,
+    device: &MidiDeviceSetting,
+    i18n: &I18n,
+    on_update: &Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let snapshot = device.clone();
+    let enabled = device.enabled;
+    let up = on_update.clone();
+    let (status_label, status_tone) = midi_device_status_label(i18n, device);
+    let type_label = midi_direction_label(i18n, device.direction);
+    let show_clock = device.clock_enabled && device.direction != MidiDeviceDirection::Input;
+
+    box_list_item()
+        .id(("midi-device-row", row_index))
+        .child(box_list_item_leading_icon(midi_device_icon(
+            device.direction,
+        )))
+        .child(
+            box_list_item_content()
+                .child(box_list_item_title(device.name.clone()))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .flex_wrap()
+                        .child(box_list_item_badge(type_label, BoxListBadgeTone::Accent))
+                        .child(box_list_item_badge(status_label, status_tone))
+                        .when(show_clock, |row| {
+                            row.child(box_list_item_badge(
+                                i18n.tr("settings.midi.clock-badge"),
+                                BoxListBadgeTone::Neutral,
+                            ))
+                        }),
+                ),
+        )
+        .child(box_list_item_trailing().child(box_list_toggle(
+            ("midi-device-toggle", row_index),
+            enabled,
+            move |_, w, cx| {
+                let next = !enabled;
+                if midi_settings_debug_enabled() {
+                    eprintln!("[MIDI settings] toggle {} enabled={next}", snapshot.name);
+                }
+                let saved_for_update = snapshot.clone();
+                up(
+                    Arc::new(move |s| {
+                        let mut updated = saved_for_update.clone();
+                        updated.enabled = next;
+                        upsert_midi_device(&mut s.hardware.midi, updated);
+                    }),
+                    w,
+                    cx,
+                );
+            },
+        )))
+}
+
+fn midi_device_group(
+    title: String,
+    devices: &[MidiDeviceSetting],
+    row_offset: &mut usize,
+    i18n: &I18n,
+    on_update: &Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+) -> Option<gpui::AnyElement> {
+    if devices.is_empty() {
+        return None;
+    }
+    let rows: Vec<_> = devices
+        .iter()
+        .enumerate()
+        .map(|(idx, device)| {
+            let row_ix = *row_offset + idx;
+            midi_device_list_row(row_ix, device, i18n, on_update).into_any_element()
+        })
+        .collect();
+    *row_offset += devices.len();
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(box_list_group_label(title))
+            .child(box_list_view().children(rows))
+            .into_any_element(),
+    )
+}
+
+fn midi_devices_section(
+    schema: &SettingsSchema,
+    i18n: &I18n,
+    on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+    on_refresh_midi: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
+) -> impl IntoElement {
+    let detected = enumerate_midi_devices();
+    let resolved = resolve_midi_devices(&schema.hardware.midi.devices, &detected);
+
+    let inputs: Vec<_> = resolved
+        .iter()
+        .filter(|d| {
+            d.direction == MidiDeviceDirection::Input
+                || d.direction == MidiDeviceDirection::InputOutput
+        })
+        .cloned()
+        .collect();
+    let outputs: Vec<_> = resolved
+        .iter()
+        .filter(|d| {
+            d.direction == MidiDeviceDirection::Output
+                || d.direction == MidiDeviceDirection::InputOutput
+        })
+        .cloned()
+        .collect();
+
+    let mut row_offset = 0usize;
+    let mut body = div().flex().flex_col().gap(px(10.0));
+
+    if resolved.is_empty() {
+        let refresh = on_refresh_midi.clone();
+        body = body.child(box_list_empty_state(
+            i18n.tr("settings.midi.empty"),
+            i18n.tr("settings.midi.refresh"),
+            move |_, w, cx| {
+                if let Some(cb) = refresh.as_ref() {
+                    cb(w, cx);
+                }
+            },
+        ));
+    } else {
+        if let Some(group) = midi_device_group(
+            i18n.tr("settings.section.midi-inputs"),
+            &inputs,
+            &mut row_offset,
+            i18n,
+            &on_update,
+        ) {
+            body = body.child(group);
+        }
+        if let Some(group) = midi_device_group(
+            i18n.tr("settings.section.midi-outputs"),
+            &outputs,
+            &mut row_offset,
+            i18n,
+            &on_update,
+        ) {
+            body = body.child(group);
+        }
+
+        let clock_sync = schema.hardware.midi.clock_sync;
+        let up_sync = on_update.clone();
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(box_list_group_label(
+                    i18n.tr("settings.section.sync-outputs"),
+                ))
+                .child(
+                    box_list_view().child(
+                        box_list_item()
+                            .id("midi-clock-sync-row")
+                            .child(box_list_item_leading_icon(assets::ICON_CLOCK_PATH))
+                            .child(
+                                box_list_item_content()
+                                    .child(box_list_item_title(
+                                        i18n.tr("settings.midi.sync-clock-send"),
+                                    ))
+                                    .child(box_list_item_subtitle(
+                                        i18n.tr("settings.midi.sync-clock-hint"),
+                                    )),
+                            )
+                            .child(box_list_item_trailing().child(box_list_toggle(
+                                "midi-clock-sync-toggle",
+                                clock_sync,
+                                move |_, w, cx| {
+                                    let next = !clock_sync;
+                                    if midi_settings_debug_enabled() {
+                                        eprintln!("[MIDI settings] clock_sync={next}");
+                                    }
+                                    up_sync(
+                                        Arc::new(move |s| s.hardware.midi.clock_sync = next),
+                                        w,
+                                        cx,
+                                    );
+                                },
+                            ))),
+                    ),
+                ),
+        );
+
+        if let Some(refresh) = on_refresh_midi {
+            let refresh_cb = refresh.clone();
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .child(box_list_icon_button(
+                        "midi-devices-refresh",
+                        assets::ICON_REPEAT_PATH,
+                        "Refresh MIDI devices",
+                        move |_, w, cx| refresh_cb(w, cx),
+                    )),
+            );
+        }
+    }
+
+    settings_section_card()
+        .child(settings_i18n_header(
+            *i18n,
+            "settings.section.midi-devices",
+            assets::ICON_LINK_PATH,
+        ))
+        .child(body)
 }
 
 fn build_settings_content(
@@ -1051,155 +1313,14 @@ fn build_settings_content(
             ) || is_match("Sync Clock", &["sync", "clock", "source", "ltc"])))
     {
         let on_update = callbacks.on_update_setting.clone();
-        let up = on_update.clone();
         sections.push(
-            settings_section_card()
-                .child(settings_i18n_header(
-                    i18n,
-                    "settings.section.midi-devices",
-                    assets::ICON_LINK_PATH,
-                ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.midi-inputs"),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child({
-                            let enabled = schema
-                                .hardware
-                                .midi
-                                .enabled_inputs
-                                .contains(&"Keyboard Controller".to_string());
-                            let up_in = up.clone();
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(fb_checkbox(
-                                    "midi-keyboard-ctrl",
-                                    enabled,
-                                    move |_, w, cx| {
-                                        up_in(
-                                            Arc::new(move |s| {
-                                                let list = &mut s.hardware.midi.enabled_inputs;
-                                                if enabled {
-                                                    list.retain(|x| x != "Keyboard Controller");
-                                                } else if !list
-                                                    .contains(&"Keyboard Controller".to_string())
-                                                {
-                                                    list.push("Keyboard Controller".to_string());
-                                                }
-                                            }),
-                                            w,
-                                            cx,
-                                        );
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(Colors::text_primary())
-                                        .child(i18n.tr("settings.midi.keyboard-controller")),
-                                )
-                        })
-                        .child({
-                            let enabled = schema
-                                .hardware
-                                .midi
-                                .enabled_inputs
-                                .contains(&"Midi Device 2".to_string());
-                            let up_in = up.clone();
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(fb_checkbox("midi-device-2", enabled, move |_, w, cx| {
-                                    up_in(
-                                        Arc::new(move |s| {
-                                            let list = &mut s.hardware.midi.enabled_inputs;
-                                            if enabled {
-                                                list.retain(|x| x != "Midi Device 2");
-                                            } else if !list.contains(&"Midi Device 2".to_string()) {
-                                                list.push("Midi Device 2".to_string());
-                                            }
-                                        }),
-                                        w,
-                                        cx,
-                                    );
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(Colors::text_primary())
-                                        .child(i18n.tr("settings.midi.device-2")),
-                                )
-                        }),
-                ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.midi-outputs"),
-                    div().flex().flex_col().gap(px(6.0)).child({
-                        let enabled = schema
-                            .hardware
-                            .midi
-                            .enabled_outputs
-                            .contains(&"Synth Out".to_string());
-                        let up_out = up.clone();
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(fb_checkbox("midi-synth-out", enabled, move |_, w, cx| {
-                                up_out(
-                                    Arc::new(move |s| {
-                                        let list = &mut s.hardware.midi.enabled_outputs;
-                                        if enabled {
-                                            list.retain(|x| x != "Synth Out");
-                                        } else if !list.contains(&"Synth Out".to_string()) {
-                                            list.push("Synth Out".to_string());
-                                        }
-                                    }),
-                                    w,
-                                    cx,
-                                );
-                            }))
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(Colors::text_primary())
-                                    .child(i18n.tr("settings.midi.synth-out")),
-                            )
-                    }),
-                ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.midi-clock-sync"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child({
-                            let val = schema.hardware.midi.clock_sync;
-                            let up_sync = up.clone();
-                            fb_checkbox("midi-clock-sync", val, move |_, w, cx| {
-                                up_sync(
-                                    Arc::new(move |s| s.hardware.midi.clock_sync = !val),
-                                    w,
-                                    cx,
-                                );
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(i18n.tr("settings.midi.clock-sync")),
-                        ),
-                ))
-                .into_any_element(),
+            midi_devices_section(
+                schema,
+                &i18n,
+                on_update.clone(),
+                callbacks.on_refresh_midi.clone(),
+            )
+            .into_any_element(),
         );
 
         let clock_select = hardware_select(
@@ -1209,6 +1330,8 @@ fn build_settings_content(
             callbacks.open_hardware_combo,
             callbacks.on_toggle_hardware_combo.clone(),
         );
+        let ltc_enabled = schema.hardware.sync.ltc_enabled;
+        let up_ltc = on_update.clone();
         sections.push(
             settings_section_card()
                 .child(settings_i18n_header(
@@ -1220,30 +1343,16 @@ fn build_settings_content(
                     i18n.tr("settings.field.clock-source"),
                     clock_select,
                 ))
-                .child(settings_daw_row(
+                .child(settings_daw_row_with_description(
                     i18n.tr("settings.field.ltc-reader"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child({
-                            let val = schema.hardware.sync.ltc_enabled;
-                            let up_ltc = up.clone();
-                            fb_checkbox("sync-ltc-enabled", val, move |_, w, cx| {
-                                up_ltc(
-                                    Arc::new(move |s| s.hardware.sync.ltc_enabled = !val),
-                                    w,
-                                    cx,
-                                );
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(i18n.tr("settings.ltc.enable")),
-                        ),
+                    Some(i18n.tr("settings.ltc.description")),
+                    box_list_toggle("sync-ltc-enabled", ltc_enabled, move |_, w, cx| {
+                        let next = !ltc_enabled;
+                        if midi_settings_debug_enabled() {
+                            eprintln!("[MIDI settings] ltc_enabled={next}");
+                        }
+                        up_ltc(Arc::new(move |s| s.hardware.sync.ltc_enabled = next), w, cx);
+                    }),
                 ))
                 .into_any_element(),
         );
@@ -2526,13 +2635,24 @@ const BUFFER_SIZE_OPTIONS: &[u32] = &[64, 128, 256, 512, 1024];
 fn combo_menu_position(anchor: OverlayAnchor, window: &Window) -> crate::overlay::OverlayPosition {
     let layout = settings_form_column(window);
     let refreshed = refresh_form_anchor(anchor, layout);
+    let content_bounds = external_dialog_overlay_bounds(window);
+    let scale = window.scale_factor();
+    if crate::components::combo_box::combobox_debug_enabled() {
+        eprintln!(
+            "[combobox] settings_menu scale_factor={scale:.2} layout=({:.0},{:.0}) anchor={:?} content={:?}",
+            layout.value_left,
+            layout.value_width,
+            refreshed.bounds,
+            content_bounds
+        );
+    }
     compute_overlay_position(
         refreshed.bounds,
         OverlaySize {
             width: layout.value_width,
             height: COMBO_MENU_ESTIMATE_HEIGHT,
         },
-        window.bounds(),
+        content_bounds,
         OverlayPlacement::BottomStart,
         4.0,
     )
@@ -2631,6 +2751,9 @@ fn hardware_combo_overlay(
                 &selected,
                 &options,
                 Arc::new(move |value, window, cx| {
+                    if midi_settings_debug_enabled() {
+                        eprintln!("[MIDI settings] clock_source={value}");
+                    }
                     up(
                         Arc::new(move |s| s.hardware.sync.clock_source = value.clone()),
                         window,
@@ -2806,6 +2929,7 @@ fn hardware_combo_overlay(
             if detected.is_empty() {
                 options.push("No GPU device found".to_string());
             }
+            let options = crate::components::combo_box::dedupe_preserve_order(&options);
             let selected = match &schema.performance.gpu_device {
                 GpuDevicePreference::Auto => "Auto".to_string(),
                 GpuDevicePreference::DeviceId(id) => detected
@@ -2875,6 +2999,7 @@ pub struct SettingsWindow {
     latency_provider: AudioLatencySnapshotProvider,
     open_hardware_combo: Option<HardwareCombo>,
     hardware_combo_anchor: Option<OverlayAnchor>,
+    midi_refresh_nonce: u64,
     on_update: OnSettingUpdate,
     focus_handle: FocusHandle,
 }
@@ -2901,6 +3026,7 @@ impl SettingsWindow {
             latency_provider,
             open_hardware_combo: None,
             hardware_combo_anchor: None,
+            midi_refresh_nonce: 0,
             on_update,
             focus_handle: cx.focus_handle(),
         }
@@ -2979,6 +3105,21 @@ impl Render for SettingsWindow {
                     });
                 }
             }),
+            on_refresh_midi: Some(Arc::new({
+                let target = target.clone();
+                move |_w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.midi_refresh_nonce = this.midi_refresh_nonce.wrapping_add(1);
+                        if midi_settings_debug_enabled() {
+                            eprintln!(
+                                "[MIDI settings] refresh requested (nonce={})",
+                                this.midi_refresh_nonce
+                            );
+                        }
+                        cx.notify();
+                    });
+                }
+            })),
             open_hardware_combo: self.open_hardware_combo,
             on_toggle_hardware_combo: Arc::new({
                 let target = target.clone();
@@ -3006,6 +3147,7 @@ impl Render for SettingsWindow {
         };
 
         let latency = (self.latency_provider)();
+        let _midi_refresh = self.midi_refresh_nonce;
 
         let (sidebar_items, sections) = build_settings_content(
             &state,
@@ -3022,30 +3164,36 @@ impl Render for SettingsWindow {
         let combo_overlay = if let (Some(open_combo), Some(anchor)) =
             (self.open_hardware_combo, self.hardware_combo_anchor)
         {
-            let close_target = sw_target.clone();
-            let overlay_update = Arc::new({
-                let on_update = on_update.clone();
-                let target = sw_target.clone();
-                move |updater: UpdateSettingFn, _w: &mut Window, cx: &mut App| {
-                    (on_update)(updater, cx);
-                    let _ = target.update(cx, |this, cx| {
-                        this.open_hardware_combo = None;
-                        this.hardware_combo_anchor = None;
-                        cx.notify();
-                    });
-                }
-            });
-            Some(hardware_combo_overlay(
-                open_combo,
-                anchor,
-                window,
-                &schema,
-                &self.available_inputs,
-                &self.available_outputs,
-                &self.available_backends,
-                overlay_update,
-                close_target,
-            ))
+            if !anchor_visible_in_window(anchor, window) {
+                self.open_hardware_combo = None;
+                self.hardware_combo_anchor = None;
+                None
+            } else {
+                let close_target = sw_target.clone();
+                let overlay_update = Arc::new({
+                    let on_update = on_update.clone();
+                    let target = sw_target.clone();
+                    move |updater: UpdateSettingFn, _w: &mut Window, cx: &mut App| {
+                        (on_update)(updater, cx);
+                        let _ = target.update(cx, |this, cx| {
+                            this.open_hardware_combo = None;
+                            this.hardware_combo_anchor = None;
+                            cx.notify();
+                        });
+                    }
+                });
+                Some(hardware_combo_overlay(
+                    open_combo,
+                    anchor,
+                    window,
+                    &schema,
+                    &self.available_inputs,
+                    &self.available_outputs,
+                    &self.available_backends,
+                    overlay_update,
+                    close_target,
+                ))
+            }
         } else {
             None
         };
@@ -3136,7 +3284,8 @@ impl Render for SettingsWindow {
                                             )),
                                     ),
                             )
-                            .child(
+                            .child({
+                                let scroll_close = sw_target.clone();
                                 div()
                                     .id("settings-content-scroll")
                                     .flex_1()
@@ -3146,8 +3295,17 @@ impl Render for SettingsWindow {
                                     .flex()
                                     .flex_col()
                                     .gap(px(10.0))
-                                    .children(sections),
-                            ),
+                                    .on_scroll_wheel(move |_, _window, cx| {
+                                        let _ = scroll_close.update(cx, |this, cx| {
+                                            if this.open_hardware_combo.take().is_some() {
+                                                this.hardware_combo_anchor = None;
+                                                cx.notify();
+                                            }
+                                        });
+                                        cx.stop_propagation();
+                                    })
+                                    .children(sections)
+                            }),
                     ),
             )
             .children(combo_overlay)
@@ -3155,7 +3313,7 @@ impl Render for SettingsWindow {
 }
 
 pub fn open_settings_window(
-    owner_bounds: Bounds<gpui::Pixels>,
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
     settings: Entity<SettingsModel>,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
@@ -3164,25 +3322,20 @@ pub fn open_settings_window(
     on_update: OnSettingUpdate,
     cx: &mut App,
 ) -> Result<WindowHandle<SettingsWindow>, String> {
-    let parent_x: f32 = owner_bounds.origin.x.into();
-    let parent_y: f32 = owner_bounds.origin.y.into();
-    let parent_w: f32 = owner_bounds.size.width.into();
-    let parent_h: f32 = owner_bounds.size.height.into();
-    let origin = Point {
-        x: px(parent_x + ((parent_w - SETTINGS_WIDTH) / 2.0).max(24.0)),
-        y: px(parent_y + ((parent_h - SETTINGS_HEIGHT) / 2.0).max(24.0)),
-    };
+    let window_bounds = centered_window_bounds(
+        owner_bounds,
+        size(px(SETTINGS_WIDTH), px(SETTINGS_HEIGHT)),
+        cx,
+    );
 
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
-    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
-        origin,
-        size: size(px(SETTINGS_WIDTH), px(SETTINGS_HEIGHT)),
-    }));
+    options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = false;
     options.window_background = WindowBackgroundAppearance::Transparent;
     options.window_min_size = Some(size(px(SETTINGS_WIDTH), px(SETTINGS_HEIGHT)));
+    apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
         cx.new(|cx| {

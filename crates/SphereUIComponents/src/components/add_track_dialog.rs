@@ -9,18 +9,23 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::components::color_picker::{
+    color_picker_field, ColorChannel, ColorPickerCallbacks, ColorPickerPlacement, ColorPickerState,
+    ColorPickerValue,
+};
 use crate::components::controls::{fb_button, fb_form_row, fb_stepper_button, FbButtonKind};
 use crate::components::form::{
     select_dismiss_backdrop, select_with_placement, SelectMenuPlacement, SelectOption,
 };
 use crate::components::text_input::{
-    bind_mouse_selection_with_offset, text_field_with_callbacks_and_ime, TextInputCallbacks,
-    TextInputState,
+    bind_mouse_selection, bind_mouse_selection_with_offset, text_field_with_callbacks_and_ime,
+    TextInputAction, TextInputCallbacks, TextInputState,
 };
 use crate::components::timeline::timeline_state::TrackType;
 use crate::components::title_bar::external_window_titlebar_with_icon;
 use crate::i18n::I18n;
 use crate::theme::{self, Colors};
+use crate::window_position::{apply_owner_display, centered_window_bounds};
 use sphere_plugin_host::{PluginFormat, RegistryPlugin};
 
 const MAX_TRACK_COUNT: u32 = 128;
@@ -201,6 +206,9 @@ pub struct AddTrackDialogState {
     pub count: u32,
     pub auto_color: bool,
     pub color_index: usize,
+    /// Chosen custom color when `auto_color` is false. `None` falls back to the
+    /// palette color at `color_index`. Persisted indirectly via track creation.
+    pub custom_color: Option<gpui::Rgba>,
     pub audio_format: AudioFormat,
     pub instrument_plugin_id: Option<String>,
     pub instrument_plugin_name: Option<String>,
@@ -249,6 +257,7 @@ impl AddTrackDialogState {
             count: 1,
             auto_color: true,
             color_index: track_count % Colors::TRACK_COLORS.len(),
+            custom_color: None,
             audio_format: AudioFormat::Stereo,
             instrument_plugin_id: None,
             instrument_plugin_name: None,
@@ -269,7 +278,12 @@ impl AddTrackDialogState {
     }
 
     pub fn selected_color(&self) -> gpui::Rgba {
-        track_color(self.color_index)
+        if self.auto_color {
+            track_color(self.color_index)
+        } else {
+            self.custom_color
+                .unwrap_or_else(|| track_color(self.color_index))
+        }
     }
 
     pub fn is_valid(&self) -> bool {
@@ -312,6 +326,15 @@ pub struct AddTrackDialogCallbacks {
 
 pub fn track_color(index: usize) -> gpui::Rgba {
     Colors::track_color_for_index(index)
+}
+
+/// Map the dialog's auto/custom color state to a [`ColorPickerValue`].
+fn color_picker_value_for(state: &AddTrackDialogState) -> ColorPickerValue {
+    if state.auto_color {
+        ColorPickerValue::auto()
+    } else {
+        ColorPickerValue::custom(state.selected_color())
+    }
 }
 
 fn kind_supported(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
@@ -579,65 +602,89 @@ fn type_tabs(
     row
 }
 
+/// Everything needed to render the color picker inside the Add Track color row.
+/// Bundled so the (already large) body signature stays readable.
+pub struct AddTrackColorUi<'a> {
+    pub picker: &'a ColorPickerState,
+    pub presets: Vec<gpui::Rgba>,
+    pub hex_focused: bool,
+    pub hex_callbacks: TextInputCallbacks,
+    pub callbacks: ColorPickerCallbacks,
+}
+
 fn color_row(
     state: &AddTrackDialogState,
     callbacks: &AddTrackDialogCallbacks,
+    color_ui: AddTrackColorUi,
     i18n: I18n,
 ) -> impl IntoElement {
     let auto_cb = callbacks.on_auto_color.clone();
     let auto_on = state.auto_color;
+    let selected_hex = crate::color::rgba_to_hex(state.selected_color());
+
+    // Quick preset swatches — kept as fast access to the DAW palette. Clicking
+    // one selects that color and turns Auto Color off (routes through the same
+    // picker callback so the trigger preview stays in sync). No duplicate
+    // picker logic: presets here and in the popover share `on_pick`.
     let mut swatches = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(5.0))
         .flex_wrap();
-    for i in 0..Colors::TRACK_COLORS.len() {
-        let cb = callbacks.on_color_index.clone();
-        let active = !auto_on && i == state.color_index;
-        let color = track_color(i);
-        let mut sw = div()
+    for (i, preset) in color_ui.presets.iter().enumerate() {
+        let preset = *preset;
+        let on_pick = color_ui.callbacks.on_pick.clone();
+        let active = !auto_on && crate::color::rgba_to_hex(preset) == selected_hex;
+        let sw = div()
             .id(("add-track-color", i))
             .w(px(16.0))
             .h(px(16.0))
             .rounded_full()
             .border(px(2.0))
-            .border_color(color)
+            .border_color(preset)
             .bg(if active {
-                color
+                preset
             } else {
                 gpui::transparent_black().into()
             })
-            .opacity(if auto_on {
-                0.35
-            } else if active {
-                1.0
-            } else {
-                0.55
-            });
-        if !auto_on {
-            sw = sw
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(move |_, w, cx| cb(&(i as u32), w, cx));
-        }
+            .opacity(if active { 1.0 } else { 0.6 })
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(|s| s.opacity(1.0))
+            .on_click(move |_, w, cx| on_pick(preset, w, cx));
         swatches = swatches.child(sw);
     }
+
+    let picker = color_picker_field(
+        "add-track-color-picker",
+        color_ui.picker,
+        &color_ui.presets,
+        // Auto Color lives in the sibling checkbox below, so the popover does
+        // not render its own Auto toggle (avoids a duplicate control).
+        false,
+        ColorPickerPlacement::Below,
+        color_ui.hex_focused,
+        color_ui.hex_callbacks,
+        color_ui.callbacks,
+    );
+
     div().child(fb_form_row(
         i18n.tr("add-track.field.color"),
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(10.0))
-            .child(swatches)
-            .child(check_row(
-                "add-track-auto-color",
-                i18n.tr("add-track.option.auto-color"),
-                auto_on,
-                true,
-                move |_, w, cx| auto_cb(&!auto_on, w, cx),
-            )),
+        div().flex().flex_col().gap(px(7.0)).child(swatches).child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .child(picker)
+                .child(check_row(
+                    "add-track-auto-color",
+                    i18n.tr("add-track.option.auto-color"),
+                    auto_on,
+                    true,
+                    move |_, w, cx| auto_cb(&!auto_on, w, cx),
+                )),
+        ),
     ))
 }
 
@@ -1068,6 +1115,7 @@ fn type_fields(
 }
 
 /// Compact DAW-style Add Tracks form (external window body).
+#[allow(clippy::too_many_arguments)]
 pub fn add_track_dialog_body(
     state: &AddTrackDialogState,
     track_name_input: &TextInputState,
@@ -1076,6 +1124,7 @@ pub fn add_track_dialog_body(
     track_name_ime_target: Entity<AddTrackWindow>,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
+    color_ui: AddTrackColorUi,
     callbacks: AddTrackDialogCallbacks,
     i18n: I18n,
 ) -> gpui::Div {
@@ -1132,7 +1181,7 @@ pub fn add_track_dialog_body(
                             i18n.tr("add-track.field.count"),
                             count_stepper(state, &callbacks),
                         ))
-                        .child(color_row(state, &callbacks, i18n)),
+                        .child(color_row(state, &callbacks, color_ui, i18n)),
                 ))
                 .child(form_panel(type_fields(
                     state,
@@ -1190,14 +1239,15 @@ pub fn add_track_dialog_body(
         )
 }
 pub const ADD_TRACK_WINDOW_WIDTH: f32 = 560.0;
-pub const ADD_TRACK_WINDOW_HEIGHT: f32 = 460.0;
+pub const ADD_TRACK_WINDOW_HEIGHT: f32 = 520.0;
 pub const ADD_TRACK_WINDOW_MIN_WIDTH: f32 = 480.0;
-pub const ADD_TRACK_WINDOW_MIN_HEIGHT: f32 = 440.0;
+pub const ADD_TRACK_WINDOW_MIN_HEIGHT: f32 = 500.0;
 
 pub struct AddTrackWindow {
     pub state: AddTrackDialogState,
     language: String,
     track_name_input: TextInputState,
+    color_picker: ColorPickerState,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: Vec<RegistryPlugin>,
     focus_handle: FocusHandle,
@@ -1216,10 +1266,18 @@ impl AddTrackWindow {
         let mut track_name_input = TextInputState::new("add-track-window-name", cx.focus_handle());
         track_name_input.set_value(initial_state.track_name.clone());
         track_name_input.select_all();
+        let color_picker = ColorPickerState::new(
+            "add-track-hex",
+            cx.focus_handle(),
+            color_picker_value_for(&initial_state),
+            initial_state.selected_color(),
+            crate::color::load_recent_colors(),
+        );
         Self {
             state: initial_state,
             language: language.into(),
             track_name_input,
+            color_picker,
             open_select: None,
             instrument_plugins,
             focus_handle: cx.focus_handle(),
@@ -1243,12 +1301,39 @@ impl AddTrackWindow {
         self.track_name_input.set_value(dialog.track_name.clone());
         self.track_name_input.select_all();
         self.open_select = None;
+        self.color_picker
+            .reset(color_picker_value_for(&dialog), dialog.selected_color());
         self.state = dialog;
+    }
+
+    /// Push the picker's current selection back into the dialog state so the
+    /// confirm path (and quick-swatch highlight) see the chosen color.
+    fn sync_color_from_picker(&mut self) {
+        self.state.auto_color = self.color_picker.auto;
+        self.state.custom_color = if self.color_picker.auto {
+            None
+        } else {
+            Some(self.color_picker.draft)
+        };
+    }
+
+    /// Remember the chosen color, sync it into the dialog, and close the popover.
+    fn close_color_picker(&mut self) {
+        if self.color_picker.open {
+            self.color_picker.remember_current();
+            self.sync_color_from_picker();
+            self.color_picker.close();
+        }
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.state.is_valid() {
             return;
+        }
+        // Capture the picker's final color and remember it for next time.
+        self.sync_color_from_picker();
+        if !self.color_picker.auto {
+            self.color_picker.remember_current();
         }
         self.state.track_name = self.track_name_input.value.clone();
         add_track_debug(&format!(
@@ -1264,6 +1349,35 @@ impl AddTrackWindow {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Route keys to the color-picker hex field when it owns focus. Enter
+        // commits the hex color, Escape closes the popover; everything else
+        // edits the field with a live preview.
+        if self.color_picker.open && self.color_picker.hex_input.is_focused(window) {
+            let action = self
+                .color_picker
+                .hex_input
+                .handle_key_with_clipboard(event, Some(cx));
+            match action {
+                TextInputAction::Submit => {
+                    if self.color_picker.commit_hex().is_some() {
+                        self.color_picker.remember_current();
+                        self.sync_color_from_picker();
+                    }
+                    cx.notify();
+                }
+                TextInputAction::Cancel => {
+                    self.close_color_picker();
+                    cx.notify();
+                }
+                TextInputAction::Consumed | TextInputAction::Pass => {
+                    self.color_picker.on_hex_changed();
+                    self.sync_color_from_picker();
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
         if self.track_name_input.is_focused(window) {
             let action = self
                 .track_name_input
@@ -1282,7 +1396,10 @@ impl AddTrackWindow {
 
         match event.keystroke.key.as_str() {
             "escape" => {
-                if self.open_select.take().is_some() {
+                if self.color_picker.open {
+                    self.close_color_picker();
+                    cx.notify();
+                } else if self.open_select.take().is_some() {
                     cx.notify();
                 } else {
                     window.remove_window();
@@ -1458,7 +1575,8 @@ impl Render for AddTrackWindow {
                 move |on: &bool, _w, cx| {
                     let on = *on;
                     let _ = target.update(cx, |this, cx| {
-                        this.state.auto_color = on;
+                        this.color_picker.set_auto(on);
+                        this.sync_color_from_picker();
                         cx.notify();
                     });
                 }
@@ -1616,6 +1734,91 @@ impl Render for AddTrackWindow {
             select_dismiss_backdrop(on_dismiss)
         });
 
+        // Color picker callbacks — mutate the host-owned `ColorPickerState` and
+        // mirror the result into the dialog state so the confirm path sees it.
+        let picker_callbacks = ColorPickerCallbacks {
+            on_toggle: Arc::new({
+                let target = target.clone();
+                move |_w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        if this.color_picker.open {
+                            this.close_color_picker();
+                        } else {
+                            this.open_select = None;
+                            this.color_picker.open();
+                        }
+                        cx.notify();
+                    });
+                }
+            }),
+            on_close: Arc::new({
+                let target = target.clone();
+                move |_w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.close_color_picker();
+                        cx.notify();
+                    });
+                }
+            }),
+            on_pick: Arc::new({
+                let target = target.clone();
+                move |color: gpui::Rgba, _w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.color_picker.set_color(color);
+                        this.sync_color_from_picker();
+                        cx.notify();
+                    });
+                }
+            }),
+            on_channel: Arc::new({
+                let target = target.clone();
+                move |channel: ColorChannel, value: f32, _w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.color_picker.set_channel(channel, value);
+                        this.sync_color_from_picker();
+                        cx.notify();
+                    });
+                }
+            }),
+            on_auto: Arc::new({
+                let target = target.clone();
+                move |on: bool, _w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.color_picker.set_auto(on);
+                        this.sync_color_from_picker();
+                        cx.notify();
+                    });
+                }
+            }),
+        };
+
+        // Click-outside dismissal for the color popover. Stops propagation so a
+        // click on the (occluded) trigger does not immediately reopen it.
+        let color_backdrop = self.color_picker.open.then(|| {
+            let target = target.clone();
+            div()
+                .absolute()
+                .inset_0()
+                .id("color-picker-dismiss")
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _w, cx| {
+                    cx.stop_propagation();
+                    let _ = target.update(cx, |this, cx| {
+                        this.close_color_picker();
+                        cx.notify();
+                    });
+                })
+        });
+
+        let color_ui = AddTrackColorUi {
+            picker: &self.color_picker,
+            presets: (0..Colors::TRACK_COLORS.len()).map(track_color).collect(),
+            hex_focused: self.color_picker.hex_input.is_focused(window),
+            hex_callbacks: bind_mouse_selection(cx.entity().clone(), |this| {
+                &mut this.color_picker.hex_input
+            }),
+            callbacks: picker_callbacks,
+        };
+
         div()
             .flex()
             .flex_col()
@@ -1648,15 +1851,17 @@ impl Render for AddTrackWindow {
                 cx.entity().clone(),
                 self.open_select,
                 &self.instrument_plugins,
+                color_ui,
                 callbacks,
                 i18n,
             ))
             .children(dismiss_backdrop)
+            .children(color_backdrop)
     }
 }
 
 pub fn open_add_track_window(
-    owner_bounds: Bounds<gpui::Pixels>,
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
     kind: AddTrackKind,
     track_count: usize,
     has_master_track: bool,
@@ -1665,14 +1870,11 @@ pub fn open_add_track_window(
     on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
     cx: &mut App,
 ) -> Result<WindowHandle<AddTrackWindow>, String> {
-    let parent_x: f32 = owner_bounds.origin.x.into();
-    let parent_y: f32 = owner_bounds.origin.y.into();
-    let parent_w: f32 = owner_bounds.size.width.into();
-    let parent_h: f32 = owner_bounds.size.height.into();
-    let origin = Point {
-        x: px(parent_x + ((parent_w - ADD_TRACK_WINDOW_WIDTH) / 2.0).max(24.0)),
-        y: px(parent_y + ((parent_h - ADD_TRACK_WINDOW_HEIGHT) / 2.0).max(24.0)),
-    };
+    let window_bounds = centered_window_bounds(
+        owner_bounds,
+        size(px(ADD_TRACK_WINDOW_WIDTH), px(ADD_TRACK_WINDOW_HEIGHT)),
+        cx,
+    );
 
     let language = language.into();
     let i18n = I18n::new(&language);
@@ -1687,10 +1889,7 @@ pub fn open_add_track_window(
     ));
 
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
-    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
-        origin,
-        size: size(px(ADD_TRACK_WINDOW_WIDTH), px(ADD_TRACK_WINDOW_HEIGHT)),
-    }));
+    options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = false;
@@ -1699,6 +1898,7 @@ pub fn open_add_track_window(
         px(ADD_TRACK_WINDOW_MIN_WIDTH),
         px(ADD_TRACK_WINDOW_MIN_HEIGHT),
     ));
+    apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, |_window, cx| {
         cx.new(|cx| {

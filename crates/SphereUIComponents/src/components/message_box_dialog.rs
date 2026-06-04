@@ -7,15 +7,14 @@
 
 use std::sync::Arc;
 
-use gpui::{
-    div, px, App, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window, WindowHandle,
-};
-#[cfg(target_os = "windows")]
-use gpui::{size, AppContext, Point, WindowBackgroundAppearance, WindowBounds, WindowKind};
-
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
+use crate::window_position::{apply_owner_display, centered_window_bounds};
+use gpui::{
+    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+};
 
 pub const MESSAGE_BOX_WIDTH: f32 = 460.0;
 const BODY_PAD_X: f32 = 18.0;
@@ -438,30 +437,22 @@ impl Render for MessageBoxWindow {
 /// Windows only; returns an error on other platforms.
 #[cfg(target_os = "windows")]
 pub fn open_message_box_window(
-    owner_bounds: Bounds<gpui::Pixels>,
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
     options: MessageBoxOptions,
     on_response: ResponseCb,
     cx: &mut App,
 ) -> Result<WindowHandle<MessageBoxWindow>, String> {
     let height = message_box_height(&options);
-    let parent_x: f32 = owner_bounds.origin.x.into();
-    let parent_y: f32 = owner_bounds.origin.y.into();
-    let parent_w: f32 = owner_bounds.size.width.into();
-    let parent_h: f32 = owner_bounds.size.height.into();
-    let origin = Point {
-        x: px(parent_x + ((parent_w - MESSAGE_BOX_WIDTH) / 2.0).max(24.0)),
-        y: px(parent_y + ((parent_h - height) / 2.0).max(24.0)),
-    };
+    let window_bounds =
+        centered_window_bounds(owner_bounds, size(px(MESSAGE_BOX_WIDTH), px(height)), cx);
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
-    window_options.window_bounds = Some(WindowBounds::Windowed(Bounds {
-        origin,
-        size: size(px(MESSAGE_BOX_WIDTH), px(height)),
-    }));
+    window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
     window_options.kind = WindowKind::Floating;
     window_options.is_resizable = false;
     window_options.is_minimizable = false;
     window_options.window_background = WindowBackgroundAppearance::Transparent;
+    apply_owner_display(&mut window_options, owner_bounds, cx);
 
     cx.open_window(window_options, move |_window, cx| {
         cx.new(|cx| MessageBoxWindow::new(options, on_response, cx))
@@ -471,7 +462,7 @@ pub fn open_message_box_window(
 
 #[cfg(not(target_os = "windows"))]
 pub fn open_message_box_window(
-    _owner_bounds: Bounds<gpui::Pixels>,
+    _owner_bounds: Option<Bounds<gpui::Pixels>>,
     _options: MessageBoxOptions,
     _on_response: ResponseCb,
     _cx: &mut App,

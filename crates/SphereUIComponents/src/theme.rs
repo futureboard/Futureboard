@@ -121,6 +121,27 @@ impl Colors {
         rgb(0x72D7D7)
     }
 
+    /// Soft tinted fill derived from the startup accent. Used for selected
+    /// filter chips / pills on the Welcome screen.
+    pub fn accent_startup_soft() -> Rgba {
+        rgba(0x72D7D726)
+    }
+
+    /// Background for category / status badges on the Welcome Feeds tab.
+    pub fn feed_badge_background() -> Rgba {
+        rgba(0xFFFFFF12)
+    }
+
+    /// Text color for category / status badges on the Welcome Feeds tab.
+    pub fn feed_badge_text() -> Rgba {
+        rgb(0x9BA1AD)
+    }
+
+    /// Unread / "new" indicator dot on Feeds items.
+    pub fn feed_unread_dot() -> Rgba {
+        rgb(0x72D7D7)
+    }
+
     // Backgrounds — JetBrains Fleet Dark inspired palette
     pub fn surface_base() -> Rgba {
         rgb(0x1E1F22)

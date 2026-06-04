@@ -6,8 +6,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, size, svg, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 use sphere_plugin_host::load_au_cache_state;
 use sphere_plugin_host::preset::register_plugin;
@@ -1761,26 +1761,20 @@ impl Render for PluginManagerWindow {
 }
 
 pub fn open_plugin_manager_window(
-    owner_bounds: Bounds<gpui::Pixels>,
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
     cx: &mut App,
 ) -> Result<WindowHandle<PluginManagerWindow>, String> {
-    let parent_x: f32 = owner_bounds.origin.x.into();
-    let parent_y: f32 = owner_bounds.origin.y.into();
-    let parent_w: f32 = owner_bounds.size.width.into();
-    let parent_h: f32 = owner_bounds.size.height.into();
-    let origin = Point {
-        x: px(parent_x + ((parent_w - PLUGIN_MANAGER_WINDOW_WIDTH) / 2.0).max(24.0)),
-        y: px(parent_y + ((parent_h - PLUGIN_MANAGER_WINDOW_HEIGHT) / 2.0).max(24.0)),
-    };
-
-    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
-    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
-        origin,
-        size: size(
+    let window_bounds = crate::window_position::centered_window_bounds(
+        owner_bounds,
+        size(
             px(PLUGIN_MANAGER_WINDOW_WIDTH),
             px(PLUGIN_MANAGER_WINDOW_HEIGHT),
         ),
-    }));
+        cx,
+    );
+
+    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
+    options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = false;
@@ -1789,6 +1783,7 @@ pub fn open_plugin_manager_window(
         px(PLUGIN_MANAGER_WINDOW_MIN_WIDTH),
         px(PLUGIN_MANAGER_WINDOW_MIN_HEIGHT),
     ));
+    crate::window_position::apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, |_window, cx| cx.new(PluginManagerWindow::new))
         .map_err(|error| error.to_string())

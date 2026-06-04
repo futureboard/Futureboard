@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
@@ -7,6 +8,34 @@ use gpui::{
 
 use crate::assets;
 use crate::theme::Colors;
+
+pub fn combobox_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_COMBOBOX_DEBUG").is_some()
+            || std::env::var_os("FUTUREBOARD_OVERLAY_DEBUG").is_some()
+    })
+}
+
+fn combobox_debug(message: &str) {
+    if combobox_debug_enabled() {
+        eprintln!("[combobox] {message}");
+    }
+}
+
+/// Remove duplicate labels while preserving first-seen order.
+pub fn dedupe_preserve_order(options: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(options.len());
+    for option in options {
+        if seen.insert(option.clone()) {
+            out.push(option.clone());
+        } else if combobox_debug_enabled() {
+            combobox_debug(&format!("duplicate option detected: {option}"));
+        }
+    }
+    out
+}
 
 #[derive(Clone, Copy)]
 pub struct ComboBoxOption<T: Copy + PartialEq + 'static> {
@@ -154,10 +183,23 @@ pub fn combo_box_string_menu(
     options: &[String],
     on_select: Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
+    let deduped = dedupe_preserve_order(options);
+    combobox_debug(&format!(
+        "open options={} unique={} selected={selected}",
+        options.len(),
+        deduped.len()
+    ));
     let left: f32 = position.x.into();
     let top: f32 = position.y.into();
     let width: f32 = position.width.map(|w| w.into()).unwrap_or(120.0);
     let max_h: f32 = position.max_height.map(|h| h.into()).unwrap_or(148.0);
+    #[cfg(target_os = "windows")]
+    let platform = "windows";
+    #[cfg(not(target_os = "windows"))]
+    let platform = "other";
+    combobox_debug(&format!(
+        "menu_bounds platform={platform} x={left:.0} y={top:.0} w={width:.0} max_h={max_h:.0}"
+    ));
     div()
         .absolute()
         .left(px(left))
@@ -179,7 +221,7 @@ pub fn combo_box_string_menu(
         .id(id)
         .overflow_y_scroll()
         .occlude()
-        .children(options.iter().enumerate().map(|(index, option)| {
+        .children(deduped.iter().enumerate().map(|(index, option)| {
             let active = option == selected;
             let value = option.clone();
             let on_select = on_select.clone();

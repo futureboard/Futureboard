@@ -186,7 +186,7 @@ pub fn settings_daw_row(label: impl Into<String>, child: impl IntoElement) -> im
 /// DAW-aligned label + control row, with optional description under the label.
 pub fn settings_daw_row_with_description(
     label: impl Into<String>,
-    description: Option<&'static str>,
+    description: Option<String>,
     child: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::components::piano_roll::PianoRoll;
@@ -263,27 +263,21 @@ fn empty_state(title: &str, hint: &str) -> gpui::AnyElement {
 }
 
 pub fn open_midi_editor_window(
-    owner_bounds: Bounds<gpui::Pixels>,
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
     timeline: Entity<Timeline>,
     piano_roll: Entity<PianoRoll>,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
     cx: &mut App,
 ) -> Result<WindowHandle<MidiEditorWindow>, String> {
-    let parent_x: f32 = owner_bounds.origin.x.into();
-    let parent_y: f32 = owner_bounds.origin.y.into();
-    let parent_w: f32 = owner_bounds.size.width.into();
-    let parent_h: f32 = owner_bounds.size.height.into();
-    let origin = Point {
-        x: px((parent_x + (parent_w - MIDI_EDITOR_WINDOW_WIDTH) * 0.5).max(24.0)),
-        y: px((parent_y + (parent_h - MIDI_EDITOR_WINDOW_HEIGHT) * 0.5).max(24.0)),
-    };
+    let window_bounds = crate::window_position::centered_window_bounds(
+        owner_bounds,
+        size(px(MIDI_EDITOR_WINDOW_WIDTH), px(MIDI_EDITOR_WINDOW_HEIGHT)),
+        cx,
+    );
 
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
-    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
-        origin,
-        size: size(px(MIDI_EDITOR_WINDOW_WIDTH), px(MIDI_EDITOR_WINDOW_HEIGHT)),
-    }));
+    options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = true;
@@ -292,6 +286,7 @@ pub fn open_midi_editor_window(
         px(MIDI_EDITOR_WINDOW_MIN_WIDTH),
         px(MIDI_EDITOR_WINDOW_MIN_HEIGHT),
     ));
+    crate::window_position::apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
         cx.new(|cx| MidiEditorWindow::new(timeline, piano_roll, on_close, dispatch_command, cx))

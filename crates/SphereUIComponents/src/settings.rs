@@ -66,6 +66,11 @@ pub struct GeneralSettings {
     pub show_start_screen: bool,
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// User-configured default directory for new projects. When `None` or empty
+    /// the platform default ([`crate::project::io::default_projects_dir`]) is
+    /// used. Resolve through [`GeneralSettings::resolved_default_project_dir`].
+    #[serde(default)]
+    pub default_project_directory: Option<PathBuf>,
     #[serde(default)]
     pub project_defaults: ProjectDefaults,
     #[serde(default)]
@@ -80,10 +85,30 @@ impl Default for GeneralSettings {
             language: default_language(),
             show_start_screen: default_true(),
             check_updates: default_true(),
+            default_project_directory: None,
             project_defaults: ProjectDefaults::default(),
             autosave: AutosaveSettings::default(),
             notifications: NotificationSettings::default(),
         }
+    }
+}
+
+impl GeneralSettings {
+    /// Resolve the effective default project directory. Falls back to the
+    /// platform default when unset, empty, or whitespace-only. Never panics.
+    pub fn resolved_default_project_dir(&self) -> PathBuf {
+        match &self.default_project_directory {
+            Some(path) if !path.as_os_str().is_empty() => path.clone(),
+            _ => crate::project::io::default_projects_dir(),
+        }
+    }
+
+    /// True when the user has explicitly configured a default project directory
+    /// (as opposed to relying on the platform fallback).
+    pub fn has_configured_project_dir(&self) -> bool {
+        self.default_project_directory
+            .as_ref()
+            .is_some_and(|p| !p.as_os_str().is_empty())
     }
 }
 
@@ -116,22 +141,69 @@ impl Default for AudioHardwareSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MidiDeviceDirection {
+    Input,
+    Output,
+    InputOutput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MidiDeviceSetting {
+    pub id: String,
+    pub name: String,
+    pub direction: MidiDeviceDirection,
+    pub enabled: bool,
+    pub connected: bool,
+    #[serde(default)]
+    pub clock_enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MidiHardwareSettings {
-    pub enabled_inputs: Vec<String>,
-    pub enabled_outputs: Vec<String>,
+    #[serde(default)]
+    pub devices: Vec<MidiDeviceSetting>,
     pub clock_sync: bool,
+    /// Legacy — migrated into [`devices`] on load.
+    #[serde(default, skip_serializing)]
+    pub enabled_inputs: Vec<String>,
+    #[serde(default, skip_serializing)]
+    pub enabled_outputs: Vec<String>,
 }
 
 impl Default for MidiHardwareSettings {
     fn default() -> Self {
         Self {
-            enabled_inputs: vec![
-                "Keyboard Controller".to_string(),
-                "Midi Device 2".to_string(),
+            devices: vec![
+                MidiDeviceSetting {
+                    id: "midi-in-keyboard-controller".to_string(),
+                    name: "Keyboard Controller".to_string(),
+                    direction: MidiDeviceDirection::Input,
+                    enabled: true,
+                    connected: true,
+                    clock_enabled: false,
+                },
+                MidiDeviceSetting {
+                    id: "midi-in-midi-device-2".to_string(),
+                    name: "Midi Device 2".to_string(),
+                    direction: MidiDeviceDirection::Input,
+                    enabled: true,
+                    connected: true,
+                    clock_enabled: false,
+                },
+                MidiDeviceSetting {
+                    id: "midi-out-interface".to_string(),
+                    name: "Interface".to_string(),
+                    direction: MidiDeviceDirection::Output,
+                    enabled: true,
+                    connected: true,
+                    clock_enabled: true,
+                },
             ],
-            enabled_outputs: vec!["Synth Out".to_string()],
             clock_sync: true,
+            enabled_inputs: Vec::new(),
+            enabled_outputs: Vec::new(),
         }
     }
 }
@@ -506,6 +578,39 @@ pub struct SettingsSchema {
 }
 
 impl SettingsSchema {
+    /// Load and validate the settings schema directly from the resolved
+    /// settings file. Useful for surfaces (e.g. the Welcome window) that run
+    /// before the [`GlobalSettingsModel`] entity exists. Falls back to defaults
+    /// on any read/parse error — never panics.
+    pub fn load_from_disk() -> Self {
+        let path = FutureboardPaths::resolve().settings_file;
+        let mut schema = SettingsModel::load_from_path(&path);
+        schema.validate_and_clamp();
+        schema
+    }
+
+    /// Persist only the default project directory back to the settings file,
+    /// preserving every other field already on disk. Intended for the Welcome
+    /// window, which has no [`SettingsModel`] entity. Best-effort; logs on
+    /// failure and never panics.
+    pub fn persist_default_project_directory(dir: Option<PathBuf>) {
+        let path = FutureboardPaths::resolve().settings_file;
+        let mut schema = SettingsModel::load_from_path(&path);
+        schema.general.default_project_directory = dir.filter(|p| !p.as_os_str().is_empty());
+        schema.validate_and_clamp();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&schema) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("[settings] failed to persist default project dir: {e}");
+                }
+            }
+            Err(e) => eprintln!("[settings] failed to serialize settings: {e}"),
+        }
+    }
+
     pub fn validate_and_clamp(&mut self) {
         // Clamp tempo
         if self.general.project_defaults.tempo < 20.0 {
@@ -533,6 +638,8 @@ impl SettingsSchema {
         } else if self.appearance.ui_scale > 2.5 {
             self.appearance.ui_scale = 2.5;
         }
+
+        crate::midi_devices::migrate_legacy_midi_settings(&mut self.hardware.midi);
     }
 }
 
@@ -594,7 +701,7 @@ impl SettingsModel {
         })
     }
 
-    fn load_from_path(path: &Path) -> SettingsSchema {
+    pub fn load_from_path(path: &Path) -> SettingsSchema {
         if path.exists() {
             match std::fs::read_to_string(path) {
                 Ok(content) => match serde_json::from_str::<SettingsSchema>(&content) {

@@ -120,8 +120,94 @@ pub fn pointer_anchor(x: f32, y: f32) -> OverlayAnchor {
     }
 }
 
+/// Width of the Inspector value column (right-aligned panel).
+pub fn inspector_value_width(inspector_width: f32) -> f32 {
+    const PAD: f32 = 10.0;
+    const LABEL: f32 = 86.0;
+    const GAP: f32 = 10.0;
+    (inspector_width - PAD * 2.0 - LABEL - GAP).max(80.0)
+}
+
+/// Build trigger bounds for an Inspector form-row ComboBox from a click on the
+/// trigger. The menu width matches the value column, not the pointer.
+pub fn inspector_combo_trigger_bounds(
+    window: &Window,
+    inspector_width: f32,
+    event: &MouseDownEvent,
+) -> Bounds<Pixels> {
+    const PAD: f32 = 10.0;
+    const LABEL: f32 = 86.0;
+    const GAP: f32 = 10.0;
+    let value_w = inspector_value_width(inspector_width);
+    let win_w: f32 = window.bounds().size.width.into();
+    let value_left = win_w - inspector_width + PAD + LABEL + GAP;
+    let click_y: f32 = event.position.y.into();
+    let top = click_y - COMBO_TRIGGER_HEIGHT * 0.5;
+    bounds(
+        point(px(value_left), px(top)),
+        size(px(value_w), px(COMBO_TRIGGER_HEIGHT)),
+    )
+}
+
+pub fn inspector_combo_menu_position(
+    anchor: OverlayAnchor,
+    inspector_width: f32,
+    menu_height: f32,
+    window: &Window,
+) -> OverlayPosition {
+    let width = inspector_value_width(inspector_width);
+    let refreshed = OverlayAnchor {
+        bounds: bounds(
+            anchor.bounds.origin,
+            size(px(width), anchor.bounds.size.height),
+        ),
+    };
+    compute_overlay_position(
+        refreshed.bounds,
+        OverlaySize {
+            width,
+            height: menu_height,
+        },
+        window.bounds(),
+        OverlayPlacement::BottomStart,
+        4.0,
+    )
+}
+
 pub fn window_content_bounds(window: &Window) -> Bounds<Pixels> {
     window.bounds()
+}
+
+/// Drawable client area below the external dialog title bar (window-local coordinates).
+pub fn external_dialog_overlay_bounds(window: &Window) -> Bounds<Pixels> {
+    let full = window.bounds();
+    let titlebar = TITLEBAR_HEIGHT;
+    let full_w: f32 = full.size.width.into();
+    let full_h: f32 = full.size.height.into();
+    let content_h = (full_h - titlebar).max(0.0);
+    bounds(
+        point(px(0.0), px(titlebar)),
+        size(px(full_w), px(content_h)),
+    )
+}
+
+/// True when `anchor` lies inside the overlay coordinate space for this window.
+pub fn anchor_visible_in_window(anchor: OverlayAnchor, window: &Window) -> bool {
+    let content = external_dialog_overlay_bounds(window);
+    let anchor_left: f32 = anchor.bounds.origin.x.into();
+    let anchor_top: f32 = anchor.bounds.origin.y.into();
+    let anchor_w: f32 = anchor.bounds.size.width.into();
+    let anchor_h: f32 = anchor.bounds.size.height.into();
+    let anchor_right = anchor_left + anchor_w;
+    let anchor_bottom = anchor_top + anchor_h;
+    let content_left: f32 = content.origin.x.into();
+    let content_top: f32 = content.origin.y.into();
+    let content_right = content_left + f32::from(content.size.width);
+    let content_bottom = content_top + f32::from(content.size.height);
+    anchor_left >= content_left - 2.0
+        && anchor_top >= content_top - 2.0
+        && anchor_right <= content_right + 2.0
+        && anchor_bottom <= content_bottom + 2.0
 }
 
 pub fn compute_overlay_position(
@@ -197,7 +283,8 @@ pub fn compute_overlay_position(
     }
 
     overlay_debug(&format!(
-        "type=compute placement={placement:?} anchor=({anchor_left:.0},{anchor_top:.0},{anchor_w:.0},{anchor_h:.0}) pos=({x:.0},{y:.0}) size=({width:.0},{height:.0}) window=({win_w:.0},{win_h:.0}) flip={flipped}"
+        "type=compute platform={} placement={placement:?} anchor=({anchor_left:.0},{anchor_top:.0},{anchor_w:.0},{anchor_h:.0}) pos=({x:.0},{y:.0}) size=({width:.0},{height:.0}) window=({win_w:.0},{win_h:.0}) flip={flipped}",
+        overlay_platform()
     ));
 
     OverlayPosition {
@@ -209,7 +296,19 @@ pub fn compute_overlay_position(
 }
 
 fn overlay_debug(message: &str) {
-    if std::env::var("FUTUREBOARD_OVERLAY_DEBUG").as_deref() == Ok("1") {
+    if std::env::var_os("FUTUREBOARD_OVERLAY_DEBUG").is_some()
+        || std::env::var_os("FUTUREBOARD_COMBOBOX_DEBUG").is_some()
+    {
         eprintln!("[overlay] {message}");
     }
+}
+
+#[cfg(target_os = "windows")]
+fn overlay_platform() -> &'static str {
+    "windows"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn overlay_platform() -> &'static str {
+    "other"
 }

@@ -3,6 +3,8 @@ mod app_chrome;
 mod audio_editor_adapter;
 mod audio_editor_host;
 mod bottom_panel;
+pub mod box_list_view;
+pub mod color_picker;
 pub mod combo_box;
 pub mod context_menu;
 pub mod controls;
@@ -28,6 +30,7 @@ pub mod plugin_format_badge;
 pub mod plugin_manager;
 pub mod plugin_picker;
 pub mod project_switcher;
+pub mod settings_components;
 pub mod settings_dialog;
 pub mod settings_layout;
 mod sidebar;
@@ -48,7 +51,16 @@ pub use app_chrome::{
 };
 pub use audio_editor_host::AudioEditorHost;
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
-pub use combo_box::{combo_box_menu, combo_box_trigger, ComboBoxOption};
+pub use box_list_view::{
+    box_list_empty_state, box_list_group_label, box_list_icon_button, box_list_item,
+    box_list_item_badge, box_list_item_content, box_list_item_leading_icon, box_list_item_subtitle,
+    box_list_item_title, box_list_item_trailing, box_list_toggle, box_list_view, BoxListBadgeTone,
+};
+pub use color_picker::{
+    color_picker_field, color_picker_trigger, default_presets, ColorChannel, ColorPickerCallbacks,
+    ColorPickerPlacement, ColorPickerState, ColorPickerValue,
+};
+pub use combo_box::{combo_box_menu, combo_box_trigger, dedupe_preserve_order, ComboBoxOption};
 pub use controls::{
     fb_button, fb_checkbox, fb_color_swatch, fb_field_label, fb_form_row, fb_section_header,
     fb_section_label, fb_segmented_button, fb_stepper_button, FbButtonKind,
@@ -71,6 +83,13 @@ pub use piano_roll::PianoRoll;
 pub use plugin_manager::{
     open_plugin_manager_window, FilterCounts, PluginManagerDialogState, PluginManagerWindow,
     SidebarFilter, SortDir, SortKey,
+};
+pub use settings_components::{
+    settings_box_list, settings_box_list_group, settings_combo_trigger, settings_control_slot,
+    settings_label, settings_label_width, settings_readout, settings_restart_footer,
+    settings_restart_label, settings_row, settings_row_restart, settings_row_shell,
+    settings_row_with_description, settings_section, settings_section_hint_text, settings_status,
+    settings_toggle, RESTART_FOOTER_TEXT,
 };
 pub use settings_dialog::{
     open_settings_window, settings_dialog, HardwareCombo, OnSettingUpdate, SettingsDialogCallbacks,

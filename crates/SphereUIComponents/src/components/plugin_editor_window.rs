@@ -611,6 +611,9 @@ impl PluginEditorWindow {
 
 impl Drop for PluginEditorWindow {
     fn drop(&mut self) {
+        if crate::shutdown::ShutdownState::global().is_shutting_down() {
+            return;
+        }
         if self.embed_handle.take().is_some() {
             // Detach the editor view + destroy the host window. The runtime
             // processor (and audio) keep running — only insert removal destroys it.

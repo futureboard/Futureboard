@@ -32,14 +32,18 @@
     clippy::useless_format
 )]
 
+pub mod app_state;
 pub mod assets;
 pub mod boot;
+pub mod color;
 pub mod components;
 pub mod embedded_assets;
+pub mod feeds;
 pub mod i18n;
 pub mod keymap;
 pub mod layout;
 pub mod menu;
+pub mod midi_devices;
 pub mod native_macos_menu;
 pub mod overlay;
 pub mod paths;
@@ -47,6 +51,9 @@ pub mod perf;
 pub mod platform_chrome;
 pub mod project;
 pub mod settings;
+pub mod shutdown;
+pub mod window_position;
+pub use shutdown::ShutdownState;
 pub mod splash;
 pub mod theme;
 pub mod welcome;

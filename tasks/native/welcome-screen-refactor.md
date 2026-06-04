@@ -1,6 +1,6 @@
 # Refactor Futureboard Welcome / Studio Bootstrap Flow
 
-> \*\*Status note:\*\* `A G B C D = Complete, continue it!`
+> **Status note:** `A G B C D = Complete, continue it!`
 
 ## Current Goals
 
@@ -22,7 +22,7 @@
 * No hardcoded custom colors.
 * Keep Welcome compact and DAW-like.
 
-\---
+---
 
 ## Part A — Initialize Studio Layout + WGPU During Welcome
 
@@ -70,8 +70,8 @@ App boot:
 ### Debug Flags
 
 ```bash
-FUTUREBOARD\_BOOT\_DEBUG=1
-FUTUREBOARD\_GPU\_RENDERER\_DEBUG=1
+FUTUREBOARD_BOOT_DEBUG=1
+FUTUREBOARD_GPU_RENDERER_DEBUG=1
 ```
 
 ### Logs
@@ -86,10 +86,10 @@ FUTUREBOARD\_GPU\_RENDERER\_DEBUG=1
 
 ### Acceptance Criteria
 
-* \[ ] Welcome opens with StudioLayout/runtime already initialized.
-* \[ ] Entering Studio does not recreate entire app state unnecessarily.
-* \[x] WGPU can be ready before opening workspace.
-* \[x] If WGPU fails, app still works with CPU Render.
+* [ ] Welcome opens with StudioLayout/runtime already initialized.
+* [ ] Entering Studio does not recreate entire app state unnecessarily.
+* [x] WGPU can be ready before opening workspace.
+* [x] If WGPU fails, app still works with CPU Render.
 
 ### Progress Notes
 
@@ -98,7 +98,7 @@ FUTUREBOARD\_GPU\_RENDERER\_DEBUG=1
   executor after the Studio shell is constructed. Full pre-created StudioLayout
   while still on Welcome remains unchecked.
 
-\---
+---
 
 ## Part B — Move Open Project Dialog Into Welcome
 
@@ -159,12 +159,12 @@ Open Project should be part of the Welcome flow.
 
 ### Acceptance Criteria
 
-* \[x] Open Project flow lives in Welcome.
-* \[x] Recent list and file picker are accessible from Welcome.
-* \[x] Invalid project shows inline error.
-* \[x] Successful open enters Studio workspace.
+* [x] Open Project flow lives in Welcome.
+* [x] Recent list and file picker are accessible from Welcome.
+* [x] Invalid project shows inline error.
+* [x] Successful open enters Studio workspace.
 
-\---
+---
 
 ## Part C — New Project Naming Directly In Welcome
 
@@ -187,21 +187,21 @@ User can create a named project directly from Welcome.
 
 ```text
 Project Name
-\[ Untitled Project ]
+[ Untitled Project ]
 
 Location
-\[ Documents/Futureboard Studio/Projects ] \[Change...]
+[ Documents/Futureboard Studio/Projects ] [Change...]
 
 Template
-\[ Empty Project / MIDI Composer / Audio Session / Mix Template ]
+[ Empty Project / MIDI Composer / Audio Session / Mix Template ]
 
 Audio
-Sample Rate: \[48 kHz]
-BPM: \[120]
-Time Signature: \[4/4]
+Sample Rate: [48 kHz]
+BPM: [120]
+Time Signature: [4/4]
 
 Buttons:
-\[ Create Project ] \[ Continue Without Project ]
+[ Create Project ] [ Continue Without Project ]
 ```
 
 ### Behavior
@@ -212,7 +212,7 @@ Buttons:
 * Project folder preview:
 
 ```text
-<default\_project\_path>/<project\_name>/
+<default_project_path>/<project_name>/
 ```
 
 * If folder exists:
@@ -247,13 +247,13 @@ Futureboard Studio/Projects/My Song/
 
 ### Acceptance Criteria
 
-* \[x] User can type project name in Welcome.
-* \[x] Create Project creates project folder.
-* \[x] Project file is created.
-* \[x] Studio opens with named project.
-* \[x] Recent projects update.
+* [x] User can type project name in Welcome.
+* [x] Create Project creates project folder.
+* [x] Project file is created.
+* [x] Studio opens with named project.
+* [x] Recent projects update.
 
-\---
+---
 
 ## Part D — Continue Without Project / Without Welcome Screen
 
@@ -299,12 +299,12 @@ If disabled:
 
 ### Acceptance Criteria
 
-* \[x] Continue Without Project enters Studio immediately.
-* \[x] No folder is created until Save.
-* \[x] Save As asks for project name/location.
-* \[x] Welcome can be disabled on startup.
+* [x] Continue Without Project enters Studio immediately.
+* [x] No folder is created until Save.
+* [x] Save As asks for project name/location.
+* [x] Welcome can be disabled on startup.
 
-\---
+---
 
 ## Part E — Save Project From Studio Windowed Mode And Copy All Assets
 
@@ -372,12 +372,12 @@ Add or update project media pool:
 ```rust
 pub struct ProjectAsset {
     pub id: String,
-    pub original\_path: Option<PathBuf>,
-    pub project\_relative\_path: PathBuf,
+    pub original_path: Option<PathBuf>,
+    pub project_relative_path: PathBuf,
     pub kind: AssetKind,
     pub hash: Option<String>,
-    pub size\_bytes: Option<u64>,
-    pub copied\_at: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub copied_at: Option<String>,
     pub missing: bool,
 }
 ```
@@ -460,15 +460,15 @@ If canceled:
 
 ### Acceptance Criteria
 
-* \[x] Unsaved workspace can Save As into project folder.
-* \[x] External audio file is copied into `Assets/Audio`.
-* \[x] Project references copied relative path.
-* \[x] Save/load works after moving project folder.
-* \[x] Duplicate asset is not copied repeatedly.
-* \[x] Missing asset shows error.
-* \[x] Large copy does not freeze UI.
+* [x] Unsaved workspace can Save As into project folder.
+* [x] External audio file is copied into `Assets/Audio`.
+* [x] Project references copied relative path.
+* [x] Save/load works after moving project folder.
+* [x] Duplicate asset is not copied repeatedly.
+* [x] Missing asset shows error.
+* [x] Large copy does not freeze UI.
 
-\---
+---
 
 ## Part F — Default Project Path
 
@@ -492,7 +492,7 @@ Documents/Futureboard Studio/Projects
 #### macOS
 
 ```text
-\~/Music/Futureboard Studio/Projects
+~/Music/Futureboard Studio/Projects
 ```
 
 Or current chosen convention.
@@ -500,22 +500,22 @@ Or current chosen convention.
 #### Linux
 
 ```text
-\~/Music/Futureboard Studio/Projects
+~/Music/Futureboard Studio/Projects
 ```
 
 Or:
 
 ```text
-\~/Documents/Futureboard Studio/Projects
+~/Documents/Futureboard Studio/Projects
 ```
 
 ### Acceptance Criteria
 
-* \[x] Default path is used consistently.
-* \[x] User can change it.
-* \[x] Path persists.
+* [x] Default path is used consistently.
+* [x] User can change it.
+* [x] Path persists.
 
-\---
+---
 
 ## Part G — Welcome / Studio State Machine
 
@@ -544,13 +544,13 @@ pub enum ProjectState {
 
 #### Startup
 
-* If `show\_welcome = true`:
+* If `show_welcome = true`:
 
   * `route = Welcome`
 * Else:
 
   * `route = StudioWorkspace`
-  * `project\_state = UnsavedWorkspace`
+  * `project_state = UnsavedWorkspace`
 
 #### Create Project
 
@@ -592,11 +592,11 @@ StudioWorkspace
 
 ### Acceptance Criteria
 
-* \[x] No ambiguous “Welcome but also loaded project” state.
-* \[x] Title bar reflects state correctly.
-* \[x] Save/Save As behavior is correct.
+* [x] No ambiguous “Welcome but also loaded project” state.
+* [x] Title bar reflects state correctly.
+* [x] Save/Save As behavior is correct.
 
-\---
+---
 
 ## Part H — UX Details
 
@@ -637,18 +637,24 @@ Use:
 * `Copying Assets…`
 * `Some assets could not be copied`
 
-\---
+### Progress Notes
+
+* 2026-06-04: Fixed detached Mixer and floating MIDI Editor window lifecycle so
+  titlebar close callbacks clear StudioLayout window handles without re-entering
+  the same WindowHandle and removing the window twice.
+
+---
 
 ## Part I — Debug Flags
 
 Add:
 
 ```bash
-FUTUREBOARD\_BOOT\_DEBUG=1
-FUTUREBOARD\_WELCOME\_DEBUG=1
-FUTUREBOARD\_PROJECT\_SAVE\_DEBUG=1
-FUTUREBOARD\_ASSET\_COPY\_DEBUG=1
-FUTUREBOARD\_GPU\_RENDERER\_DEBUG=1
+FUTUREBOARD_BOOT_DEBUG=1
+FUTUREBOARD_WELCOME_DEBUG=1
+FUTUREBOARD_PROJECT_SAVE_DEBUG=1
+FUTUREBOARD_ASSET_COPY_DEBUG=1
+FUTUREBOARD_GPU_RENDERER_DEBUG=1
 ```
 
 ### Logs
@@ -665,7 +671,7 @@ FUTUREBOARD\_GPU\_RENDERER\_DEBUG=1
 * Project file written
 * Recent project updated
 
-\---
+---
 
 ## Part J — Manual Tests
 
@@ -731,21 +737,21 @@ FUTUREBOARD\_GPU\_RENDERER\_DEBUG=1
 ### Build
 
 ```bash
-cargo check -p sphere\_ui\_components
+cargo check -p sphere_ui_components
 cargo check --manifest-path apps/native/Cargo.toml
-cargo clippy -p sphere\_ui\_components -- -D warnings
+cargo clippy -p sphere_ui_components -- -D warnings
 ```
 
-\---
+---
 
 ## Final Acceptance Criteria
 
-* \[ ] WGPU / Studio Layout initializes at app startup even while Welcome is shown.
-* \[x] Welcome owns New Project / Open Project / Continue Without Project flows.
-* \[x] User can name project directly in Welcome.
-* \[x] Default project path is used consistently.
-* \[x] Continue Without Project creates unsaved workspace only.
-* \[ ] Save/Save As from Studio creates project folder and copies all referenced assets.
-* \[x] Project assets are stored relative to the project folder.
-* \[x] Asset copy is deduped and error-safe.
-* \[x] Existing Studio workflow remains stable.
+* [ ] WGPU / Studio Layout initializes at app startup even while Welcome is shown.
+* [x] Welcome owns New Project / Open Project / Continue Without Project flows.
+* [x] User can name project directly in Welcome.
+* [x] Default project path is used consistently.
+* [x] Continue Without Project creates unsaved workspace only.
+* [ ] Save/Save As from Studio creates project folder and copies all referenced assets.
+* [x] Project assets are stored relative to the project folder.
+* [x] Asset copy is deduped and error-safe.
+* [x] Existing Studio workflow remains stable.

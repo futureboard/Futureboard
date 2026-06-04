@@ -401,7 +401,7 @@ impl StudioLayout {
         let owner = cx.entity().clone();
         let on_close: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
             std::sync::Arc::new(move |_window, cx| {
-                let _ = owner.update(cx, |layout, cx| layout.close_mixer_window(cx));
+                let _ = owner.update(cx, |layout, cx| layout.note_mixer_window_closed(cx));
             });
         let scroll_owner = cx.entity().clone();
         let on_mixer_scroll: std::sync::Arc<
@@ -438,6 +438,11 @@ impl StudioLayout {
         if let Some(handle) = self.mixer_window.take() {
             let _ = handle.update(cx, |_mixer, window, _cx| window.remove_window());
         }
+        cx.notify();
+    }
+
+    pub(super) fn note_mixer_window_closed(&mut self, cx: &mut Context<Self>) {
+        self.mixer_window = None;
         cx.notify();
     }
 
@@ -544,7 +549,7 @@ impl StudioLayout {
         let owner = cx.entity().clone();
         let on_close: Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
             Arc::new(move |_window, cx| {
-                let _ = owner.update(cx, |layout, cx| layout.close_midi_editor_window(cx));
+                let _ = owner.update(cx, |layout, cx| layout.note_midi_editor_window_closed(cx));
             });
         let dispatch_owner = cx.entity().clone();
         let dispatch_command: Arc<dyn Fn(&'static str, &mut gpui::App) + Send + Sync> =
@@ -575,6 +580,11 @@ impl StudioLayout {
         if let Some(handle) = self.midi_editor_window.take() {
             let _ = handle.update(cx, |_w, window, _cx| window.remove_window());
         }
+        cx.notify();
+    }
+
+    pub(super) fn note_midi_editor_window_closed(&mut self, cx: &mut Context<Self>) {
+        self.midi_editor_window = None;
         cx.notify();
     }
 

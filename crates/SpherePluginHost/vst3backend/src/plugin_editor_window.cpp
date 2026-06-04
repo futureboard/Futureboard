@@ -2446,6 +2446,8 @@ extern "C" unsigned long long sphere_plugin_editor_open_window(
     const char* subtitle,
     int width,
     int height) {
+  (void)width;
+  (void)height;
   const std::string id = window_id && *window_id ? window_id : "plugin-editor";
 #ifdef _WIN32
   {

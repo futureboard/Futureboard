@@ -9,11 +9,9 @@ use std::sync::Arc;
 
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
-use crate::window_position::{apply_owner_display, centered_window_bounds};
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    div, px, App, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Window, WindowHandle,
 };
 
 pub const MESSAGE_BOX_WIDTH: f32 = 460.0;
@@ -442,6 +440,11 @@ pub fn open_message_box_window(
     on_response: ResponseCb,
     cx: &mut App,
 ) -> Result<WindowHandle<MessageBoxWindow>, String> {
+    use crate::window_position::{apply_owner_display, centered_window_bounds};
+    use gpui::{
+        size, AppContext, WindowBackgroundAppearance, WindowBounds, WindowKind,
+    };
+
     let height = message_box_height(&options);
     let window_bounds =
         centered_window_bounds(owner_bounds, size(px(MESSAGE_BOX_WIDTH), px(height)), cx);

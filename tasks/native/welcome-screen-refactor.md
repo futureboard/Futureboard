@@ -742,6 +742,13 @@ cargo check --manifest-path apps/native/Cargo.toml
 cargo clippy -p sphere_ui_components -- -D warnings
 ```
 
+### Progress Notes
+
+* 2026-06-04: Fixed CI warning cleanup for non-Windows builds: native message
+  box GPUI imports are now scoped to the Windows-only open path, and plugin
+  editor window dimensions are marked intentionally unused for non-Win32
+  backends.
+
 ---
 
 ## Final Acceptance Criteria

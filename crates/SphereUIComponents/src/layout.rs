@@ -195,6 +195,59 @@ pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &
     }
 }
 
+fn build_and_warm_audio_engine(
+    schema: crate::settings::SettingsSchema,
+) -> Result<(DAUx::AudioEngine, DAUx::EngineStats), String> {
+    let backend = match schema.hardware.audio.driver_type.as_str() {
+        "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
+        _ => DAUx::AudioBackend::Auto,
+    };
+    let audio_config = DAUx::EngineConfig {
+        sample_rate: schema.general.project_defaults.sample_rate,
+        buffer_size: schema.general.project_defaults.buffer_size,
+        channels: 2,
+        backend,
+    };
+
+    let mut engine = DAUx::AudioEngine::new(audio_config).map_err(|error| error.to_string())?;
+    eprintln!(
+        "[audio] sphere-direct-audio-engine v{} ready (backend={:?}, sr={}, buf={})",
+        engine.version(),
+        engine.config().backend,
+        engine.config().sample_rate,
+        engine.config().buffer_size
+    );
+    let devices = engine.list_output_devices();
+    eprintln!("[audio] {} output device(s) discovered", devices.len());
+    for d in devices.iter().take(8) {
+        eprintln!(
+            "[audio]   - {} ({} ch @ {} Hz){}",
+            d.name,
+            d.channels,
+            d.default_sample_rate,
+            if d.is_default { "  [default]" } else { "" }
+        );
+    }
+
+    engine.set_pdc_enabled(schema.playback.latency_compensation);
+    match engine.start() {
+        Ok(()) => {
+            let stats = engine.stats();
+            eprintln!(
+                "[audio] stream warmed: backend={} sr={} buf={}",
+                stats.backend_name, stats.sample_rate, stats.buffer_size
+            );
+            Ok((engine, stats))
+        }
+        Err(error) => {
+            let message = format!("warm-up failed; will retry on first Play: {error}");
+            eprintln!("[audio] {message}");
+            let stats = engine.stats();
+            Ok((engine, stats))
+        }
+    }
+}
+
 pub struct StudioLayout {
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
@@ -376,59 +429,7 @@ impl StudioLayout {
         // `FUTUREBOARD_WGPU_TIMELINE=1` still wins as a dev override.
         apply_renderer_preference(&schema);
 
-        let backend = match schema.hardware.audio.driver_type.as_str() {
-            "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
-            _ => DAUx::AudioBackend::Auto,
-        };
-        let audio_config = DAUx::EngineConfig {
-            sample_rate: schema.general.project_defaults.sample_rate,
-            buffer_size: schema.general.project_defaults.buffer_size,
-            channels: 2,
-            backend,
-        };
-
-        let audio_engine = match DAUx::AudioEngine::new(audio_config) {
-            Ok(engine) => {
-                eprintln!(
-                    "[audio] sphere-direct-audio-engine v{} ready (backend={:?}, sr={}, buf={})",
-                    engine.version(),
-                    engine.config().backend,
-                    engine.config().sample_rate,
-                    engine.config().buffer_size
-                );
-                let devices = engine.list_output_devices();
-                eprintln!("[audio] {} output device(s) discovered", devices.len());
-                for d in devices.iter().take(8) {
-                    eprintln!(
-                        "[audio]   - {} ({} ch @ {} Hz){}",
-                        d.name,
-                        d.channels,
-                        d.default_sample_rate,
-                        if d.is_default { "  [default]" } else { "" }
-                    );
-                }
-                let mut engine = engine;
-                engine.set_pdc_enabled(schema.playback.latency_compensation);
-                match engine.start() {
-                    Ok(()) => {
-                        let stats = engine.stats();
-                        eprintln!(
-                            "[audio] stream warmed: backend={} sr={} buf={}",
-                            stats.backend_name, stats.sample_rate, stats.buffer_size
-                        );
-                    }
-                    Err(error) => {
-                        eprintln!("[audio] warm-up failed; will retry on first Play: {error}");
-                    }
-                }
-                Some(engine)
-            }
-            Err(error) => {
-                eprintln!("[audio] failed to initialize engine: {error}");
-                None
-            }
-        };
-        crate::boot::log("audio engine handle ready");
+        crate::boot::log("audio engine warm-up deferred");
 
         let timeline = cx.new(|_| {
             if use_demo_project() {
@@ -465,43 +466,6 @@ impl StudioLayout {
                 pr
             })
         };
-        if let Some(engine) = audio_engine.clone() {
-            let seek_engine = engine.clone();
-            let param_engine = engine.clone();
-            let _ = timeline.update(cx, |timeline, _cx| {
-                timeline.set_native_audio_callbacks(
-                    Some(Arc::new(move |beats, bpm| {
-                        let seconds = beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
-                        if let Err(error) = seek_engine.seek(seconds) {
-                            eprintln!("[audio] seek failed: {error}");
-                        }
-                    })),
-                    Some(Arc::new(move |track_id, param_id, value| {
-                        let engine_value = match param_id.as_str() {
-                            "volume" => volume_norm_to_linear(value) as f64,
-                            "mute" | "solo" => {
-                                if value >= 0.5 {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            _ => value as f64,
-                        };
-                        if let Err(error) =
-                            param_engine.update_track_param(&track_id, &param_id, engine_value)
-                        {
-                            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
-                                eprintln!(
-                                    "[audio] track param update failed: track={} param={} error={}",
-                                    track_id, param_id, error
-                                );
-                            }
-                        }
-                    })),
-                );
-            });
-        }
         {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
@@ -537,12 +501,6 @@ impl StudioLayout {
                 })));
             });
         }
-
-        let initial_audio_stats = audio_engine.as_ref().map(|engine| engine.stats());
-        let initial_audio_running = initial_audio_stats
-            .as_ref()
-            .map(|stats| stats.running)
-            .unwrap_or(false);
 
         Self::spawn_audio_poll(cx);
 
@@ -623,10 +581,10 @@ impl StudioLayout {
             open_popover: None,
             open_inspector_routing_combo: None,
             inspector_routing_combo_anchor: None,
-            audio_engine,
-            audio_running: initial_audio_running,
+            audio_engine: None,
+            audio_running: false,
             audio_last_error: None,
-            audio_stats: initial_audio_stats,
+            audio_stats: None,
             last_audio_project_signature: None,
             engine_project_dirty: true,
             engine_media_dirty: true,
@@ -659,11 +617,80 @@ impl StudioLayout {
             last_window_title: None,
         };
 
-        if layout.audio_engine.is_some() {
-            layout.schedule_audio_project_sync(cx, true, "studio_init");
-        }
+        layout.spawn_audio_engine_warmup(cx);
 
         layout
+    }
+
+    fn spawn_audio_engine_warmup(&mut self, cx: &mut Context<Self>) {
+        if self.audio_engine.is_some() {
+            return;
+        }
+        let schema = self.settings.read(cx).current.clone();
+        self.audio_last_error = Some("Initializing audio...".to_string());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { build_and_warm_audio_engine(schema) })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok((engine, stats)) => {
+                    this.install_audio_callbacks(&engine, cx);
+                    this.audio_running = stats.running;
+                    this.audio_stats = Some(stats);
+                    this.audio_last_error = None;
+                    this.audio_engine = Some(engine);
+                    this.schedule_audio_project_sync(cx, true, "studio_audio_ready");
+                    crate::boot::log("audio engine handle ready");
+                    cx.notify();
+                }
+                Err(error) => {
+                    eprintln!("[audio] failed to initialize engine: {error}");
+                    this.audio_last_error = Some(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn install_audio_callbacks(&mut self, engine: &DAUx::AudioEngine, cx: &mut Context<Self>) {
+        let seek_engine = engine.clone();
+        let param_engine = engine.clone();
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            timeline.set_native_audio_callbacks(
+                Some(Arc::new(move |beats, bpm| {
+                    let seconds = beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
+                    if let Err(error) = seek_engine.seek(seconds) {
+                        eprintln!("[audio] seek failed: {error}");
+                    }
+                })),
+                Some(Arc::new(move |track_id, param_id, value| {
+                    let engine_value = match param_id.as_str() {
+                        "volume" => volume_norm_to_linear(value) as f64,
+                        "mute" | "solo" => {
+                            if value >= 0.5 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        _ => value as f64,
+                    };
+                    if let Err(error) =
+                        param_engine.update_track_param(&track_id, &param_id, engine_value)
+                    {
+                        if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                            eprintln!(
+                                "[audio] track param update failed: track={} param={} error={}",
+                                track_id, param_id, error
+                            );
+                        }
+                    }
+                })),
+            );
+        });
     }
 
     /// Switch the active keyboard shortcut profile. `"default"` restores the

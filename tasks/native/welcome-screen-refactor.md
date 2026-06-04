@@ -91,6 +91,13 @@ FUTUREBOARD\_GPU\_RENDERER\_DEBUG=1
 * \[x] WGPU can be ready before opening workspace.
 * \[x] If WGPU fails, app still works with CPU Render.
 
+### Progress Notes
+
+* 2026-06-04: Studio first paint no longer waits for native audio engine creation,
+  device enumeration, or stream warm-up. Audio warm-up now runs on the background
+  executor after the Studio shell is constructed. Full pre-created StudioLayout
+  while still on Welcome remains unchecked.
+
 \---
 
 ## Part B — Move Open Project Dialog Into Welcome

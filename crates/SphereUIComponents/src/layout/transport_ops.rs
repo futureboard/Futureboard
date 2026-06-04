@@ -71,6 +71,7 @@ impl StudioLayout {
                     timeline.state.transport.loop_enabled = !timeline.state.transport.loop_enabled;
                     cx.notify();
                 });
+                self.sync_loop_controls(cx);
             }
             TransportCommand::ToggleMetronome => {
                 let enabled = self.timeline.update(cx, |timeline, cx| {
@@ -99,9 +100,7 @@ impl StudioLayout {
                     eprintln!("[autoscroll] toggled follow_playhead -> {}", enabled);
                 }
             }
-            TransportCommand::Record => {
-                eprintln!("[transport] record is disabled in native Stage 2.1");
-            }
+            TransportCommand::Record => self.toggle_native_recording(cx),
         }
     }
 
@@ -136,7 +135,12 @@ impl StudioLayout {
                     "{}/{}",
                     timeline.state.time_signature_num, timeline.state.time_signature_den
                 ),
-                timeline.state.transport.recording,
+                timeline.state.transport.recording
+                    || self
+                        .audio_engine
+                        .as_ref()
+                        .map(|engine| engine.recording_status().active)
+                        .unwrap_or(false),
                 timeline.state.transport.loop_enabled,
                 timeline.state.transport.metronome_enabled,
                 timeline.state.follow_playhead,

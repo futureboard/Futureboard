@@ -13,6 +13,7 @@ use crate::command::EngineCommand;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::engine::{SharedState, PEAK_DECAY, TEST_TONE_AMPLITUDE};
 use crate::runtime::{RuntimePreviewMode, RuntimeProject};
+use crate::transport;
 
 // Re-export helpers so wasapi_exclusive.rs can use them through render.
 pub use crate::engine::{render_project_block_interleaved, render_project_sample};
@@ -196,7 +197,7 @@ pub fn drain_commands(
                 // background dropper — never run its destructor on this
                 // realtime thread (frees buffers / munmaps sources / destroys
                 // VST3 handles). See `crate::graveyard`.
-                let old = std::mem::replace(runtime, next_runtime);
+                let old = std::mem::replace(runtime, *next_runtime);
                 runtime.sample_rate = output_sample_rate;
                 crate::graveyard::retire(old);
             }
@@ -239,15 +240,31 @@ pub fn drain_commands(
             }
             EngineCommand::SetMetronomeEnabled(enabled) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
+                shared.metronome_enabled.store(enabled, Ordering::Relaxed);
                 local.set_metronome_enabled(enabled, pos, output_sample_rate);
             }
             EngineCommand::SetBpm(bpm) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
+                transport::store_f64_bits(&shared.bpm_bits, bpm);
                 local.set_bpm(bpm, pos, output_sample_rate);
             }
             EngineCommand::SetTimeSignature(num, den) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
+                shared.time_sig_num.store(num.max(1), Ordering::Relaxed);
+                shared.time_sig_den.store(den.max(1), Ordering::Relaxed);
                 local.set_time_signature(num, den, pos, output_sample_rate);
+            }
+            EngineCommand::SetLoop {
+                enabled,
+                start_seconds,
+                end_seconds,
+            } => {
+                let sr = shared.sample_rate.load(Ordering::Relaxed) as f64;
+                let start = (start_seconds.max(0.0) * sr) as u64;
+                let end = (end_seconds.max(0.0) * sr) as u64;
+                shared.loop_enabled.store(enabled, Ordering::Relaxed);
+                shared.loop_start_samples.store(start, Ordering::Relaxed);
+                shared.loop_end_samples.store(end, Ordering::Relaxed);
             }
             EngineCommand::SetMasterVolume { value } => {
                 shared
@@ -345,6 +362,7 @@ pub fn fill_output_f32(
                 frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
             }
         }
+        crate::recording::apply_recording_monitor_mix(data, channels, shared, master_vol);
         for frame in data.chunks(channels) {
             let l = frame[0];
             let r = frame[1];
@@ -375,8 +393,19 @@ pub fn fill_output_f32(
             };
             let l = (tone_l + proj_l + click).clamp(-1.0, 1.0);
             let r = (tone_r + proj_r + click).clamp(-1.0, 1.0);
-            frame[0] = l;
-            frame[1] = r;
+            if shared.recording_monitor_mix.load(Ordering::Relaxed) {
+                let mon_l = f32::from_bits(shared.recording_monitor_l.load(Ordering::Relaxed))
+                    * master_vol
+                    * 0.85;
+                let mon_r = f32::from_bits(shared.recording_monitor_r.load(Ordering::Relaxed))
+                    * master_vol
+                    * 0.85;
+                frame[0] = (l + mon_l).clamp(-1.0, 1.0);
+                frame[1] = (r + mon_r).clamp(-1.0, 1.0);
+            } else {
+                frame[0] = l;
+                frame[1] = r;
+            }
             for extra in frame.iter_mut().skip(2) {
                 *extra = 0.0;
             }
@@ -446,6 +475,10 @@ pub fn fill_output_f32(
     // Advance transport position.
     if local.playing_local && channels > 0 {
         shared.position_samples.fetch_add(frames, Ordering::Relaxed);
+        let sample_rate = runtime.sample_rate;
+        transport::apply_loop_wrap(shared, runtime, sample_rate, |start| {
+            local.reset_metronome_schedule(start, sample_rate);
+        });
     }
 
     frames

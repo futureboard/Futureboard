@@ -1593,7 +1593,8 @@ impl PianoRoll {
         if left_len < MIN_NOTE_BEATS || right_len < MIN_NOTE_BEATS {
             return;
         }
-        let mut left = MidiNoteState::new(original.pitch, original.start, left_len, original.velocity);
+        let mut left =
+            MidiNoteState::new(original.pitch, original.start, left_len, original.velocity);
         left.muted = original.muted;
         let mut right = MidiNoteState::new(original.pitch, cut, right_len, original.velocity);
         right.muted = original.muted;
@@ -3113,10 +3114,7 @@ impl PianoRoll {
     }
 
     /// Loop region band in the ruler header (clip-local beats).
-    fn build_loop_ruler_markers(
-        &self,
-        loop_region: Option<(f32, f32)>,
-    ) -> Vec<gpui::AnyElement> {
+    fn build_loop_ruler_markers(&self, loop_region: Option<(f32, f32)>) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
         let Some((lo, hi)) = loop_region else {
             return out;

@@ -986,7 +986,7 @@ fn track_inspector(
             .child(toggle_badge(
                 "inspector-input",
                 "I",
-                track.input_monitor,
+                track.input_monitor.is_active(track.armed),
                 Colors::accent_primary(),
                 move |_, w, cx| input(&t4, w, cx),
             ))

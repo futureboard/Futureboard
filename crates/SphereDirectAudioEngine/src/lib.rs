@@ -20,6 +20,7 @@
 #![allow(non_snake_case)] // lib name "DAUx" is intentional branding
 
 mod audio_file;
+mod audio_graph;
 mod audio_source;
 pub mod backend;
 mod command;
@@ -29,10 +30,13 @@ pub mod engine;
 pub mod error;
 mod graph;
 mod graveyard;
+mod latency_graph;
 pub mod native;
 pub mod recording;
 mod runtime;
 mod streaming_source;
+pub mod tempo_map;
+pub mod transport;
 pub mod types;
 mod vst3_processor;
 
@@ -49,15 +53,25 @@ pub use crate::audio_file::{
     AudioPeakFile, AudioPeakLod, MAX_IN_MEMORY_DECODE_BYTES, PEAK_LOD_LEVELS,
     STREAMING_WAV_THRESHOLD_BYTES,
 };
+pub use crate::audio_graph::{
+    plan_runtime_audio_graph, AudioGraphNode, AudioGraphNodeKind, GraphRouteIssue, GraphRouteKind,
+    GraphValidationError, RuntimeAudioGraph,
+};
 pub use crate::audio_source::{
     open_clip_audio_source, read_frame_stereo, sample_source_stereo, ClipAudioSource,
     MappedWavSource,
 };
 pub use crate::error::SphereAudioError;
+pub use crate::latency_graph::{
+    apply_pdc_delay_block, plan_runtime_latency_graph, strip_plugin_latency_samples,
+    RuntimeLatencyGraph,
+};
 pub use crate::native::{
     AudioBackend, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo,
     EngineInsertStatus, EngineStats, DEFAULT_BUFFER_SIZE, DEFAULT_SAMPLE_RATE,
 };
+pub use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint, TempoSegment};
+pub use crate::transport::RuntimeTransportSnapshot;
 pub use crate::vst3_processor::{Vst3MidiEvent, Vst3MidiEventKind, Vst3RuntimeProcessor};
 
 #[cfg(feature = "napi")]

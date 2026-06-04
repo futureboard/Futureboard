@@ -65,16 +65,16 @@ impl StudioLayout {
         self.audio_running = stats.running;
         self.audio_last_error = stats.last_error.clone();
 
-        let bpm = {
-            let timeline = self.timeline.read(cx);
-            timeline.state.bpm
-        };
-        let engine_beat = (stats.position_seconds * bpm.max(1.0) as f64 / 60.0) as f32;
+        let engine_beat = stats.position_beats as f32;
         self.last_engine_playhead_beat = engine_beat.max(0.0);
         self.last_engine_sync = Instant::now();
         self.apply_engine_meters(cx);
 
         if stats.transport_playing {
+            let bpm = {
+                let timeline = self.timeline.read(cx);
+                timeline.state.bpm
+            };
             let interpolated = self.interpolated_playhead_beat(bpm);
             let _ = self.timeline.update(cx, move |timeline, cx| {
                 timeline.state.transport.playing = true;
@@ -252,9 +252,13 @@ impl StudioLayout {
         }
 
         let sample_rate = self.current_audio_sample_rate();
+        let project_root = self
+            .project_folder
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
         let snapshot = {
             let timeline = self.timeline.read(cx);
-            build_engine_project_snapshot(&timeline.state, sample_rate)
+            build_engine_project_snapshot(&timeline.state, sample_rate, project_root.as_deref())
         };
         log_engine_sync_snapshot(
             &snapshot,
@@ -438,7 +442,7 @@ impl StudioLayout {
             self.schedule_audio_project_sync(cx, false, "transport_play_pending_sync");
             return;
         }
-        self.sync_metronome_controls(cx);
+        self.sync_transport_controls(cx);
 
         let (playhead_beats, bpm) = {
             let timeline = self.timeline.read(cx);
@@ -492,6 +496,11 @@ impl StudioLayout {
         self.poll_native_audio(cx);
     }
 
+    pub(super) fn sync_transport_controls(&mut self, cx: &mut Context<Self>) {
+        self.sync_metronome_controls(cx);
+        self.sync_loop_controls(cx);
+    }
+
     pub(super) fn sync_metronome_controls(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.audio_engine.as_ref() else {
             return;
@@ -518,6 +527,30 @@ impl StudioLayout {
         if let Err(error) = engine.set_metronome_enabled(enabled) {
             if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set metronome failed: {error}");
+            }
+        }
+    }
+
+    pub(super) fn sync_loop_controls(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.audio_engine.as_ref() else {
+            return;
+        };
+        let (enabled, start_beats, end_beats, bpm) = {
+            let timeline = self.timeline.read(cx);
+            let transport = &timeline.state.transport;
+            (
+                transport.loop_enabled,
+                transport.loop_start_beats,
+                transport.loop_end_beats,
+                timeline.state.bpm,
+            )
+        };
+        let bpm = bpm.max(1.0) as f64;
+        let start_seconds = start_beats as f64 * 60.0 / bpm;
+        let end_seconds = end_beats as f64 * 60.0 / bpm;
+        if let Err(error) = engine.set_loop(enabled, start_seconds, end_seconds) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set loop failed: {error}");
             }
         }
     }

@@ -141,8 +141,11 @@ impl StudioLayout {
                                 pan: 0.0,
                                 armed: dialog.selected_kind == AddTrackKind::Audio
                                     && dialog.arm_track,
-                                input_monitor: dialog.selected_kind == AddTrackKind::Audio
-                                    && dialog.monitor_mode != "off",
+                                input_monitor: match dialog.monitor_mode {
+                                    "input" => timeline_state::InputMonitorMode::Always,
+                                    "auto" => timeline_state::InputMonitorMode::WhenRecordArmed,
+                                    _ => timeline_state::InputMonitorMode::Off,
+                                },
                             });
                             if dialog.selected_kind == AddTrackKind::Instrument {
                                 if let Some(plugin_id) = dialog.instrument_plugin_id.as_deref() {
@@ -297,12 +300,22 @@ impl StudioLayout {
             });
         });
 
+        let engine_for_latency = self.audio_engine.clone();
+        let latency_provider: crate::components::settings_dialog::AudioLatencySnapshotProvider =
+            Arc::new(move || {
+                engine_for_latency
+                    .as_ref()
+                    .map(crate::settings::SettingsAudioLatencySnapshot::from_engine)
+                    .unwrap_or_else(crate::settings::SettingsAudioLatencySnapshot::unavailable)
+            });
+
         match open_settings_window(
             owner_bounds,
             settings,
             available_inputs,
             available_outputs,
             available_backends,
+            latency_provider,
             on_update,
             cx,
         ) {

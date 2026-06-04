@@ -137,6 +137,12 @@ pub struct JsTrackLatency {
     pub track_id: String,
     pub plugin_samples: u32,
     pub plugin_ms: f64,
+    /// Path latency to master summing bus (Phase W graph).
+    pub path_samples: u32,
+    pub path_ms: f64,
+    /// Playback delay compensation applied on this track's output.
+    pub pdc_delay_samples: u32,
+    pub pdc_delay_ms: f64,
 }
 
 /// Latency report for the Audio Settings / mixer UI (Phase V — reporting only;
@@ -153,7 +159,12 @@ pub struct JsLatencyInfo {
     /// Plugin latency on the master track.
     pub master_samples: u32,
     pub master_ms: f64,
-    /// Longest per-track plugin latency — the basis for future full PDC.
+    /// Longest path latency to master — PDC basis (Phase W).
+    pub max_path_samples: u32,
+    pub max_path_ms: f64,
+    /// Whether playback PDC is active (`FUTUREBOARD_PDC=0` disables compensation).
+    pub pdc_enabled: bool,
+    /// Longest per-track plugin latency (legacy field kept for older UI callers).
     pub max_track_samples: u32,
 }
 
@@ -433,6 +444,8 @@ pub struct JsStartRecordingConfig {
     pub input_device_id: Option<String>,
     /// Armed tracks to record.
     pub tracks: Vec<JsRecordingTrackConfig>,
+    /// Mix live input onto the master output while recording (software monitor).
+    pub monitor_mix: bool,
 }
 
 /// Per-track result returned by `stopRecording()`.
@@ -479,6 +492,10 @@ pub struct JsEngineDebugInfo {
     pub is_playing: bool,
     /// Current transport position in seconds.
     pub position_seconds: f64,
+    /// Current transport position in beats (via tempo map; static BPM today).
+    pub position_beats: f64,
+    /// Whether loop playback is enabled in the engine.
+    pub loop_enabled: bool,
     /// Whether any track has solo enabled.
     pub has_solo: bool,
     /// Human-readable summary of each loaded clip (id, trackId, startSec, durationSec, frames).
@@ -488,4 +505,14 @@ pub struct JsEngineDebugInfo {
     /// Total disk-stream underruns since process start (Phase F diagnostics).
     /// A streaming clip read that found its frame outside the buffered window.
     pub disk_underruns: f64,
+    /// Declarative audio graph node count (Phase O).
+    pub graph_node_count: u32,
+    /// Pass-1 source track count in the runtime graph plan.
+    pub graph_pass1_count: u32,
+    /// Pass-2 routing track count in topological order.
+    pub graph_pass2_count: u32,
+    /// Sends/main outputs rejected at graph plan time (cycle-unsafe or invalid target).
+    pub graph_rejected_route_count: u32,
+    /// Human-readable rejected route summaries for UI diagnostics.
+    pub graph_rejected_route_summaries: Vec<String>,
 }

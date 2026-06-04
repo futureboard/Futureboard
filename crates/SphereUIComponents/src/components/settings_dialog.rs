@@ -29,7 +29,9 @@ use crate::overlay::{
     compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor, settings_form_column,
     OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
 };
-use crate::settings::{GpuDevicePreference, RenderMode, SettingsModel, SettingsSchema};
+use crate::settings::{
+    GpuDevicePreference, RenderMode, SettingsAudioLatencySnapshot, SettingsModel, SettingsSchema,
+};
 use crate::theme::{self, Colors};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,6 +449,8 @@ fn tab_matches_search(
             is_match("Audio Driver", &["driver", "wasapi", "backend"])
                 || is_match("Input Device", &["input", "microphone"])
                 || is_match("Output Device", &["output", "speakers"])
+                || is_match("Latency", &["latency", "pdc", "delay", "buffer"])
+                || is_match("Buffer Size", &["buffer", "sample"])
         }
         SettingsTab::Midi => {
             is_match("MIDI", &["midi", "port", "keyboard"])
@@ -467,7 +471,13 @@ fn tab_matches_search(
             is_match("Recording", &["record", "wav", "bit"])
                 || is_match("Metronome", &["metronome", "click"])
         }
-        SettingsTab::Playback => is_match("Transport", &["transport", "play", "stop"]),
+        SettingsTab::Playback => {
+            is_match("Transport", &["transport", "play", "stop"])
+                || is_match(
+                    "Latency Compensation",
+                    &["latency", "pdc", "delay", "compensation"],
+                )
+        }
         SettingsTab::Plugins => {
             is_match("VST3", &["vst3", "plugin"])
                 || is_match("CLAP", &["clap"])
@@ -488,10 +498,104 @@ fn tab_matches_search(
     }
 }
 
+pub type AudioLatencySnapshotProvider = Arc<dyn Fn() -> SettingsAudioLatencySnapshot + Send + Sync>;
+
+fn latency_ms_label(i18n: &I18n, ms: f64) -> String {
+    if ms > 0.0 {
+        i18n.tr_vars("settings.latency.ms-value", &[("ms", format!("{ms:.2}"))])
+    } else {
+        i18n.tr("settings.latency.unavailable")
+    }
+}
+
+fn audio_latency_report_section(
+    i18n: &I18n,
+    latency: &SettingsAudioLatencySnapshot,
+    pdc_setting_enabled: bool,
+) -> impl IntoElement {
+    let engine_ready = latency.engine_open;
+    let pdc_label = if !pdc_setting_enabled {
+        i18n.tr("settings.latency.pdc-disabled-setting")
+    } else if latency.pdc_active {
+        i18n.tr("settings.latency.pdc-active")
+    } else {
+        i18n.tr("settings.latency.pdc-off")
+    };
+    let pdc_ok = pdc_setting_enabled && latency.pdc_active;
+
+    let mut card = settings_section_card().child(settings_i18n_header(
+        *i18n,
+        "settings.section.latency-report",
+        assets::ICON_CLOCK_PATH,
+    ));
+
+    if !engine_ready {
+        card = card.child(settings_section_hint(
+            i18n.tr("settings.latency.engine-closed"),
+        ));
+    } else {
+        card = card
+            .child(settings_daw_row(
+                i18n.tr("settings.field.device-state"),
+                settings_status_badge(
+                    if latency.device_state.is_empty() {
+                        i18n.tr("settings.driver-status.ready")
+                    } else {
+                        latency.device_state.clone()
+                    },
+                    latency.device_state != "DeviceLost",
+                ),
+            ))
+            .child(settings_daw_row(
+                i18n.tr("settings.field.output-buffer-latency"),
+                settings_value_readout(latency_ms_label(i18n, latency.buffer_ms)),
+            ))
+            .child(settings_daw_row(
+                i18n.tr("settings.field.round-trip-latency"),
+                settings_value_readout(latency_ms_label(i18n, latency.round_trip_ms)),
+            ))
+            .child(settings_daw_row(
+                i18n.tr("settings.field.plugin-path-latency"),
+                settings_value_readout(latency_ms_label(i18n, latency.max_path_ms)),
+            ))
+            .child(settings_daw_row(
+                i18n.tr("settings.field.master-plugin-latency"),
+                settings_value_readout(latency_ms_label(i18n, latency.master_plugin_ms)),
+            ))
+            .child(settings_daw_row(
+                i18n.tr("settings.field.pdc-status"),
+                settings_status_badge(pdc_label, pdc_ok),
+            ));
+
+        if !latency.track_lines.is_empty() {
+            card = card.child(div().mt(px(4.0)).flex().flex_col().gap(px(4.0)).children(
+                latency.track_lines.iter().map(|line| {
+                    settings_daw_row(
+                        line.track_id.clone(),
+                        settings_value_readout(i18n.tr_vars(
+                            "settings.latency.track-summary",
+                            &[
+                                ("plugin", format!("{:.1}", line.plugin_ms)),
+                                ("path", format!("{:.1}", line.path_ms)),
+                                ("pdc", format!("{:.1}", line.pdc_ms)),
+                            ],
+                        )),
+                    )
+                }),
+            ));
+        }
+    }
+
+    card.child(settings_section_hint(
+        i18n.tr("settings.latency.report-hint"),
+    ))
+}
+
 fn build_settings_content(
     state: &SettingsDialogState,
     schema: &SettingsSchema,
     callbacks: &SettingsDialogCallbacks,
+    latency: &SettingsAudioLatencySnapshot,
     _available_inputs: &[String],
     _available_outputs: &[String],
     _available_backends: &[String],
@@ -849,9 +953,11 @@ fn build_settings_content(
             on_toggle.clone(),
         );
 
-        let buffer_ms = schema.general.project_defaults.buffer_size as f32
-            / schema.general.project_defaults.sample_rate as f32
-            * 1000.0;
+        let buffer_ms = latency.buffer_ms.max(
+            schema.general.project_defaults.buffer_size as f64
+                / schema.general.project_defaults.sample_rate as f64
+                * 1000.0,
+        );
 
         sections.push(
             settings_section_card()
@@ -874,7 +980,16 @@ fn build_settings_content(
                 ))
                 .child(settings_daw_row(
                     i18n.tr("settings.field.driver-status"),
-                    settings_status_badge(i18n.tr("settings.driver-status.ready"), true),
+                    settings_status_badge(
+                        if latency.engine_open && !latency.device_state.is_empty() {
+                            latency.device_state.clone()
+                        } else if latency.engine_open {
+                            i18n.tr("settings.driver-status.ready")
+                        } else {
+                            i18n.tr("settings.latency.engine-closed")
+                        },
+                        !latency.engine_open || latency.device_state != "DeviceLost",
+                    ),
                 ))
                 .into_any_element(),
         );
@@ -911,13 +1026,18 @@ fn build_settings_content(
                     )
                 }))
                 .child(settings_daw_row(
-                    i18n.tr("settings.field.round-trip-latency"),
-                    settings_value_readout(i18n.tr_vars(
-                        "settings.latency.approx",
-                        &[("ms", format!("{buffer_ms:.1}"))],
+                    i18n.tr("settings.field.output-buffer-latency"),
+                    settings_value_readout(latency_ms_label(
+                        &i18n,
+                        if latency.engine_open { buffer_ms } else { 0.0 },
                     )),
                 ))
                 .child(settings_section_hint(i18n.tr("settings.buffer.hint")))
+                .into_any_element(),
+        );
+
+        sections.push(
+            audio_latency_report_section(&i18n, latency, schema.playback.latency_compensation)
                 .into_any_element(),
         );
     }
@@ -1935,8 +2055,52 @@ fn build_settings_content(
             && (is_match(
                 "Transport Playback",
                 &["spacebar", "transport", "stop", "start"],
+            ) || is_match(
+                "Latency Compensation",
+                &["latency", "pdc", "delay", "compensation", "plugin"],
             )))
     {
+        let on_update = callbacks.on_update_setting.clone();
+        let pdc_enabled = schema.playback.latency_compensation;
+        sections.push(
+            settings_section_card()
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.playback-latency",
+                    assets::ICON_CLOCK_PATH,
+                ))
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.latency-compensation"),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(fb_checkbox(
+                            "playback-pdc-enabled",
+                            pdc_enabled,
+                            move |_, w, cx| {
+                                (on_update.clone())(
+                                    Arc::new(|schema| {
+                                        schema.playback.latency_compensation =
+                                            !schema.playback.latency_compensation;
+                                    }),
+                                    w,
+                                    cx,
+                                );
+                            },
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(Colors::text_muted())
+                                .child(i18n.tr("settings.latency.pdc-toggle-hint")),
+                        ),
+                ))
+                .child(settings_section_hint(i18n.tr("settings.latency.pdc-hint")))
+                .into_any_element(),
+        );
+
         sections.push(
             div()
                 .flex()
@@ -2208,6 +2372,7 @@ pub fn settings_dialog(
     search_focused: bool,
     search_callbacks: TextInputCallbacks,
     callbacks: SettingsDialogCallbacks,
+    latency: &SettingsAudioLatencySnapshot,
     available_inputs: &[String],
     available_outputs: &[String],
     available_backends: &[String],
@@ -2220,6 +2385,7 @@ pub fn settings_dialog(
         state,
         schema,
         &callbacks,
+        latency,
         available_inputs,
         available_outputs,
         available_backends,
@@ -2706,6 +2872,7 @@ pub struct SettingsWindow {
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     available_backends: Vec<String>,
+    latency_provider: AudioLatencySnapshotProvider,
     open_hardware_combo: Option<HardwareCombo>,
     hardware_combo_anchor: Option<OverlayAnchor>,
     on_update: OnSettingUpdate,
@@ -2718,6 +2885,7 @@ impl SettingsWindow {
         available_inputs: Vec<String>,
         available_outputs: Vec<String>,
         available_backends: Vec<String>,
+        latency_provider: AudioLatencySnapshotProvider,
         on_update: OnSettingUpdate,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -2730,6 +2898,7 @@ impl SettingsWindow {
             available_inputs,
             available_outputs,
             available_backends,
+            latency_provider,
             open_hardware_combo: None,
             hardware_combo_anchor: None,
             on_update,
@@ -2836,10 +3005,13 @@ impl Render for SettingsWindow {
             on_mouse: None,
         };
 
+        let latency = (self.latency_provider)();
+
         let (sidebar_items, sections) = build_settings_content(
             &state,
             &schema,
             &callbacks,
+            &latency,
             &self.available_inputs,
             &self.available_outputs,
             &self.available_backends,
@@ -2988,6 +3160,7 @@ pub fn open_settings_window(
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     available_backends: Vec<String>,
+    latency_provider: AudioLatencySnapshotProvider,
     on_update: OnSettingUpdate,
     cx: &mut App,
 ) -> Result<WindowHandle<SettingsWindow>, String> {
@@ -3018,6 +3191,7 @@ pub fn open_settings_window(
                 available_inputs,
                 available_outputs,
                 available_backends,
+                latency_provider,
                 on_update,
                 cx,
             )

@@ -43,6 +43,7 @@ mod inspector_ops;
 mod mixer_ops;
 mod plugin_ops;
 mod project_ops;
+mod recording_ops;
 mod studio_render;
 mod studio_state;
 mod track_clip_ops;
@@ -206,6 +207,8 @@ pub struct StudioLayout {
     audio_sync_pending: bool,
     /// Start transport once the current background sync completes.
     pending_play_after_sync: bool,
+    /// Beat position when the current recording session started.
+    recording_start_beat: f32,
     last_engine_playhead_beat: f32,
     last_engine_sync: Instant,
     /// Last time we pushed engine meter levels into timeline state. Used to
@@ -319,6 +322,7 @@ impl StudioLayout {
                     );
                 }
                 let mut engine = engine;
+                engine.set_pdc_enabled(schema.playback.latency_compensation);
                 match engine.start() {
                     Ok(()) => {
                         let stats = engine.stats();
@@ -541,6 +545,7 @@ impl StudioLayout {
             audio_sync_in_flight: false,
             audio_sync_pending: false,
             pending_play_after_sync: false,
+            recording_start_beat: 0.0,
             last_engine_playhead_beat: 0.0,
             last_engine_sync: Instant::now(),
             last_meter_apply: Instant::now(),
@@ -986,6 +991,14 @@ impl StudioLayout {
 
     fn sync_settings_to_systems(&mut self, cx: &mut Context<Self>) {
         let schema = self.settings.read(cx).current.clone();
+
+        if let Some(ref engine) = self.audio_engine {
+            let desired_pdc = schema.playback.latency_compensation;
+            if engine.pdc_enabled() != desired_pdc {
+                engine.set_pdc_enabled(desired_pdc);
+                self.schedule_audio_project_sync(cx, false, "pdc_setting");
+            }
+        }
 
         // 1. Sync metronome enabled state
         let _ = self.timeline.update(cx, |timeline, _cx| {

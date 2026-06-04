@@ -410,7 +410,7 @@ pub fn track_header(
                                     ("input-btn", id_num).into(),
                                     "I",
                                     None,
-                                    track.input_monitor,
+                                    track.input_monitor.is_active(track.armed),
                                     Colors::accent_primary(),
                                     Colors::text_inverse(),
                                     on_input,

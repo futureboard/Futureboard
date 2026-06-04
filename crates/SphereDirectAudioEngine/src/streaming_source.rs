@@ -32,6 +32,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use std::fs::File;
+use std::io;
+use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -39,9 +42,6 @@ use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use std::fs::File;
-use std::io;
-use std::path::Path;
 
 use crate::audio_file::probe_audio_file;
 
@@ -291,7 +291,11 @@ impl Drop for StreamingSource {
 /// Decoder thread body: open the file, then loop decoding and filling the ring,
 /// repositioning on seek and throttling so the buffer stays ahead of the
 /// playhead without overrunning unread frames.
-fn decode_loop(path: &str, ring: &Arc<StreamingRing>, stop: &Arc<AtomicBool>) -> Result<(), String> {
+fn decode_loop(
+    path: &str,
+    ring: &Arc<StreamingRing>,
+    stop: &Arc<AtomicBool>,
+) -> Result<(), String> {
     let file = File::open(Path::new(path)).map_err(|e| format!("open failed: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 

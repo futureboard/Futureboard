@@ -388,7 +388,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .child(msri_button(
             ("mix-i-btn", id_num).into(),
             "I",
-            track.input_monitor,
+            track.input_monitor.is_active(track.armed),
             Colors::accent_primary(),
             Colors::text_inverse(),
             on_input,

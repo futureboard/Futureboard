@@ -69,38 +69,47 @@ Windows-first pass. Verified/implemented in `backend/`, `device/mod.rs`,
 ## Runtime Snapshot
 
 - [ ] Define runtime project snapshot.
-- [ ] Define runtime transport snapshot.
-- [ ] Define runtime tempo map snapshot.
+- [x] Define runtime transport snapshot. — `transport::RuntimeTransportSnapshot`
+  built from shared atomics + tempo map; exposed via `transport_snapshot()`,
+  `EngineStats`, and `getDebugInfo().positionBeats`.
+- [x] Define runtime tempo map snapshot. — `tempo_map::RuntimeTempoMapSnapshot`
+  with step-hold segments; `TempoMap` provides `tempo_at_beat`,
+  `seconds_at_beat`, `beat_at_seconds` (unit-tested).
 - [ ] Define runtime track snapshot.
 - [ ] Define runtime clip snapshot.
-- [ ] Define runtime routing graph.
+- [x] Define runtime routing graph. — `RuntimeAudioGraph` on `RuntimeProject`.
 - [ ] Define runtime automation snapshot.
 - [ ] Define runtime media/source handles.
 - [ ] Resolve project string IDs to runtime handles.
 - [ ] Sort clips/events for playback.
-- [ ] Validate routing before swap.
-- [ ] Build snapshots off audio callback.
-- [ ] Atomic/safe snapshot swap.
+- [x] Validate routing before swap. — `RuntimeProject::build` runs
+  `plan_runtime_audio_graph`; cycles reject `load_project` without swapping.
+- [x] Build snapshots off audio callback. — graph plan built on control thread
+  in `RuntimeProject::build`.
+- [x] Atomic/safe snapshot swap. — unchanged `LoadProject` command path.
 
 ## Audio Graph
 
-- [ ] Audio input node.
-- [ ] Audio clip node.
-- [ ] MIDI clip node.
-- [ ] Instrument node.
-- [ ] Insert plugin node.
-- [ ] Track mixer node.
-- [ ] Send node.
-- [ ] Return track node.
-- [ ] Bus track node.
-- [ ] Group track node.
-- [ ] Master node.
-- [ ] Output node.
-- [ ] Meter node.
-- [ ] Topological sort.
-- [ ] Cycle detection.
-- [ ] Invalid route UI feedback.
-- [ ] Stereo-first graph.
+- [x] Audio input node. — `AudioInput` kind defined; capture stays on the
+  recording path (not yet a mix-graph node instance).
+- [x] Audio clip node. — `AudioClip` kind defined; Pass-1 clip render unchanged
+  (per-clip graph nodes deferred).
+- [x] MIDI clip node. — `MidiClip` kind defined; MIDI scheduling unchanged.
+- [x] Instrument node. — `Instrument` track mixer kind.
+- [x] Insert plugin node. — per-insert nodes in `plan_runtime_audio_graph`.
+- [x] Track mixer node. — default mixer kind for audio/midi tracks.
+- [x] Send node. — per-send nodes on source tracks.
+- [x] Return track node. — `ReturnTrack` mixer kind.
+- [x] Bus track node. — `BusTrack` mixer kind.
+- [x] Group track node. — `GroupTrack` mixer kind + Pass-2 routing.
+- [x] Master node. — `Master` kind + `master_index` in `RuntimeAudioGraph`.
+- [x] Output node. — `master-output` sink node after master strip.
+- [x] Meter node. — per-track meter nodes in the plan.
+- [x] Topological sort. — `pass2_routing_indices` from Kahn toposort.
+- [x] Cycle detection. — DFS in `plan_runtime_audio_graph`; fails `load_project`.
+- [x] Invalid route UI feedback. — `get_debug_info` exposes rejected route
+  count + summaries; `load_project` returns `InvalidRoutingGraph` on cycles.
+- [x] Stereo-first graph. — plan mirrors existing stereo Pass-1/Pass-2 render.
 - [ ] Hardware output target later.
 
 ## Audio Clips and Regions
@@ -250,8 +259,9 @@ the UI (`audio_transport.rs` poll, `vu_meter.rs`, `mixer_panel.rs`).
 - [x] Track solo. — `SetTrackSolo` + `has_solo` gating.
 - [x] Track arm. — `EngineTrackSnapshot.armed` + recording config
   (`JsRecordingTrackConfig`); arm has no effect on playback render.
-- [~] Track input monitor. — UI flag `TrackState.input_monitor` exists; software
-  monitoring through the track chain (audio) is Recording-phase (Phase U).
+- [~] Track input monitor. — `InputMonitorMode` (Off/Auto/Input) wired; software
+  monitor mixes live input to master during **active recording** only. Full
+  playback-time monitor through the track chain is still TODO.
 - [x] Master fader. — atomic `master_volume`, applied with soft-limit at output.
 - [x] Pan law. — defined + consistent (linear/balance, unity center), used by
   both the fader path and pan automation via `pan_gains`. The spec's suggested
@@ -293,19 +303,16 @@ Verified/implemented in `engine.rs` (`render_project_block_interleaved` Pass 1/2
 - [x] Send gain. — `RuntimeSend.level`.
 - [x] Post-fader sends. — `accumulate_sends(.., pre_fader = false)` after fader.
 - [x] Pre-fader sends later. — already done: `pre_fader` tap before fader.
-- [ ] Group track later. — not implemented (deferred). Group would route like a
-  bus; `route_main_output` already accepts any routing-type target, so adding a
-  "group" track type is the main remaining step.
+- [ ] Group track later. — group tracks route in Pass-2 via `RuntimeAudioGraph`;
+  UI/group-folder semantics may still evolve.
 - [x] Reject track -> bus -> same track cycle. — sends/output only accept
   routing-type targets; a routing target can't loop back to a source track.
 - [x] Reject return self-send. — `accumulate_sends`/`route_main_output` reject
   `target == src_index`.
 - [x] Reject master back-routing. — master is only ever summed into; it never
   sends, and `is_master_output` short-circuits output routing.
-- [x] Reject bus cycle. — forward-only rule: a routing source may only target a
-  *later* routing track in array order (`t > src_index`), so A→B→A is rejected.
-  Heuristic (array-order), not a full topological sort — sufficient for the
-  cases above; a real toposort is a future hardening (Phase O).
+- [x] Reject bus cycle. — `plan_runtime_audio_graph` DFS cycle detection rejects
+  cyclic bus/return/group graphs at load time; Pass-2 uses topological order.
 
 ## Plugin Hosting
 
@@ -392,37 +399,46 @@ Verified/implemented in `engine.rs` (`render_project_block_interleaved` Pass 1/2
 
 ## Transport and Clock
 
-- [ ] Play.
-- [ ] Stop.
-- [ ] Pause.
-- [ ] Record.
-- [ ] Loop.
-- [ ] Seek.
-- [ ] Rewind/forward.
-- [ ] Go start/end.
-- [ ] Follow playhead.
-- [ ] Auto-scroll UI-only.
-- [ ] Metronome.
-- [ ] Count-in.
-- [ ] Pre-roll.
-- [ ] Sample position.
-- [ ] Beat position.
-- [ ] Seconds position.
-- [ ] Static tempo.
-- [ ] Tempo map API.
-- [ ] Time signature.
-- [ ] Seek applies at block boundary.
+- [x] Play. — `StartTransport` / `play()`.
+- [x] Stop. — `StopTransport` + UI stop (pause transport, keep position).
+- [x] Pause. — same as stop-transport; audio stream stays open.
+- [x] Record. — native transport record toggles DAUx `start_recording` /
+  `stop_recording`; creates clips + waveforms on stop.
+- [x] Loop. — `SetLoop` command + block-boundary wrap in callback; UI syncs
+  loop region beats → seconds.
+- [x] Seek. — `Seek { position_seconds }` at block boundary.
+- [x] Rewind/forward. — bar nudge commands in transport chrome.
+- [x] Go start/end. — `transport:go-to-start` / `transport:go-to-end`.
+- [x] Follow playhead. — timeline `follow_playhead` + auto-scroll.
+- [x] Auto-scroll UI-only. — does not reload engine.
+- [x] Metronome. — generated clicks in callback; `setMetronomeEnabled`.
+- [ ] Count-in. — later.
+- [ ] Pre-roll. — later.
+- [x] Sample position. — `position_samples` atomic.
+- [x] Beat position. — `RuntimeTransportSnapshot.position_beats` via tempo map.
+- [x] Seconds position. — `position_seconds` in stats/debug.
+- [x] Static tempo. — `SetBpm` + project snapshot BPM.
+- [x] Tempo map API. — `TempoMap` step-hold segments + conversion fns
+  (full tempo-map playback still deferred).
+- [x] Time signature. — `SetTimeSignature` for metronome accent + snapshot.
+- [x] Seek applies at block boundary. — command drain runs before render.
 
 ## Recording
 
-- [ ] Arm audio track.
-- [ ] Select input device/channel.
-- [ ] Monitor off/auto/input.
-- [ ] Record WAV.
-- [ ] Finalize file safely.
-- [ ] Create audio clip after recording.
-- [ ] Generate waveform after recording.
-- [ ] Record MIDI clip.
+- [x] Arm audio track. — track header / mixer `R` button + `EngineTrackSnapshot.armed`.
+- [x] Select input device/channel. — Settings `device_in` resolved to DAUx input
+  device id; per-track mono/stereo or `AudioDeviceChannel` maps to
+  `input_channels`.
+- [x] Monitor off/auto/input. — `InputMonitorMode` cycles Off → Auto → Input;
+  software monitor mix onto master during active recording when enabled.
+- [x] Record WAV. — `recording.rs` cpal input → disk writer → float32 WAV in
+  `<projectRoot>/Media/Audio`.
+- [x] Finalize file safely. — temp file in `.rec/<session>/`, header patched,
+  atomic rename on stop.
+- [x] Create audio clip after recording. — native UI `commit_recording_results`
+  inserts clip at `start_beat` with measured duration.
+- [x] Generate waveform after recording. — reuses `spawn_timeline_audio_import_jobs`.
+- [ ] Record MIDI clip. — **deferred**; no MIDI input capture in engine yet.
 - [ ] MIDI overdub later.
 - [ ] Punch in/out later.
 - [ ] Manual recording offset.
@@ -430,9 +446,8 @@ Verified/implemented in `engine.rs` (`render_project_block_interleaved` Pass 1/2
 
 ## Latency
 
-Phase V (reporting) implemented via `EngineInner::get_latency_info` →
-`getLatencyInfo` / native `latency_info`. Phase W (delay compensation) is not
-started — those items remain unchecked.
+Phase V (reporting) and Phase W (playback PDC + recording offset) are implemented
+in `latency_graph.rs` + render-path delay lines.
 
 - [~] Device input latency. — cpal does not expose driver-reported input
   latency; the buffer figure is the available proxy. Driver-reported value TODO.
@@ -442,15 +457,20 @@ started — those items remain unchecked.
   `getDauxStatus().estimatedLatencyMs`.
 - [x] Plugin latency query. — `Vst3RuntimeProcessor::get_latency_samples` (C++
   `getLatencySamples`), summed per track for enabled native-plugin inserts.
-- [x] Track latency display. — per-track `plugin_samples`/`plugin_ms`.
+- [x] Track latency display. — per-track `plugin_samples`/`plugin_ms` plus
+  `path_samples` / `pdc_delay_samples` from `RuntimeLatencyGraph`.
 - [x] Master latency display. — `master_samples`/`master_ms`.
-- [~] Latency graph. — `max_track_samples` gives the longest track latency (the
-  PDC basis); a full routed graph latency (through buses/sends) is Phase W.
-- [ ] Playback delay compensation. — **Phase W**, not started.
-- [ ] Send/return latency handling. — **Phase W**.
-- [ ] Recording offset compensation. — **Phase W/U**; manual offset not wired.
-- [ ] Automation alignment. — **Phase W** (depends on PDC).
-- [ ] Meter alignment. — **Phase W** (depends on PDC).
+- [x] Latency graph. — `plan_runtime_latency_graph` propagates send/return/bus
+  path latencies; `max_path_samples` in `getLatencyInfo`.
+- [x] Playback delay compensation. — per-track ring-buffer delay after fader,
+  before sends/main route (`apply_pdc_delay_block`); disable with `FUTUREBOARD_PDC=0`.
+- [x] Send/return latency handling. — return `output_latency` includes max
+  send feed latency; PDC aligns source/return paths to master.
+- [x] Recording offset compensation. — `stop_recording` shifts `start_beat` by
+  round-trip buffer + monitored path latency (manual offset still TODO).
+- [x] Automation alignment. — automation evaluates at transport beat on the
+  undelayed fader (correct UX); audible output is PDC-aligned.
+- [x] Meter alignment. — track meters accumulate post-PDC `block_*` samples.
 
 ## Offline Render / Export
 
@@ -478,7 +498,8 @@ started — those items remain unchecked.
 - [ ] Monitor mode setting.
 - [ ] Recording format.
 - [ ] Recording bit depth.
-- [ ] Latency compensation setting.
+- [x] Latency compensation setting. — Settings → Playback → Plugin Delay
+  Compensation; persisted in `playback.latency_compensation`, synced to DAUx PDC.
 - [ ] Performance renderer setting.
 - [ ] Waveform quality setting.
 - [ ] Meter update rate setting.

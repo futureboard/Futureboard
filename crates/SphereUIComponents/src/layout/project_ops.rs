@@ -8,7 +8,7 @@ use crate::components::message_box_dialog::{
 };
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::timeline::timeline_state::{
-    self, CreateTrackOptions, TimelineState, TrackType,
+    self, CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
 };
 use crate::project::{
     apply_to_timeline, io::load_project, io::save_project, now_secs, FutureboardProject,
@@ -93,7 +93,7 @@ impl StudioLayout {
                     volume: timeline_state::volume::db_to_norm(0.0),
                     pan: 0.0,
                     armed: false,
-                    input_monitor: false,
+                    input_monitor: InputMonitorMode::Off,
                 });
             }
             for i in 0..midi_count {
@@ -107,7 +107,7 @@ impl StudioLayout {
                     volume: timeline_state::volume::db_to_norm(0.0),
                     pan: 0.0,
                     armed: false,
-                    input_monitor: false,
+                    input_monitor: InputMonitorMode::Off,
                 });
             }
             cx.notify();

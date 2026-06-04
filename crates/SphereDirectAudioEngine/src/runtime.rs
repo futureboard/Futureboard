@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::audio_graph::{plan_runtime_audio_graph, GraphValidationError, RuntimeAudioGraph};
 use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
+use crate::latency_graph::{plan_runtime_latency_graph, RuntimeLatencyGraph};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
 
@@ -58,6 +60,12 @@ pub struct RuntimeTrack {
     pub midi_block_events: Vec<Vst3MidiEvent>,
     /// Index into `inserts` of the first instrument-capable native VST3 insert.
     pub midi_instrument_insert_ix: Option<usize>,
+    /// Sum of enabled insert latencies at build time (Phase V/W reporting).
+    pub plugin_latency_samples: u32,
+    /// Ring buffers for PDC on post-fader output (preallocated at build).
+    pub pdc_delay_l: Vec<f32>,
+    pub pdc_delay_r: Vec<f32>,
+    pub pdc_write_pos: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +395,10 @@ pub struct RuntimeProject {
     pub midi_clips: Vec<RuntimeMidiClip>,
     /// Per-track scheduling state driven by the audio callback.
     pub midi_tracks: Vec<RuntimeMidiTrack>,
+    /// Precomputed pass order and routing validation (Phase O).
+    pub audio_graph: RuntimeAudioGraph,
+    /// Latency propagation and PDC delays (Phase V/W).
+    pub latency_graph: RuntimeLatencyGraph,
 }
 
 impl RuntimeProject {
@@ -403,7 +415,8 @@ impl RuntimeProject {
         output_sample_rate: u32,
         decoded_by_path: &mut HashMap<String, Arc<ClipAudioSource>>,
         mut existing_vst3: Option<&mut HashMap<String, Vst3RuntimeProcessor>>,
-    ) -> Self {
+        pdc_enabled: bool,
+    ) -> Result<Self, GraphValidationError> {
         let output_sample_rate = output_sample_rate.max(1);
         let beats_per_second = snapshot.bpm.max(1.0) / 60.0;
         let mut clips = Vec::new();
@@ -619,6 +632,10 @@ impl RuntimeProject {
                 recv_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 midi_block_events: Vec::with_capacity(256),
                 midi_instrument_insert_ix,
+                plugin_latency_samples: 0,
+                pdc_delay_l: Vec::new(),
+                pdc_delay_r: Vec::new(),
+                pdc_write_pos: 0,
             });
         }
         let has_solo = tracks.iter().any(|t| t.solo);
@@ -742,7 +759,70 @@ impl RuntimeProject {
             );
         }
 
-        Self {
+        let audio_graph = match plan_runtime_audio_graph(&tracks) {
+            Ok(graph) => graph,
+            Err(err) => {
+                if let Some(map) = existing_vst3 {
+                    for track in &mut tracks {
+                        for insert in &mut track.inserts {
+                            if let Some(vst3) = insert.vst3.take() {
+                                map.insert(insert.id.clone(), vst3);
+                            }
+                        }
+                    }
+                }
+                return Err(err);
+            }
+        };
+
+        if std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some() {
+            eprintln!(
+                "[routing] graph nodes={} pass1={} pass2={} rejected={}",
+                audio_graph.nodes.len(),
+                audio_graph.pass1_source_indices.len(),
+                audio_graph.pass2_routing_indices.len(),
+                audio_graph.rejected_routes.len(),
+            );
+        }
+
+        for (idx, track) in tracks.iter_mut().enumerate() {
+            track.plugin_latency_samples =
+                crate::latency_graph::strip_plugin_latency_samples(track);
+            let _ = idx;
+        }
+
+        let pdc_active = pdc_enabled
+            && !std::env::var_os("FUTUREBOARD_PDC").is_some_and(|v| v == "0" || v == "false");
+        let latency_graph = plan_runtime_latency_graph(&tracks, &audio_graph, pdc_active);
+
+        let pdc_buffer_frames =
+            latency_graph.max_path_latency_samples.max(1) as usize + DEFAULT_AUDIO_BLOCK_CAPACITY;
+        for (idx, track) in tracks.iter_mut().enumerate() {
+            track.pdc_delay_l.resize(pdc_buffer_frames, 0.0);
+            track.pdc_delay_r.resize(pdc_buffer_frames, 0.0);
+            track.pdc_write_pos = 0;
+            let _ = idx;
+        }
+
+        if std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some() {
+            eprintln!(
+                "[latency] max_path={} master_plugin={} pdc_enabled={}",
+                latency_graph.max_path_latency_samples,
+                latency_graph.master_plugin_latency,
+                pdc_active
+            );
+            for (idx, track) in tracks.iter().enumerate() {
+                eprintln!(
+                    "[latency] track={} plugin={} output={} pdc_delay={}",
+                    track.id,
+                    latency_graph.track_plugin_latency[idx],
+                    latency_graph.track_output_latency[idx],
+                    latency_graph.track_pdc_delay[idx],
+                );
+            }
+        }
+
+        Ok(Self {
             sample_rate: output_sample_rate,
             tracks,
             clips,
@@ -750,7 +830,9 @@ impl RuntimeProject {
             samples_per_beat,
             midi_clips,
             midi_tracks,
-        }
+            audio_graph,
+            latency_graph,
+        })
     }
 
     /// Reposition every MIDI track's cursor to the first event at/after

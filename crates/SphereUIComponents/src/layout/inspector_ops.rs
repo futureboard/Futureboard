@@ -550,7 +550,7 @@ impl StudioLayout {
                     TrackToggle::Mute => t.state.toggle_track_mute(&id),
                     TrackToggle::Solo => t.state.toggle_track_solo(&id),
                     TrackToggle::Arm => t.state.toggle_track_arm(&id),
-                    TrackToggle::Input => t.state.toggle_track_input_monitor(&id),
+                    TrackToggle::Input => t.state.cycle_track_input_monitor(&id),
                 }
                 value = t
                     .state
@@ -559,7 +559,7 @@ impl StudioLayout {
                         TrackToggle::Mute => track.muted,
                         TrackToggle::Solo => track.solo,
                         TrackToggle::Arm => track.armed,
-                        TrackToggle::Input => track.input_monitor,
+                        TrackToggle::Input => track.input_monitor.is_active(track.armed),
                     })
                     .unwrap_or(false);
                 cx.notify();

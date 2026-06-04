@@ -21,6 +21,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use sphere_audio_plugins::{canonical_plugin_id, process_stereo_sample};
 
+use crate::audio_graph::is_routing_track_type;
 use crate::audio_source::{sample_source_stereo, ClipAudioSource};
 #[cfg(target_os = "windows")]
 use crate::backend::wasapi_exclusive::{self, WasapiExclusiveHandle};
@@ -33,8 +34,11 @@ use crate::device;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
+use crate::latency_graph::apply_pdc_delay_block;
 use crate::recording::{self, RecordingSession};
 use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
+use crate::tempo_map::TempoMap;
+use crate::transport::{self, RuntimeTransportSnapshot};
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
@@ -92,6 +96,21 @@ pub struct SharedState {
     pub position_samples: AtomicU64, // samples elapsed from start
     pub sample_rate: AtomicU32,
 
+    // Transport clock (control ↔ audio via commands + Relaxed reads)
+    pub bpm_bits: AtomicU64,
+    pub time_sig_num: AtomicU32,
+    pub time_sig_den: AtomicU32,
+    pub loop_enabled: AtomicBool,
+    pub loop_start_samples: AtomicU64,
+    pub loop_end_samples: AtomicU64,
+    pub metronome_enabled: AtomicBool,
+
+    // Recording (Phase U): input monitor tap + session flag for realtime mix.
+    pub recording_active: AtomicBool,
+    pub recording_monitor_mix: AtomicBool,
+    pub recording_monitor_l: AtomicU32,
+    pub recording_monitor_r: AtomicU32,
+
     // DAUx diagnostics (incremented by audio thread, read by control thread)
     pub glitch_count: AtomicU64,
     pub mmcss_active: AtomicBool,
@@ -99,6 +118,8 @@ pub struct SharedState {
     /// unplugged, default device changed, exclusive-mode timeout). Read by the
     /// control thread to surface a DeviceLost state and trigger recovery.
     pub device_lost: AtomicBool,
+    /// Playback plugin delay compensation (Phase W). Settings → Playback.
+    pub pdc_enabled: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -114,9 +135,21 @@ impl Default for SharedState {
             playing: AtomicBool::new(false),
             position_samples: AtomicU64::new(0),
             sample_rate: AtomicU32::new(44100),
+            bpm_bits: AtomicU64::new(120.0_f64.to_bits()),
+            time_sig_num: AtomicU32::new(4),
+            time_sig_den: AtomicU32::new(4),
+            loop_enabled: AtomicBool::new(false),
+            loop_start_samples: AtomicU64::new(0),
+            loop_end_samples: AtomicU64::new(0),
+            metronome_enabled: AtomicBool::new(false),
+            recording_active: AtomicBool::new(false),
+            recording_monitor_mix: AtomicBool::new(false),
+            recording_monitor_l: AtomicU32::new(f32_store(0.0)),
+            recording_monitor_r: AtomicU32::new(f32_store(0.0)),
             glitch_count: AtomicU64::new(0),
             mmcss_active: AtomicBool::new(false),
             device_lost: AtomicBool::new(false),
+            pdc_enabled: AtomicBool::new(true),
         }
     }
 }
@@ -294,6 +327,18 @@ impl EngineInner {
         }
     }
 
+    #[inline]
+    pub fn pdc_enabled(&self) -> bool {
+        if std::env::var_os("FUTUREBOARD_PDC").is_some_and(|v| v == "0" || v == "false") {
+            return false;
+        }
+        self.shared.pdc_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_pdc_enabled(&self, enabled: bool) {
+        self.shared.pdc_enabled.store(enabled, Ordering::Relaxed);
+    }
+
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
     pub fn get_version(&self) -> String {
@@ -354,12 +399,23 @@ impl EngineInner {
                 .as_ref()
                 .map(|snapshot| {
                     let mut audio_cache = self.audio_cache.lock();
-                    RuntimeProject::build(
+                    match RuntimeProject::build(
                         snapshot,
                         candidate.config.sample_rate.0,
                         &mut audio_cache,
                         None,
-                    )
+                        self.pdc_enabled(),
+                    ) {
+                        Ok(runtime) => runtime,
+                        Err(e) => {
+                            eprintln!(
+                                "[SphereAudio] open_device: invalid routing graph ({e}), keeping previous runtime"
+                            );
+                            let mut runtime = self.runtime.lock().clone();
+                            runtime.sample_rate = candidate.config.sample_rate.0;
+                            runtime
+                        }
+                    }
                 })
                 .unwrap_or_else(|| {
                     let mut runtime = self.runtime.lock().clone();
@@ -474,10 +530,14 @@ impl EngineInner {
     }
 
     pub fn set_metronome_enabled(&self, enabled: bool) -> Result<(), SphereAudioError> {
+        self.shared
+            .metronome_enabled
+            .store(enabled, Ordering::Relaxed);
         self.send_command(EngineCommand::SetMetronomeEnabled(enabled))
     }
 
     pub fn set_bpm(&self, bpm: f64) -> Result<(), SphereAudioError> {
+        transport::store_f64_bits(&self.shared.bpm_bits, bpm);
         self.send_command(EngineCommand::SetBpm(bpm))
     }
 
@@ -486,7 +546,43 @@ impl EngineInner {
         numerator: u32,
         denominator: u32,
     ) -> Result<(), SphereAudioError> {
+        self.shared
+            .time_sig_num
+            .store(numerator.max(1), Ordering::Relaxed);
+        self.shared
+            .time_sig_den
+            .store(denominator.max(1), Ordering::Relaxed);
         self.send_command(EngineCommand::SetTimeSignature(numerator, denominator))
+    }
+
+    pub fn set_loop(
+        &self,
+        enabled: bool,
+        start_seconds: f64,
+        end_seconds: f64,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetLoop {
+            enabled,
+            start_seconds,
+            end_seconds,
+        })
+    }
+
+    /// Read the current transport/clock snapshot for UI polling.
+    pub fn transport_snapshot(&self) -> RuntimeTransportSnapshot {
+        RuntimeTransportSnapshot::from_shared(&self.shared, &self.tempo_map())
+    }
+
+    fn tempo_map(&self) -> TempoMap {
+        self.project
+            .lock()
+            .as_ref()
+            .map(|project| TempoMap::static_tempo(project.bpm))
+            .unwrap_or_else(|| {
+                TempoMap::static_tempo(transport::f64_from_bits(
+                    self.shared.bpm_bits.load(Ordering::Relaxed),
+                ))
+            })
     }
 
     // ── Test tone ──────────────────────────────────────────────────────────
@@ -767,34 +863,52 @@ impl EngineInner {
 
         let runtime = {
             let mut audio_cache = self.audio_cache.lock();
-            let project = RuntimeProject::build(
+            match RuntimeProject::build(
                 &snapshot,
                 output_sample_rate,
                 &mut audio_cache,
                 Some(&mut existing_vst3),
-            );
-
-            // Evict cache entries no longer referenced by any clip in the new snapshot.
-            // This keeps memory bounded when clips are removed between project loads.
-            let active_paths: std::collections::HashSet<&str> = snapshot
-                .clips
-                .iter()
-                .filter_map(|c| c.media_path.as_deref())
-                .filter(|p| !p.is_empty())
-                .collect();
-            audio_cache.retain(|path, _| active_paths.contains(path.as_str()));
-
-            project
+                self.pdc_enabled(),
+            ) {
+                Ok(project) => {
+                    // Evict cache entries no longer referenced by any clip in the new snapshot.
+                    // This keeps memory bounded when clips are removed between project loads.
+                    let active_paths: std::collections::HashSet<&str> = snapshot
+                        .clips
+                        .iter()
+                        .filter_map(|c| c.media_path.as_deref())
+                        .filter(|p| !p.is_empty())
+                        .collect();
+                    audio_cache.retain(|path, _| active_paths.contains(path.as_str()));
+                    project
+                }
+                Err(e) => {
+                    let mut current = self.runtime.lock();
+                    for track in &mut current.tracks {
+                        for insert in &mut track.inserts {
+                            if insert.vst3.is_none() {
+                                if let Some(vst3) = existing_vst3.remove(&insert.id) {
+                                    insert.vst3 = Some(vst3);
+                                }
+                            }
+                        }
+                    }
+                    return Err(e.into());
+                }
+            }
         };
         // Processors left in existing_vst3 had no matching insert in the new
         // snapshot — they are dropped here with reason="replaced-by-load-project".
         drop(existing_vst3);
 
         eprintln!(
-            "[SphereAudio] RuntimeProject built: {} runtime clips from {} snapshot clips (sr={})",
+            "[SphereAudio] RuntimeProject built: {} runtime clips from {} snapshot clips (sr={}) graph_nodes={} pass2={} rejected_routes={}",
             runtime.clips.len(),
             snapshot.clips.len(),
             output_sample_rate,
+            runtime.audio_graph.nodes.len(),
+            runtime.audio_graph.pass2_routing_indices.len(),
+            runtime.audio_graph.rejected_routes.len(),
         );
 
         // Build initial track states from snapshot.
@@ -826,7 +940,7 @@ impl EngineInner {
         // channel allocation + thread spawn on the audio thread.
         crate::graveyard::prime();
 
-        match self.send_command(EngineCommand::LoadProject(runtime)) {
+        match self.send_command(EngineCommand::LoadProject(Box::new(runtime))) {
             Ok(()) => eprintln!("[SphereAudio] LoadProject command sent to audio callback"),
             Err(SphereAudioError::EngineNotOpen) => {
                 eprintln!(
@@ -837,6 +951,9 @@ impl EngineInner {
             Err(e) => return Err(e),
         }
 
+        let _ = self.set_bpm(snapshot.bpm);
+        let _ = self.set_time_signature(snapshot.time_signature[0], snapshot.time_signature[1]);
+
         Ok(())
     }
 
@@ -846,7 +963,6 @@ impl EngineInner {
         let runtime = self.runtime.lock();
         let project = self.project.lock();
         let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
-        let position_samples = self.shared.position_samples.load(Ordering::Relaxed);
 
         let ready_clips = runtime
             .clips
@@ -922,17 +1038,38 @@ impl EngineInner {
             })
             .collect();
 
+        let graph_rejected_route_summaries: Vec<String> = runtime
+            .audio_graph
+            .rejected_routes
+            .iter()
+            .map(|route| {
+                format!(
+                    "{} -> {} ({:?}): {}",
+                    route.from_track_id, route.to_track_id, route.kind, route.reason
+                )
+            })
+            .collect();
+
+        let transport = self.transport_snapshot();
+
         JsEngineDebugInfo {
             project_id: project.as_ref().map(|p| p.project_id.clone()),
             loaded_tracks: runtime.tracks.len() as u32,
             loaded_clips: runtime.clips.len() as u32,
             ready_clips,
-            is_playing: self.shared.playing.load(Ordering::Relaxed),
-            position_seconds: position_samples as f64 / sample_rate as f64,
+            is_playing: transport.playing,
+            position_seconds: transport.position_seconds,
+            position_beats: transport.position_beats,
+            loop_enabled: transport.loop_enabled,
             has_solo: runtime.has_solo,
             clip_summaries,
             insert_summaries,
             disk_underruns: crate::streaming_source::total_disk_underruns() as f64,
+            graph_node_count: runtime.audio_graph.nodes.len() as u32,
+            graph_pass1_count: runtime.audio_graph.pass1_source_indices.len() as u32,
+            graph_pass2_count: runtime.audio_graph.pass2_routing_indices.len() as u32,
+            graph_rejected_route_count: runtime.audio_graph.rejected_routes.len() as u32,
+            graph_rejected_route_summaries,
         }
     }
 
@@ -978,7 +1115,8 @@ impl EngineInner {
                 "A recording session is already active".to_string(),
             ));
         }
-        let session = recording::start_recording(config)?;
+        let monitor_mix = config.monitor_mix;
+        let session = recording::start_recording(config, Arc::clone(&self.shared), monitor_mix)?;
         *guard = Some(session);
         Ok(())
     }
@@ -988,22 +1126,46 @@ impl EngineInner {
         let session = self.recording.lock().take().ok_or_else(|| {
             SphereAudioError::NativeError("No active recording session".to_string())
         })?;
-        recording::stop_recording(session)
+        let mut results = recording::stop_recording(session)?;
+        let runtime = self.runtime.lock();
+        let buffer_frames = self.status.lock().buffer_size;
+        let samples_per_beat = runtime.samples_per_beat.max(1.0);
+        let round_trip_buffer = buffer_frames.saturating_mul(2);
+        for result in &mut results {
+            let Some(track_idx) = runtime
+                .tracks
+                .iter()
+                .position(|track| track.id == result.track_id)
+            else {
+                continue;
+            };
+            let path_samples = runtime
+                .latency_graph
+                .max_path_latency_samples
+                .saturating_sub(
+                    runtime
+                        .latency_graph
+                        .track_pdc_delay
+                        .get(track_idx)
+                        .copied()
+                        .unwrap_or(0),
+                );
+            let offset_samples = round_trip_buffer.saturating_add(path_samples);
+            let offset_beats = offset_samples as f64 / samples_per_beat;
+            result.start_beat = (result.start_beat - offset_beats).max(0.0);
+        }
+        Ok(results)
     }
 
     /// Snapshot of current recording state (for UI status polling).
     pub fn get_recording_status(&self) -> JsRecordingStatus {
         match self.recording.lock().as_ref() {
             None => JsRecordingStatus::default(),
-            Some(s) => {
-                // We don't track elapsed time with an atomic — returning track_count
-                // is sufficient for the UI to show a "recording" badge.
-                JsRecordingStatus {
-                    active: true,
-                    duration_seconds: 0.0,
-                    track_count: s.track_count as u32,
-                }
-            }
+            Some(s) => JsRecordingStatus {
+                active: true,
+                duration_seconds: s.started_at.elapsed().as_secs_f64(),
+                track_count: s.track_count as u32,
+            },
         }
     }
 
@@ -1274,6 +1436,7 @@ impl EngineInner {
     /// is the data the UI displays and the basis (`max_track_samples`) PDC will
     /// later use.
     pub fn get_latency_info(&self) -> crate::types::JsLatencyInfo {
+        use crate::latency_graph::strip_plugin_latency_samples;
         use crate::types::{JsLatencyInfo, JsTrackLatency};
         let runtime = self.runtime.lock();
         let (sample_rate, buffer_frames) = {
@@ -1281,11 +1444,13 @@ impl EngineInner {
             (st.sample_rate.max(1), st.buffer_size)
         };
         let to_ms = |samples: u32| samples as f64 / sample_rate as f64 * 1000.0;
+        let pdc_enabled = self.pdc_enabled();
 
+        let max_path_samples = runtime.latency_graph.max_path_latency_samples;
         let mut tracks = Vec::new();
         let mut master_samples = 0u32;
-        let mut max_track_samples = 0u32;
-        for track in &runtime.tracks {
+        let mut max_track_plugin_samples = 0u32;
+        for (idx, track) in runtime.tracks.iter().enumerate() {
             let mut samples: i64 = 0;
             for insert in &track.inserts {
                 if !insert.enabled {
@@ -1297,15 +1462,37 @@ impl EngineInner {
                     }
                 }
             }
-            let samples = samples.max(0) as u32;
-            if track.track_type == "master" {
-                master_samples = samples;
+            let plugin_samples = if samples > 0 {
+                samples as u32
             } else {
-                max_track_samples = max_track_samples.max(samples);
+                strip_plugin_latency_samples(track)
+            };
+            let path_samples = max_path_samples.saturating_sub(
+                runtime
+                    .latency_graph
+                    .track_pdc_delay
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(0),
+            );
+            let pdc_delay_samples = runtime
+                .latency_graph
+                .track_pdc_delay
+                .get(idx)
+                .copied()
+                .unwrap_or(0);
+            if track.track_type == "master" {
+                master_samples = plugin_samples;
+            } else {
+                max_track_plugin_samples = max_track_plugin_samples.max(plugin_samples);
                 tracks.push(JsTrackLatency {
                     track_id: track.id.clone(),
-                    plugin_samples: samples,
-                    plugin_ms: to_ms(samples),
+                    plugin_samples,
+                    plugin_ms: to_ms(plugin_samples),
+                    path_samples,
+                    path_ms: to_ms(path_samples),
+                    pdc_delay_samples,
+                    pdc_delay_ms: to_ms(pdc_delay_samples),
                 });
             }
         }
@@ -1317,7 +1504,10 @@ impl EngineInner {
             tracks,
             master_samples,
             master_ms: to_ms(master_samples),
-            max_track_samples,
+            max_path_samples,
+            max_path_ms: to_ms(max_path_samples),
+            pdc_enabled,
+            max_track_samples: max_track_plugin_samples,
         }
     }
 
@@ -1379,9 +1569,17 @@ impl EngineInner {
             .as_ref()
             .map(|snapshot| {
                 let mut audio_cache = self.audio_cache.lock();
-                // Pass None for existing_vst3: opening a new device may change
-                // the sample rate, so processors cannot be safely reused here.
-                RuntimeProject::build(snapshot, sr, &mut audio_cache, None)
+                match RuntimeProject::build(snapshot, sr, &mut audio_cache, None, self.pdc_enabled()) {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        eprintln!(
+                            "[SphereAudio] get_initial_runtime: invalid routing graph ({e}), keeping previous runtime"
+                        );
+                        let mut runtime = self.runtime.lock().clone();
+                        runtime.sample_rate = sr;
+                        runtime
+                    }
+                }
             })
             .unwrap_or_else(|| {
                 let mut runtime = self.runtime.lock().clone();
@@ -1619,7 +1817,7 @@ pub fn render_project_sample(
 /// Routing track kinds (Phase 3): receive sends rather than hosting clips.
 #[inline]
 fn is_routing_type(track_type: &str) -> bool {
-    track_type == "bus" || track_type == "return"
+    is_routing_track_type(track_type)
 }
 
 /// Two distinct mutable elements of a slice without allocation. Panics in
@@ -1690,6 +1888,14 @@ fn apply_fader(track: &mut RuntimeTrack, frames: usize, beat: f64) {
         );
         track.block_l[frame_idx] = l;
         track.block_r[frame_idx] = r;
+    }
+}
+
+#[inline]
+fn accumulate_block_meter(track: &mut RuntimeTrack, frames: usize) {
+    for frame_idx in 0..frames {
+        let l = track.block_l[frame_idx];
+        let r = track.block_r[frame_idx];
         track.meter_peak_l = track.meter_peak_l.max(l.abs());
         track.meter_peak_r = track.meter_peak_r.max(r.abs());
         track.meter_sum_sq_l += l * l;
@@ -1760,7 +1966,26 @@ fn process_track_block(
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
     apply_fader(&mut runtime.tracks[track_index], frames, beat);
-    // Post-fader sends tap the post-fader signal now in block_*.
+    let pdc_delay = runtime
+        .latency_graph
+        .track_pdc_delay
+        .get(track_index)
+        .copied()
+        .unwrap_or(0);
+    if pdc_delay > 0 {
+        let track = &mut runtime.tracks[track_index];
+        apply_pdc_delay_block(
+            &mut track.block_l[..frames],
+            &mut track.block_r[..frames],
+            &mut track.pdc_delay_l,
+            &mut track.pdc_delay_r,
+            &mut track.pdc_write_pos,
+            pdc_delay,
+            frames,
+        );
+    }
+    accumulate_block_meter(&mut runtime.tracks[track_index], frames);
+    // Post-fader sends tap the post-fader (and PDC-aligned) signal in block_*.
     accumulate_sends(runtime, track_index, frames, false);
     // Route the post-fader signal to master or the track's output bus.
     route_main_output(runtime, track_index, frames, output, channels);
@@ -1860,7 +2085,7 @@ pub fn render_project_block_interleaved(
         track.recv_r[..frames].fill(0.0);
     }
 
-    let master_index = runtime.tracks.iter().position(|t| t.track_type == "master");
+    let master_index = runtime.audio_graph.master_index;
 
     for clip_index in 0..runtime.clips.len() {
         let clip = &runtime.clips[clip_index];
@@ -1911,14 +2136,9 @@ pub fn render_project_block_interleaved(
     // ── Pass 1: source tracks (audio / midi / instrument) ───────────────
     // Clips → inserts → fader, sum the post-fader signal into the master
     // output, then feed sends into routing-track receive buffers. Routing
-    // tracks (bus/return) are deferred to Pass 2 so their inputs are complete.
-    for track_index in 0..runtime.tracks.len() {
-        if Some(track_index) == master_index {
-            continue;
-        }
-        if is_routing_type(&runtime.tracks[track_index].track_type) {
-            continue;
-        }
+    // tracks (bus/return/group) are deferred to Pass 2 so their inputs are complete.
+    let pass1_indices = runtime.audio_graph.pass1_source_indices.clone();
+    for &track_index in &pass1_indices {
         if effective_track_muted(&runtime.tracks[track_index], block_beat)
             || (runtime.has_solo && !runtime.tracks[track_index].solo)
         {
@@ -1981,18 +2201,13 @@ pub fn render_project_block_interleaved(
         process_track_block(runtime, track_index, frames, output, channels, block_beat);
     }
 
-    // ── Pass 2: routing tracks (bus / return) ───────────────────────────
+    // ── Pass 2: routing tracks (bus / return / group) ───────────────────
     // Input = the accumulated send receive buffer. Process inserts → fader and
     // sum to the master output. Solo is ignored for routing tracks so soloing
-    // a *source* track still lets its send reach the return. A routing track
-    // may itself send to a *later* routing track (forward-only → acyclic).
-    for track_index in 0..runtime.tracks.len() {
-        if Some(track_index) == master_index {
-            continue;
-        }
-        if !is_routing_type(&runtime.tracks[track_index].track_type) {
-            continue;
-        }
+    // a *source* track still lets its send reach the return. Order comes from
+    // the precomputed topological sort in `RuntimeAudioGraph`.
+    let pass2_indices = runtime.audio_graph.pass2_routing_indices.clone();
+    for &track_index in &pass2_indices {
         if effective_track_muted(&runtime.tracks[track_index], block_beat) {
             continue;
         }
@@ -2440,7 +2655,7 @@ where
                             // the realtime thread — its destructor frees
                             // buffers / munmaps sources / destroys VST3 handles
                             // and must not run here. See `crate::graveyard`.
-                            let old = std::mem::replace(&mut runtime, next_runtime);
+                            let old = std::mem::replace(&mut runtime, *next_runtime);
                             runtime.sample_rate = output_sample_rate;
                             crate::graveyard::retire(old);
                             if crate::runtime::midi_engine_debug_enabled() {
@@ -2506,15 +2721,35 @@ where
                         }
                         EngineCommand::SetMetronomeEnabled(enabled) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
+                            shared
+                                .metronome_enabled
+                                .store(enabled, Ordering::Relaxed);
                             metronome.set_metronome_enabled(enabled, pos, output_sample_rate);
                         }
                         EngineCommand::SetBpm(bpm) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
+                            transport::store_f64_bits(&shared.bpm_bits, bpm);
                             metronome.set_bpm(bpm, pos, output_sample_rate);
                         }
                         EngineCommand::SetTimeSignature(num, den) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
+                            shared.time_sig_num.store(num.max(1), Ordering::Relaxed);
+                            shared.time_sig_den.store(den.max(1), Ordering::Relaxed);
                             metronome.set_time_signature(num, den, pos, output_sample_rate);
+                        }
+                        EngineCommand::SetLoop {
+                            enabled,
+                            start_seconds,
+                            end_seconds,
+                        } => {
+                            let sr_local = shared.sample_rate.load(Ordering::Relaxed) as f64;
+                            let start = (start_seconds.max(0.0) * sr_local) as u64;
+                            let end = (end_seconds.max(0.0) * sr_local) as u64;
+                            shared.loop_enabled.store(enabled, Ordering::Relaxed);
+                            shared
+                                .loop_start_samples
+                                .store(start, Ordering::Relaxed);
+                            shared.loop_end_samples.store(end, Ordering::Relaxed);
                         }
                         EngineCommand::SetMasterVolume { value } => {
                             shared
@@ -2624,6 +2859,12 @@ where
                             frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
                         }
                     }
+                    crate::recording::apply_recording_monitor_mix(
+                        &mut *scratch,
+                        ch,
+                        &shared,
+                        master_vol,
+                    );
                     for (out_frame, frame) in data.chunks_mut(ch).zip(scratch.chunks(ch)) {
                         let l = frame[0].clamp(-1.0, 1.0);
                         let r = frame[1].clamp(-1.0, 1.0);
@@ -2660,6 +2901,17 @@ where
                         };
                         let l = (tone_l + project_l + click).clamp(-1.0, 1.0);
                         let r = (tone_r + project_r + click).clamp(-1.0, 1.0);
+                        let (l, r) = if shared.recording_monitor_mix.load(Ordering::Relaxed) {
+                            let mon_l = f32_load(shared.recording_monitor_l.load(Ordering::Relaxed))
+                                * master_vol
+                                * 0.85;
+                            let mon_r = f32_load(shared.recording_monitor_r.load(Ordering::Relaxed))
+                                * master_vol
+                                * 0.85;
+                            ((l + mon_l).clamp(-1.0, 1.0), (r + mon_r).clamp(-1.0, 1.0))
+                        } else {
+                            (l, r)
+                        };
                         frame[0] = T::from_sample(l);
                         frame[1] = T::from_sample(r);
                         // Extra channels get silence.
@@ -2734,6 +2986,9 @@ where
                 // Advance position counter.
                 if playing_local && ch > 0 {
                     shared.position_samples.fetch_add(frames, Ordering::Relaxed);
+                    transport::apply_loop_wrap(&shared, &mut runtime, output_sample_rate, |start| {
+                        metronome.reset_metronome_schedule(start, output_sample_rate);
+                    });
                 }
             },
             move |err| {
@@ -2821,6 +3076,10 @@ mod routing_tests {
             recv_r: vec![0.0; cap],
             midi_block_events: Vec::new(),
             midi_instrument_insert_ix: None,
+            plugin_latency_samples: 0,
+            pdc_delay_l: Vec::new(),
+            pdc_delay_r: Vec::new(),
+            pdc_write_pos: 0,
         }
     }
 

@@ -6,7 +6,7 @@ use crate::runtime::RuntimeProject;
 #[derive(Debug)]
 pub enum EngineCommand {
     /// Replace the callback's render graph with a fully prepared project.
-    LoadProject(RuntimeProject),
+    LoadProject(Box<RuntimeProject>),
     /// Enable or disable the sine test tone.
     SetTestTone { enabled: bool, frequency: f32 },
     /// Set master output gain (linear, 0..2).
@@ -40,4 +40,10 @@ pub enum EngineCommand {
     SetBpm(f64),
     /// Set project time signature for metronome accent scheduling.
     SetTimeSignature(u32, u32),
+    /// Enable/disable loop region and set its bounds in seconds.
+    SetLoop {
+        enabled: bool,
+        start_seconds: f64,
+        end_seconds: f64,
+    },
 }

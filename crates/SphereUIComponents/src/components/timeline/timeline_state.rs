@@ -12,6 +12,8 @@ fn routing_debug_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some())
 }
 
+pub use crate::project::InputMonitorMode;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackType {
     Audio,
@@ -734,8 +736,8 @@ pub struct TrackState {
     pub muted: bool,
     pub solo: bool,
     pub armed: bool,
-    /// Whether the track is monitoring its input. UI-only for now (no audio).
-    pub input_monitor: bool,
+    /// Input monitoring mode (Off / Auto / Input).
+    pub input_monitor: InputMonitorMode,
     /// Latest peak meter levels in `0.0..=1.0`. Currently a static placeholder
     /// per track; will be driven by the audio engine when that lands.
     pub meter_level_l: f32,
@@ -808,7 +810,7 @@ pub struct CreateTrackOptions {
     pub volume: f32,
     pub pan: f32,
     pub armed: bool,
-    pub input_monitor: bool,
+    pub input_monitor: InputMonitorMode,
 }
 
 /// Volume / dB mapping helpers. Linear in dB between the soft floor and a
@@ -1133,7 +1135,7 @@ impl TimelineState {
             muted: false,
             solo: false,
             armed: false,
-            input_monitor: false,
+            input_monitor: InputMonitorMode::Off,
             meter_level_l: 0.62,
             meter_level_r: 0.68,
             meter_peak_hold_l: 0.0,
@@ -1200,7 +1202,7 @@ impl TimelineState {
             muted: false,
             solo: false,
             armed: false,
-            input_monitor: false,
+            input_monitor: InputMonitorMode::Off,
             meter_level_l: 0.42,
             meter_level_r: 0.48,
             meter_peak_hold_l: 0.0,
@@ -1239,7 +1241,7 @@ impl TimelineState {
             muted: false,
             solo: false,
             armed: false,
-            input_monitor: false,
+            input_monitor: InputMonitorMode::Off,
             meter_level_l: 0.15,
             meter_level_r: 0.12,
             meter_peak_hold_l: 0.0,
@@ -1852,7 +1854,7 @@ impl TimelineState {
             volume: volume::db_to_norm(0.0),
             pan: 0.0,
             armed: false,
-            input_monitor: false,
+            input_monitor: InputMonitorMode::Off,
         });
         eprintln!("[import] created track id={} name={}", id, log_name);
         id
@@ -1867,7 +1869,7 @@ impl TimelineState {
             volume: volume::db_to_norm(0.0),
             pan: 0.0,
             armed: false,
-            input_monitor: false,
+            input_monitor: InputMonitorMode::Off,
         })
     }
 
@@ -2916,9 +2918,9 @@ impl TimelineState {
         Some(send.enabled)
     }
 
-    pub fn toggle_track_input_monitor(&mut self, track_id: &str) {
+    pub fn cycle_track_input_monitor(&mut self, track_id: &str) {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
-            t.input_monitor = !t.input_monitor;
+            t.input_monitor = t.input_monitor.cycle();
         }
     }
 
@@ -3722,6 +3724,69 @@ impl TimelineState {
         self.insert_audio_clip(track_id, source_path, clip_name, start_beat)
     }
 
+    pub fn insert_recorded_clip(
+        &mut self,
+        track_id: &str,
+        source_path: String,
+        clip_name: String,
+        start_beat: f32,
+        duration_seconds: f64,
+        bpm: f32,
+    ) -> String {
+        let duration_beats = (duration_seconds.max(0.0) * bpm.max(1.0) as f64 / 60.0) as f32;
+        self.insert_audio_clip_with_duration(
+            track_id.to_string(),
+            source_path,
+            clip_name,
+            start_beat,
+            duration_beats.max(0.01),
+            Some(duration_seconds),
+        )
+    }
+
+    fn insert_audio_clip_with_duration(
+        &mut self,
+        track_id: String,
+        source_path: String,
+        clip_name: String,
+        start_beat: f32,
+        duration_beats: f32,
+        source_duration_seconds: Option<f64>,
+    ) -> String {
+        let track_id = if self.tracks.iter().any(|track| track.id == track_id) {
+            track_id
+        } else {
+            eprintln!(
+                "[recording] target track id={track_id} missing; creating fallback audio track"
+            );
+            self.create_audio_track()
+        };
+
+        let clip_id = self.next_clip_id();
+        let new_clip = ClipState {
+            id: clip_id.clone(),
+            name: clip_name,
+            start_beat: start_beat.max(0.0),
+            duration_beats,
+            source_duration_seconds,
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Audio {
+                file_id: source_path.clone(),
+                source_path: Some(source_path),
+            },
+            muted: false,
+            audio_import: AudioImportState::Pending,
+        };
+
+        if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {
+            track.clips.push(new_clip);
+        }
+        self.selection.selected_track_id = Some(track_id);
+        self.selection.selected_clip_ids = vec![clip_id.clone()];
+        clip_id
+    }
+
     fn insert_audio_clip(
         &mut self,
         track_id: String,
@@ -3744,55 +3809,14 @@ impl TimelineState {
             "[audio-import] WARNING using fallback duration because metadata is pending: path={} duration_beats=8.0",
             source_path
         );
-        let clip_id = self.next_clip_id();
-        let log_clip_name = clip_name.clone();
-        let new_clip = ClipState {
-            id: clip_id.clone(),
-            name: clip_name,
-            start_beat: start_beat.max(0.0),
+        self.insert_audio_clip_with_duration(
+            track_id,
+            source_path,
+            clip_name,
+            start_beat,
             duration_beats,
-            source_duration_seconds: None,
-            offset_beats: 0.0,
-            gain: 1.0,
-            clip_type: ClipType::Audio {
-                file_id: source_path.clone(),
-                source_path: Some(source_path),
-            },
-            muted: false,
-            audio_import: AudioImportState::Pending,
-        };
-
-        if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {
-            track.clips.push(new_clip);
-        }
-        self.selection.selected_track_id = Some(track_id);
-        self.selection.selected_clip_ids = vec![clip_id.clone()];
-        debug_assert!(
-            self.tracks
-                .iter()
-                .any(|track| track.clips.iter().any(|clip| clip.id == clip_id)),
-            "imported clip must be stored inside a renderable track"
-        );
-        let selected_track = self
-            .selection
-            .selected_track_id
-            .as_deref()
-            .unwrap_or("<none>");
-        let total_clips: usize = self.tracks.iter().map(|track| track.clips.len()).sum();
-        eprintln!(
-            "[import] clip id={} name={} track_id={} tracks.len={} clips.len={} selected_clip={}",
-            clip_id,
-            log_clip_name,
-            selected_track,
-            self.tracks.len(),
-            total_clips,
-            self.selection
-                .selected_clip_ids
-                .first()
-                .map(String::as_str)
-                .unwrap_or("<none>")
-        );
-        clip_id
+            None,
+        )
     }
 
     pub fn update_audio_clip_metadata(
@@ -3920,7 +3944,7 @@ mod midi_edit_tests {
             volume: 1.0,
             pan: 0.0,
             armed: false,
-            input_monitor: false,
+            input_monitor: InputMonitorMode::Off,
         });
         let clip = state
             .build_midi_clip(&track_id, 0.0, 4.0)

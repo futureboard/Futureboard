@@ -778,7 +778,7 @@ impl Render for Timeline {
         });
 
         let on_toggle_input = cx.listener(|this, track_id: &String, _window, cx| {
-            this.state.toggle_track_input_monitor(track_id);
+            this.state.cycle_track_input_monitor(track_id);
             this.mark_project_changed(cx);
             cx.notify();
         });

@@ -71,6 +71,8 @@ pub struct RecordingSession {
     pub sample_rate: u32,
     pub track_count: usize,
     pub recording_active: Arc<AtomicBool>,
+    pub started_at: std::time::Instant,
+    pub shared: Arc<crate::engine::SharedState>,
 }
 
 // Safety: cpal::Stream is !Send due to a PhantomData marker on Windows (COM
@@ -246,6 +248,27 @@ fn disk_writer_thread(
     let _ = finalize_tx.send(results);
 }
 
+/// Mix the latest captured input sample onto interleaved output (Phase U monitor).
+pub fn apply_recording_monitor_mix(
+    data: &mut [f32],
+    channels: usize,
+    shared: &crate::engine::SharedState,
+    master_vol: f32,
+) {
+    use std::sync::atomic::Ordering;
+    if channels < 2 || !shared.recording_monitor_mix.load(Ordering::Relaxed) {
+        return;
+    }
+    let mon_l =
+        f32::from_bits(shared.recording_monitor_l.load(Ordering::Relaxed)) * master_vol * 0.85;
+    let mon_r =
+        f32::from_bits(shared.recording_monitor_r.load(Ordering::Relaxed)) * master_vol * 0.85;
+    for frame in data.chunks_mut(channels) {
+        frame[0] = (frame[0] + mon_l).clamp(-1.0, 1.0);
+        frame[1] = (frame[1] + mon_r).clamp(-1.0, 1.0);
+    }
+}
+
 // ── Input stream builder (f32 samples) ───────────────────────────────────────
 
 fn build_f32_input_stream(
@@ -253,6 +276,8 @@ fn build_f32_input_stream(
     config: &cpal::StreamConfig,
     tx: crossbeam_channel::Sender<Vec<f32>>,
     active: Arc<AtomicBool>,
+    shared: Arc<crate::engine::SharedState>,
+    channels: usize,
 ) -> Result<cpal::Stream, SphereAudioError> {
     device
         .build_input_stream::<f32, _, _>(
@@ -262,6 +287,18 @@ fn build_f32_input_stream(
                     // `to_vec()` allocates once per block — not in the output hot path,
                     // so occasional allocation here is acceptable for recording.
                     let _ = tx.try_send(data.to_vec());
+                    if shared.recording_monitor_mix.load(Ordering::Relaxed) && channels >= 2 {
+                        let frames = data.len() / channels.max(1);
+                        if frames > 0 {
+                            let last = frames - 1;
+                            shared
+                                .recording_monitor_l
+                                .store(data[last * channels].to_bits(), Ordering::Relaxed);
+                            shared
+                                .recording_monitor_r
+                                .store(data[last * channels + 1].to_bits(), Ordering::Relaxed);
+                        }
+                    }
                 }
             },
             |err| eprintln!("[SphereAudio] Input stream error: {err}"),
@@ -275,6 +312,8 @@ fn build_f32_input_stream(
 /// Open an input stream and begin recording armed tracks.
 pub fn start_recording(
     config: JsStartRecordingConfig,
+    shared: Arc<crate::engine::SharedState>,
+    monitor_mix: bool,
 ) -> Result<RecordingSession, SphereAudioError> {
     if config.tracks.is_empty() {
         return Err(SphereAudioError::NativeError(
@@ -361,6 +400,10 @@ pub fn start_recording(
 
     // AtomicBool: the input callback checks this before sending.
     let recording_active = Arc::new(AtomicBool::new(true));
+    shared.recording_active.store(true, Ordering::Relaxed);
+    shared
+        .recording_monitor_mix
+        .store(monitor_mix, Ordering::Relaxed);
 
     // Build the input stream — `audio_tx` is moved into the closure.
     let input_stream = build_f32_input_stream(
@@ -368,6 +411,8 @@ pub fn start_recording(
         &stream_config,
         audio_tx,
         Arc::clone(&recording_active),
+        Arc::clone(&shared),
+        input_ch,
     )?;
 
     input_stream
@@ -386,6 +431,8 @@ pub fn start_recording(
         sample_rate,
         track_count,
         recording_active,
+        started_at: std::time::Instant::now(),
+        shared,
     })
 }
 
@@ -395,6 +442,14 @@ pub fn stop_recording(
 ) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
     // Tell the callback to stop sending.
     session.recording_active.store(false, Ordering::Relaxed);
+    session
+        .shared
+        .recording_active
+        .store(false, Ordering::Relaxed);
+    session
+        .shared
+        .recording_monitor_mix
+        .store(false, Ordering::Relaxed);
 
     // Dropping the stream disconnects `audio_tx` (it lived inside the closure),
     // which causes `audio_rx.recv()` in the disk writer to return Err → loop exits.

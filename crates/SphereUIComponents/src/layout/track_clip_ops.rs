@@ -1,8 +1,8 @@
 use gpui::Context;
 
-use crate::components::timeline::timeline_state;
 #[cfg(debug_assertions)]
 use crate::components::timeline::timeline_state::TrackType;
+use crate::components::timeline::timeline_state::{self, InputMonitorMode};
 
 use super::StudioLayout;
 impl StudioLayout {
@@ -28,7 +28,7 @@ impl StudioLayout {
                         volume: timeline_state::volume::db_to_norm(0.0),
                         pan: 0.0,
                         armed: false,
-                        input_monitor: false,
+                        input_monitor: InputMonitorMode::Off,
                     });
             }
         });

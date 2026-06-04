@@ -24,7 +24,7 @@ use crate::backend::BackendKind;
 use crate::device;
 use crate::engine::EngineInner;
 use crate::error::SphereAudioError;
-use crate::types::{EngineProjectSnapshot, JsDauxConfig, JsMeterSnapshot};
+use crate::types::{EngineProjectSnapshot, JsDauxConfig, JsMeterSnapshot, JsStartRecordingConfig};
 
 /// Default sample rate used when the caller does not specify one. Mirrors
 /// the system's "Auto" path — most backends ignore this and pick their
@@ -120,6 +120,12 @@ pub struct EngineStats {
     pub stream_open: bool,
     pub transport_playing: bool,
     pub position_seconds: f64,
+    pub position_beats: f64,
+    pub position_samples: u64,
+    pub loop_enabled: bool,
+    pub bpm: f64,
+    pub time_signature_num: u32,
+    pub time_signature_den: u32,
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub backend_name: String,
@@ -241,6 +247,15 @@ impl AudioEngine {
         self.inner.set_time_signature(numerator, denominator)
     }
 
+    pub fn set_loop(
+        &self,
+        enabled: bool,
+        start_seconds: f64,
+        end_seconds: f64,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_loop(enabled, start_seconds, end_seconds)
+    }
+
     /// Toggle the transport between play and pause. Returns the new playing
     /// state. No-ops cleanly if the stream is not open yet.
     pub fn toggle_transport(&self) -> Result<bool, SphereAudioError> {
@@ -283,11 +298,18 @@ impl AudioEngine {
     pub fn stats(&self) -> EngineStats {
         let st = self.inner.get_status();
         let daux = self.inner.get_daux_status();
+        let transport = self.inner.transport_snapshot();
         EngineStats {
             running: st.running,
             stream_open: st.stream_open,
             transport_playing: self.inner.shared_playing(),
-            position_seconds: st.position_seconds,
+            position_seconds: transport.position_seconds,
+            position_beats: transport.position_beats,
+            position_samples: transport.position_samples,
+            loop_enabled: transport.loop_enabled,
+            bpm: transport.bpm,
+            time_signature_num: transport.time_signature[0],
+            time_signature_den: transport.time_signature[1],
             sample_rate: st.sample_rate,
             buffer_size: st.buffer_size,
             backend_name: daux.backend_name,
@@ -343,6 +365,18 @@ impl AudioEngine {
         self.inner.load_project(snapshot)
     }
 
+    pub fn start_recording(&self, config: JsStartRecordingConfig) -> Result<(), SphereAudioError> {
+        self.inner.start_recording(config)
+    }
+
+    pub fn stop_recording(&self) -> Result<Vec<crate::types::JsRecordingResult>, SphereAudioError> {
+        self.inner.stop_recording()
+    }
+
+    pub fn recording_status(&self) -> crate::types::JsRecordingStatus {
+        self.inner.get_recording_status()
+    }
+
     /// Update a track or master parameter without rebuilding the full runtime graph.
     pub fn update_track_param(
         &self,
@@ -377,6 +411,14 @@ impl AudioEngine {
     /// compensation is Phase W.
     pub fn latency_info(&self) -> crate::types::JsLatencyInfo {
         self.inner.get_latency_info()
+    }
+
+    pub fn pdc_enabled(&self) -> bool {
+        self.inner.pdc_enabled()
+    }
+
+    pub fn set_pdc_enabled(&self, enabled: bool) {
+        self.inner.set_pdc_enabled(enabled);
     }
 
     /// Multi-LOD peak summary for any audio format supported by the

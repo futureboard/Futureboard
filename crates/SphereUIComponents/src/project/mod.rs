@@ -47,11 +47,40 @@ pub enum ProjectTrackType {
     Master,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMonitorMode {
+    #[default]
     Off,
+    /// Monitor input whenever this mode is selected (Input).
     Always,
+    /// Monitor input whenever the track is record-armed (Auto).
     WhenRecordArmed,
+}
+
+impl InputMonitorMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::WhenRecordArmed,
+            Self::WhenRecordArmed => Self::Always,
+            Self::Always => Self::Off,
+        }
+    }
+
+    pub fn is_active(self, armed: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Always => true,
+            Self::WhenRecordArmed => armed,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::WhenRecordArmed => "Auto",
+            Self::Always => "Input",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -530,11 +559,7 @@ impl From<&TimelineState> for FutureboardProject {
                     muted: t.muted,
                     solo: t.solo,
                     record_arm: t.armed,
-                    input_monitor: if t.input_monitor {
-                        InputMonitorMode::Always
-                    } else {
-                        InputMonitorMode::Off
-                    },
+                    input_monitor: t.input_monitor,
                     routing: TrackRouting {
                         input: timeline_input_to_project(&t.routing.input),
                         output: timeline_output_to_project(&t.routing.output),
@@ -770,7 +795,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 muted: pt.muted,
                 solo: pt.solo,
                 armed: pt.record_arm,
-                input_monitor: pt.input_monitor == InputMonitorMode::Always,
+                input_monitor: pt.input_monitor,
                 meter_level_l: 0.0,
                 meter_level_r: 0.0,
                 meter_peak_hold_l: 0.0,

@@ -211,7 +211,7 @@ impl StudioLayout {
             let id = id.clone();
             external_mixer_debug(&format!("mixer command dispatched toggle_input id={id}"));
             timeline_input.update(cx, |t, cx| {
-                t.state.toggle_track_input_monitor(&id);
+                t.state.cycle_track_input_monitor(&id);
                 cx.notify();
             });
             let _ = owner_dirty.update(cx, |this, cx| {

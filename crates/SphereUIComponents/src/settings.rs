@@ -447,6 +447,44 @@ pub struct PerformanceSettings {
     pub gpu_device: GpuDevicePreference,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaybackSettings {
+    /// Align parallel track paths at the master bus (Phase W PDC).
+    #[serde(default = "default_true")]
+    pub latency_compensation: bool,
+}
+
+impl Default for PlaybackSettings {
+    fn default() -> Self {
+        Self {
+            latency_compensation: default_true(),
+        }
+    }
+}
+
+/// Live latency readout shown in Settings → Audio (polled from DAUx).
+#[derive(Debug, Clone, Default)]
+pub struct SettingsAudioLatencySnapshot {
+    pub engine_open: bool,
+    pub device_state: String,
+    pub buffer_ms: f64,
+    pub buffer_frames: u32,
+    pub round_trip_ms: f64,
+    pub max_path_ms: f64,
+    pub max_path_samples: u32,
+    pub master_plugin_ms: f64,
+    pub pdc_active: bool,
+    pub track_lines: Vec<SettingsTrackLatencyLine>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SettingsTrackLatencyLine {
+    pub track_id: String,
+    pub plugin_ms: f64,
+    pub path_ms: f64,
+    pub pdc_ms: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SettingsSchema {
     #[serde(default)]
@@ -459,6 +497,8 @@ pub struct SettingsSchema {
     pub editing: EditingSettings,
     #[serde(default)]
     pub recording: RecordingSettings,
+    #[serde(default)]
+    pub playback: PlaybackSettings,
     #[serde(default)]
     pub plugins: PluginsSettings,
     #[serde(default)]
@@ -493,6 +533,47 @@ impl SettingsSchema {
         } else if self.appearance.ui_scale > 2.5 {
             self.appearance.ui_scale = 2.5;
         }
+    }
+}
+
+impl SettingsAudioLatencySnapshot {
+    pub fn from_engine(engine: &DAUx::AudioEngine) -> Self {
+        let stats = engine.stats();
+        let info = engine.latency_info();
+        let mut track_lines: Vec<SettingsTrackLatencyLine> = info
+            .tracks
+            .iter()
+            .filter(|track| track.plugin_samples > 0 || track.path_samples > 0)
+            .map(|track| SettingsTrackLatencyLine {
+                track_id: track.track_id.clone(),
+                plugin_ms: track.plugin_ms,
+                path_ms: track.path_ms,
+                pdc_ms: track.pdc_delay_ms,
+            })
+            .collect();
+        track_lines.sort_by(|a, b| {
+            b.path_ms
+                .partial_cmp(&a.path_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        track_lines.truncate(6);
+
+        Self {
+            engine_open: stats.stream_open,
+            device_state: stats.device_state,
+            buffer_ms: info.buffer_ms,
+            buffer_frames: info.buffer_frames,
+            round_trip_ms: info.buffer_ms * 2.0,
+            max_path_ms: info.max_path_ms,
+            max_path_samples: info.max_path_samples,
+            master_plugin_ms: info.master_ms,
+            pdc_active: info.pdc_enabled,
+            track_lines,
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::default()
     }
 }
 

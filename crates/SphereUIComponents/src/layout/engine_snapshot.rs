@@ -145,6 +145,7 @@ fn build_engine_automation_lanes(track: &TrackState) -> Vec<EngineAutomationLane
 pub(super) fn build_engine_project_snapshot(
     state: &TimelineState,
     sample_rate: u32,
+    project_root: Option<&str>,
 ) -> EngineProjectSnapshot {
     let mut tracks: Vec<EngineTrackSnapshot> = state
         .tracks
@@ -298,7 +299,7 @@ pub(super) fn build_engine_project_snapshot(
 
     EngineProjectSnapshot {
         project_id: "futureboard-native".to_string(),
-        project_root: None,
+        project_root: project_root.map(str::to_string),
         bpm: state.bpm.max(1.0) as f64,
         time_signature: [state.time_signature_num, state.time_signature_den],
         sample_rate: sample_rate.max(1),
@@ -414,7 +415,7 @@ mod tests {
             volume: 1.0,
             pan: 0.0,
             armed: false,
-            input_monitor: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
         });
         let clip = state.build_midi_clip(&track_id, 0.0, 4.0).expect("clip");
         let clip_id = clip.id.clone();
@@ -429,7 +430,7 @@ mod tests {
         let _audible = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).unwrap();
         state.set_midi_notes_muted(&clip_id, &[muted], true);
 
-        let snap = build_engine_project_snapshot(&state, 48_000);
+        let snap = build_engine_project_snapshot(&state, 48_000, None);
         let total: usize = snap.midi_clips.iter().map(|c| c.notes.len()).sum();
         assert_eq!(total, 1, "muted note must not reach the engine snapshot");
     }
@@ -442,7 +443,7 @@ mod tests {
         // Pitch bend resolves to VST3 controller 129.
         state.put_controller_point(&clip_id, MidiControllerKind::PitchBend, 1.0, 0.5);
 
-        let snap = build_engine_project_snapshot(&state, 48_000);
+        let snap = build_engine_project_snapshot(&state, 48_000, None);
         let clip = snap
             .midi_clips
             .iter()
@@ -464,7 +465,7 @@ mod tests {
         state.ensure_controller_lane(&clip_id, MidiControllerKind::CC(7));
         state.put_controller_point(&clip_id, MidiControllerKind::PolyPressure, 0.0, 0.5);
 
-        let snap = build_engine_project_snapshot(&state, 48_000);
+        let snap = build_engine_project_snapshot(&state, 48_000, None);
         let clip = snap.midi_clips.iter().find(|c| c.id == clip_id).unwrap();
         assert!(
             clip.controllers.is_empty(),

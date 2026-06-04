@@ -6,7 +6,7 @@
 //! Each backend creates a `LocalAudioState` per-stream and passes it along
 //! with the shared `SharedState` and the mutable `RuntimeProject`.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::command::EngineCommand;
@@ -31,6 +31,26 @@ fn command_debug_enabled() -> bool {
 fn callback_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_CALLBACK_DEBUG").is_some())
+}
+
+fn transport_freeze_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_TRANSPORT_FREEZE_DEBUG").is_some())
+}
+
+/// Logs the first N audio blocks after `StartTransport` when freeze debug is on.
+static POST_PLAY_CALLBACK_LOGS: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+fn log_post_play_callback(step: &str) {
+    let remaining = POST_PLAY_CALLBACK_LOGS.load(Ordering::Relaxed);
+    if remaining == 0 || !transport_freeze_debug_enabled() {
+        return;
+    }
+    let left = POST_PLAY_CALLBACK_LOGS
+        .fetch_sub(1, Ordering::Relaxed)
+        .saturating_sub(1);
+    eprintln!("[play-debug callback] {step} (remaining={left})");
 }
 
 // ── Per-stream oscillator + local playback state ──────────────────────────────
@@ -200,6 +220,8 @@ pub fn drain_commands(
                 let old = std::mem::replace(runtime, *next_runtime);
                 runtime.sample_rate = output_sample_rate;
                 crate::graveyard::retire(old);
+                let pos = shared.position_samples.load(Ordering::Relaxed);
+                runtime.reset_midi_playback(pos);
             }
             EngineCommand::SetTestTone { enabled, frequency } => {
                 local.osc_on = enabled;
@@ -219,8 +241,13 @@ pub fn drain_commands(
                         runtime.clips.len(),
                     );
                 }
+                if transport_freeze_debug_enabled() {
+                    eprintln!("[play-debug callback] StartTransport command applied");
+                    POST_PLAY_CALLBACK_LOGS.store(5, Ordering::Relaxed);
+                }
                 local.playing_local = true;
                 shared.playing.store(true, Ordering::Relaxed);
+                runtime.reset_midi_playback(pos);
             }
             EngineCommand::StopTransport => {
                 if command_debug_enabled() {
@@ -237,6 +264,7 @@ pub fn drain_commands(
                 }
                 shared.position_samples.store(pos, Ordering::Relaxed);
                 local.reset_metronome_schedule(pos, output_sample_rate);
+                runtime.reset_midi_playback(pos);
             }
             EngineCommand::SetMetronomeEnabled(enabled) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -315,6 +343,9 @@ pub fn fill_output_f32(
     shared: &Arc<SharedState>,
     local: &mut LocalAudioState,
 ) -> u64 {
+    if local.playing_local {
+        log_post_play_callback("block entered");
+    }
     // Sync oscillator from atomics (set from control thread between blocks).
     let tone_on = shared.test_tone_enabled.load(Ordering::Relaxed);
     let tone_freq = f32_load(shared.test_tone_freq.load(Ordering::Relaxed));
@@ -333,6 +364,17 @@ pub fn fill_output_f32(
     let mut sum_sq_r = 0.0f32;
     let mut frames = 0u64;
     runtime.begin_meter_block();
+
+    for track in &mut runtime.tracks {
+        track.midi_block_events.clear();
+    }
+
+    if local.playing_local {
+        let frames_needed = data.len().checked_div(channels).unwrap_or(0) as u64;
+        if frames_needed > 0 {
+            runtime.schedule_midi_block(base_sample, frames_needed);
+        }
+    }
 
     if channels >= 2 && local.playing_local {
         frames = render_project_block_interleaved(runtime, base_sample, master_vol, data, channels);

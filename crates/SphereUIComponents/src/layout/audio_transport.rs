@@ -6,6 +6,7 @@ use crate::components;
 
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
 use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
+use super::transport_freeze_debug::{self, PlayWatchdog};
 use super::StudioLayout;
 
 impl StudioLayout {
@@ -18,14 +19,23 @@ impl StudioLayout {
         // `interpolated_playhead_beat` smooth between engine snapshots.
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| loop {
+            if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                break;
+            }
             executor.timer(Duration::from_millis(16)).await;
+            if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                break;
+            }
             let Ok((changed, mixer_handle)) = this.update(cx, |this, cx| {
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    return (false, None);
+                }
                 let changed = this.poll_native_audio(cx);
                 (changed, this.mixer_window.clone())
             }) else {
                 continue;
             };
-            if changed {
+            if changed && !crate::shutdown::ShutdownState::global().is_shutting_down() {
                 crate::perf::record_notify("transport");
                 let studio_id = this.entity_id();
                 let _ = cx.update(|app| app.notify(studio_id));
@@ -40,6 +50,9 @@ impl StudioLayout {
     }
 
     pub(super) fn poll_native_audio(&mut self, cx: &mut Context<Self>) -> bool {
+        if crate::shutdown::ShutdownState::global().is_shutting_down() {
+            return false;
+        }
         let _s = crate::perf::PerfScope::enter("poll_native_audio");
         if self.audio_engine.is_none() {
             return false;
@@ -237,6 +250,9 @@ impl StudioLayout {
         force: bool,
         reason: &'static str,
     ) {
+        if crate::shutdown::ShutdownState::global().is_shutting_down() {
+            return;
+        }
         let Some(engine) = self.audio_engine.clone() else {
             self.audio_last_error = Some("audio engine unavailable".to_string());
             return;
@@ -275,15 +291,26 @@ impl StudioLayout {
         self.audio_sync_in_flight = true;
         let owner = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { engine.load_project(snapshot) })
-                .await;
+            let join = std::thread::Builder::new()
+                .name("audio-project-load".into())
+                .spawn(move || engine.load_project(snapshot));
+            let result = match join {
+                Ok(handle) => handle.join().unwrap_or_else(|_| {
+                    Err(DAUx::SphereAudioError::NativeError(
+                        "audio project load thread panicked".to_string(),
+                    ))
+                }),
+                Err(error) => Err(DAUx::SphereAudioError::NativeError(format!(
+                    "failed to spawn audio project load thread: {error}"
+                ))),
+            };
             let _ = owner.update(cx, |this, cx| {
                 this.complete_audio_project_sync(cx, result, signature);
             });
-            let studio_id = owner.entity_id();
-            let _ = cx.update(|app| app.notify(studio_id));
+            if !crate::shutdown::ShutdownState::global().is_shutting_down() {
+                let studio_id = owner.entity_id();
+                let _ = cx.update(|app| app.notify(studio_id));
+            }
         })
         .detach();
     }
@@ -379,21 +406,29 @@ impl StudioLayout {
     }
 
     pub(super) fn ensure_audio_stream_warm(&mut self) -> bool {
-        if self
+        transport_freeze_debug::log("ensure_audio_stream_warm enter");
+        let stream_ready = self
             .audio_stats
             .as_ref()
-            .map(|stats| stats.running)
-            .unwrap_or(self.audio_running)
-        {
+            .map(|stats| stats.stream_open && stats.running)
+            .unwrap_or(false)
+            || self.audio_running;
+        if stream_ready {
+            transport_freeze_debug::log("ensure_audio_stream_warm already warm");
             return true;
         }
 
         let Some(engine) = self.audio_engine.as_mut() else {
             self.audio_last_error = Some("audio engine unavailable".to_string());
+            transport_freeze_debug::log("ensure_audio_stream_warm no engine");
             return false;
         };
+        transport_freeze_debug::log("ensure_audio_stream_warm before engine.start");
+        // `AudioEngine::start` resumes an open stream without reopening the
+        // device or rebuilding/decoding the runtime graph on this thread.
         match engine.start() {
             Ok(()) => {
+                transport_freeze_debug::log("ensure_audio_stream_warm after engine.start ok");
                 self.audio_stats = Some(engine.stats());
                 self.audio_running = true;
                 self.audio_last_error = None;
@@ -403,6 +438,7 @@ impl StudioLayout {
                 self.audio_running = false;
                 self.audio_last_error = Some(error.to_string());
                 eprintln!("[audio] stream warm-up failed: {error}");
+                transport_freeze_debug::log("ensure_audio_stream_warm engine.start failed");
                 false
             }
         }
@@ -423,77 +459,172 @@ impl StudioLayout {
     }
 
     pub(super) fn start_native_playback(&mut self, cx: &mut Context<Self>) {
+        transport_freeze_debug::reset_sequence();
+        transport_freeze_debug::log("Play requested");
         eprintln!("[transport] Play requested");
+
         if self.audio_engine.is_none() {
             self.audio_last_error = Some("audio engine unavailable".to_string());
+            transport_freeze_debug::log("abort: no audio engine");
             return;
         }
 
-        if !self.ensure_audio_stream_warm() {
+        let already_playing = self
+            .audio_stats
+            .as_ref()
+            .map(|stats| stats.transport_playing)
+            .unwrap_or(false);
+        if already_playing {
+            transport_freeze_debug::log("abort: already playing (idempotent)");
             return;
         }
 
+        transport_freeze_debug::log("before sync/dirty gates");
         if self.audio_sync_in_flight {
             self.pending_play_after_sync = true;
+            transport_freeze_debug::log("defer: audio_sync_in_flight");
             return;
         }
         if self.engine_project_dirty || self.engine_media_dirty {
             self.pending_play_after_sync = true;
+            transport_freeze_debug::log("defer: schedule_audio_project_sync");
             self.schedule_audio_project_sync(cx, false, "transport_play_pending_sync");
             return;
         }
-        self.sync_transport_controls(cx);
 
-        let (playhead_beats, bpm) = {
+        transport_freeze_debug::log("before ensure_audio_stream_warm");
+        if !self.ensure_audio_stream_warm() {
+            transport_freeze_debug::log("abort: stream warm-up failed");
+            return;
+        }
+
+        transport_freeze_debug::log("after ensure_audio_stream_warm");
+
+        // Read transport state once; do not hold timeline lease across engine I/O.
+        let (
+            playhead_beats,
+            bpm,
+            metronome_enabled,
+            loop_enabled,
+            loop_start_beats,
+            loop_end_beats,
+            ts_num,
+            ts_den,
+        ) = {
+            transport_freeze_debug::log("before timeline.read");
             let timeline = self.timeline.read(cx);
-            (timeline.state.transport.playhead_beats, timeline.state.bpm)
+            transport_freeze_debug::log("after timeline.read");
+            (
+                timeline.state.transport.playhead_beats,
+                timeline.state.bpm,
+                timeline.state.transport.metronome_enabled,
+                timeline.state.transport.loop_enabled,
+                timeline.state.transport.loop_start_beats,
+                timeline.state.transport.loop_end_beats,
+                timeline.state.time_signature_num,
+                timeline.state.time_signature_den,
+            )
         };
-        let seconds = playhead_beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
+
         let Some(engine) = self.audio_engine.as_ref() else {
+            transport_freeze_debug::log("abort: engine handle missing");
             return;
         };
+
+        transport_freeze_debug::log("before engine transport sync");
+        if let Err(error) = engine.set_bpm(bpm as f64) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set BPM failed: {error}");
+            }
+        }
+        if let Err(error) = engine.set_time_signature(ts_num, ts_den) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set time signature failed: {error}");
+            }
+        }
+        if let Err(error) = engine.set_metronome_enabled(metronome_enabled) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set metronome failed: {error}");
+            }
+        }
+        let bpm_secs = bpm.max(1.0) as f64;
+        let loop_start_seconds = loop_start_beats as f64 * 60.0 / bpm_secs;
+        let loop_end_seconds = loop_end_beats as f64 * 60.0 / bpm_secs;
+        if let Err(error) = engine.set_loop(loop_enabled, loop_start_seconds, loop_end_seconds) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set loop failed: {error}");
+            }
+        }
+        transport_freeze_debug::log("after engine transport sync");
+
+        let seconds = playhead_beats.max(0.0) as f64 * 60.0 / bpm_secs;
+        transport_freeze_debug::log("before engine.seek");
         if let Err(error) = engine.seek(seconds) {
             self.audio_last_error = Some(error.to_string());
             eprintln!("[audio] seek before play failed: {error}");
+            transport_freeze_debug::log("abort: seek failed");
             return;
         }
+        transport_freeze_debug::log("after engine.seek");
 
-        // Surface what actually made it into the realtime runtime. Silent
-        // playback almost always shows `loaded_clips=0` or `ready_clips=0`
-        // here — typically a missing/unreadable media path.
-        let debug = engine.debug_snapshot();
-        eprintln!(
-            "[playback] starting: sr={} loaded_clips={} ready_clips={} seek_seconds={:.3} bpm={:.1}",
-            self.current_audio_sample_rate(),
-            debug.loaded_clips,
-            debug.ready_clips,
-            seconds,
-            bpm
-        );
-        if debug.loaded_clips == 0 {
+        if std::env::var_os("FUTUREBOARD_PLAYBACK_DEBUG").is_some() {
+            let debug = engine.debug_snapshot();
             eprintln!(
-                "[playback] WARNING: no clips in realtime runtime — verify that imported clips \
-                 have a non-empty media path"
+                "[playback] starting: sr={} loaded_clips={} ready_clips={} seek_seconds={:.3} bpm={:.1}",
+                self.current_audio_sample_rate(),
+                debug.loaded_clips,
+                debug.ready_clips,
+                seconds,
+                bpm
             );
-        } else if debug.ready_clips == 0 {
-            eprintln!(
-                "[playback] WARNING: clips loaded but none decoded — check earlier \
-                 '[SphereAudio] clip ... decode FAILED' lines"
-            );
+            if debug.loaded_clips == 0 {
+                eprintln!(
+                    "[playback] WARNING: no clips in realtime runtime — verify that imported clips \
+                     have a non-empty media path"
+                );
+            } else if debug.ready_clips == 0 {
+                eprintln!(
+                    "[playback] WARNING: clips loaded but none decoded — check earlier \
+                     '[SphereAudio] clip ... decode FAILED' lines"
+                );
+            }
         }
 
+        transport_freeze_debug::log("before engine.play");
         if let Err(error) = engine.play() {
             self.audio_last_error = Some(error.to_string());
             eprintln!("[audio] play failed: {error}");
+            transport_freeze_debug::log("abort: engine.play failed");
             return;
         }
+        transport_freeze_debug::log("after engine.play");
 
         self.audio_stats = Some(engine.stats());
+        transport_freeze_debug::log("before timeline.update playing=true");
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.playing = true;
             cx.notify();
         });
-        self.poll_native_audio(cx);
+        transport_freeze_debug::log("after timeline.update");
+        transport_freeze_debug::log("returning from start_native_playback");
+
+        if let Some(watchdog) = PlayWatchdog::start() {
+            let owner = cx.entity().clone();
+            cx.spawn(async move |_this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let _ = owner.update(cx, |this, _cx| {
+                    let playing = this
+                        .audio_stats
+                        .as_ref()
+                        .map(|stats| stats.transport_playing)
+                        .unwrap_or(false);
+                    watchdog.check(playing);
+                });
+            })
+            .detach();
+        }
     }
 
     pub(super) fn sync_transport_controls(&mut self, cx: &mut Context<Self>) {

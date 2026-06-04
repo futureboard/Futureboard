@@ -183,6 +183,16 @@ impl AudioEngine {
     /// transport level — use [`AudioEngine::play`] to advance the
     /// timeline once playback work is wired up.
     pub fn start(&mut self) -> Result<(), SphereAudioError> {
+        // Resume an already-open stream — never tear down and reopen here.
+        // Reopening runs `get_initial_runtime` on the caller thread and can
+        // re-decode every clip (UI freeze on Play after a project sync).
+        let st = self.inner.get_status();
+        if st.stream_open && st.running {
+            return Ok(());
+        }
+        if st.stream_open {
+            return self.inner.start();
+        }
         let daux = JsDauxConfig {
             backend_id: self.config.backend.backend_id().to_string(),
             output_device_id: None,
@@ -208,6 +218,11 @@ impl AudioEngine {
         self.inner.stop();
         self.inner.close_device();
         Ok(())
+    }
+
+    /// Ordered shutdown before UI teardown. Idempotent.
+    pub fn shutdown(&mut self) {
+        self.inner.shutdown();
     }
 
     /// Whether the stream is currently active.

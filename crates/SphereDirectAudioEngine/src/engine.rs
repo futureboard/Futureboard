@@ -486,19 +486,34 @@ impl EngineInner {
 
     /// Start audio playback (calls `stream.play()`).
     pub fn start(&self) -> Result<(), SphereAudioError> {
-        // Try DAUx active stream first.
-        if let Some(stream) = self.active_stream.lock().as_ref() {
-            stream.play().map_err(SphereAudioError::StreamStartFailed)?;
+        {
+            let st = self.status.lock();
+            if st.stream_open && st.running {
+                return Ok(());
+            }
+        }
+
+        // Try DAUx active stream first — drop `active_stream` lock before `play()`.
+        let daux_play = {
+            let guard = self.active_stream.lock();
+            guard.as_ref().map(|stream| stream.play())
+        };
+        if let Some(result) = daux_play {
+            result.map_err(SphereAudioError::StreamStartFailed)?;
             self.shared.playing.store(false, Ordering::Relaxed); // transport starts paused
             self.status.lock().running = true;
             return Ok(());
         }
         // Legacy cpal path.
-        let guard = self.stream.lock();
-        let stream = guard.as_ref().ok_or(SphereAudioError::EngineNotOpen)?;
-        stream
-            .play()
-            .map_err(|e| SphereAudioError::StreamStartFailed(e.to_string()))?;
+        let play_result = {
+            let guard = self.stream.lock();
+            guard
+                .as_ref()
+                .ok_or(SphereAudioError::EngineNotOpen)?
+                .play()
+                .map_err(|e| SphereAudioError::StreamStartFailed(e.to_string()))
+        };
+        play_result?;
         self.shared.playing.store(false, Ordering::Relaxed); // transport starts paused
         self.status.lock().running = true;
         Ok(())
@@ -515,9 +530,27 @@ impl EngineInner {
         self.status.lock().running = false;
     }
 
+    /// Explicit shutdown for application exit — do not rely on `Drop` alone.
+    /// Stops transport, pauses the device stream, and releases realtime resources.
+    pub fn shutdown(&self) {
+        self.shared.playing.store(false, Ordering::Relaxed);
+        let _ = self.send_command(EngineCommand::StopTransport);
+        self.stop();
+        self.close_device_inner();
+    }
+
     // ── Transport ──────────────────────────────────────────────────────────
 
     pub fn play(&self) -> Result<(), SphereAudioError> {
+        if self.shared.playing.load(Ordering::Relaxed) {
+            if transport_freeze_debug_enabled() {
+                eprintln!("[play-debug engine] play() skipped — transport already playing");
+            }
+            return Ok(());
+        }
+        if transport_freeze_debug_enabled() {
+            eprintln!("[play-debug engine] play() queuing StartTransport");
+        }
         self.send_command(EngineCommand::StartTransport)
     }
 
@@ -1564,6 +1597,18 @@ impl EngineInner {
         let sr = sample_rate_override
             .unwrap_or_else(|| self.shared.sample_rate.load(Ordering::Relaxed).max(44100));
 
+        // Prefer the live runtime built by `load_project`. Rebuilding from the
+        // snapshot here re-decodes media on the caller thread and has frozen
+        // the native UI when Play re-opened the device after a sync.
+        {
+            let cached = self.runtime.lock().clone();
+            if !cached.tracks.is_empty() {
+                let mut runtime = cached;
+                runtime.sample_rate = sr;
+                return runtime;
+            }
+        }
+
         self.project
             .lock()
             .as_ref()
@@ -1600,23 +1645,46 @@ impl EngineInner {
         eprintln!("[DAUx] Stream committed: backend={backend_name} sr={sr} buf={bs}");
     }
 
-    fn send_command(&self, cmd: EngineCommand) -> Result<(), SphereAudioError> {
-        // Prefer active_stream (DAUx path); fall back to legacy cmd_tx.
+    fn cmd_sender(&self) -> Option<Sender<EngineCommand>> {
         if let Some(stream) = self.active_stream.lock().as_ref() {
             if let Some(tx) = stream.cmd_tx() {
-                return tx
-                    .try_send(cmd)
-                    .map_err(|e| SphereAudioError::NativeError(e.to_string()));
+                return Some(tx.clone());
             }
         }
-        let guard = self.cmd_tx.lock();
-        match guard.as_ref() {
-            Some(tx) => tx
-                .try_send(cmd)
-                .map_err(|e| SphereAudioError::NativeError(e.to_string())),
-            None => Err(SphereAudioError::EngineNotOpen),
-        }
+        self.cmd_tx.lock().as_ref().cloned()
     }
+
+    fn send_command(&self, cmd: EngineCommand) -> Result<(), SphereAudioError> {
+        if transport_freeze_debug_enabled() {
+            let label = match &cmd {
+                EngineCommand::LoadProject(_) => "LoadProject",
+                EngineCommand::SetTestTone { .. } => "SetTestTone",
+                EngineCommand::SetMasterVolume { .. } => "SetMasterVolume",
+                EngineCommand::SetTrackVolume { .. } => "SetTrackVolume",
+                EngineCommand::SetTrackPan { .. } => "SetTrackPan",
+                EngineCommand::SetTrackMute { .. } => "SetTrackMute",
+                EngineCommand::SetTrackSolo { .. } => "SetTrackSolo",
+                EngineCommand::SetTrackPreviewMode { .. } => "SetTrackPreviewMode",
+                EngineCommand::SetInsertParam { .. } => "SetInsertParam",
+                EngineCommand::StartTransport => "StartTransport",
+                EngineCommand::StopTransport => "StopTransport",
+                EngineCommand::Seek { .. } => "Seek",
+                EngineCommand::SetMetronomeEnabled(_) => "SetMetronomeEnabled",
+                EngineCommand::SetBpm(_) => "SetBpm",
+                EngineCommand::SetTimeSignature(_, _) => "SetTimeSignature",
+                EngineCommand::SetLoop { .. } => "SetLoop",
+            };
+            eprintln!("[play-debug engine] send_command {label}");
+        }
+        let tx = self.cmd_sender().ok_or(SphereAudioError::EngineNotOpen)?;
+        tx.try_send(cmd)
+            .map_err(|e| SphereAudioError::NativeError(e.to_string()))
+    }
+}
+
+fn transport_freeze_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_TRANSPORT_FREEZE_DEBUG").is_some())
 }
 
 // ── Audio callback builder ────────────────────────────────────────────────────

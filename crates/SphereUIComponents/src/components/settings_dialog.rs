@@ -990,6 +990,44 @@ fn midi_devices_section(
         .child(body)
 }
 
+/// Read-only Input/Output Channels card for Preferences > Audio (roadmap Phase C):
+/// the selected device plus the concrete channel routes derived from its channel
+/// count (shared `audio_routing` builder). Reactive — reads the current schema
+/// device each render.
+fn audio_channel_section(
+    title: &str,
+    device_name: &str,
+    options: &[crate::audio_routing::AudioRouteOption],
+) -> gpui::AnyElement {
+    let card = settings_section_card().child(settings_section_title(title.to_string()));
+    if device_name.trim().is_empty() {
+        return card
+            .child(settings_section_hint("No device selected."))
+            .into_any_element();
+    }
+    let card = card.child(settings_daw_row(
+        "Device",
+        settings_value_readout(device_name.to_string()),
+    ));
+    let card = if options.is_empty() {
+        card.child(settings_section_hint(
+            "No channels reported by this device.",
+        ))
+    } else {
+        let summary = options
+            .iter()
+            .map(|o| o.label.clone())
+            .collect::<Vec<_>>()
+            .join("  ·  ");
+        card.child(settings_daw_row(
+            "Channels",
+            settings_value_readout(summary),
+        ))
+    };
+    card.into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_settings_content(
     state: &SettingsDialogState,
     schema: &SettingsSchema,
@@ -998,6 +1036,8 @@ fn build_settings_content(
     _available_inputs: &[String],
     _available_outputs: &[String],
     _available_backends: &[String],
+    available_input_channels: &[(String, u32)],
+    available_output_channels: &[(String, u32)],
 ) -> (Vec<gpui::AnyElement>, Vec<gpui::AnyElement>) {
     let i18n = I18n::new(&schema.general.language);
     let query = state.search_query.trim().to_lowercase();
@@ -1392,6 +1432,28 @@ fn build_settings_content(
                 ))
                 .into_any_element(),
         );
+
+        // Input / Output channel routes for the currently selected devices.
+        let in_count = available_input_channels
+            .iter()
+            .find(|(name, _)| *name == schema.hardware.audio.device_in)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        sections.push(audio_channel_section(
+            "Input Channels",
+            &schema.hardware.audio.device_in,
+            &crate::audio_routing::build_input_channel_options(in_count),
+        ));
+        let out_count = available_output_channels
+            .iter()
+            .find(|(name, _)| *name == schema.hardware.audio.device_out)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        sections.push(audio_channel_section(
+            "Output Channels",
+            &schema.hardware.audio.device_out,
+            &crate::audio_routing::build_output_channel_options(out_count),
+        ));
 
         sections.push(
             settings_section_card()
@@ -2517,6 +2579,10 @@ pub fn settings_dialog(
         available_inputs,
         available_outputs,
         available_backends,
+        // Channel lists are only populated for the live SettingsWindow path;
+        // this legacy embedded dialog has no device-channel source.
+        &[],
+        &[],
     );
 
     // Overlay shell
@@ -3015,6 +3081,11 @@ pub struct SettingsWindow {
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     available_backends: Vec<String>,
+    /// `(device name, input channel count)` for every enumerated input device —
+    /// drives the read-only Input Channels list (roadmap Phase C).
+    available_input_channels: Vec<(String, u32)>,
+    /// `(device name, output channel count)` for every enumerated output device.
+    available_output_channels: Vec<(String, u32)>,
     latency_provider: AudioLatencySnapshotProvider,
     open_hardware_combo: Option<HardwareCombo>,
     hardware_combo_anchor: Option<OverlayAnchor>,
@@ -3024,11 +3095,14 @@ pub struct SettingsWindow {
 }
 
 impl SettingsWindow {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         settings: Entity<SettingsModel>,
         available_inputs: Vec<String>,
         available_outputs: Vec<String>,
         available_backends: Vec<String>,
+        available_input_channels: Vec<(String, u32)>,
+        available_output_channels: Vec<(String, u32)>,
         latency_provider: AudioLatencySnapshotProvider,
         on_update: OnSettingUpdate,
         cx: &mut Context<Self>,
@@ -3042,6 +3116,8 @@ impl SettingsWindow {
             available_inputs,
             available_outputs,
             available_backends,
+            available_input_channels,
+            available_output_channels,
             latency_provider,
             open_hardware_combo: None,
             hardware_combo_anchor: None,
@@ -3176,6 +3252,8 @@ impl Render for SettingsWindow {
             &self.available_inputs,
             &self.available_outputs,
             &self.available_backends,
+            &self.available_input_channels,
+            &self.available_output_channels,
         );
 
         let sw_target = target.clone();
@@ -3331,12 +3409,15 @@ impl Render for SettingsWindow {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn open_settings_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     settings: Entity<SettingsModel>,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     available_backends: Vec<String>,
+    available_input_channels: Vec<(String, u32)>,
+    available_output_channels: Vec<(String, u32)>,
     latency_provider: AudioLatencySnapshotProvider,
     on_update: OnSettingUpdate,
     cx: &mut App,
@@ -3363,6 +3444,8 @@ pub fn open_settings_window(
                 available_inputs,
                 available_outputs,
                 available_backends,
+                available_input_channels,
+                available_output_channels,
                 latency_provider,
                 on_update,
                 cx,

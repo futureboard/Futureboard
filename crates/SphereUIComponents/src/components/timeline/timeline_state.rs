@@ -623,8 +623,17 @@ impl SendSlotState {
 pub enum TrackInputRouting {
     None,
     AllInputs,
-    AudioDeviceChannel { device_id: String, channel: u32 },
-    MidiDevice { device_id: String },
+    AudioDeviceChannel {
+        device_id: String,
+        channel: u32,
+    },
+    AudioDeviceChannels {
+        device_id: String,
+        channels: Vec<u32>,
+    },
+    MidiDevice {
+        device_id: String,
+    },
 }
 
 impl TrackInputRouting {
@@ -634,6 +643,17 @@ impl TrackInputRouting {
             Self::AllInputs => "All Inputs".to_string(),
             Self::AudioDeviceChannel { device_id, channel } => {
                 format!("{device_id} ch {}", channel + 1)
+            }
+            Self::AudioDeviceChannels {
+                device_id,
+                channels,
+            } => {
+                let labels = channels
+                    .iter()
+                    .map(|channel| (channel + 1).to_string())
+                    .collect::<Vec<_>>()
+                    .join("+");
+                format!("{device_id} ch {labels}")
             }
             Self::MidiDevice { device_id } => device_id.clone(),
         }
@@ -809,9 +829,7 @@ impl TrackState {
     /// actually carries points — i.e. automation can resolve a value.
     pub fn has_active_volume_automation(&self) -> bool {
         self.automation_lanes.iter().any(|l| {
-            l.enabled
-                && matches!(l.target, AutomationTarget::TrackVolume)
-                && !l.points.is_empty()
+            l.enabled && matches!(l.target, AutomationTarget::TrackVolume) && !l.points.is_empty()
         })
     }
 
@@ -2846,22 +2864,28 @@ impl TimelineState {
         false
     }
 
-    pub fn toggle_track_mute(&mut self, track_id: &str) {
+    pub fn toggle_track_mute(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.muted = !t.muted;
+            return true;
         }
+        false
     }
 
-    pub fn toggle_track_solo(&mut self, track_id: &str) {
+    pub fn toggle_track_solo(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.solo = !t.solo;
+            return true;
         }
+        false
     }
 
-    pub fn toggle_track_arm(&mut self, track_id: &str) {
+    pub fn toggle_track_arm(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.armed = !t.armed;
+            return true;
         }
+        false
     }
 
     /// Append an empty insert slot to a track and return the slot id.
@@ -3090,10 +3114,12 @@ impl TimelineState {
         Some(send.enabled)
     }
 
-    pub fn cycle_track_input_monitor(&mut self, track_id: &str) {
+    pub fn cycle_track_input_monitor(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.input_monitor = t.input_monitor.cycle();
+            return true;
         }
+        false
     }
 
     pub fn select_track(&mut self, track_id: &str) {

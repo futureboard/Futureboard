@@ -10,11 +10,12 @@ use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 
 pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
-/// On-disk format version. v5 adds MIDI controller (CC) lanes per MIDI clip.
+/// On-disk format version. v6 adds multi-channel audio input routing.
+/// v5 adds MIDI controller (CC) lanes per MIDI clip.
 /// v4 adds a per-MIDI-note muted flag. v3 adds persisted track routing fields.
 /// Older files still load: v1/v2 use stable per-track routing defaults,
 /// v1/v2/v3 notes default to unmuted, and pre-v5 MIDI clips have no CC lanes.
-pub const PROJECT_VERSION: u32 = 5;
+pub const PROJECT_VERSION: u32 = 6;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -438,6 +439,17 @@ fn encode_track_input_routing(w: &mut FbWriter, input: &ProjectTrackInputRouting
             w.write_str(device_id);
             w.write_u32(*channel);
         }
+        ProjectTrackInputRouting::AudioDeviceChannels {
+            device_id,
+            channels,
+        } => {
+            w.write_u8(4);
+            w.write_str(device_id);
+            w.write_u32(channels.len() as u32);
+            for channel in channels {
+                w.write_u32(*channel);
+            }
+        }
         ProjectTrackInputRouting::MidiDevice { device_id } => {
             w.write_u8(3);
             w.write_str(device_id);
@@ -832,6 +844,22 @@ fn decode_track_input_routing(r: &mut FbReader) -> Result<ProjectTrackInputRouti
         3 => ProjectTrackInputRouting::MidiDevice {
             device_id: r.read_str()?,
         },
+        4 => {
+            let device_id = r.read_str()?;
+            let count = r.read_u32()? as usize;
+            if count == 0 {
+                ProjectTrackInputRouting::None
+            } else {
+                let mut channels = Vec::with_capacity(count);
+                for _ in 0..count {
+                    channels.push(r.read_u32()?);
+                }
+                ProjectTrackInputRouting::AudioDeviceChannels {
+                    device_id,
+                    channels,
+                }
+            }
+        }
         t => {
             return Err(ProjectError::Corrupted(format!(
                 "unknown track input routing {t}"
@@ -1166,6 +1194,20 @@ mod tests {
         assert_eq!(got.points[1].value, 1.0);
         assert_eq!(got.height, 72.0);
         assert!(got.visible);
+    }
+
+    #[test]
+    fn multi_channel_audio_input_routing_roundtrips_v6() {
+        let routing = ProjectTrackInputRouting::AudioDeviceChannels {
+            device_id: "Interface 8i6".to_string(),
+            channels: vec![2, 3],
+        };
+        let mut w = FbWriter::new();
+        encode_track_input_routing(&mut w, &routing);
+        let bytes = w.into_bytes();
+
+        let mut r = FbReader::new(&bytes);
+        assert_eq!(decode_track_input_routing(&mut r).unwrap(), routing);
     }
 
     #[test]

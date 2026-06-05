@@ -501,37 +501,94 @@ fn audio_format_options() -> Vec<String> {
     ]
 }
 
-fn audio_input_options() -> Vec<String> {
-    // TODO(device-enumeration): populate real audio input device/channel options
-    // once DAUx device discovery is available in TimelineState.
-    vec!["None".to_string()]
+/// Build the Inspector audio-input options as `(label, routing)` pairs from the
+/// selected input device's channel count. Mono routes map to
+/// `AudioDeviceChannel`; stereo pairs and multi-channel routes map to
+/// `AudioDeviceChannels`.
+fn build_input_routing_options(
+    track: &TrackState,
+    device: Option<&(String, u32)>,
+) -> Vec<(String, TrackInputRouting)> {
+    let mut out = vec![("None".to_string(), TrackInputRouting::None)];
+    if let Some((name, count)) = device {
+        for opt in crate::audio_routing::build_input_channel_options(*count) {
+            let compatible = match track.routing.audio_format {
+                TrackAudioFormat::Mono => opt.channels.len() == 1,
+                TrackAudioFormat::Stereo => opt.channels.len() == 2,
+            };
+            if !compatible {
+                continue;
+            }
+            let routing = match opt.channels.as_slice() {
+                [ch] => TrackInputRouting::AudioDeviceChannel {
+                    device_id: name.clone(),
+                    channel: *ch,
+                },
+                channels if !channels.is_empty() => TrackInputRouting::AudioDeviceChannels {
+                    device_id: name.clone(),
+                    channels: channels.to_vec(),
+                },
+                _ => continue,
+            };
+            out.push((format!("{name} - {}", opt.label), routing));
+        }
+    }
+    if !out.iter().any(|(_, r)| *r == track.routing.input) {
+        out.push((
+            format!("Missing - {}", track.routing.input.label()),
+            track.routing.input.clone(),
+        ));
+    }
+    out
 }
 
-fn audio_output_options() -> Vec<String> {
-    // TODO(device-enumeration): add real hardware outputs and bus targets when
-    // the routing/device registry is exposed to the Inspector.
-    vec!["Main".to_string(), "None".to_string()]
+fn build_audio_output_options(
+    track: &TrackState,
+    bus_targets: &[(String, String)],
+    output_device: Option<&(String, u32)>,
+) -> Vec<(String, TrackOutputRouting)> {
+    let mut out = vec![
+        ("Main".to_string(), TrackOutputRouting::Main),
+        ("None".to_string(), TrackOutputRouting::None),
+    ];
+    for (bus_id, name) in bus_targets {
+        if *bus_id == track.id {
+            continue;
+        }
+        out.push((
+            format!("Bus - {name}"),
+            TrackOutputRouting::Bus {
+                bus_id: bus_id.clone(),
+            },
+        ));
+    }
+    if let Some((device_name, count)) = output_device {
+        for opt in crate::audio_routing::build_output_channel_options(*count) {
+            let [channel] = opt.channels.as_slice() else {
+                continue;
+            };
+            out.push((
+                format!("Hardware - {device_name} - {}", opt.label),
+                TrackOutputRouting::HardwareOutput {
+                    device_id: device_name.clone(),
+                    channel: *channel,
+                },
+            ));
+        }
+    }
+    if !out.iter().any(|(_, r)| *r == track.routing.output) {
+        out.push((
+            format!("Missing - {}", track.routing.output.label()),
+            track.routing.output.clone(),
+        ));
+    }
+    out
 }
 
 fn parse_audio_format_option(label: &str) -> TrackAudioFormat {
     match label {
         "Mono" => TrackAudioFormat::Mono,
         _ => TrackAudioFormat::Stereo,
-    }
-}
-
-fn parse_audio_input_option(label: &str) -> TrackInputRouting {
-    match label {
-        "None" => TrackInputRouting::None,
-        _ => TrackInputRouting::None,
-    }
-}
-
-fn parse_audio_output_option(label: &str) -> TrackOutputRouting {
-    match label {
-        "Main" => TrackOutputRouting::Main,
-        "None" => TrackOutputRouting::None,
-        _ => TrackOutputRouting::None,
     }
 }
 
@@ -667,6 +724,12 @@ pub fn inspector_routing_combo_overlay(
     window: &Window,
     callbacks: &InspectorCallbacks,
     on_close: CloseRoutingComboCb,
+    // Selected input device `(name, channel_count)` for the audio-input combo.
+    audio_input_device: Option<(String, u32)>,
+    // Available Bus/Return output targets as `(track_id, display_name)`.
+    audio_output_buses: Vec<(String, String)>,
+    // Selected output device `(name, channel_count)` for hardware output routes.
+    audio_output_device: Option<(String, u32)>,
 ) -> impl IntoElement {
     let position =
         inspector_combo_menu_position(anchor, INSPECTOR_WIDTH, ROUTING_COMBO_MENU_HEIGHT, window);
@@ -695,17 +758,26 @@ pub fn inspector_routing_combo_overlay(
             .into_any_element()
         }
         InspectorRoutingCombo::AudioInput => {
-            let selected = track.routing.input.label();
-            let options = audio_input_options();
+            let routing_options = build_input_routing_options(track, audio_input_device.as_ref());
+            let selected = routing_options
+                .iter()
+                .find(|(_, r)| *r == track.routing.input)
+                .map(|(l, _)| l.clone())
+                .unwrap_or_else(|| track.routing.input.label());
+            let labels: Vec<String> = routing_options.iter().map(|(l, _)| l.clone()).collect();
             let cb = callbacks.on_set_input_routing.clone();
             let close = on_close.clone();
             combo_box_string_menu(
                 "inspector-audio-input-menu",
                 position,
                 &selected,
-                &options,
+                &labels,
                 Arc::new(move |value, window, cx| {
-                    let routing = parse_audio_input_option(&value);
+                    let routing = routing_options
+                        .iter()
+                        .find(|(l, _)| *l == value)
+                        .map(|(_, r)| r.clone())
+                        .unwrap_or(TrackInputRouting::None);
                     cb(&(track_id.clone(), routing), window, cx);
                     close(cx);
                 }),
@@ -713,17 +785,30 @@ pub fn inspector_routing_combo_overlay(
             .into_any_element()
         }
         InspectorRoutingCombo::AudioOutput => {
-            let selected = track.routing.output.label();
-            let options = audio_output_options();
+            let routing_options = build_audio_output_options(
+                track,
+                &audio_output_buses,
+                audio_output_device.as_ref(),
+            );
+            let selected = routing_options
+                .iter()
+                .find(|(_, r)| *r == track.routing.output)
+                .map(|(l, _)| l.clone())
+                .unwrap_or_else(|| track.routing.output.label());
+            let labels: Vec<String> = routing_options.iter().map(|(l, _)| l.clone()).collect();
             let cb = callbacks.on_set_output_routing.clone();
             let close = on_close.clone();
             combo_box_string_menu(
                 "inspector-audio-output-menu",
                 position,
                 &selected,
-                &options,
+                &labels,
                 Arc::new(move |value, window, cx| {
-                    let output = parse_audio_output_option(&value);
+                    let output = routing_options
+                        .iter()
+                        .find(|(l, _)| *l == value)
+                        .map(|(_, r)| r.clone())
+                        .unwrap_or(TrackOutputRouting::None);
                     cb(&(track_id.clone(), output), window, cx);
                     close(cx);
                 }),
@@ -1186,10 +1271,9 @@ fn track_inspector(
                 })
                 .cursor(gpui::CursorStyle::PointingHand)
                 .child("A")
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    move |_ev, w, cx| read_cb(&tid_a, w, cx),
-                )
+                .on_mouse_down(gpui::MouseButton::Left, move |_ev, w, cx| {
+                    read_cb(&tid_a, w, cx)
+                })
         });
         div()
             .flex()

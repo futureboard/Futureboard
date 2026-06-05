@@ -666,13 +666,13 @@ impl StudioLayout {
         Arc::new(move |id: &String, _w, cx: &mut App| {
             let id = id.clone();
             let mut value = false;
-            timeline.update(cx, |t, cx| {
-                match kind {
+            let changed = timeline.update(cx, |t, cx| {
+                let changed = match kind {
                     TrackToggle::Mute => t.state.toggle_track_mute(&id),
                     TrackToggle::Solo => t.state.toggle_track_solo(&id),
                     TrackToggle::Arm => t.state.toggle_track_arm(&id),
                     TrackToggle::Input => t.state.cycle_track_input_monitor(&id),
-                }
+                };
                 value = t
                     .state
                     .find_track(&id)
@@ -683,8 +683,14 @@ impl StudioLayout {
                         TrackToggle::Input => track.input_monitor.is_active(track.armed),
                     })
                     .unwrap_or(false);
-                cx.notify();
+                if changed {
+                    cx.notify();
+                }
+                changed
             });
+            if !changed {
+                return;
+            }
             inspector_debug(&format!(
                 "edit track {} track={id} new={value}",
                 kind.label()

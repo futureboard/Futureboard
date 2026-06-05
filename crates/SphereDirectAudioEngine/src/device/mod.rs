@@ -1,6 +1,23 @@
 use crate::types::JsAudioDeviceInfo;
 use cpal::traits::{DeviceTrait, HostTrait};
 
+/// `FUTUREBOARD_AUDIO_DEVICE_DEBUG=1` traces enumerated devices + channel counts.
+fn device_debug_enabled() -> bool {
+    std::env::var_os("FUTUREBOARD_AUDIO_DEVICE_DEBUG").is_some()
+}
+
+fn log_devices(direction: &str, devices: &[JsAudioDeviceInfo]) {
+    if !device_debug_enabled() {
+        return;
+    }
+    for d in devices {
+        eprintln!(
+            "[audio-device] {direction} name={:?} channels={} default_sr={} default={} backend={}",
+            d.name, d.channels, d.default_sample_rate, d.is_default, d.backend
+        );
+    }
+}
+
 /// Enumerate all available output devices on the default host.
 /// Never panics — returns empty vec on any cpal error.
 pub fn list_output_devices() -> Vec<JsAudioDeviceInfo> {
@@ -13,21 +30,25 @@ pub fn list_output_devices() -> Vec<JsAudioDeviceInfo> {
             eprintln!("[SphereAudio] list_output_devices error: {e}");
             vec![]
         }
-        Ok(devices) => devices
-            .filter_map(|dev| {
-                let name = dev.name().ok()?;
-                let cfg = dev.default_output_config().ok()?;
-                Some(JsAudioDeviceInfo {
-                    id: name.clone(),
-                    name: name.clone(),
-                    kind: "output".into(),
-                    channels: cfg.channels() as u32,
-                    default_sample_rate: cfg.sample_rate().0,
-                    is_default: Some(&name) == default_name.as_ref(),
-                    backend: backend.clone(),
+        Ok(devices) => {
+            let list: Vec<JsAudioDeviceInfo> = devices
+                .filter_map(|dev| {
+                    let name = dev.name().ok()?;
+                    let cfg = dev.default_output_config().ok()?;
+                    Some(JsAudioDeviceInfo {
+                        id: name.clone(),
+                        name: name.clone(),
+                        kind: "output".into(),
+                        channels: cfg.channels() as u32,
+                        default_sample_rate: cfg.sample_rate().0,
+                        is_default: Some(&name) == default_name.as_ref(),
+                        backend: backend.clone(),
+                    })
                 })
-            })
-            .collect(),
+                .collect();
+            log_devices("output", &list);
+            list
+        }
     }
 }
 
@@ -42,21 +63,25 @@ pub fn list_input_devices() -> Vec<JsAudioDeviceInfo> {
             eprintln!("[SphereAudio] list_input_devices error: {e}");
             vec![]
         }
-        Ok(devices) => devices
-            .filter_map(|dev| {
-                let name = dev.name().ok()?;
-                let cfg = dev.default_input_config().ok()?;
-                Some(JsAudioDeviceInfo {
-                    id: name.clone(),
-                    name: name.clone(),
-                    kind: "input".into(),
-                    channels: cfg.channels() as u32,
-                    default_sample_rate: cfg.sample_rate().0,
-                    is_default: Some(&name) == default_name.as_ref(),
-                    backend: backend.clone(),
+        Ok(devices) => {
+            let list: Vec<JsAudioDeviceInfo> = devices
+                .filter_map(|dev| {
+                    let name = dev.name().ok()?;
+                    let cfg = dev.default_input_config().ok()?;
+                    Some(JsAudioDeviceInfo {
+                        id: name.clone(),
+                        name: name.clone(),
+                        kind: "input".into(),
+                        channels: cfg.channels() as u32,
+                        default_sample_rate: cfg.sample_rate().0,
+                        is_default: Some(&name) == default_name.as_ref(),
+                        backend: backend.clone(),
+                    })
                 })
-            })
-            .collect(),
+                .collect();
+            log_devices("input", &list);
+            list
+        }
     }
 }
 

@@ -167,7 +167,7 @@ impl StudioLayout {
         let on_loop_toggle = make_command_handler("transport:toggle-loop");
         let on_metronome_toggle = make_command_handler("transport:toggle-metronome");
         let on_follow_toggle = make_command_handler("transport:toggle-follow-playhead");
-        let _on_record = make_command_handler("transport:record");
+        let on_record = make_command_handler("transport:record");
 
         let on_set_bpm: components::BpmChangeCb = {
             let this = cx.entity().clone();
@@ -206,6 +206,7 @@ impl StudioLayout {
             on_return_to_start,
             on_play_toggle,
             on_stop,
+            on_record,
             on_loop_toggle,
             on_metronome_toggle,
             on_follow_toggle,

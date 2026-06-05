@@ -96,6 +96,33 @@ impl Render for StudioLayout {
         let mixer_callbacks = self.build_mixer_callbacks(cx.entity().clone());
         let inspector_callbacks = self.build_inspector_callbacks(cx.entity().clone());
 
+        // Enumerate the selected input device's channels only while the audio-input
+        // combo is open (avoids per-frame device enumeration).
+        let audio_input_device = if self.open_inspector_routing_combo
+            == Some(crate::components::panel::InspectorRoutingCombo::AudioInput)
+        {
+            self.selected_input_device_channels(cx)
+        } else {
+            None
+        };
+        let audio_output_buses: Vec<(String, String)> = if self.open_inspector_routing_combo
+            == Some(crate::components::panel::InspectorRoutingCombo::AudioOutput)
+        {
+            tracks
+                .iter()
+                .filter(|track| track.track_type.is_routing())
+                .map(|track| (track.id.clone(), track.name.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let audio_output_device = if self.open_inspector_routing_combo
+            == Some(crate::components::panel::InspectorRoutingCombo::AudioOutput)
+        {
+            self.selected_output_device_channels(cx)
+        } else {
+            None
+        };
         let inspector_routing_combo_overlay: Option<gpui::AnyElement> =
             if let (Some(combo), Some(anchor)) = (
                 self.open_inspector_routing_combo,
@@ -120,6 +147,9 @@ impl Render for StudioLayout {
                             window,
                             &inspector_callbacks,
                             close,
+                            audio_input_device.clone(),
+                            audio_output_buses.clone(),
+                            audio_output_device.clone(),
                         )
                         .into_any_element()
                     })

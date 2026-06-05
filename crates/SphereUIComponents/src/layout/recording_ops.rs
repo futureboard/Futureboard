@@ -2,7 +2,9 @@ use gpui::Context;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::components::timeline::timeline_state::{TrackAudioFormat, TrackType};
+use crate::components::timeline::timeline_state::{
+    TrackAudioFormat, TrackInputRouting, TrackState, TrackType,
+};
 
 use super::StudioLayout;
 use DAUx::types::{JsRecordingTrackConfig, JsStartRecordingConfig};
@@ -19,7 +21,7 @@ impl StudioLayout {
 
     pub(super) fn start_native_recording(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.audio_engine.as_ref() else {
-            self.audio_last_error = Some("audio engine unavailable".to_string());
+            self.fail_recording_start("audio engine unavailable", cx);
             return;
         };
 
@@ -33,6 +35,17 @@ impl StudioLayout {
             }
         };
 
+        let input_devices: Vec<RecordingInputDevice> = engine
+            .list_input_devices()
+            .into_iter()
+            .map(|d| RecordingInputDevice {
+                id: d.id,
+                name: d.name,
+                channels: d.channels,
+                is_default: d.is_default,
+            })
+            .collect();
+
         let (bpm, start_beat, sample_rate, input_device_name, monitor_mix) = {
             let timeline = self.timeline.read(cx);
             let settings = self.settings.read(cx);
@@ -43,7 +56,7 @@ impl StudioLayout {
                 .filter(|t| t.armed && t.track_type == TrackType::Audio)
                 .count();
             if armed_count == 0 {
-                eprintln!("[recording] no armed audio tracks");
+                self.fail_recording_start("no armed audio tracks", cx);
                 return;
             }
             let monitor_mix = timeline
@@ -61,22 +74,58 @@ impl StudioLayout {
             )
         };
 
-        let tracks: Vec<JsRecordingTrackConfig> = {
+        let selected_input_device =
+            select_recording_input_device(&input_devices, &input_device_name);
+
+        let (tracks, explicit_device_id): (Vec<JsRecordingTrackConfig>, Option<String>) = {
             let timeline = self.timeline.read(cx);
-            timeline
+            let mut explicit_device_id: Option<String> = None;
+            let mut configs = Vec::new();
+            for track in timeline
                 .state
                 .tracks
                 .iter()
                 .filter(|t| t.armed && t.track_type == TrackType::Audio)
-                .map(|t| JsRecordingTrackConfig {
-                    track_id: t.id.clone(),
-                    input_channels: recording_input_channels(t),
-                    name: t.name.clone(),
-                })
-                .collect()
+            {
+                let route = match recording_input_channels_checked(
+                    track,
+                    &input_devices,
+                    selected_input_device,
+                ) {
+                    Ok(route) => route,
+                    Err(error) => {
+                        self.fail_recording_start(&error, cx);
+                        return;
+                    }
+                };
+                if let Some(device_id) = route.device_id.clone() {
+                    match explicit_device_id.as_ref() {
+                        Some(existing) if existing != &device_id => {
+                            self.fail_recording_start(
+                                "armed tracks use different input devices; record one input device at a time",
+                                cx,
+                            );
+                            return;
+                        }
+                        None => explicit_device_id = Some(device_id),
+                        _ => {}
+                    }
+                }
+                configs.push(JsRecordingTrackConfig {
+                    track_id: track.id.clone(),
+                    input_channels: route.channels,
+                    name: track.name.clone(),
+                });
+            }
+            (configs, explicit_device_id)
         };
 
-        let input_device_id = resolve_input_device_id(engine, &input_device_name);
+        let input_device_id = explicit_device_id.or_else(|| {
+            selected_input_device
+                .as_ref()
+                .map(|device| device.id.clone())
+                .or_else(|| resolve_input_device_id(engine, &input_device_name))
+        });
         let session_id = format!(
             "rec-{}",
             SystemTime::now()
@@ -201,19 +250,186 @@ impl StudioLayout {
             );
         }
     }
+
+    fn fail_recording_start(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.audio_last_error = Some(message.to_string());
+        eprintln!("[recording] start blocked: {message}");
+        cx.notify();
+    }
 }
 
-fn recording_input_channels(
-    track: &crate::components::timeline::timeline_state::TrackState,
-) -> Vec<u32> {
-    use crate::components::timeline::timeline_state::TrackInputRouting;
-    match &track.routing.input {
-        TrackInputRouting::AudioDeviceChannel { channel, .. } => vec![*channel],
-        _ => match track.routing.audio_format {
-            TrackAudioFormat::Mono => vec![0],
-            TrackAudioFormat::Stereo => vec![0, 1],
-        },
+impl StudioLayout {
+    /// `(device name, input channel count)` for the currently selected global
+    /// input device — used to populate the Inspector input-channel selector
+    /// (roadmap Phase E). Falls back to the default input device, then the first
+    /// enumerated input. `None` when the engine is unavailable or no inputs exist.
+    pub(super) fn selected_input_device_channels(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<(String, u32)> {
+        let engine = self.audio_engine.as_ref()?;
+        let wanted = self
+            .settings
+            .read(cx)
+            .current
+            .hardware
+            .audio
+            .device_in
+            .clone();
+        let devices = engine.list_input_devices();
+        if !wanted.trim().is_empty() {
+            if let Some(d) = devices.iter().find(|d| d.name == wanted || d.id == wanted) {
+                return Some((d.name.clone(), d.channels));
+            }
+        }
+        devices
+            .iter()
+            .find(|d| d.is_default)
+            .or_else(|| devices.first())
+            .map(|d| (d.name.clone(), d.channels))
     }
+
+    /// `(device name, output channel count)` for the currently selected global
+    /// output device, used to populate hardware output routes in the Inspector.
+    pub(super) fn selected_output_device_channels(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<(String, u32)> {
+        let engine = self.audio_engine.as_ref()?;
+        let wanted = self
+            .settings
+            .read(cx)
+            .current
+            .hardware
+            .audio
+            .device_out
+            .clone();
+        let devices = engine.list_output_devices();
+        if !wanted.trim().is_empty() {
+            if let Some(d) = devices.iter().find(|d| d.name == wanted || d.id == wanted) {
+                return Some((d.name.clone(), d.channels));
+            }
+        }
+        devices
+            .iter()
+            .find(|d| d.is_default)
+            .or_else(|| devices.first())
+            .map(|d| (d.name.clone(), d.channels))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RecordingInputDevice {
+    id: String,
+    name: String,
+    channels: u32,
+    is_default: bool,
+}
+
+#[derive(Clone, Debug)]
+struct RecordingInputRoute {
+    device_id: Option<String>,
+    channels: Vec<u32>,
+}
+
+fn recording_input_channels_checked(
+    track: &TrackState,
+    devices: &[RecordingInputDevice],
+    selected_device: Option<&RecordingInputDevice>,
+) -> Result<RecordingInputRoute, String> {
+    match &track.routing.input {
+        TrackInputRouting::None => Err(format!(
+            "{} has no input selected. Choose an input channel before recording.",
+            track.name
+        )),
+        TrackInputRouting::AllInputs => {
+            let Some(device) = selected_device else {
+                return Err("no input device selected or available".to_string());
+            };
+            let channels = match track.routing.audio_format {
+                TrackAudioFormat::Mono => vec![0],
+                TrackAudioFormat::Stereo => vec![0, 1],
+            };
+            validate_channels(&track.name, device, &channels)?;
+            Ok(RecordingInputRoute {
+                device_id: Some(device.id.clone()),
+                channels,
+            })
+        }
+        TrackInputRouting::AudioDeviceChannel { device_id, channel } => {
+            let device = find_recording_input_device(devices, device_id).ok_or_else(|| {
+                format!("{} input device is unavailable: {}", track.name, device_id)
+            })?;
+            let channels = vec![*channel];
+            validate_channels(&track.name, device, &channels)?;
+            Ok(RecordingInputRoute {
+                device_id: Some(device.id.clone()),
+                channels,
+            })
+        }
+        TrackInputRouting::AudioDeviceChannels {
+            device_id,
+            channels,
+        } => {
+            if channels.is_empty() {
+                return Err(format!("{} has no input channels selected.", track.name));
+            }
+            let device = find_recording_input_device(devices, device_id).ok_or_else(|| {
+                format!("{} input device is unavailable: {}", track.name, device_id)
+            })?;
+            validate_channels(&track.name, device, channels)?;
+            Ok(RecordingInputRoute {
+                device_id: Some(device.id.clone()),
+                channels: channels.clone(),
+            })
+        }
+        TrackInputRouting::MidiDevice { .. } => Err(format!(
+            "{} has a MIDI input route; choose an audio input channel before recording.",
+            track.name
+        )),
+    }
+}
+
+fn validate_channels(
+    track_name: &str,
+    device: &RecordingInputDevice,
+    channels: &[u32],
+) -> Result<(), String> {
+    for channel in channels {
+        if *channel >= device.channels {
+            return Err(format!(
+                "{} input channel {} is unavailable on {}.",
+                track_name,
+                channel + 1,
+                device.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn select_recording_input_device<'a>(
+    devices: &'a [RecordingInputDevice],
+    wanted: &str,
+) -> Option<&'a RecordingInputDevice> {
+    if !wanted.trim().is_empty() {
+        if let Some(device) = find_recording_input_device(devices, wanted) {
+            return Some(device);
+        }
+    }
+    devices
+        .iter()
+        .find(|device| device.is_default)
+        .or_else(|| devices.first())
+}
+
+fn find_recording_input_device<'a>(
+    devices: &'a [RecordingInputDevice],
+    id_or_name: &str,
+) -> Option<&'a RecordingInputDevice> {
+    devices
+        .iter()
+        .find(|device| device.id == id_or_name || device.name == id_or_name)
 }
 
 fn resolve_input_device_id(engine: &DAUx::AudioEngine, device_name: &str) -> Option<String> {

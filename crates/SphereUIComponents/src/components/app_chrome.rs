@@ -93,6 +93,7 @@ pub struct TransportChromeState {
     pub on_return_to_start: ChromeActionCb,
     pub on_play_toggle: ChromeActionCb,
     pub on_stop: ChromeActionCb,
+    pub on_record: ChromeActionCb,
     pub on_loop_toggle: ChromeActionCb,
     pub on_metronome_toggle: ChromeActionCb,
     pub on_follow_toggle: ChromeActionCb,
@@ -254,6 +255,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let on_return = state.on_return_to_start.clone();
     let on_play = state.on_play_toggle.clone();
     let on_stop = state.on_stop.clone();
+    let on_record = state.on_record.clone();
     let on_loop = state.on_loop_toggle.clone();
     let on_metronome = state.on_metronome_toggle.clone();
     let on_follow = state.on_follow_toggle.clone();
@@ -311,7 +313,11 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                 state.recording,
                 record_color,
             )
-            .opacity(0.38),
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_record(&(), window, cx);
+            })
+            .occlude(),
         )
         // Loop
         .child(

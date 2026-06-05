@@ -200,8 +200,17 @@ pub struct ProjectInsert {
 pub enum ProjectTrackInputRouting {
     None,
     AllInputs,
-    AudioDeviceChannel { device_id: String, channel: u32 },
-    MidiDevice { device_id: String },
+    AudioDeviceChannel {
+        device_id: String,
+        channel: u32,
+    },
+    AudioDeviceChannels {
+        device_id: String,
+        channels: Vec<u32>,
+    },
+    MidiDevice {
+        device_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -827,6 +836,13 @@ fn timeline_input_to_project(
                 channel: *channel,
             }
         }
+        T::AudioDeviceChannels {
+            device_id,
+            channels,
+        } => ProjectTrackInputRouting::AudioDeviceChannels {
+            device_id: device_id.clone(),
+            channels: channels.clone(),
+        },
         T::MidiDevice { device_id } => ProjectTrackInputRouting::MidiDevice {
             device_id: device_id.clone(),
         },
@@ -894,6 +910,13 @@ fn project_routing_to_timeline(
                 channel: *channel,
             }
         }
+        ProjectTrackInputRouting::AudioDeviceChannels {
+            device_id,
+            channels,
+        } => TrackInputRouting::AudioDeviceChannels {
+            device_id: device_id.clone(),
+            channels: channels.clone(),
+        },
         ProjectTrackInputRouting::MidiDevice { device_id } => TrackInputRouting::MidiDevice {
             device_id: device_id.clone(),
         },

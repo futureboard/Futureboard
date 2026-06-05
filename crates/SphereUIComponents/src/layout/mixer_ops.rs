@@ -193,14 +193,19 @@ impl StudioLayout {
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
                 external_mixer_debug(&format!("mixer command dispatched toggle_arm id={id}"));
-                timeline_arm.update(cx, |t, cx| {
-                    t.state.toggle_track_arm(&id);
-                    cx.notify();
+                let changed = timeline_arm.update(cx, |t, cx| {
+                    let changed = t.state.toggle_track_arm(&id);
+                    if changed {
+                        cx.notify();
+                    }
+                    changed
                 });
-                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
-                    this.mark_dirty();
-                    this.push_mixer_snapshot_to_window(cx);
-                });
+                if changed {
+                    StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
+                        this.mark_dirty();
+                        this.push_mixer_snapshot_to_window(cx);
+                    });
+                }
             });
 
         let timeline_input = self.timeline.clone();
@@ -210,14 +215,19 @@ impl StudioLayout {
         > = std::sync::Arc::new(move |id: &String, _w, cx| {
             let id = id.clone();
             external_mixer_debug(&format!("mixer command dispatched toggle_input id={id}"));
-            timeline_input.update(cx, |t, cx| {
-                t.state.cycle_track_input_monitor(&id);
-                cx.notify();
+            let changed = timeline_input.update(cx, |t, cx| {
+                let changed = t.state.cycle_track_input_monitor(&id);
+                if changed {
+                    cx.notify();
+                }
+                changed
             });
-            StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
-                this.mark_dirty();
-                this.push_mixer_snapshot_to_window(cx);
-            });
+            if changed {
+                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
+                    this.mark_dirty();
+                    this.push_mixer_snapshot_to_window(cx);
+                });
+            }
         });
 
         let audio_engine = self.audio_engine.clone();

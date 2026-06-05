@@ -123,11 +123,23 @@ fn build_engine_automation_lanes(track: &TrackState) -> Vec<EngineAutomationLane
                 _ => {}
             }
 
+            // Track Volume automation also honors the per-track `automation read`
+            // toggle: when read is off the runtime must fall back to base volume,
+            // so we disable the lane in the snapshot. The runtime stays a pure
+            // value copy — it never reads UI state — and base volume is always
+            // sent as `EngineTrackSnapshot.volume`, so this never double-applies.
+            let enabled = match lane.target {
+                timeline_state::AutomationTarget::TrackVolume => {
+                    lane.enabled && track.volume_automation_read
+                }
+                _ => lane.enabled,
+            };
+
             EngineAutomationLaneSnapshot {
                 id: lane.id.clone(),
                 name: lane.name.clone(),
                 target,
-                enabled: lane.enabled,
+                enabled,
                 points: lane
                     .points
                     .iter()

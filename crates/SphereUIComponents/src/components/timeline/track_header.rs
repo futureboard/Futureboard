@@ -454,7 +454,7 @@ pub fn track_header(
                         // Real horizontal slider
                         .child(slider(
                             format!("track-vol-{}", track.id),
-                            track.volume,
+                            track.display_volume(),
                             track.color,
                             on_volume_norm,
                         ))
@@ -490,7 +490,10 @@ pub fn track_header(
                             track.meter_level_r,
                         ))
                         // Bordered dB pill
-                        .child(db_value_pill(volume::format_db(track.volume), is_selected)),
+                        .child(db_value_pill(
+                            volume::format_db(track.display_volume()),
+                            is_selected,
+                        )),
                 ),
         )
 }

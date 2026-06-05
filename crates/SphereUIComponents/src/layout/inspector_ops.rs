@@ -85,6 +85,41 @@ impl StudioLayout {
             }
         });
 
+        let timeline_auto = self.timeline.clone();
+        let owner_auto = owner.clone();
+        let on_toggle_volume_automation_read: StrCb = Arc::new(move |id: &String, _w, cx| {
+            let id = id.clone();
+            let changed = timeline_auto.update(cx, |t, cx| {
+                let read = t
+                    .state
+                    .find_track(&id)
+                    .map(|track| !track.volume_automation_read)
+                    .unwrap_or(true);
+                let changed = t.state.set_track_volume_automation_read(&id, read);
+                if changed {
+                    // Refresh the effective preview at the current playhead so the
+                    // fader/readout update immediately on toggle.
+                    let beat = t.state.transport.playhead_beats;
+                    t.state.recompute_effective_volumes(beat, "point_edit");
+                    cx.notify();
+                }
+                changed
+            });
+            if changed {
+                inspector_debug(&format!("toggle volume automation read track={id}"));
+                // The flag is not persisted (so the project is not marked dirty),
+                // but the runtime must learn whether the volume lane should drive
+                // audio: resync the engine snapshot once on toggle (a control
+                // action, not a per-tick event) so playback honors read on/off,
+                // and refresh the mixer view.
+                StudioLayout::defer_update(&owner_auto, cx, |this, cx| {
+                    this.engine_project_dirty = true;
+                    this.schedule_audio_project_sync(cx, false, "inspector_volume_automation_read");
+                    this.push_mixer_snapshot_to_window(cx);
+                });
+            }
+        });
+
         let on_toggle_mute = self.track_toggle_cb(owner.clone(), TrackToggle::Mute);
         let on_toggle_solo = self.track_toggle_cb(owner.clone(), TrackToggle::Solo);
         let on_toggle_arm = self.track_toggle_cb(owner.clone(), TrackToggle::Arm);
@@ -150,6 +185,7 @@ impl StudioLayout {
 
         InspectorCallbacks {
             on_volume,
+            on_toggle_volume_automation_read,
             on_pan,
             on_toggle_mute,
             on_toggle_solo,

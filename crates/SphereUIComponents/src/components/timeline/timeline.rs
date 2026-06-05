@@ -1180,6 +1180,10 @@ impl Render for Timeline {
             let beats = this.state.x_to_beats(*click_x);
             let snapped_sec = this.state.snap_time(beats * this.state.seconds_per_beat());
             this.state.transport.playhead_beats = snapped_sec / this.state.seconds_per_beat();
+            // Preview Track Volume automation at the clicked beat immediately so
+            // the fader/inspector update even before the engine seek round-trips.
+            let beat = this.state.transport.playhead_beats;
+            this.state.recompute_effective_volumes(beat, "seek");
             if let Some(cb) = this.on_seek_beats.as_ref() {
                 cb(this.state.transport.playhead_beats, this.state.bpm);
             }

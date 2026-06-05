@@ -99,6 +99,13 @@ impl StudioLayout {
                     timeline.state.transport.playhead_beats = next;
                     dirty = true;
                 }
+                // Follow Track Volume automation: refresh each track's effective
+                // volume so the mixer/track-header/inspector fader track the curve
+                // during playback. UI-only (faders read `display_volume`), so this
+                // never writes the base value or fires a user-edit command.
+                if timeline.state.recompute_effective_volumes(next, "playback_tick") {
+                    dirty = true;
+                }
                 // Follow-playhead / auto-scroll. Keeps the playhead visible
                 // during playback; user-scroll temporarily disables it via
                 // `note_user_scrolled`. Cheap — no rebuild, just viewport
@@ -832,6 +839,9 @@ impl StudioLayout {
         self.last_engine_sync = Instant::now();
         let _ = self.timeline.update(cx, move |timeline, cx| {
             timeline.state.transport.playhead_beats = beat;
+            // Preview Track Volume automation at the new playhead so a stopped
+            // seek updates the fader/inspector to the value under the cursor.
+            timeline.state.recompute_effective_volumes(beat, "seek");
             cx.notify();
         });
     }

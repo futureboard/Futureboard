@@ -787,6 +787,11 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 track_type,
                 color: hex_to_rgba(&pt.color_hex),
                 volume: pt.volume_norm,
+                // Effective volume is derived (recomputed from automation at the
+                // playhead after load); seed it from the persisted base so the
+                // first frame before any recompute shows the saved value.
+                volume_effective: pt.volume_norm,
+                volume_automation_read: true,
                 pan: pt.pan,
                 muted: pt.muted,
                 solo: pt.solo,

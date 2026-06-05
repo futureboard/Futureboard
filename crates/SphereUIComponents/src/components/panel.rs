@@ -67,6 +67,9 @@ const ROUTING_COMBO_MENU_HEIGHT: f32 = 220.0;
 #[derive(Clone)]
 pub struct InspectorCallbacks {
     pub on_volume: StrF32Cb,
+    /// Toggle whether Track Volume automation drives this track's effective
+    /// volume (the `[A]` button beside the volume readout).
+    pub on_toggle_volume_automation_read: StrCb,
     pub on_pan: StrF32Cb,
     pub on_toggle_mute: StrCb,
     pub on_toggle_solo: StrCb,
@@ -1139,9 +1142,55 @@ fn track_inspector(
     let tid = track.id.clone();
 
     // ── Volume slider + dB readout ──────────────────────────────────────
+    // When Track Volume automation is reading, the slider/readout follow the
+    // effective (automation) value and an `[A]` marker plus a separate base
+    // readout make the manual value clear. Otherwise it shows the base only.
     let volume_row = {
         let cb = callbacks.on_volume.clone();
         let tid_v = tid.clone();
+        let has_volume_automation = track.has_active_volume_automation();
+        let automation_active = track.volume_automation_read && has_volume_automation;
+        let display_vol = track.display_volume();
+        // `[A]` automation-read toggle — only meaningful when a volume lane
+        // exists. Lit when reading, dim when bypassed.
+        let auto_toggle = has_volume_automation.then(|| {
+            let read_cb = callbacks.on_toggle_volume_automation_read.clone();
+            let tid_a = tid.clone();
+            let on = track.volume_automation_read;
+            div()
+                .id("inspector-vol-automation-read")
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(18.0))
+                .h(px(16.0))
+                .rounded_sm()
+                .border(px(1.0))
+                .border_color(if on {
+                    Colors::accent_primary()
+                } else {
+                    Colors::border_default()
+                })
+                .bg(if on {
+                    Colors::with_alpha(Colors::accent_primary(), 0.18)
+                } else {
+                    Colors::with_alpha(Colors::surface_canvas(), 0.3)
+                })
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(if on {
+                    Colors::accent_primary()
+                } else {
+                    Colors::text_muted()
+                })
+                .cursor(gpui::CursorStyle::PointingHand)
+                .child("A")
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |_ev, w, cx| read_cb(&tid_a, w, cx),
+                )
+        });
         div()
             .flex()
             .flex_row()
@@ -1149,18 +1198,34 @@ fn track_inspector(
             .gap(px(8.0))
             .child(slider(
                 "inspector-volume",
-                track.volume,
+                display_vol,
                 track.color,
                 move |v, w, cx| cb(&(tid_v.clone(), *v), w, cx),
             ))
             .child(
                 div()
                     .flex_shrink_0()
-                    .min_w(px(40.0))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .min_w(px(48.0))
                     .text_size(px(10.0))
                     .text_color(Colors::text_secondary())
-                    .child(format!("{} dB", volume::format_db(track.volume))),
+                    .child(format!(
+                        "{} dB{}",
+                        volume::format_db(display_vol),
+                        if automation_active { " [A]" } else { "" }
+                    ))
+                    .when(has_volume_automation, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(8.0))
+                                .text_color(Colors::text_faint())
+                                .child(format!("Base {} dB", volume::format_db(track.volume))),
+                        )
+                    }),
             )
+            .when_some(auto_toggle, |row, toggle| row.child(toggle))
     };
 
     // ── Pan slider (mapped -1..1 ↔ 0..1) + readout ──────────────────────

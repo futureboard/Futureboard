@@ -298,8 +298,14 @@ pub struct PianoRoll {
     /// positions the affected notes would snap to.
     quantize_preview: bool,
     /// Last clip-local beat the pointer was over the note grid. Used as the
-    /// anchor for paste-at-mouse (`Ctrl/Cmd+Shift+V`).
+    /// anchor for paste-at-mouse (`Ctrl/Cmd+Shift+V`) and status feedback.
     hover_beat: Option<f32>,
+    /// Last pitch row the pointer was over in the note grid, for compact status.
+    hover_pitch: Option<u8>,
+    /// Detailed note hover text: pitch, start, length, velocity.
+    hover_note_status: Option<String>,
+    /// Live value text shown while dragging velocity/CC values.
+    drag_value_status: Option<String>,
     /// Last clip id we ran [`Self::fit_piano_roll_to_notes`] for.
     fitted_clip_id: Option<String>,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -335,6 +341,9 @@ impl PianoRoll {
             erase_preview_ids: HashSet::new(),
             quantize_preview: false,
             hover_beat: None,
+            hover_pitch: None,
+            hover_note_status: None,
+            drag_value_status: None,
             fitted_clip_id: None,
             grid_bounds: Rc::new(Cell::new(None)),
             active_cc: MidiControllerKind::CC(1),
@@ -361,6 +370,9 @@ impl PianoRoll {
             self.drag = PianoDrag::None;
             self.cc_edit_prev = None;
             self.hover_beat = None;
+            self.hover_pitch = None;
+            self.hover_note_status = None;
+            self.drag_value_status = None;
             self.fitted_clip_id = None;
             return;
         };
@@ -411,6 +423,92 @@ impl PianoRoll {
 
     pub fn grid_label(&self) -> &'static str {
         self.grid_res.label()
+    }
+
+    fn toolbar_status(&self, note_count: usize, sel_count: usize) -> String {
+        let pointer = match (self.hover_pitch, self.hover_beat) {
+            (Some(pitch), Some(beat)) => format!("{} @ {:.2}", note_name(pitch as i32), beat),
+            _ => "Pointer: —".to_string(),
+        };
+        let drag = match &self.drag {
+            PianoDrag::Velocity { prev, .. } => self
+                .drag_value_status
+                .clone()
+                .unwrap_or_else(|| format!("Vel drag · {} note{}", prev.len(), plural(prev.len()))),
+            PianoDrag::DrawNote {
+                pitch,
+                start_beat,
+                end_beat,
+            } => {
+                let (lo, hi) = normalize_range(*start_beat, *end_beat);
+                format!(
+                    "Draw {} · {:.2}+{:.2}",
+                    note_name(*pitch as i32),
+                    lo,
+                    (hi - lo).max(self.step_beats())
+                )
+            }
+            PianoDrag::Move {
+                dx_beats, dpitch, ..
+            } => format!("Move Δ{:.2} beat Δ{} st", dx_beats, dpitch),
+            PianoDrag::Resize { new_dur, .. } => format!("Length {:.2}", new_dur),
+            PianoDrag::CcPaint { erase } => self.drag_value_status.clone().unwrap_or_else(|| {
+                if *erase {
+                    "CC erase".to_string()
+                } else {
+                    "CC draw".to_string()
+                }
+            }),
+            PianoDrag::CcMove { .. } => self
+                .drag_value_status
+                .clone()
+                .unwrap_or_else(|| "CC move".to_string()),
+            PianoDrag::CcLine { .. } => self
+                .drag_value_status
+                .clone()
+                .unwrap_or_else(|| "CC line".to_string()),
+            PianoDrag::EraseNotes { erased, .. } => {
+                format!("Erase {} note{}", erased.len(), plural(erased.len()))
+            }
+            PianoDrag::MarqueeSelect { mode, dragging, .. } => {
+                if *dragging {
+                    format!("Select · {}", mode.label())
+                } else {
+                    "Select".to_string()
+                }
+            }
+            PianoDrag::None => self.hover_note_status.clone().unwrap_or(pointer),
+        };
+        format!("{} notes · {} sel · {}", note_count, sel_count, drag)
+    }
+
+    fn add_active_controller_lane(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        self.timeline.update(cx, |tl, tcx| {
+            tl.state.ensure_controller_lane(&clip_id, kind);
+            tcx.notify();
+        });
+        cx.notify();
+    }
+
+    fn remove_active_controller_lane_if_empty(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        let removed = self.timeline.update(cx, |tl, tcx| {
+            let removed = tl.state.remove_empty_controller_lane(&clip_id, kind);
+            if removed {
+                tcx.notify();
+            }
+            removed
+        });
+        if removed {
+            cx.notify();
+        }
     }
 
     /// Menu / command-bar actions for the MIDI editor (shared menu IDs).
@@ -641,6 +739,7 @@ impl PianoRoll {
             self.drag = PianoDrag::None;
             self.erase_preview_ids.clear();
             self.cc_edit_prev = None;
+            self.drag_value_status = None;
             cx.notify();
         }
     }
@@ -1125,8 +1224,9 @@ impl PianoRoll {
     fn on_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // Track the grid beat under the pointer so paste-at-mouse has an anchor.
         // Cheap field write, no repaint.
-        if let Some((lx, _)) = self.grid_local(event.position) {
+        if let Some((lx, ly)) = self.grid_local(event.position) {
             self.hover_beat = Some(self.x_to_beat(lx));
+            self.hover_pitch = Some(self.y_to_pitch(ly));
         }
         match self.drag {
             PianoDrag::CcPaint { erase } => {
@@ -1254,6 +1354,13 @@ impl PianoRoll {
                     .iter()
                     .map(|(id, orig)| (*id, (*orig as i32 + delta).clamp(1, 127) as u8))
                     .collect();
+                if let Some((_, value)) = updates.first() {
+                    self.drag_value_status = Some(if updates.len() == 1 {
+                        format!("Velocity: {value}")
+                    } else {
+                        format!("Velocity: {value} · {} notes", updates.len())
+                    });
+                }
                 if let Some(clip_id) = self.editing_clip_id(cx) {
                     self.with_timeline_silent(cx, |tl, _| {
                         for (id, new_vel) in &updates {
@@ -1334,6 +1441,7 @@ impl PianoRoll {
             PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. }
         ) {
             self.drag = PianoDrag::None;
+            self.drag_value_status = None;
             self.commit_cc_edit(cx);
             return;
         }
@@ -1342,6 +1450,7 @@ impl PianoRoll {
             return;
         }
         let drag = std::mem::replace(&mut self.drag, PianoDrag::None);
+        self.drag_value_status = None;
         if matches!(drag, PianoDrag::DrawNote { .. }) {
             self.commit_draw_note(drag, cx);
             return;
@@ -2359,183 +2468,227 @@ impl PianoRoll {
                     .map(|n| n.len())
             })
             .unwrap_or(0);
+        let lane_exists = clip_id
+            .and_then(|cid| {
+                self.timeline
+                    .read(cx)
+                    .state
+                    .controller_lane_points(cid, self.active_cc)
+                    .map(|_| true)
+            })
+            .unwrap_or(false);
         let sel_count = self.selection.len();
         let tool = self.tool;
         let snap_on = self.snap_on;
-        let grid_label = self.grid_res.label();
-        let quantize_label = self.quantize_res.label();
-        let cc_label = cc_kind_label(self.active_cc);
+        let grid_label = format!("Grid: {}", self.grid_res.label());
+        let cc_label = format!("Lane: {}", cc_kind_label(self.active_cc));
+        let status = self.toolbar_status(note_count, sel_count);
 
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .h(px(30.0))
+            .h(px(34.0))
             .px(px(8.0))
             .border_b(px(1.0))
             .border_color(Colors::panel_border())
             .bg(Colors::surface_panel())
-            .child(tool_btn(
-                "pr-draw",
-                "Draw",
-                tool == PianoTool::Draw,
-                cx.listener(|this, _, _w, cx| {
-                    this.cancel_active_gesture(cx);
-                    this.tool = PianoTool::Draw;
-                    cx.notify();
-                }),
-            ))
-            .child(tool_btn(
-                "pr-select",
-                "Select",
-                tool == PianoTool::Select,
-                cx.listener(|this, _, _w, cx| {
-                    this.cancel_active_gesture(cx);
-                    this.tool = PianoTool::Select;
-                    cx.notify();
-                }),
-            ))
-            .child(tool_btn(
-                "pr-erase",
-                "Erase",
-                tool == PianoTool::Erase,
-                cx.listener(|this, _, _w, cx| {
-                    this.cancel_active_gesture(cx);
-                    this.tool = PianoTool::Erase;
-                    cx.notify();
-                }),
-            ))
-            .child(tool_btn(
-                "pr-split",
-                "Split",
-                tool == PianoTool::Split,
-                cx.listener(|this, _, _w, cx| {
-                    this.cancel_active_gesture(cx);
-                    this.tool = PianoTool::Split;
-                    cx.notify();
-                }),
-            ))
-            .child(tool_btn(
-                "pr-mute-tool",
-                "Mute",
-                tool == PianoTool::Mute,
-                cx.listener(|this, _, _w, cx| {
-                    this.cancel_active_gesture(cx);
-                    this.tool = PianoTool::Mute;
-                    cx.notify();
-                }),
-            ))
-            .child(divider())
-            .child(tool_btn(
-                "pr-snap",
-                "Snap",
-                snap_on,
-                cx.listener(|this, _, _w, cx| {
-                    this.snap_on = !this.snap_on;
-                    cx.notify();
-                }),
-            ))
-            .child(tool_btn(
-                "pr-grid",
-                grid_label,
-                false,
-                cx.listener(|this, _, _w, cx| {
-                    this.grid_res = this.grid_res.cycle();
-                    cx.notify();
-                }),
-            ))
-            .child(divider())
-            // Quantize: hovering previews target positions, clicking commits.
+            .child(
+                toolbar_group("Tools")
+                    .child(tool_btn(
+                        "pr-select",
+                        "Select",
+                        tool == PianoTool::Select,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Select;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-draw",
+                        "Draw",
+                        tool == PianoTool::Draw,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Draw;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-erase",
+                        "Erase",
+                        tool == PianoTool::Erase,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Erase;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-split",
+                        "Split",
+                        tool == PianoTool::Split,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Split;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-mute-tool",
+                        "Mute",
+                        tool == PianoTool::Mute,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Mute;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(
+                toolbar_group("Snap")
+                    .child(tool_btn(
+                        "pr-snap",
+                        "Snap",
+                        snap_on,
+                        cx.listener(|this, _, _w, cx| {
+                            this.snap_on = !this.snap_on;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-grid",
+                        &grid_label,
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.grid_res = this.grid_res.cycle();
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(
+                toolbar_group("Edit")
+                    .child(
+                        div()
+                            .id("pr-quantize")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(22.0))
+                            .min_w(px(24.0))
+                            .px(px(7.0))
+                            .rounded(px(4.0))
+                            .text_size(px(10.0))
+                            .text_color(if self.quantize_preview {
+                                Colors::text_primary()
+                            } else {
+                                Colors::text_secondary()
+                            })
+                            .bg(if self.quantize_preview {
+                                Colors::surface_hover()
+                            } else {
+                                Colors::with_alpha(Colors::text_primary(), 0.0)
+                            })
+                            .border(px(1.0))
+                            .border_color(if self.quantize_preview {
+                                Colors::border_subtle()
+                            } else {
+                                Colors::with_alpha(Colors::text_primary(), 0.0)
+                            })
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_hover(cx.listener(|this, hovered: &bool, _w, cx| {
+                                this.quantize_preview = *hovered;
+                                cx.notify();
+                            }))
+                            .on_click(cx.listener(|this, _, _w, cx| this.quantize_selection(cx)))
+                            .child("Quantize"),
+                    )
+                    .child(tool_btn(
+                        "pr-delete",
+                        "Del",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-dup",
+                        "Dup",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
+                    )),
+            )
+            .child(
+                toolbar_group("Controller")
+                    .child(tool_btn(
+                        "pr-cc",
+                        &cc_label,
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.active_cc = cc_cycle(this.active_cc);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-add-lane",
+                        "+ Lane",
+                        lane_exists,
+                        cx.listener(|this, _, _w, cx| this.add_active_controller_lane(cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-remove-lane",
+                        "− Lane",
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.remove_active_controller_lane_if_empty(cx)
+                        }),
+                    )),
+            )
+            .child(
+                toolbar_group("View")
+                    .child(tool_btn(
+                        "pr-fit",
+                        "Fit",
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            if let Some(cid) = this.editing_clip_id(cx) {
+                                this.fit_piano_roll_to_notes(cx, &cid);
+                                cx.notify();
+                            }
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-zoom-out",
+                        "−",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.zoom_by(0.8, cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-zoom-in",
+                        "+",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.zoom_by(1.25, cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-c4",
+                        "C4",
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.scroll_to_pitch(60);
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(div().flex_1())
             .child(
                 div()
-                    .id("pr-quantize")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(22.0))
-                    .min_w(px(24.0))
-                    .px(px(7.0))
-                    .rounded(px(4.0))
-                    .text_size(px(10.0))
-                    .text_color(Colors::text_secondary())
-                    .border(px(1.0))
-                    .border_color(Colors::with_alpha(Colors::text_primary(), 0.0))
-                    .hover(|s| s.bg(Colors::surface_hover()))
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_hover(cx.listener(|this, hovered: &bool, _w, cx| {
-                        this.quantize_preview = *hovered;
-                        cx.notify();
-                    }))
-                    .on_click(cx.listener(|this, _, _w, cx| this.quantize_selection(cx)))
-                    .child("Q"),
+                    .min_w(px(132.0))
+                    .text_size(px(9.0))
+                    .text_color(Colors::text_muted())
+                    .truncate()
+                    .child(status),
             )
-            // Quantize strength value, separate from the visual grid.
-            .child(tool_btn(
-                "pr-quantize-val",
-                quantize_label,
-                false,
-                cx.listener(|this, _, _w, cx| {
-                    this.quantize_res = this.quantize_res.cycle();
-                    cx.notify();
-                }),
-            ))
-            .child(tool_btn(
-                "pr-delete",
-                "Del",
-                false,
-                cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
-            ))
-            .child(tool_btn(
-                "pr-dup",
-                "Dup",
-                false,
-                cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
-            ))
-            .child(divider())
-            .child(tool_btn(
-                "pr-cc",
-                &cc_label,
-                false,
-                cx.listener(|this, _, _w, cx| {
-                    this.active_cc = cc_cycle(this.active_cc);
-                    cx.notify();
-                }),
-            ))
-            .child(divider())
-            .child(tool_btn(
-                "pr-zoom-out",
-                "−",
-                false,
-                cx.listener(|this, _, _w, cx| this.zoom_by(0.8, cx)),
-            ))
-            .child(tool_btn(
-                "pr-zoom-in",
-                "+",
-                false,
-                cx.listener(|this, _, _w, cx| this.zoom_by(1.25, cx)),
-            ))
-            .child(tool_btn(
-                "pr-fit",
-                "Fit",
-                false,
-                cx.listener(|this, _, _w, cx| {
-                    if let Some(cid) = this.editing_clip_id(cx) {
-                        this.fit_piano_roll_to_notes(cx, &cid);
-                        cx.notify();
-                    }
-                }),
-            ))
-            .child(tool_btn(
-                "pr-c4",
-                "C4",
-                false,
-                cx.listener(|this, _, _w, cx| {
-                    this.scroll_to_pitch(60);
-                    cx.notify();
-                }),
-            ))
-            .child(div().flex_1())
             .when_some(self.on_pop_out.clone(), |row, pop_out| {
                 row.child(
                     div()
@@ -2551,12 +2704,6 @@ impl PianoRoll {
                         .child("Pop out"),
                 )
             })
-            .child(
-                div()
-                    .text_size(px(9.0))
-                    .text_color(Colors::text_muted())
-                    .child(format!("{} notes · {} sel", note_count, sel_count)),
-            )
     }
 
     fn render_body(&mut self, cx: &mut Context<Self>, clip_id: &str) -> impl IntoElement {
@@ -2668,6 +2815,24 @@ impl PianoRoll {
         let draw_preview = self.build_draw_note_preview();
         let erase_overlay = self.build_erase_overlay();
         let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
+        let velocity_empty = (note_count_for_clip(cx, &self.timeline, clip_id) == 0).then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(9.0))
+                .text_color(Colors::text_faint())
+                .child("No notes — draw notes above to edit velocity")
+        });
+        let velocity_value_chip = matches!(self.drag, PianoDrag::Velocity { .. }).then(|| {
+            value_chip(
+                self.drag_value_status.as_deref().unwrap_or("Velocity"),
+                8.0,
+                8.0,
+            )
+        });
         let note_inspector = self.render_note_inspector(cx, clip_id);
         let cc_label = cc_kind_label(self.active_cc);
         let cc_lane = self
@@ -2732,11 +2897,19 @@ impl PianoRoll {
                             .border_color(Colors::panel_border())
                             .bg(Colors::surface_panel())
                             .flex()
+                            .flex_col()
                             .items_center()
                             .justify_center()
+                            .gap(px(2.0))
                             .text_size(px(8.0))
                             .text_color(Colors::text_muted())
-                            .child("VEL"),
+                            .child("Velocity")
+                            .child(
+                                div()
+                                    .text_size(px(7.0))
+                                    .text_color(Colors::text_faint())
+                                    .child("1–127"),
+                            ),
                     )
                     // CC lane label (aligned to the CC strip on the right).
                     .child(
@@ -2747,11 +2920,19 @@ impl PianoRoll {
                             .border_color(Colors::panel_border())
                             .bg(Colors::surface_panel())
                             .flex()
+                            .flex_col()
                             .items_center()
                             .justify_center()
+                            .gap(px(2.0))
                             .text_size(px(9.0))
                             .text_color(Colors::text_secondary())
-                            .child(cc_label),
+                            .child(cc_label)
+                            .child(
+                                div()
+                                    .text_size(px(7.0))
+                                    .text_color(Colors::text_faint())
+                                    .child("0–127"),
+                            ),
                     ),
             )
             // Right: grid + velocity lane.
@@ -2811,7 +2992,9 @@ impl PianoRoll {
                             .border_color(Colors::panel_border())
                             .bg(Colors::surface_panel_alt())
                             .children(vel_grid)
-                            .children(vel_bars),
+                            .children(vel_bars)
+                            .children(velocity_empty)
+                            .children(velocity_value_chip),
                     )
                     // CC controller lane.
                     .child(cc_lane),
@@ -3463,7 +3646,7 @@ impl PianoRoll {
         let (view_w, view_h) = self.grid_view_size();
         // Collect owned geometry first so the timeline read borrow is released
         // before we build per-note listeners (which borrow `cx` mutably).
-        let geos: Vec<(u64, u8, f32, f32, f32, bool, bool, bool)> = {
+        let geos: Vec<(u64, u8, f32, f32, f32, f32, f32, u8, bool, bool, bool)> = {
             let tl = self.timeline.read(cx);
             let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
                 return Vec::new();
@@ -3473,7 +3656,7 @@ impl PianoRoll {
                 .filter_map(|n| {
                     let d = self.display_note(n);
                     let x = self.beat_to_x(d.start);
-                    let w = (d.duration * self.ppb).max(3.0);
+                    let w = (d.duration * self.ppb).max(5.0);
                     let y = self.pitch_to_y(d.pitch);
                     // Cull off-screen notes.
                     if x + w < 0.0 || x > view_w || y + ROW_H < 0.0 || y > view_h {
@@ -3482,9 +3665,12 @@ impl PianoRoll {
                     Some((
                         d.id,
                         d.pitch,
+                        d.start,
+                        d.duration,
                         x,
                         y,
                         w,
+                        d.velocity,
                         self.selection.contains(&d.id),
                         self.erase_preview_ids.contains(&d.id),
                         n.muted,
@@ -3494,102 +3680,128 @@ impl PianoRoll {
         };
 
         geos.into_iter()
-            .map(|(id, pitch, x, y, w, selected, erase_target, muted)| {
-                let mut fill = track_color;
-                fill.a = if erase_target {
-                    0.45
-                } else if muted {
-                    // Muted notes read as hollow/dim so they stand apart from
-                    // active notes without leaving the grid.
-                    0.18
-                } else if selected {
-                    1.0
-                } else {
-                    0.78
-                };
-                let border = if erase_target {
-                    Colors::status_error()
-                } else if selected {
-                    Colors::text_primary()
-                } else if muted {
-                    Colors::with_alpha(Colors::text_muted(), 0.7)
-                } else {
-                    Colors::with_alpha(track_color, 0.55)
-                };
-                let mut note = div()
-                    .id(("pr-note", id as usize))
-                    .absolute()
-                    .left(px(x))
-                    .top(px(y + 1.0))
-                    .w(px(w))
-                    .h(px(ROW_H - 2.0))
-                    .rounded(px(2.0))
-                    .bg(fill)
-                    .border(px(1.0))
-                    .border_color(border)
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.note_mouse_down(id, ev, window, cx);
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                            cx.stop_propagation();
-                            let (lx, ly) = this.grid_local(ev.position).unwrap_or((0.0, 0.0));
-                            this.note_right_down(id, lx, ly, cx);
-                        }),
-                    );
-                // Note-name label, shown only when the block is large enough to
-                // read so dense clips stay clean.
-                if w >= 22.0 && ROW_H >= 11.0 {
-                    let label_color = if muted {
-                        Colors::with_alpha(Colors::text_muted(), 0.8)
+            .map(
+                |(id, pitch, start, duration, x, y, w, velocity, selected, erase_target, muted)| {
+                    let mut fill = track_color;
+                    fill.a = if erase_target {
+                        0.45
+                    } else if muted {
+                        // Muted notes read as hollow/dim so they stand apart from
+                        // active notes without leaving the grid.
+                        0.18
                     } else if selected {
-                        Colors::text_primary()
+                        1.0
                     } else {
-                        Colors::with_alpha(Colors::text_primary(), 0.85)
+                        0.78
                     };
-                    note = note.child(
-                        div()
-                            .absolute()
-                            .left(px(3.0))
-                            .top_0()
-                            .bottom_0()
-                            .flex()
-                            .items_center()
-                            .text_size(px(8.0))
-                            .text_color(label_color)
-                            .child(note_name(pitch as i32)),
-                    );
-                }
-                // Right-edge resize handle (only when the note is wide enough to
-                // leave room for a separate move/resize zone).
-                if w >= 12.0 {
-                    note = note.child(
-                        div()
-                            .id(("pr-note-edge", id as usize))
-                            .absolute()
-                            .right_0()
-                            .top_0()
-                            .w(px(RESIZE_ZONE))
-                            .h_full()
-                            .cursor(gpui::CursorStyle::ResizeLeftRight)
-                            .hover(|s| s.bg(Colors::with_alpha(Colors::text_primary(), 0.35)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    this.begin_resize_drag(id, ev, window, cx);
-                                }),
-                            ),
-                    );
-                }
-                note.into_any_element()
-            })
+                    let border = if erase_target {
+                        Colors::status_error()
+                    } else if selected {
+                        Colors::accent_primary()
+                    } else if muted {
+                        Colors::with_alpha(Colors::text_muted(), 0.7)
+                    } else {
+                        Colors::with_alpha(track_color, 0.55)
+                    };
+                    let mut note = div()
+                        .id(("pr-note", id as usize))
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y + 1.0))
+                        .w(px(w))
+                        .h(px(ROW_H - 2.0))
+                        .rounded(px(2.0))
+                        .bg(fill)
+                        .border(px(1.0))
+                        .border_color(border)
+                        .shadow(if selected {
+                            vec![gpui::BoxShadow {
+                                color: Colors::with_alpha(Colors::accent_primary(), 0.35).into(),
+                                offset: gpui::point(px(0.0), px(0.0)),
+                                blur_radius: px(8.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            }]
+                        } else {
+                            Vec::new()
+                        })
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                            this.hover_note_status = hovered.then(|| {
+                                format!(
+                                    "{} · start {:.2} · len {:.2} · vel {}{}",
+                                    note_name(pitch as i32),
+                                    start,
+                                    duration,
+                                    velocity,
+                                    if muted { " · muted" } else { "" }
+                                )
+                            });
+                            cx.notify();
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.note_mouse_down(id, ev, window, cx);
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                let (lx, ly) = this.grid_local(ev.position).unwrap_or((0.0, 0.0));
+                                this.note_right_down(id, lx, ly, cx);
+                            }),
+                        );
+                    // Note-name label, shown only when the block is large enough to
+                    // read so dense clips stay clean.
+                    if w >= 22.0 && ROW_H >= 11.0 {
+                        let label_color = if muted {
+                            Colors::with_alpha(Colors::text_muted(), 0.8)
+                        } else if selected {
+                            Colors::text_primary()
+                        } else {
+                            Colors::with_alpha(Colors::text_primary(), 0.85)
+                        };
+                        note = note.child(
+                            div()
+                                .absolute()
+                                .left(px(3.0))
+                                .top_0()
+                                .bottom_0()
+                                .flex()
+                                .items_center()
+                                .text_size(px(8.0))
+                                .text_color(label_color)
+                                .child(note_name(pitch as i32)),
+                        );
+                    }
+                    // Right-edge resize handle (only when the note is wide enough to
+                    // leave room for a separate move/resize zone).
+                    if w >= 12.0 {
+                        note = note.child(
+                            div()
+                                .id(("pr-note-edge", id as usize))
+                                .absolute()
+                                .right_0()
+                                .top_0()
+                                .w(px(RESIZE_ZONE))
+                                .h_full()
+                                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                .hover(|s| s.bg(Colors::with_alpha(Colors::text_primary(), 0.35)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_resize_drag(id, ev, window, cx);
+                                    }),
+                                ),
+                        );
+                    }
+                    note.into_any_element()
+                },
+            )
             .collect()
     }
 
@@ -3669,10 +3881,15 @@ const CC_PRESETS: [MidiControllerKind; 7] = [
 
 fn cc_kind_label(kind: MidiControllerKind) -> String {
     match kind {
+        MidiControllerKind::CC(1) => "CC1 Mod".to_string(),
+        MidiControllerKind::CC(7) => "CC7 Volume".to_string(),
+        MidiControllerKind::CC(10) => "CC10 Pan".to_string(),
+        MidiControllerKind::CC(11) => "CC11 Expr".to_string(),
+        MidiControllerKind::CC(64) => "CC64 Sustain".to_string(),
         MidiControllerKind::CC(n) => format!("CC{n}"),
-        MidiControllerKind::PitchBend => "Bend".to_string(),
-        MidiControllerKind::ChannelPressure => "Press".to_string(),
-        MidiControllerKind::PolyPressure => "Poly".to_string(),
+        MidiControllerKind::PitchBend => "Pitch Bend".to_string(),
+        MidiControllerKind::ChannelPressure => "Ch Pressure".to_string(),
+        MidiControllerKind::PolyPressure => "Poly Pressure".to_string(),
     }
 }
 
@@ -3743,6 +3960,11 @@ impl PianoRoll {
         let beat = self.snap_beats(self.x_to_beat(lx));
         let (_, cc_h) = self.cc_view_size();
         let value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
+        self.drag_value_status = Some(format!(
+            "{}: {}",
+            cc_kind_label(kind),
+            controller_display_value(kind, value)
+        ));
         let tol = (self.step_beats() * 0.5).max(1.0e-3);
         self.timeline.update(cx, |tl, tcx| {
             if erase {
@@ -3796,6 +4018,11 @@ impl PianoRoll {
         let beat = self.snap_beats(self.x_to_beat(lx));
         let (_, cc_h) = self.cc_view_size();
         let value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
+        self.drag_value_status = Some(format!(
+            "{}: {}",
+            cc_kind_label(kind),
+            controller_display_value(kind, value)
+        ));
         self.timeline.update(cx, |tl, tcx| {
             tl.state
                 .set_controller_point(&clip_id, kind, id, beat, value);
@@ -3852,6 +4079,12 @@ impl PianoRoll {
         let cur_beat = self.snap_beats(self.x_to_beat(lx)).max(0.0);
         let (_, cc_h) = self.cc_view_size();
         let cur_value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
+        self.drag_value_status = Some(format!(
+            "{} line: {}→{}",
+            cc_kind_label(kind),
+            controller_display_value(kind, anchor_value),
+            controller_display_value(kind, cur_value)
+        ));
 
         // Orient the span left-to-right and pair values with the same orientation.
         let (lo_beat, hi_beat, lo_val, hi_val) = if anchor_beat <= cur_beat {
@@ -3921,16 +4154,16 @@ impl PianoRoll {
     fn build_cc_points(&self, cx: &Context<Self>, clip_id: &str) -> Vec<gpui::AnyElement> {
         let (view_w, cc_h) = self.cc_view_size();
         let kind = self.active_cc;
-        let pts: Vec<(f32, f32)> = self
+        let pts: Vec<(u64, f32, f32)> = self
             .timeline
             .read(cx)
             .state
             .controller_lane_points(clip_id, kind)
-            .map(|ps| ps.iter().map(|p| (p.beat, p.value)).collect())
+            .map(|ps| ps.iter().map(|p| (p.id, p.beat, p.value)).collect())
             .unwrap_or_default();
         let accent = Colors::accent_primary();
         pts.into_iter()
-            .filter_map(|(beat, value)| {
+            .filter_map(|(id, beat, value)| {
                 let x = self.beat_to_x(beat);
                 if x < -6.0 || x > view_w + 6.0 {
                     return None;
@@ -3938,30 +4171,35 @@ impl PianoRoll {
                 let y = (1.0 - value) * (cc_h - 6.0) + 3.0;
                 Some(
                     div()
+                        .id(("pr-cc-point", id as usize))
                         .absolute()
-                        .left(px(x - 3.0))
+                        .left(px(x - 5.0))
                         .top_0()
-                        .w(px(6.0))
+                        .w(px(10.0))
                         .h_full()
+                        .cursor(gpui::CursorStyle::ResizeUpDown)
+                        .hover(|s| s.bg(Colors::with_alpha(Colors::accent_primary(), 0.08)))
                         // Stem from the point down to the lane floor.
                         .child(
                             div()
                                 .absolute()
-                                .left(px(2.0))
+                                .left(px(4.0))
                                 .top(px(y))
                                 .w(px(2.0))
                                 .bottom(px(0.0))
-                                .bg(Colors::with_alpha(accent, 0.35)),
+                                .bg(Colors::with_alpha(accent, 0.45)),
                         )
                         // Point dot.
                         .child(
                             div()
                                 .absolute()
-                                .left(px(0.0))
-                                .top(px(y - 3.0))
-                                .w(px(6.0))
-                                .h(px(6.0))
-                                .rounded(px(3.0))
+                                .left(px(1.0))
+                                .top(px(y - 4.0))
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .rounded(px(4.0))
+                                .border(px(1.0))
+                                .border_color(Colors::text_primary())
                                 .bg(accent),
                         )
                         .into_any_element(),
@@ -3981,6 +4219,23 @@ impl PianoRoll {
     ) -> impl IntoElement {
         let grid = self.build_velocity_grid(start_beat, end_beat, bpb);
         let points = self.build_cc_points(cx, clip_id);
+        let is_empty = points.is_empty();
+        let value_chip_el = matches!(
+            self.drag,
+            PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. }
+        )
+        .then(|| value_chip(self.drag_value_status.as_deref().unwrap_or("CC"), 8.0, 8.0));
+        let empty_state = is_empty.then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(9.0))
+                .text_color(Colors::text_faint())
+                .child("Click to draw controller points · Shift-drag for line")
+        });
         let cc_bounds = self.cc_bounds.clone();
         let canvas = canvas(
             move |bounds, _w, _cx| cc_bounds.set(Some(bounds)),
@@ -4001,6 +4256,8 @@ impl PianoRoll {
             .child(canvas)
             .children(grid)
             .children(points)
+            .children(empty_state)
+            .children(value_chip_el)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
@@ -4035,11 +4292,72 @@ impl PianoRoll {
 }
 
 // ── Small toolbar helpers ───────────────────────────────────────────────────
-fn divider() -> impl IntoElement {
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn note_count_for_clip(
+    cx: &Context<PianoRoll>,
+    timeline: &Entity<Timeline>,
+    clip_id: &str,
+) -> usize {
+    timeline
+        .read(cx)
+        .state
+        .midi_clip_notes(clip_id)
+        .map(|notes| notes.len())
+        .unwrap_or(0)
+}
+
+fn controller_display_value(kind: MidiControllerKind, value: f32) -> String {
+    match kind {
+        MidiControllerKind::PitchBend => {
+            let semis = (value.clamp(0.0, 1.0) * 2.0 - 1.0) * 2.0;
+            format!("{semis:+.2} st")
+        }
+        _ => format!("{}", (value.clamp(0.0, 1.0) * 127.0).round() as i32),
+    }
+}
+
+fn value_chip(label: &str, left: f32, top: f32) -> impl IntoElement {
     div()
-        .w(px(1.0))
-        .h(px(16.0))
-        .bg(Colors::with_alpha(Colors::text_primary(), 0.08))
+        .absolute()
+        .left(px(left))
+        .top(px(top))
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded_md()
+        .bg(Colors::surface_card())
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .text_size(px(9.0))
+        .text_color(Colors::text_primary())
+        .child(label.to_string())
+}
+
+fn toolbar_group(label: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(3.0))
+        .py(px(2.0))
+        .rounded_md()
+        .bg(Colors::surface_panel_alt())
+        .border(px(1.0))
+        .border_color(Colors::divider())
+        .child(
+            div()
+                .px(px(3.0))
+                .text_size(px(8.0))
+                .text_color(Colors::text_faint())
+                .child(label),
+        )
 }
 
 fn tool_btn(

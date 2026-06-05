@@ -50,6 +50,30 @@ pub fn automation_debug_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_AUTOMATION_DEBUG").is_some())
 }
 
+/// `FUTUREBOARD_AUTOMATION_SYNC_DEBUG=1` enables `[automation-sync]` traces that
+/// follow Track Volume automation through the base/effective model: which beat
+/// was evaluated, the resolved value, and the before/after effective volume with
+/// the edit reason (playback_tick / seek / point_edit / fader_drag). Cached on
+/// first read. Separate from `FUTUREBOARD_AUTOMATION_DEBUG` so the high-volume
+/// sync trace can be enabled on its own.
+pub fn automation_sync_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_AUTOMATION_SYNC_DEBUG").is_some())
+}
+
+/// Origin of a track volume change, so the base/effective model can route the
+/// write correctly and never let an automation-follow display update masquerade
+/// as a user fader edit (which would fight automation / spam dirty).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeUpdateSource {
+    /// User dragged the mixer/track-header/inspector fader — edits base only.
+    UserFader,
+    /// Automation read at the playhead — edits effective only.
+    AutomationRead,
+    /// Project load / programmatic reset — sets base and effective together.
+    ProjectLoad,
+}
+
 /// Monotonic source of transient automation-point identities. Like MIDI note
 /// ids these are NOT persisted — they only let the lane editor track selection
 /// and in-flight drag targets across edits. Fresh ids are minted on create and
@@ -728,9 +752,22 @@ pub struct TrackState {
     pub name: String,
     pub track_type: TrackType,
     pub color: gpui::Rgba,
-    /// Normalized fader position in `0.0..=1.0`. `1.0` is the top of the fader
-    /// (≈ +6 dB) and `0.0` is the bottom (≈ -60 dB). See `Volume::norm_to_db`.
+    /// Manual/base normalized fader position in `0.0..=1.0`. `1.0` is the top of
+    /// the fader (≈ +6 dB) and `0.0` is the bottom (≈ -60 dB). See
+    /// `Volume::norm_to_db`. This is the value the user sets directly and the
+    /// value persisted as `volume_norm`; Track Volume automation does NOT write
+    /// here — it drives [`Self::volume_effective`] instead.
     pub volume: f32,
+    /// Automation-evaluated effective volume at the current playhead. UI-only and
+    /// not persisted — recomputed from the Track Volume automation lane on
+    /// playback ticks, seeks, and point edits (see
+    /// [`TimelineState::recompute_effective_volumes`]). Equals [`Self::volume`]
+    /// whenever automation read is off or there is no active volume automation.
+    pub volume_effective: f32,
+    /// Whether Track Volume automation drives the effective volume / display.
+    /// UI-only, not persisted; defaults to `true` so existing automated projects
+    /// follow their curves on load.
+    pub volume_automation_read: bool,
     /// Pan position in `-1.0..=1.0`. `-1.0` is hard left, `+1.0` is hard right.
     pub pan: f32,
     pub muted: bool,
@@ -768,6 +805,29 @@ pub struct TrackState {
 }
 
 impl TrackState {
+    /// `true` when this track has an enabled Track Volume automation lane that
+    /// actually carries points — i.e. automation can resolve a value.
+    pub fn has_active_volume_automation(&self) -> bool {
+        self.automation_lanes.iter().any(|l| {
+            l.enabled
+                && matches!(l.target, AutomationTarget::TrackVolume)
+                && !l.points.is_empty()
+        })
+    }
+
+    /// The normalized volume the UI fader / readout should display: the
+    /// automation-evaluated effective value when automation read is active and a
+    /// volume lane exists, otherwise the manual/base value. Faders still WRITE
+    /// the base via [`TimelineState::set_track_volume`] — this is display only,
+    /// so an automation-follow repaint can never be mistaken for a user edit.
+    pub fn display_volume(&self) -> f32 {
+        if self.volume_automation_read && self.has_active_volume_automation() {
+            self.volume_effective
+        } else {
+            self.volume
+        }
+    }
+
     pub fn instrument_insert(&self) -> Option<&InsertSlotState> {
         if self.track_type == TrackType::Instrument {
             self.inserts.first()
@@ -1131,6 +1191,8 @@ impl TimelineState {
             track_type: TrackType::Audio,
             color: crate::theme::Colors::track_color_for_index(0),
             volume: volume::db_to_norm(-3.0),
+            volume_effective: volume::db_to_norm(-3.0),
+            volume_automation_read: true,
             pan: 0.0,
             muted: false,
             solo: false,
@@ -1198,6 +1260,8 @@ impl TimelineState {
             track_type: TrackType::Audio,
             color: crate::theme::Colors::track_color_for_index(1),
             volume: volume::db_to_norm(-6.0),
+            volume_effective: volume::db_to_norm(-6.0),
+            volume_automation_read: true,
             pan: -0.2,
             muted: false,
             solo: false,
@@ -1237,6 +1301,8 @@ impl TimelineState {
             track_type: TrackType::Midi,
             color: crate::theme::Colors::track_color_for_index(2),
             volume: volume::db_to_norm(-1.5),
+            volume_effective: volume::db_to_norm(-1.5),
+            volume_automation_read: true,
             pan: 0.3,
             muted: false,
             solo: false,
@@ -2344,6 +2410,26 @@ impl TimelineState {
         true
     }
 
+    /// Remove a controller lane only when it has no points. This backs the MIDI
+    /// editor's safe "Remove lane" action and prevents accidental data loss.
+    pub fn remove_empty_controller_lane(
+        &mut self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+    ) -> bool {
+        let Some(lanes) = self.controller_lanes_mut(clip_id) else {
+            return false;
+        };
+        let Some(index) = lanes
+            .iter()
+            .position(|lane| lane.kind == kind && lane.points.is_empty())
+        else {
+            return false;
+        };
+        lanes.remove(index);
+        true
+    }
+
     fn sort_lane_points(points: &mut [MidiControllerPoint]) {
         points.sort_by(|a, b| {
             a.beat
@@ -2511,6 +2597,8 @@ impl TimelineState {
             track_type,
             color: options.color,
             volume: options.volume.clamp(0.0, 1.0),
+            volume_effective: options.volume.clamp(0.0, 1.0),
+            volume_automation_read: true,
             pan: options.pan.clamp(-1.0, 1.0),
             muted: false,
             solo: false,
@@ -2549,10 +2637,90 @@ impl TimelineState {
         self.master.volume = norm.clamp(0.0, 1.0);
     }
 
+    /// Set a track's manual/base fader volume (the `UserFader` path). When
+    /// automation read is off — or there is no active volume automation — the
+    /// effective volume follows the base immediately so the display and runtime
+    /// track the fader. When automation read is on with an active lane, base is
+    /// updated underneath but effective stays automation-driven (DAW behavior).
     pub fn set_track_volume(&mut self, track_id: &str, norm: f32) {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
-            t.volume = norm.clamp(0.0, 1.0);
+            let v = norm.clamp(0.0, 1.0);
+            t.volume = v;
+            if !(t.volume_automation_read && t.has_active_volume_automation()) {
+                t.volume_effective = v;
+            }
+            if automation_sync_debug_enabled() {
+                eprintln!(
+                    "[automation-sync] target=TrackVolume({}) base={:.3}({}) effective={:.3} reason=fader_drag",
+                    t.id,
+                    v,
+                    volume::format_db(v),
+                    t.volume_effective,
+                );
+            }
         }
+    }
+
+    /// Toggle whether Track Volume automation drives this track's effective
+    /// value. Returns `true` if the flag changed. The caller should follow with
+    /// [`Self::recompute_effective_volumes`] at the current playhead so the
+    /// fader/inspector preview updates immediately.
+    pub fn set_track_volume_automation_read(&mut self, track_id: &str, read: bool) -> bool {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            if t.volume_automation_read != read {
+                t.volume_automation_read = read;
+                if !read {
+                    t.volume_effective = t.volume;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Recompute every track's effective volume from its Track Volume automation
+    /// lane at `beat`. UI-only: faders/inspector read [`TrackState::display_volume`]
+    /// which prefers the effective value. Returns `true` if any effective value
+    /// changed (so the caller can `notify`). `reason` is only used for the
+    /// `[automation-sync]` trace and should be one of `playback_tick`, `seek`,
+    /// or `point_edit`.
+    pub fn recompute_effective_volumes(&mut self, beat: f32, reason: &str) -> bool {
+        let debug = automation_sync_debug_enabled();
+        let mut changed = false;
+        for track in &mut self.tracks {
+            let resolved = track
+                .automation_lanes
+                .iter()
+                .find(|l| {
+                    l.enabled
+                        && matches!(l.target, AutomationTarget::TrackVolume)
+                        && !l.points.is_empty()
+                })
+                .map(|l| evaluate_automation(&l.points, beat as f64, l.target.default_value()));
+            let new_effective = match (track.volume_automation_read, resolved) {
+                (true, Some(v)) => v,
+                _ => track.volume,
+            };
+            if (track.volume_effective - new_effective).abs() > 1.0e-5 {
+                if debug {
+                    eprintln!(
+                        "[automation-sync] target=TrackVolume({}) beat={:.3} value={:.3}({}) base={:.3}({}) effective {:.3}→{:.3} reason={}",
+                        track.id,
+                        beat,
+                        new_effective,
+                        volume::format_db(new_effective),
+                        track.volume,
+                        volume::format_db(track.volume),
+                        track.volume_effective,
+                        new_effective,
+                        reason,
+                    );
+                }
+                track.volume_effective = new_effective;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Rename a track. Trims surrounding whitespace and ignores an
@@ -3242,6 +3410,10 @@ impl TimelineState {
                 lane_id, beat, value
             );
         }
+        // Preview the edited curve at the playhead so the fader/inspector follow
+        // a Track Volume point edit immediately (even while stopped).
+        let playhead = self.transport.playhead_beats;
+        self.recompute_effective_volumes(playhead, "point_edit");
         Some(id)
     }
 
@@ -3269,6 +3441,8 @@ impl TimelineState {
                 lane_id, point_id, beat, value
             );
         }
+        let playhead = self.transport.playhead_beats;
+        self.recompute_effective_volumes(playhead, "point_edit");
     }
 
     /// Set a point's curve type. Committed edit.

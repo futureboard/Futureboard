@@ -852,7 +852,8 @@ fn fader_area(
     callbacks: &MixerCallbacks,
     is_selected: bool,
 ) -> impl IntoElement {
-    let db_str = volume::format_db(track.volume);
+    let display_vol = track.display_volume();
+    let db_str = volume::format_db(display_vol);
     let track_id = track.id.clone();
     let vol_cb = callbacks.on_volume_change.clone();
     let on_vol_change = move |new_norm: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
@@ -890,7 +891,7 @@ fn fader_area(
                         .justify_center()
                         .child(render_fader(
                             format!("mix-fader-{}", track.id),
-                            track.volume,
+                            display_vol,
                             track.color,
                             on_vol_change,
                         )),

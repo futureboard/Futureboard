@@ -71,6 +71,7 @@ pub struct RecordingSession {
     pub sample_rate: u32,
     pub track_count: usize,
     pub recording_active: Arc<AtomicBool>,
+    pub dropped_blocks: Arc<AtomicU64>,
     pub started_at: std::time::Instant,
     pub shared: Arc<crate::engine::SharedState>,
 }
@@ -276,6 +277,7 @@ fn build_f32_input_stream(
     config: &cpal::StreamConfig,
     tx: crossbeam_channel::Sender<Vec<f32>>,
     active: Arc<AtomicBool>,
+    dropped_blocks: Arc<AtomicU64>,
     shared: Arc<crate::engine::SharedState>,
     channels: usize,
 ) -> Result<cpal::Stream, SphereAudioError> {
@@ -286,7 +288,9 @@ fn build_f32_input_stream(
                 if active.load(Ordering::Relaxed) {
                     // `to_vec()` allocates once per block — not in the output hot path,
                     // so occasional allocation here is acceptable for recording.
-                    let _ = tx.try_send(data.to_vec());
+                    if tx.try_send(data.to_vec()).is_err() {
+                        dropped_blocks.fetch_add(1, Ordering::Relaxed);
+                    }
                     if shared.recording_monitor_mix.load(Ordering::Relaxed) && channels >= 2 {
                         let frames = data.len() / channels.max(1);
                         if frames > 0 {
@@ -400,6 +404,7 @@ pub fn start_recording(
 
     // AtomicBool: the input callback checks this before sending.
     let recording_active = Arc::new(AtomicBool::new(true));
+    let dropped_blocks = Arc::new(AtomicU64::new(0));
     shared.recording_active.store(true, Ordering::Relaxed);
     shared
         .recording_monitor_mix
@@ -411,6 +416,7 @@ pub fn start_recording(
         &stream_config,
         audio_tx,
         Arc::clone(&recording_active),
+        Arc::clone(&dropped_blocks),
         Arc::clone(&shared),
         input_ch,
     )?;
@@ -431,6 +437,7 @@ pub fn start_recording(
         sample_rate,
         track_count,
         recording_active,
+        dropped_blocks,
         started_at: std::time::Instant::now(),
         shared,
     })
@@ -450,13 +457,14 @@ pub fn stop_recording(
         .shared
         .recording_monitor_mix
         .store(false, Ordering::Relaxed);
+    let dropped_blocks = session.dropped_blocks.load(Ordering::Relaxed);
 
     // Dropping the stream disconnects `audio_tx` (it lived inside the closure),
     // which causes `audio_rx.recv()` in the disk writer to return Err → loop exits.
     drop(session._input_stream);
 
     // Wait up to 60 s for the disk writer to flush and finalize.
-    let results = session
+    let mut results = session
         .results_rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .map_err(|e| {
@@ -467,6 +475,15 @@ pub fn stop_recording(
         "[SphereAudio] Recording stopped: {} file(s) finalized",
         results.len()
     );
+
+    if dropped_blocks > 0 {
+        for result in &mut results {
+            result.success = false;
+            result.error = Some(format!(
+                "Recording writer could not keep up; dropped {dropped_blocks} input block(s)"
+            ));
+        }
+    }
 
     Ok(results
         .into_iter()

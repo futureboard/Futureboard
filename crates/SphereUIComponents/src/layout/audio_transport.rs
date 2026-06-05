@@ -78,9 +78,17 @@ impl StudioLayout {
         self.audio_running = stats.running;
         self.audio_last_error = stats.last_error.clone();
 
-        let engine_beat = stats.position_beats as f32;
-        self.last_engine_playhead_beat = engine_beat.max(0.0);
-        self.last_engine_sync = Instant::now();
+        let engine_beat = stats.position_beats.max(0.0) as f32;
+        let sync_changed = (engine_beat - self.last_engine_playhead_beat).abs() > 0.0001
+            || self
+                .audio_stats
+                .as_ref()
+                .map(|previous| previous.transport_playing != stats.transport_playing)
+                .unwrap_or(true);
+        if sync_changed {
+            self.last_engine_playhead_beat = engine_beat;
+            self.last_engine_sync = Instant::now();
+        }
         self.apply_engine_meters(cx);
 
         if stats.transport_playing {

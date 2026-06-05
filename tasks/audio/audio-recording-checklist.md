@@ -101,7 +101,7 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 
 - [x] Dedicated disk-writer thread; bounded channel; no I/O in audio callback.
 - [x] Float32 WAV; header placeholder + finalize; temp→final rename.
-- [~] Ring-buffer overflow → user-visible error (currently silent `try_send` drop).
+- [x] Ring-buffer overflow → atomic dropped-block counter; stop/finalize surfaces user-visible error and prevents silent bad clips.
 - [ ] 24-bit PCM option (later).
 
 ## Phase K — Engine Input Capture

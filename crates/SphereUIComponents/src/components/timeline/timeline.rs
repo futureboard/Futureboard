@@ -11,9 +11,11 @@ use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, AppContext, Context, Empty, ExternalPaths, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollDelta, StatefulInteractiveElement, Styled, Subscription, Window,
+    div, pulsating_between, px, svg, Animation, AnimationExt, AppContext, Context, Empty,
+    ExternalPaths, InteractiveElement, IntoElement, ParentElement, Render, ScrollDelta,
+    StatefulInteractiveElement, Styled, Subscription, Window,
 };
+use std::time::Duration;
 
 /// App chrome (top titlebar/menu strip) — used to convert window-space y into
 /// the timeline track area. Mirrors the value used by app_chrome.
@@ -31,6 +33,20 @@ pub struct TimelineChromeMetrics {
     pub inspector_width: f32,
     pub bottom_panel_height: f32,
     pub status_bar_height: f32,
+}
+
+/// Live pen-tool MIDI clip draw. Held only while the gesture is in flight
+/// (mouse-down → mouse-up); the real clip is created once on release. `start_beat`
+/// is snapped at mouse-down; `current_beat` tracks the snapped cursor while
+/// dragging so the ghost preview and the committed clip share one set of bounds.
+#[derive(Clone, Debug)]
+struct ClipDrawPreview {
+    track_id: String,
+    start_beat: f32,
+    current_beat: f32,
+    /// `true` once the cursor has moved past the start — distinguishes a plain
+    /// click (default-length clip) from a drag (sized clip).
+    dragging: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -71,8 +87,8 @@ pub struct Timeline {
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
-    /// Pen-tool click-drag: `(track_id, start_beat)` until mouse-up creates the clip.
-    pen_clip_draw: Option<(String, f32)>,
+    /// Pen-tool click-drag MIDI clip preview, live until mouse-up creates the clip.
+    pen_clip_draw: Option<ClipDrawPreview>,
     /// Pointer-tool empty-lane marquee. Rule: Pointer + empty lane drag starts
     /// replace-marquee; Ctrl/Cmd + Pointer + empty lane drag starts additive
     /// marquee. Clips, rulers, toolbar controls, and non-pointer tools never
@@ -340,12 +356,11 @@ impl Timeline {
     }
 
     fn finish_pen_midi_clip(&mut self, end_beat: f32, cx: &mut gpui::Context<Self>) {
-        use crate::components::timeline::timeline_state::{
-            TrackType, DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS,
-        };
-        let Some((track_id, start_beat)) = self.pen_clip_draw.take() else {
+        use crate::components::timeline::timeline_state::{TrackType, MIN_MIDI_CLIP_BEATS};
+        let Some(preview) = self.pen_clip_draw.take() else {
             return;
         };
+        let track_id = preview.track_id;
         let track_type = self
             .state
             .tracks
@@ -361,15 +376,9 @@ impl Timeline {
             let (lo, hi) = normalize_range(range_start, range_end);
             (lo, (hi - lo).max(MIN_MIDI_CLIP_BEATS))
         } else {
-            let (lo, hi) = normalize_range(start_beat, end_beat);
-            let mut len = (hi - lo).max(DEFAULT_MIDI_CLIP_BEATS);
-            if self.state.snap_to_grid {
-                let step = self.state.midi_snap_step_beats();
-                len = ((len / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
-            } else {
-                len = len.max(MIN_MIDI_CLIP_BEATS);
-            }
-            (lo, len)
+            // Commit exactly what the ghost preview showed: same start + snapped
+            // length helper, fed the live end beat from release.
+            compute_pen_clip_span(&self.state, preview.start_beat, end_beat)
         };
 
         if let Some(clip) = self.state.build_midi_clip(&track_id, clip_start, length) {
@@ -956,7 +965,13 @@ impl Render for Timeline {
                 }
                 Some(TrackType::Midi | TrackType::Instrument) => {
                     if this.state.active_tool == TimelineTool::Pen {
-                        this.pen_clip_draw = Some((track_id.clone(), *beat));
+                        let start = this.snap_beat(*beat);
+                        this.pen_clip_draw = Some(ClipDrawPreview {
+                            track_id: track_id.clone(),
+                            start_beat: start,
+                            current_beat: start,
+                            dragging: false,
+                        });
                     }
                 }
                 Some(TrackType::Bus | TrackType::Return | TrackType::Master) | None => {}
@@ -1092,6 +1107,23 @@ impl Render for Timeline {
                     }
                 }
                 cx.notify();
+            } else if event.pressed_button == Some(gpui::MouseButton::Left)
+                && this.state.active_tool == TimelineTool::Pen
+                && this.pen_clip_draw.is_some()
+            {
+                // Live MIDI clip draw: track the snapped cursor beat so the ghost
+                // preview expands/shrinks in real time. No project mutation —
+                // the real clip is created once on release.
+                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                if let Some(preview) = this.pen_clip_draw.as_mut() {
+                    if (beat - preview.current_beat).abs() > f32::EPSILON {
+                        preview.current_beat = beat;
+                        if (beat - preview.start_beat).abs() > f32::EPSILON {
+                            preview.dragging = true;
+                        }
+                        cx.notify();
+                    }
+                }
             }
         });
 
@@ -1342,6 +1374,12 @@ impl Render for Timeline {
         };
 
         let state = &self.state;
+        // Live pen-draw ghost clip (built before the chain to keep the borrow of
+        // `self.pen_clip_draw` separate from the render closures).
+        let pen_preview_overlay = self
+            .pen_clip_draw
+            .as_ref()
+            .and_then(|preview| pen_clip_draw_overlay(preview, state));
         let on_zoom_in_btn = on_zoom_in.clone();
         let on_zoom_out_btn = on_zoom_out.clone();
 
@@ -1661,6 +1699,18 @@ impl Render for Timeline {
             // lane content but below the playhead/tools so it never hides the
             // playhead. Follows zoom/scroll via the same lane coordinate space.
             .children(arrangement_range_overlay(state).map(|overlay| {
+                div()
+                    .absolute()
+                    .left(px(HEADER_WIDTH))
+                    .right_0()
+                    .top(px(RULER_HEIGHT))
+                    .bottom_0()
+                    .overflow_hidden()
+                    .child(overlay)
+            }))
+            // Live pen-draw MIDI clip ghost preview (same lane coordinate space
+            // as the arrangement overlay; above content, below the playhead).
+            .children(pen_preview_overlay.map(|overlay| {
                 div()
                     .absolute()
                     .left(px(HEADER_WIDTH))
@@ -1996,6 +2046,177 @@ fn horizontal_scrollbar(
 /// the engine or marks the project dirty. Spans the affected tracks vertically
 /// and the selected beat span horizontally. Non-interactive so it does not
 /// intercept lane drags. Returns `None` when no range is active.
+/// Resolve a pen-draw gesture's `(start_beat, end_beat)` into the final
+/// `(clip_start, length_beats)` that will be committed — snapping the length to
+/// the MIDI grid when snap is on and clamping to the minimum clip length. Shared
+/// by the live ghost preview and the commit so they can never disagree.
+fn compute_pen_clip_span(state: &TimelineState, start_beat: f32, end_beat: f32) -> (f32, f32) {
+    use crate::components::timeline::timeline_state::{
+        DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS,
+    };
+    let (lo, hi) = normalize_range(start_beat, end_beat);
+    let mut len = (hi - lo).max(DEFAULT_MIDI_CLIP_BEATS);
+    if state.snap_to_grid {
+        let step = state.midi_snap_step_beats().max(1.0e-3);
+        len = ((len / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
+    } else {
+        len = len.max(MIN_MIDI_CLIP_BEATS);
+    }
+    (lo, len)
+}
+
+/// Human-readable musical length, e.g. `1 bar`, `4 bars`, `2.5 bars`, `3.0 bt`.
+fn format_clip_length(length_beats: f32, beats_per_bar: f32) -> String {
+    let bpb = beats_per_bar.max(1.0);
+    let bars = length_beats / bpb;
+    if (bars - bars.round()).abs() < 1.0e-3 && bars >= 1.0 {
+        let n = bars.round() as i32;
+        format!("{} bar{}", n, if n == 1 { "" } else { "s" })
+    } else if bars >= 1.0 {
+        format!("{:.1} bars", bars)
+    } else {
+        format!("{:.1} bt", length_beats)
+    }
+}
+
+/// Live ghost-clip overlay for the in-flight pen MIDI clip draw. Translucent,
+/// track-colored, with a pulsing outline and a floating length/range label so
+/// the user sees the exact bounds and musical length before releasing.
+fn pen_clip_draw_overlay(
+    preview: &ClipDrawPreview,
+    state: &TimelineState,
+) -> Option<gpui::AnyElement> {
+    let track_index = state.tracks.iter().position(|t| t.id == preview.track_id)?;
+    let track_color = state.tracks[track_index].color;
+
+    let (clip_start, length) =
+        compute_pen_clip_span(state, preview.start_beat, preview.current_beat);
+    let clip_end = clip_start + length;
+
+    let x_lo = state.beats_to_x(clip_start);
+    let width = (state.beats_to_x(clip_end) - x_lo).max(2.0);
+    let pad = 7.0;
+    let top = track_index as f32 * TRACK_HEIGHT - state.viewport.scroll_y + pad;
+    let height = (TRACK_HEIGHT - pad * 2.0).max(1.0);
+
+    let bpb = state.beats_per_bar();
+    let length_label = format_clip_length(length, bpb);
+    let range_label = format!(
+        "{} → {}",
+        state.format_bar_beat(clip_start),
+        state.format_bar_beat(clip_end)
+    );
+
+    let ghost_fill = Colors::with_alpha(track_color, 0.16);
+    let label_text = Colors::with_alpha(Colors::text_primary(), 0.92);
+
+    // Ghost clip body — translucent track-colored fill with a pulsing outline so
+    // it reads as "in creation". The pulse animates on its own frames, so it
+    // stays alive even when the cursor is held still.
+    let body = div()
+        .absolute()
+        .left(px(x_lo))
+        .top(px(top))
+        .w(px(width))
+        .h(px(height))
+        .rounded_md()
+        .bg(ghost_fill)
+        .border(px(1.0))
+        .border_color(Colors::with_alpha(track_color, 0.85))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .justify_between()
+        // Title placeholder.
+        .child(
+            div()
+                .px(px(6.0))
+                .pt(px(4.0))
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(label_text)
+                .truncate()
+                .child("New MIDI Clip"),
+        )
+        // Bottom length readout, mirroring the committed clip's label bar.
+        .child(
+            div()
+                .h(px(14.0))
+                .w_full()
+                .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.85))
+                .border_t(px(1.0))
+                .border_color(Colors::divider())
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .justify_end()
+                .text_size(px(8.0))
+                .text_color(Colors::text_secondary())
+                .child(format!("{:.1} bt", length)),
+        )
+        .with_animation(
+            "pen-clip-draw-pulse",
+            Animation::new(Duration::from_millis(1100))
+                .repeat()
+                .with_easing(pulsating_between(0.35, 0.85)),
+            move |this, delta| this.border_color(Colors::with_alpha(track_color, delta)),
+        );
+
+    // Floating musical-length label, pinned just above the ghost clip (or below
+    // it when the clip sits at the very top of the lane area).
+    let label_below = top < 26.0;
+    let label = div()
+        .absolute()
+        .left(px(x_lo + 2.0))
+        .map(|el| {
+            if label_below {
+                el.top(px(top + height + 4.0))
+            } else {
+                el.top(px((top - 22.0).max(0.0)))
+            }
+        })
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded_md()
+        .bg(Colors::with_alpha(Colors::surface_panel(), 0.96))
+        .border(px(1.0))
+        .border_color(Colors::with_alpha(track_color, 0.6))
+        .shadow_lg()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(9.0))
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(label_text)
+                .child(length_label),
+        )
+        .child(div().text_color(Colors::text_muted()).child(range_label));
+
+    // Subtle full-height guide at the clip end so the snapped end position reads
+    // clearly against the grid.
+    let end_x = state.beats_to_x(clip_end);
+    let end_guide = div()
+        .absolute()
+        .left(px((end_x - 0.5).max(0.0)))
+        .top_0()
+        .bottom_0()
+        .w(px(1.0))
+        .bg(Colors::with_alpha(track_color, 0.45));
+
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .child(end_guide)
+            .child(body)
+            .child(label)
+            .into_any_element(),
+    )
+}
+
 fn arrangement_range_overlay(state: &TimelineState) -> Option<gpui::AnyElement> {
     let range = state.arrangement_range.as_ref()?;
     let (start_beat, end_beat) = range.as_f32_range();

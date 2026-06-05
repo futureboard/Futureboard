@@ -61,6 +61,32 @@ pub(super) fn key_debug() -> bool {
     std::env::var_os("FUTUREBOARD_KEY_DEBUG").is_some()
 }
 
+/// `FUTUREBOARD_EDIT_COMMAND_DEBUG=1` traces edit-command routing (resolved
+/// command, target editor, no-op reason). Cached on first read.
+pub(super) fn edit_command_debug() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_EDIT_COMMAND_DEBUG").is_some())
+}
+
+/// The Ctrl/Cmd+A/C/V/X and Delete/Backspace command family that both the
+/// timeline and the MIDI editor implement. When the MIDI editor holds focus the
+/// `StudioLayout` global handler must NOT dispatch these as timeline commands —
+/// it lets the event bubble to the piano roll's own `on_key_down` instead, so
+/// Ctrl+A selects notes (not clips) and Delete removes notes (not tracks/clips).
+pub(super) fn is_midi_routable_edit_command(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "edit:select-all"
+            | "edit:copy"
+            | "edit:cut"
+            | "edit:paste"
+            | "edit:duplicate"
+            | "edit:delete"
+            | "clip:delete"
+            | "clip:duplicate"
+    )
+}
+
 pub(super) fn is_text_input_key(event: &KeyDownEvent) -> bool {
     let key = event.keystroke.key.as_str();
     let mods = event.keystroke.modifiers;

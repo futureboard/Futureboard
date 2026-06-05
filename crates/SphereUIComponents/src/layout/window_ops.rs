@@ -290,6 +290,30 @@ impl StudioLayout {
         }
         available_outputs = dedupe_preserve_order(&available_outputs);
 
+        // (device name, channel count) for the read-only channel lists (Phase C).
+        let available_input_channels: Vec<(String, u32)> = self
+            .audio_engine
+            .as_ref()
+            .map(|engine| {
+                engine
+                    .list_input_devices()
+                    .into_iter()
+                    .map(|d| (d.name, d.channels))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let available_output_channels: Vec<(String, u32)> = self
+            .audio_engine
+            .as_ref()
+            .map(|engine| {
+                engine
+                    .list_output_devices()
+                    .into_iter()
+                    .map(|d| (d.name, d.channels))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let available_backends = vec![
             "WASAPI Exclusive".to_string(),
             "WASAPI Shared".to_string(),
@@ -322,6 +346,8 @@ impl StudioLayout {
             available_inputs,
             available_outputs,
             available_backends,
+            available_input_channels,
+            available_output_channels,
             latency_provider,
             on_update,
             cx,

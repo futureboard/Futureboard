@@ -421,6 +421,13 @@ impl PianoRoll {
         self.selection.len()
     }
 
+    /// `true` when this editor's grid currently holds keyboard focus. Used by
+    /// `StudioLayout` to route Ctrl+A/C/V/X/Delete to the MIDI editor (its own
+    /// `on_key_down`) instead of the timeline clip commands.
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     pub fn grid_label(&self) -> &'static str {
         self.grid_res.label()
     }
@@ -1567,6 +1574,15 @@ impl PianoRoll {
             "c" if ctrl => {
                 cx.stop_propagation();
                 self.copy_selection(cx);
+            }
+            "x" if ctrl => {
+                // Cut = copy then delete the selection. `delete_selection` records
+                // one undoable edit, so the cut is a single undo step.
+                cx.stop_propagation();
+                if !self.selection.is_empty() {
+                    self.copy_selection(cx);
+                    self.delete_selection(cx);
+                }
             }
             "v" if ctrl && shift => {
                 cx.stop_propagation();

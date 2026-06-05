@@ -828,6 +828,10 @@ impl Render for StudioLayout {
         };
         let (status_left, status_right) = self.status_text();
         let shortcut_target = cx.entity().clone();
+        // Docked MIDI editor — consulted in the key handler so Ctrl+A/C/V/X and
+        // Delete route to the piano roll (its own `on_key_down`) when it holds
+        // focus, instead of the global timeline clip commands.
+        let midi_editor = self.piano_roll.clone();
 
         // Keep keyboard focus on our shortcut anchor so transport shortcuts
         // (Space, Enter, L, K, R, Home) reach `capture_key_down` below. GPUI
@@ -917,6 +921,22 @@ impl Render for StudioLayout {
                 }
                 let command_id = shortcut_target.read(cx).shortcut_command_id(event);
                 if let Some(command_id) = command_id {
+                    // MIDI editor focus gate: when the docked piano roll holds
+                    // keyboard focus, the A/C/V/X/Delete family belongs to it.
+                    // Skip global dispatch (which would target timeline clips and
+                    // could nested-update) and let the event bubble to the piano
+                    // roll's `on_key_down`. See PART D/E of the shortcuts task.
+                    if is_midi_routable_edit_command(&normalize_command_id(&command_id))
+                        && midi_editor.read(cx).is_focused(window)
+                    {
+                        if edit_command_debug() {
+                            eprintln!(
+                                "[edit-command] command={command_id} target=MidiEditor \
+                                 reason=focus-passthrough (handled by piano roll)"
+                            );
+                        }
+                        return;
+                    }
                     // Transport shortcuts go through the same dispatcher as the
                     // chrome Play button (transport:play-pause → PlayPause), so
                     // Spacebar and the button are always one command. Only the

@@ -59,8 +59,9 @@ mod window_ops;
 use engine_snapshot::volume_norm_to_linear;
 use frame_diagnostics::FrameDiagnostics;
 use helpers::{
-    find_clip_summary, is_supported_audio_ext, is_text_input_key, key_debug, normalize_command_id,
-    reveal_path, should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
+    edit_command_debug, find_clip_summary, is_midi_routable_edit_command, is_supported_audio_ext,
+    is_text_input_key, key_debug, normalize_command_id, reveal_path,
+    should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
 };
 use project_ops::LifecycleAction;
 pub use studio_state::{ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility};
@@ -501,8 +502,20 @@ impl StudioLayout {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_project_changed_callback(Some(Arc::new(move |cx| {
-                    let _ = target.update(cx, |this, _cx| {
-                        this.mark_dirty();
+                    // DEFER the parent update. This callback runs from inside
+                    // `Timeline::update` (gesture commits) AND from inside
+                    // `StudioLayout::update → timeline.update` (keyboard command
+                    // dispatch). In the latter case updating StudioLayout here
+                    // would be a nested lease on an entity already being updated
+                    // → GPUI double-lease panic. `cx.defer` runs the dirty mark
+                    // after the current update stack unwinds, which is safe for
+                    // both call paths (dirty is a flag the audio poll reads on
+                    // its own cadence). See PART B of the shortcuts task.
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |this, _cx| {
+                            this.mark_dirty();
+                        });
                     });
                 })));
             });
@@ -511,11 +524,14 @@ impl StudioLayout {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_media_changed_callback(Some(Arc::new(move |cx| {
-                    // Only mark dirty here — never read/sync Timeline from this
-                    // callback. It runs inside Timeline::update (e.g. file drop)
-                    // and sync_audio_project reads Timeline, which panics.
-                    let _ = target.update(cx, |this, _cx| {
-                        this.mark_engine_media_dirty();
+                    // Deferred for the same nested-update reason as the project
+                    // changed callback above. Only marks engine-media dirty here —
+                    // never read/sync Timeline from this callback.
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |this, _cx| {
+                            this.mark_engine_media_dirty();
+                        });
                     });
                 })));
             });
@@ -789,6 +805,9 @@ impl StudioLayout {
     ) {
         let normalized = normalize_command_id(command_id);
         let command_id = normalized.as_str();
+        if edit_command_debug() && is_midi_routable_edit_command(command_id) {
+            eprintln!("[edit-command] command={command_id} target=Timeline");
+        }
         if let Some(command) = transport_command_from_id(command_id) {
             self.dispatch_transport_command(command, cx);
             return;

@@ -52,7 +52,7 @@ impl StudioLayout {
             })
             .collect();
 
-        let (bpm, start_beat, sample_rate, input_device_name, monitor_mix) = {
+        let (bpm, start_beat, sample_rate, input_device_name) = {
             let timeline = self.timeline.read(cx);
             let settings = self.settings.read(cx);
             let armed_count = timeline
@@ -65,27 +65,25 @@ impl StudioLayout {
                 self.fail_recording_start("no armed audio tracks", cx);
                 return;
             }
-            let monitor_mix = timeline
-                .state
-                .tracks
-                .iter()
-                .filter(|t| t.armed && t.track_type == TrackType::Audio)
-                .any(|t| t.input_monitor.is_active(t.armed));
             (
                 timeline.state.bpm,
                 timeline.state.transport.playhead_beats,
                 self.current_audio_sample_rate(),
                 settings.current.hardware.audio.device_in.clone(),
-                monitor_mix,
             )
         };
 
         let selected_input_device =
             select_recording_input_device(&input_devices, &input_device_name);
 
-        let (tracks, explicit_device_id): (Vec<JsRecordingTrackConfig>, Option<String>) = {
+        let (tracks, explicit_device_id, monitor_channels): (
+            Vec<JsRecordingTrackConfig>,
+            Option<String>,
+            Vec<u32>,
+        ) = {
             let timeline = self.timeline.read(cx);
             let mut explicit_device_id: Option<String> = None;
+            let mut monitor_channels = Vec::new();
             let mut configs = Vec::new();
             for track in timeline
                 .state
@@ -117,13 +115,16 @@ impl StudioLayout {
                         _ => {}
                     }
                 }
+                if monitor_channels.is_empty() && track.input_monitor.is_active(track.armed) {
+                    monitor_channels = route.channels.clone();
+                }
                 configs.push(JsRecordingTrackConfig {
                     track_id: track.id.clone(),
                     input_channels: route.channels,
                     name: track.name.clone(),
                 });
             }
-            (configs, explicit_device_id)
+            (configs, explicit_device_id, monitor_channels)
         };
 
         let input_device_id = explicit_device_id.or_else(|| {
@@ -132,23 +133,26 @@ impl StudioLayout {
                 .map(|device| device.id.clone())
                 .or_else(|| resolve_input_device_id(engine, &input_device_name))
         });
-        let session_id = format!(
-            "rec-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+            .to_string();
+        let session_id = format!("rec-{timestamp}");
+        let project_name = self.project_switcher.current_project.name.clone();
 
         let config = JsStartRecordingConfig {
             project_root: project_root.to_string_lossy().into_owned(),
+            project_name,
             session_id,
+            timestamp,
             bpm: bpm.max(1.0) as f64,
             start_beat: start_beat.max(0.0) as f64,
             sample_rate: sample_rate.max(1),
             input_device_id,
             tracks,
-            monitor_mix,
+            monitor_mix: !monitor_channels.is_empty(),
+            monitor_channels,
         };
 
         if let Err(error) = engine.start_recording(config) {
@@ -221,6 +225,13 @@ impl StudioLayout {
         let bpm = self.timeline.read(cx).state.bpm;
         let owner = cx.entity().clone();
         let timeline = self.timeline.clone();
+        let generate_waveforms = self
+            .settings
+            .read(cx)
+            .current
+            .recording
+            .audio
+            .generate_waveform_after_record;
         let mut import_paths: Vec<(PathBuf, String)> = Vec::new();
         let mut failed_tracks: Vec<String> = Vec::new();
 
@@ -252,7 +263,9 @@ impl StudioLayout {
                     result.duration_seconds,
                     bpm,
                 );
-                import_paths.push((PathBuf::from(&result.file_path), result.file_path.clone()));
+                if generate_waveforms {
+                    import_paths.push((PathBuf::from(&result.file_path), result.file_path.clone()));
+                }
                 eprintln!(
                     "[recording] clip created id={clip_id} track={} path={}",
                     result.track_id, result.relative_path
@@ -295,7 +308,7 @@ impl StudioLayout {
 }
 
 impl StudioLayout {
-    /// `(device name, input channel count)` for the currently selected global
+    /// `(device id, input channel count)` for the currently selected global
     /// input device — used to populate the Inspector input-channel selector
     /// (roadmap Phase E). Falls back to the default input device, then the first
     /// enumerated input. `None` when the engine is unavailable or no inputs exist.
@@ -315,14 +328,14 @@ impl StudioLayout {
         let devices = engine.list_input_devices();
         if !wanted.trim().is_empty() {
             if let Some(d) = devices.iter().find(|d| d.name == wanted || d.id == wanted) {
-                return Some((d.name.clone(), d.channels));
+                return Some((d.id.clone(), d.channels));
             }
         }
         devices
             .iter()
             .find(|d| d.is_default)
             .or_else(|| devices.first())
-            .map(|d| (d.name.clone(), d.channels))
+            .map(|d| (d.id.clone(), d.channels))
     }
 
     /// `(device name, output channel count)` for the currently selected global
@@ -393,6 +406,12 @@ fn recording_input_channels_checked(
             })
         }
         TrackInputRouting::AudioDeviceChannel { device_id, channel } => {
+            if track.routing.audio_format != TrackAudioFormat::Mono {
+                return Err(format!(
+                    "{} is stereo but has a mono input route. Choose a stereo input pair.",
+                    track.name
+                ));
+            }
             let device = find_recording_input_device(devices, device_id).ok_or_else(|| {
                 format!("{} input device is unavailable: {}", track.name, device_id)
             })?;
@@ -409,6 +428,21 @@ fn recording_input_channels_checked(
         } => {
             if channels.is_empty() {
                 return Err(format!("{} has no input channels selected.", track.name));
+            }
+            match track.routing.audio_format {
+                TrackAudioFormat::Mono if channels.len() != 1 => {
+                    return Err(format!(
+                        "{} is mono but has a stereo/multi input route. Choose one input channel.",
+                        track.name
+                    ));
+                }
+                TrackAudioFormat::Stereo if channels.len() != 2 => {
+                    return Err(format!(
+                        "{} is stereo but has an incompatible input route. Choose a stereo input pair.",
+                        track.name
+                    ));
+                }
+                _ => {}
             }
             let device = find_recording_input_device(devices, device_id).ok_or_else(|| {
                 format!("{} input device is unavailable: {}", track.name, device_id)

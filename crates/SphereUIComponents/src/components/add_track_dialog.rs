@@ -248,6 +248,14 @@ impl AddTrackDialogState {
     }
 
     pub fn open_for(track_count: usize, has_master_track: bool) -> Self {
+        Self::open_for_with_monitor(track_count, has_master_track, "off")
+    }
+
+    pub fn open_for_with_monitor(
+        track_count: usize,
+        has_master_track: bool,
+        default_monitor_mode: &'static str,
+    ) -> Self {
         let next_number = track_count.saturating_add(1);
         let kind = AddTrackKind::Audio;
         Self {
@@ -270,7 +278,7 @@ impl AddTrackDialogState {
             pack_folder: false,
             channel_count: 2,
             arm_track: false,
-            monitor_mode: "off",
+            monitor_mode: valid_monitor_mode(default_monitor_mode),
             next_number,
             has_master_track,
             base_track_count: track_count,
@@ -1285,8 +1293,18 @@ impl AddTrackWindow {
         }
     }
 
-    pub fn set_context(&mut self, kind: AddTrackKind, track_count: usize, has_master: bool) {
-        let mut dialog = AddTrackDialogState::open_for(track_count, has_master);
+    pub fn set_context(
+        &mut self,
+        kind: AddTrackKind,
+        track_count: usize,
+        has_master: bool,
+        default_monitor_mode: &'static str,
+    ) {
+        let mut dialog = AddTrackDialogState::open_for_with_monitor(
+            track_count,
+            has_master,
+            default_monitor_mode,
+        );
         dialog.selected_kind = kind;
         dialog.input_label = kind.default_input().to_string();
         let i18n = I18n::new(&self.language);
@@ -1865,6 +1883,7 @@ pub fn open_add_track_window(
     kind: AddTrackKind,
     track_count: usize,
     has_master_track: bool,
+    default_monitor_mode: &'static str,
     language: impl Into<String>,
     instrument_plugins: Vec<RegistryPlugin>,
     on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
@@ -1878,7 +1897,11 @@ pub fn open_add_track_window(
 
     let language = language.into();
     let i18n = I18n::new(&language);
-    let mut state = AddTrackDialogState::open_for(track_count, has_master_track);
+    let mut state = AddTrackDialogState::open_for_with_monitor(
+        track_count,
+        has_master_track,
+        default_monitor_mode,
+    );
     state.selected_kind = kind;
     state.input_label = kind.default_input().to_string();
     state.track_name = format!("{} {}", i18n.tr(kind.label_key()), state.next_number);
@@ -1906,4 +1929,11 @@ pub fn open_add_track_window(
         })
     })
     .map_err(|e| e.to_string())
+}
+
+fn valid_monitor_mode(mode: &'static str) -> &'static str {
+    match mode {
+        "auto" | "input" => mode,
+        _ => "off",
+    }
 }

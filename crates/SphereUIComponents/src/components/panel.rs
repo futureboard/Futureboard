@@ -477,7 +477,7 @@ fn format_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl I
 fn audio_input_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
     routing_combo_trigger(
         "inspector-input-combo",
-        track.routing.input.label(),
+        audio_input_combo_label(&track.routing.input),
         InspectorRoutingCombo::AudioInput,
         callbacks.open_routing_combo,
         callbacks.on_toggle_routing_combo.clone(),
@@ -487,7 +487,7 @@ fn audio_input_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> i
 fn output_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
     routing_combo_trigger(
         "inspector-output-combo",
-        track.routing.output.label(),
+        audio_output_combo_label(&track.routing.output, track.routing.audio_format),
         InspectorRoutingCombo::AudioOutput,
         callbacks.open_routing_combo,
         callbacks.on_toggle_routing_combo.clone(),
@@ -530,25 +530,52 @@ fn build_input_routing_options(
                 },
                 _ => continue,
             };
-            out.push((format!("{name} - {}", opt.label), routing));
+            out.push((audio_input_combo_label(&routing), routing));
         }
     }
     if !out.iter().any(|(_, r)| *r == track.routing.input) {
         out.push((
-            format!("Missing - {}", track.routing.input.label()),
+            format!(
+                "Missing - {}",
+                audio_input_combo_label(&track.routing.input)
+            ),
             track.routing.input.clone(),
         ));
     }
     out
 }
 
+fn audio_input_combo_label(routing: &TrackInputRouting) -> String {
+    match routing {
+        TrackInputRouting::None => "None".to_string(),
+        TrackInputRouting::AudioDeviceChannel { channel, .. } => {
+            format!("Channel {}", channel + 1)
+        }
+        TrackInputRouting::AudioDeviceChannels { channels, .. } => match channels.as_slice() {
+            [0, 1] => "Stereo".to_string(),
+            [left, right] => format!("Stereo {}+{}", left + 1, right + 1),
+            channels if !channels.is_empty() => channels
+                .iter()
+                .map(|channel| (channel + 1).to_string())
+                .collect::<Vec<_>>()
+                .join("+"),
+            _ => "None".to_string(),
+        },
+        TrackInputRouting::AllInputs => "All Inputs".to_string(),
+        TrackInputRouting::MidiDevice { .. } => "MIDI".to_string(),
+    }
+}
+
 fn build_audio_output_options(
     track: &TrackState,
     bus_targets: &[(String, String)],
-    output_device: Option<&(String, u32)>,
+    _output_device: Option<&(String, u32)>,
 ) -> Vec<(String, TrackOutputRouting)> {
     let mut out = vec![
-        ("Main".to_string(), TrackOutputRouting::Main),
+        (
+            master_output_label(track.routing.audio_format),
+            TrackOutputRouting::Main,
+        ),
         ("None".to_string(), TrackOutputRouting::None),
     ];
     for (bus_id, name) in bus_targets {
@@ -562,27 +589,37 @@ fn build_audio_output_options(
             },
         ));
     }
-    if let Some((device_name, count)) = output_device {
-        for opt in crate::audio_routing::build_output_channel_options(*count) {
-            let [channel] = opt.channels.as_slice() else {
-                continue;
-            };
-            out.push((
-                format!("Hardware - {device_name} - {}", opt.label),
-                TrackOutputRouting::HardwareOutput {
-                    device_id: device_name.clone(),
-                    channel: *channel,
-                },
-            ));
-        }
-    }
     if !out.iter().any(|(_, r)| *r == track.routing.output) {
         out.push((
-            format!("Missing - {}", track.routing.output.label()),
+            format!(
+                "Missing - {}",
+                audio_output_combo_label(&track.routing.output, track.routing.audio_format)
+            ),
             track.routing.output.clone(),
         ));
     }
     out
+}
+
+fn audio_output_combo_label(
+    routing: &TrackOutputRouting,
+    audio_format: TrackAudioFormat,
+) -> String {
+    match routing {
+        TrackOutputRouting::Main => master_output_label(audio_format),
+        TrackOutputRouting::Bus { bus_id } => format!("Bus - {bus_id}"),
+        TrackOutputRouting::HardwareOutput { channel, .. } => {
+            format!("Channel {}", channel + 1)
+        }
+        TrackOutputRouting::None => "None".to_string(),
+    }
+}
+
+fn master_output_label(audio_format: TrackAudioFormat) -> String {
+    match audio_format {
+        TrackAudioFormat::Mono => "Mono Master".to_string(),
+        TrackAudioFormat::Stereo => "Stereo Master".to_string(),
+    }
 }
 
 fn parse_audio_format_option(label: &str) -> TrackAudioFormat {

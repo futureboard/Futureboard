@@ -145,11 +145,33 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 /// Returns a unique path inside `dir` that does not already exist.
-fn unique_wav_path(dir: &Path, base_name: &str) -> PathBuf {
-    let n = RECORD_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // Zero-pad to 4 digits so alphabetical sort matches recording order.
-    let filename = format!("{} Rec {:04}.wav", base_name, n);
-    dir.join(filename)
+///
+/// Filename contract:
+/// `{ProjectName}-{timestamp}-{takenumber}.{ext}`
+fn unique_recording_path(
+    dir: &Path,
+    project_name: &str,
+    timestamp: &str,
+    extension: &str,
+) -> PathBuf {
+    let project_name = sanitize_filename(project_name);
+    let timestamp = sanitize_filename(timestamp);
+    let extension = extension.trim_start_matches('.').trim();
+    let extension = if extension.is_empty() {
+        "wav"
+    } else {
+        extension
+    };
+
+    loop {
+        let n = RECORD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Zero-pad to 4 digits so alphabetical sort matches recording order.
+        let filename = format!("{project_name}-{timestamp}-{n:04}.{extension}");
+        let path = dir.join(filename);
+        if !path.exists() {
+            return path;
+        }
+    }
 }
 
 // ── Device lookup ─────────────────────────────────────────────────────────────
@@ -280,6 +302,7 @@ fn build_f32_input_stream(
     dropped_blocks: Arc<AtomicU64>,
     shared: Arc<crate::engine::SharedState>,
     channels: usize,
+    monitor_channels: Vec<usize>,
 ) -> Result<cpal::Stream, SphereAudioError> {
     device
         .build_input_stream::<f32, _, _>(
@@ -291,16 +314,23 @@ fn build_f32_input_stream(
                     if tx.try_send(data.to_vec()).is_err() {
                         dropped_blocks.fetch_add(1, Ordering::Relaxed);
                     }
-                    if shared.recording_monitor_mix.load(Ordering::Relaxed) && channels >= 2 {
+                    if shared.recording_monitor_mix.load(Ordering::Relaxed) && channels > 0 {
                         let frames = data.len() / channels.max(1);
                         if frames > 0 {
                             let last = frames - 1;
+                            let left_ch = monitor_channels.first().copied().unwrap_or(0);
+                            let right_ch = monitor_channels.get(1).copied().unwrap_or(left_ch);
+                            let left = data.get(last * channels + left_ch).copied().unwrap_or(0.0);
+                            let right = data
+                                .get(last * channels + right_ch)
+                                .copied()
+                                .unwrap_or(left);
                             shared
                                 .recording_monitor_l
-                                .store(data[last * channels].to_bits(), Ordering::Relaxed);
+                                .store(left.to_bits(), Ordering::Relaxed);
                             shared
                                 .recording_monitor_r
-                                .store(data[last * channels + 1].to_bits(), Ordering::Relaxed);
+                                .store(right.to_bits(), Ordering::Relaxed);
                         }
                     }
                 }
@@ -354,8 +384,17 @@ pub fn start_recording(
     // Build per-track writer states.
     let mut track_writers: Vec<TrackWriterState> = Vec::new();
     for track in &config.tracks {
-        let safe_name = sanitize_filename(&track.name);
-        let final_path = unique_wav_path(&media_dir, &safe_name);
+        let project_name = if config.project_name.trim().is_empty() {
+            "Recording"
+        } else {
+            config.project_name.as_str()
+        };
+        let timestamp = if config.timestamp.trim().is_empty() {
+            config.session_id.as_str()
+        } else {
+            config.timestamp.as_str()
+        };
+        let final_path = unique_recording_path(&media_dir, project_name, timestamp, "wav");
         let filename = final_path
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -368,6 +407,19 @@ pub fn start_recording(
         })?;
 
         let in_chs: Vec<usize> = track.input_channels.iter().map(|&c| c as usize).collect();
+        if in_chs.is_empty() {
+            return Err(SphereAudioError::NativeError(format!(
+                "{} has no input channels selected",
+                track.name
+            )));
+        }
+        if let Some(channel) = in_chs.iter().find(|&&channel| channel >= input_ch) {
+            return Err(SphereAudioError::NativeError(format!(
+                "{} input channel {} is unavailable on the active input device ({input_ch} channel(s))",
+                track.name,
+                channel + 1
+            )));
+        }
         let out_channels = in_chs.len().max(1) as u16;
 
         track_writers.push(TrackWriterState {
@@ -409,6 +461,15 @@ pub fn start_recording(
     shared
         .recording_monitor_mix
         .store(monitor_mix, Ordering::Relaxed);
+    let monitor_channels: Vec<usize> = config
+        .monitor_channels
+        .iter()
+        .copied()
+        .filter_map(|channel| {
+            let channel = channel as usize;
+            (channel < input_ch).then_some(channel)
+        })
+        .collect();
 
     // Build the input stream — `audio_tx` is moved into the closure.
     let input_stream = build_f32_input_stream(
@@ -419,6 +480,7 @@ pub fn start_recording(
         Arc::clone(&dropped_blocks),
         Arc::clone(&shared),
         input_ch,
+        monitor_channels,
     )?;
 
     input_stream

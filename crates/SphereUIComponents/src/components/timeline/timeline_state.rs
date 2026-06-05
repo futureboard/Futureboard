@@ -696,6 +696,21 @@ impl TrackAudioFormat {
     }
 }
 
+fn input_route_matches_audio_format(
+    input: &TrackInputRouting,
+    audio_format: TrackAudioFormat,
+) -> bool {
+    match input {
+        TrackInputRouting::None | TrackInputRouting::AllInputs => true,
+        TrackInputRouting::AudioDeviceChannel { .. } => audio_format == TrackAudioFormat::Mono,
+        TrackInputRouting::AudioDeviceChannels { channels, .. } => match audio_format {
+            TrackAudioFormat::Mono => channels.len() == 1,
+            TrackAudioFormat::Stereo => channels.len() == 2,
+        },
+        TrackInputRouting::MidiDevice { .. } => true,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackMidiInputRouting {
     None,
@@ -2777,6 +2792,9 @@ impl TimelineState {
 
     pub fn set_track_input_routing(&mut self, track_id: &str, input: TrackInputRouting) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            if !input_route_matches_audio_format(&input, t.routing.audio_format) {
+                return false;
+            }
             if t.routing.input != input {
                 if routing_debug_enabled() {
                     eprintln!(
@@ -2821,6 +2839,9 @@ impl TimelineState {
                     );
                 }
                 t.routing.audio_format = audio_format;
+                if !input_route_matches_audio_format(&t.routing.input, audio_format) {
+                    t.routing.input = TrackInputRouting::None;
+                }
                 return true;
             }
         }

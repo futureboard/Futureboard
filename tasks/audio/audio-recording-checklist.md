@@ -40,7 +40,7 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 - [x] Output Channels card — same for the selected output device.
 - [x] Reuse shared `settings_section_card` / `settings_section_title` / `settings_daw_row` style; no hardcoded colors.
 - [x] Graceful empty states ("No device selected." / "No channels reported by this device.").
-- [ ] Optional input test meter (later).
+- [x] Optional input test meter.
 
 > Channel counts threaded via `(String, u32)` lists from `open_settings_dialog`
 > → `open_settings_window` → `SettingsWindow` → `build_settings_content`
@@ -65,8 +65,8 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 - [x] Explicit stereo-pair options (Input 1+2, Input 3+4, etc.) map to `AudioDeviceChannels`.
 - [x] Phase E remainder: output selector lists Main, None, and real Bus/Return track targets.
 - [x] Phase E remainder: saved unavailable input/output routes appear as `Missing - ...` entries and are not silently reset.
-- [x] Phase E remainder: input routes are format-compatible (Mono tracks show mono routes; Stereo tracks show stereo-pair routes).
-- [x] Phase E remainder: hardware output routes are listed from the selected output device's mono hardware channels.
+- [x] Phase E remainder: input routes are format-compatible (Mono tracks show mono routes; Stereo tracks show stereo-pair routes); stale incompatible routes are reset/blocked.
+- [x] Phase E remainder: output selector intentionally shows logical stereo output (`Mono Master` / `Stereo Master`), `None`, and Bus/Return targets; hardware channel 1/2 routes are hidden from the Inspector.
 
 ---
 
@@ -94,7 +94,7 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 ## Phase I — Project Recording Folder
 
 - [x] `Media/Audio/` + `.rec/<session>` temp dir.
-- [x] Take filename + collision counter (`unique_wav_path`).
+- [x] Take filename + collision counter (`{ProjectName}-{timestamp}-{takenumber}.wav`).
 - [x] Saved-project requirement enforced.
 
 ## Phase J — WAV Writer Thread
@@ -108,7 +108,7 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 
 - [x] cpal input stream (`build_f32_input_stream`).
 - [x] Input channel count from device default config.
-- [~] Explicit input/output channel mapping (currently default-config driven).
+- [~] Explicit input/output channel mapping: recording validates selected input channels against the active device and monitor tap follows the selected route; stream format still uses the device default config.
 
 ## Phase L — Recording Runtime Session
 
@@ -130,7 +130,7 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 ## Phase O — Input Monitoring
 
 - [x] Monitor mix Off/In (`apply_recording_monitor_mix`, `input_monitor.is_active`).
-- [ ] Explicit Auto mode semantics.
+- [x] Explicit Auto mode semantics for recording: `Auto` monitors when the track is armed; `Input` monitors when selected.
 - [ ] Feedback warning when in/out share a device (later).
 - [ ] Input level meter on armed track (later).
 
@@ -144,9 +144,9 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 
 - [x] Recording tab: path, audio format, metronome count-in.
 - [ ] Save-before-recording toggle.
-- [ ] Default monitor mode.
+- [x] Default monitor mode.
 - [ ] Recording offset (samples/ms).
-- [ ] Generate-waveform-after-record toggle.
+- [x] Generate-waveform-after-record toggle.
 
 ## Phase R — Latency Offset
 
@@ -201,8 +201,8 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 
 ## Build / Validation (run per slice)
 
-- [ ] `cargo check -p sphere_ui_components`
-- [ ] `cargo check --manifest-path apps/native/Cargo.toml`
+- [x] `cargo check -p sphere_ui_components`
+- [x] `cargo check --manifest-path apps/native/Cargo.toml`
 - [ ] `cargo clippy -p sphere_ui_components -- -D warnings`
 - [ ] Engine: `cargo check -p sphere-direct-audio-engine`
 

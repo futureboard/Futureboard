@@ -43,7 +43,7 @@ use crate::overlay::{
     OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
 };
 use crate::settings::{
-    GpuDevicePreference, MidiDeviceDirection, MidiDeviceSetting, RenderMode,
+    DefaultMonitorMode, GpuDevicePreference, MidiDeviceDirection, MidiDeviceSetting, RenderMode,
     SettingsAudioLatencySnapshot, SettingsModel, SettingsSchema,
 };
 use crate::theme::{self, Colors};
@@ -188,6 +188,17 @@ impl SettingsDialogState {
 }
 
 pub type UpdateSettingFn = Arc<dyn Fn(&mut SettingsSchema) + Send + Sync + 'static>;
+pub type InputTestStartFn =
+    Arc<dyn Fn(Option<String>) -> Result<(), String> + Send + Sync + 'static>;
+pub type InputTestStopFn = Arc<dyn Fn() + Send + Sync + 'static>;
+pub type InputTestLevelFn = Arc<dyn Fn() -> f32 + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, Default)]
+pub struct InputTestMeterState {
+    pub active: bool,
+    pub level: f32,
+    pub error: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardwareCombo {
@@ -209,6 +220,7 @@ pub struct SettingsDialogCallbacks {
     pub on_close: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
     pub on_select_tab: Arc<dyn Fn(&SettingsTab, &mut Window, &mut App) + 'static>,
     pub on_update_setting: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+    pub on_toggle_input_test: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
     pub on_refresh_midi: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
     pub open_hardware_combo: Option<HardwareCombo>,
     pub on_toggle_hardware_combo:
@@ -1027,12 +1039,81 @@ fn audio_channel_section(
     card.into_any_element()
 }
 
+fn input_test_meter_row(
+    state: &InputTestMeterState,
+    callbacks: &SettingsDialogCallbacks,
+) -> impl IntoElement {
+    let level = state.level.clamp(0.0, 1.0);
+    let level_percent = (level * 100.0).round() as u32;
+    let toggle = callbacks.on_toggle_input_test.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(fb_button(
+                    "settings-input-test-toggle",
+                    if state.active {
+                        "Stop Test"
+                    } else {
+                        "Test Input"
+                    },
+                    if state.active {
+                        FbButtonKind::Primary
+                    } else {
+                        FbButtonKind::Default
+                    },
+                    true,
+                    move |_, window, cx| toggle(&(), window, cx),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(10.0))
+                        .rounded_sm()
+                        .border(px(1.0))
+                        .border_color(Colors::border_subtle())
+                        .bg(Colors::meter_rail())
+                        .child(div().h_full().w(gpui::relative(level)).rounded_sm().bg(
+                            if level >= 0.9 {
+                                Colors::meter_high()
+                            } else if level >= 0.65 {
+                                Colors::meter_mid()
+                            } else {
+                                Colors::meter_low()
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .w(px(38.0))
+                        .text_size(px(10.0))
+                        .text_color(Colors::text_muted())
+                        .child(format!("{level_percent}%")),
+                ),
+        )
+        .when_some(state.error.clone(), |el, error| {
+            el.child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::status_error())
+                    .child(error),
+            )
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_settings_content(
     state: &SettingsDialogState,
     schema: &SettingsSchema,
     callbacks: &SettingsDialogCallbacks,
     latency: &SettingsAudioLatencySnapshot,
+    input_test: &InputTestMeterState,
     _available_inputs: &[String],
     _available_outputs: &[String],
     _available_backends: &[String],
@@ -2066,6 +2147,7 @@ fn build_settings_content(
     if (state.active_tab == SettingsTab::Recording && query.is_empty())
         || (!query.is_empty()
             && (is_match("Audio Recording Format", &["format", "bit", "depth", "wav"])
+                || is_match("Input Test Meter", &["input", "test", "meter", "level"])
                 || is_match(
                     "Metronome Click",
                     &["metronome", "click", "sound", "volume"],
@@ -2179,6 +2261,101 @@ fn build_settings_content(
                                 },
                             )
                         }),
+                ))
+                .child(settings_daw_row(
+                    "Default Monitor",
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(4.0))
+                        .child({
+                            let val = schema.recording.default_monitor_mode;
+                            let up = on_update.clone();
+                            fb_segmented_button(
+                                "rec-monitor-off",
+                                "Off",
+                                val == DefaultMonitorMode::Off,
+                                move |_, w, cx| {
+                                    up(
+                                        Arc::new(|s| {
+                                            s.recording.default_monitor_mode =
+                                                DefaultMonitorMode::Off
+                                        }),
+                                        w,
+                                        cx,
+                                    );
+                                },
+                            )
+                        })
+                        .child({
+                            let val = schema.recording.default_monitor_mode;
+                            let up = on_update.clone();
+                            fb_segmented_button(
+                                "rec-monitor-auto",
+                                "Auto",
+                                val == DefaultMonitorMode::Auto,
+                                move |_, w, cx| {
+                                    up(
+                                        Arc::new(|s| {
+                                            s.recording.default_monitor_mode =
+                                                DefaultMonitorMode::Auto
+                                        }),
+                                        w,
+                                        cx,
+                                    );
+                                },
+                            )
+                        })
+                        .child({
+                            let val = schema.recording.default_monitor_mode;
+                            let up = on_update.clone();
+                            fb_segmented_button(
+                                "rec-monitor-input",
+                                "Input",
+                                val == DefaultMonitorMode::Input,
+                                move |_, w, cx| {
+                                    up(
+                                        Arc::new(|s| {
+                                            s.recording.default_monitor_mode =
+                                                DefaultMonitorMode::Input
+                                        }),
+                                        w,
+                                        cx,
+                                    );
+                                },
+                            )
+                        }),
+                ))
+                .child(settings_daw_row(
+                    "Generate Waveform",
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child({
+                            let val = schema.recording.audio.generate_waveform_after_record;
+                            let up = on_update.clone();
+                            fb_checkbox("rec-generate-waveform", val, move |_, w, cx| {
+                                up(
+                                    Arc::new(move |s| {
+                                        s.recording.audio.generate_waveform_after_record = !val
+                                    }),
+                                    w,
+                                    cx,
+                                );
+                            })
+                        })
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(Colors::text_muted())
+                                .child("Build clip waveforms after recording stops"),
+                        ),
+                ))
+                .child(settings_daw_row(
+                    "Input Test",
+                    input_test_meter_row(input_test, callbacks),
                 ))
                 .into_any_element(),
         );
@@ -2576,6 +2753,7 @@ pub fn settings_dialog(
         schema,
         &callbacks,
         latency,
+        &InputTestMeterState::default(),
         available_inputs,
         available_outputs,
         available_backends,
@@ -3087,6 +3265,12 @@ pub struct SettingsWindow {
     /// `(device name, output channel count)` for every enumerated output device.
     available_output_channels: Vec<(String, u32)>,
     latency_provider: AudioLatencySnapshotProvider,
+    input_test_start: Option<InputTestStartFn>,
+    input_test_stop: Option<InputTestStopFn>,
+    input_test_level: Option<InputTestLevelFn>,
+    input_test_active: bool,
+    input_test_level_value: f32,
+    input_test_error: Option<String>,
     open_hardware_combo: Option<HardwareCombo>,
     hardware_combo_anchor: Option<OverlayAnchor>,
     midi_refresh_nonce: u64,
@@ -3104,6 +3288,9 @@ impl SettingsWindow {
         available_input_channels: Vec<(String, u32)>,
         available_output_channels: Vec<(String, u32)>,
         latency_provider: AudioLatencySnapshotProvider,
+        input_test_start: Option<InputTestStartFn>,
+        input_test_stop: Option<InputTestStopFn>,
+        input_test_level: Option<InputTestLevelFn>,
         on_update: OnSettingUpdate,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -3119,12 +3306,85 @@ impl SettingsWindow {
             available_input_channels,
             available_output_channels,
             latency_provider,
+            input_test_start,
+            input_test_stop,
+            input_test_level,
+            input_test_active: false,
+            input_test_level_value: 0.0,
+            input_test_error: None,
             open_hardware_combo: None,
             hardware_combo_anchor: None,
             midi_refresh_nonce: 0,
             on_update,
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    fn start_input_test(&mut self, cx: &mut Context<Self>) {
+        let Some(start) = self.input_test_start.clone() else {
+            self.input_test_error = Some("audio engine unavailable".to_string());
+            cx.notify();
+            return;
+        };
+        let device = self
+            .settings
+            .read(cx)
+            .current
+            .hardware
+            .audio
+            .device_in
+            .clone();
+        match start(Some(device)) {
+            Ok(()) => {
+                self.input_test_active = true;
+                self.input_test_level_value = 0.0;
+                self.input_test_error = None;
+                self.schedule_input_test_poll(cx);
+            }
+            Err(error) => {
+                self.input_test_active = false;
+                self.input_test_level_value = 0.0;
+                self.input_test_error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn stop_input_test(&mut self, cx: &mut Context<Self>) {
+        if let Some(stop) = self.input_test_stop.as_ref() {
+            stop();
+        }
+        self.input_test_active = false;
+        self.input_test_level_value = 0.0;
+        cx.notify();
+    }
+
+    fn schedule_input_test_poll(&mut self, cx: &mut Context<Self>) {
+        if !self.input_test_active {
+            return;
+        }
+        let level_provider = self.input_test_level.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+            let _ = this.update(cx, |window, cx| {
+                if !window.input_test_active {
+                    return;
+                }
+                if window.active_tab != SettingsTab::Recording {
+                    window.stop_input_test(cx);
+                    return;
+                }
+                window.input_test_level_value = level_provider
+                    .as_ref()
+                    .map(|read| read().clamp(0.0, 1.0))
+                    .unwrap_or(0.0);
+                window.schedule_input_test_poll(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3147,7 +3407,10 @@ impl SettingsWindow {
         let key = event.keystroke.key.as_str();
         let ctrl = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         match key {
-            "escape" => window.remove_window(),
+            "escape" => {
+                self.stop_input_test(cx);
+                window.remove_window();
+            }
             "f" if ctrl => {
                 self.search_input.focus_handle.focus(window, cx);
                 cx.notify();
@@ -3181,6 +3444,9 @@ impl Render for SettingsWindow {
                 move |tab: &SettingsTab, _w: &mut Window, cx: &mut App| {
                     let tab = *tab;
                     let _ = target.update(cx, |this, cx| {
+                        if tab != SettingsTab::Recording && this.input_test_active {
+                            this.stop_input_test(cx);
+                        }
                         this.active_tab = tab;
                         this.open_hardware_combo = None;
                         this.hardware_combo_anchor = None;
@@ -3197,6 +3463,18 @@ impl Render for SettingsWindow {
                         this.open_hardware_combo = None;
                         this.hardware_combo_anchor = None;
                         cx.notify();
+                    });
+                }
+            }),
+            on_toggle_input_test: Arc::new({
+                let target = target.clone();
+                move |_: &(), _w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        if this.input_test_active {
+                            this.stop_input_test(cx);
+                        } else {
+                            this.start_input_test(cx);
+                        }
                     });
                 }
             }),
@@ -3242,6 +3520,11 @@ impl Render for SettingsWindow {
         };
 
         let latency = (self.latency_provider)();
+        let input_test = InputTestMeterState {
+            active: self.input_test_active,
+            level: self.input_test_level_value,
+            error: self.input_test_error.clone(),
+        };
         let _midi_refresh = self.midi_refresh_nonce;
 
         let (sidebar_items, sections) = build_settings_content(
@@ -3249,6 +3532,7 @@ impl Render for SettingsWindow {
             &schema,
             &callbacks,
             &latency,
+            &input_test,
             &self.available_inputs,
             &self.available_outputs,
             &self.available_backends,
@@ -3317,6 +3601,9 @@ impl Render for SettingsWindow {
                     let target = sw_target.clone();
                     move |window, cx| {
                         let _ = target.update(cx, |this, cx| {
+                            if this.input_test_active {
+                                this.stop_input_test(cx);
+                            }
                             this.open_hardware_combo = None;
                             this.hardware_combo_anchor = None;
                             cx.notify();
@@ -3419,6 +3706,9 @@ pub fn open_settings_window(
     available_input_channels: Vec<(String, u32)>,
     available_output_channels: Vec<(String, u32)>,
     latency_provider: AudioLatencySnapshotProvider,
+    input_test_start: Option<InputTestStartFn>,
+    input_test_stop: Option<InputTestStopFn>,
+    input_test_level: Option<InputTestLevelFn>,
     on_update: OnSettingUpdate,
     cx: &mut App,
 ) -> Result<WindowHandle<SettingsWindow>, String> {
@@ -3447,6 +3737,9 @@ pub fn open_settings_window(
                 available_input_channels,
                 available_output_channels,
                 latency_provider,
+                input_test_start,
+                input_test_stop,
+                input_test_level,
                 on_update,
                 cx,
             )

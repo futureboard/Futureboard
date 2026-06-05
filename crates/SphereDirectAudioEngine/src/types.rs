@@ -435,8 +435,12 @@ pub struct JsRecordingTrackConfig {
 pub struct JsStartRecordingConfig {
     /// Absolute path to the project folder root.
     pub project_root: String,
+    /// Human-readable project name used as the recording filename prefix.
+    pub project_name: String,
     /// Unique ID for this recording session (used to name temp files).
     pub session_id: String,
+    /// Stable timestamp string for this recording take.
+    pub timestamp: String,
     pub bpm: f64,
     pub start_beat: f64,
     pub sample_rate: u32,
@@ -446,6 +450,9 @@ pub struct JsStartRecordingConfig {
     pub tracks: Vec<JsRecordingTrackConfig>,
     /// Mix live input onto the master output while recording (software monitor).
     pub monitor_mix: bool,
+    /// 0-based input channel indices used for software monitoring. One channel
+    /// is duplicated to stereo; two or more use the first stereo pair.
+    pub monitor_channels: Vec<u32>,
 }
 
 /// Per-track result returned by `stopRecording()`.

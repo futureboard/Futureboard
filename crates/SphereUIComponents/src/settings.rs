@@ -370,6 +370,8 @@ pub struct AudioRecordingSettings {
     pub format: String,
     pub bit_depth: u32,
     pub recording_path: String,
+    #[serde(default = "default_true")]
+    pub generate_waveform_after_record: bool,
 }
 
 impl Default for AudioRecordingSettings {
@@ -378,6 +380,31 @@ impl Default for AudioRecordingSettings {
             format: "wav".to_string(),
             bit_depth: 24,
             recording_path: String::new(),
+            generate_waveform_after_record: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultMonitorMode {
+    Off,
+    Auto,
+    Input,
+}
+
+impl Default for DefaultMonitorMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+impl DefaultMonitorMode {
+    pub fn add_track_value(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Input => "input",
         }
     }
 }
@@ -405,6 +432,8 @@ impl Default for MetronomeSettings {
 pub struct RecordingSettings {
     #[serde(default)]
     pub audio: AudioRecordingSettings,
+    #[serde(default)]
+    pub default_monitor_mode: DefaultMonitorMode,
     #[serde(default)]
     pub metronome: MetronomeSettings,
 }

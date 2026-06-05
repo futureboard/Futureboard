@@ -170,11 +170,10 @@ pub(super) fn build_engine_project_snapshot(
             muted: track.muted,
             solo: track.solo,
             armed: track.armed,
-            preview_mode: match track.routing.audio_format {
-                timeline_state::TrackAudioFormat::Mono => "mono",
-                timeline_state::TrackAudioFormat::Stereo => "stereo",
-            }
-            .to_string(),
+            // Track audio format controls input/recording channel selection.
+            // Engine output remains stereo so mono-input tracks still route to
+            // the stereo master/bus instead of collapsing the playback graph.
+            preview_mode: "stereo".to_string(),
             output_track_id: match &track.routing.output {
                 timeline_state::TrackOutputRouting::Bus { bus_id } => Some(bus_id.clone()),
                 timeline_state::TrackOutputRouting::Main

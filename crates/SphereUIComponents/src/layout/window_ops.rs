@@ -57,10 +57,17 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         // If window is already open, activate and refresh its context.
+        let default_monitor_mode = self
+            .settings
+            .read(cx)
+            .current
+            .recording
+            .default_monitor_mode
+            .add_track_value();
         if let Some(handle) = self.add_track_window.clone() {
             if handle
                 .update(cx, |win, window, _cx| {
-                    win.set_context(kind, track_count, has_master_track);
+                    win.set_context(kind, track_count, has_master_track, default_monitor_mode);
                     window.activate_window();
                 })
                 .is_ok()
@@ -214,6 +221,7 @@ impl StudioLayout {
             kind,
             track_count,
             has_master_track,
+            default_monitor_mode,
             language,
             instrument_plugins,
             on_confirm_request,
@@ -339,6 +347,26 @@ impl StudioLayout {
                     .map(crate::settings::SettingsAudioLatencySnapshot::from_engine)
                     .unwrap_or_else(crate::settings::SettingsAudioLatencySnapshot::unavailable)
             });
+        let input_test_start: Option<crate::components::settings_dialog::InputTestStartFn> =
+            self.audio_engine.clone().map(|engine| {
+                Arc::new(move |device_id: Option<String>| {
+                    let device_id = device_id.filter(|id| !id.trim().is_empty());
+                    engine
+                        .start_input_test(device_id.as_deref())
+                        .map_err(|error| error.to_string())
+                }) as crate::components::settings_dialog::InputTestStartFn
+            });
+        let input_test_stop: Option<crate::components::settings_dialog::InputTestStopFn> =
+            self.audio_engine.clone().map(|engine| {
+                Arc::new(move || {
+                    engine.stop_input_test();
+                }) as crate::components::settings_dialog::InputTestStopFn
+            });
+        let input_test_level: Option<crate::components::settings_dialog::InputTestLevelFn> =
+            self.audio_engine.clone().map(|engine| {
+                Arc::new(move || engine.input_test_level())
+                    as crate::components::settings_dialog::InputTestLevelFn
+            });
 
         match open_settings_window(
             owner_bounds,
@@ -349,6 +377,9 @@ impl StudioLayout {
             available_input_channels,
             available_output_channels,
             latency_provider,
+            input_test_start,
+            input_test_stop,
+            input_test_level,
             on_update,
             cx,
         ) {

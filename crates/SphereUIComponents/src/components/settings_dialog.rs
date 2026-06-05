@@ -18,7 +18,8 @@ use crate::components::controls::{
     fb_button, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
 use crate::components::settings_components::{
-    settings_restart_footer, settings_row_restart, settings_section,
+    settings_readout, settings_restart_footer, settings_row, settings_row_restart,
+    settings_section, settings_section_hint_text, settings_toggle,
 };
 use crate::components::settings_layout::{
     settings_daw_row, settings_daw_row_with_description, settings_nav_group_header,
@@ -350,6 +351,142 @@ fn locale_label(i18n: I18n, locale: Locale) -> String {
 
 fn selected_locale_label(i18n: I18n, language_code: &str) -> String {
     locale_label(i18n, Locale::from_code(language_code))
+}
+
+fn plugins_section(
+    schema: &SettingsSchema,
+    on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let vst3_enabled = schema.plugins.vst3.enabled;
+    let clap_enabled = schema.plugins.clap.enabled;
+    let background_scan = schema.plugins.scan.background_scan;
+    let failed_count = schema.plugins.scan.failed_plugins.len();
+
+    settings_section("Plugins")
+        .child(settings_section_hint_text(
+            "Manage native plugin formats, scan behavior, and watched plugin folders.",
+        ))
+        .child(settings_row(
+            "Enable VST3",
+            settings_toggle("settings-vst3-enabled", vst3_enabled, {
+                let on_update = on_update.clone();
+                move |_, w, cx| {
+                    on_update(
+                        Arc::new(move |s| s.plugins.vst3.enabled = !vst3_enabled),
+                        w,
+                        cx,
+                    );
+                }
+            }),
+        ))
+        .child(settings_row(
+            "Enable CLAP",
+            settings_toggle("settings-clap-enabled", clap_enabled, {
+                let on_update = on_update.clone();
+                move |_, w, cx| {
+                    on_update(
+                        Arc::new(move |s| s.plugins.clap.enabled = !clap_enabled),
+                        w,
+                        cx,
+                    );
+                }
+            }),
+        ))
+        .child(settings_row(
+            "Background Scan",
+            settings_toggle("settings-plugin-background-scan", background_scan, {
+                let on_update = on_update.clone();
+                move |_, w, cx| {
+                    on_update(
+                        Arc::new(move |s| s.plugins.scan.background_scan = !background_scan),
+                        w,
+                        cx,
+                    );
+                }
+            }),
+        ))
+        .child(settings_row(
+            "VST3 Folders",
+            settings_path_list(&schema.plugins.vst3.paths),
+        ))
+        .child(settings_row(
+            "CLAP Folders",
+            settings_path_list(&schema.plugins.clap.paths),
+        ))
+        .child(settings_row(
+            "Failed Plugins",
+            settings_readout(format!("{failed_count} quarantined")),
+        ))
+        .child(settings_row(
+            "Actions",
+            fb_button(
+                "trigger-plugins-scan",
+                "Scan Plugins Now",
+                FbButtonKind::Primary,
+                true,
+                |_e, _w, _cx| {
+                    eprintln!("[plugins] manual scan triggered from settings dialog");
+                },
+            ),
+        ))
+}
+
+fn files_media_section() -> impl IntoElement {
+    settings_section("Files & Media")
+        .child(settings_section_hint_text(
+            "Project folders, sample libraries, recording paths, and media cache settings.",
+        ))
+        .child(settings_row(
+            "Project Folder",
+            settings_readout("Use project location"),
+        ))
+        .child(settings_row(
+            "Recording Path",
+            settings_readout("Project Media/"),
+        ))
+        .child(settings_row(
+            "Sample Libraries",
+            settings_readout("Not configured"),
+        ))
+        .child(settings_row(
+            "Media Cache",
+            settings_readout("Project Cache/"),
+        ))
+}
+
+fn advanced_section() -> impl IntoElement {
+    settings_section("Advanced")
+        .child(settings_section_hint_text(
+            "Experimental features, developer tools, and low-level engine options.",
+        ))
+        .child(settings_row(
+            "Experimental Flags",
+            settings_readout("Default"),
+        ))
+        .child(settings_row(
+            "Developer Logging",
+            settings_readout("Environment controlled"),
+        ))
+        .child(settings_row(
+            "Audio Engine",
+            settings_readout("Sphere Direct Audio"),
+        ))
+}
+
+fn about_section() -> impl IntoElement {
+    settings_section("Futureboard Studio")
+        .child(settings_section_hint_text(
+            "Futureboard Studio / Mochi DAW v0.1.0",
+        ))
+        .child(settings_row("Runtime", settings_readout("GPUI + Rust")))
+        .child(settings_row(
+            "Plugin Host",
+            settings_readout("VST3 / CLAP scaffold"),
+        ))
+        .child(settings_row(
+            "Copyright",
+            settings_readout("© 2026 Futureboard Studio team"),
+        ))
 }
 
 /// Performance > Rendering section. Renderer and GPU Device choices are
@@ -2279,157 +2416,39 @@ fn build_settings_content(
             && (is_match("VST3 CLAP Formats", &["vst3", "clap", "plugins"])
                 || is_match("Paths Directories", &["paths", "directories", "folders"])))
     {
-        let on_update = callbacks.on_update_setting.clone();
-        sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(settings_header(
-                    "Plugins > Formats & Folders",
-                    assets::ICON_CPU_PATH,
-                ))
-                .child(settings_daw_row(
-                    "Formats",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(16.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child({
-                                    let val = schema.plugins.vst3.enabled;
-                                    let up = on_update.clone();
-                                    fb_checkbox("vst3-enabled", val, move |_, w, cx| {
-                                        up(Arc::new(move |s| s.plugins.vst3.enabled = !val), w, cx);
-                                    })
-                                })
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(Colors::text_primary())
-                                        .child("Enable VST3"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child({
-                                    let val = schema.plugins.clap.enabled;
-                                    let up = on_update.clone();
-                                    fb_checkbox("clap-enabled", val, move |_, w, cx| {
-                                        up(Arc::new(move |s| s.plugins.clap.enabled = !val), w, cx);
-                                    })
-                                })
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(Colors::text_primary())
-                                        .child("Enable CLAP"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child({
-                                    let val = schema.plugins.scan.background_scan;
-                                    let up = on_update.clone();
-                                    fb_checkbox("scan-background-scan", val, move |_, w, cx| {
-                                        up(
-                                            Arc::new(move |s| {
-                                                s.plugins.scan.background_scan = !val
-                                            }),
-                                            w,
-                                            cx,
-                                        );
-                                    })
-                                })
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(Colors::text_primary())
-                                        .child("Background Scan"),
-                                ),
-                        ),
-                ))
-                .child(settings_daw_row(
-                    "VST3 Folders",
-                    settings_path_list(&schema.plugins.vst3.paths),
-                ))
-                .child(settings_daw_row(
-                    "CLAP Folders",
-                    settings_path_list(&schema.plugins.clap.paths),
-                ))
-                .child(settings_daw_row(
-                    "Actions",
-                    fb_button(
-                        "trigger-plugins-scan",
-                        "Scan Plugins Now",
-                        FbButtonKind::Primary,
-                        true,
-                        |_e, _w, _cx| {
-                            eprintln!("[plugins] manual scan triggered from settings dialog");
-                        },
-                    ),
-                ))
-                .into_any_element(),
-        );
+        sections
+            .push(plugins_section(schema, callbacks.on_update_setting.clone()).into_any_element());
+    }
+
+    // Files & Media Panel
+    if (state.active_tab == SettingsTab::FilesMedia && query.is_empty())
+        || (!query.is_empty()
+            && (is_match("Projects", &["project", "folder", "path"])
+                || is_match("Samples", &["sample", "media"])
+                || is_match("Cache", &["cache", "recording"])))
+    {
+        sections.push(files_media_section().into_any_element());
+    }
+
+    // Advanced Panel
+    if (state.active_tab == SettingsTab::Advanced && query.is_empty())
+        || (!query.is_empty() && is_match("Advanced", &["experimental", "developer", "engine"]))
+    {
+        sections.push(advanced_section().into_any_element());
     }
 
     // About Panel
     if (state.active_tab == SettingsTab::About && query.is_empty())
         || (!query.is_empty() && (is_match("Version About", &["version", "credits", "about"])))
     {
-        sections.push(
-            settings_section_card()
-                .child(settings_header(
-                    "Futureboard Studio",
-                    assets::ICON_CIRCLE_DOT_PATH,
-                ))
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(Colors::text_primary())
-                        .child("Futureboard Studio / Mochi DAW v0.1.0"),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(Colors::text_muted())
-                        .child("Built with GPUI, Rust, and C++ VST3 SDK."),
-                )
-                .child(
-                    div()
-                        .text_size(px(9.5))
-                        .text_color(Colors::text_faint())
-                        .child("© 2026 Futureboard Studio team. All rights reserved."),
-                )
-                .into_any_element(),
-        );
+        sections.push(about_section().into_any_element());
     }
 
-    // Placeholder panels for categories not yet fully wired
+    // Placeholder panel for categories not yet fully wired.
     if sections.is_empty() && query.is_empty() {
         let hint = match state.active_tab {
-            SettingsTab::FilesMedia => {
-                "Project folders, sample libraries, recording paths, and media cache settings."
-            }
             SettingsTab::Shortcuts => {
                 "Search, edit, and reset keyboard commands grouped by workflow area."
-            }
-            SettingsTab::Advanced => {
-                "Experimental features, developer tools, and low-level engine options."
             }
             _ => "",
         };

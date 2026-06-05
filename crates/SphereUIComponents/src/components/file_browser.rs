@@ -399,30 +399,28 @@ impl FileBrowserState {
             }
         }
 
-        // 8. Logical drives (fallback at bottom only when no project is open)
-        if self.project_folder.is_none() {
-            for drive in &self.root_drives {
-                let drive_path = match drive.root_path.as_ref() {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let expanded = self.expanded_paths.contains(drive_path);
-                let selected = self.selected.as_deref() == Some(drive_path.as_path());
-                nodes.push(BrowserVisibleNode {
-                    id: drive.id.clone(),
-                    label: drive.label.clone(),
-                    path: Some(drive_path.clone()),
-                    kind: BrowserNodeKind::Folder,
-                    depth: 0,
-                    extension: String::new(),
-                    expandable: true,
-                    expanded,
-                    selected,
-                    error: None,
-                });
-                if expanded {
-                    self.append_cached_dir(drive_path, 1, &mut nodes);
-                }
+        // 8. Local drives
+        for drive in &self.root_drives {
+            let drive_path = match drive.root_path.as_ref() {
+                Some(p) => p,
+                None => continue,
+            };
+            let expanded = self.expanded_paths.contains(drive_path);
+            let selected = self.selected.as_deref() == Some(drive_path.as_path());
+            nodes.push(BrowserVisibleNode {
+                id: drive.id.clone(),
+                label: drive.label.clone(),
+                path: Some(drive_path.clone()),
+                kind: BrowserNodeKind::Folder,
+                depth: 0,
+                extension: String::new(),
+                expandable: true,
+                expanded,
+                selected,
+                error: None,
+            });
+            if expanded {
+                self.append_cached_dir(drive_path, 1, &mut nodes);
             }
         }
 

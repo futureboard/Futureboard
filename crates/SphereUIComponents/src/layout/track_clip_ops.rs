@@ -1,5 +1,6 @@
 use gpui::Context;
 
+use crate::components::edit::{ClipSnapshot, EditCommand};
 #[cfg(debug_assertions)]
 use crate::components::timeline::timeline_state::TrackType;
 use crate::components::timeline::timeline_state::{self, InputMonitorMode};
@@ -75,6 +76,115 @@ impl StudioLayout {
             }
         });
         self.mark_dirty();
+    }
+
+    pub(super) fn select_all_timeline_items(&mut self, cx: &mut Context<Self>) {
+        let mut selected_automation = false;
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            use crate::components::timeline::timeline_state::TrackLaneMode;
+            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
+                if timeline.state.track_lane_mode(&id) == TrackLaneMode::Automation {
+                    if let Some(lane_id) = timeline.state.active_automation_lane_id(&id) {
+                        timeline.state.select_all_automation_points(&id, &lane_id);
+                        selected_automation = true;
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+
+            let clip_ids: Vec<String> = timeline
+                .state
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter().map(|clip| clip.id.clone()))
+                .collect();
+            if !clip_ids.is_empty() {
+                timeline.state.selection.selected_track_id =
+                    timeline.state.tracks.first().map(|t| t.id.clone());
+                timeline.state.selection.selected_clip_ids = clip_ids;
+                timeline.state.arrangement_range = None;
+                cx.notify();
+            }
+        });
+        if selected_automation {
+            return;
+        }
+    }
+
+    pub(super) fn copy_selected_clips(&mut self, cx: &mut Context<Self>) {
+        self.clip_clipboard = self
+            .timeline
+            .read(cx)
+            .state
+            .selection
+            .selected_clip_ids
+            .iter()
+            .filter_map(|id| ClipSnapshot::capture(&self.timeline.read(cx).state, id))
+            .collect();
+    }
+
+    pub(super) fn cut_selected_clips(&mut self, cx: &mut Context<Self>) {
+        self.copy_selected_clips(cx);
+        if self.clip_clipboard.is_empty() {
+            return;
+        }
+        self.mark_dirty();
+        let snapshots = self.clip_clipboard.clone();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.run_edit_command(EditCommand::BatchDeleteClips { snapshots }, cx);
+        });
+    }
+
+    pub(super) fn paste_clips_at_playhead(&mut self, cx: &mut Context<Self>) {
+        if self.clip_clipboard.is_empty() {
+            return;
+        }
+        self.mark_dirty();
+        let snapshots = self.clip_clipboard.clone();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            let min_start = snapshots
+                .iter()
+                .map(|snapshot| snapshot.clip.start_beat)
+                .fold(f32::INFINITY, f32::min);
+            let paste_beat = timeline.state.transport.playhead_beats.max(0.0);
+            let offset = if min_start.is_finite() {
+                paste_beat - min_start
+            } else {
+                0.0
+            };
+            let mut pasted_ids = Vec::new();
+            for snapshot in snapshots {
+                let track_id = if timeline
+                    .state
+                    .tracks
+                    .iter()
+                    .any(|track| track.id == snapshot.track_id)
+                {
+                    snapshot.track_id.clone()
+                } else if let Some(track_id) = timeline
+                    .state
+                    .selection
+                    .selected_track_id
+                    .clone()
+                    .or_else(|| timeline.state.tracks.first().map(|track| track.id.clone()))
+                {
+                    track_id
+                } else {
+                    continue;
+                };
+                let mut clip = snapshot.clip.clone();
+                clip.id = timeline.state.next_clip_id();
+                clip.start_beat = (clip.start_beat + offset).max(0.0);
+                pasted_ids.push(clip.id.clone());
+                timeline.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+            }
+            if !pasted_ids.is_empty() {
+                timeline.state.selection.selected_clip_ids = pasted_ids;
+                timeline.state.arrangement_range = None;
+                cx.notify();
+            }
+        });
     }
 
     pub(super) fn toggle_selected_track_automation_mode(&mut self, cx: &mut Context<Self>) {

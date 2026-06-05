@@ -14,6 +14,7 @@ impl Render for StudioLayout {
         };
         self.frame_diag.tick(reason);
         crate::perf::tick_root_frame(reason_static);
+        self.cached_studio_window_bounds = Some(window.bounds());
 
         // Keep the OS window title in sync with the project lifecycle state
         // (Part G/H), e.g. "Untitled Project — Unsaved" / "My Song — Saved".
@@ -872,10 +873,8 @@ impl Render for StudioLayout {
                 if event.keystroke.key.as_str() == "escape" {
                     let _ = shortcut_target.update(cx, |this, cx| {
                         let _ = this.timeline.update(cx, |timeline, cx| {
-                            if timeline.state.dragging_track_id.is_some() {
-                                timeline.state.clear_track_drag();
-                                cx.notify();
-                            }
+                            timeline.reset_input_state();
+                            cx.notify();
                         });
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();

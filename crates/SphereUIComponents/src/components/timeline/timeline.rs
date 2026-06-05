@@ -131,6 +131,45 @@ impl Render for ClipResizeDrag {
 }
 
 impl Timeline {
+    fn input_debug_enabled() -> bool {
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_TIMELINE_INPUT_DEBUG").is_some())
+    }
+
+    fn log_input_state(&self, label: &str) {
+        if Self::input_debug_enabled() {
+            eprintln!(
+                "[timeline-input] {label} pen_drag={} range_drag={} erase_drag={} automation_drag={} automation_marquee={} clip_drag_origin={} pan_drag={}",
+                self.pen_clip_draw.is_some(),
+                self.range_select_drag.is_some(),
+                self.erase_clip_drag.is_some(),
+                self.automation_drag.is_some(),
+                self.automation_marquee.is_some(),
+                self.clip_drag_origin.is_some(),
+                self.pan_last_position.is_some(),
+            );
+        }
+    }
+
+    pub fn reset_input_state(&mut self) {
+        self.log_input_state("reset-before");
+        let had_uncommitted_range = self.range_select_drag.is_some();
+        self.clip_drag_origin = None;
+        self.clip_drag_target_track_index = None;
+        self.pen_clip_draw = None;
+        self.range_select_drag = None;
+        if had_uncommitted_range {
+            self.state.arrangement_range = None;
+        }
+        self.erase_clip_drag = None;
+        self.erase_preview_ids.clear();
+        self.automation_drag = None;
+        self.automation_marquee = None;
+        self.pan_last_position = None;
+        self.state.clear_track_drag();
+        self.log_input_state("reset-after");
+    }
+
     /// Clean empty-project Timeline — the real runtime entry point.
     pub fn new() -> Self {
         Self {
@@ -332,6 +371,11 @@ impl Timeline {
             return;
         };
         let (lo, hi) = normalize_range(start, end_beat);
+        if (hi - lo).abs() <= f32::EPSILON {
+            self.state.arrangement_range = None;
+            cx.notify();
+            return;
+        }
         let track_ids = self
             .state
             .arrangement_range
@@ -870,6 +914,28 @@ impl Render for Timeline {
         });
 
         let on_edit_mouse_move = cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+            if Self::input_debug_enabled() {
+                eprintln!(
+                    "[timeline-input] mouse-move pressed={:?} range_drag={} ctrl={} platform={} shift={}",
+                    event.pressed_button,
+                    this.range_select_drag.is_some(),
+                    event.modifiers.control,
+                    event.modifiers.platform,
+                    event.modifiers.shift,
+                );
+            }
+            if event.pressed_button.is_none()
+                && (this.pen_clip_draw.is_some()
+                    || this.range_select_drag.is_some()
+                    || this.erase_clip_drag.is_some()
+                    || this.automation_drag.is_some()
+                    || this.automation_marquee.is_some()
+                    || this.pan_last_position.is_some())
+            {
+                this.reset_input_state();
+                cx.notify();
+                return;
+            }
             if event.pressed_button == Some(gpui::MouseButton::Left)
                 && (this.automation_drag.is_some() || this.automation_marquee.is_some())
             {
@@ -908,38 +974,40 @@ impl Render for Timeline {
         });
 
         let on_pen_mouse_up = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
-            if this.finish_automation_interaction(cx) {
-                return;
+            this.log_input_state("mouse-up-left");
+            let finished_automation = this.finish_automation_interaction(cx);
+            if !finished_automation {
+                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
+                    this.finish_pen_midi_clip(beat, cx);
+                } else if this.state.active_tool == TimelineTool::Pointer
+                    && this.range_select_drag.is_some()
+                {
+                    this.finish_range_select(beat, cx);
+                } else if this.erase_clip_drag.is_some() {
+                    this.finish_erase_clip_drag(cx);
+                }
             }
-            let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-            if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
-                this.finish_pen_midi_clip(beat, cx);
-                return;
-            }
-            if this.state.active_tool == TimelineTool::Pointer && this.range_select_drag.is_some() {
-                this.finish_range_select(beat, cx);
-                return;
-            }
-            if this.erase_clip_drag.is_some() {
-                this.finish_erase_clip_drag(cx);
-            }
+            this.reset_input_state();
+            cx.notify();
         });
         let on_pen_mouse_up_out = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
-            if this.finish_automation_interaction(cx) {
-                return;
+            this.log_input_state("mouse-up-left-out");
+            let finished_automation = this.finish_automation_interaction(cx);
+            if !finished_automation {
+                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
+                    this.finish_pen_midi_clip(beat, cx);
+                } else if this.state.active_tool == TimelineTool::Pointer
+                    && this.range_select_drag.is_some()
+                {
+                    this.finish_range_select(beat, cx);
+                } else if this.erase_clip_drag.is_some() {
+                    this.finish_erase_clip_drag(cx);
+                }
             }
-            let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-            if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
-                this.finish_pen_midi_clip(beat, cx);
-                return;
-            }
-            if this.state.active_tool == TimelineTool::Pointer && this.range_select_drag.is_some() {
-                this.finish_range_select(beat, cx);
-                return;
-            }
-            if this.erase_clip_drag.is_some() {
-                this.finish_erase_clip_drag(cx);
-            }
+            this.reset_input_state();
+            cx.notify();
         });
 
         let on_add_track = cx.listener(|this, _: &(), window, cx| {
@@ -995,6 +1063,8 @@ impl Render for Timeline {
         });
 
         let on_select_tool = cx.listener(|this, tool: &TimelineTool, _window, cx| {
+            this.log_input_state("tool-change");
+            this.reset_input_state();
             this.state.active_tool = *tool;
             cx.notify();
         });
@@ -1393,17 +1463,23 @@ impl Render for Timeline {
             .on_mouse_up(
                 gpui::MouseButton::Right,
                 cx.listener(|this, _ev, _w, cx| {
+                    this.log_input_state("mouse-up-right");
                     if this.erase_clip_drag.is_some() {
                         this.finish_erase_clip_drag(cx);
                     }
+                    this.reset_input_state();
+                    cx.notify();
                 }),
             )
             .on_mouse_up_out(
                 gpui::MouseButton::Right,
                 cx.listener(|this, _ev, _w, cx| {
+                    this.log_input_state("mouse-up-right-out");
                     if this.erase_clip_drag.is_some() {
                         this.finish_erase_clip_drag(cx);
                     }
+                    this.reset_input_state();
+                    cx.notify();
                 }),
             )
             .on_scroll_wheel(on_ctrl_wheel_zoom)

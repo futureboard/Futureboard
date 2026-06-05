@@ -232,8 +232,11 @@ pub fn track_lane(
                     on_add(&(track_id_add.clone(), snapped_beat), window, cx);
                 } else {
                     on_select(&track_id_select, window, cx);
-                    if let Some(start_range) = on_range_start.as_ref() {
-                        start_range(&(track_id_select.clone(), snapped_beat), window, cx);
+                    let range_modifier = event.modifiers.control || event.modifiers.platform;
+                    if range_modifier {
+                        if let Some(start_range) = on_range_start.as_ref() {
+                            start_range(&(track_id_select.clone(), snapped_beat), window, cx);
+                        }
                     }
                 }
             },

@@ -35,6 +35,7 @@ type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) 
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
+type ClipBoolCb = Arc<dyn Fn(&(String, bool), &mut Window, &mut App) + 'static>;
 
 impl StudioLayout {
     pub(crate) fn build_inspector_callbacks(&self, owner: Entity<Self>) -> InspectorCallbacks {
@@ -55,7 +56,7 @@ impl StudioLayout {
                 cx.notify();
             });
             inspector_debug(&format!("edit track volume old={old:.3} new={v:.3}"));
-            let _ = owner_vol.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner_vol, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);
             });
@@ -75,7 +76,7 @@ impl StudioLayout {
                 cx.notify();
             });
             inspector_debug(&format!("edit track pan track={id} new={v:.3}"));
-            let _ = owner_pan.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner_pan, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);
             });
@@ -101,6 +102,8 @@ impl StudioLayout {
         let on_open_insert_editor = self.open_insert_editor_cb(owner.clone());
         let on_set_clip_start = self.set_clip_start_cb(owner.clone());
         let on_set_clip_length = self.set_clip_length_cb(owner.clone());
+        let on_set_clip_gain = self.set_clip_gain_cb(owner.clone());
+        let on_set_clip_muted = self.set_clip_muted_cb(owner.clone());
         let on_open_clip_bottom_editor = self.open_clip_bottom_editor_cb(owner.clone());
         let on_open_clip_external_midi_editor =
             self.open_clip_external_midi_editor_cb(owner.clone());
@@ -111,7 +114,7 @@ impl StudioLayout {
             dyn Fn(InspectorRoutingCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static,
         > = Arc::new(
             move |combo: InspectorRoutingCombo, anchor: Option<OverlayAnchor>, _w, cx| {
-                let _ = owner_routing_combo.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner_routing_combo, cx, move |this, cx| {
                     if this.open_inspector_routing_combo == Some(combo) {
                         this.open_inspector_routing_combo = None;
                         this.inspector_routing_combo_anchor = None;
@@ -138,7 +141,7 @@ impl StudioLayout {
             });
             if changed {
                 inspector_debug(&format!("edit track color track={id}"));
-                let _ = owner_color.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner_color, cx, |this, cx| {
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
                 });
@@ -166,6 +169,8 @@ impl StudioLayout {
             on_open_insert_editor,
             on_set_clip_start,
             on_set_clip_length,
+            on_set_clip_gain,
+            on_set_clip_muted,
             on_open_clip_bottom_editor,
             on_open_clip_external_midi_editor,
             open_routing_combo,
@@ -194,7 +199,7 @@ impl StudioLayout {
                 inspector_debug(&format!(
                     "clip start clip={clip_id} old={old:?} new={start:.3}"
                 ));
-                let _ = owner.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
                     this.mark_dirty();
                     this.mark_engine_media_dirty();
                     this.schedule_audio_project_sync(cx, false, "inspector_clip_start");
@@ -225,7 +230,7 @@ impl StudioLayout {
                 inspector_debug(&format!(
                     "clip length clip={clip_id} old={old:?} new={length:.3}"
                 ));
-                let _ = owner.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
                     this.mark_dirty();
                     this.mark_engine_media_dirty();
                     this.schedule_audio_project_sync(cx, false, "inspector_clip_length");
@@ -235,10 +240,58 @@ impl StudioLayout {
         })
     }
 
+    fn set_clip_gain_cb(&self, owner: Entity<Self>) -> ClipF32Cb {
+        let timeline = self.timeline.clone();
+        Arc::new(move |(clip_id, gain): &(String, f32), _w, cx| {
+            let clip_id = clip_id.clone();
+            let gain = *gain;
+            let changed = timeline.update(cx, |t, cx| {
+                let changed = t.state.set_clip_gain(&clip_id, gain);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if changed {
+                inspector_debug(&format!("clip gain clip={clip_id} new={gain:.3}"));
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
+                    this.mark_dirty();
+                    this.mark_engine_media_dirty();
+                    this.schedule_audio_project_sync(cx, false, "inspector_clip_gain");
+                    cx.notify();
+                });
+            }
+        })
+    }
+
+    fn set_clip_muted_cb(&self, owner: Entity<Self>) -> ClipBoolCb {
+        let timeline = self.timeline.clone();
+        Arc::new(move |(clip_id, muted): &(String, bool), _w, cx| {
+            let clip_id = clip_id.clone();
+            let muted = *muted;
+            let changed = timeline.update(cx, |t, cx| {
+                let changed = t.state.set_clip_muted(&clip_id, muted);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if changed {
+                inspector_debug(&format!("clip muted clip={clip_id} muted={muted}"));
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
+                    this.mark_dirty();
+                    this.mark_engine_media_dirty();
+                    this.schedule_audio_project_sync(cx, false, "inspector_clip_muted");
+                    cx.notify();
+                });
+            }
+        })
+    }
+
     fn open_clip_bottom_editor_cb(&self, owner: Entity<Self>) -> StrCb {
         Arc::new(move |clip_id: &String, _w, cx| {
             let clip_id = clip_id.clone();
-            let _ = owner.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
                 let _ = this.timeline.update(cx, |timeline, cx| {
                     timeline.state.select_clip(&clip_id);
                     cx.notify();
@@ -253,7 +306,7 @@ impl StudioLayout {
         Arc::new(move |clip_id: &String, window, cx| {
             let clip_id = clip_id.clone();
             let bounds = window.bounds();
-            let _ = owner.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
                 let _ = this.timeline.update(cx, |timeline, cx| {
                     timeline.state.select_clip(&clip_id);
                     cx.notify();
@@ -274,18 +327,23 @@ impl StudioLayout {
                 } else {
                     PluginInsertKind::Effect
                 };
-                let _ = owner.update(cx, |this, cx| {
-                    inspector_debug(&format!(
+                StudioLayout::defer_update_in_window(
+                    &owner,
+                    window,
+                    cx,
+                    move |this, window, cx| {
+                        inspector_debug(&format!(
                         "insert picker track={track_id} slot={slot_index} kind={desired_kind:?}"
                     ));
-                    this.open_insert_picker_for(
-                        &track_id,
-                        Some(slot_index),
-                        desired_kind,
-                        window,
-                        cx,
-                    );
-                });
+                        this.open_insert_picker_for(
+                            &track_id,
+                            Some(slot_index),
+                            desired_kind,
+                            window,
+                            cx,
+                        );
+                    },
+                );
             },
         )
     }
@@ -294,7 +352,7 @@ impl StudioLayout {
         Arc::new(move |(track_id, insert_id): &(String, String), _w, cx| {
             let track_id = track_id.clone();
             let insert_id = insert_id.clone();
-            let _ = owner.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
                 this.close_insert_editor(&track_id, &insert_id, cx);
                 this.timeline.update(cx, |timeline, cx| {
                     timeline.state.remove_insert(&track_id, &insert_id);
@@ -315,7 +373,7 @@ impl StudioLayout {
         Arc::new(move |(track_id, insert_id): &(String, String), _w, cx| {
             let track_id = track_id.clone();
             let insert_id = insert_id.clone();
-            let _ = owner.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
                 let bypassed = this.timeline.update(cx, |timeline, cx| {
                     let bypassed = timeline
                         .state
@@ -339,7 +397,7 @@ impl StudioLayout {
         Arc::new(move |(track_id, insert_id): &(String, String), _w, cx| {
             let track_id = track_id.clone();
             let insert_id = insert_id.clone();
-            let _ = owner.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
                 let enabled = this.timeline.update(cx, |timeline, cx| {
                     let enabled = timeline
                         .state
@@ -365,7 +423,7 @@ impl StudioLayout {
                 let track_id = track_id.clone();
                 let insert_id = insert_id.clone();
                 let up = *up;
-                let _ = owner.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner, cx, move |this, cx| {
                     let moved = this.timeline.update(cx, |timeline, cx| {
                         let moved = timeline.state.move_insert(&track_id, &insert_id, up);
                         if moved {
@@ -393,12 +451,17 @@ impl StudioLayout {
                 let track_id = track_id.clone();
                 let insert_index = *insert_index;
                 let insert_id = insert_id.clone();
-                let _ = owner.update(cx, |this, cx| {
-                    inspector_debug(&format!(
+                StudioLayout::defer_update_in_window(
+                    &owner,
+                    window,
+                    cx,
+                    move |this, window, cx| {
+                        inspector_debug(&format!(
                         "insert open_editor track={track_id} index={insert_index} insert={insert_id}"
                     ));
-                    this.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
-                });
+                        this.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
+                    },
+                );
             },
         )
     }
@@ -425,7 +488,7 @@ impl StudioLayout {
                     "routing input track={id} old={:?} new={:?}",
                     old, input
                 ));
-                let _ = owner.update(cx, |this, _cx| {
+                StudioLayout::defer_update(&owner, cx, |this, _cx| {
                     this.project_switcher.current_project.is_dirty = true;
                     this.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
                 });
@@ -455,7 +518,7 @@ impl StudioLayout {
                     "routing output track={id} old={:?} new={:?}",
                     old, output
                 ));
-                let _ = owner.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
                 });
@@ -486,7 +549,7 @@ impl StudioLayout {
                         "routing audio_format track={id} old={:?} new={:?}",
                         old, audio_format
                     ));
-                    let _ = owner.update(cx, |this, cx| {
+                    StudioLayout::defer_update(&owner, cx, |this, cx| {
                         this.mark_dirty();
                         this.push_mixer_snapshot_to_window(cx);
                     });
@@ -518,7 +581,7 @@ impl StudioLayout {
                         "routing midi_input track={id} old={:?} new={:?}",
                         old, midi_input
                     ));
-                    let _ = owner.update(cx, |this, _cx| {
+                    StudioLayout::defer_update(&owner, cx, |this, _cx| {
                         this.project_switcher.current_project.is_dirty = true;
                         this.project_switcher.current_project.subtitle =
                             "Unsaved changes".to_string();
@@ -550,7 +613,7 @@ impl StudioLayout {
                     "routing midi_channel track={id} old={:?} new={:?}",
                     old, channel
                 ));
-                let _ = owner.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
                 });
@@ -590,7 +653,7 @@ impl StudioLayout {
                 "edit track {} track={id} new={value}",
                 kind.label()
             ));
-            let _ = owner.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);
             });

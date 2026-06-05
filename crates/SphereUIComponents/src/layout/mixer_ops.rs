@@ -83,7 +83,7 @@ impl StudioLayout {
                 t.state.select_track(&id);
                 cx.notify();
             });
-            let _ = owner_select.update(cx, |layout, cx| {
+            StudioLayout::defer_update(&owner_select, cx, |layout, cx| {
                 layout.push_mixer_snapshot_to_window(cx);
             });
         });
@@ -102,7 +102,7 @@ impl StudioLayout {
                 t.state.set_track_volume(&id, v);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);
             });
@@ -126,7 +126,7 @@ impl StudioLayout {
                 t.state.set_track_pan(&id, v);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);
             });
@@ -152,7 +152,7 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
-                let _ = owner_dirty.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
                 });
@@ -178,7 +178,7 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
-                let _ = owner_dirty.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
                 });
@@ -197,7 +197,7 @@ impl StudioLayout {
                     t.state.toggle_track_arm(&id);
                     cx.notify();
                 });
-                let _ = owner_dirty.update(cx, |this, cx| {
+                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
                 });
@@ -214,7 +214,7 @@ impl StudioLayout {
                 t.state.cycle_track_input_monitor(&id);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);
             });
@@ -232,7 +232,7 @@ impl StudioLayout {
                 t.state.set_master_volume(v);
                 cx.notify();
             });
-            let _ = owner_dirty.update(cx, |this, cx| {
+            StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);
             });
@@ -252,7 +252,7 @@ impl StudioLayout {
                 let track_id = track_id.clone();
                 let x = *x;
                 let y = *y;
-                let _ = this.update(cx, |this, cx| {
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
                     let _ = this.timeline.update(cx, |timeline, cx| {
                         timeline.state.select_track(&track_id);
                         cx.notify();
@@ -285,7 +285,7 @@ impl StudioLayout {
             let this = owner.clone();
             std::sync::Arc::new(move |track_id: &String, window, cx| {
                 let track_id = track_id.clone();
-                let _ = this.update(cx, |this, cx| {
+                StudioLayout::defer_update_in_window(&this, window, cx, move |this, window, cx| {
                     this.open_insert_picker(&track_id, window, cx);
                 });
             })
@@ -297,7 +297,7 @@ impl StudioLayout {
             std::sync::Arc::new(move |(track_id, insert_id): &(String, String), _w, cx| {
                 let track_id = track_id.clone();
                 let insert_id = insert_id.clone();
-                let _ = this.update(cx, |this, cx| {
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
                     // Close any open editor window for this slot before dropping
                     // the descriptor — every open pairs with a close.
                     this.close_insert_editor(&track_id, &insert_id, cx);
@@ -317,7 +317,7 @@ impl StudioLayout {
             std::sync::Arc::new(move |(track_id, insert_id): &(String, String), _w, cx| {
                 let track_id = track_id.clone();
                 let insert_id = insert_id.clone();
-                let _ = this.update(cx, |this, cx| {
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
                     this.timeline.update(cx, |timeline, _cx| {
                         timeline.state.toggle_insert_bypass(&track_id, &insert_id);
                     });
@@ -336,7 +336,7 @@ impl StudioLayout {
                     let track_id = track_id.clone();
                     let insert_id = insert_id.clone();
                     let up = *up;
-                    let _ = this.update(cx, |this, cx| {
+                    StudioLayout::defer_update(&this, cx, move |this, cx| {
                         let moved = this.timeline.update(cx, |timeline, _cx| {
                             timeline.state.move_insert(&track_id, &insert_id, up)
                         });
@@ -360,7 +360,7 @@ impl StudioLayout {
                 let track_id = track_id.clone();
                 let insert_index = *insert_index;
                 let insert_id = insert_id.clone();
-                let _ = this.update(cx, |this, cx| {
+                StudioLayout::defer_update_in_window(&this, window, cx, move |this, window, cx| {
                     this.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
                 });
             })
@@ -374,7 +374,7 @@ impl StudioLayout {
             let this = owner.clone();
             std::sync::Arc::new(move |track_id: &String, _w, cx| {
                 let track_id = track_id.clone();
-                let _ = this.update(cx, |this, cx| {
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
                     let added = this
                         .timeline
                         .update(cx, |timeline, _cx| timeline.state.add_send(&track_id));
@@ -393,7 +393,7 @@ impl StudioLayout {
             std::sync::Arc::new(move |(track_id, send_id): &(String, String), _w, cx| {
                 let track_id = track_id.clone();
                 let send_id = send_id.clone();
-                let _ = this.update(cx, |this, cx| {
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
                     this.timeline.update(cx, |timeline, _cx| {
                         timeline.state.remove_send(&track_id, &send_id);
                     });

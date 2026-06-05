@@ -160,6 +160,7 @@ pub struct WgpuTimelineRenderer {
     selected_device_id: Option<String>,
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
+    max_texture_dimension_2d: u32,
     init_error: Option<String>,
 }
 
@@ -188,6 +189,7 @@ impl WgpuTimelineRenderer {
             selected_device_id,
             device: None,
             queue: None,
+            max_texture_dimension_2d: wgpu::Limits::downlevel_defaults().max_texture_dimension_2d,
             init_error: None,
         }
     }
@@ -290,12 +292,13 @@ impl WgpuTimelineRenderer {
             );
         }
 
-        // Conservative limits: use the adapter's reported limits clamped
-        // by `downlevel_defaults` so iGPU / older drivers don't fail device
-        // creation. `wgpu::Limits` doesn't expose a `min` helper here, so
-        // pick downlevel_defaults outright — it's the documented "works on
-        // all GL/DX11-class GPUs" preset.
-        let limits = wgpu::Limits::downlevel_defaults();
+        // Start with downlevel defaults for broad compatibility, but request
+        // the adapter's native 2D texture size. A maximized 4K timeline can be
+        // wider than the downlevel 2048px cap even at 100% scale.
+        let adapter_limits = adapter.limits();
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
+        let max_texture_dimension_2d = limits.max_texture_dimension_2d;
         let device_result = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("futureboard-timeline"),
             required_features: wgpu::Features::empty(),
@@ -316,6 +319,7 @@ impl WgpuTimelineRenderer {
             }
         };
 
+        self.max_texture_dimension_2d = max_texture_dimension_2d;
         self.device = Some(device);
         self.queue = Some(queue);
         Ok(())
@@ -331,6 +335,13 @@ impl WgpuTimelineRenderer {
 
         let width = snapshot.viewport.width.max(1.0) as u32;
         let height = snapshot.viewport.height.max(1.0) as u32;
+        let max_texture_dimension_2d = self.max_texture_dimension_2d;
+        if width > max_texture_dimension_2d || height > max_texture_dimension_2d {
+            return Err(format!(
+                "viewport {}x{} exceeds WGPU texture limit {}; falling back to GPUI paint",
+                width, height, max_texture_dimension_2d
+            ));
+        }
         let format = wgpu::TextureFormat::Rgba8Unorm;
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {

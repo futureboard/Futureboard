@@ -10,6 +10,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
 
 use crate::components;
 use crate::components::add_track_dialog::{AddTrackKind, AddTrackWindow};
+use crate::components::edit::ClipSnapshot;
 use crate::components::file_browser::FileBrowserState;
 use crate::components::message_box_dialog::MessageBoxWindow;
 use crate::components::midi_editor_window::MidiEditorWindow;
@@ -364,6 +365,9 @@ pub struct StudioLayout {
     /// so we focus this handle on first render — that is what makes
     /// Spacebar, Enter, L, K, R, Home reach `shortcut_command`.
     focus_handle: FocusHandle,
+    /// Arrangement clip snapshots copied by Ctrl/Cmd+C/X. Kept in-memory to
+    /// avoid serializing the full project clip model into the system clipboard.
+    clip_clipboard: Vec<ClipSnapshot>,
     /// Menu/key command IDs we've already logged as unsupported. Keeps
     /// the unified dispatcher quiet after the first miss per command.
     logged_unsupported_commands: HashSet<String>,
@@ -387,6 +391,10 @@ pub struct StudioLayout {
     /// the window opens so `close_project` can close it when returning to
     /// Welcome. `None` until wired (e.g. in tests / headless contexts).
     self_window: Option<WindowHandle<StudioLayout>>,
+    /// Last known main workspace bounds. Updated during render so code running
+    /// inside a `StudioLayout` update can position child windows without
+    /// re-entering the root `WindowHandle<StudioLayout>`.
+    cached_studio_window_bounds: Option<Bounds<gpui::Pixels>>,
     /// App-level hook that re-opens the Welcome window. Invoked by
     /// `do_close_project`. The app layer owns Welcome window construction, so
     /// the studio crate stays decoupled from native window options.
@@ -409,6 +417,29 @@ pub struct StudioLayout {
 }
 
 impl StudioLayout {
+    pub(crate) fn defer_update(
+        owner: &Entity<Self>,
+        cx: &mut gpui::App,
+        f: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) {
+        let owner = owner.clone();
+        cx.defer(move |cx| {
+            let _ = owner.update(cx, f);
+        });
+    }
+
+    pub(crate) fn defer_update_in_window(
+        owner: &Entity<Self>,
+        window: &Window,
+        cx: &mut gpui::App,
+        f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let owner = owner.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = owner.update(cx, |this, cx| f(this, window, cx));
+        });
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         // ── Centralized path resolution ───────────────────────────────────
         let paths = FutureboardPaths::resolve();
@@ -600,6 +631,7 @@ impl StudioLayout {
             bpm_drag_accum: 0.0,
             last_engine_bpm_commit: None,
             focus_handle: cx.focus_handle(),
+            clip_clipboard: Vec::new(),
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
             mixer_scroll_x: 0.0,
@@ -608,6 +640,7 @@ impl StudioLayout {
             project_folder: None,
             recent_projects: RecentProjectsStore::load(),
             self_window: None,
+            cached_studio_window_bounds: None,
             on_request_welcome: None,
             unsaved_guard_window: None,
             pending_close_action: None,
@@ -743,11 +776,9 @@ impl StudioLayout {
     }
 
     /// Main workspace window bounds — preferred owner for dialogs on Windows.
-    pub(super) fn studio_window_bounds(&self, cx: &mut gpui::App) -> Option<Bounds<gpui::Pixels>> {
-        self.self_window.as_ref().and_then(|handle| {
-            let bounds = handle.update(cx, |_, window, _| window.bounds()).ok()?;
-            crate::window_position::is_valid_owner_bounds(bounds).then_some(bounds)
-        })
+    pub(super) fn studio_window_bounds(&self, _cx: &mut gpui::App) -> Option<Bounds<gpui::Pixels>> {
+        self.cached_studio_window_bounds
+            .filter(|bounds| crate::window_position::is_valid_owner_bounds(*bounds))
     }
 
     pub(super) fn dispatch_command_id_from_bounds(
@@ -980,12 +1011,13 @@ impl StudioLayout {
             "edit:delete" | "clip:delete" | "automation:delete-selected-points" => {
                 self.delete_selected_clip_or_track(cx)
             }
-            // Automation editor commands. select-all / deselect are automation
-            // aware so they act on points when the selected track is in
-            // Automation mode, and fall through harmlessly otherwise.
-            "edit:select-all" | "automation:select-all-points" => {
-                self.select_all_automation_points(cx)
-            }
+            // Automation editor commands are automation-aware. General edit
+            // shortcuts fall back to arrangement clip selection/clipboard.
+            "edit:select-all" => self.select_all_timeline_items(cx),
+            "automation:select-all-points" => self.select_all_automation_points(cx),
+            "edit:copy" => self.copy_selected_clips(cx),
+            "edit:cut" => self.cut_selected_clips(cx),
+            "edit:paste" => self.paste_clips_at_playhead(cx),
             "edit:deselect-all" | "automation:clear-selection" => {
                 self.clear_automation_selection(cx)
             }
@@ -1024,6 +1056,7 @@ impl StudioLayout {
                 };
                 let _ = self.timeline.update(cx, |timeline, cx| {
                     if timeline.state.active_tool != tool {
+                        timeline.reset_input_state();
                         timeline.state.active_tool = tool;
                         cx.notify();
                     }

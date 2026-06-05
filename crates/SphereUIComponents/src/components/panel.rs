@@ -20,7 +20,7 @@ use gpui::{
 
 use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
 use crate::components::controls::{
-    fb_button, fb_form_row, fb_section_header, fb_segmented_button, FbButtonKind,
+    fb_button, fb_checkbox, fb_form_row, fb_section_header, FbButtonKind,
 };
 use crate::components::slider::slider;
 use crate::components::text_input::{text_field, TextInputState};
@@ -47,10 +47,14 @@ type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) 
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
+type ClipBoolCb = Arc<dyn Fn(&(String, bool), &mut Window, &mut App) + 'static>;
 
-/// Open routing ComboBox in the Inspector (MIDI Input / Ch / Out).
+/// Open routing ComboBox in the Inspector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InspectorRoutingCombo {
+    AudioFormat,
+    AudioInput,
+    AudioOutput,
     MidiInput,
     MidiChannel,
     MidiOut,
@@ -82,6 +86,8 @@ pub struct InspectorCallbacks {
     pub on_open_insert_editor: InsertOpenCb,
     pub on_set_clip_start: ClipF32Cb,
     pub on_set_clip_length: ClipF32Cb,
+    pub on_set_clip_gain: ClipF32Cb,
+    pub on_set_clip_muted: ClipBoolCb,
     pub on_open_clip_bottom_editor: StrCb,
     pub on_open_clip_external_midi_editor: StrCb,
     pub open_routing_combo: Option<InspectorRoutingCombo>,
@@ -455,74 +461,75 @@ fn color_palette(track_id: String, current: gpui::Rgba, on_set: ColorCb) -> impl
     row
 }
 
-fn option_button(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<String>,
-    active: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    fb_segmented_button(id, label, active, on_click)
-}
-
 fn format_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
-    let tid_mono = track.id.clone();
-    let tid_stereo = track.id.clone();
-    let cb_mono = callbacks.on_set_audio_format.clone();
-    let cb_stereo = callbacks.on_set_audio_format.clone();
-    div()
-        .flex()
-        .flex_row()
-        .gap(px(4.0))
-        .child(option_button(
-            "inspector-format-mono",
-            TrackAudioFormat::Mono.label(),
-            track.routing.audio_format == TrackAudioFormat::Mono,
-            move |_, w, cx| cb_mono(&(tid_mono.clone(), TrackAudioFormat::Mono), w, cx),
-        ))
-        .child(option_button(
-            "inspector-format-stereo",
-            TrackAudioFormat::Stereo.label(),
-            track.routing.audio_format == TrackAudioFormat::Stereo,
-            move |_, w, cx| cb_stereo(&(tid_stereo.clone(), TrackAudioFormat::Stereo), w, cx),
-        ))
+    routing_combo_trigger(
+        "inspector-format-combo",
+        track.routing.audio_format.label().to_string(),
+        InspectorRoutingCombo::AudioFormat,
+        callbacks.open_routing_combo,
+        callbacks.on_toggle_routing_combo.clone(),
+    )
 }
 
 fn audio_input_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
-    let tid = track.id.clone();
-    let cb = callbacks.on_set_input_routing.clone();
-    // TODO(device-enumeration): populate real audio input device/channel options
-    // once DAUx device discovery is available in TimelineState.
-    div().flex().flex_row().gap(px(4.0)).child(option_button(
-        "inspector-input-none",
-        "None",
-        track.routing.input == TrackInputRouting::None,
-        move |_, w, cx| cb(&(tid.clone(), TrackInputRouting::None), w, cx),
-    ))
+    routing_combo_trigger(
+        "inspector-input-combo",
+        track.routing.input.label(),
+        InspectorRoutingCombo::AudioInput,
+        callbacks.open_routing_combo,
+        callbacks.on_toggle_routing_combo.clone(),
+    )
 }
 
 fn output_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
-    let tid_main = track.id.clone();
-    let tid_none = track.id.clone();
-    let cb_main = callbacks.on_set_output_routing.clone();
-    let cb_none = callbacks.on_set_output_routing.clone();
+    routing_combo_trigger(
+        "inspector-output-combo",
+        track.routing.output.label(),
+        InspectorRoutingCombo::AudioOutput,
+        callbacks.open_routing_combo,
+        callbacks.on_toggle_routing_combo.clone(),
+    )
+}
+
+fn audio_format_options() -> Vec<String> {
+    vec![
+        TrackAudioFormat::Mono.label().to_string(),
+        TrackAudioFormat::Stereo.label().to_string(),
+    ]
+}
+
+fn audio_input_options() -> Vec<String> {
+    // TODO(device-enumeration): populate real audio input device/channel options
+    // once DAUx device discovery is available in TimelineState.
+    vec!["None".to_string()]
+}
+
+fn audio_output_options() -> Vec<String> {
     // TODO(device-enumeration): add real hardware outputs and bus targets when
     // the routing/device registry is exposed to the Inspector.
-    div()
-        .flex()
-        .flex_row()
-        .gap(px(4.0))
-        .child(option_button(
-            "inspector-output-main",
-            "Main",
-            track.routing.output == TrackOutputRouting::Main,
-            move |_, w, cx| cb_main(&(tid_main.clone(), TrackOutputRouting::Main), w, cx),
-        ))
-        .child(option_button(
-            "inspector-output-none",
-            "None",
-            track.routing.output == TrackOutputRouting::None,
-            move |_, w, cx| cb_none(&(tid_none.clone(), TrackOutputRouting::None), w, cx),
-        ))
+    vec!["Main".to_string(), "None".to_string()]
+}
+
+fn parse_audio_format_option(label: &str) -> TrackAudioFormat {
+    match label {
+        "Mono" => TrackAudioFormat::Mono,
+        _ => TrackAudioFormat::Stereo,
+    }
+}
+
+fn parse_audio_input_option(label: &str) -> TrackInputRouting {
+    match label {
+        "None" => TrackInputRouting::None,
+        _ => TrackInputRouting::None,
+    }
+}
+
+fn parse_audio_output_option(label: &str) -> TrackOutputRouting {
+    match label {
+        "Main" => TrackOutputRouting::Main,
+        "None" => TrackOutputRouting::None,
+        _ => TrackOutputRouting::None,
+    }
 }
 
 fn midi_input_combo_label(routing: &TrackMidiInputRouting) -> String {
@@ -666,6 +673,60 @@ pub fn inspector_routing_combo_overlay(
 
     let track_id = track.id.clone();
     let menu = match open_combo {
+        InspectorRoutingCombo::AudioFormat => {
+            let selected = track.routing.audio_format.label().to_string();
+            let options = audio_format_options();
+            let cb = callbacks.on_set_audio_format.clone();
+            let close = on_close.clone();
+            combo_box_string_menu(
+                "inspector-audio-format-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let format = parse_audio_format_option(&value);
+                    cb(&(track_id.clone(), format), window, cx);
+                    close(cx);
+                }),
+            )
+            .into_any_element()
+        }
+        InspectorRoutingCombo::AudioInput => {
+            let selected = track.routing.input.label();
+            let options = audio_input_options();
+            let cb = callbacks.on_set_input_routing.clone();
+            let close = on_close.clone();
+            combo_box_string_menu(
+                "inspector-audio-input-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let routing = parse_audio_input_option(&value);
+                    cb(&(track_id.clone(), routing), window, cx);
+                    close(cx);
+                }),
+            )
+            .into_any_element()
+        }
+        InspectorRoutingCombo::AudioOutput => {
+            let selected = track.routing.output.label();
+            let options = audio_output_options();
+            let cb = callbacks.on_set_output_routing.clone();
+            let close = on_close.clone();
+            combo_box_string_menu(
+                "inspector-audio-output-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let output = parse_audio_output_option(&value);
+                    cb(&(track_id.clone(), output), window, cx);
+                    close(cx);
+                }),
+            )
+            .into_any_element()
+        }
         InspectorRoutingCombo::MidiInput => {
             let selected = midi_input_combo_label(&track.routing.midi_input);
             let options = midi_input_options(&detected_midi_inputs);
@@ -1221,6 +1282,121 @@ fn track_inspector(
         )
 }
 
+fn inspector_section(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(fb_section_header(label))
+        .child(child)
+}
+
+fn compact_property_row(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .min_h(px(26.0))
+        .child(
+            div()
+                .w(px(66.0))
+                .flex_shrink_0()
+                .text_size(px(10.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_muted())
+                .child(label.into()),
+        )
+        .child(div().flex_1().min_w_0().child(child))
+}
+
+fn value_box(text: impl Into<String>, width: f32) -> impl IntoElement {
+    div()
+        .w(px(width))
+        .h(px(26.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_end()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .px(px(8.0))
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(Colors::text_primary())
+        .child(text.into())
+}
+
+fn readonly_value(text: impl Into<String>) -> impl IntoElement {
+    div()
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .justify_end()
+        .pr(px(64.0))
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(Colors::text_secondary())
+        .child(text.into())
+}
+
+fn disabled_value(text: impl Into<String>) -> impl IntoElement {
+    div()
+        .w(px(92.0))
+        .h(px(26.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_end()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .opacity(0.5)
+        .px(px(8.0))
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(Colors::text_secondary())
+        .child(text.into())
+}
+
+fn small_step_button(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let mut button = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(28.0))
+        .min_w(px(28.0))
+        .h(px(26.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_secondary())
+        .opacity(if enabled { 1.0 } else { 0.45 })
+        .child(label);
+    if enabled {
+        button = button
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(|s| {
+                s.bg(Colors::surface_control_hover())
+                    .border_color(Colors::border_strong())
+            })
+            .on_click(on_click);
+    }
+    button
+}
+
 fn beat_stepper(
     id: &'static str,
     clip_id: &str,
@@ -1237,26 +1413,79 @@ fn beat_stepper(
         .flex_row()
         .items_center()
         .gap(px(4.0))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_size(px(11.0))
-                .text_color(Colors::text_primary())
-                .child(format!("{value:.2} bt")),
-        )
-        .child(compact_action_button(
+        .child(value_box(format!("{value:.2} bt"), 92.0))
+        .child(small_step_button(
             (id, 0usize),
             "-",
             value > min_value + 0.0001,
             move |_, w, cx| down(&(down_id.clone(), (value - 0.25).max(min_value)), w, cx),
         ))
-        .child(compact_action_button(
+        .child(small_step_button(
             (id, 1usize),
             "+",
             true,
             move |_, w, cx| up(&(up_id.clone(), value + 0.25), w, cx),
         ))
+}
+
+fn linear_gain_to_db(gain: f32) -> f32 {
+    if gain <= 0.000_001 {
+        -60.0
+    } else {
+        20.0 * gain.log10()
+    }
+}
+
+fn db_to_linear_gain(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
+fn gain_stepper(clip_id: &str, gain: f32, callback: ClipF32Cb) -> impl IntoElement {
+    let db = linear_gain_to_db(gain);
+    let down_id = clip_id.to_string();
+    let up_id = clip_id.to_string();
+    let down = callback.clone();
+    let up = callback;
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .child(value_box(format!("{db:.1} dB"), 92.0))
+        .child(small_step_button(
+            "clip-gain-down",
+            "-",
+            db > -59.9,
+            move |_, w, cx| {
+                down(
+                    &(down_id.clone(), db_to_linear_gain((db - 1.0).max(-60.0))),
+                    w,
+                    cx,
+                )
+            },
+        ))
+        .child(small_step_button(
+            "clip-gain-up",
+            "+",
+            db < 12.0,
+            move |_, w, cx| {
+                up(
+                    &(up_id.clone(), db_to_linear_gain((db + 1.0).min(12.0))),
+                    w,
+                    cx,
+                )
+            },
+        ))
+}
+
+fn truncate_value(text: impl Into<String>) -> impl IntoElement {
+    div()
+        .min_w(px(0.0))
+        .truncate()
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(Colors::text_primary())
+        .child(text.into())
 }
 
 fn file_name_from_path(path: &str) -> String {
@@ -1276,6 +1505,208 @@ fn clip_inspector(
     let clip_id = clip.clip_id.to_string();
     let open_bottom = callbacks.on_open_clip_bottom_editor.clone();
     let open_external = callbacks.on_open_clip_external_midi_editor.clone();
+
+    if clip.kind == "Audio" {
+        let source_duration = clip
+            .source_duration_seconds
+            .map(|seconds| format!("{seconds:.2} s"))
+            .unwrap_or_else(|| "Pending".to_string());
+        let file_name = clip
+            .source_path
+            .map(file_name_from_path)
+            .unwrap_or_else(|| "Missing source".to_string());
+        let path = clip.source_path.unwrap_or("-");
+        let gain_db = linear_gain_to_db(clip.gain);
+        let muted_id = clip.clip_id.to_string();
+        let mute_cb = callbacks.on_set_clip_muted.clone();
+        let mut body = scroll_body()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .w(px(4.0))
+                                    .h(px(30.0))
+                                    .rounded_sm()
+                                    .bg(Colors::accent_primary()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(Colors::text_primary())
+                                    .child(clip.name.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px(px(7.0))
+                                    .py(px(2.0))
+                                    .rounded_sm()
+                                    .bg(Colors::with_alpha(Colors::accent_primary(), 0.16))
+                                    .text_size(px(9.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(Colors::accent_primary())
+                                    .child("Audio Clip"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .pl(px(12.0))
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(10.5))
+                            .text_color(Colors::text_muted())
+                            .child(format!(
+                                "{} • {} source • Gain {:.1} dB",
+                                clip.track_name, source_duration, gain_db
+                            )),
+                    ),
+            )
+            .child(inspector_section(
+                "CLIP",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(compact_property_row(
+                        "Name",
+                        text_field(clip_name_input, clip_name_focused),
+                    )),
+            ))
+            .child(inspector_section(
+                "TIMING",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(compact_property_row(
+                        "Start",
+                        beat_stepper(
+                            "clip-start",
+                            clip.clip_id,
+                            clip.start_beat,
+                            callbacks.on_set_clip_start.clone(),
+                            0.0,
+                        ),
+                    ))
+                    .child(compact_property_row(
+                        "Length",
+                        beat_stepper(
+                            "clip-length",
+                            clip.clip_id,
+                            clip.duration_beats,
+                            callbacks.on_set_clip_length.clone(),
+                            0.25,
+                        ),
+                    ))
+                    .child(compact_property_row(
+                        "End",
+                        readonly_value(format!("{:.2} bt", clip.start_beat + clip.duration_beats)),
+                    )),
+            ))
+            .child(inspector_section(
+                "AUDIO",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(compact_property_row(
+                        "Muted",
+                        fb_checkbox("clip-muted", "Muted", clip.muted, true, move |_, w, cx| {
+                            mute_cb(&(muted_id.clone(), !clip.muted), w, cx)
+                        }),
+                    ))
+                    .child(compact_property_row(
+                        "Gain",
+                        gain_stepper(clip.clip_id, clip.gain, callbacks.on_set_clip_gain.clone()),
+                    ))
+                    .child(compact_property_row("Fade In", disabled_value("0.00 ms")))
+                    .child(compact_property_row("Fade Out", disabled_value("0.00 ms")))
+                    .child(compact_property_row(
+                        "Actions",
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(4.0))
+                            // TODO(audio-actions): wire these to non-destructive clip processors.
+                            .child(compact_action_button(
+                                "clip-normalize",
+                                "Normalize",
+                                false,
+                                |_, _, _| {},
+                            ))
+                            .child(compact_action_button(
+                                "clip-reverse",
+                                "Reverse",
+                                false,
+                                |_, _, _| {},
+                            )),
+                    )),
+            ))
+            .child(inspector_section(
+                "SOURCE",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(compact_property_row("File", truncate_value(file_name)))
+                    .child(compact_property_row(
+                        "Duration",
+                        truncate_value(source_duration),
+                    ))
+                    .child(compact_property_row(
+                        "Path",
+                        truncate_value(path.to_string()),
+                    ))
+                    .child(compact_property_row(
+                        "",
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(4.0))
+                            // TODO(source-actions): reveal/replace need shell + relink callbacks.
+                            .child(compact_action_button(
+                                "clip-reveal",
+                                "Reveal",
+                                false,
+                                |_, _, _| {},
+                            ))
+                            .child(compact_action_button(
+                                "clip-replace",
+                                "Replace",
+                                false,
+                                |_, _, _| {},
+                            )),
+                    )),
+            ));
+
+        if std::env::var_os("FUTUREBOARD_INSPECTOR_DEBUG").is_some() {
+            body = body.child(inspector_section(
+                "DEBUG",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(kv_row("Track ID", clip.track_id.to_string())),
+            ));
+        }
+
+        return body;
+    }
+
     let mut body = scroll_body()
         .child(inspector_header(
             Colors::accent_primary(),

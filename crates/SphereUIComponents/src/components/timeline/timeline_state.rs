@@ -2931,10 +2931,12 @@ impl TimelineState {
     pub fn select_track(&mut self, track_id: &str) {
         self.selection.selected_track_id = Some(track_id.to_string());
         self.selection.selected_clip_ids.clear();
+        self.arrangement_range = None;
     }
 
     pub fn select_clip(&mut self, clip_id: &str) {
         self.selection.selected_clip_ids = vec![clip_id.to_string()];
+        self.arrangement_range = None;
         if let Some(track) = self
             .tracks
             .iter()
@@ -2991,6 +2993,33 @@ impl TimelineState {
                 let duration_beats = duration_beats.max(min_len);
                 if (clip.duration_beats - duration_beats).abs() > 0.0001 {
                     clip.duration_beats = duration_beats;
+                    return true;
+                }
+                return false;
+            }
+        }
+        false
+    }
+
+    pub fn set_clip_muted(&mut self, clip_id: &str, muted: bool) -> bool {
+        for track in &mut self.tracks {
+            if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
+                if clip.muted != muted {
+                    clip.muted = muted;
+                    return true;
+                }
+                return false;
+            }
+        }
+        false
+    }
+
+    pub fn set_clip_gain(&mut self, clip_id: &str, gain: f32) -> bool {
+        let gain = gain.clamp(0.0, 4.0);
+        for track in &mut self.tracks {
+            if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
+                if (clip.gain - gain).abs() > 0.0001 {
+                    clip.gain = gain;
                     return true;
                 }
                 return false;

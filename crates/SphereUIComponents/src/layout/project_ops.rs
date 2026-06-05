@@ -93,7 +93,9 @@ impl StudioLayout {
         self.project_folder = None;
         self.file_browser.set_project_folder(None);
         self.project_switcher = ProjectSwitcherState::default();
+        self.clip_clipboard.clear();
         let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.reset_input_state();
             timeline.state = TimelineState::default();
             cx.notify();
         });
@@ -619,10 +621,13 @@ impl StudioLayout {
 
     pub fn load_project_from_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.project_state = crate::app_state::ProjectState::Loading;
+        self.clip_clipboard.clear();
         match load_project(&path) {
             Ok(project) => {
-                let _ = self.timeline.update(cx, |timeline, _cx| {
+                let _ = self.timeline.update(cx, |timeline, cx| {
+                    timeline.reset_input_state();
                     apply_to_timeline(&project, &mut timeline.state);
+                    cx.notify();
                 });
                 self.project_state =
                     crate::app_state::ProjectState::SavedProject { path: path.clone() };

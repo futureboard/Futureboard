@@ -6,7 +6,7 @@ use crate::components::timeline::timeline_state::{
     TrackAudioFormat, TrackInputRouting, TrackState, TrackType,
 };
 
-use super::StudioLayout;
+use super::{RecordingUiState, StudioLayout};
 use DAUx::types::{JsRecordingTrackConfig, JsStartRecordingConfig};
 
 impl StudioLayout {
@@ -20,6 +20,9 @@ impl StudioLayout {
     }
 
     pub(super) fn start_native_recording(&mut self, cx: &mut Context<Self>) {
+        self.recording_ui_state = RecordingUiState::Preparing;
+        cx.notify();
+
         let Some(engine) = self.audio_engine.as_ref() else {
             self.fail_recording_start("audio engine unavailable", cx);
             return;
@@ -30,6 +33,9 @@ impl StudioLayout {
             None => {
                 self.audio_last_error =
                     Some("save the project to a folder before recording".to_string());
+                self.recording_ui_state = RecordingUiState::Failed {
+                    reason: "save the project to a folder before recording".to_string(),
+                };
                 eprintln!("[recording] no project folder — save project first");
                 return;
             }
@@ -146,13 +152,13 @@ impl StudioLayout {
         };
 
         if let Err(error) = engine.start_recording(config) {
-            self.audio_last_error = Some(error.to_string());
-            eprintln!("[recording] start failed: {error}");
+            self.fail_recording_start(&error.to_string(), cx);
             return;
         }
 
         self.recording_start_beat = start_beat.max(0.0);
         self.audio_last_error = None;
+        self.recording_ui_state = RecordingUiState::Recording;
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.recording = true;
             cx.notify();
@@ -170,13 +176,22 @@ impl StudioLayout {
 
     pub(super) fn stop_native_recording(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.audio_engine.as_ref() else {
+            self.recording_ui_state = RecordingUiState::Failed {
+                reason: "audio engine unavailable".to_string(),
+            };
+            cx.notify();
             return;
         };
+        self.recording_ui_state = RecordingUiState::Finalizing;
+        cx.notify();
 
         let results = match engine.stop_recording() {
             Ok(results) => results,
             Err(error) => {
                 self.audio_last_error = Some(error.to_string());
+                self.recording_ui_state = RecordingUiState::Failed {
+                    reason: error.to_string(),
+                };
                 eprintln!("[recording] stop failed: {error}");
                 let _ = self.timeline.update(cx, |timeline, cx| {
                     timeline.state.transport.recording = false;
@@ -192,6 +207,10 @@ impl StudioLayout {
         });
 
         self.commit_recording_results(cx, results);
+        if !matches!(self.recording_ui_state, RecordingUiState::Failed { .. }) {
+            self.recording_ui_state = RecordingUiState::Idle;
+            cx.notify();
+        }
     }
 
     fn commit_recording_results(
@@ -203,10 +222,16 @@ impl StudioLayout {
         let owner = cx.entity().clone();
         let timeline = self.timeline.clone();
         let mut import_paths: Vec<(PathBuf, String)> = Vec::new();
+        let mut failed_tracks: Vec<String> = Vec::new();
 
         let _ = self.timeline.update(cx, |timeline, cx| {
             for result in &results {
                 if !result.success {
+                    failed_tracks.push(format!(
+                        "{}: {}",
+                        result.track_id,
+                        result.error.as_deref().unwrap_or("unknown error")
+                    ));
                     eprintln!(
                         "[recording] track {} failed: {}",
                         result.track_id,
@@ -236,6 +261,14 @@ impl StudioLayout {
             cx.notify();
         });
 
+        if !failed_tracks.is_empty() {
+            let reason = format!("recording finalize failed ({})", failed_tracks.join("; "));
+            self.audio_last_error = Some(reason.clone());
+            self.recording_ui_state = RecordingUiState::Failed { reason };
+            cx.notify();
+            return;
+        }
+
         self.engine_project_dirty = true;
         self.engine_media_dirty = true;
         self.schedule_audio_project_sync(cx, true, "recording_commit");
@@ -253,6 +286,9 @@ impl StudioLayout {
 
     fn fail_recording_start(&mut self, message: &str, cx: &mut Context<Self>) {
         self.audio_last_error = Some(message.to_string());
+        self.recording_ui_state = RecordingUiState::Failed {
+            reason: message.to_string(),
+        };
         eprintln!("[recording] start blocked: {message}");
         cx.notify();
     }

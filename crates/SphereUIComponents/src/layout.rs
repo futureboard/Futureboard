@@ -144,6 +144,27 @@ impl RendererWarmup {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingUiState {
+    Idle,
+    Preparing,
+    Recording,
+    Finalizing,
+    Failed { reason: String },
+}
+
+impl RecordingUiState {
+    fn status_text(&self) -> Option<String> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing => Some("Recording: preparing...".to_string()),
+            Self::Recording => Some("Recording".to_string()),
+            Self::Finalizing => Some("Recording: finalizing...".to_string()),
+            Self::Failed { reason } => Some(format!("Recording failed: {reason}")),
+        }
+    }
+}
+
 /// Warm the renderer and report whether the GPU backend was requested and
 /// whether it came up. Logs start/end (and any fallback) under
 /// `FUTUREBOARD_GPU_RENDERER_DEBUG=1`. Non-fatal: a failed GPU init falls back
@@ -341,6 +362,7 @@ pub struct StudioLayout {
     pending_play_after_sync: bool,
     /// Beat position when the current recording session started.
     recording_start_beat: f32,
+    recording_ui_state: RecordingUiState,
     last_engine_playhead_beat: f32,
     last_engine_sync: Instant,
     /// Last time we pushed engine meter levels into timeline state. Used to
@@ -639,6 +661,7 @@ impl StudioLayout {
             audio_sync_pending: false,
             pending_play_after_sync: false,
             recording_start_beat: 0.0,
+            recording_ui_state: RecordingUiState::Idle,
             last_engine_playhead_beat: 0.0,
             last_engine_sync: Instant::now(),
             last_meter_apply: Instant::now(),

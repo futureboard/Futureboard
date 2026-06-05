@@ -216,11 +216,16 @@ impl StudioLayout {
     }
 
     pub(super) fn status_text(&self) -> (String, String) {
-        let left = match (&self.audio_last_error, &self.audio_stats) {
-            (Some(error), _) => format!("Audio: {error}"),
-            (_, Some(stats)) if stats.transport_playing => "Playing".to_string(),
-            (_, Some(stats)) if stats.running => "Audio ready".to_string(),
-            _ => "Ready".to_string(),
+        let left = match (
+            self.recording_ui_state.status_text(),
+            &self.audio_last_error,
+            &self.audio_stats,
+        ) {
+            (Some(status), _, _) => status,
+            (None, Some(error), _) => format!("Audio: {error}"),
+            (None, _, Some(stats)) if stats.transport_playing => "Playing".to_string(),
+            (None, _, Some(stats)) if stats.running => "Audio ready".to_string(),
+            (None, _, _) => "Ready".to_string(),
         };
         let audio = self
             .audio_stats

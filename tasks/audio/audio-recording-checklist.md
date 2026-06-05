@@ -88,8 +88,8 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 
 - [x] `transport.recording` flag; start playback on record; stop finalizes.
 - [x] Commit avoids nested update (deferred sync) — see [[gpui-nested-entity-update-panic]].
-- [~] Explicit Idle/Prepare/Recording/Finalizing/Error states (currently implicit).
-- [ ] Partial-file handling on abort/error surfaced to UI.
+- [x] Explicit Idle/Prepare/Recording/Finalizing/Error UI states (`RecordingUiState`) drive status text.
+- [x] Start/stop/finalize errors surface through `audio_last_error` + `RecordingUiState::Failed`; partial-file cleanup remains engine-owned.
 
 ## Phase I — Project Recording Folder
 

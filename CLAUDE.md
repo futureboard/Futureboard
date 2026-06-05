@@ -1,4 +1,4 @@
-Before implementing task specs, read `tasks/SKILL.txt`.
+Before implementing task specs, read `tasks/SKILL.md`.
 
 ## PluginHost
 

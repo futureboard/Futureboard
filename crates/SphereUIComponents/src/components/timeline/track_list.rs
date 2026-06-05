@@ -19,7 +19,9 @@ pub fn track_list(
     state: &TimelineState,
     header_callbacks: TrackHeaderCallbacks,
     on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_select_clip: std::sync::Arc<
+        dyn Fn(&(String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     on_add_clip: std::sync::Arc<
         dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
@@ -31,7 +33,7 @@ pub fn track_list(
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
     on_range_start: Option<
-        std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+        std::sync::Arc<dyn Fn(&(String, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_erase_start: Option<
         std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,

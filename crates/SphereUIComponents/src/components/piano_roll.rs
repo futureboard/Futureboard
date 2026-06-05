@@ -23,7 +23,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     canvas, div, px, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Render, ScrollWheelEvent, StatefulInteractiveElement, Styled, Window,
+    Render, ScrollWheelEvent, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 use crate::components::edit::{normalize_range, EditCommand};
@@ -313,6 +313,7 @@ pub struct PianoRoll {
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
     focus: FocusHandle,
+    focus_lost_subscription: Option<Subscription>,
 }
 
 impl PianoRoll {
@@ -341,6 +342,7 @@ impl PianoRoll {
             cc_edit_prev: None,
             last_editing_clip: None,
             focus: cx.focus_handle(),
+            focus_lost_subscription: None,
         }
     }
 
@@ -628,6 +630,17 @@ impl PianoRoll {
             self.selection = self.selection_before_marquee.clone();
             self.selection_before_marquee.clear();
             self.drag = PianoDrag::None;
+            cx.notify();
+        }
+    }
+
+    fn cancel_active_gesture(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
+            self.cancel_marquee_select(cx);
+        } else if !matches!(self.drag, PianoDrag::None) {
+            self.drag = PianoDrag::None;
+            self.erase_preview_ids.clear();
+            self.cc_edit_prev = None;
             cx.notify();
         }
     }
@@ -1464,10 +1477,9 @@ impl PianoRoll {
             }
             "escape" => {
                 cx.stop_propagation();
-                if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
-                    self.cancel_marquee_select(cx);
+                if !matches!(self.drag, PianoDrag::None) {
+                    self.cancel_active_gesture(cx);
                 } else {
-                    self.drag = PianoDrag::None;
                     self.selection.clear();
                     cx.notify();
                 }
@@ -2259,7 +2271,15 @@ impl PianoRoll {
 }
 
 impl Render for PianoRoll {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_lost_subscription.is_none() {
+            self.focus_lost_subscription = Some(cx.on_focus_lost(window, |this, _window, cx| {
+                if !matches!(this.drag, PianoDrag::None) {
+                    this.cancel_active_gesture(cx);
+                }
+            }));
+        }
+
         let clip_id = self.editing_clip_id(cx);
         self.prune_transient_state(cx, clip_id.as_deref());
 
@@ -2361,6 +2381,7 @@ impl PianoRoll {
                 "Draw",
                 tool == PianoTool::Draw,
                 cx.listener(|this, _, _w, cx| {
+                    this.cancel_active_gesture(cx);
                     this.tool = PianoTool::Draw;
                     cx.notify();
                 }),
@@ -2370,6 +2391,7 @@ impl PianoRoll {
                 "Select",
                 tool == PianoTool::Select,
                 cx.listener(|this, _, _w, cx| {
+                    this.cancel_active_gesture(cx);
                     this.tool = PianoTool::Select;
                     cx.notify();
                 }),
@@ -2379,6 +2401,7 @@ impl PianoRoll {
                 "Erase",
                 tool == PianoTool::Erase,
                 cx.listener(|this, _, _w, cx| {
+                    this.cancel_active_gesture(cx);
                     this.tool = PianoTool::Erase;
                     cx.notify();
                 }),
@@ -2388,6 +2411,7 @@ impl PianoRoll {
                 "Split",
                 tool == PianoTool::Split,
                 cx.listener(|this, _, _w, cx| {
+                    this.cancel_active_gesture(cx);
                     this.tool = PianoTool::Split;
                     cx.notify();
                 }),
@@ -2397,6 +2421,7 @@ impl PianoRoll {
                 "Mute",
                 tool == PianoTool::Mute,
                 cx.listener(|this, _, _w, cx| {
+                    this.cancel_active_gesture(cx);
                     this.tool = PianoTool::Mute;
                     cx.notify();
                 }),

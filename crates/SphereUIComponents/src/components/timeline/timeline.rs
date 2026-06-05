@@ -12,12 +12,13 @@ use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, svg, AppContext, Context, Empty, ExternalPaths, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollDelta, StatefulInteractiveElement, Styled, Window,
+    ParentElement, Render, ScrollDelta, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 /// App chrome (top titlebar/menu strip) — used to convert window-space y into
 /// the timeline track area. Mirrors the value used by app_chrome.
 const APP_CHROME_HEIGHT: f32 = 36.0;
+const MARQUEE_DRAG_THRESHOLD: f32 = 4.0;
 
 /// Sizes of the surrounding chrome panels that the timeline's scroll/grid
 /// math has to subtract from the window to know the actual timeline body
@@ -30,6 +31,15 @@ pub struct TimelineChromeMetrics {
     pub inspector_width: f32,
     pub bottom_panel_height: f32,
     pub status_bar_height: f32,
+}
+
+#[derive(Clone, Debug)]
+struct RangeSelectDrag {
+    start_beat: f32,
+    current_beat: f32,
+    start_track_id: String,
+    additive: bool,
+    dragging: bool,
 }
 
 fn is_supported_audio_ext(path: &std::path::Path) -> bool {
@@ -63,8 +73,11 @@ pub struct Timeline {
     clip_drag_target_track_index: Option<usize>,
     /// Pen-tool click-drag: `(track_id, start_beat)` until mouse-up creates the clip.
     pen_clip_draw: Option<(String, f32)>,
-    /// Pointer-tool range select drag: `(start_beat, current_beat, start_track_id)`.
-    range_select_drag: Option<(f32, f32, String)>,
+    /// Pointer-tool empty-lane marquee. Rule: Pointer + empty lane drag starts
+    /// replace-marquee; Ctrl/Cmd + Pointer + empty lane drag starts additive
+    /// marquee. Clips, rulers, toolbar controls, and non-pointer tools never
+    /// start this gesture.
+    range_select_drag: Option<RangeSelectDrag>,
     /// Right-drag erase: clip ids already queued for deletion this gesture.
     erase_clip_drag: Option<HashSet<String>>,
     /// Live preview of clip ids marked for erase (mirrors `erase_clip_drag`).
@@ -79,6 +92,7 @@ pub struct Timeline {
     /// to switch the bottom panel to the piano-roll Editor tab.
     on_open_editor: Option<TimelineOpenEditorCb>,
     chrome_metrics: TimelineChromeMetrics,
+    focus_lost_subscription: Option<Subscription>,
 }
 
 pub type TimelineOpenEditorCb = std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>;
@@ -133,7 +147,10 @@ impl Render for ClipResizeDrag {
 impl Timeline {
     fn input_debug_enabled() -> bool {
         static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_TIMELINE_INPUT_DEBUG").is_some())
+        *FLAG.get_or_init(|| {
+            std::env::var_os("FUTUREBOARD_TIMELINE_INPUT_DEBUG").is_some()
+                || std::env::var_os("FUTUREBOARD_SELECTION_DEBUG").is_some()
+        })
     }
 
     fn log_input_state(&self, label: &str) {
@@ -153,14 +170,11 @@ impl Timeline {
 
     pub fn reset_input_state(&mut self) {
         self.log_input_state("reset-before");
-        let had_uncommitted_range = self.range_select_drag.is_some();
         self.clip_drag_origin = None;
         self.clip_drag_target_track_index = None;
         self.pen_clip_draw = None;
         self.range_select_drag = None;
-        if had_uncommitted_range {
-            self.state.arrangement_range = None;
-        }
+        self.state.arrangement_range = None;
         self.erase_clip_drag = None;
         self.erase_preview_ids.clear();
         self.automation_drag = None;
@@ -168,6 +182,14 @@ impl Timeline {
         self.pan_last_position = None;
         self.state.clear_track_drag();
         self.log_input_state("reset-after");
+    }
+
+    fn cancel_active_gesture(&mut self, cx: &mut gpui::Context<Self>) {
+        if Self::input_debug_enabled() {
+            eprintln!("[selection] marquee_cancel");
+        }
+        self.reset_input_state();
+        cx.notify();
     }
 
     /// Clean empty-project Timeline — the real runtime entry point.
@@ -193,6 +215,7 @@ impl Timeline {
             on_context_menu: None,
             on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
+            focus_lost_subscription: None,
         }
     }
 
@@ -220,6 +243,7 @@ impl Timeline {
             on_context_menu: None,
             on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
+            focus_lost_subscription: None,
         }
     }
 
@@ -367,15 +391,10 @@ impl Timeline {
     }
 
     fn finish_range_select(&mut self, end_beat: f32, cx: &mut gpui::Context<Self>) {
-        let Some((start, _, start_track_id)) = self.range_select_drag.take() else {
+        let Some(drag) = self.range_select_drag.take() else {
             return;
         };
-        let (lo, hi) = normalize_range(start, end_beat);
-        if (hi - lo).abs() <= f32::EPSILON {
-            self.state.arrangement_range = None;
-            cx.notify();
-            return;
-        }
+        let (lo, hi) = normalize_range(drag.start_beat, end_beat);
         let track_ids = self
             .state
             .arrangement_range
@@ -384,10 +403,48 @@ impl Timeline {
             .filter(|ids| !ids.is_empty())
             .unwrap_or_else(|| {
                 self.state
-                    .track_ids_between(&start_track_id, &start_track_id)
+                    .track_ids_between(&drag.start_track_id, &drag.start_track_id)
             });
-        self.state.arrangement_range =
-            Some(TimelineRangeSelection::new(lo as f64, hi as f64, track_ids));
+
+        let mut hit_clip_ids = Vec::new();
+        if drag.dragging && (hi - lo).abs() > f32::EPSILON {
+            for track in &self.state.tracks {
+                if !track_ids.iter().any(|id| id == &track.id) {
+                    continue;
+                }
+                for clip in &track.clips {
+                    let clip_start = clip.start_beat;
+                    let clip_end = clip.start_beat + clip.duration_beats;
+                    if clip_start < hi && clip_end > lo {
+                        hit_clip_ids.push(clip.id.clone());
+                    }
+                }
+            }
+        }
+
+        if drag.additive {
+            for clip_id in hit_clip_ids {
+                if !self.state.selection.selected_clip_ids.contains(&clip_id) {
+                    self.state.selection.selected_clip_ids.push(clip_id);
+                }
+            }
+        } else if drag.dragging {
+            self.state.selection.selected_clip_ids = hit_clip_ids;
+            self.state.selection.selected_track_id = track_ids.first().cloned();
+        }
+
+        if Self::input_debug_enabled() {
+            eprintln!(
+                "[selection] marquee_commit additive={} dragging={} selected={}",
+                drag.additive,
+                drag.dragging,
+                self.state.selection.selected_clip_ids.len()
+            );
+        }
+
+        // The marquee rectangle is a transient drag affordance only. Commit the
+        // selected clip ids, then clear the overlay immediately on mouse-up.
+        self.state.arrangement_range = None;
         cx.notify();
     }
 
@@ -766,6 +823,23 @@ impl Render for Timeline {
         if scrolling {
             cx.notify();
         }
+        if self.focus_lost_subscription.is_none() {
+            self.focus_lost_subscription = Some(cx.on_focus_lost(window, |this, _window, cx| {
+                if this.range_select_drag.is_some()
+                    || this.pen_clip_draw.is_some()
+                    || this.erase_clip_drag.is_some()
+                    || this.automation_drag.is_some()
+                    || this.automation_marquee.is_some()
+                    || this.pan_last_position.is_some()
+                {
+                    if Self::input_debug_enabled() {
+                        eprintln!("[selection] focus_lost_cancel");
+                    }
+                    this.cancel_active_gesture(cx);
+                }
+            }));
+        }
+
         crate::perf::count(
             "clips",
             self.state
@@ -780,10 +854,15 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_select_clip = cx.listener(|this, clip_id: &String, _window, cx| {
-            this.state.select_clip(clip_id);
-            cx.notify();
-        });
+        let on_select_clip =
+            cx.listener(|this, (clip_id, additive): &(String, bool), _window, cx| {
+                if *additive {
+                    this.state.select_clip_additive(clip_id);
+                } else {
+                    this.state.select_clip(clip_id);
+                }
+                cx.notify();
+            });
 
         let on_toggle_mute = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_mute(track_id);
@@ -885,17 +964,27 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_range_start = cx.listener(|this, (track_id, beat): &(String, f32), _window, cx| {
-            if this.state.active_tool == TimelineTool::Pointer {
-                this.range_select_drag = Some((*beat, *beat, track_id.clone()));
-                this.state.arrangement_range = Some(TimelineRangeSelection::new(
-                    *beat as f64,
-                    *beat as f64,
-                    vec![track_id.clone()],
-                ));
-                cx.notify();
-            }
-        });
+        let on_range_start = cx.listener(
+            |this, (track_id, beat, additive): &(String, f32, bool), _window, cx| {
+                if this.state.active_tool == TimelineTool::Pointer {
+                    if Self::input_debug_enabled() {
+                        eprintln!(
+                            "[selection] marquee_start_pending track={} beat={:.3} additive={}",
+                            track_id, beat, additive
+                        );
+                    }
+                    this.range_select_drag = Some(RangeSelectDrag {
+                        start_beat: *beat,
+                        current_beat: *beat,
+                        start_track_id: track_id.clone(),
+                        additive: *additive,
+                        dragging: false,
+                    });
+                    this.state.arrangement_range = None;
+                    cx.notify();
+                }
+            },
+        );
 
         let on_erase_start = cx.listener(|this, beat: &f32, _window, cx| {
             this.begin_erase_at(*beat, None, cx);
@@ -955,21 +1044,54 @@ impl Render for Timeline {
                 && this.range_select_drag.is_some()
             {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-                if let Some((start, _, ref start_track_id)) = this.range_select_drag {
-                    let (lo, hi) = normalize_range(start, beat);
-                    let lane_y = Self::track_area_y_from_window(event.position);
-                    let current_track_id = this
-                        .state
-                        .lane_y_to_track_id(lane_y)
-                        .unwrap_or_else(|| start_track_id.clone());
-                    this.state.arrangement_range = Some(TimelineRangeSelection::new(
-                        lo as f64,
-                        hi as f64,
-                        this.state
-                            .track_ids_between(start_track_id, &current_track_id),
-                    ));
-                    cx.notify();
+                let lane_y = Self::track_area_y_from_window(event.position);
+                let current_track_id = this.state.lane_y_to_track_id(lane_y);
+                let mut overlay: Option<TimelineRangeSelection> = None;
+                if let Some(drag) = this.range_select_drag.as_mut() {
+                    drag.current_beat = beat;
+                    let dx = this.state.beats_to_x(beat) - this.state.beats_to_x(drag.start_beat);
+                    let dy_tracks = current_track_id
+                        .as_ref()
+                        .and_then(|id| {
+                            let start_idx = this
+                                .state
+                                .tracks
+                                .iter()
+                                .position(|track| track.id == drag.start_track_id)?;
+                            let current_idx = this
+                                .state
+                                .tracks
+                                .iter()
+                                .position(|track| track.id == *id)?;
+                            Some(((current_idx as isize - start_idx as isize).abs() as f32) * TRACK_HEIGHT)
+                        })
+                        .unwrap_or(0.0);
+                    if !drag.dragging && (dx * dx + dy_tracks * dy_tracks).sqrt() >= MARQUEE_DRAG_THRESHOLD {
+                        drag.dragging = true;
+                        if Self::input_debug_enabled() {
+                            eprintln!("[selection] marquee_start additive={}", drag.additive);
+                        }
+                    }
+                    if drag.dragging {
+                        let (lo, hi) = normalize_range(drag.start_beat, beat);
+                        let end_track_id = current_track_id.unwrap_or_else(|| drag.start_track_id.clone());
+                        overlay = Some(TimelineRangeSelection::new(
+                            lo as f64,
+                            hi as f64,
+                            this.state.track_ids_between(&drag.start_track_id, &end_track_id),
+                        ));
+                    }
                 }
+                this.state.arrangement_range = overlay;
+                if Self::input_debug_enabled() {
+                    if let Some(drag) = this.range_select_drag.as_ref() {
+                        eprintln!(
+                            "[selection] marquee_update dragging={} beat={:.3}",
+                            drag.dragging, drag.current_beat
+                        );
+                    }
+                }
+                cx.notify();
             }
         });
 
@@ -989,6 +1111,7 @@ impl Render for Timeline {
                 }
             }
             this.reset_input_state();
+            debug_assert!(this.range_select_drag.is_none());
             cx.notify();
         });
         let on_pen_mouse_up_out = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
@@ -1007,6 +1130,7 @@ impl Render for Timeline {
                 }
             }
             this.reset_input_state();
+            debug_assert!(this.range_select_drag.is_none());
             cx.notify();
         });
 
@@ -1092,7 +1216,7 @@ impl Render for Timeline {
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_select_track);
         let on_select_clip: std::sync::Arc<
-            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+            dyn Fn(&(String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_select_clip);
         let on_toggle_mute: std::sync::Arc<
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
@@ -1135,7 +1259,7 @@ impl Render for Timeline {
             dyn Fn(&TimelineTool, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_select_tool);
         let on_range_start: std::sync::Arc<
-            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+            dyn Fn(&(String, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_range_start);
         let on_erase_start: std::sync::Arc<
             dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static,
@@ -1436,6 +1560,21 @@ impl Render for Timeline {
             .border_r(px(1.0))
             .border_color(Colors::border_subtle())
             .relative()
+            .capture_key_down(
+                cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
+                    if event.keystroke.key.as_str() == "escape"
+                        && (this.range_select_drag.is_some()
+                            || this.pen_clip_draw.is_some()
+                            || this.erase_clip_drag.is_some()
+                            || this.automation_drag.is_some()
+                            || this.automation_marquee.is_some()
+                            || this.pan_last_position.is_some())
+                    {
+                        cx.stop_propagation();
+                        this.cancel_active_gesture(cx);
+                    }
+                }),
+            )
             .on_drag_move::<ExternalPaths>(on_drag_track)
             .on_drop::<ExternalPaths>(on_files_dropped)
             .on_drag_move::<BrowserDragItem>(on_browser_drag_track)

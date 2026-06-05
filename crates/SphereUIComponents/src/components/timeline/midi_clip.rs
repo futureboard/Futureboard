@@ -14,7 +14,9 @@ pub fn midi_clip(
     track_id: &str,
     track_color: gpui::Rgba,
     state: &TimelineState,
-    on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_select_clip: std::sync::Arc<
+        dyn Fn(&(String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
@@ -157,7 +159,8 @@ pub fn midi_clip(
                 // clearing this clip selection — the piano roll edits the
                 // selected clip, so selection must survive the click.
                 cx.stop_propagation();
-                on_select(&clip_id, window, cx);
+                let additive = event.modifiers.control || event.modifiers.platform;
+                on_select(&(clip_id.clone(), additive), window, cx);
                 if event.click_count >= 2 {
                     if let Some(open) = on_open_editor.as_ref() {
                         open(window, cx);

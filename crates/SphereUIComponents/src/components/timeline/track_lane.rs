@@ -27,7 +27,9 @@ pub fn track_lane(
     track_index: usize,
     state: &TimelineState,
     on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_select_clip: std::sync::Arc<
+        dyn Fn(&(String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     on_add_clip: std::sync::Arc<
         dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
@@ -39,7 +41,7 @@ pub fn track_lane(
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
     on_range_start: Option<
-        std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+        std::sync::Arc<dyn Fn(&(String, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_erase_start: Option<
         std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -230,14 +232,20 @@ pub fn track_lane(
 
                 if active_tool == TimelineTool::Pen {
                     on_add(&(track_id_add.clone(), snapped_beat), window, cx);
+                } else if active_tool == TimelineTool::Pointer {
+                    let additive = event.modifiers.control || event.modifiers.platform;
+                    if !additive {
+                        on_select(&track_id_select, window, cx);
+                    }
+                    if let Some(start_range) = on_range_start.as_ref() {
+                        start_range(
+                            &(track_id_select.clone(), snapped_beat, additive),
+                            window,
+                            cx,
+                        );
+                    }
                 } else {
                     on_select(&track_id_select, window, cx);
-                    let range_modifier = event.modifiers.control || event.modifiers.platform;
-                    if range_modifier {
-                        if let Some(start_range) = on_range_start.as_ref() {
-                            start_range(&(track_id_select.clone(), snapped_beat), window, cx);
-                        }
-                    }
                 }
             },
         )

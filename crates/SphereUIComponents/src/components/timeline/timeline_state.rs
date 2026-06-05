@@ -2946,6 +2946,27 @@ impl TimelineState {
         }
     }
 
+    pub fn select_clip_additive(&mut self, clip_id: &str) {
+        self.arrangement_range = None;
+        if let Some(pos) = self
+            .selection
+            .selected_clip_ids
+            .iter()
+            .position(|id| id == clip_id)
+        {
+            self.selection.selected_clip_ids.remove(pos);
+        } else {
+            self.selection.selected_clip_ids.push(clip_id.to_string());
+        }
+        if let Some(track) = self
+            .tracks
+            .iter()
+            .find(|t| t.clips.iter().any(|c| c.id == clip_id))
+        {
+            self.selection.selected_track_id = Some(track.id.clone());
+        }
+    }
+
     pub fn rename_clip(&mut self, clip_id: &str, name: &str) -> bool {
         let trimmed = name.trim();
         if trimmed.is_empty() {

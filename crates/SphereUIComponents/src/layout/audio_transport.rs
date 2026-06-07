@@ -10,6 +10,52 @@ use super::transport_freeze_debug::{self, PlayWatchdog};
 use super::StudioLayout;
 
 impl StudioLayout {
+    pub(super) fn dispatch_midi_preview_command(
+        &mut self,
+        command: components::piano_roll::UiMidiPreviewCommand,
+    ) {
+        let Some(engine) = self.audio_engine.as_ref() else {
+            eprintln!("[PopoutMidiEditor] engine_command_bus_connected=false");
+            return;
+        };
+        eprintln!("[PopoutMidiEditor] engine_command_bus_connected=true");
+        let result = match command {
+            components::piano_roll::UiMidiPreviewCommand::NoteOn {
+                track_id,
+                channel,
+                pitch,
+                velocity,
+            } => {
+                eprintln!(
+                    "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOn -> engine",
+                    track_id
+                );
+                engine.midi_preview_note_on(track_id, channel, pitch, velocity)
+            }
+            components::piano_roll::UiMidiPreviewCommand::NoteOff {
+                track_id,
+                channel,
+                pitch,
+            } => {
+                eprintln!(
+                    "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOff -> engine",
+                    track_id
+                );
+                engine.midi_preview_note_off(track_id, channel, pitch)
+            }
+            components::piano_roll::UiMidiPreviewCommand::AllNotesOff { track_id } => {
+                eprintln!(
+                    "[PopoutMidiEditor] active_track_id={} dispatch PreviewAllNotesOff -> engine",
+                    track_id
+                );
+                engine.midi_preview_all_notes_off(track_id)
+            }
+        };
+        if let Err(error) = result {
+            eprintln!("[EngineMidiPreview] dispatch failed: {error}");
+        }
+    }
+
     pub(super) fn spawn_audio_poll(cx: &mut Context<Self>) {
         // 16 ms ≈ 60 Hz — matches a typical display refresh and is fine for
         // VU + transport-time animation. The engine produces position
@@ -62,7 +108,14 @@ impl StudioLayout {
             self.schedule_audio_project_sync(cx, false, "engine_dirty_poll");
         }
 
+        // Backstop: close editors whose track/insert was removed by any path
+        // (notably the track-header delete button, which mutates the Timeline
+        // entity directly and never reaches the StudioLayout delete commands).
+        self.reconcile_open_plugin_editors(cx);
+
         let engine = self.audio_engine.as_ref().expect("checked above");
+        // Throttled raw/bus input-peak trace (gated by FUTUREBOARD_INPUT_DEBUG).
+        engine.log_input_debug();
         let stats = engine.stats();
         // State-transition signal — used to notify the root layout even
         // when the transport is paused (e.g. error appears, stream opens).
@@ -89,7 +142,11 @@ impl StudioLayout {
             self.last_engine_playhead_beat = engine_beat;
             self.last_engine_sync = Instant::now();
         }
-        self.apply_engine_meters(cx);
+        let meter_changed = self.apply_engine_meters(cx);
+
+        // Realtime recording waveform preview (Part 1) — grow the preview clip
+        // and append streamed peaks. Self-contained; notifies the timeline.
+        self.update_recording_preview(cx);
 
         if stats.transport_playing {
             let bpm = {
@@ -143,7 +200,7 @@ impl StudioLayout {
         // transport chrome (bar:beat:tick, status line) tracks the
         // playhead. Otherwise we'd be limited to engine-snapshot cadence
         // and the readout would stutter at ~10-20 Hz.
-        state_changed || was_playing
+        state_changed || was_playing || meter_changed
     }
 
     /// Block-rate automation evaluation scaffolding. Evaluates each track's
@@ -204,9 +261,9 @@ impl StudioLayout {
     /// Update smoothed meter levels in timeline state. Does not call
     /// `cx.notify` — repaints are driven by the audio poll when transport
     /// is active, or by user interaction when idle.
-    pub(super) fn apply_engine_meters(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn apply_engine_meters(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(engine) = self.audio_engine.as_ref() else {
-            return;
+            return false;
         };
         // Throttle meter polling to `PowerMode::meter_update_hz`. The audio
         // poll fires at 60 Hz; on low-end GPUs that's too many meter writes
@@ -214,11 +271,12 @@ impl StudioLayout {
         let power = crate::perf::power_mode();
         let min_interval = Duration::from_secs_f32(1.0 / power.meter_update_hz().max(1.0));
         if self.last_meter_apply.elapsed() < min_interval {
-            return;
+            return false;
         }
         self.last_meter_apply = Instant::now();
         let meters = engine.meters();
-        let _ = self.timeline.update(cx, |timeline, _cx| {
+        self.timeline.update(cx, |timeline, _cx| {
+            let mut changed = false;
             for track_meter in meters.tracks {
                 if let Some(track) = timeline
                     .state
@@ -228,8 +286,8 @@ impl StudioLayout {
                 {
                     let next_l = track_meter.peak_l.clamp(0.0, 1.0) as f32;
                     let next_r = track_meter.peak_r.clamp(0.0, 1.0) as f32;
-                    let _ = smooth_meter_value(&mut track.meter_level_l, next_l);
-                    let _ = smooth_meter_value(&mut track.meter_level_r, next_r);
+                    changed |= smooth_meter_value(&mut track.meter_level_l, next_l);
+                    changed |= smooth_meter_value(&mut track.meter_level_r, next_r);
                     update_meter_hold(&mut track.meter_peak_hold_l, track.meter_level_l);
                     update_meter_hold(&mut track.meter_peak_hold_r, track.meter_level_r);
                     update_meter_clip(
@@ -241,11 +299,11 @@ impl StudioLayout {
                 }
             }
             let master = &mut timeline.state.master;
-            let _ = smooth_meter_value(
+            changed |= smooth_meter_value(
                 &mut master.meter_level_l,
                 meters.master_peak_l.clamp(0.0, 1.0) as f32,
             );
-            let _ = smooth_meter_value(
+            changed |= smooth_meter_value(
                 &mut master.meter_level_r,
                 meters.master_peak_r.clamp(0.0, 1.0) as f32,
             );
@@ -257,7 +315,8 @@ impl StudioLayout {
                 meters.master_peak_r,
                 master.meter_peak_hold_l.max(master.meter_peak_hold_r),
             );
-        });
+            changed
+        })
     }
 
     /// Queue a background engine sync. `load_project` decodes media on the
@@ -290,9 +349,30 @@ impl StudioLayout {
             .project_folder
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
+        let preferred_input_device = {
+            let settings = self.settings.read(cx);
+            settings.current.hardware.audio.device_in.clone()
+        };
+        let preferred_output_device = {
+            let settings = self.settings.read(cx);
+            settings.current.hardware.audio.device_out.clone()
+        };
+        eprintln!(
+            "[AudioSettings] selected input device = {:?}",
+            preferred_input_device
+        );
+        eprintln!(
+            "[AudioSettings] selected output device = {:?}",
+            preferred_output_device
+        );
         let snapshot = {
             let timeline = self.timeline.read(cx);
-            build_engine_project_snapshot(&timeline.state, sample_rate, project_root.as_deref())
+            build_engine_project_snapshot(
+                &timeline.state,
+                sample_rate,
+                project_root.as_deref(),
+                Some(preferred_input_device.as_str()),
+            )
         };
         log_engine_sync_snapshot(
             &snapshot,

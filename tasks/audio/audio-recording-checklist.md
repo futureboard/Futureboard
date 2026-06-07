@@ -132,7 +132,7 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 - [x] Monitor mix Off/In (`apply_recording_monitor_mix`, `input_monitor.is_active`).
 - [x] Explicit Auto mode semantics for recording: `Auto` monitors when the track is armed; `Input` monitors when selected.
 - [ ] Feedback warning when in/out share a device (later).
-- [ ] Input level meter on armed track (later).
+- [x] Input level meter on armed/monitored track: engine snapshots now carry `input_source`/`input_monitor`; the engine-owned live input stream feeds runtime track meters instead of the UI input-test probe.
 
 ## Phase P — Recording Error UX
 
@@ -143,15 +143,15 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 ## Phase Q — Recording Preferences Page
 
 - [x] Recording tab: path, audio format, metronome count-in.
-- [ ] Save-before-recording toggle.
+- [x] Save-before-recording toggle.
 - [x] Default monitor mode.
-- [ ] Recording offset (samples/ms).
+- [x] Recording offset (ms).
 - [x] Generate-waveform-after-record toggle.
 
 ## Phase R — Latency Offset
 
-- [ ] Manual recording offset setting.
-- [ ] Apply offset to recorded clip start.
+- [x] Manual recording offset setting.
+- [x] Apply offset to recorded clip start.
 - [ ] Display backend input latency if exposed.
 
 ## Phase S — Unsaved Workspace Recording

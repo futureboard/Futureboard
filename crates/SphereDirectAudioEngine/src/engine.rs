@@ -54,6 +54,13 @@ fn command_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_COMMAND_DEBUG").is_some())
 }
 
+/// `FUTUREBOARD_INPUT_DEBUG=1` enables throttled raw-input-peak traces from the
+/// control thread (see `log_input_debug_throttled`). Off by default.
+fn input_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_INPUT_DEBUG").is_some())
+}
+
 /// `FUTUREBOARD_AUDIO_CALLBACK_DEBUG=1` enables the realtime callback's
 /// occasional eprintln traces (graph swap, mute, render-path). Off by default
 /// so the audio thread never formats strings or writes to stdio — see
@@ -77,6 +84,26 @@ pub fn f32_store(v: f32) -> u32 {
 #[inline]
 pub fn f32_load(v: u32) -> f32 {
     f32::from_bits(v)
+}
+
+#[inline]
+fn atomic_max_f32_bits(target: &AtomicU32, value: f32) {
+    let value = value.max(0.0);
+    let mut current = target.load(Ordering::Relaxed);
+    loop {
+        if value <= f32::from_bits(current) {
+            break;
+        }
+        match target.compare_exchange_weak(
+            current,
+            value.to_bits(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
 }
 
 // ── Shared state (accessed by both control and audio threads) ─────────────────
@@ -110,6 +137,52 @@ pub struct SharedState {
     pub recording_monitor_mix: AtomicBool,
     pub recording_monitor_l: AtomicU32,
     pub recording_monitor_r: AtomicU32,
+    pub live_input_active: AtomicBool,
+    pub live_input_l: AtomicU32,
+    pub live_input_r: AtomicU32,
+    pub live_input_peak_l: AtomicU32,
+    pub live_input_peak_r: AtomicU32,
+
+    // ── Live monitoring / input bus (Layers 4, 6, 7) ──────────────────────
+    /// Lock-free stereo bridge from the input callback to the output render
+    /// callback. Carries the actual monitored samples (not just a peak).
+    pub input_ring: crate::input_ring::InputRing,
+    /// `true` when any track has monitoring enabled — gates the output-side
+    /// monitor mix so the render callback only taps the ring when needed.
+    pub monitor_enabled_any: AtomicBool,
+    /// Linear monitor gain applied to the input bus before it reaches master.
+    pub monitor_gain: AtomicU32,
+    /// Peak of the input bus *after* the render callback reads it from the ring
+    /// (Layer 4 verification — distinct from the raw `live_input_peak_*`).
+    pub input_bus_peak_l: AtomicU32,
+    pub input_bus_peak_r: AtomicU32,
+
+    // ── Realtime diagnostics counters (Part 4) ────────────────────────────
+    pub input_cb_count: AtomicU64,
+    pub output_cb_count: AtomicU64,
+    pub input_frames_received: AtomicU64,
+    pub monitor_frames_consumed: AtomicU64,
+    pub monitor_ring_underruns: AtomicU64,
+    pub monitor_ring_overruns: AtomicU64,
+    pub record_ring_overruns: AtomicU64,
+    pub output_xruns: AtomicU64,
+    /// Peak of the record capture (pre-file) for diagnostics.
+    pub record_peak: AtomicU32,
+    /// Peak actually mixed to the monitor output for diagnostics.
+    pub monitor_output_peak: AtomicU32,
+
+    // ── Realtime recording waveform preview (Part 1) ──────────────────────
+    /// Finalized preview bins pushed by the recording input callback.
+    pub preview_ring: crate::input_ring::PreviewPeakRing,
+    /// `true` while a take is feeding the preview ring.
+    pub recording_preview_active: AtomicBool,
+    /// Monotonic id for the current take (lets the UI discard stale chunks).
+    pub recording_preview_id: AtomicU64,
+    /// Transport sample at which the take started (preview clip origin).
+    pub recording_preview_start_sample: AtomicU64,
+    pub recording_preview_sample_rate: AtomicU32,
+    pub recording_preview_channels: AtomicU32,
+    pub recording_preview_peaks_per_sec: AtomicU32,
 
     // DAUx diagnostics (incremented by audio thread, read by control thread)
     pub glitch_count: AtomicU64,
@@ -146,6 +219,33 @@ impl Default for SharedState {
             recording_monitor_mix: AtomicBool::new(false),
             recording_monitor_l: AtomicU32::new(f32_store(0.0)),
             recording_monitor_r: AtomicU32::new(f32_store(0.0)),
+            live_input_active: AtomicBool::new(false),
+            live_input_l: AtomicU32::new(f32_store(0.0)),
+            live_input_r: AtomicU32::new(f32_store(0.0)),
+            live_input_peak_l: AtomicU32::new(f32_store(0.0)),
+            live_input_peak_r: AtomicU32::new(f32_store(0.0)),
+            input_ring: crate::input_ring::InputRing::default(),
+            monitor_enabled_any: AtomicBool::new(false),
+            monitor_gain: AtomicU32::new(f32_store(1.0)),
+            input_bus_peak_l: AtomicU32::new(f32_store(0.0)),
+            input_bus_peak_r: AtomicU32::new(f32_store(0.0)),
+            input_cb_count: AtomicU64::new(0),
+            output_cb_count: AtomicU64::new(0),
+            input_frames_received: AtomicU64::new(0),
+            monitor_frames_consumed: AtomicU64::new(0),
+            monitor_ring_underruns: AtomicU64::new(0),
+            monitor_ring_overruns: AtomicU64::new(0),
+            record_ring_overruns: AtomicU64::new(0),
+            output_xruns: AtomicU64::new(0),
+            record_peak: AtomicU32::new(f32_store(0.0)),
+            monitor_output_peak: AtomicU32::new(f32_store(0.0)),
+            preview_ring: crate::input_ring::PreviewPeakRing::default(),
+            recording_preview_active: AtomicBool::new(false),
+            recording_preview_id: AtomicU64::new(0),
+            recording_preview_start_sample: AtomicU64::new(0),
+            recording_preview_sample_rate: AtomicU32::new(0),
+            recording_preview_channels: AtomicU32::new(0),
+            recording_preview_peaks_per_sec: AtomicU32::new(0),
             glitch_count: AtomicU64::new(0),
             mmcss_active: AtomicBool::new(false),
             device_lost: AtomicBool::new(false),
@@ -231,6 +331,11 @@ struct InputTestHandle {
     peak: Arc<AtomicU32>,
 }
 
+struct LiveInputHandle {
+    _stream: cpal::Stream,
+    device_id: Option<String>,
+}
+
 pub struct EngineInner {
     // Shared atomic state
     pub shared: Arc<SharedState>,
@@ -267,6 +372,9 @@ pub struct EngineInner {
 
     // Live input-level test stream (None when not testing input).
     input_test: Mutex<Option<InputTestHandle>>,
+
+    // Engine-owned live input stream for armed/monitored track meters.
+    live_input: Mutex<Option<LiveInputHandle>>,
 }
 
 #[derive(Clone)]
@@ -324,6 +432,7 @@ impl EngineInner {
             daux_config: Mutex::new(DauxDeviceConfig::default()),
             recording: Mutex::new(None),
             input_test: Mutex::new(None),
+            live_input: Mutex::new(None),
         }
     }
 
@@ -601,6 +710,38 @@ impl EngineInner {
         })
     }
 
+    pub fn midi_preview_note_on(
+        &self,
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::MidiPreviewNoteOn {
+            track_id,
+            channel,
+            pitch,
+            velocity,
+        })
+    }
+
+    pub fn midi_preview_note_off(
+        &self,
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::MidiPreviewNoteOff {
+            track_id,
+            channel,
+            pitch,
+        })
+    }
+
+    pub fn midi_preview_all_notes_off(&self, track_id: String) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::MidiPreviewAllNotesOff { track_id })
+    }
+
     /// Read the current transport/clock snapshot for UI polling.
     pub fn transport_snapshot(&self) -> RuntimeTransportSnapshot {
         RuntimeTransportSnapshot::from_shared(&self.shared, &self.tempo_map())
@@ -654,6 +795,188 @@ impl EngineInner {
             master_peak_r: f32_load(self.shared.peak_r.load(Ordering::Relaxed)) as f64,
             master_rms_l: f32_load(self.shared.rms_l.load(Ordering::Relaxed)) as f64,
             master_rms_r: f32_load(self.shared.rms_r.load(Ordering::Relaxed)) as f64,
+            input_peak_l: f32_load(self.shared.live_input_peak_l.swap(0, Ordering::Relaxed)) as f64,
+            input_peak_r: f32_load(self.shared.live_input_peak_r.swap(0, Ordering::Relaxed)) as f64,
+        }
+    }
+
+    /// Full-pipeline diagnostics snapshot (Layer 10). Non-destructive — reads
+    /// peaks without resetting them so it can be polled alongside `get_meters`.
+    pub fn get_audio_diagnostics(&self) -> crate::types::JsAudioDiagnostics {
+        use crate::types::{JsAudioDiagnostics, JsTrackInputDiagnostics};
+        let st = self.status.lock().clone();
+        let input_device_name = self
+            .live_input
+            .lock()
+            .as_ref()
+            .and_then(|h| h.device_id.clone());
+        let input_running = self.live_input.lock().is_some() && self.shared.input_ring.is_active();
+
+        let raw_input_peak = f32_load(self.shared.live_input_peak_l.load(Ordering::Relaxed)).max(
+            f32_load(self.shared.live_input_peak_r.load(Ordering::Relaxed)),
+        );
+        let input_bus_peak = f32_load(self.shared.input_bus_peak_l.load(Ordering::Relaxed)).max(
+            f32_load(self.shared.input_bus_peak_r.load(Ordering::Relaxed)),
+        );
+        let output_peak = f32_load(self.shared.peak_l.load(Ordering::Relaxed))
+            .max(f32_load(self.shared.peak_r.load(Ordering::Relaxed)));
+
+        let runtime = self.runtime.lock();
+        let tracks = runtime
+            .tracks
+            .iter()
+            .filter(|t| t.track_type == "audio")
+            .map(|t| {
+                let meter = t.meter.load(&t.id);
+                JsTrackInputDiagnostics {
+                    track_id: t.id.clone(),
+                    record_armed: t.record_armed,
+                    monitor_enabled: t.monitor_enabled,
+                    input_source: format!("{:?}", t.input_source),
+                    track_input_peak: meter.peak_l.max(meter.peak_r) as f64,
+                    track_output_peak: meter.peak_l.max(meter.peak_r) as f64,
+                }
+            })
+            .collect();
+
+        JsAudioDiagnostics {
+            backend: cpal::default_host().id().name().to_string(),
+            input_device_name,
+            output_device_name: st.output_device,
+            input_stream_running: input_running,
+            output_stream_running: st.running,
+            input_sample_rate: self.shared.input_ring.sample_rate(),
+            input_channels: self.shared.input_ring.channels(),
+            raw_input_peak: raw_input_peak as f64,
+            input_bus_peak: input_bus_peak as f64,
+            output_peak: output_peak as f64,
+            tracks,
+            input_callback_count: self.shared.input_cb_count.load(Ordering::Relaxed) as f64,
+            output_callback_count: self.shared.output_cb_count.load(Ordering::Relaxed) as f64,
+            input_frames_received: self.shared.input_frames_received.load(Ordering::Relaxed) as f64,
+            monitor_frames_consumed: self.shared.monitor_frames_consumed.load(Ordering::Relaxed)
+                as f64,
+            monitor_ring_underruns: self.shared.monitor_ring_underruns.load(Ordering::Relaxed)
+                as f64,
+            monitor_ring_overruns: self.shared.monitor_ring_overruns.load(Ordering::Relaxed) as f64,
+            record_ring_overruns: self.shared.record_ring_overruns.load(Ordering::Relaxed) as f64,
+            output_xruns: self.shared.output_xruns.load(Ordering::Relaxed) as f64,
+            monitor_output_peak: f32_load(self.shared.monitor_output_peak.load(Ordering::Relaxed))
+                as f64,
+            record_peak: f32_load(self.shared.record_peak.load(Ordering::Relaxed)) as f64,
+        }
+    }
+
+    /// Metadata + current bin count for the in-progress recording preview.
+    pub fn recording_preview_info(&self) -> crate::types::JsRecordingPreviewInfo {
+        crate::types::JsRecordingPreviewInfo {
+            active: self.shared.recording_preview_active.load(Ordering::Relaxed),
+            recording_id: self.shared.recording_preview_id.load(Ordering::Relaxed) as f64,
+            start_sample: self
+                .shared
+                .recording_preview_start_sample
+                .load(Ordering::Relaxed) as f64,
+            sample_rate: self
+                .shared
+                .recording_preview_sample_rate
+                .load(Ordering::Relaxed),
+            channels: self
+                .shared
+                .recording_preview_channels
+                .load(Ordering::Relaxed),
+            peaks_per_second: self
+                .shared
+                .recording_preview_peaks_per_sec
+                .load(Ordering::Relaxed),
+            peak_count: self.shared.preview_ring.head() as f64,
+        }
+    }
+
+    /// Drain preview bins in `[from_index, head)`. Cheap clone on the control
+    /// thread; never blocks the audio path. Returns an empty vec when there is
+    /// nothing new.
+    pub fn drain_recording_preview_peaks(
+        &self,
+        from_index: f64,
+    ) -> Vec<crate::types::JsWaveformPeak> {
+        let head = self.shared.preview_ring.head();
+        let mut from = from_index.max(0.0) as u64;
+        // If the consumer lagged past the ring window, clamp to what's retained.
+        let cap = crate::input_ring::PreviewPeakRing::default_capacity();
+        if head.saturating_sub(from) > cap {
+            from = head.saturating_sub(cap);
+        }
+        let mut out = Vec::with_capacity((head.saturating_sub(from)) as usize);
+        let mut i = from;
+        while i < head {
+            let p = self.shared.preview_ring.read(i);
+            out.push(crate::types::JsWaveformPeak {
+                min: p.min as f64,
+                max: p.max as f64,
+                rms: p.rms as f64,
+            });
+            i += 1;
+        }
+        out
+    }
+
+    /// Throttled (≈500 ms) raw-input-peak trace, gated by
+    /// `FUTUREBOARD_INPUT_DEBUG`. Called from the control thread (never the
+    /// audio callback) so the realtime path stays allocation/IO-free.
+    pub fn log_input_debug_throttled(&self) {
+        if !input_debug_enabled() {
+            return;
+        }
+        static LAST: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+        let last = LAST.get_or_init(|| {
+            Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1))
+        });
+        {
+            let mut guard = last.lock();
+            if guard.elapsed() < std::time::Duration::from_millis(500) {
+                return;
+            }
+            *guard = std::time::Instant::now();
+        }
+        let s = &self.shared;
+        let raw = f32_load(s.live_input_peak_l.load(Ordering::Relaxed))
+            .max(f32_load(s.live_input_peak_r.load(Ordering::Relaxed)));
+        let bus = f32_load(s.input_bus_peak_l.load(Ordering::Relaxed))
+            .max(f32_load(s.input_bus_peak_r.load(Ordering::Relaxed)));
+        let head = s.preview_ring.head();
+        eprintln!(
+            "[AudioRealtime] input_cb={} output_cb={} input_frames={} monitor_consumed={} \
+             monitor_underruns={} monitor_overruns={} record_overruns={} output_xruns={} \
+             raw_input_peak={raw:.4} monitor_output_peak={:.4} record_peak={:.4} input_stream={} monitor_any={}",
+            s.input_cb_count.load(Ordering::Relaxed),
+            s.output_cb_count.load(Ordering::Relaxed),
+            s.input_frames_received.load(Ordering::Relaxed),
+            s.monitor_frames_consumed.load(Ordering::Relaxed),
+            s.monitor_ring_underruns.load(Ordering::Relaxed),
+            s.monitor_ring_overruns.load(Ordering::Relaxed),
+            s.record_ring_overruns.load(Ordering::Relaxed),
+            s.output_xruns.load(Ordering::Relaxed),
+            f32_load(s.monitor_output_peak.load(Ordering::Relaxed)),
+            f32_load(s.record_peak.load(Ordering::Relaxed)),
+            s.input_ring.is_active(),
+            s.monitor_enabled_any.load(Ordering::Relaxed),
+        );
+        let _ = bus;
+        if s.recording_preview_active.load(Ordering::Relaxed) {
+            let sr = s
+                .recording_preview_sample_rate
+                .load(Ordering::Relaxed)
+                .max(1);
+            let pps = s
+                .recording_preview_peaks_per_sec
+                .load(Ordering::Relaxed)
+                .max(1);
+            eprintln!(
+                "[RecordingPreview] recording_id={} peaks={} preview_duration_sec={:.2} sr={sr} pps={pps}",
+                s.recording_preview_id.load(Ordering::Relaxed),
+                head,
+                head as f64 / pps as f64,
+            );
         }
     }
 
@@ -958,6 +1281,11 @@ impl EngineInner {
         drop(tracks);
 
         // Store snapshot for future reference.
+        if let Err(error) = self.sync_live_input_stream(&snapshot) {
+            let message = format!("Live input unavailable: {error}");
+            eprintln!("[SphereAudio] {message}");
+            self.status.lock().last_error = Some(message);
+        }
         *self.project.lock() = Some(snapshot.clone());
         *self.runtime.lock() = runtime.clone();
 
@@ -1084,6 +1412,7 @@ impl EngineInner {
             .collect();
 
         let transport = self.transport_snapshot();
+        let disk = crate::streaming_source::diagnostics();
 
         JsEngineDebugInfo {
             project_id: project.as_ref().map(|p| p.project_id.clone()),
@@ -1097,7 +1426,17 @@ impl EngineInner {
             has_solo: runtime.has_solo,
             clip_summaries,
             insert_summaries,
-            disk_underruns: crate::streaming_source::total_disk_underruns() as f64,
+            disk_underruns: disk.underruns as f64,
+            disk_stream_active_sources: disk.active_sources as f64,
+            disk_stream_cache_reads: disk.cache_reads as f64,
+            disk_stream_cache_hits: disk.cache_hits as f64,
+            disk_stream_cache_misses: disk.cache_misses as f64,
+            disk_stream_cache_memory_used_mb: disk.cache_memory_used_bytes as f64
+                / (1024.0 * 1024.0),
+            disk_stream_cache_memory_budget_mb: disk.cache_memory_budget_bytes as f64
+                / (1024.0 * 1024.0),
+            disk_stream_blocks_decoded: disk.blocks_decoded as f64,
+            disk_stream_frames_decoded: disk.frames_decoded as f64,
             graph_node_count: runtime.audio_graph.nodes.len() as u32,
             graph_pass1_count: runtime.audio_graph.pass1_source_indices.len() as u32,
             graph_pass2_count: runtime.audio_graph.pass2_routing_indices.len() as u32,
@@ -1149,9 +1488,29 @@ impl EngineInner {
             ));
         }
         let monitor_mix = config.monitor_mix;
-        let session = recording::start_recording(config, Arc::clone(&self.shared), monitor_mix)?;
-        *guard = Some(session);
-        Ok(())
+        // Single-capture-stream invariant: the recording stream becomes the sole
+        // input device client during a take (it feeds the monitor ring, preview
+        // ring, and file writer). Stop the standalone monitor stream so two
+        // WASAPI shared clients don't contend on the same endpoint — a likely
+        // source of jitter while recording.
+        self.stop_live_input_stream();
+        match recording::start_recording(config, Arc::clone(&self.shared), monitor_mix) {
+            Ok(session) => {
+                *guard = Some(session);
+                drop(guard);
+                // Ensure the output stream runs so monitoring is audible.
+                self.warm_output_for_monitoring();
+                Ok(())
+            }
+            Err(e) => {
+                drop(guard);
+                // Restore standalone monitoring from the last snapshot on failure.
+                if let Some(snapshot) = self.project.lock().clone() {
+                    let _ = self.sync_live_input_stream(&snapshot);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Stop the active recording, finalize WAV files, and return per-track results.
@@ -1186,6 +1545,13 @@ impl EngineInner {
             let offset_samples = round_trip_buffer.saturating_add(path_samples);
             let offset_beats = offset_samples as f64 / samples_per_beat;
             result.start_beat = (result.start_beat - offset_beats).max(0.0);
+        }
+        drop(runtime);
+
+        // Restore the standalone monitoring input stream from the last snapshot
+        // (re-opens it if any track is still armed/monitored).
+        if let Some(snapshot) = self.project.lock().clone() {
+            let _ = self.sync_live_input_stream(&snapshot);
         }
         Ok(results)
     }
@@ -1379,6 +1745,222 @@ impl EngineInner {
                 }
             }
         }
+    }
+
+    fn sync_live_input_stream(
+        &self,
+        snapshot: &EngineProjectSnapshot,
+    ) -> Result<(), SphereAudioError> {
+        // The first armed/monitored audio track with a routable input source
+        // drives which device + channels the shared capture stream uses.
+        let desired_track = snapshot.tracks.iter().find(|track| {
+            track.track_type == "audio"
+                && (track.armed || track.input_monitor)
+                && !track.input_source.channels.is_empty()
+        });
+
+        let wants_live_input = desired_track.is_some();
+
+        // Any track that explicitly wants monitoring (not just record-arm) —
+        // gates whether the render callback mixes the input bus to the output.
+        let monitor_any = snapshot.tracks.iter().any(|track| {
+            track.track_type == "audio"
+                && track.input_monitor
+                && !track.input_source.channels.is_empty()
+        });
+        self.shared
+            .monitor_enabled_any
+            .store(monitor_any, Ordering::Relaxed);
+
+        if !wants_live_input {
+            self.stop_live_input_stream();
+            return Ok(());
+        }
+
+        // Device resolution order: the track's own pinned device, then the
+        // global Preferences input device, then the system default.
+        let desired_device = desired_track
+            .and_then(|track| track.input_source.device_id.clone())
+            .filter(|device_id| !device_id.trim().is_empty())
+            .or_else(|| {
+                snapshot
+                    .preferred_input_device
+                    .clone()
+                    .filter(|d| !d.trim().is_empty())
+            });
+
+        // Which device channels feed the L/R input bus.
+        let (mon_l_ch, mon_r_ch) = desired_track
+            .map(|track| {
+                let ch = &track.input_source.channels;
+                let l = ch.first().copied().unwrap_or(0);
+                let r = ch.get(1).copied().unwrap_or(l);
+                (l as usize, r as usize)
+            })
+            .unwrap_or((0, 1));
+
+        eprintln!(
+            "[Engine] applied input device = {:?} (preferred={:?}) monitor_any={}",
+            desired_device, snapshot.preferred_input_device, monitor_any
+        );
+
+        // Reuse the existing stream when the device is unchanged — only the
+        // monitor flag/channels may have moved (already stored above).
+        if self
+            .live_input
+            .lock()
+            .as_ref()
+            .is_some_and(|handle| handle.device_id == desired_device)
+        {
+            self.shared.live_input_active.store(true, Ordering::Relaxed);
+            self.warm_output_for_monitoring();
+            return Ok(());
+        }
+
+        self.stop_live_input_stream();
+        let device = crate::recording::find_input_device(desired_device.as_deref())?;
+        let default_cfg = device.default_input_config().map_err(|e| {
+            SphereAudioError::NativeError(format!("Input device config error: {e}"))
+        })?;
+        let stream_config = cpal::StreamConfig {
+            channels: default_cfg.channels(),
+            sample_rate: default_cfg.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let channel_count = stream_config.channels.max(1) as usize;
+        let input_sr = stream_config.sample_rate.0;
+        let device_label = device
+            .name()
+            .unwrap_or_else(|_| desired_device.clone().unwrap_or_else(|| "default".into()));
+
+        eprintln!(
+            "[AudioDevice] opening input stream: device='{device_label}' sample_rate={input_sr} \
+             channels={channel_count} buffer=default monitor_channels=({mon_l_ch},{mon_r_ch})"
+        );
+        eprintln!(
+            "[WASAPI] input sample_rate={input_sr} channels={channel_count} format={:?}",
+            default_cfg.sample_format()
+        );
+        let output_sr = self.shared.sample_rate.load(Ordering::Relaxed);
+        if output_sr != 0 && input_sr != 0 && output_sr != input_sr {
+            eprintln!(
+                "[WASAPI] ⚠ input sample_rate ({input_sr}) != output sample_rate ({output_sr}); \
+                 monitored audio will be pitch-shifted until resampling is added (Layer 9 TODO)"
+            );
+        }
+
+        // Reset and arm the input ring for this stream's format.
+        self.shared
+            .input_ring
+            .set_active(true, channel_count as u32, input_sr);
+
+        let shared = Arc::clone(&self.shared);
+        let stream = device
+            .build_input_stream::<f32, _, _>(
+                &stream_config,
+                move |data: &[f32], _info| {
+                    let frames = data.len() / channel_count.max(1);
+                    shared.input_cb_count.fetch_add(1, Ordering::Relaxed);
+                    shared
+                        .input_frames_received
+                        .fetch_add(frames as u64, Ordering::Relaxed);
+                    let mut peak_l = 0.0f32;
+                    let mut peak_r = 0.0f32;
+                    let mut last_l = 0.0f32;
+                    let mut last_r = 0.0f32;
+                    for frame in data.chunks(channel_count) {
+                        // Pick the configured monitor channels; fall back to the
+                        // first sample when a channel index is out of range.
+                        let first = frame.first().copied().unwrap_or(0.0);
+                        let l = frame
+                            .get(mon_l_ch)
+                            .copied()
+                            .unwrap_or(first)
+                            .clamp(-1.0, 1.0);
+                        let r = frame.get(mon_r_ch).copied().unwrap_or(l).clamp(-1.0, 1.0);
+                        last_l = l;
+                        last_r = r;
+                        peak_l = peak_l.max(l.abs());
+                        peak_r = peak_r.max(r.abs());
+                        // Layer 4: publish the actual samples to the output side.
+                        shared.input_ring.write_stereo(l, r);
+                    }
+                    shared
+                        .live_input_l
+                        .store(f32_store(last_l), Ordering::Relaxed);
+                    shared
+                        .live_input_r
+                        .store(f32_store(last_r), Ordering::Relaxed);
+                    atomic_max_f32_bits(&shared.live_input_peak_l, peak_l);
+                    atomic_max_f32_bits(&shared.live_input_peak_r, peak_r);
+                    shared.live_input_active.store(true, Ordering::Relaxed);
+                },
+                |err| eprintln!("[SphereAudio] Live input stream error: {err}"),
+                None,
+            )
+            .map_err(|e| {
+                self.shared.input_ring.set_active(false, 0, 0);
+                SphereAudioError::NativeError(format!("Cannot open live input stream: {e}"))
+            })?;
+        stream
+            .play()
+            .map_err(|e| SphereAudioError::NativeError(format!("Live input play failed: {e}")))?;
+        eprintln!("[AudioDevice] input stream started: device='{device_label}'");
+
+        *self.live_input.lock() = Some(LiveInputHandle {
+            _stream: stream,
+            device_id: desired_device,
+        });
+        self.shared.live_input_active.store(true, Ordering::Relaxed);
+
+        // Make sure the output render callback is actually running so per-track
+        // input meters and the monitor mix update even before transport play.
+        self.warm_output_for_monitoring();
+        Ok(())
+    }
+
+    /// Resume the (already-open) output stream so `fill_output_f32` runs while
+    /// monitoring/armed, without advancing the transport. No-op when no stream
+    /// is open yet — the next explicit `start()` will pick it up.
+    fn warm_output_for_monitoring(&self) {
+        let already_running = self.status.lock().running;
+        if already_running {
+            return;
+        }
+        match self.start() {
+            Ok(()) => eprintln!("[AudioDevice] output stream warmed for monitoring"),
+            Err(SphereAudioError::EngineNotOpen) => {}
+            Err(e) => eprintln!("[AudioDevice] could not warm output for monitoring: {e}"),
+        }
+    }
+
+    fn stop_live_input_stream(&self) {
+        *self.live_input.lock() = None;
+        self.shared
+            .live_input_active
+            .store(false, Ordering::Relaxed);
+        self.shared.input_ring.set_active(false, 0, 0);
+        self.shared
+            .monitor_enabled_any
+            .store(false, Ordering::Relaxed);
+        self.shared
+            .live_input_l
+            .store(f32_store(0.0), Ordering::Relaxed);
+        self.shared
+            .live_input_r
+            .store(f32_store(0.0), Ordering::Relaxed);
+        self.shared
+            .live_input_peak_l
+            .store(f32_store(0.0), Ordering::Relaxed);
+        self.shared
+            .live_input_peak_r
+            .store(f32_store(0.0), Ordering::Relaxed);
+        self.shared
+            .input_bus_peak_l
+            .store(f32_store(0.0), Ordering::Relaxed);
+        self.shared
+            .input_bus_peak_r
+            .store(f32_store(0.0), Ordering::Relaxed);
     }
 
     /// Start an input-level test on `device_id` (or the default input). Opens a
@@ -1666,6 +2248,9 @@ impl EngineInner {
                 EngineCommand::SetTrackSolo { .. } => "SetTrackSolo",
                 EngineCommand::SetTrackPreviewMode { .. } => "SetTrackPreviewMode",
                 EngineCommand::SetInsertParam { .. } => "SetInsertParam",
+                EngineCommand::MidiPreviewNoteOn { .. } => "MidiPreviewNoteOn",
+                EngineCommand::MidiPreviewNoteOff { .. } => "MidiPreviewNoteOff",
+                EngineCommand::MidiPreviewAllNotesOff { .. } => "MidiPreviewAllNotesOff",
                 EngineCommand::StartTransport => "StartTransport",
                 EngineCommand::StopTransport => "StopTransport",
                 EngineCommand::Seek { .. } => "Seek",
@@ -2708,6 +3293,11 @@ where
 
                 // ── 1. Drain command queue ───────────────────────────────────
                 // Runs first so commands take effect from the start of this block.
+                let frames_for_flush = if ch > 0 {
+                    data.len().checked_div(ch).unwrap_or(0)
+                } else {
+                    0
+                };
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         EngineCommand::LoadProject(next_runtime) => {
@@ -2719,6 +3309,11 @@ where
                                     output_sample_rate,
                                 );
                             }
+                            // Release notes on the current graph before swapping
+                            // it out, otherwise pending note-offs would be
+                            // dropped with the retired VST3 processors.
+                            runtime.all_notes_off("project_load");
+                            runtime.flush_vst3_midi_inserts(frames_for_flush);
                             // Swap in the new graph and retire the old one off
                             // the realtime thread — its destructor frees
                             // buffers / munmaps sources / destroys VST3 handles
@@ -2798,6 +3393,8 @@ where
                             let pos = shared.position_samples.load(Ordering::Relaxed);
                             transport::store_f64_bits(&shared.bpm_bits, bpm);
                             metronome.set_bpm(bpm, pos, output_sample_rate);
+                            let next_pos = runtime.set_static_midi_tempo(bpm, pos);
+                            shared.position_samples.store(next_pos, Ordering::Relaxed);
                         }
                         EngineCommand::SetTimeSignature(num, den) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -2834,9 +3431,11 @@ where
                             if callback_debug_enabled() {
                                 eprintln!("[SphereAudio callback] SetTrackMute track={track_id} muted={muted}");
                             }
+                            runtime.all_notes_off("track_mute");
                             runtime.update_track_mute(&track_id, muted);
                         }
                         EngineCommand::SetTrackSolo { track_id, solo } => {
+                            runtime.all_notes_off("track_solo");
                             runtime.update_track_solo(&track_id, solo);
                         }
                         EngineCommand::SetTrackPreviewMode { track_id, value } => {
@@ -2844,6 +3443,24 @@ where
                         }
                         EngineCommand::SetInsertParam { track_id, insert_id, param_id, value } => {
                             runtime.update_insert_param(&track_id, &insert_id, &param_id, value);
+                        }
+                        EngineCommand::MidiPreviewNoteOn {
+                            track_id,
+                            channel,
+                            pitch,
+                            velocity,
+                        } => {
+                            runtime.midi_preview_note_on(&track_id, channel, pitch, velocity);
+                        }
+                        EngineCommand::MidiPreviewNoteOff {
+                            track_id,
+                            channel,
+                            pitch,
+                        } => {
+                            runtime.midi_preview_note_off(&track_id, channel, pitch);
+                        }
+                        EngineCommand::MidiPreviewAllNotesOff { track_id } => {
+                            runtime.midi_preview_all_notes_off(&track_id);
                         }
                     }
                 }
@@ -2875,18 +3492,40 @@ where
                     runtime.schedule_midi_block(base_sample, frames_needed);
                 }
 
-                if ch > 0 {
-                    let frames_needed = data.len().checked_div(ch).unwrap_or(0);
-                    let pending_midi = runtime
+                let pending_midi = ch > 0
+                    && runtime
                         .tracks
                         .iter()
                         .any(|t| !t.midi_block_events.is_empty());
-                    if pending_midi && !playing_local {
-                        runtime.flush_vst3_midi_inserts(frames_needed);
+                let frames_in_block = data.len().checked_div(ch).unwrap_or(0) as u64;
+                let has_preview = runtime.has_active_midi_preview();
+                if playing_local {
+                    metronome.preview_tail_samples = 0;
+                } else if has_preview || pending_midi {
+                    // Keep release-tail processing queued past the note-off so a
+                    // stopped-transport preview doesn't cut the instrument dead.
+                    metronome.preview_tail_samples =
+                        (runtime.sample_rate as u64).saturating_mul(2);
+                }
+                let preview_render_active =
+                    has_preview || pending_midi || metronome.preview_tail_samples > 0;
+                if preview_render_active && !playing_local {
+                    let active_notes: usize = runtime
+                        .midi_tracks
+                        .iter()
+                        .map(|mt| mt.preview_active.len())
+                        .sum();
+                    eprintln!(
+                        "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
+                        active_notes, metronome.preview_tail_samples
+                    );
+                    if !has_preview && !pending_midi {
+                        metronome.preview_tail_samples =
+                            metronome.preview_tail_samples.saturating_sub(frames_in_block);
                     }
                 }
 
-                if ch >= 2 && playing_local {
+                if ch >= 2 && (playing_local || preview_render_active) {
                     let frames_needed = data.len() / ch;
                     let scratch_len = frames_needed * ch;
                     if block_scratch.len() < scratch_len {
@@ -2927,12 +3566,9 @@ where
                             frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
                         }
                     }
-                    crate::recording::apply_recording_monitor_mix(
-                        &mut *scratch,
-                        ch,
-                        &shared,
-                        master_vol,
-                    );
+                    // (Legacy NAPI path) Software monitoring is handled by the
+                    // DAUx/cpal render kernel via the input ring; the old
+                    // sample-and-hold monitor was removed (warble).
                     for (out_frame, frame) in data.chunks_mut(ch).zip(scratch.chunks(ch)) {
                         let l = frame[0].clamp(-1.0, 1.0);
                         let r = frame[1].clamp(-1.0, 1.0);
@@ -2969,17 +3605,6 @@ where
                         };
                         let l = (tone_l + project_l + click).clamp(-1.0, 1.0);
                         let r = (tone_r + project_r + click).clamp(-1.0, 1.0);
-                        let (l, r) = if shared.recording_monitor_mix.load(Ordering::Relaxed) {
-                            let mon_l = f32_load(shared.recording_monitor_l.load(Ordering::Relaxed))
-                                * master_vol
-                                * 0.85;
-                            let mon_r = f32_load(shared.recording_monitor_r.load(Ordering::Relaxed))
-                                * master_vol
-                                * 0.85;
-                            ((l + mon_l).clamp(-1.0, 1.0), (r + mon_r).clamp(-1.0, 1.0))
-                        } else {
-                            (l, r)
-                        };
                         frame[0] = T::from_sample(l);
                         frame[1] = T::from_sample(r);
                         // Extra channels get silence.
@@ -3017,6 +3642,12 @@ where
                         sum_sq_l += value * value;
                         frames += 1;
                     }
+                }
+
+                if shared.live_input_active.load(Ordering::Relaxed) {
+                    let input_l = f32_load(shared.live_input_l.load(Ordering::Relaxed));
+                    let input_r = f32_load(shared.live_input_r.load(Ordering::Relaxed));
+                    runtime.accumulate_live_input_meters(input_l, input_r);
                 }
 
                 // ── 4. Compute meters (no allocation) ────────────────────────
@@ -3126,6 +3757,9 @@ mod routing_tests {
             pan: 0.0,
             muted: false,
             solo: false,
+            record_armed: false,
+            monitor_enabled: false,
+            input_source: crate::runtime::RuntimeTrackInputSource::None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             inserts: Vec::new(),

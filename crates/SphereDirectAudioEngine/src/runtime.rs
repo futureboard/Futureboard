@@ -35,6 +35,9 @@ pub struct RuntimeTrack {
     pub pan: f32,
     pub muted: bool,
     pub solo: bool,
+    pub record_armed: bool,
+    pub monitor_enabled: bool,
+    pub input_source: RuntimeTrackInputSource,
     pub preview_mode: RuntimePreviewMode,
     pub output_track_id: Option<String>,
     pub inserts: Vec<RuntimeInsert>,
@@ -66,6 +69,48 @@ pub struct RuntimeTrack {
     pub pdc_delay_l: Vec<f32>,
     pub pdc_delay_r: Vec<f32>,
     pub pdc_write_pos: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeTrackInputSource {
+    None,
+    Mono { channel: usize },
+    Stereo { left: usize, right: usize },
+}
+
+impl RuntimeTrackInputSource {
+    fn from_channels(channels: &[u32]) -> Self {
+        match channels {
+            [] => Self::None,
+            [channel] => Self::Mono {
+                channel: *channel as usize,
+            },
+            [left, right, ..] => Self::Stereo {
+                left: *left as usize,
+                right: *right as usize,
+            },
+        }
+    }
+
+    #[inline]
+    pub fn is_routable(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    #[inline]
+    pub fn sample_from_latest(&self, latest_l: f32, latest_r: f32) -> (f32, f32) {
+        match self {
+            Self::None => (0.0, 0.0),
+            Self::Mono { channel } => {
+                let mono = if *channel == 0 { latest_l } else { latest_r };
+                (mono, mono)
+            }
+            Self::Stereo { left, right } => {
+                let pick = |channel: usize| if channel == 0 { latest_l } else { latest_r };
+                (pick(*left), pick(*right))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +317,7 @@ impl RuntimeTrackMeter {
     }
 
     #[inline]
-    fn load(&self, track_id: &str) -> RuntimeTrackMeterSnapshot {
+    pub(crate) fn load(&self, track_id: &str) -> RuntimeTrackMeterSnapshot {
         RuntimeTrackMeterSnapshot {
             track_id: track_id.to_string(),
             peak_l: f32_load(self.peak_l.load(Ordering::Relaxed)),
@@ -346,7 +391,8 @@ pub struct RuntimeMidiEvent {
     /// snapshot BPM at build time, mirroring how audio clips resolve to
     /// samples — keeps scheduling deterministic and lock-free in the callback).
     pub sample: u64,
-    /// Absolute project beat (kept for debug logging only).
+    /// Absolute project beat. This is the canonical musical position; `sample`
+    /// is rebuilt from it when the project tempo changes.
     pub beat: f64,
     pub kind: RuntimeMidiEventKind,
     pub pitch: u8,
@@ -380,6 +426,8 @@ pub struct RuntimeMidiTrack {
     pub cursor: usize,
     /// Currently-sounding (channel, pitch) pairs since the last NoteOn.
     pub active: Vec<(u8, u8)>,
+    /// UI preview notes currently held independently of transport playback.
+    pub preview_active: Vec<(u8, u8)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -388,8 +436,8 @@ pub struct RuntimeProject {
     pub tracks: Vec<RuntimeTrack>,
     pub clips: Vec<RuntimeClip>,
     pub has_solo: bool,
-    /// Samples per beat at the snapshot BPM (constant-tempo; tempo automation
-    /// is a TODO — see midi-phase2-engine-playback.md).
+    /// Samples per beat at the current static BPM. MIDI event sample positions
+    /// are derived from event beats whenever tempo changes.
     pub samples_per_beat: f64,
     /// Structural MIDI clips (logging / inspection).
     pub midi_clips: Vec<RuntimeMidiClip>,
@@ -453,7 +501,13 @@ impl RuntimeProject {
                             source.frames(),
                             source.sample_rate(),
                             source.channels(),
-                            if source.is_mapped() { "mmap" } else { "memory" }
+                            if source.is_streaming() {
+                                "stream"
+                            } else if source.is_mapped() {
+                                "mmap"
+                            } else {
+                                "memory"
+                            }
                         );
                         loaded_fresh += 1;
                         let source = Arc::new(source);
@@ -600,6 +654,9 @@ impl RuntimeProject {
                 pan: t.pan.clamp(-1.0, 1.0),
                 muted: t.muted,
                 solo: t.solo,
+                record_armed: t.armed,
+                monitor_enabled: t.input_monitor,
+                input_source: RuntimeTrackInputSource::from_channels(&t.input_source.channels),
                 preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
                 inserts,
@@ -853,6 +910,37 @@ impl RuntimeProject {
         }
     }
 
+    /// Rebuild MIDI event sample positions from their canonical beat positions
+    /// after a static BPM change. Returns the sample position that preserves the
+    /// current musical playhead beat under the new tempo.
+    pub fn set_static_midi_tempo(&mut self, bpm: f64, position_sample: u64) -> u64 {
+        let previous_spb = self.samples_per_beat.max(1.0);
+        let current_beat = position_sample as f64 / previous_spb;
+        let next_spb = if bpm > 0.0 {
+            self.sample_rate.max(1) as f64 * 60.0 / bpm
+        } else {
+            previous_spb
+        };
+        self.all_notes_off("tempo_change");
+        self.samples_per_beat = next_spb.max(1.0);
+        for clip in &mut self.midi_clips {
+            for event in &mut clip.events {
+                event.sample = beat_to_sample(event.beat, self.samples_per_beat);
+            }
+            sort_midi_events(&mut clip.events);
+        }
+        let next_position = beat_to_sample(current_beat, self.samples_per_beat);
+        for mt in &mut self.midi_tracks {
+            for event in &mut mt.events {
+                event.sample = beat_to_sample(event.beat, self.samples_per_beat);
+            }
+            sort_midi_events(&mut mt.events);
+            mt.cursor = mt.events.partition_point(|ev| ev.sample < next_position);
+            mt.active.clear();
+        }
+        next_position
+    }
+
     /// Emit note-off for all active notes on every MIDI track and clear the
     /// active set. Called on stop/seek to prevent stuck notes.
     pub fn all_notes_off(&mut self, reason: &str) {
@@ -860,22 +948,22 @@ impl RuntimeProject {
         let flush: Vec<(String, Vec<(u8, u8)>)> = self
             .midi_tracks
             .iter()
-            .filter(|mt| !mt.active.is_empty())
             .map(|mt| (mt.track_id.clone(), mt.active.clone()))
             .collect();
         for (track_id, active) in flush {
             if debug {
                 eprintln!(
-                    "[DAUx MIDI] all notes off track={} active={} reason={}",
+                    "[MidiPanic] track={} reason={} active_notes_cleared={}",
                     track_id,
-                    active.len(),
-                    reason
+                    reason,
+                    active.len()
                 );
             }
             push_all_notes_off_for_track(self, &track_id, &active);
         }
         for mt in &mut self.midi_tracks {
             mt.active.clear();
+            mt.preview_active.clear();
         }
     }
 
@@ -978,6 +1066,167 @@ impl RuntimeProject {
         }
     }
 
+    pub fn midi_preview_note_on(&mut self, track_id: &str, channel: u8, pitch: u8, velocity: u8) {
+        let channel = channel.min(15);
+        let pitch = pitch.min(127);
+        let velocity = velocity.clamp(1, 127);
+        eprintln!(
+            "[EngineMidiPreview] received note_on track={} ch={} pitch={} vel={}",
+            track_id, channel, pitch, velocity
+        );
+        if self.queue_preview_event(
+            track_id,
+            Vst3MidiEvent::note_on(0, channel, pitch, velocity as f32 / 127.0),
+            "note_on",
+            channel,
+            pitch,
+        ) {
+            self.set_preview_active(track_id, channel, pitch, true);
+        }
+    }
+
+    pub fn midi_preview_note_off(&mut self, track_id: &str, channel: u8, pitch: u8) {
+        let channel = channel.min(15);
+        let pitch = pitch.min(127);
+        eprintln!(
+            "[EngineMidiPreview] received note_off track={} ch={} pitch={}",
+            track_id, channel, pitch
+        );
+        if self.queue_preview_event(
+            track_id,
+            Vst3MidiEvent::note_off(0, channel, pitch, 0.0),
+            "note_off",
+            channel,
+            pitch,
+        ) {
+            self.set_preview_active(track_id, channel, pitch, false);
+        }
+    }
+
+    pub fn midi_preview_all_notes_off(&mut self, track_id: &str) {
+        let active = self
+            .midi_tracks
+            .iter()
+            .find(|mt| mt.track_id == track_id)
+            .map(|mt| mt.preview_active.clone())
+            .unwrap_or_default();
+        eprintln!(
+            "[EngineMidiPreview] received all_notes_off track={} active_notes={}",
+            track_id,
+            active.len()
+        );
+        push_all_notes_off_for_track(self, track_id, &active);
+        if let Some(mt) = self
+            .midi_tracks
+            .iter_mut()
+            .find(|mt| mt.track_id == track_id)
+        {
+            mt.preview_active.clear();
+        }
+    }
+
+    pub fn has_active_midi_preview(&self) -> bool {
+        self.midi_tracks
+            .iter()
+            .any(|mt| !mt.preview_active.is_empty())
+    }
+
+    fn queue_preview_event(
+        &mut self,
+        track_id: &str,
+        event: Vst3MidiEvent,
+        event_type: &str,
+        channel: u8,
+        pitch: u8,
+    ) -> bool {
+        let Some(ti) = self.tracks.iter().position(|t| t.id == track_id) else {
+            eprintln!(
+                "[InstrumentRoute] track={} no instrument plugin found reason=missing_track",
+                track_id
+            );
+            return false;
+        };
+        let track = &self.tracks[ti];
+        let plugins = track
+            .inserts
+            .iter()
+            .map(|insert| {
+                format!(
+                    "{}:{}:{}",
+                    insert.id,
+                    insert.kind,
+                    if insert.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "[InstrumentRoute] track={} kind={} plugins={}",
+            track.id, track.track_type, plugins
+        );
+        let Some(insert_ix) = track.midi_instrument_insert_ix else {
+            eprintln!(
+                "[InstrumentRoute] track={} selected_instrument_plugin=none no instrument plugin found",
+                track_id
+            );
+            return false;
+        };
+        let plugin_id = self.tracks[ti].inserts[insert_ix].id.clone();
+        eprintln!(
+            "[InstrumentRoute] track={} selected_instrument_plugin={}",
+            track_id, plugin_id
+        );
+        eprintln!(
+            "[PluginMidiIn] plugin={} {} ch={} pitch={} offset=0",
+            plugin_id, event_type, channel, pitch
+        );
+        self.tracks[ti].midi_block_events.push(event);
+        eprintln!(
+            "[EngineMidiPreview] target plugin={} event queued",
+            plugin_id
+        );
+        true
+    }
+
+    fn set_preview_active(&mut self, track_id: &str, channel: u8, pitch: u8, active: bool) {
+        let Some(mt) = self
+            .midi_tracks
+            .iter_mut()
+            .find(|mt| mt.track_id == track_id)
+        else {
+            self.midi_tracks.push(RuntimeMidiTrack {
+                track_id: track_id.to_string(),
+                events: Vec::new(),
+                cursor: 0,
+                active: Vec::with_capacity(128),
+                preview_active: Vec::with_capacity(128),
+            });
+            let Some(mt) = self
+                .midi_tracks
+                .iter_mut()
+                .find(|mt| mt.track_id == track_id)
+            else {
+                return;
+            };
+            if active {
+                mt.preview_active.push((channel, pitch));
+            }
+            return;
+        };
+        let key = (channel, pitch);
+        if active {
+            if !mt.preview_active.contains(&key) {
+                mt.preview_active.push(key);
+            }
+        } else {
+            mt.preview_active.retain(|k| *k != key);
+        }
+    }
+
     #[inline]
     pub fn active_clip_count_at_sample(&self, project_sample: u64) -> usize {
         self.clips
@@ -1057,6 +1306,31 @@ impl RuntimeProject {
         track.meter_peak_r = track.meter_peak_r.max(abs_r);
         track.meter_sum_sq_l += l * l;
         track.meter_sum_sq_r += r * r;
+    }
+
+    #[inline]
+    pub fn accumulate_live_input_meters(&mut self, latest_l: f32, latest_r: f32) {
+        if latest_l == 0.0 && latest_r == 0.0 {
+            return;
+        }
+        for track in &mut self.tracks {
+            if track.track_type != "audio" {
+                continue;
+            }
+            if !track.record_armed && !track.monitor_enabled {
+                continue;
+            }
+            if !track.input_source.is_routable() {
+                continue;
+            }
+            let (l, r) = track.input_source.sample_from_latest(latest_l, latest_r);
+            let abs_l = l.abs();
+            let abs_r = r.abs();
+            track.meter_peak_l = track.meter_peak_l.max(abs_l);
+            track.meter_peak_r = track.meter_peak_r.max(abs_r);
+            track.meter_sum_sq_l += l * l;
+            track.meter_sum_sq_r += r * r;
+        }
     }
 
     #[inline]
@@ -1214,6 +1488,33 @@ fn push_all_notes_off_for_track(project: &mut RuntimeProject, track_id: &str, ac
             .midi_block_events
             .push(Vst3MidiEvent::note_off(0, channel, pitch, 0.0));
     }
+    for channel in 0..16 {
+        project.tracks[ti]
+            .midi_block_events
+            .push(Vst3MidiEvent::control_change(0, channel, 64, 0.0));
+        project.tracks[ti]
+            .midi_block_events
+            .push(Vst3MidiEvent::control_change(0, channel, 123, 0.0));
+        project.tracks[ti]
+            .midi_block_events
+            .push(Vst3MidiEvent::control_change(0, channel, 120, 0.0));
+        project.tracks[ti]
+            .midi_block_events
+            .push(Vst3MidiEvent::control_change(0, channel, 121, 0.0));
+    }
+}
+
+#[inline]
+fn beat_to_sample(beat: f64, samples_per_beat: f64) -> u64 {
+    (beat.max(0.0) * samples_per_beat.max(1.0)).round().max(0.0) as u64
+}
+
+fn sort_midi_events(events: &mut [RuntimeMidiEvent]) {
+    events.sort_by(|a, b| {
+        a.sample
+            .cmp(&b.sample)
+            .then((a.kind as u8).cmp(&(b.kind as u8)))
+    });
 }
 
 /// Apply a note event to the active-note set (NoteOn inserts, NoteOff removes).
@@ -1257,8 +1558,8 @@ fn build_midi_runtime(
             let channel = note.channel.min(15);
             let abs_start = clip.start_beat + note.start_beat.max(0.0);
             let abs_end = abs_start + note.length_beats;
-            let on_sample = (abs_start * samples_per_beat).round().max(0.0) as u64;
-            let off_sample = (abs_end * samples_per_beat).round().max(0.0) as u64;
+            let on_sample = beat_to_sample(abs_start, samples_per_beat);
+            let off_sample = beat_to_sample(abs_end, samples_per_beat);
             events.push(RuntimeMidiEvent {
                 sample: on_sample,
                 beat: abs_start,
@@ -1287,7 +1588,7 @@ fn build_midi_runtime(
             let channel = lane.channel.min(15);
             for point in &lane.points {
                 let abs_beat = clip.start_beat + point.beat.max(0.0);
-                let sample = (abs_beat * samples_per_beat).round().max(0.0) as u64;
+                let sample = beat_to_sample(abs_beat, samples_per_beat);
                 events.push(RuntimeMidiEvent {
                     sample,
                     beat: abs_beat,
@@ -1302,11 +1603,7 @@ fn build_midi_runtime(
             }
         }
         // Sort by sample; NoteOff before NoteOn at the same sample.
-        events.sort_by(|a, b| {
-            a.sample
-                .cmp(&b.sample)
-                .then((a.kind as u8).cmp(&(b.kind as u8)))
-        });
+        sort_midi_events(&mut events);
         let end_beat = clip.start_beat + clip.length_beats.max(0.0);
         by_track
             .entry(clip.track_id.clone())
@@ -1324,17 +1621,14 @@ fn build_midi_runtime(
     let mut midi_tracks: Vec<RuntimeMidiTrack> = by_track
         .into_iter()
         .map(|(track_id, mut events)| {
-            events.sort_by(|a, b| {
-                a.sample
-                    .cmp(&b.sample)
-                    .then((a.kind as u8).cmp(&(b.kind as u8)))
-            });
+            sort_midi_events(&mut events);
             let active = Vec::with_capacity(128); // bound growth out of the audio callback
             RuntimeMidiTrack {
                 track_id,
                 events,
                 cursor: 0,
                 active,
+                preview_active: Vec::with_capacity(128),
             }
         })
         .collect();
@@ -1577,6 +1871,44 @@ mod midi_tests {
         assert_eq!(p.midi_tracks[0].active.len(), 1);
         p.all_notes_off("stop");
         assert!(p.midi_tracks[0].active.is_empty());
+    }
+
+    #[test]
+    fn all_notes_off_clears_preview_tracker() {
+        // A held preview/audition note that never received an explicit note-off
+        // (e.g. deleted mid-move) must not leave the engine believing a note is
+        // still sounding — the panic clears the preview tracker.
+        let mut p = project_with(vec![clip_with_one_note()]);
+        let track_id = p.midi_tracks[0].track_id.clone();
+        p.midi_tracks[0].preview_active.push((0, 60));
+        assert!(p.has_active_midi_preview());
+        p.midi_preview_all_notes_off(&track_id);
+        assert!(p.midi_tracks[0].preview_active.is_empty());
+        assert!(!p.has_active_midi_preview());
+    }
+
+    #[test]
+    fn tempo_change_reschedules_midi_samples_from_beats() {
+        let mut p = project_with(vec![clip_with_one_note()]);
+        let next_pos = p.set_static_midi_tempo(60.0, 96_000);
+        let evs = &p.midi_tracks[0].events;
+        let on = evs
+            .iter()
+            .find(|e| e.kind == RuntimeMidiEventKind::NoteOn)
+            .unwrap();
+        let off = evs
+            .iter()
+            .find(|e| e.kind == RuntimeMidiEventKind::NoteOff)
+            .unwrap();
+
+        // 60 BPM @ 48 kHz -> 48000 samples/beat. The note stays at beat 4..5,
+        // so only its sample positions change.
+        assert_eq!(on.beat, 4.0);
+        assert_eq!(off.beat, 5.0);
+        assert_eq!(on.sample, 192_000);
+        assert_eq!(off.sample, 240_000);
+        // Current sample 96000 was beat 4 at 120 BPM; preserve beat 4.
+        assert_eq!(next_pos, 192_000);
     }
 
     #[test]

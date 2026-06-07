@@ -695,6 +695,15 @@ impl StudioLayout {
                 "edit track {} track={id} new={value}",
                 kind.label()
             ));
+            match kind {
+                TrackToggle::Arm => {
+                    eprintln!("[GPUI] SetTrackRecordArm track={id} armed={value}")
+                }
+                TrackToggle::Input => {
+                    eprintln!("[GPUI] SetTrackMonitor track={id} enabled={value}")
+                }
+                _ => {}
+            }
             StudioLayout::defer_update(&owner, cx, |this, cx| {
                 this.mark_dirty();
                 this.push_mixer_snapshot_to_window(cx);

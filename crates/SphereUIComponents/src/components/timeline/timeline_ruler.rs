@@ -104,13 +104,16 @@ pub fn timeline_ruler(
                                 .h(px(20.0))
                                 .w(px(20.0))
                                 .rounded_md()
-                                .bg(if state.snap_to_grid {
-                                    Colors::accent_primary()
-                                } else {
-                                    Colors::surface_raised()
-                                })
+                                // Active = accent stroke + accent icon, not a
+                                // filled accent background (matches transport
+                                // toolbar styling).
+                                .bg(Colors::surface_raised())
                                 .border(px(1.0))
-                                .border_color(Colors::border_subtle())
+                                .border_color(if state.snap_to_grid {
+                                    Colors::with_alpha(Colors::accent_primary(), 0.55)
+                                } else {
+                                    Colors::border_subtle()
+                                })
                                 .cursor(gpui::CursorStyle::PointingHand)
                                 .id("ruler-snap-toggle-btn")
                                 .on_click(move |_, window, cx| {
@@ -122,7 +125,7 @@ pub fn timeline_ruler(
                                         .w(px(12.0))
                                         .h(px(12.0))
                                         .text_color(if state.snap_to_grid {
-                                            Colors::text_inverse()
+                                            Colors::accent_primary()
                                         } else {
                                             Colors::text_secondary()
                                         }),

@@ -38,6 +38,13 @@ pub enum TimelineRendererBackend {
 /// a developer override.
 static PREFERRED_BACKEND: std::sync::OnceLock<TimelineRendererBackend> = std::sync::OnceLock::new();
 
+/// The WGPU timeline path currently renders into an offscreen texture, but GPUI
+/// does not yet composite that texture into the window. Running it every frame
+/// therefore adds GPU work and then still paints the GPUI fallback. Keep the
+/// user-visible renderer on GPUI paint until texture interop lands.
+#[cfg(feature = "gpu-renderer")]
+const WGPU_TIMELINE_COMPOSITE_READY: bool = false;
+
 /// Called once at app startup with the user's saved Renderer choice.
 /// Settings UI is gated on a restart marker, so we never mutate this
 /// after the first call. Subsequent calls are no-ops.
@@ -87,6 +94,17 @@ pub fn create_timeline_renderer_with_fallback(
     #[cfg(feature = "gpu-renderer")]
     {
         if preferred == TimelineRendererBackend::Wgpu {
+            if !WGPU_TIMELINE_COMPOSITE_READY {
+                if std::env::var_os("FUTUREBOARD_GPU_RENDERER_DEBUG").is_some() {
+                    eprintln!(
+                        "[gpu-renderer] WGPU timeline requested, but texture compositing is not ready; using GPUI paint"
+                    );
+                }
+                return (
+                    Box::new(super::gpui_paint::GpuiPaintTimelineRenderer::new()),
+                    TimelineRendererBackend::GpuiPaint,
+                );
+            }
             let mut wgpu = super::wgpu_renderer::WgpuTimelineRenderer::new();
             if wgpu.is_available() {
                 return (Box::new(wgpu), TimelineRendererBackend::Wgpu);

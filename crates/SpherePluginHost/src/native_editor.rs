@@ -74,6 +74,11 @@ pub enum PluginEditorPresentationMode {
     ChildHwndEmbed,
     /// `WS_POPUP | WS_EX_TOOLWINDOW` owned by the GPUI window (default).
     OwnedToolWindowFallback,
+    /// Standalone top-level OS window, modeled on the VST3 SDK editorhost
+    /// sample — not owned by or composited under the GPUI window. Generic
+    /// escape hatch for editors that won't render in the embedded/overlay modes
+    /// (`FUTUREBOARD_PLUGIN_EDITOR_MODE=detached`).
+    DetachedNativeWindow,
 }
 
 /// Query the presentation mode currently backing an attached editor session.
@@ -85,6 +90,7 @@ pub fn editor_presentation_mode(handle: u64) -> Option<PluginEditorPresentationM
     match unsafe { sphere_plugin_editor_embed_host_kind(handle as c_ulonglong) } {
         0 => Some(PluginEditorPresentationMode::ChildHwndEmbed),
         1 => Some(PluginEditorPresentationMode::OwnedToolWindowFallback),
+        2 => Some(PluginEditorPresentationMode::DetachedNativeWindow),
         _ => None,
     }
 }

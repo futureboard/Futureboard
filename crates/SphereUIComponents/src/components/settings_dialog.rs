@@ -2354,6 +2354,93 @@ fn build_settings_content(
                         ),
                 ))
                 .child(settings_daw_row(
+                    "Save Before Record",
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child({
+                            let val = schema.recording.audio.save_before_recording;
+                            let up = on_update.clone();
+                            fb_checkbox("rec-save-before-recording", val, move |_, w, cx| {
+                                up(
+                                    Arc::new(move |s| {
+                                        s.recording.audio.save_before_recording = !val
+                                    }),
+                                    w,
+                                    cx,
+                                );
+                            })
+                        })
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(Colors::text_muted())
+                                .child("Save dirty projects before recording starts"),
+                        ),
+                ))
+                .child(settings_daw_row(
+                    "Recording Offset",
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child({
+                            let val = schema.recording.audio.recording_offset_ms;
+                            let up = on_update.clone();
+                            fb_stepper_button("rec-offset-dec", "-", move |_, w, cx| {
+                                up(
+                                    Arc::new(move |s| {
+                                        s.recording.audio.recording_offset_ms =
+                                            (val - 1).clamp(-2000, 2000)
+                                    }),
+                                    w,
+                                    cx,
+                                );
+                            })
+                        })
+                        .child(
+                            div()
+                                .w(px(64.0))
+                                .h(px(28.0))
+                                .rounded_md()
+                                .border(px(1.0))
+                                .border_color(Colors::border_subtle())
+                                .bg(Colors::surface_input())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(11.0))
+                                .text_color(Colors::text_primary())
+                                .child(format!(
+                                    "{} ms",
+                                    schema.recording.audio.recording_offset_ms
+                                )),
+                        )
+                        .child({
+                            let val = schema.recording.audio.recording_offset_ms;
+                            let up = on_update.clone();
+                            fb_stepper_button("rec-offset-inc", "+", move |_, w, cx| {
+                                up(
+                                    Arc::new(move |s| {
+                                        s.recording.audio.recording_offset_ms =
+                                            (val + 1).clamp(-2000, 2000)
+                                    }),
+                                    w,
+                                    cx,
+                                );
+                            })
+                        })
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(Colors::text_muted())
+                                .child("clip start"),
+                        ),
+                ))
+                .child(settings_daw_row(
                     "Input Test",
                     input_test_meter_row(input_test, callbacks),
                 ))

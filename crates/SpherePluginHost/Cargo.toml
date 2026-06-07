@@ -13,6 +13,13 @@ name = "futureboard_plugin_scanner"
 path = "src/bin/futureboard_plugin_scanner.rs"
 required-features = ["plugin-scanner-bin"]
 
+# Separated plugin/editor host process. Workspace builds skip it unless the
+# feature is enabled, mirroring the scanner bin.
+[[bin]]
+name = "FutureboardPluginHost-x64"
+path = "src/bin/futureboard_plugin_host.rs"
+required-features = ["plugin-host-bin"]
+
 [dependencies]
 napi        = { workspace = true, optional = true }
 napi-derive = { workspace = true, optional = true }
@@ -20,6 +27,13 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 rusqlite.workspace = true
+crossbeam-channel.workspace = true
+
+# Win32 (COM STA, message pump, HWND validation, self-test windows) for the
+# host binary. The main app already pulls the same workspace `windows` version
+# transitively, so this adds no new toolchain surface.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
 
 [build-dependencies]
 cc.workspace = true
@@ -27,7 +41,10 @@ napi-build.workspace = true
 
 [features]
 # Default build is native/rlib-safe for Studio workspace builds.
-default = []
+default = [
+    "plugin-host-bin",
+    "plugin-scanner-bin"
+]
 
 # Build the N-API surface (`*.node` addon entrypoints and Js-visible types).
 napi = ["dep:napi", "dep:napi-derive"]
@@ -35,3 +52,6 @@ napi = ["dep:napi", "dep:napi-derive"]
 # Opt-in standalone scanner target. Workspace builds skip this so the binary
 # does not try to link N-API symbols outside a Node/Electron host.
 plugin-scanner-bin = []
+
+# Opt-in standalone plugin/editor host process target.
+plugin-host-bin = []

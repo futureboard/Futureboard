@@ -29,8 +29,13 @@ pub fn chrome_button(
     active: bool,
     color: Rgba,
 ) -> Div {
-    let bg = if active {
-        Colors::accent_muted()
+    // Active state is shown with a stroked/accent icon + a subtle 1px accent
+    // ring — never a filled background (pro-DAW toolbar feel). A transparent
+    // border on inactive buttons keeps the box size identical so toggling
+    // active never shifts layout. The `color` argument already carries the
+    // accent/status color when `active`, so the icon itself reads as accent.
+    let border_color = if active {
+        Colors::with_alpha(color, 0.45)
     } else {
         gpui::transparent_black().into()
     };
@@ -42,7 +47,8 @@ pub fn chrome_button(
         .items_center()
         .justify_center()
         .rounded_md()
-        .bg(bg)
+        .border_1()
+        .border_color(border_color)
         .text_color(color)
         .hover(|style| {
             style
@@ -145,27 +151,25 @@ pub fn external_window_titlebar_with_icon(
         .child(draggable_spacer());
 
     if policy.show_window_controls {
-        bar = bar.child(
-            div()
-                .window_control_area(WindowControlArea::Close)
-                .id(close_id)
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(TITLEBAR_HEIGHT))
-                .h(px(TITLEBAR_HEIGHT))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .hover(|s| s.bg(Colors::surface_control_hover()))
-                .occlude()
-                .on_click(move |_, window, cx| on_close(window, cx))
-                .child(
-                    svg()
-                        .path(assets::ICON_X_PATH)
-                        .w(px(12.0))
-                        .h(px(12.0))
-                        .text_color(Colors::text_faint()),
-                ),
-        );
+        bar = bar
+            .child(external_window_control_button(
+                WindowControlArea::Min,
+                "external-window-minimize",
+                assets::ICON_MINIMIZE_PATH,
+                move |window, _cx| window.minimize_window(),
+            ))
+            .child(external_window_control_button(
+                WindowControlArea::Max,
+                "external-window-maximize",
+                assets::ICON_MAXIMIZE_PATH,
+                move |window, _cx| window.zoom_window(),
+            ))
+            .child(external_window_control_button(
+                WindowControlArea::Close,
+                close_id,
+                assets::ICON_X_PATH,
+                move |window, cx| on_close(window, cx),
+            ));
     } else {
         bar = bar.child(
             div()
@@ -190,6 +194,33 @@ pub fn external_window_titlebar_with_icon(
     }
 
     bar
+}
+
+fn external_window_control_button(
+    area: WindowControlArea,
+    id: impl Into<gpui::ElementId>,
+    icon_path: &'static str,
+    on_click: impl Fn(&mut Window, &mut App) + 'static + Clone,
+) -> impl IntoElement {
+    div()
+        .window_control_area(area)
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(TITLEBAR_HEIGHT))
+        .h(px(TITLEBAR_HEIGHT))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .occlude()
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .child(
+            svg()
+                .path(icon_path)
+                .w(px(12.0))
+                .h(px(12.0))
+                .text_color(Colors::text_faint()),
+        )
 }
 
 pub fn status_item(text: impl Into<String>, strong: bool) -> impl gpui::IntoElement {

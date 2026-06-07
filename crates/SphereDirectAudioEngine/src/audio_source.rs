@@ -1,5 +1,8 @@
-//! Lightweight clip audio sources: in-memory decode for small files,
-//! memory-mapped WAV for large files (OS demand-paged, no full PCM buffer).
+//! Lightweight clip audio sources.
+//!
+//! Small files may be decoded into memory. Large files are streamed by a
+//! background worker into bounded realtime-readable rings so the audio callback
+//! never decodes, seeks, opens files, or faults file-backed mmap pages.
 
 use std::fs::File;
 use std::path::Path;
@@ -132,7 +135,10 @@ impl MappedWavSource {
     }
 }
 
-/// Open the best playback source for `path` — mmap for large WAV, decode for small/other.
+/// Open the best playback source for `path`.
+///
+/// Large WAVs and large compressed files use the disk-streaming source. Small
+/// files can still be decoded in memory for low-latency editing and tests.
 pub fn open_clip_audio_source(path: &str) -> Result<ClipAudioSource, String> {
     let p = Path::new(path);
     let file_size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
@@ -143,12 +149,15 @@ pub fn open_clip_audio_source(path: &str) -> Result<ClipAudioSource, String> {
         .to_ascii_lowercase();
 
     if matches!(ext.as_str(), "wav" | "wave") && file_size >= STREAMING_WAV_THRESHOLD_BYTES {
-        let mapped = Arc::new(MappedWavSource::open(p)?);
+        let source = StreamingSource::open(path)?;
         eprintln!(
-            "[SphereAudio] mmap WAV '{}': {} bytes, {} frames @ {}Hz {} ch",
-            path, file_size, mapped.frames, mapped.sample_rate, mapped.channels
+            "[SphereAudio] stream WAV '{}': {} bytes, {} frames @ {}Hz",
+            path,
+            file_size,
+            source.frames(),
+            source.sample_rate()
         );
-        return Ok(ClipAudioSource::MappedWav(mapped));
+        return Ok(ClipAudioSource::Streaming(Arc::new(source)));
     }
 
     if file_size > MAX_IN_MEMORY_DECODE_BYTES && !matches!(ext.as_str(), "wav" | "wave") {

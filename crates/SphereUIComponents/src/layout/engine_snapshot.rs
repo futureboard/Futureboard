@@ -7,7 +7,8 @@ use DAUx::types::{
     EngineAutomationLaneSnapshot, EngineAutomationPointSnapshot, EngineAutomationTargetSnapshot,
     EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineMidiClipSnapshot,
     EngineMidiControllerLane, EngineMidiControllerPoint, EngineMidiNoteSnapshot,
-    EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot, EngineTrackSnapshot,
+    EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot,
+    EngineTrackInputSourceSnapshot, EngineTrackSnapshot,
 };
 
 /// Map a controller lane kind to its VST3 controller number, or `None` for
@@ -19,6 +20,58 @@ fn vst3_controller_number(kind: MidiControllerKind) -> Option<u16> {
         MidiControllerKind::ChannelPressure => Some(128), // kAfterTouch
         MidiControllerKind::PitchBend => Some(129),       // kPitchBend
         MidiControllerKind::PolyPressure => None,
+    }
+}
+
+fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapshot {
+    use timeline_state::{TrackAudioFormat, TrackInputRouting};
+
+    let format_channels = || match track.routing.audio_format {
+        TrackAudioFormat::Mono => vec![0],
+        TrackAudioFormat::Stereo => vec![0, 1],
+    };
+
+    match &track.routing.input {
+        TrackInputRouting::MidiDevice { .. } => EngineTrackInputSourceSnapshot {
+            device_id: None,
+            channels: Vec::new(),
+        },
+        TrackInputRouting::None => {
+            // No explicit input route assigned. When the track is armed or
+            // monitoring we still want live input, so fall back to the default
+            // channels for the track's format on the globally-selected
+            // (preferred) input device. This is what makes pressing Record-Arm
+            // / Monitor on a fresh track actually capture signal — without it
+            // the engine sees empty channels and opens no input stream.
+            if track.armed || track.input_monitor.is_active(track.armed) {
+                EngineTrackInputSourceSnapshot {
+                    device_id: None,
+                    channels: format_channels(),
+                }
+            } else {
+                EngineTrackInputSourceSnapshot {
+                    device_id: None,
+                    channels: Vec::new(),
+                }
+            }
+        }
+        TrackInputRouting::AllInputs => EngineTrackInputSourceSnapshot {
+            device_id: None,
+            channels: format_channels(),
+        },
+        TrackInputRouting::AudioDeviceChannel { device_id, channel } => {
+            EngineTrackInputSourceSnapshot {
+                device_id: Some(device_id.clone()),
+                channels: vec![*channel],
+            }
+        }
+        TrackInputRouting::AudioDeviceChannels {
+            device_id,
+            channels,
+        } => EngineTrackInputSourceSnapshot {
+            device_id: Some(device_id.clone()),
+            channels: channels.iter().copied().take(2).collect(),
+        },
     }
 }
 
@@ -158,6 +211,7 @@ pub(super) fn build_engine_project_snapshot(
     state: &TimelineState,
     sample_rate: u32,
     project_root: Option<&str>,
+    preferred_input_device: Option<&str>,
 ) -> EngineProjectSnapshot {
     let mut tracks: Vec<EngineTrackSnapshot> = state
         .tracks
@@ -170,6 +224,8 @@ pub(super) fn build_engine_project_snapshot(
             muted: track.muted,
             solo: track.solo,
             armed: track.armed,
+            input_monitor: track.input_monitor.is_active(track.armed),
+            input_source: build_engine_input_source(track),
             // Track audio format controls input/recording channel selection.
             // Engine output remains stereo so mono-input tracks still route to
             // the stereo master/bus instead of collapsing the playback graph.
@@ -194,6 +250,11 @@ pub(super) fn build_engine_project_snapshot(
         muted: false,
         solo: false,
         armed: false,
+        input_monitor: false,
+        input_source: EngineTrackInputSourceSnapshot {
+            device_id: None,
+            channels: Vec::new(),
+        },
         preview_mode: "stereo".to_string(),
         output_track_id: None,
         inserts: Vec::new(),
@@ -311,6 +372,9 @@ pub(super) fn build_engine_project_snapshot(
     EngineProjectSnapshot {
         project_id: "futureboard-native".to_string(),
         project_root: project_root.map(str::to_string),
+        preferred_input_device: preferred_input_device
+            .map(str::to_string)
+            .filter(|d| !d.trim().is_empty()),
         bpm: state.bpm.max(1.0) as f64,
         time_signature: [state.time_signature_num, state.time_signature_den],
         sample_rate: sample_rate.max(1),
@@ -441,7 +505,7 @@ mod tests {
         let _audible = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).unwrap();
         state.set_midi_notes_muted(&clip_id, &[muted], true);
 
-        let snap = build_engine_project_snapshot(&state, 48_000, None);
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
         let total: usize = snap.midi_clips.iter().map(|c| c.notes.len()).sum();
         assert_eq!(total, 1, "muted note must not reach the engine snapshot");
     }
@@ -454,7 +518,7 @@ mod tests {
         // Pitch bend resolves to VST3 controller 129.
         state.put_controller_point(&clip_id, MidiControllerKind::PitchBend, 1.0, 0.5);
 
-        let snap = build_engine_project_snapshot(&state, 48_000, None);
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
         let clip = snap
             .midi_clips
             .iter()
@@ -476,7 +540,7 @@ mod tests {
         state.ensure_controller_lane(&clip_id, MidiControllerKind::CC(7));
         state.put_controller_point(&clip_id, MidiControllerKind::PolyPressure, 0.0, 0.5);
 
-        let snap = build_engine_project_snapshot(&state, 48_000, None);
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
         let clip = snap.midi_clips.iter().find(|c| c.id == clip_id).unwrap();
         assert!(
             clip.controllers.is_empty(),

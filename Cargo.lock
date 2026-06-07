@@ -5744,6 +5744,7 @@ name = "sphere-plugin-host"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "crossbeam-channel",
  "dirs 5.0.1",
  "napi",
  "napi-build",
@@ -5751,6 +5752,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -5769,6 +5771,7 @@ dependencies = [
  "sphere-direct-audio-engine",
  "sphere-plugin-host",
  "wgpu",
+ "windows 0.61.3",
 ]
 
 [[package]]

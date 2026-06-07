@@ -25,6 +25,7 @@ mod mixer_window;
 pub(crate) use mixer_window::external_mixer_debug;
 pub mod panel;
 pub mod piano_roll;
+pub mod plugin_content_host;
 pub mod plugin_editor_window;
 pub mod plugin_format_badge;
 pub mod plugin_manager;

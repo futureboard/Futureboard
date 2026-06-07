@@ -2,10 +2,8 @@
 
 use std::cell::RefCell;
 
-use gpui::IntoElement;
+use gpui::{div, IntoElement, Styled};
 
-#[cfg(feature = "gpu-renderer")]
-use crate::components::timeline::render::GpuiPaintTimelineRenderer;
 use crate::components::timeline::render::{
     create_timeline_renderer_with_fallback, gpui_paint, renderer::TimelineRenderOutput,
     snapshot::SnapshotBuildOptions, snapshot::TimelineRenderSnapshot, TimelineRenderer,
@@ -28,11 +26,12 @@ fn render_arrangement_with(
         TimelineRenderOutput::Gpui(element) => element,
         #[cfg(feature = "gpu-renderer")]
         TimelineRenderOutput::WgpuOffscreen(frame) => {
+            // This branch is retained for the future texture-composite path.
+            // Today `create_timeline_renderer_with_fallback` keeps WGPU disabled
+            // for user-visible timeline paint because this offscreen texture is
+            // not yet composited into GPUI.
             let _ = frame;
-            match GpuiPaintTimelineRenderer::new().render_arrangement(snapshot) {
-                TimelineRenderOutput::Gpui(element) => element,
-                TimelineRenderOutput::WgpuOffscreen(_) => unreachable!(),
-            }
+            div().absolute().inset_0().into_any_element()
         }
     }
 }
@@ -73,6 +72,17 @@ pub fn warm_up_timeline_renderer() -> &'static str {
         }
         slot.as_ref().expect("renderer slot").0.label()
     })
+}
+
+pub fn active_timeline_renderer_backend() -> &'static str {
+    TIMELINE_RENDERER
+        .try_with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|(backend, _)| backend.label())
+                .unwrap_or_else(|| TimelineRendererBackend::from_env().label())
+        })
+        .unwrap_or("unknown")
 }
 
 /// Scrollable arrangement grid layer (behind track lanes / clips).

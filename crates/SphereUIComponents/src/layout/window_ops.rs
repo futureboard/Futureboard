@@ -634,6 +634,9 @@ impl StudioLayout {
     }
 
     pub(crate) fn close_midi_editor_window(&mut self, cx: &mut Context<Self>) {
+        let _ = self.piano_roll_floating.update(cx, |roll, cx| {
+            roll.preview_all_notes_off("editor_close", cx);
+        });
         if let Some(handle) = self.midi_editor_window.take() {
             let _ = handle.update(cx, |_w, window, _cx| window.remove_window());
         }
@@ -641,6 +644,9 @@ impl StudioLayout {
     }
 
     pub(super) fn note_midi_editor_window_closed(&mut self, cx: &mut Context<Self>) {
+        let _ = self.piano_roll_floating.update(cx, |roll, cx| {
+            roll.preview_all_notes_off("editor_close", cx);
+        });
         self.midi_editor_window = None;
         cx.notify();
     }

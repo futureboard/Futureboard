@@ -21,7 +21,7 @@
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc,
 };
 
@@ -271,29 +271,39 @@ fn disk_writer_thread(
     let _ = finalize_tx.send(results);
 }
 
-/// Mix the latest captured input sample onto interleaved output (Phase U monitor).
-pub fn apply_recording_monitor_mix(
-    data: &mut [f32],
-    channels: usize,
-    shared: &crate::engine::SharedState,
-    master_vol: f32,
-) {
-    use std::sync::atomic::Ordering;
-    if channels < 2 || !shared.recording_monitor_mix.load(Ordering::Relaxed) {
-        return;
-    }
-    let mon_l =
-        f32::from_bits(shared.recording_monitor_l.load(Ordering::Relaxed)) * master_vol * 0.85;
-    let mon_r =
-        f32::from_bits(shared.recording_monitor_r.load(Ordering::Relaxed)) * master_vol * 0.85;
-    for frame in data.chunks_mut(channels) {
-        frame[0] = (frame[0] + mon_l).clamp(-1.0, 1.0);
-        frame[1] = (frame[1] + mon_r).clamp(-1.0, 1.0);
+/// Realtime-safe max into an f32-bits atomic (no allocation, no lock).
+#[inline]
+fn atomic_max_bits(target: &AtomicU32, value: f32) {
+    let value = value.max(0.0);
+    let mut cur = target.load(Ordering::Relaxed);
+    loop {
+        if value <= f32::from_bits(cur) {
+            break;
+        }
+        match target.compare_exchange_weak(
+            cur,
+            value.to_bits(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(c) => cur = c,
+        }
     }
 }
 
 // ── Input stream builder (f32 samples) ───────────────────────────────────────
 
+/// Build the single recording capture stream. Its one realtime callback fans
+/// out to four independent paths, none of which blocks another:
+///   1. monitor    → `shared.input_ring` (read by the output render callback)
+///   2. record     → `tx` channel → disk-writer worker thread
+///   3. preview     → min/max/rms bins → `shared.preview_ring` (drained by UI)
+///   4. meters/diag → raw input peak + lightweight counters
+///
+/// Realtime-safe: only the record path allocates (`to_vec` once per block, off
+/// the output hot path); the monitor/preview/meter paths are atomics-only.
+#[allow(clippy::too_many_arguments)]
 fn build_f32_input_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -303,36 +313,108 @@ fn build_f32_input_stream(
     shared: Arc<crate::engine::SharedState>,
     channels: usize,
     monitor_channels: Vec<usize>,
+    samples_per_bin: usize,
 ) -> Result<cpal::Stream, SphereAudioError> {
+    use crate::engine::{f32_load, f32_store};
+    use crate::input_ring::WaveformPeak;
+
+    let mon_l_ch = monitor_channels.first().copied().unwrap_or(0);
+    let mon_r_ch = monitor_channels.get(1).copied().unwrap_or(mon_l_ch);
+    let samples_per_bin = samples_per_bin.max(1);
+
+    // Preview accumulator — captured (FnMut) state, no allocation per callback.
+    let mut bin_min = f32::MAX;
+    let mut bin_max = f32::MIN;
+    let mut bin_sumsq = 0.0f32;
+    let mut bin_count = 0usize;
+
     device
         .build_input_stream::<f32, _, _>(
             config,
             move |data: &[f32], _info| {
-                if active.load(Ordering::Relaxed) {
-                    // `to_vec()` allocates once per block — not in the output hot path,
-                    // so occasional allocation here is acceptable for recording.
-                    if tx.try_send(data.to_vec()).is_err() {
-                        dropped_blocks.fetch_add(1, Ordering::Relaxed);
-                    }
-                    if shared.recording_monitor_mix.load(Ordering::Relaxed) && channels > 0 {
-                        let frames = data.len() / channels.max(1);
-                        if frames > 0 {
-                            let last = frames - 1;
-                            let left_ch = monitor_channels.first().copied().unwrap_or(0);
-                            let right_ch = monitor_channels.get(1).copied().unwrap_or(left_ch);
-                            let left = data.get(last * channels + left_ch).copied().unwrap_or(0.0);
-                            let right = data
-                                .get(last * channels + right_ch)
-                                .copied()
-                                .unwrap_or(left);
-                            shared
-                                .recording_monitor_l
-                                .store(left.to_bits(), Ordering::Relaxed);
-                            shared
-                                .recording_monitor_r
-                                .store(right.to_bits(), Ordering::Relaxed);
+                let ch = channels.max(1);
+                let frames = data.len() / ch;
+                shared.input_cb_count.fetch_add(1, Ordering::Relaxed);
+                shared
+                    .input_frames_received
+                    .fetch_add(frames as u64, Ordering::Relaxed);
+
+                let mut raw_peak_l = 0.0f32;
+                let mut raw_peak_r = 0.0f32;
+                let mut last_l = 0.0f32;
+                let mut last_r = 0.0f32;
+                let mut rec_peak = 0.0f32;
+
+                for frame in data.chunks(ch) {
+                    let first = frame.first().copied().unwrap_or(0.0);
+                    let l = frame
+                        .get(mon_l_ch)
+                        .copied()
+                        .unwrap_or(first)
+                        .clamp(-1.0, 1.0);
+                    let r = frame.get(mon_r_ch).copied().unwrap_or(l).clamp(-1.0, 1.0);
+                    last_l = l;
+                    last_r = r;
+                    raw_peak_l = raw_peak_l.max(l.abs());
+                    raw_peak_r = raw_peak_r.max(r.abs());
+
+                    // 1. Monitor bridge → output render callback.
+                    shared.input_ring.write_stereo(l, r);
+
+                    // 3. Preview bins (mono mix of the monitored channels).
+                    // Guard with the same session-active flag as the writer so
+                    // stopping a take cannot publish late bins while the UI is
+                    // finalizing the committed clip.
+                    if active.load(Ordering::Relaxed) {
+                        let m = (l + r) * 0.5;
+                        bin_min = bin_min.min(m);
+                        bin_max = bin_max.max(m);
+                        bin_sumsq += m * m;
+                        bin_count += 1;
+                        if bin_count >= samples_per_bin {
+                            let rms = (bin_sumsq / bin_count as f32).sqrt();
+                            shared.preview_ring.push(WaveformPeak {
+                                min: bin_min,
+                                max: bin_max,
+                                rms,
+                            });
+                            bin_min = f32::MAX;
+                            bin_max = f32::MIN;
+                            bin_sumsq = 0.0;
+                            bin_count = 0;
                         }
+                    } else {
+                        bin_min = f32::MAX;
+                        bin_max = f32::MIN;
+                        bin_sumsq = 0.0;
+                        bin_count = 0;
                     }
+
+                    // 4. Record peak across all channels (diagnostics).
+                    for &s in frame {
+                        rec_peak = rec_peak.max(s.abs());
+                    }
+                }
+
+                // Meters / diagnostics atomics.
+                shared
+                    .live_input_l
+                    .store(f32_store(last_l), Ordering::Relaxed);
+                shared
+                    .live_input_r
+                    .store(f32_store(last_r), Ordering::Relaxed);
+                atomic_max_bits(&shared.live_input_peak_l, raw_peak_l);
+                atomic_max_bits(&shared.live_input_peak_r, raw_peak_r);
+                shared.live_input_active.store(true, Ordering::Relaxed);
+                let prev_rec = f32_load(shared.record_peak.load(Ordering::Relaxed)) * 0.9;
+                shared
+                    .record_peak
+                    .store(f32_store(prev_rec.max(rec_peak)), Ordering::Relaxed);
+
+                // 2. Record path → disk writer worker (only while armed/active).
+                if active.load(Ordering::Relaxed) && tx.try_send(data.to_vec()).is_err() {
+                    dropped_blocks.fetch_add(1, Ordering::Relaxed);
+                    shared.record_ring_overruns.fetch_add(1, Ordering::Relaxed);
                 }
             },
             |err| eprintln!("[SphereAudio] Input stream error: {err}"),
@@ -471,6 +553,43 @@ pub fn start_recording(
         })
         .collect();
 
+    // ── Realtime preview + monitor setup (Parts 1 & 2) ────────────────────
+    // The recording stream is the single capture source during a take: it
+    // feeds the monitor ring, the preview ring, and the file writer. Monitoring
+    // is mixed by the output callback from the ring (clean), not by the old
+    // sample-and-hold path.
+    const PREVIEW_PEAKS_PER_SEC: u32 = 150;
+    let samples_per_bin = (sample_rate / PREVIEW_PEAKS_PER_SEC).max(1) as usize;
+    let preview_channels = monitor_channels.len().max(1) as u32;
+    let start_sample = shared.position_samples.load(Ordering::Relaxed);
+
+    shared.preview_ring.reset();
+    shared.recording_preview_id.fetch_add(1, Ordering::Relaxed);
+    shared
+        .recording_preview_start_sample
+        .store(start_sample, Ordering::Relaxed);
+    shared
+        .recording_preview_sample_rate
+        .store(sample_rate, Ordering::Relaxed);
+    shared
+        .recording_preview_channels
+        .store(preview_channels, Ordering::Relaxed);
+    shared
+        .recording_preview_peaks_per_sec
+        .store(PREVIEW_PEAKS_PER_SEC, Ordering::Relaxed);
+    shared
+        .recording_preview_active
+        .store(true, Ordering::Relaxed);
+
+    // Arm the monitor ring for this stream's format and enable output monitoring
+    // when the user requested it.
+    shared
+        .input_ring
+        .set_active(true, input_ch as u32, sample_rate);
+    shared
+        .monitor_enabled_any
+        .store(monitor_mix, Ordering::Relaxed);
+
     // Build the input stream — `audio_tx` is moved into the closure.
     let input_stream = build_f32_input_stream(
         &device,
@@ -481,6 +600,7 @@ pub fn start_recording(
         Arc::clone(&shared),
         input_ch,
         monitor_channels,
+        samples_per_bin,
     )?;
 
     input_stream
@@ -518,6 +638,15 @@ pub fn stop_recording(
     session
         .shared
         .recording_monitor_mix
+        .store(false, Ordering::Relaxed);
+    session
+        .shared
+        .recording_preview_active
+        .store(false, Ordering::Relaxed);
+    session.shared.input_ring.set_active(false, 0, 0);
+    session
+        .shared
+        .monitor_enabled_any
         .store(false, Ordering::Relaxed);
     let dropped_blocks = session.dropped_blocks.load(Ordering::Relaxed);
 

@@ -271,6 +271,25 @@ fn build_and_warm_audio_engine(
     }
 }
 
+/// Fixed clip id for the temporary live-recording preview clip.
+pub(crate) const RECORDING_PREVIEW_CLIP_ID: &str = "__recording_preview__";
+
+/// UI-side bookkeeping for the realtime recording waveform preview (Part 1).
+/// Holds the streamed peak bins and where they live in the arrangement; the
+/// growing preview clip itself lives in timeline state under
+/// [`RECORDING_PREVIEW_CLIP_ID`].
+pub(crate) struct RecordingPreviewUi {
+    pub clip_id: String,
+    pub recording_id: u64,
+    pub track_id: String,
+    pub start_beat: f32,
+    pub sample_rate: u32,
+    pub peaks_per_second: u32,
+    /// Number of preview bins already drained from the engine.
+    pub drained: u64,
+    pub peaks: Vec<crate::components::timeline::waveform_cache::WaveformPeak>,
+}
+
 pub struct StudioLayout {
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
@@ -363,6 +382,9 @@ pub struct StudioLayout {
     /// Beat position when the current recording session started.
     recording_start_beat: f32,
     recording_ui_state: RecordingUiState,
+    /// Live recording waveform preview (Part 1). `Some` while a take is drawing
+    /// a growing preview clip in the arrangement.
+    recording_preview: Option<RecordingPreviewUi>,
     last_engine_playhead_beat: f32,
     last_engine_sync: Instant,
     /// Last time we pushed engine meter levels into timeline state. Used to
@@ -522,6 +544,22 @@ impl StudioLayout {
         };
         {
             let target = cx.entity().clone();
+            let preview_handler = Arc::new(
+                move |command: components::piano_roll::UiMidiPreviewCommand, cx: &mut gpui::App| {
+                    let _ = target.update(cx, |layout, _cx| {
+                        layout.dispatch_midi_preview_command(command);
+                    });
+                },
+            );
+            let _ = piano_roll.update(cx, |roll, _cx| {
+                roll.set_midi_preview_handler(Some(preview_handler.clone()));
+            });
+            let _ = piano_roll_floating.update(cx, |roll, _cx| {
+                roll.set_midi_preview_handler(Some(preview_handler));
+            });
+        }
+        {
+            let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_project_changed_callback(Some(Arc::new(move |cx| {
                     // DEFER the parent update. This callback runs from inside
@@ -662,6 +700,7 @@ impl StudioLayout {
             pending_play_after_sync: false,
             recording_start_beat: 0.0,
             recording_ui_state: RecordingUiState::Idle,
+            recording_preview: None,
             last_engine_playhead_beat: 0.0,
             last_engine_sync: Instant::now(),
             last_meter_apply: Instant::now(),

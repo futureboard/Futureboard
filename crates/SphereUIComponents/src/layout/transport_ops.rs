@@ -53,6 +53,11 @@ impl StudioLayout {
     ) {
         match command {
             TransportCommand::PlayPause => {
+                if self.is_recording_active(cx) {
+                    self.log_transport_debug("Spacebar", "stop_recording_and_stop_transport", cx);
+                    self.stop_native_recording(cx);
+                    return;
+                }
                 let playing = self
                     .audio_stats
                     .as_ref()
@@ -64,7 +69,14 @@ impl StudioLayout {
                     self.start_native_playback(cx);
                 }
             }
-            TransportCommand::Stop => self.stop_native_playback(cx),
+            TransportCommand::Stop => {
+                if self.is_recording_active(cx) {
+                    self.log_transport_debug("Stop", "stop_recording_and_stop_transport", cx);
+                    self.stop_native_recording(cx);
+                } else {
+                    self.stop_native_playback(cx);
+                }
+            }
             TransportCommand::ReturnToStart => self.seek_native_playhead(cx, 0.0),
             TransportCommand::ToggleLoop => {
                 let _ = self.timeline.update(cx, |timeline, cx| {
@@ -100,8 +112,38 @@ impl StudioLayout {
                     eprintln!("[autoscroll] toggled follow_playhead -> {}", enabled);
                 }
             }
-            TransportCommand::Record => self.toggle_native_recording(cx),
+            TransportCommand::Record => {
+                if self.is_recording_active(cx) {
+                    self.log_transport_debug("Record", "stop_recording_and_stop_transport", cx);
+                }
+                self.toggle_native_recording(cx)
+            }
         }
+    }
+
+    pub(super) fn is_recording_active(&self, cx: &mut Context<Self>) -> bool {
+        self.timeline.read(cx).state.transport.recording
+            || self.recording_preview.is_some()
+            || self
+                .audio_engine
+                .as_ref()
+                .map(|engine| engine.recording_status().active)
+                .unwrap_or(false)
+    }
+
+    pub(super) fn log_transport_debug(&self, event: &str, action: &str, cx: &mut Context<Self>) {
+        if std::env::var_os("FUTUREBOARD_TRANSPORT_DEBUG").is_none() {
+            return;
+        }
+        let timeline = self.timeline.read(cx);
+        eprintln!(
+            "[TransportDebug] event={} before playing={} recording={} active_recording_id={:?} action={}",
+            event,
+            timeline.state.transport.playing,
+            timeline.state.transport.recording,
+            self.recording_preview.as_ref().map(|p| p.recording_id),
+            action
+        );
     }
 
     pub(super) fn transport_chrome_state(
@@ -239,8 +281,15 @@ impl StudioLayout {
                 )
             })
             .unwrap_or_else(|| "Audio offline".to_string());
+        let renderer =
+            crate::components::timeline::timeline_surface::active_timeline_renderer_backend();
         // UI repaint cadence. Idle scenes stop updating when nothing is dirty.
-        let right = format!("{}  •  {}", audio, self.frame_diag.hud());
+        let right = format!(
+            "{}  •  UI {}  •  {}",
+            audio,
+            renderer,
+            self.frame_diag.hud()
+        );
         (left, right)
     }
 

@@ -65,7 +65,17 @@ pub struct LocalAudioState {
     pub playing_local: bool,
     pub prev_peak_l: f32,
     pub prev_peak_r: f32,
+    /// Read cursor into the shared input ring (Layer 4 consumer state).
+    pub input_read_frames: u64,
+    /// Smoothed input-bus peaks for diagnostics (Layer 4 verification).
+    pub prev_input_bus_l: f32,
+    pub prev_input_bus_r: f32,
     pub render_path_logged: bool,
+    /// Samples of instrument processing still owed after the last preview note
+    /// went off, so the plugin's release tail renders out instead of being cut
+    /// dead when transport is stopped. Counts down per block; refreshed while a
+    /// preview note is held.
+    pub preview_tail_samples: u64,
     pub metronome_enabled: bool,
     pub metronome_bpm: f64,
     pub metronome_ts_num: u32,
@@ -88,7 +98,11 @@ impl LocalAudioState {
             playing_local: false,
             prev_peak_l: 0.0,
             prev_peak_r: 0.0,
+            input_read_frames: 0,
+            prev_input_bus_l: 0.0,
+            prev_input_bus_r: 0.0,
             render_path_logged: false,
+            preview_tail_samples: 0,
             metronome_enabled: false,
             metronome_bpm: 120.0,
             metronome_ts_num: 4,
@@ -217,6 +231,7 @@ pub fn drain_commands(
                 // background dropper — never run its destructor on this
                 // realtime thread (frees buffers / munmaps sources / destroys
                 // VST3 handles). See `crate::graveyard`.
+                runtime.all_notes_off("project_load");
                 let old = std::mem::replace(runtime, *next_runtime);
                 runtime.sample_rate = output_sample_rate;
                 crate::graveyard::retire(old);
@@ -255,6 +270,7 @@ pub fn drain_commands(
                 }
                 local.playing_local = false;
                 shared.playing.store(false, Ordering::Relaxed);
+                runtime.all_notes_off("stop");
             }
             EngineCommand::Seek { position_seconds } => {
                 let sr = shared.sample_rate.load(Ordering::Relaxed) as f64;
@@ -275,6 +291,8 @@ pub fn drain_commands(
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 transport::store_f64_bits(&shared.bpm_bits, bpm);
                 local.set_bpm(bpm, pos, output_sample_rate);
+                let next_pos = runtime.set_static_midi_tempo(bpm, pos);
+                shared.position_samples.store(next_pos, Ordering::Relaxed);
             }
             EngineCommand::SetTimeSignature(num, den) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -309,9 +327,11 @@ pub fn drain_commands(
                 if callback_debug_enabled() {
                     eprintln!("[DAUx] SetTrackMute track={track_id} muted={muted}");
                 }
+                runtime.all_notes_off("track_mute");
                 runtime.update_track_mute(&track_id, muted);
             }
             EngineCommand::SetTrackSolo { track_id, solo } => {
+                runtime.all_notes_off("track_solo");
                 runtime.update_track_solo(&track_id, solo);
             }
             EngineCommand::SetTrackPreviewMode { track_id, value } => {
@@ -324,6 +344,24 @@ pub fn drain_commands(
                 value,
             } => {
                 runtime.update_insert_param(&track_id, &insert_id, &param_id, value);
+            }
+            EngineCommand::MidiPreviewNoteOn {
+                track_id,
+                channel,
+                pitch,
+                velocity,
+            } => {
+                runtime.midi_preview_note_on(&track_id, channel, pitch, velocity);
+            }
+            EngineCommand::MidiPreviewNoteOff {
+                track_id,
+                channel,
+                pitch,
+            } => {
+                runtime.midi_preview_note_off(&track_id, channel, pitch);
+            }
+            EngineCommand::MidiPreviewAllNotesOff { track_id } => {
+                runtime.midi_preview_all_notes_off(&track_id);
             }
         }
     }
@@ -343,6 +381,7 @@ pub fn fill_output_f32(
     shared: &Arc<SharedState>,
     local: &mut LocalAudioState,
 ) -> u64 {
+    shared.output_cb_count.fetch_add(1, Ordering::Relaxed);
     if local.playing_local {
         log_post_play_callback("block entered");
     }
@@ -376,7 +415,40 @@ pub fn fill_output_f32(
         }
     }
 
-    if channels >= 2 && local.playing_local {
+    let pending_midi = channels > 0
+        && runtime
+            .tracks
+            .iter()
+            .any(|t| !t.midi_block_events.is_empty());
+    let frames_in_block = data.len().checked_div(channels).unwrap_or(0) as u64;
+    let has_preview = runtime.has_active_midi_preview();
+    if local.playing_local {
+        // Transport drives processing while playing; don't carry a stale tail.
+        local.preview_tail_samples = 0;
+    } else if has_preview || pending_midi {
+        // A preview note is held (or its on/off just queued) — keep enough tail
+        // queued to render the instrument's release after the eventual note-off.
+        local.preview_tail_samples = (runtime.sample_rate as u64).saturating_mul(2);
+    }
+    let preview_render_active = has_preview || pending_midi || local.preview_tail_samples > 0;
+    if preview_render_active && !local.playing_local {
+        let active_notes: usize = runtime
+            .midi_tracks
+            .iter()
+            .map(|mt| mt.preview_active.len())
+            .sum();
+        eprintln!(
+            "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
+            active_notes, local.preview_tail_samples
+        );
+        // Once no note is held and nothing is queued, the remaining tail is pure
+        // decay — count it down so processing eventually stops.
+        if !has_preview && !pending_midi {
+            local.preview_tail_samples = local.preview_tail_samples.saturating_sub(frames_in_block);
+        }
+    }
+
+    if channels >= 2 && (local.playing_local || preview_render_active) {
         frames = render_project_block_interleaved(runtime, base_sample, master_vol, data, channels);
         if !local.render_path_logged {
             local.render_path_logged = true;
@@ -404,7 +476,9 @@ pub fn fill_output_f32(
                 frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
             }
         }
-        crate::recording::apply_recording_monitor_mix(data, channels, shared, master_vol);
+        // Live monitoring is mixed below via the input ring (single, clean
+        // path) — the old per-block sample-and-hold monitor was removed because
+        // it held one input sample across the whole output block (warble).
         for frame in data.chunks(channels) {
             let l = frame[0];
             let r = frame[1];
@@ -435,19 +509,9 @@ pub fn fill_output_f32(
             };
             let l = (tone_l + proj_l + click).clamp(-1.0, 1.0);
             let r = (tone_r + proj_r + click).clamp(-1.0, 1.0);
-            if shared.recording_monitor_mix.load(Ordering::Relaxed) {
-                let mon_l = f32::from_bits(shared.recording_monitor_l.load(Ordering::Relaxed))
-                    * master_vol
-                    * 0.85;
-                let mon_r = f32::from_bits(shared.recording_monitor_r.load(Ordering::Relaxed))
-                    * master_vol
-                    * 0.85;
-                frame[0] = (l + mon_l).clamp(-1.0, 1.0);
-                frame[1] = (r + mon_r).clamp(-1.0, 1.0);
-            } else {
-                frame[0] = l;
-                frame[1] = r;
-            }
+            // Live monitor is added afterwards from the input ring (see below).
+            frame[0] = l;
+            frame[1] = r;
             for extra in frame.iter_mut().skip(2) {
                 *extra = 0.0;
             }
@@ -480,6 +544,32 @@ pub fn fill_output_f32(
             sum_sq_l += v * v;
             frames += 1;
         }
+    }
+
+    if shared.live_input_active.load(Ordering::Relaxed) {
+        // Per-track input meters from the latest captured sample (Layer 6).
+        let input_l = f32_load(shared.live_input_l.load(Ordering::Relaxed));
+        let input_r = f32_load(shared.live_input_r.load(Ordering::Relaxed));
+        runtime.accumulate_live_input_meters(input_l, input_r);
+
+        // Live monitoring: drain the input ring and mix it into the output
+        // (Layers 4 + 7). Runs whether or not the transport is playing so the
+        // user hears input as soon as Monitor is enabled.
+        let (mon_peak_l, mon_peak_r) = mix_monitor_input(data, channels, shared, local, master_vol);
+        // Fold the monitored signal into the master peak so the master meter
+        // reflects what is actually leaving the device.
+        peak_l = peak_l.max(mon_peak_l);
+        peak_r = peak_r.max(mon_peak_r);
+    } else {
+        // No live input — clear the input-bus peak so diagnostics decay to 0.
+        shared
+            .input_bus_peak_l
+            .store(f32_store(0.0), Ordering::Relaxed);
+        shared
+            .input_bus_peak_r
+            .store(f32_store(0.0), Ordering::Relaxed);
+        local.prev_input_bus_l = 0.0;
+        local.prev_input_bus_r = 0.0;
     }
 
     // Update meters.
@@ -524,4 +614,119 @@ pub fn fill_output_f32(
     }
 
     frames
+}
+
+/// Drain the shared input ring into the output buffer (Layers 4 + 7).
+///
+/// Always advances the read cursor — even when monitoring is off — so the
+/// input-bus peak stays live for diagnostics and the monitor mix never replays
+/// stale audio when it is toggled on. Returns the *post-gain* monitor peak so
+/// the caller can fold it into the master meter.
+///
+/// Realtime-safe: atomics + arithmetic only, no allocation or locking.
+fn mix_monitor_input(
+    data: &mut [f32],
+    channels: usize,
+    shared: &Arc<SharedState>,
+    local: &mut LocalAudioState,
+    master_vol: f32,
+) -> (f32, f32) {
+    let ring = &shared.input_ring;
+    if !ring.is_active() || channels == 0 {
+        return (0.0, 0.0);
+    }
+    let frames = data.len() / channels;
+    if frames == 0 {
+        return (0.0, 0.0);
+    }
+    let head = ring.write_head();
+    if head == 0 {
+        return (0.0, 0.0);
+    }
+    let frames64 = frames as u64;
+
+    // Hold a small, stable monitoring latency behind the producer. The input
+    // and output callbacks are separate WASAPI clients with different block
+    // sizes, so reading right up to the head underruns on every block tail
+    // (the warble). Target ≈15 ms of buffered input; resync only when drift
+    // leaves the safe window. Same physical device ⇒ shared word clock ⇒ no
+    // sustained drift, so corrections are rare.
+    let cap = ring.capacity_frames();
+    let sr = shared.sample_rate.load(Ordering::Relaxed).max(1) as u64;
+    let target = ((sr * 15) / 1000).max(frames64 * 2);
+
+    // Resync on gross overrun (cursor lapped) or if the cursor is ahead of the
+    // producer (should not happen): jump to `target` frames behind the head.
+    if local.input_read_frames > head || head.saturating_sub(local.input_read_frames) > cap {
+        local.input_read_frames = head.saturating_sub(target);
+        shared.monitor_ring_overruns.fetch_add(1, Ordering::Relaxed);
+    }
+    // Latency crept too high (input outran output): skip forward to `target`.
+    if head.saturating_sub(local.input_read_frames) > target + frames64 {
+        local.input_read_frames = head.saturating_sub(target);
+        shared.monitor_ring_overruns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let available = head.saturating_sub(local.input_read_frames);
+    if available < frames64 {
+        // Not enough buffered to fill the block — count an underrun. We still
+        // read what's there and pad the remainder with silence (never replay
+        // stale samples).
+        shared
+            .monitor_ring_underruns
+            .fetch_add(1, Ordering::Relaxed);
+        shared.output_xruns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let monitor_on = shared.monitor_enabled_any.load(Ordering::Relaxed);
+    let mon_gain = f32_load(shared.monitor_gain.load(Ordering::Relaxed));
+
+    let mut bus_peak_l = 0.0f32;
+    let mut bus_peak_r = 0.0f32;
+    let mut out_peak_l = 0.0f32;
+    let mut out_peak_r = 0.0f32;
+    let mut read = local.input_read_frames;
+    let mut consumed = 0u64;
+
+    for frame in data.chunks_mut(channels) {
+        let (in_l, in_r) = if read < head {
+            let s = ring.read_frame(read);
+            read += 1;
+            consumed += 1;
+            s
+        } else {
+            // Underrun: emit silence rather than repeating the last block.
+            (0.0, 0.0)
+        };
+        bus_peak_l = bus_peak_l.max(in_l.abs());
+        bus_peak_r = bus_peak_r.max(in_r.abs());
+        if monitor_on && channels >= 2 {
+            let m_l = in_l * mon_gain * master_vol;
+            let m_r = in_r * mon_gain * master_vol;
+            frame[0] = (frame[0] + m_l).clamp(-1.0, 1.0);
+            frame[1] = (frame[1] + m_r).clamp(-1.0, 1.0);
+            out_peak_l = out_peak_l.max(m_l.abs());
+            out_peak_r = out_peak_r.max(m_r.abs());
+        }
+    }
+    local.input_read_frames = read;
+    shared
+        .monitor_frames_consumed
+        .fetch_add(consumed, Ordering::Relaxed);
+
+    // Smooth + publish the input-bus peak (pre-master) and monitor-output peak
+    // for diagnostics.
+    local.prev_input_bus_l = smooth_peak(local.prev_input_bus_l, bus_peak_l, PEAK_DECAY);
+    local.prev_input_bus_r = smooth_peak(local.prev_input_bus_r, bus_peak_r, PEAK_DECAY);
+    shared
+        .input_bus_peak_l
+        .store(f32_store(local.prev_input_bus_l), Ordering::Relaxed);
+    shared
+        .input_bus_peak_r
+        .store(f32_store(local.prev_input_bus_r), Ordering::Relaxed);
+    shared
+        .monitor_output_peak
+        .store(f32_store(out_peak_l.max(out_peak_r)), Ordering::Relaxed);
+
+    (out_peak_l, out_peak_r)
 }

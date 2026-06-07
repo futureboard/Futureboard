@@ -55,6 +55,9 @@ pub mod settings;
 pub mod shutdown;
 pub mod window_position;
 pub use shutdown::ShutdownState;
+/// Re-export of the separated plugin-host bridge client so the native app can
+/// log bridge env / drive the bridge without a direct `sphere-plugin-host` dep.
+pub use sphere_plugin_host::plugin_host_client;
 pub mod splash;
 pub mod theme;
 pub mod welcome;

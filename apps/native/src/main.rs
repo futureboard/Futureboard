@@ -12,6 +12,12 @@ fn main() {
     // env flags (before GPUI/window creation), panic hook, logging. No window,
     // no settings I/O, no device/plugin work here.
     boot::log("process setup start");
+    eprintln!(
+        "[process] role=main pid={} exe=futureboard_native",
+        std::process::id()
+    );
+    // Plugin-host bridge selection diagnostics (FUTUREBOARD_PLUGIN_HOST_BRIDGE).
+    sphere_ui_components::plugin_host_client::log_bridge_env();
 
     // Catch any panic that escapes the GPUI render loop so we see *why*
     // the window blanks out instead of getting a silent crash.

@@ -15,6 +15,12 @@ pub fn waveform_canvas(
     clip_width: f32,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("WaveformCanvas");
+    // Live recording take: draw streamed preview peaks (Part 1). Checked first
+    // so the temporary preview clip never falls through to the file cache or the
+    // synthetic placeholder.
+    if let Some(preview) = waveform_cache::recording_preview(&clip.id) {
+        return draw_preview_waveform(preview.as_ref(), color, state, clip_left, clip_width);
+    }
     match &clip.clip_type {
         ClipType::Audio {
             source_path: Some(path),

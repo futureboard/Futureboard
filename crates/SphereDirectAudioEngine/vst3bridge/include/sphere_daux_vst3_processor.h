@@ -138,8 +138,13 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_is_valid(
 SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_has_visible_ui(
     SphereDauxVst3Processor* processor);
 
-// 0 = WS_CHILD, 1 = owned tool window, -1 = no embedded editor.
+// 0 = WS_CHILD, 1 = owned tool window, 2 = detached top-level, -1 = none.
 SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_host_kind(
+    SphereDauxVst3Processor* processor);
+
+// Detached mode only: 1 (and resets) if the user closed the standalone editor
+// window so the host can tear the editor down; 0 otherwise.
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_take_user_close(
     SphereDauxVst3Processor* processor);
 
 /// Returns 1 if the processor has not been destroyed, 0 if it has.

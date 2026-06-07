@@ -594,6 +594,61 @@ fn decode_file_uncached(path: &Path) -> Option<WaveformPreview> {
     }
 }
 
+// ── Realtime recording preview registry (Part 1) ──────────────────────────────
+//
+// Live takes are drawn from a side registry keyed by the temporary preview
+// clip's id, so the normal file/placeholder clip pipeline is untouched. The
+// audio poll rebuilds the `WaveformPreview` as peaks stream in; the render path
+// only reads it.
+
+fn recording_preview_registry() -> &'static Mutex<HashMap<String, Arc<WaveformPreview>>> {
+    static REG: OnceLock<Mutex<HashMap<String, Arc<WaveformPreview>>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Publish (or replace) the live preview for `clip_id`.
+pub fn set_recording_preview(clip_id: &str, preview: Arc<WaveformPreview>) {
+    recording_preview_registry()
+        .lock()
+        .unwrap()
+        .insert(clip_id.to_string(), preview);
+}
+
+/// Read the live preview for `clip_id`, if a take is currently feeding it.
+pub fn recording_preview(clip_id: &str) -> Option<Arc<WaveformPreview>> {
+    recording_preview_registry()
+        .lock()
+        .unwrap()
+        .get(clip_id)
+        .map(Arc::clone)
+}
+
+/// Drop the live preview for `clip_id` (take finished / cancelled).
+pub fn clear_recording_preview(clip_id: &str) {
+    recording_preview_registry().lock().unwrap().remove(clip_id);
+}
+
+/// Build a single-LOD [`WaveformPreview`] from streamed min/max/rms peak bins.
+pub fn preview_from_recording_peaks(
+    peaks: &[WaveformPeak],
+    sample_rate: u32,
+    peaks_per_second: u32,
+) -> WaveformPreview {
+    let pps = peaks_per_second.max(1);
+    let samples_per_peak = (sample_rate.max(1) / pps).max(1) as usize;
+    let duration_seconds = peaks.len() as f64 / pps as f64;
+    WaveformPreview {
+        sample_rate,
+        channels: 1,
+        duration_seconds,
+        total_frames: (peaks.len() * samples_per_peak) as u64,
+        lods: vec![WaveformLod {
+            samples_per_peak,
+            peaks: peaks.to_vec(),
+        }],
+    }
+}
+
 // ── Demo / placeholder previews ───────────────────────────────────────────────
 
 pub fn get_or_generate_waveform(

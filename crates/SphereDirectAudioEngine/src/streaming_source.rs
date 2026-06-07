@@ -63,11 +63,47 @@ fn disk_stream_debug_enabled() -> bool {
 /// Process-wide disk-underrun counter, surfaced in diagnostics. A streaming
 /// read that finds its frame outside the buffered window bumps this and returns
 /// silence.
+static GLOBAL_READS: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_HITS: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_BLOCKS_DECODED: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_FRAMES_DECODED: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_ACTIVE_SOURCES: AtomicU64 = AtomicU64::new(0);
 
-/// Total disk-stream underruns since process start (diagnostics, plan §18).
-pub fn total_disk_underruns() -> u64 {
-    GLOBAL_UNDERRUNS.load(Ordering::Relaxed)
+/// Aggregate process-wide disk stream diagnostics. These are lightweight
+/// atomics updated by the streaming reader and worker; the audio callback never
+/// logs or blocks to produce them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiskStreamDiagnostics {
+    pub active_sources: u64,
+    pub cache_reads: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub underruns: u64,
+    pub blocks_decoded: u64,
+    pub frames_decoded: u64,
+    pub cache_memory_used_bytes: u64,
+    pub cache_memory_budget_bytes: u64,
+}
+
+pub fn diagnostics() -> DiskStreamDiagnostics {
+    let reads = GLOBAL_READS.load(Ordering::Relaxed);
+    let hits = GLOBAL_HITS.load(Ordering::Relaxed);
+    let underruns = GLOBAL_UNDERRUNS.load(Ordering::Relaxed);
+    let active_sources = GLOBAL_ACTIVE_SOURCES.load(Ordering::Relaxed);
+    let source_bytes = RING_FRAMES as u64 * 2 * std::mem::size_of::<f32>() as u64;
+    DiskStreamDiagnostics {
+        active_sources,
+        cache_reads: reads,
+        cache_hits: hits,
+        cache_misses: reads.saturating_sub(hits),
+        underruns,
+        blocks_decoded: GLOBAL_BLOCKS_DECODED.load(Ordering::Relaxed),
+        frames_decoded: GLOBAL_FRAMES_DECODED.load(Ordering::Relaxed),
+        // StreamingSource uses one bounded stereo f32 ring per active source.
+        cache_memory_used_bytes: active_sources.saturating_mul(source_bytes),
+        cache_memory_budget_bytes: active_sources.saturating_mul(source_bytes),
+    }
 }
 
 /// Lock-free stereo ring shared between the decoder thread (producer) and the
@@ -156,6 +192,7 @@ impl StreamingRing {
     /// silence and bump the underrun counters.
     #[inline]
     pub fn read_interp(&self, pos: f64) -> (f32, f32) {
+        GLOBAL_READS.fetch_add(1, Ordering::Relaxed);
         if pos < 0.0 || self.total_frames == 0 {
             return (0.0, 0.0);
         }
@@ -171,6 +208,7 @@ impl StreamingRing {
             self.bump_underrun();
             return (0.0, 0.0);
         }
+        GLOBAL_HITS.fetch_add(1, Ordering::Relaxed);
 
         // Next frame for interpolation, clamped to the last real frame.
         let next = (idx + 1).min(self.total_frames - 1);
@@ -251,6 +289,8 @@ impl StreamingSource {
             );
         }
 
+        GLOBAL_ACTIVE_SOURCES.fetch_add(1, Ordering::Relaxed);
+
         Ok(Self {
             ring,
             stop,
@@ -281,6 +321,7 @@ impl StreamingSource {
 
 impl Drop for StreamingSource {
     fn drop(&mut self) {
+        GLOBAL_ACTIVE_SOURCES.fetch_sub(1, Ordering::Relaxed);
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
@@ -415,6 +456,8 @@ fn decode_loop(
                         ring.store_frame(decode_frame, l, r);
                         decode_frame += 1;
                     }
+                    GLOBAL_BLOCKS_DECODED.fetch_add(1, Ordering::Relaxed);
+                    GLOBAL_FRAMES_DECODED.fetch_add(frame_count as u64, Ordering::Relaxed);
                     ring.publish_write(decode_frame);
                 }
             }

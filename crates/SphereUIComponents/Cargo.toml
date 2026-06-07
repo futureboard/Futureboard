@@ -41,3 +41,8 @@ wgpu = { workspace = true, optional = true }
 rfd.workspace = true
 # CRC-32/ISO-HDLC checksum for .fbproj binary format.
 crc32fast.workspace = true
+
+# Win32 for the main-app-owned plugin **content child HWND** (host-process
+# editor ownership). Same workspace version the app already links transitively.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

@@ -128,6 +128,8 @@ pub struct JsMeterSnapshot {
     pub master_peak_r: f64,
     pub master_rms_l: f64,
     pub master_rms_r: f64,
+    pub input_peak_l: f64,
+    pub input_peak_r: f64,
 }
 
 /// Per-track plugin latency (sum of enabled native-plugin insert latencies).
@@ -202,6 +204,12 @@ pub struct EngineProjectSnapshot {
     pub project_id: String,
     #[serde(default)]
     pub project_root: Option<String>,
+    /// Globally-selected input device (Preferences → Audio → Input Device).
+    /// Used as the fallback capture device for armed/monitored tracks whose
+    /// own input routing does not pin a specific device (e.g. "All Inputs").
+    /// `None`/empty falls back to the system default input.
+    #[serde(default)]
+    pub preferred_input_device: Option<String>,
     pub bpm: f64,
     pub time_signature: [u32; 2],
     pub sample_rate: u32,
@@ -272,6 +280,10 @@ pub struct EngineTrackSnapshot {
     pub muted: bool,
     pub solo: bool,
     pub armed: bool,
+    #[serde(default)]
+    pub input_monitor: bool,
+    #[serde(default)]
+    pub input_source: EngineTrackInputSourceSnapshot,
     #[serde(default = "default_preview_mode")]
     pub preview_mode: String,
     pub output_track_id: Option<String>,
@@ -284,6 +296,15 @@ pub struct EngineTrackSnapshot {
 
 fn default_preview_mode() -> String {
     "stereo".to_string()
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineTrackInputSourceSnapshot {
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub channels: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,6 +533,22 @@ pub struct JsEngineDebugInfo {
     /// Total disk-stream underruns since process start (Phase F diagnostics).
     /// A streaming clip read that found its frame outside the buffered window.
     pub disk_underruns: f64,
+    /// Number of active bounded disk-stream sources.
+    pub disk_stream_active_sources: f64,
+    /// Realtime streaming ring reads from the audio callback.
+    pub disk_stream_cache_reads: f64,
+    /// Reads served from already-buffered disk stream data.
+    pub disk_stream_cache_hits: f64,
+    /// Reads that missed the buffered disk stream window.
+    pub disk_stream_cache_misses: f64,
+    /// Approximate bounded stream cache memory currently allocated.
+    pub disk_stream_cache_memory_used_mb: f64,
+    /// Approximate bounded stream cache memory budget currently allocated.
+    pub disk_stream_cache_memory_budget_mb: f64,
+    /// Number of decoder/read blocks completed by stream workers.
+    pub disk_stream_blocks_decoded: f64,
+    /// Number of frames decoded/read by stream workers.
+    pub disk_stream_frames_decoded: f64,
     /// Declarative audio graph node count (Phase O).
     pub graph_node_count: u32,
     /// Pass-1 source track count in the runtime graph plan.
@@ -522,4 +559,81 @@ pub struct JsEngineDebugInfo {
     pub graph_rejected_route_count: u32,
     /// Human-readable rejected route summaries for UI diagnostics.
     pub graph_rejected_route_summaries: Vec<String>,
+}
+
+// ── Audio input diagnostics (Layer 10) ─────────────────────────────────────────
+
+/// Per-track input/monitor state snapshot for the audio diagnostics panel.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
+pub struct JsTrackInputDiagnostics {
+    pub track_id: String,
+    pub record_armed: bool,
+    pub monitor_enabled: bool,
+    /// Human-readable input source: "None" | "Mono(ch)" | "Stereo(l,r)".
+    pub input_source: String,
+    pub track_input_peak: f64,
+    pub track_output_peak: f64,
+}
+
+/// Whole-pipeline diagnostics snapshot. Mirrors the `AudioDiagnostics` struct in
+/// the task spec — lets the UI (or a dev console dump) verify every layer of the
+/// input path at a glance.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
+pub struct JsAudioDiagnostics {
+    pub backend: String,
+    pub input_device_name: Option<String>,
+    pub output_device_name: Option<String>,
+    pub input_stream_running: bool,
+    pub output_stream_running: bool,
+    pub input_sample_rate: u32,
+    pub input_channels: u32,
+    /// Raw peak straight from the input callback (Layer 3).
+    pub raw_input_peak: f64,
+    /// Peak after the render callback reads the input ring (Layer 4).
+    pub input_bus_peak: f64,
+    /// Master output peak (Layer 7).
+    pub output_peak: f64,
+    pub tracks: Vec<JsTrackInputDiagnostics>,
+
+    // ── Realtime counters (Part 4) ───────────────────────────────────────
+    pub input_callback_count: f64,
+    pub output_callback_count: f64,
+    pub input_frames_received: f64,
+    pub monitor_frames_consumed: f64,
+    pub monitor_ring_underruns: f64,
+    pub monitor_ring_overruns: f64,
+    pub record_ring_overruns: f64,
+    pub output_xruns: f64,
+    pub monitor_output_peak: f64,
+    pub record_peak: f64,
+}
+
+// ── Recording waveform preview (Part 1) ────────────────────────────────────────
+
+/// One realtime preview peak bin (min/max/rms of one preview window).
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct JsWaveformPeak {
+    pub min: f64,
+    pub max: f64,
+    pub rms: f64,
+}
+
+/// Metadata + current bin count for the in-progress recording preview. The UI
+/// polls this, then drains new bins with `drainRecordingPreviewPeaks(from)`.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
+pub struct JsRecordingPreviewInfo {
+    pub active: bool,
+    /// Monotonic take id — changes between takes so the UI can drop stale data.
+    pub recording_id: f64,
+    /// Transport sample at which the take started (preview clip origin).
+    pub start_sample: f64,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub peaks_per_second: u32,
+    /// Total bins produced so far (drain target / head index).
+    pub peak_count: f64,
 }

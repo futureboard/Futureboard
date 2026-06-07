@@ -16,7 +16,7 @@
 //!
 //! The old C++ NanoVG/D3D top-level window is no longer used on this path.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
@@ -24,10 +24,15 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
+use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
 use sphere_plugin_host::editor_quirk::{match_quirk, PluginEditorQuirk};
+use sphere_plugin_host::ipc::HostEvent;
 use sphere_plugin_host::native_editor::PluginEditorPresentationMode;
+use sphere_plugin_host::plugin_host_client::{
+    plugin_host_bridge_enabled, ClientEvent, PluginHostClient,
+};
 
 /// Physical-pixel host region under the GPUI window. (Local mirror of the
 /// backend's region struct — the editor is now driven by the DAUx runtime
@@ -40,13 +45,93 @@ struct EmbedRegion {
     height: i32,
 }
 
-/// Map the DAUx embed host-kind code (0 = WS_CHILD, 1 = owned tool window) to
-/// the shared presentation-mode enum. Exactly one mode is active per editor.
+/// Map the DAUx embed host-kind code (0 = WS_CHILD, 1 = owned tool window,
+/// 2 = detached top-level) to the shared presentation-mode enum. Exactly one
+/// mode is active per editor.
 fn presentation_mode_from_host_kind(kind: i32) -> PluginEditorPresentationMode {
     match kind {
         0 => PluginEditorPresentationMode::ChildHwndEmbed,
+        2 => PluginEditorPresentationMode::DetachedNativeWindow,
         _ => PluginEditorPresentationMode::OwnedToolWindowFallback,
     }
+}
+
+/// State for the separated-process editor backend. Present only when host-process
+/// ownership is selected and the host spawned successfully. The main app owns
+/// the window + the content child HWND; the host process owns the VST3 view.
+struct HostEditorBackend {
+    /// One host process per open editor (simplest lifecycle + crash isolation;
+    /// a shared host is a later optimization). Drop shuts it down.
+    client: PluginHostClient,
+    /// Main-app-owned `WS_CHILD` content HWND the host attaches the view into.
+    content: Option<ContentChildHwnd>,
+    plugin_path: String,
+    class_id: String,
+    /// Captured from `HostEvent::Ready` for diagnostics.
+    host_pid: Option<u32>,
+    /// Last content rect pushed to the host (dedup resize spam).
+    last_region: Option<ContentRect>,
+}
+
+/// Spawn the bridge host and complete a Ping/Pong handshake. Returns `None` on
+/// any failure — but the caller's `bridge_required` gate ensures we NEVER fall
+/// back to the in-process editor path when the bridge is enabled (spec point 6:
+/// no silent fallback). `[plugin-bridge]` diagnostics are emitted throughout.
+fn build_host_backend(
+    processor: &DAUx::Vst3RuntimeProcessor,
+    _display_name: &str,
+) -> Option<HostEditorBackend> {
+    let plugin_path = processor.plugin_path().map(|s| s.to_string());
+    let class_id = processor.class_id().map(|s| s.to_string());
+
+    let mut client = match PluginHostClient::spawn_bridge() {
+        Ok(c) => c, // spawn_bridge logged current_exe/resolved/exists/spawned
+        Err(_) => return None, // spawn_bridge already logged spawn_failed
+    };
+
+    // Liveness handshake before any editor command.
+    eprintln!("[plugin-bridge] sending Ping");
+    if let Err(e) = client.ping() {
+        eprintln!("[plugin-bridge] spawn_failed error=ping send: {e}");
+        return None;
+    }
+    let mut host_pid = Some(client.pid());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut ponged = false;
+    while Instant::now() < deadline {
+        match client.try_recv_event() {
+            Some(ClientEvent::Host(HostEvent::Pong { pid })) => {
+                host_pid = Some(pid);
+                ponged = true;
+                break;
+            }
+            Some(ClientEvent::Host(HostEvent::Ready { pid, .. })) => {
+                host_pid = Some(pid); // startup Ready; keep waiting for Pong
+            }
+            Some(ClientEvent::Disconnected) => {
+                eprintln!("[plugin-bridge] spawn_failed error=host disconnected during handshake");
+                return None;
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    if !ponged {
+        eprintln!("[plugin-bridge] spawn_failed error=handshake timeout (no Pong)");
+        return None;
+    }
+    eprintln!("[plugin-bridge] received Pong");
+
+    // The bridge is live. If plugin identity is missing we still go through the
+    // bridge (skeleton OpenEditor) — we must never touch the in-process path.
+    Some(HostEditorBackend {
+        client,
+        content: None,
+        plugin_path: plugin_path.unwrap_or_default(),
+        class_id: class_id.unwrap_or_default(),
+        host_pid,
+        last_region: None,
+    })
 }
 
 /// Logical-pixel height reserved for the GPUI-drawn header (matches titlebar).
@@ -119,6 +204,13 @@ pub struct PluginEditorWindow {
     /// Editor quirk resolved from the plug-in path + name at construction.
     /// Drives the delayed-ready ramp and informs failure messaging.
     quirk: PluginEditorQuirk,
+    /// `Some` when the bridge is active and the host spawned. When `None` and
+    /// `bridge_required` is false, the in-process path runs unchanged.
+    host: Option<HostEditorBackend>,
+    /// True when `FUTUREBOARD_PLUGIN_HOST_BRIDGE` is enabled. Hard gate: while
+    /// set, the in-process editor path is NEVER used — if `host` is `None` the
+    /// window surfaces a failure instead of silently embedding in-process.
+    bridge_required: bool,
     focus_handle: FocusHandle,
 }
 
@@ -147,19 +239,40 @@ impl PluginEditorWindow {
                 quirk.plugin_webview_based,
             );
         }
+        let bridge_required = plugin_host_bridge_enabled();
+        let host = if bridge_required {
+            build_host_backend(&processor, &display_name)
+        } else {
+            None
+        };
+        // Bridge enabled but host unavailable → fail visibly; never fall back to
+        // the in-process path (spec point 6).
+        let status = if bridge_required && host.is_none() {
+            eprintln!("[plugin-view] editor open failed because bridge enabled but unavailable");
+            PluginEditorStatus::Failed(
+                "Plugin host bridge is enabled (FUTUREBOARD_PLUGIN_HOST_BRIDGE=1) but the \
+                 FutureboardPluginHost-x64 process could not be started. The in-process editor \
+                 is disabled while the bridge is enabled."
+                    .to_string(),
+            )
+        } else {
+            PluginEditorStatus::Opening
+        };
         Self {
             track_id,
             insert_id,
             display_name,
             processor,
             embed_handle: None,
-            status: PluginEditorStatus::Opening,
+            status,
             wait_ticks: 0,
             tick_scheduled: false,
             host_mounted_logged: false,
             last_region: None,
             editor_content_size: None,
             quirk,
+            host,
+            bridge_required,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -263,7 +376,41 @@ impl PluginEditorWindow {
     /// both the live `Window` and `Context`). Never blocks; transitions through
     /// explicit states and defers via `schedule_tick` until bounds are ready.
     fn drive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host.is_some() {
+            self.drive_host(window, cx);
+            return;
+        }
+        // Hard gate: bridge enabled but no host process → never touch the
+        // in-process editor path. Stay in a surfaced failure (set in `new`).
+        if self.bridge_required {
+            if !matches!(self.status, PluginEditorStatus::Failed(_)) {
+                self.status = PluginEditorStatus::Failed(
+                    "Plugin host bridge enabled but host process is unavailable; \
+                     in-process editor is disabled."
+                        .to_string(),
+                );
+                cx.notify();
+            }
+            return;
+        }
         match self.status.clone() {
+            PluginEditorStatus::Attached(PluginEditorPresentationMode::DetachedNativeWindow) => {
+                // The plug-in owns a standalone window; the GPUI shell only
+                // watches for the user closing that window (WM_CLOSE) or the
+                // native window vanishing, then tears the editor down.
+                if self.embed_handle.is_some()
+                    && (self.processor.embed_take_user_close() || !self.processor.embed_is_valid())
+                {
+                    if plugin_view_debug() {
+                        eprintln!(
+                            "[plugin-view] detached window closed editor_id={} → removing shell",
+                            self.editor_id()
+                        );
+                    }
+                    window.remove_window();
+                }
+                return;
+            }
             PluginEditorStatus::Attached(_) => {
                 self.sync_region(window);
                 return;
@@ -354,24 +501,33 @@ impl PluginEditorWindow {
         {
             Some(handle) => {
                 self.embed_handle = Some(handle);
-                let applied_region = self.apply_native_auto_size(window).unwrap_or(region);
-                self.last_region = Some((
-                    applied_region.x,
-                    applied_region.y,
-                    applied_region.width,
-                    applied_region.height,
-                ));
-                // Re-apply bounds + z-order after attach (plugins may resize the host).
-                self.processor.embed_set_bounds(
-                    applied_region.x,
-                    applied_region.y,
-                    applied_region.width,
-                    applied_region.height,
-                );
-                self.processor.embed_refresh();
                 // Record the single presentation mode the host selected so we
                 // never drive both a child-HWND embed and a tool-window overlay.
                 let mode = presentation_mode_from_host_kind(self.processor.embed_host_kind());
+                let detached = mode == PluginEditorPresentationMode::DetachedNativeWindow;
+                if detached {
+                    // The plug-in lives in its own standalone OS window; the GPUI
+                    // shell must NOT resize to the plug-in size or push host
+                    // bounds (those are no-ops for detached anyway). Leave the
+                    // small shell as a control/close surface.
+                    self.last_region = None;
+                } else {
+                    let applied_region = self.apply_native_auto_size(window).unwrap_or(region);
+                    self.last_region = Some((
+                        applied_region.x,
+                        applied_region.y,
+                        applied_region.width,
+                        applied_region.height,
+                    ));
+                    // Re-apply bounds + z-order after attach (plugins may resize the host).
+                    self.processor.embed_set_bounds(
+                        applied_region.x,
+                        applied_region.y,
+                        applied_region.width,
+                        applied_region.height,
+                    );
+                    self.processor.embed_refresh();
+                }
                 let visible = self.processor.embed_has_visible_ui();
                 if visible {
                     self.status = PluginEditorStatus::Attached(mode);
@@ -560,6 +716,11 @@ impl PluginEditorWindow {
         if self.embed_handle.is_none() || !self.processor.embed_is_valid() {
             return;
         }
+        // Detached: the plug-in's standalone window owns its own size/position.
+        // Never resize the GPUI shell to it or push host bounds.
+        if self.processor.embed_host_kind() == 2 {
+            return;
+        }
         if let Some(plugin_size) = self.processor.embed_content_size() {
             if self.editor_content_size != Some(plugin_size) {
                 self.editor_content_size = Some(plugin_size);
@@ -607,11 +768,228 @@ impl PluginEditorWindow {
         // onSize / raise work — no flicker, no resize spam.
         self.processor.embed_refresh();
     }
+
+    // --- Host-process editor path (gated; in-process path above is untouched) ---
+
+    /// Drive the separated-process editor lifecycle. Mirrors `drive` but the
+    /// VST3 view lives in `FutureboardPluginHost-x64.exe`: the main app creates a
+    /// content child HWND under its GPUI window and hands the handle to the host
+    /// over IPC. Attach is event-driven (`HostEvent::EditorAttached`).
+    fn drive_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 1. Drain host → client events into the shared status state machine.
+        let mut events = Vec::new();
+        if let Some(host) = self.host.as_ref() {
+            while let Some(ev) = host.client.try_recv_event() {
+                events.push(ev);
+            }
+        }
+        for ev in events {
+            self.on_host_event(ev, cx);
+        }
+
+        match self.status.clone() {
+            PluginEditorStatus::Attached(_) => {
+                self.sync_host_region(window);
+                // Keep a light tick so a host crash (EditorDisconnected) is
+                // noticed promptly even with no user interaction.
+                self.schedule_tick(cx);
+                return;
+            }
+            PluginEditorStatus::Failed(_) => return,
+            PluginEditorStatus::Attaching | PluginEditorStatus::ProbingReady { .. } => {
+                // Waiting for EditorAttached / EditorAttachFailed.
+                self.schedule_tick(cx);
+                return;
+            }
+            PluginEditorStatus::Opening | PluginEditorStatus::WaitingForHostHandle => {}
+        }
+
+        // 2. Need a valid GPUI top HWND before we can parent a content child.
+        let Some(top) = Self::native_parent_handle(window) else {
+            self.note_waiting("no native parent handle (host mode)", cx);
+            return;
+        };
+        let region = self.host_region_for(window);
+        if region.width <= 0 || region.height <= 0 {
+            self.note_waiting("host bounds not ready (host mode)", cx);
+            return;
+        }
+        let rect = ContentRect {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+        };
+        let dpi = (window.scale_factor().max(0.5) * 96.0).round() as u32;
+        let id = self.editor_id();
+
+        // 3. Create the main-app-owned content child HWND (content != top).
+        let Some(content) = ContentChildHwnd::create(top, rect) else {
+            self.status =
+                PluginEditorStatus::Failed("failed to create content child HWND".to_string());
+            cx.notify();
+            return;
+        };
+        let content_hwnd = content.hwnd();
+        eprintln!(
+            "[plugin-view][host] top_hwnd=0x{top:x} content_hwnd=0x{content_hwnd:x} editor_id={id}"
+        );
+
+        // 4. Send OpenEditorWithParentHwnd to the host process.
+        let (path, class_id) = {
+            let host = self.host.as_ref().unwrap();
+            (host.plugin_path.clone(), host.class_id.clone())
+        };
+        {
+            let host = self.host.as_mut().unwrap();
+            host.content = Some(content);
+            let pid = host
+                .host_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "pending".to_string());
+            eprintln!(
+                "[plugin-bridge] sending OpenEditorWithParentHwnd instance={id} hwnd=0x{content_hwnd:x}"
+            );
+            match host.client.open_editor(
+                id.clone(),
+                path,
+                class_id,
+                content_hwnd,
+                rect.width as u32,
+                rect.height as u32,
+                dpi,
+            ) {
+                Ok(()) => {
+                    host.last_region = Some(rect);
+                    eprintln!(
+                        "[plugin-view][host] OpenEditorWithParentHwnd sent editor_id={id} \
+                         content_hwnd=0x{content_hwnd:x} host_pid={pid} size={}x{} dpi={dpi}",
+                        rect.width, rect.height
+                    );
+                }
+                Err(e) => {
+                    self.status = PluginEditorStatus::Failed(format!("send OpenEditor failed: {e}"));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.wait_ticks = 0;
+        self.status = PluginEditorStatus::Attaching;
+        self.schedule_tick(cx);
+        cx.notify();
+    }
+
+    /// Fold a host event into the existing `PluginEditorStatus` state machine.
+    fn on_host_event(&mut self, ev: ClientEvent, cx: &mut Context<Self>) {
+        let id = self.editor_id();
+        match ev {
+            ClientEvent::Host(HostEvent::Ready { pid, .. }) => {
+                if let Some(host) = self.host.as_mut() {
+                    host.host_pid = Some(pid);
+                }
+                eprintln!("[plugin-view][host] host ready pid={pid} editor_id={id}");
+            }
+            ClientEvent::Host(HostEvent::Pong { pid }) => {
+                if let Some(host) = self.host.as_mut() {
+                    host.host_pid = Some(pid);
+                }
+                eprintln!("[plugin-bridge] received Pong (late) pid={pid} editor_id={id}");
+            }
+            ClientEvent::Host(HostEvent::EditorAttached {
+                result,
+                preferred_width,
+                preferred_height,
+                ..
+            }) => {
+                eprintln!(
+                    "[plugin-view][host] EditorAttached editor_id={id} attached_result={result} \
+                     preferred={preferred_width}x{preferred_height}"
+                );
+                // Content is a WS_CHILD embed under the GPUI window.
+                self.status =
+                    PluginEditorStatus::Attached(PluginEditorPresentationMode::ChildHwndEmbed);
+                cx.notify();
+            }
+            ClientEvent::Host(HostEvent::EditorAttachFailed { error, .. }) => {
+                eprintln!("[plugin-view][host] EditorAttachFailed editor_id={id} error={error}");
+                self.status = PluginEditorStatus::Failed(error);
+                cx.notify();
+            }
+            ClientEvent::Host(HostEvent::EditorClosed { .. }) => {
+                eprintln!("[plugin-view][host] EditorClosed editor_id={id}");
+            }
+            ClientEvent::Host(HostEvent::EditorPreferredSize { width, height, .. }) => {
+                eprintln!(
+                    "[plugin-view][host] EditorPreferredSize editor_id={id} {width}x{height}"
+                );
+            }
+            ClientEvent::Host(HostEvent::PluginUnloaded { .. }) => {}
+            ClientEvent::Host(HostEvent::Log { level, message }) => {
+                eprintln!("[plugin-view][host][{level}] {message}");
+            }
+            ClientEvent::Disconnected => {
+                eprintln!(
+                    "[plugin-view][host] EditorDisconnected editor_id={id} (host process exited/crashed)"
+                );
+                self.status = PluginEditorStatus::Failed(
+                    "Plugin host process disconnected (crashed or exited). \
+                     The editor closed; audio is unaffected."
+                        .to_string(),
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    /// Push a resized content rect to both the content child HWND (geometry,
+    /// owned by the main app) and the host (`ResizeEditor` → `onSize`).
+    fn sync_host_region(&mut self, window: &mut Window) {
+        let region = self.host_region_for(window);
+        let rect = ContentRect {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+        };
+        let dpi = (window.scale_factor().max(0.5) * 96.0).round() as u32;
+        let id = self.editor_id();
+        let Some(host) = self.host.as_mut() else {
+            return;
+        };
+        if host.last_region == Some(rect) {
+            return;
+        }
+        host.last_region = Some(rect);
+        if let Some(content) = host.content.as_ref() {
+            if !content.is_valid() {
+                return;
+            }
+            content.set_bounds(rect);
+        }
+        let _ = host
+            .client
+            .resize_editor(id.clone(), rect.width as u32, rect.height as u32, dpi);
+        if plugin_view_debug() {
+            eprintln!(
+                "[plugin-view][host] resize editor_id={id} content=({},{},{}x{})",
+                rect.x, rect.y, rect.width, rect.height
+            );
+        }
+    }
 }
 
 impl Drop for PluginEditorWindow {
     fn drop(&mut self) {
         if crate::shutdown::ShutdownState::global().is_shutting_down() {
+            return;
+        }
+        // Host-process path: ask the host to remove the view (spec Part 6), then
+        // let the backend's Drop tear down the content HWND + the host process.
+        if let Some(host) = self.host.as_mut() {
+            let id = format!("{}::{}", self.track_id, self.insert_id);
+            let _ = host.client.close_editor(id.clone());
+            eprintln!("[plugin-view][host] CloseEditor sent editor_id={id} (drop) — tearing down content HWND + host process");
             return;
         }
         if self.embed_handle.take().is_some() {
@@ -756,6 +1134,14 @@ impl Render for PluginEditorWindow {
                 let err = err.clone();
                 Some(self.render_failure_panel(&err, cx))
             }
+            PluginEditorStatus::Attached(PluginEditorPresentationMode::DetachedNativeWindow) => {
+                // The plug-in is in its own standalone OS window — the GPUI shell
+                // has no native plugin region to expose, so fill it with an
+                // explanatory panel (closing this shell closes the editor).
+                Some(self.render_status_message(
+                    "Editor opened in a separate window. Closing this window closes the editor.",
+                ))
+            }
             PluginEditorStatus::Attached(mode) => {
                 // Transparent hole — the single active host HWND is aligned to
                 // this region. GPUI must not paint an opaque layer here or it
@@ -826,6 +1212,16 @@ pub fn open_plugin_editor_window(
     processor: DAUx::Vst3RuntimeProcessor,
     cx: &mut App,
 ) -> Result<WindowHandle<PluginEditorWindow>, String> {
+    if plugin_host_bridge_enabled() {
+        eprintln!(
+            "[plugin-view] editor_backend=external_bridge reason=FUTUREBOARD_PLUGIN_HOST_BRIDGE=1 \
+             instance={track_id}::{insert_id}"
+        );
+    } else {
+        eprintln!(
+            "[plugin-view] editor_backend=in_process reason=env_disabled instance={track_id}::{insert_id}"
+        );
+    }
     if plugin_view_debug() {
         eprintln!(
             "[plugin-view] open requested plugin={display_name} track={track_id} insert={insert_id} instance={}::{}",

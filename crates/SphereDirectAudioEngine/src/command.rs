@@ -28,6 +28,22 @@ pub enum EngineCommand {
         param_id: String,
         value: f32,
     },
+    /// Immediate MIDI preview note-on from the UI piano roll. Bypasses timeline
+    /// scheduling and can render while transport is stopped.
+    MidiPreviewNoteOn {
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    /// Immediate MIDI preview note-off from the UI piano roll.
+    MidiPreviewNoteOff {
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+    },
+    /// Panic/cleanup for preview notes on one track.
+    MidiPreviewAllNotesOff { track_id: String },
     /// Start transport (playback) from current position.
     StartTransport,
     /// Stop transport (but keep position).

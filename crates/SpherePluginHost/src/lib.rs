@@ -10,9 +10,14 @@ pub mod au_scanner;
 pub mod editor_quirk;
 #[cfg(feature = "napi")]
 mod editor_window;
+/// Cross-process IPC protocol (commands/events + JSON framing) shared by the
+/// main app and the `FutureboardPluginHost-x64` process.
+pub mod ipc;
 /// Plain-Rust facade over the editor C ABI — always built so the native
 /// binary can drive the IPlugView lifecycle without N-API.
 pub mod native_editor;
+/// Main-app client that spawns and drives the separated plugin host process.
+pub mod plugin_host_client;
 pub mod plugin_db;
 pub mod preset;
 pub mod registry;

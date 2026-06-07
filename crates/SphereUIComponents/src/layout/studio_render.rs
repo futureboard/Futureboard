@@ -950,6 +950,11 @@ impl Render for StudioLayout {
                         }
                         return;
                     }
+                    if command_id == "transport:play-pause"
+                        && event.keystroke.key.eq_ignore_ascii_case("space")
+                    {
+                        eprintln!("[KeyCommand] Spacebar -> TransportTogglePlay");
+                    }
                     if key_debug() {
                         eprintln!("[key] dispatched command={command_id}");
                     }

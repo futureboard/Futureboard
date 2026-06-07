@@ -271,6 +271,30 @@ impl AudioEngine {
         self.inner.set_loop(enabled, start_seconds, end_seconds)
     }
 
+    pub fn midi_preview_note_on(
+        &self,
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .midi_preview_note_on(track_id, channel, pitch, velocity)
+    }
+
+    pub fn midi_preview_note_off(
+        &self,
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.midi_preview_note_off(track_id, channel, pitch)
+    }
+
+    pub fn midi_preview_all_notes_off(&self, track_id: String) -> Result<(), SphereAudioError> {
+        self.inner.midi_preview_all_notes_off(track_id)
+    }
+
     /// Toggle the transport between play and pause. Returns the new playing
     /// state. No-ops cleanly if the stream is not open yet.
     pub fn toggle_transport(&self) -> Result<bool, SphereAudioError> {
@@ -419,6 +443,36 @@ impl AudioEngine {
     /// Poll meter atomics and runtime track meters for UI display.
     pub fn meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()
+    }
+
+    /// Full audio-input pipeline diagnostics (Layer 10). Non-destructive — safe
+    /// to poll alongside [`AudioEngine::meters`]. Use for a dev diagnostics
+    /// panel or console dump to verify raw/bus/track input peaks at a glance.
+    pub fn audio_diagnostics(&self) -> crate::types::JsAudioDiagnostics {
+        self.inner.get_audio_diagnostics()
+    }
+
+    /// Emit a throttled (~500 ms) `[AudioRealtime]` trace when
+    /// `FUTUREBOARD_INPUT_DEBUG` is set. Call from the UI poll loop; it is a
+    /// cheap no-op when the env var is unset or the throttle window is open.
+    pub fn log_input_debug(&self) {
+        self.inner.log_input_debug_throttled();
+    }
+
+    /// Metadata + current bin count for the in-progress recording waveform
+    /// preview (Part 1). Poll this, then drain with
+    /// [`AudioEngine::drain_recording_preview_peaks`].
+    pub fn recording_preview_info(&self) -> crate::types::JsRecordingPreviewInfo {
+        self.inner.recording_preview_info()
+    }
+
+    /// Drain finalized preview peak bins in `[from_index, head)`. Cheap clone on
+    /// the control thread; never blocks the audio path.
+    pub fn drain_recording_preview_peaks(
+        &self,
+        from_index: f64,
+    ) -> Vec<crate::types::JsWaveformPeak> {
+        self.inner.drain_recording_preview_peaks(from_index)
     }
 
     /// Aggregate latency report: device buffer latency plus per-track and master

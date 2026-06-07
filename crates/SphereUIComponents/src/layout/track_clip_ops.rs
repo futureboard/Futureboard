@@ -41,17 +41,119 @@ impl StudioLayout {
 
     // Add Track is now an external window that owns its own state.
 
+    /// Release everything a track owns at the plugin-host level *before* the
+    /// track is removed from the project model.
+    ///
+    /// Ordering matters. An open plugin editor holds its own clone of the
+    /// insert's `Vst3RuntimeProcessor` (an `Arc`); the engine drops its clone
+    /// when the next project sync reconciles the now-absent track, but the C++
+    /// VST3 instance is only destroyed once the *last* clone drops. So unless we
+    /// close the editor windows here, deleting the track leaks the plugin
+    /// instance and leaves an orphan editor window pointing at a disconnected
+    /// processor. We also MIDI-panic the track up front so a note that is
+    /// sounding (or stuck) when the track is deleted is silenced immediately,
+    /// without waiting for the async engine reload. UI thread only.
+    pub(super) fn cleanup_track_plugins_before_delete(
+        &mut self,
+        track_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        // Count owned plugin inserts/editors for diagnostics before we start closing.
+        let plugin_ids: Vec<String> = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(track_id)
+            .map(|track| track.inserts.iter().map(|insert| insert.id.clone()).collect())
+            .unwrap_or_default();
+        let insert_ids: Vec<String> = self
+            .open_plugin_editors
+            .keys()
+            .filter(|(tid, _)| tid == track_id)
+            .map(|(_, insert_id)| insert_id.clone())
+            .collect();
+
+        eprintln!(
+            "[TrackDelete] track={} plugins_count={} plugin_editors={} reason=track_delete",
+            track_id,
+            plugin_ids.len(),
+            insert_ids.len()
+        );
+
+        // 1. Silence the track's instrument now (Part 13: delete while sounding).
+        //    The engine reload also panics on project_load, but doing it here
+        //    stops audio without waiting for the background sync.
+        if let Some(engine) = self.audio_engine.as_ref() {
+            if let Err(error) = engine.midi_preview_all_notes_off(track_id.to_string()) {
+                eprintln!("[TrackDelete] midi panic failed track_id={track_id} err={error}");
+            }
+        }
+
+        // 2. Close every open editor owned by the track. Dropping each
+        //    PluginEditorWindow detaches its native view and releases its
+        //    processor clone; the engine drops the matching clone on the next
+        //    project sync, after which the C++ instance is destroyed.
+        for insert_id in &insert_ids {
+            eprintln!(
+                "[PluginUnload] track_id={track_id} insert_id={insert_id} action=close_editor reason=track_delete"
+            );
+            self.close_insert_editor(track_id, insert_id, cx);
+        }
+
+        for plugin_id in &plugin_ids {
+            eprintln!("[GraphUpdate] remove_plugin_node={plugin_id}");
+            eprintln!("[PluginUnload] plugin={plugin_id} released=pending_runtime_reconcile");
+        }
+    }
+
     pub(super) fn delete_selected_track(&mut self, cx: &mut Context<Self>) {
+        let Some(track_id) = self
+            .timeline
+            .read(cx)
+            .state
+            .selection
+            .selected_track_id
+            .clone()
+        else {
+            return;
+        };
+        // Close editors + MIDI panic BEFORE the model mutation so the engine
+        // reload triggered by `mark_dirty` can actually release the instances.
+        self.cleanup_track_plugins_before_delete(&track_id, cx);
         self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
-            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
-                timeline.state.delete_track(&id);
-                cx.notify();
-            }
+            timeline.state.delete_track(&track_id);
+            cx.notify();
         });
     }
 
     pub(super) fn delete_selected_clip_or_track(&mut self, cx: &mut Context<Self>) {
+        // Decide up front whether this gesture resolves to a *track* delete, so
+        // plugin cleanup (close editors, MIDI panic) runs before the model
+        // mutation. Mirrors the branch order inside the update below: automation
+        // points win, then a selected clip, then the track.
+        let track_to_delete: Option<String> = {
+            use crate::components::timeline::timeline_state::TrackLaneMode;
+            let state = &self.timeline.read(cx).state;
+            let sel_track = state.selection.selected_track_id.clone();
+            let is_automation_delete = sel_track
+                .as_deref()
+                .map(|tid| {
+                    state.track_lane_mode(tid) == TrackLaneMode::Automation
+                        && state.selected_automation_point_count(tid) > 0
+                })
+                .unwrap_or(false);
+            let has_clip = !state.selection.selected_clip_ids.is_empty();
+            if is_automation_delete || has_clip {
+                None
+            } else {
+                sel_track
+            }
+        };
+        if let Some(track_id) = track_to_delete.as_deref() {
+            self.cleanup_track_plugins_before_delete(track_id, cx);
+        }
+
         let _ = self.timeline.update(cx, |timeline, cx| {
             use crate::components::timeline::timeline_state::TrackLaneMode;
             // Automation mode: Delete removes selected automation points first

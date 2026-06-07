@@ -167,9 +167,43 @@ impl StudioLayout {
         let key = (track_id.to_string(), insert_id.to_string());
         if let Some(handle) = self.open_plugin_editors.remove(&key) {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
+            eprintln!("[PluginEditorClose] plugin={insert_id} removed_called=true");
             if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
                 eprintln!("[plugin-view] close track={track_id} slot={insert_id}");
             }
+        }
+    }
+
+    /// Close any open plugin editor whose owning track or insert slot no longer
+    /// exists in the project model. This is the catch-all that backstops every
+    /// removal path — the track-header delete button mutates the `Timeline`
+    /// entity directly (it cannot reach `StudioLayout`'s editor registry), and
+    /// undo/redo or programmatic edits can also drop a track/insert without
+    /// going through `cleanup_track_plugins_before_delete`. Without this, a
+    /// deleted track leaves an orphan editor window holding a live
+    /// `Vst3RuntimeProcessor` clone, which keeps the C++ VST3 instance from ever
+    /// being destroyed (Part 11). Cheap: only inspects state when an editor is
+    /// open, and only closes when its backing slot is genuinely gone.
+    pub(super) fn reconcile_open_plugin_editors(&mut self, cx: &mut Context<Self>) {
+        if self.open_plugin_editors.is_empty() {
+            return;
+        }
+        let stale: Vec<(String, String)> = {
+            let state = &self.timeline.read(cx).state;
+            self.open_plugin_editors
+                .keys()
+                .filter(|(track_id, insert_id)| match state.find_track(track_id) {
+                    None => true,
+                    Some(track) => !track.inserts.iter().any(|insert| &insert.id == insert_id),
+                })
+                .cloned()
+                .collect()
+        };
+        for (track_id, insert_id) in stale {
+            eprintln!(
+                "[PluginUnload] track_id={track_id} insert_id={insert_id} action=close_editor reason=stale_reference"
+            );
+            self.close_insert_editor(&track_id, &insert_id, cx);
         }
     }
 
@@ -418,6 +452,12 @@ impl StudioLayout {
                 .ensure_insert_slot_at(&track_id, target_slot_index)
         });
         if let Some(slot_id) = new_slot_id {
+            // Replacing the plugin in a slot that already has an editor open: the
+            // editor holds a clone of the OLD instance's processor. Close it
+            // before rebinding so the old C++ instance is released and we don't
+            // orphan a window pointing at a disconnected processor. No-op when
+            // the slot is freshly created (no editor open yet).
+            self.close_insert_editor(&track_id, &slot_id, cx);
             let log_display_name = display_name.clone();
             self.timeline.update(cx, |timeline, _cx| {
                 timeline.state.set_insert_plugin(

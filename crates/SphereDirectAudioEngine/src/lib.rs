@@ -30,6 +30,7 @@ pub mod engine;
 pub mod error;
 mod graph;
 mod graveyard;
+pub mod input_ring;
 mod latency_graph;
 pub mod native;
 pub mod recording;

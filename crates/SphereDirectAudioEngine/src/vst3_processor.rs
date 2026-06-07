@@ -153,6 +153,7 @@ extern "C" {
     fn sphere_daux_vst3_embed_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_embed_has_visible_ui(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_embed_host_kind(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_embed_take_user_close(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_embed_content_size(
         processor: *mut SphereDauxVst3Processor,
         out_width: *mut i32,
@@ -562,12 +563,21 @@ impl Vst3RuntimeProcessor {
         unsafe { sphere_daux_vst3_embed_has_visible_ui(self.inner.raw) != 0 }
     }
 
-    /// 0 = WS_CHILD, 1 = owned tool window, -1 = no embedded editor.
+    /// 0 = WS_CHILD, 1 = owned tool window, 2 = detached top-level, -1 = none.
     pub fn embed_host_kind(&self) -> i32 {
         if self.inner.raw.is_null() {
             return -1;
         }
         unsafe { sphere_daux_vst3_embed_host_kind(self.inner.raw) }
+    }
+
+    /// Detached mode only: `true` (and resets) when the user closed the
+    /// standalone editor window, so the host can tear the editor shell down.
+    pub fn embed_take_user_close(&self) -> bool {
+        if self.inner.raw.is_null() {
+            return false;
+        }
+        unsafe { sphere_daux_vst3_embed_take_user_close(self.inner.raw) != 0 }
     }
 
     pub fn embed_content_size(&self) -> Option<(i32, i32)> {

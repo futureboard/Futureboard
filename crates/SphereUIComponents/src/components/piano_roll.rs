@@ -39,8 +39,9 @@ const ROW_H: f32 = 14.0; // px per semitone
 const PITCH_CNT: i32 = 128;
 const TOTAL_H: f32 = PITCH_CNT as f32 * ROW_H;
 const KEY_W: f32 = 56.0; // piano key lane width
-const VEL_H: f32 = 72.0; // velocity lane height
-const CC_H: f32 = 80.0; // controller (CC) lane height
+/// Height of the single unified controller lane (velocity / CC / pitch-bend /
+/// pressure). Replaces the old stacked velocity + CC lanes — one lane at a time.
+const LANE_H: f32 = 140.0;
 const RULER_H: f32 = 18.0; // bar/beat ruler header height
 const RESIZE_ZONE: f32 = 6.0; // px on the right edge that starts a resize
 /// Pixels of movement before an empty-grid press becomes a marquee drag.
@@ -128,6 +129,31 @@ pub enum PianoTool {
     Mute,
 }
 
+/// What the single unified controller lane currently shows and edits. Replaces
+/// the old always-on stacked velocity + CC lanes — exactly one is shown at a
+/// time. `Velocity` edits note-owned velocity; `Controller` edits a controller
+/// automation lane (CC / pitch-bend / pressure) by [`MidiControllerKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerLaneKind {
+    Velocity,
+    Controller(MidiControllerKind),
+}
+
+/// Lane choices presented by the selector / cycled by the keyboard commands,
+/// in display order. Custom CC numbers (not in this list) are reachable via the
+/// selector's stepper and are preserved as data either way.
+const LANE_CYCLE: [ControllerLaneKind; 9] = [
+    ControllerLaneKind::Velocity,
+    ControllerLaneKind::Controller(MidiControllerKind::CC(1)),
+    ControllerLaneKind::Controller(MidiControllerKind::CC(7)),
+    ControllerLaneKind::Controller(MidiControllerKind::CC(10)),
+    ControllerLaneKind::Controller(MidiControllerKind::CC(11)),
+    ControllerLaneKind::Controller(MidiControllerKind::CC(64)),
+    ControllerLaneKind::Controller(MidiControllerKind::PitchBend),
+    ControllerLaneKind::Controller(MidiControllerKind::ChannelPressure),
+    ControllerLaneKind::Controller(MidiControllerKind::PolyPressure),
+];
+
 /// Grid resolution in beats-per-step. Mirrors the WebUI dropdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridRes {
@@ -137,6 +163,24 @@ pub enum GridRes {
     Eighth,
     Sixteenth,
     ThirtySecond,
+}
+
+#[derive(Debug, Clone)]
+pub enum UiMidiPreviewCommand {
+    NoteOn {
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        track_id: String,
+        channel: u8,
+        pitch: u8,
+    },
+    AllNotesOff {
+        track_id: String,
+    },
 }
 
 impl GridRes {
@@ -208,12 +252,15 @@ enum PianoDrag {
     None,
     /// Move the selected notes. `prev` snapshots each affected note's original
     /// (id, start, pitch). `dx_beats` / `dpitch` are the live, snapped deltas.
+    /// `grab_pitch` is the original pitch of the note under the pointer — the
+    /// anchor for the live audition preview while the pitch is dragged.
     Move {
         start_x: f32,
         start_y: f32,
         prev: Vec<(u64, f32, u8)>,
         dx_beats: f32,
         dpitch: i32,
+        grab_pitch: u8,
     },
     /// Resize a single note from its right edge (also used to drag-extend a
     /// freshly drawn note). `new_dur` is the live length.
@@ -280,6 +327,8 @@ pub struct PianoRoll {
     pub midi_editor_sink: bool,
     /// Docked editor only: opens the floating MIDI editor window.
     on_pop_out: Option<std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync>>,
+    on_midi_preview:
+        Option<std::sync::Arc<dyn Fn(UiMidiPreviewCommand, &mut gpui::App) + Send + Sync>>,
     tool: PianoTool,
     ppb: f32,
     snap_on: bool,
@@ -309,8 +358,20 @@ pub struct PianoRoll {
     /// Last clip id we ran [`Self::fit_piano_roll_to_notes`] for.
     fitted_clip_id: Option<String>,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The controller lane currently shown/edited in the CC strip.
+    /// The controller kind shown/edited when the unified lane is NOT in velocity
+    /// mode. Also remembered while velocity is shown, so switching back restores
+    /// the last controller. Switching the lane never touches hidden lane data.
     active_cc: MidiControllerKind,
+    /// `true` when the unified lane shows note velocities; `false` shows the
+    /// `active_cc` controller lane. Default: velocity.
+    lane_shows_velocity: bool,
+    /// `false` collapses the controller lane entirely (grid uses the full
+    /// height). Toggled from the selector / commands.
+    lane_visible: bool,
+    /// Selector dropdown open state.
+    lane_menu_open: bool,
+    /// CC number bound to the selector's "Custom CC" stepper (0..=127).
+    custom_cc: u8,
     /// Bounds of the CC strip, captured at paint for cursor → beat/value mapping.
     cc_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Lane points snapshotted when a CC paint/erase gesture begins (undo prev).
@@ -318,6 +379,7 @@ pub struct PianoRoll {
     /// Last clip the editor rendered — used to emit the `open_editor` debug log
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
+    active_preview_note: Option<(String, u8, u8)>,
     focus: FocusHandle,
     focus_lost_subscription: Option<Subscription>,
 }
@@ -328,6 +390,7 @@ impl PianoRoll {
             timeline,
             midi_editor_sink: false,
             on_pop_out: None,
+            on_midi_preview: None,
             tool: PianoTool::Draw,
             ppb: 80.0,
             snap_on: true,
@@ -347,9 +410,14 @@ impl PianoRoll {
             fitted_clip_id: None,
             grid_bounds: Rc::new(Cell::new(None)),
             active_cc: MidiControllerKind::CC(1),
+            lane_shows_velocity: true,
+            lane_visible: true,
+            lane_menu_open: false,
+            custom_cc: 74,
             cc_bounds: Rc::new(Cell::new(None)),
             cc_edit_prev: None,
             last_editing_clip: None,
+            active_preview_note: None,
             focus: cx.focus_handle(),
             focus_lost_subscription: None,
         }
@@ -360,6 +428,13 @@ impl PianoRoll {
         handler: Option<std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync>>,
     ) {
         self.on_pop_out = handler;
+    }
+
+    pub fn set_midi_preview_handler(
+        &mut self,
+        handler: Option<std::sync::Arc<dyn Fn(UiMidiPreviewCommand, &mut gpui::App) + Send + Sync>>,
+    ) {
+        self.on_midi_preview = handler;
     }
 
     fn prune_transient_state(&mut self, cx: &Context<Self>, clip_id: Option<&str>) {
@@ -489,32 +564,63 @@ impl PianoRoll {
         format!("{} notes · {} sel · {}", note_count, sel_count, drag)
     }
 
-    fn add_active_controller_lane(&mut self, cx: &mut Context<Self>) {
-        let Some(clip_id) = self.editing_clip_id(cx) else {
-            return;
-        };
-        let kind = self.active_cc;
-        self.timeline.update(cx, |tl, tcx| {
-            tl.state.ensure_controller_lane(&clip_id, kind);
-            tcx.notify();
-        });
+    // ── Unified controller lane selection ────────────────────────────────
+    /// What the single bottom lane currently shows/edits.
+    fn current_lane(&self) -> ControllerLaneKind {
+        if self.lane_shows_velocity {
+            ControllerLaneKind::Velocity
+        } else {
+            ControllerLaneKind::Controller(self.active_cc)
+        }
+    }
+
+    /// Switch which controller the unified lane shows. Only changes what is
+    /// displayed/edited — hidden lane data (velocity stays on notes, CC points
+    /// stay in their lanes) is never touched. Always makes the lane visible.
+    fn set_lane(&mut self, kind: ControllerLaneKind, cx: &mut Context<Self>) {
+        match kind {
+            ControllerLaneKind::Velocity => self.lane_shows_velocity = true,
+            ControllerLaneKind::Controller(k) => {
+                self.lane_shows_velocity = false;
+                self.active_cc = k;
+            }
+        }
+        self.lane_visible = true;
+        self.lane_menu_open = false;
+        // Geometry of the active lane may differ; force a fresh bounds capture.
+        self.cc_bounds.set(None);
         cx.notify();
     }
 
-    fn remove_active_controller_lane_if_empty(&mut self, cx: &mut Context<Self>) {
-        let Some(clip_id) = self.editing_clip_id(cx) else {
-            return;
-        };
-        let kind = self.active_cc;
-        let removed = self.timeline.update(cx, |tl, tcx| {
-            let removed = tl.state.remove_empty_controller_lane(&clip_id, kind);
-            if removed {
-                tcx.notify();
-            }
-            removed
-        });
-        if removed {
-            cx.notify();
+    /// Step through [`LANE_CYCLE`] (Next/Previous controller lane commands).
+    fn cycle_lane(&mut self, dir: i32, cx: &mut Context<Self>) {
+        let cur = self.current_lane();
+        let n = LANE_CYCLE.len() as i32;
+        let idx = LANE_CYCLE.iter().position(|k| *k == cur).unwrap_or(0) as i32;
+        let next = (((idx + dir) % n) + n) % n;
+        self.set_lane(LANE_CYCLE[next as usize], cx);
+    }
+
+    fn toggle_lane_visible(&mut self, cx: &mut Context<Self>) {
+        self.lane_visible = !self.lane_visible;
+        self.lane_menu_open = false;
+        cx.notify();
+    }
+
+    /// Display name of the active lane (header + selector button).
+    fn lane_name(&self) -> String {
+        match self.current_lane() {
+            ControllerLaneKind::Velocity => "Velocity".to_string(),
+            ControllerLaneKind::Controller(k) => cc_kind_label(k),
+        }
+    }
+
+    /// Value-range caption for the active lane header.
+    fn lane_range(&self) -> &'static str {
+        match self.current_lane() {
+            ControllerLaneKind::Velocity => "1–127",
+            ControllerLaneKind::Controller(MidiControllerKind::PitchBend) => "-8192..8191",
+            ControllerLaneKind::Controller(_) => "0–127",
         }
     }
 
@@ -547,6 +653,11 @@ impl PianoRoll {
                 self.scroll_to_pitch(60);
                 cx.notify();
             }
+            "midi:lane-next" => self.cycle_lane(1, cx),
+            "midi:lane-prev" => self.cycle_lane(-1, cx),
+            "midi:lane-velocity" => self.set_lane(ControllerLaneKind::Velocity, cx),
+            "midi:lane-cc" => self.set_lane(ControllerLaneKind::Controller(self.active_cc), cx),
+            "midi:lane-toggle" => self.toggle_lane_visible(cx),
             _ => {}
         }
     }
@@ -557,6 +668,105 @@ impl PianoRoll {
         let tl = self.timeline.read(cx);
         let cid = tl.state.selection.selected_clip_ids.first()?.clone();
         tl.state.midi_clip_notes(&cid).map(|_| cid)
+    }
+
+    fn preview_target(&self, cx: &Context<Self>) -> Option<(String, u8)> {
+        let tl = self.timeline.read(cx);
+        let clip_id = tl.state.selection.selected_clip_ids.first()?;
+        let (track, clip) = tl.state.find_clip(clip_id)?;
+        if !matches!(
+            clip.clip_type,
+            crate::components::timeline::timeline_state::ClipType::Midi { .. }
+        ) {
+            return None;
+        }
+        let channel = track
+            .routing
+            .midi_channel
+            .map(|ch| ch.saturating_sub(1).min(15))
+            .unwrap_or(0);
+        Some((track.id.clone(), channel))
+    }
+
+    fn begin_preview_note(
+        &mut self,
+        pitch: u8,
+        velocity: u8,
+        reason: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_preview_note("replace", cx);
+        let Some((track_id, channel)) = self.preview_target(cx) else {
+            eprintln!(
+                "[MidiEditor] sending PreviewNoteOn skipped pitch={} reason={} no_midi_track",
+                pitch, reason
+            );
+            return;
+        };
+        eprintln!(
+            "[MidiEditor] sending PreviewNoteOn track_id={} pitch={} channel={} reason={}",
+            track_id, pitch, channel, reason
+        );
+        if let Some(handler) = self.on_midi_preview.clone() {
+            handler(
+                UiMidiPreviewCommand::NoteOn {
+                    track_id: track_id.clone(),
+                    channel,
+                    pitch,
+                    velocity,
+                },
+                cx,
+            );
+            self.active_preview_note = Some((track_id, channel, pitch));
+        }
+    }
+
+    fn end_preview_note(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let Some((track_id, channel, pitch)) = self.active_preview_note.take() else {
+            return;
+        };
+        eprintln!(
+            "[MidiEditor] sending PreviewNoteOff track_id={} pitch={} channel={} reason={}",
+            track_id, pitch, channel, reason
+        );
+        if let Some(handler) = self.on_midi_preview.clone() {
+            handler(
+                UiMidiPreviewCommand::NoteOff {
+                    track_id,
+                    channel,
+                    pitch,
+                },
+                cx,
+            );
+        }
+    }
+
+    pub fn preview_all_notes_off(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let target = self
+            .active_preview_note
+            .as_ref()
+            .map(|(track_id, _, _)| track_id.clone())
+            .or_else(|| self.preview_target(cx).map(|(track_id, _)| track_id));
+        self.active_preview_note = None;
+        let Some(track_id) = target else {
+            return;
+        };
+        eprintln!(
+            "[MidiEditor] sending PreviewAllNotesOff track_id={} reason={}",
+            track_id, reason
+        );
+        if let Some(handler) = self.on_midi_preview.clone() {
+            handler(UiMidiPreviewCommand::AllNotesOff { track_id }, cx);
+        }
+    }
+
+    /// Stop any sounding preview/audition note AND panic the track before a
+    /// destructive edit (delete / erase / cut) removes note data. The engine's
+    /// `AllNotesOff` handler resolves the track instrument and sends explicit
+    /// note-offs for tracked preview notes plus CC64/CC123/CC120/CC121, so a
+    /// note that was sounding when its data is destroyed cannot get stuck.
+    fn cleanup_midi_before_destructive_edit(&mut self, reason: &str, cx: &mut Context<Self>) {
+        self.preview_all_notes_off(reason, cx);
     }
 
     fn step_beats(&self) -> f32 {
@@ -740,6 +950,7 @@ impl PianoRoll {
     }
 
     fn cancel_active_gesture(&mut self, cx: &mut Context<Self>) {
+        self.preview_all_notes_off("cancel", cx);
         if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
             self.cancel_marquee_select(cx);
         } else if !matches!(self.drag, PianoDrag::None) {
@@ -985,6 +1196,8 @@ impl PianoRoll {
         cx: &mut Context<Self>,
     ) {
         cx.stop_propagation();
+        // Any grid interaction dismisses the lane selector dropdown.
+        self.lane_menu_open = false;
         window.focus(&self.focus, cx);
         let Some((lx, ly)) = self.grid_local(event.position) else {
             // Bounds not captured yet (first frame) — ignore to avoid creating
@@ -1011,6 +1224,13 @@ impl PianoRoll {
             PianoTool::Draw => {
                 let pitch = self.y_to_pitch(ly);
                 let start = self.snap_beats(self.x_to_beat(lx));
+                if let Some((track_id, channel)) = self.preview_target(cx) {
+                    eprintln!(
+                        "[MidiEditor] draw_start pitch={} velocity=100 track_id={} channel={}",
+                        pitch, track_id, channel
+                    );
+                }
+                self.begin_preview_note(pitch, 100, "draw_start", cx);
                 self.drag = PianoDrag::DrawNote {
                     pitch,
                     start_beat: start,
@@ -1132,6 +1352,15 @@ impl PianoRoll {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
+        // Anchor pitch/velocity of the grabbed note for the live audition.
+        let (grab_pitch, grab_vel) = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .and_then(|notes| notes.iter().find(|n| n.id == id))
+            .map(|n| (n.pitch, n.velocity))
+            .unwrap_or((60, 100));
         let prev = self.snapshot_selection(cx, &clip_id);
         self.drag = PianoDrag::Move {
             start_x: event.position.x.into(),
@@ -1139,7 +1368,11 @@ impl PianoRoll {
             prev,
             dx_beats: 0.0,
             dpitch: 0,
+            grab_pitch,
         };
+        // Audition the grabbed pitch immediately; on_move switches it as the
+        // drag changes pitch, on_up / cancel stops it.
+        self.begin_preview_note(grab_pitch, grab_vel, "note_move_start", cx);
         cx.notify();
     }
 
@@ -1321,23 +1554,44 @@ impl PianoRoll {
             self.update_marquee_select(lx, ly, &clip_id, cx);
             return;
         }
-        match &mut self.drag {
-            PianoDrag::None => {}
-            PianoDrag::Move {
+        if matches!(self.drag, PianoDrag::Move { .. }) {
+            let cur_x: f32 = event.position.x.into();
+            let cur_y: f32 = event.position.y.into();
+            let ppb = self.ppb.max(0.0001);
+            let mut audition_pitch: Option<u8> = None;
+            if let PianoDrag::Move {
                 start_x,
                 start_y,
                 dx_beats,
                 dpitch,
+                grab_pitch,
                 ..
-            } => {
-                let cur_x: f32 = event.position.x.into();
-                let cur_y: f32 = event.position.y.into();
+            } = &mut self.drag
+            {
                 // Store the raw beat delta; snapping is applied per-note against
                 // each note's absolute start in `display_note` / commit.
-                *dx_beats = (cur_x - *start_x) / self.ppb.max(0.0001);
+                *dx_beats = (cur_x - *start_x) / ppb;
                 *dpitch = -(((cur_y - *start_y) / ROW_H).round() as i32);
-                cx.notify();
+                audition_pitch = Some((*grab_pitch as i32 + *dpitch).clamp(0, 127) as u8);
             }
+            // Switch the live audition note when the dragged pitch changes; a
+            // horizontal-only (timing) move never retriggers.
+            if let Some(pitch) = audition_pitch {
+                let changed = self
+                    .active_preview_note
+                    .as_ref()
+                    .map(|(_, _, p)| *p != pitch)
+                    .unwrap_or(true);
+                if changed {
+                    self.begin_preview_note(pitch, 100, "note_move_pitch", cx);
+                }
+            }
+            cx.notify();
+            return;
+        }
+        match &mut self.drag {
+            PianoDrag::None => {}
+            PianoDrag::Move { .. } => {}
             PianoDrag::Resize {
                 start_x,
                 prev_dur,
@@ -1437,12 +1691,14 @@ impl PianoRoll {
         if notes.is_empty() {
             return;
         }
+        self.cleanup_midi_before_destructive_edit("note_erase_sweep", cx);
         self.run_edit_command(EditCommand::DeleteMidiNotes { clip_id, notes }, cx);
         self.selection.retain(|id| !erased.contains(id));
         cx.notify();
     }
 
     fn on_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.end_preview_note("mouse_up", cx);
         if matches!(
             self.drag,
             PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. }
@@ -1664,6 +1920,9 @@ impl PianoRoll {
         if notes.is_empty() {
             return;
         }
+        // Stop/panic any sounding preview before the note data disappears so a
+        // held audition (e.g. delete pressed mid-move) cannot get stuck.
+        self.cleanup_midi_before_destructive_edit("note_delete", cx);
         self.run_edit_command(EditCommand::DeleteMidiNotes { clip_id, notes }, cx);
         self.selection.clear();
     }
@@ -1720,6 +1979,7 @@ impl PianoRoll {
         let Some(note) = note else {
             return;
         };
+        self.cleanup_midi_before_destructive_edit("note_erase", cx);
         self.run_edit_command(
             EditCommand::DeleteMidiNotes {
                 clip_id,
@@ -2399,7 +2659,7 @@ impl Render for PianoRoll {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.focus_lost_subscription.is_none() {
             self.focus_lost_subscription = Some(cx.on_focus_lost(window, |this, _window, cx| {
-                if !matches!(this.drag, PianoDrag::None) {
+                if !matches!(this.drag, PianoDrag::None) || this.active_preview_note.is_some() {
                     this.cancel_active_gesture(cx);
                 }
             }));
@@ -2409,6 +2669,11 @@ impl Render for PianoRoll {
         self.prune_transient_state(cx, clip_id.as_deref());
 
         if clip_id != self.last_editing_clip {
+            // Editing target changed (clip/track switch) — stop any audition note
+            // before it strands on the previous track's instrument.
+            if self.active_preview_note.is_some() {
+                self.preview_all_notes_off("clip_change", cx);
+            }
             if midi_debug_enabled() {
                 if let Some(cid) = clip_id.as_deref() {
                     let tl = self.timeline.read(cx);
@@ -2474,6 +2739,215 @@ impl Render for PianoRoll {
 }
 
 impl PianoRoll {
+    /// Compact selector for the single controller lane: a button showing the
+    /// active lane that opens a dropdown of choices (Velocity / common CCs /
+    /// pitch-bend / pressure / custom CC), plus a collapse toggle. Alt+wheel on
+    /// the button cycles lanes. Replaces the old "Lane / +Lane / −Lane" trio —
+    /// switching here only changes what the one lane shows, never the data.
+    fn render_lane_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.current_lane();
+        let label = format!("Lane: {}", self.lane_name());
+        let open = self.lane_menu_open;
+        let visible = self.lane_visible;
+        let custom = self.custom_cc;
+
+        let mut dropdown: Option<gpui::Div> = None;
+        if open {
+            let mut panel = div()
+                .absolute()
+                .top(px(26.0))
+                .left_0()
+                .w(px(150.0))
+                .flex()
+                .flex_col()
+                .p(px(3.0))
+                .gap(px(1.0))
+                .rounded(px(6.0))
+                .bg(Colors::surface_card())
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .shadow_lg();
+            for (i, kind) in LANE_CYCLE.iter().enumerate() {
+                let kind = *kind;
+                let selected = kind == current;
+                let text = match kind {
+                    ControllerLaneKind::Velocity => "Velocity".to_string(),
+                    ControllerLaneKind::Controller(k) => cc_kind_label(k),
+                };
+                panel = panel.child(
+                    div()
+                        .id(("pr-lane-opt", i))
+                        .flex()
+                        .items_center()
+                        .h(px(20.0))
+                        .px(px(7.0))
+                        .rounded(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(if selected {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_secondary()
+                        })
+                        .hover(|s| s.bg(Colors::surface_hover()))
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_click(cx.listener(move |this, _ev, _w, cx| this.set_lane(kind, cx)))
+                        .child(text),
+                );
+            }
+            // Custom CC row: − / CCnn (select) / + . Steppers keep the menu open.
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(22.0))
+                    .px(px(4.0))
+                    .mt(px(2.0))
+                    .border_t(px(1.0))
+                    .border_color(Colors::divider())
+                    .child(
+                        div()
+                            .id(("pr-lane-custom", 0usize))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(16.0))
+                            .rounded(px(3.0))
+                            .text_size(px(11.0))
+                            .text_color(Colors::text_secondary())
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(|this, _ev, _w, cx| {
+                                this.custom_cc = this.custom_cc.saturating_sub(1);
+                                cx.notify();
+                            }))
+                            .child("−"),
+                    )
+                    .child(
+                        div()
+                            .id(("pr-lane-custom", 1usize))
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(18.0))
+                            .rounded(px(3.0))
+                            .text_size(px(10.0))
+                            .text_color(
+                                if current
+                                    == ControllerLaneKind::Controller(MidiControllerKind::CC(
+                                        custom,
+                                    ))
+                                {
+                                    Colors::accent_primary()
+                                } else {
+                                    Colors::text_primary()
+                                },
+                            )
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                this.set_lane(
+                                    ControllerLaneKind::Controller(MidiControllerKind::CC(
+                                        this.custom_cc,
+                                    )),
+                                    cx,
+                                )
+                            }))
+                            .child(format!("Custom CC{custom}")),
+                    )
+                    .child(
+                        div()
+                            .id(("pr-lane-custom", 2usize))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(16.0))
+                            .rounded(px(3.0))
+                            .text_size(px(11.0))
+                            .text_color(Colors::text_secondary())
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(|this, _ev, _w, cx| {
+                                this.custom_cc = (this.custom_cc + 1).min(127);
+                                cx.notify();
+                            }))
+                            .child("+"),
+                    ),
+            );
+            dropdown = Some(panel);
+        }
+
+        div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .id("pr-lane-select")
+                    .flex()
+                    .items_center()
+                    .h(px(22.0))
+                    .px(px(7.0))
+                    .gap(px(4.0))
+                    .rounded(px(4.0))
+                    .text_size(px(10.0))
+                    .text_color(if open {
+                        Colors::text_primary()
+                    } else {
+                        Colors::text_secondary()
+                    })
+                    .bg(if open {
+                        Colors::surface_hover()
+                    } else {
+                        Colors::with_alpha(Colors::text_primary(), 0.0)
+                    })
+                    .border(px(1.0))
+                    .border_color(if open {
+                        Colors::border_subtle()
+                    } else {
+                        Colors::with_alpha(Colors::text_primary(), 0.0)
+                    })
+                    .hover(|s| s.bg(Colors::surface_hover()))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        this.lane_menu_open = !this.lane_menu_open;
+                        cx.notify();
+                    }))
+                    // Alt + mouse wheel cycles lanes (Part 7 optional shortcut).
+                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _w, cx| {
+                        if !ev.modifiers.alt {
+                            return;
+                        }
+                        let dy = match ev.delta {
+                            gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
+                            gpui::ScrollDelta::Lines(p) => p.y,
+                        };
+                        if dy != 0.0 {
+                            this.cycle_lane(if dy < 0.0 { 1 } else { -1 }, cx);
+                        }
+                    }))
+                    .child(label)
+                    .child(
+                        div()
+                            .text_size(px(8.0))
+                            .text_color(Colors::text_faint())
+                            .child("▾"),
+                    ),
+            )
+            // Collapse / expand the whole lane.
+            .child(tool_btn(
+                "pr-lane-toggle",
+                if visible { "▾" } else { "▸" },
+                !visible,
+                cx.listener(|this, _ev, _w, cx| this.toggle_lane_visible(cx)),
+            ))
+            .children(dropdown)
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>, clip_id: Option<&str>) -> impl IntoElement {
         let note_count = clip_id
             .and_then(|cid| {
@@ -2484,20 +2958,10 @@ impl PianoRoll {
                     .map(|n| n.len())
             })
             .unwrap_or(0);
-        let lane_exists = clip_id
-            .and_then(|cid| {
-                self.timeline
-                    .read(cx)
-                    .state
-                    .controller_lane_points(cid, self.active_cc)
-                    .map(|_| true)
-            })
-            .unwrap_or(false);
         let sel_count = self.selection.len();
         let tool = self.tool;
         let snap_on = self.snap_on;
         let grid_label = format!("Grid: {}", self.grid_res.label());
-        let cc_label = format!("Lane: {}", cc_kind_label(self.active_cc));
         let status = self.toolbar_status(note_count, sel_count);
 
         div()
@@ -2635,32 +3099,7 @@ impl PianoRoll {
                         cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
                     )),
             )
-            .child(
-                toolbar_group("Controller")
-                    .child(tool_btn(
-                        "pr-cc",
-                        &cc_label,
-                        false,
-                        cx.listener(|this, _, _w, cx| {
-                            this.active_cc = cc_cycle(this.active_cc);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(tool_btn(
-                        "pr-add-lane",
-                        "+ Lane",
-                        lane_exists,
-                        cx.listener(|this, _, _w, cx| this.add_active_controller_lane(cx)),
-                    ))
-                    .child(tool_btn(
-                        "pr-remove-lane",
-                        "− Lane",
-                        false,
-                        cx.listener(|this, _, _w, cx| {
-                            this.remove_active_controller_lane_if_empty(cx)
-                        }),
-                    )),
-            )
+            .child(toolbar_group("Controller").child(self.render_lane_selector(cx)))
             .child(
                 toolbar_group("View")
                     .child(tool_btn(
@@ -2794,6 +3233,31 @@ impl PianoRoll {
                     .items_center()
                     .justify_end()
                     .pr(px(5.0))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            if let Some((track_id, channel)) = this.preview_target(cx) {
+                                eprintln!(
+                                    "[MidiEditor] piano_key_down pitch={} velocity=100 track_id={} channel={}",
+                                    p, track_id, channel
+                                );
+                            }
+                            this.begin_preview_note(p as u8, 100, "piano_key_down", cx);
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.end_preview_note("piano_key_up", cx);
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.end_preview_note("piano_key_up_out", cx);
+                        }),
+                    )
                     .when(show_label, |this| {
                         this.child(
                             div()
@@ -2824,36 +3288,86 @@ impl PianoRoll {
         };
         let mut ruler = self.build_ruler(start_beat, end_beat, bpb);
         ruler.extend(self.build_loop_ruler_markers(loop_region));
-        let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
         let notes_geo = self.build_note_elements(cx, clip_id, track_color);
         let quantize_preview = self.build_quantize_preview(cx, clip_id);
         let marquee_overlay = self.build_marquee_overlay();
         let draw_preview = self.build_draw_note_preview();
         let erase_overlay = self.build_erase_overlay();
-        let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
-        let velocity_empty = (note_count_for_clip(cx, &self.timeline, clip_id) == 0).then(|| {
+        let note_inspector = self.render_note_inspector(cx, clip_id);
+
+        // ── Single unified controller lane ───────────────────────────────────
+        // Exactly one lane is built per frame: velocity OR the active controller.
+        // Switching the selector only changes which is built — the hidden lane's
+        // data (note velocities / other controller points) is left untouched.
+        let lane_header: Option<gpui::AnyElement> = self.lane_visible.then(|| {
             div()
-                .absolute()
-                .inset_0()
+                .h(px(LANE_H))
+                .w_full()
+                .border_t(px(1.0))
+                .border_color(Colors::panel_border())
+                .bg(Colors::surface_panel())
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap(px(2.0))
                 .text_size(px(9.0))
-                .text_color(Colors::text_faint())
-                .child("No notes — draw notes above to edit velocity")
+                .text_color(Colors::text_secondary())
+                .child(self.lane_name())
+                .child(
+                    div()
+                        .text_size(px(7.0))
+                        .text_color(Colors::text_faint())
+                        .child(self.lane_range()),
+                )
+                .into_any_element()
         });
-        let velocity_value_chip = matches!(self.drag, PianoDrag::Velocity { .. }).then(|| {
-            value_chip(
-                self.drag_value_status.as_deref().unwrap_or("Velocity"),
-                8.0,
-                8.0,
+        let lane_body: Option<gpui::AnyElement> = if !self.lane_visible {
+            None
+        } else if self.lane_shows_velocity {
+            let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
+            let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
+            let velocity_empty =
+                (note_count_for_clip(cx, &self.timeline, clip_id) == 0).then(|| {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.0))
+                        .text_color(Colors::text_faint())
+                        .child("No notes — draw notes above to edit velocity")
+                });
+            let velocity_value_chip = matches!(self.drag, PianoDrag::Velocity { .. }).then(|| {
+                value_chip(
+                    self.drag_value_status.as_deref().unwrap_or("Velocity"),
+                    8.0,
+                    8.0,
+                )
+            });
+            Some(
+                div()
+                    .id("piano-vel")
+                    .h(px(LANE_H))
+                    .w_full()
+                    .relative()
+                    .overflow_hidden()
+                    .border_t(px(1.0))
+                    .border_color(Colors::panel_border())
+                    .bg(Colors::surface_panel_alt())
+                    .children(vel_grid)
+                    .children(vel_bars)
+                    .children(velocity_empty)
+                    .children(velocity_value_chip)
+                    .into_any_element(),
             )
-        });
-        let note_inspector = self.render_note_inspector(cx, clip_id);
-        let cc_label = cc_kind_label(self.active_cc);
-        let cc_lane = self
-            .render_cc_lane(cx, clip_id, start_beat, end_beat, bpb)
-            .into_any_element();
+        } else {
+            Some(
+                self.render_cc_lane(cx, clip_id, start_beat, end_beat, bpb)
+                    .into_any_element(),
+            )
+        };
         let grid_cursor = if self.tool == PianoTool::Draw {
             gpui::CursorStyle::Crosshair
         } else {
@@ -2905,53 +3419,10 @@ impl PianoRoll {
                             .border_color(Colors::panel_border())
                             .children(keys),
                     )
-                    .child(
-                        div()
-                            .h(px(VEL_H))
-                            .w_full()
-                            .border_t(px(1.0))
-                            .border_color(Colors::panel_border())
-                            .bg(Colors::surface_panel())
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(2.0))
-                            .text_size(px(8.0))
-                            .text_color(Colors::text_muted())
-                            .child("Velocity")
-                            .child(
-                                div()
-                                    .text_size(px(7.0))
-                                    .text_color(Colors::text_faint())
-                                    .child("1–127"),
-                            ),
-                    )
-                    // CC lane label (aligned to the CC strip on the right).
-                    .child(
-                        div()
-                            .h(px(CC_H))
-                            .w_full()
-                            .border_t(px(1.0))
-                            .border_color(Colors::panel_border())
-                            .bg(Colors::surface_panel())
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(2.0))
-                            .text_size(px(9.0))
-                            .text_color(Colors::text_secondary())
-                            .child(cc_label)
-                            .child(
-                                div()
-                                    .text_size(px(7.0))
-                                    .text_color(Colors::text_faint())
-                                    .child("0–127"),
-                            ),
-                    ),
+                    // Single unified controller-lane header (name + range).
+                    .children(lane_header),
             )
-            // Right: grid + velocity lane.
+            // Right: grid + single controller lane.
             .child(
                 div()
                     .flex_1()
@@ -2996,24 +3467,8 @@ impl PianoRoll {
                                 cx.listener(Self::on_grid_right_down),
                             ),
                     )
-                    // Velocity lane.
-                    .child(
-                        div()
-                            .id("piano-vel")
-                            .h(px(VEL_H))
-                            .w_full()
-                            .relative()
-                            .overflow_hidden()
-                            .border_t(px(1.0))
-                            .border_color(Colors::panel_border())
-                            .bg(Colors::surface_panel_alt())
-                            .children(vel_grid)
-                            .children(vel_bars)
-                            .children(velocity_empty)
-                            .children(velocity_value_chip),
-                    )
-                    // CC controller lane.
-                    .child(cc_lane),
+                    // Single unified controller lane (velocity / CC / etc).
+                    .children(lane_body),
             )
             .child(note_inspector)
     }
@@ -3848,7 +4303,7 @@ impl PianoRoll {
 
         geos.into_iter()
             .map(|(id, vel, x, selected)| {
-                let bar_h = (((vel as f32 - 1.0) / 126.0) * (VEL_H - 8.0)).max(1.0);
+                let bar_h = (((vel as f32 - 1.0) / 126.0) * (LANE_H - 8.0)).max(1.0);
                 let mut fill = track_color;
                 fill.a = if selected { 1.0 } else { 0.5 };
                 // Full-height invisible hit column so even low-velocity bars are
@@ -3885,16 +4340,6 @@ impl PianoRoll {
 }
 
 // ── CC controller lane ───────────────────────────────────────────────────────
-const CC_PRESETS: [MidiControllerKind; 7] = [
-    MidiControllerKind::CC(1),
-    MidiControllerKind::CC(7),
-    MidiControllerKind::CC(10),
-    MidiControllerKind::CC(11),
-    MidiControllerKind::CC(64),
-    MidiControllerKind::PitchBend,
-    MidiControllerKind::ChannelPressure,
-];
-
 fn cc_kind_label(kind: MidiControllerKind) -> String {
     match kind {
         MidiControllerKind::CC(1) => "CC1 Mod".to_string(),
@@ -3909,14 +4354,6 @@ fn cc_kind_label(kind: MidiControllerKind) -> String {
     }
 }
 
-fn cc_cycle(kind: MidiControllerKind) -> MidiControllerKind {
-    let idx = CC_PRESETS.iter().position(|k| *k == kind);
-    match idx {
-        Some(i) => CC_PRESETS[(i + 1) % CC_PRESETS.len()],
-        None => CC_PRESETS[0],
-    }
-}
-
 impl PianoRoll {
     fn cc_view_size(&self) -> (f32, f32) {
         match self.cc_bounds.get() {
@@ -3924,7 +4361,7 @@ impl PianoRoll {
                 f32::from(b.size.width).max(1.0),
                 f32::from(b.size.height).max(1.0),
             ),
-            None => (600.0, CC_H),
+            None => (600.0, LANE_H),
         }
     }
 
@@ -4261,7 +4698,7 @@ impl PianoRoll {
         .inset_0();
         div()
             .id("piano-cc")
-            .h(px(CC_H))
+            .h(px(LANE_H))
             .w_full()
             .relative()
             .overflow_hidden()

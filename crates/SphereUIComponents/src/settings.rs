@@ -370,6 +370,10 @@ pub struct AudioRecordingSettings {
     pub format: String,
     pub bit_depth: u32,
     pub recording_path: String,
+    #[serde(default)]
+    pub recording_offset_ms: i32,
+    #[serde(default = "default_true")]
+    pub save_before_recording: bool,
     #[serde(default = "default_true")]
     pub generate_waveform_after_record: bool,
 }
@@ -380,6 +384,8 @@ impl Default for AudioRecordingSettings {
             format: "wav".to_string(),
             bit_depth: 24,
             recording_path: String::new(),
+            recording_offset_ms: 0,
+            save_before_recording: true,
             generate_waveform_after_record: true,
         }
     }

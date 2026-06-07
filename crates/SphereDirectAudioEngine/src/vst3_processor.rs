@@ -204,10 +204,18 @@ impl Vst3RuntimeProcessor {
     }
 
     pub fn new(plugin_path: &str, class_id: &str, sample_rate: u32) -> Option<Self> {
+        let log_tag = if std::env::var("FUTUREBOARD_PROCESS_ROLE")
+            .map(|v| v == "plugin_host")
+            .unwrap_or(false)
+        {
+            "[plugin-host-vst3]"
+        } else {
+            "[SphereVST3]"
+        };
         let bridge_probe = unsafe { sphere_daux_vst3_bridge_probe() };
-        eprintln!("[SphereVST3] bridge probe result=0x{bridge_probe:x}");
+        eprintln!("{log_tag} bridge probe result=0x{bridge_probe:x}");
         eprintln!(
-            "[SphereVST3] create request path='{}' exists={} classId='{}' sr={}",
+            "{log_tag} create request path='{}' exists={} classId='{}' sr={}",
             plugin_path,
             std::path::Path::new(plugin_path).exists(),
             class_id,
@@ -232,14 +240,14 @@ impl Vst3RuntimeProcessor {
                 }
             };
             eprintln!(
-                "[SphereVST3] create failed path='{}' classId='{}' reason={}",
+                "{log_tag} create failed path='{}' classId='{}' reason={}",
                 plugin_path, class_id, reason
             );
             return None;
         }
         let event_input_bus_count = unsafe { sphere_daux_vst3_event_input_bus_count(raw) };
         eprintln!(
-            "[SphereVST3] create ok path='{}' classId='{}' handle=0x{:x} eventInputBuses={}",
+            "{log_tag} create ok path='{}' classId='{}' handle=0x{:x} eventInputBuses={}",
             plugin_path, class_id, raw as usize, event_input_bus_count
         );
         Some(Self {

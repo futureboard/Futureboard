@@ -89,6 +89,65 @@ fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapsh
 fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
     use crate::components::timeline::timeline_state::InsertPluginFormat;
 
+    if super::plugin_bridge_runtime::bridge_enabled() {
+        return track
+            .inserts
+            .iter()
+            .filter_map(|slot| {
+                let plugin_id = slot.plugin_id.as_deref()?;
+                if plugin_id == STUB_PLUGIN_ID {
+                    return None;
+                }
+                if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+                    return None;
+                }
+                let path = slot
+                    .plugin_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .filter(|p| !p.trim().is_empty())?;
+
+                use crate::components::timeline::timeline_state::TrackType;
+                let role = if matches!(
+                    track.track_type,
+                    TrackType::Instrument | TrackType::Midi
+                ) {
+                    "instrument"
+                } else {
+                    "effect"
+                };
+
+                let mut params: std::collections::HashMap<String, serde_json::Value> =
+                    std::collections::HashMap::new();
+                params.insert("format".to_string(), serde_json::json!("VST3"));
+                params.insert("modulePath".to_string(), serde_json::json!(path));
+                params.insert("path".to_string(), serde_json::json!(path));
+                params.insert("classId".to_string(), serde_json::json!(plugin_id));
+                params.insert("class_id".to_string(), serde_json::json!(plugin_id));
+                params.insert("pluginInstanceId".to_string(), serde_json::json!(slot.id));
+                params.insert(
+                    "displayName".to_string(),
+                    serde_json::json!(slot.display_name),
+                );
+                params.insert("bridge".to_string(), serde_json::json!(true));
+                params.insert("role".to_string(), serde_json::json!(role));
+
+                eprintln!(
+                    "[SphereAudio] external bridged insert track={} insert={} instance={}",
+                    track.id, slot.id, slot.id
+                );
+                eprintln!("[SphereAudio] graph node ExternalBridgePlugin created");
+
+                Some(EngineInsertSnapshot {
+                    id: slot.id.clone(),
+                    kind: "external-bridge-plugin".to_string(),
+                    enabled: slot.enabled && !slot.bypassed,
+                    params,
+                })
+            })
+            .collect();
+    }
+
     track
         .inserts
         .iter()

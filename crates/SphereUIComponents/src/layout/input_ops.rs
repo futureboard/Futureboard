@@ -276,7 +276,11 @@ impl StudioLayout {
                 if let Some(id) =
                     visible_plugin_id_at(&self.plugin_picker, &index, &self.plugin_picker_prefs)
                 {
-                    self.apply_picked_insert(&id, cx);
+                    if let Some((track_id, insert_index, insert_id)) =
+                        self.apply_picked_insert(&id, cx)
+                    {
+                        self.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
+                    }
                 }
                 return true;
             }

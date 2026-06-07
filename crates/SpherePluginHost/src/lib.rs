@@ -6,6 +6,13 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(non_snake_case)]
 
+/// Stage 2 lock-free shared-memory audio bridge layout (audio in/out, MIDI ring,
+/// parameter-automation ring, status/latency/meter block) shared by the engine
+/// and the `FutureboardPluginHost-x64` process.
+pub mod audio_bridge;
+/// Stage 3b engine-facing realtime sink: implements DAUx's `PluginBridgeSink`
+/// over the shared-memory audio region.
+pub mod plugin_bridge_sink;
 pub mod au_scanner;
 pub mod editor_quirk;
 #[cfg(feature = "napi")]
@@ -18,6 +25,10 @@ pub mod ipc;
 pub mod native_editor;
 /// Main-app client that spawns and drives the separated plugin host process.
 pub mod plugin_host_client;
+/// Windows job object + coordinated plugin-host shutdown for the main app.
+pub mod plugin_host_lifecycle;
+#[cfg(feature = "plugin-host-bin")]
+pub mod plugin_host_preview;
 pub mod plugin_db;
 pub mod preset;
 pub mod registry;

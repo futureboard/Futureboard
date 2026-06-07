@@ -1435,8 +1435,7 @@ const char* embed_editor_runtime_kind_name(EmbedEditorRuntimeKind kind) {
 
 bool embed_plugin_webview_based_debug() {
   static const bool enabled =
-      std::getenv("FUTUREBOARD_PLUGIN_WEBVIEW_DEBUG") != nullptr ||
-      std::getenv("FUTUREBOARD_UAD_DEBUG") != nullptr;
+      std::getenv("FUTUREBOARD_PLUGIN_WEBVIEW_DEBUG") != nullptr;
   return enabled;
 }
 
@@ -1753,13 +1752,15 @@ enum class EmbedHostKind : std::uint8_t {
 };
 
 struct EmbedSession {
-  EmbedHostKind host_kind = EmbedHostKind::OwnedToolWindow;
+  EmbedHostKind host_kind = EmbedHostKind::WsChild;
   HWND child = nullptr;   // host surface passed to IPlugView::attached
   HWND parent = nullptr;  // GPUI PluginView top-level HWND (owner for tool mode)
   int host_x = 0;
   int host_y = 0;
   int host_w = 0;
   int host_h = 0;
+  int preferred_w = 0;
+  int preferred_h = 0;
   // Last applied window rect (screen coords for tool mode, client coords for
   // WsChild). Used to skip redundant SetWindowPos/onSize/raise so idle frames
   // never re-flush geometry (Part D — no flicker / no resize spam).
@@ -1771,6 +1772,17 @@ struct EmbedSession {
 };
 
 std::unordered_map<unsigned long long, std::unique_ptr<EmbedSession>> g_embed_sessions; // guarded by g_windows_mutex
+
+struct PrepareSession {
+  std::unique_ptr<Vst3EditorAttachment> vst3;
+  int preferred_w = 0;
+  int preferred_h = 0;
+  bool have_preferred = false;
+  std::string window_id;
+};
+
+std::unordered_map<unsigned long long, std::unique_ptr<PrepareSession>> g_prepare_sessions;
+std::atomic<unsigned long long> g_next_prepare_handle{1};
 
 bool embed_debug() {
   static const bool enabled = std::getenv("FUTUREBOARD_PLUGIN_VIEW_DEBUG") != nullptr;
@@ -1789,6 +1801,11 @@ LRESULT CALLBACK embed_child_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
   // Paint a solid black backing so there is no flash before the plugin draws,
   // and so anything outside the plugin's own view stays inside our bounds.
   if (msg == WM_ERASEBKGND) {
+    // GPU/OpenGL plugin children paint their own pixels — erasing the host
+    // background can flash over or fight nested GL/DComp child HWNDs.
+    if (GetWindow(hwnd, GW_CHILD) != nullptr) {
+      return 1;
+    }
     HDC hdc = reinterpret_cast<HDC>(wparam);
     RECT rc{};
     GetClientRect(hwnd, &rc);
@@ -1833,8 +1850,9 @@ EmbedHostKind embed_resolve_host_kind() {
       return EmbedHostKind::OwnedToolWindow;
     }
   }
-  // Default: owned tool window — gpui D3D swapchain often paints over WS_CHILD hosts.
-  return EmbedHostKind::OwnedToolWindow;
+  // Default for the external bridge's main-owned mode: a real child HWND under
+  // the main-app-owned content HWND. Tool/popup modes are explicit fallbacks.
+  return EmbedHostKind::WsChild;
 }
 
 const char* embed_host_kind_name(EmbedHostKind kind) {
@@ -1947,11 +1965,21 @@ void embed_ensure_parent_clip_children(HWND parent) {
         stderr,
         "[vst3-editor-audit] WARNING: parent has WS_EX_LAYERED — child embed may not paint\n");
   }
-  const BOOL dcomp_disabled = std::getenv("GPUI_DISABLE_DIRECT_COMPOSITION") != nullptr;
+  // The GPUI flag is a main-app-only renderer workaround and must NOT be
+  // inherited here (spec Part 1/2) — it should now read <unset> in the host. A
+  // PluginHost-specific opt-in re-enables the workaround for the host alone,
+  // without reusing the GPUI flag.
+  const BOOL gpui_dcomp = std::getenv("GPUI_DISABLE_DIRECT_COMPOSITION") != nullptr;
   std::fprintf(
       stderr,
       "[vst3-editor-audit] GPUI_DISABLE_DIRECT_COMPOSITION=%s\n",
-      dcomp_disabled ? "set" : "unset");
+      gpui_dcomp ? "set" : "<unset>");
+  const BOOL host_dcomp =
+      std::getenv("FUTUREBOARD_PLUGIN_HOST_DISABLE_DIRECT_COMPOSITION") != nullptr;
+  std::fprintf(
+      stderr,
+      "[vst3-editor-audit] FUTUREBOARD_PLUGIN_HOST_DISABLE_DIRECT_COMPOSITION=%s\n",
+      host_dcomp ? "set" : "<unset>");
 }
 
 HWND embed_create_host_window(
@@ -2038,6 +2066,12 @@ Steinberg::tresult embed_resize_view(EmbedSession* session, bool audit_log) {
   size.right = rc.right - rc.left;
   size.bottom = rc.bottom - rc.top;
   const auto result = session->vst3->view->onSize(&size);
+  std::fprintf(
+      stderr,
+      "[plugin-host] onSize result=%d rect=(0,0,%d,%d)\n",
+      (int)result,
+      size.right - size.left,
+      size.bottom - size.top);
   if (audit_log || embed_debug()) {
     std::fprintf(
         stderr,
@@ -2166,6 +2200,7 @@ BOOL CALLBACK embed_refresh_plugin_child(HWND hwnd, LPARAM lparam) {
 void embed_post_attach_refresh(HWND child, int w, int h) {
   if (!child || !IsWindow(child)) return;
   const LPARAM size_lp = MAKELPARAM(w, h);
+  SetWindowPos(child, HWND_TOP, 0, 0, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
   ShowWindow(child, SW_SHOW);
   SendMessageW(child, WM_SHOWWINDOW, TRUE, 0);
   SendMessageW(child, WM_SIZE, SIZE_RESTORED, size_lp);
@@ -2174,7 +2209,45 @@ void embed_post_attach_refresh(HWND child, int w, int h) {
   EnumChildWindows(child, embed_refresh_plugin_child, reinterpret_cast<LPARAM>(&ctx));
   InvalidateRect(child, nullptr, TRUE);
   UpdateWindow(child);
-  RedrawWindow(child, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+  RedrawWindow(child, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+  std::fprintf(stderr, "[gpu-editor] post_attach_show_resize_redraw\n");
+}
+
+bool embed_class_looks_gpu(const wchar_t* class_name) {
+  if (!class_name || !class_name[0]) return false;
+  auto contains = [&](const wchar_t* token) {
+    return wcsstr(class_name, token) != nullptr;
+  };
+  return contains(L"JUCE") || contains(L"OpenGL") || contains(L"Chrome") ||
+         contains(L"WebView") || contains(L"CEF") || contains(L"ANGLE");
+}
+
+struct EmbedGpuDetectCtx {
+  bool detected = false;
+  int child_count = 0;
+};
+
+BOOL CALLBACK embed_gpu_detect_child(HWND hwnd, LPARAM lparam) {
+  auto* ctx = reinterpret_cast<EmbedGpuDetectCtx*>(lparam);
+  if (!hwnd || !IsWindow(hwnd)) return TRUE;
+  ctx->child_count++;
+  wchar_t class_name[256]{};
+  const int len = GetClassNameW(hwnd, class_name, static_cast<int>(std::size(class_name)));
+  if (len > 0 && embed_class_looks_gpu(class_name)) {
+    ctx->detected = true;
+  }
+  EnumChildWindows(hwnd, embed_gpu_detect_child, lparam);
+  return TRUE;
+}
+
+bool embed_detect_gpu_children(HWND root) {
+  if (!root || !IsWindow(root)) return false;
+  EmbedGpuDetectCtx ctx;
+  EnumChildWindows(root, embed_gpu_detect_child, reinterpret_cast<LPARAM>(&ctx));
+  if (ctx.detected) {
+    std::fprintf(stderr, "[gpu-editor] gpu_editor_detected=true child_count=%d\n", ctx.child_count);
+  }
+  return ctx.detected;
 }
 
 void embed_sync_parent_visibility(EmbedSession* session) {
@@ -2323,8 +2396,8 @@ void embed_refresh_session(EmbedSession* session, bool audit_log) {
 }
 
 // Initialize COM on the editor (UI) thread before any IPlugView::attached call.
-// Some VST3 editors — notably UAD Native and other WebView/CEF-backed plug-ins —
-// need a live STA on the thread that owns their parent HWND, otherwise the
+// Some WebView/CEF-backed VST3 editors need a live STA on the thread that owns
+// their parent HWND, otherwise the
 // embedded WebView/CEF host never spins up child windows and the editor stays
 // blank. Idempotent and safe to call multiple times: if the thread is already
 // initialized to a different apartment we log the HRESULT and keep going (the
@@ -2618,6 +2691,111 @@ extern "C" SpherePluginHostString sphere_plugin_editor_drain_param_events_json()
 #endif
 }
 
+// Complete an embed attach using a prepared Vst3EditorAttachment (createView
+// already done; getSize may have been queried before attach).
+unsigned long long embed_complete_attach(
+    HWND parent,
+    int x,
+    int y,
+    int width,
+    int height,
+    std::unique_ptr<Vst3EditorAttachment> attachment,
+    int preferred_w,
+    int preferred_h,
+    bool have_preferred) {
+  if (!attachment || !attachment->view) return 0;
+
+  embed_ensure_parent_clip_children(parent);
+  embed_audit_log_threads(parent, nullptr);
+
+  const EmbedHostKind host_kind = embed_resolve_host_kind();
+  const int region_w = width > 1 ? width : 1;
+  const int region_h = height > 1 ? height : 1;
+
+  HWND child = embed_create_host_window(parent, host_kind, x, y, region_w, region_h);
+  if (!child) {
+    std::fprintf(stderr, "[SpherePluginHost] embed_attach: create host window failed\n");
+    return 0;
+  }
+
+  embed_audit_log_threads(parent, child);
+
+  vst3_install_plug_frame(*attachment, child, parent);
+
+  const auto attach_result =
+      attachment->view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
+  std::fprintf(
+      stderr,
+      "[vst3-editor-audit] attached result=%s(%d)\n",
+      embed_vst3_result_name(attach_result),
+      (int)attach_result);
+  if (attach_result != Steinberg::kResultTrue && attach_result != Steinberg::kResultOk) {
+    vst3_clear_plug_frame(*attachment);
+    DestroyWindow(child);
+    return 0;
+  }
+  attachment->attached = true;
+
+  auto session = std::make_unique<EmbedSession>();
+  session->host_kind = host_kind;
+  session->child = child;
+  session->parent = parent;
+  session->host_x = x;
+  session->host_y = y;
+  session->host_w = region_w;
+  session->host_h = region_h;
+  session->preferred_w = preferred_w;
+  session->preferred_h = preferred_h;
+  session->window_id = attachment->plugin_path;
+  session->vst3 = std::move(attachment);
+
+  embed_force_show_child(session.get(), x, y, region_w, region_h);
+  embed_resize_view(session.get(), true);
+  const int pumped = embed_pump_child_messages(child);
+  std::fprintf(stderr, "[vst3-editor-audit] post-attach pump drained=%d messages\n", pumped);
+
+  const bool gpu_detected = embed_detect_gpu_children(child);
+  if (gpu_detected) {
+    embed_post_attach_refresh(child, region_w, region_h);
+  }
+
+  Steinberg::ViewRect after{};
+  const auto after_result = session->vst3->view->getSize(&after);
+  if (after_result == Steinberg::kResultTrue && !have_preferred) {
+    const int after_w = after.right - after.left;
+    const int after_h = after.bottom - after.top;
+    session->preferred_w = after_w > 1 ? after_w : 1;
+    session->preferred_h = after_h > 1 ? after_h : 1;
+  }
+
+  embed_audit_log_child_state(child, parent);
+  embed_audit_enum_children(child);
+
+  if (!IsWindowVisible(child)) {
+    if (session->vst3 && session->vst3->view && session->vst3->attached) {
+      vst3_clear_plug_frame(*session->vst3);
+      session->vst3->view->removed();
+      session->vst3->attached = false;
+    } else if (session->vst3) {
+      vst3_clear_plug_frame(*session->vst3);
+    }
+    session->vst3.reset();
+    DestroyWindow(child);
+    return 0;
+  }
+
+  if (host_kind == EmbedHostKind::OwnedToolWindow) {
+    embed_apply_toolwindow_to_descendants(child);
+  }
+
+  const auto handle = g_next_handle.fetch_add(1);
+  {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    g_embed_sessions[handle] = std::move(session);
+  }
+  return handle;
+}
+
 // ── Embedded editor C ABI (GPUI-hosted) ─────────────────────────────────────
 
 extern "C" unsigned long long sphere_plugin_editor_embed_attach(
@@ -2630,8 +2808,8 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
     int height) {
 #ifdef _WIN32
   // Phase 4: ensure COM (STA) is live on the editor thread before any
-  // IPlugView call. UAD Native and CEF/WebView plug-ins rely on this; benign
-  // for SDK-only editors (idempotent / no-op when already initialized).
+  // IPlugView call. CEF/WebView plug-ins rely on this; benign for SDK-only
+  // editors (idempotent / no-op when already initialized).
   embed_ensure_com_initialized();
 
   HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
@@ -2677,70 +2855,10 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
     return 0;
   }
 
-  embed_ensure_parent_clip_children(parent);
-  embed_audit_log_threads(parent, nullptr);
-
-  const EmbedHostKind host_kind = embed_resolve_host_kind();
-  const int region_w = width > 1 ? width : 1;
-  const int region_h = height > 1 ? height : 1;
-
-  std::fprintf(
-      stderr,
-      "[vst3-editor-audit] host_mode=%s region=(%d,%d,%d,%d)\n",
-      embed_host_kind_name(host_kind),
-      x,
-      y,
-      region_w,
-      region_h);
-  if (embed_debug()) {
-    std::fprintf(
-        stderr,
-        "[plugin-view] using mode: %s\n",
-        embed_host_kind_name(host_kind));
-    std::fprintf(
-        stderr,
-        "[plugin-view] attach parent hwnd=0x%p\n",
-        static_cast<void*>(parent));
-  }
-
-  HWND child = embed_create_host_window(parent, host_kind, x, y, region_w, region_h);
-  if (!child) {
-    std::fprintf(stderr, "[SpherePluginHost] embed_attach: create host window failed\n");
-    return 0;
-  }
-
-  embed_audit_log_threads(parent, child);
-
-  const LONG_PTR child_style = GetWindowLongPtr(child, GWL_STYLE);
-  if (host_kind == EmbedHostKind::WsChild) {
-    assert(child_style & WS_CHILD);
-    assert(!(child_style & WS_POPUP));
-    assert(GetParent(child) == parent);
-  }
-
-  if (embed_debug()) {
-    std::fprintf(
-        stderr,
-        "[vst3-editor] child hwnd=0x%p parent=0x%p style=0x%08lx WS_CHILD=%d WS_POPUP=%d "
-        "GetParent(child)=0x%p IsWindow(child)=%d region=(x=%d y=%d w=%d h=%d)\n",
-        static_cast<void*>(child),
-        static_cast<void*>(parent),
-        static_cast<unsigned long>(child_style),
-        (child_style & WS_CHILD) ? 1 : 0,
-        (child_style & WS_POPUP) ? 1 : 0,
-        static_cast<void*>(GetParent(child)),
-        IsWindow(child) ? 1 : 0,
-        x,
-        y,
-        region_w,
-        region_h);
-  }
-
   std::string error;
   auto attachment = build_vst3_attachment(path, cid, window_id, error);
   if (!attachment) {
     std::fprintf(stderr, "[vst3-editor] attach failed error=%s\n", error.c_str());
-    DestroyWindow(child);
     return 0;
   }
   std::fprintf(
@@ -2748,138 +2866,22 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
       "[vst3-editor-audit] createView ptr=0x%p platform=HWND\n",
       static_cast<void*>(attachment->view.get()));
 
-  // Report the plugin's preferred size for logging only; the host region size
-  // is authoritative so the editor clips/resizes with the GPUI window.
   Steinberg::ViewRect preferred{};
   const auto get_size_result = attachment->view->getSize(&preferred);
   const bool have_preferred = get_size_result == Steinberg::kResultTrue;
+  const int raw_preferred_w = preferred.right - preferred.left;
+  const int raw_preferred_h = preferred.bottom - preferred.top;
+  const int preferred_w = have_preferred ? (raw_preferred_w > 1 ? raw_preferred_w : 1) : 0;
+  const int preferred_h = have_preferred ? (raw_preferred_h > 1 ? raw_preferred_h : 1) : 0;
   std::fprintf(
       stderr,
-      "[vst3-editor-audit] getSize before attach result=%s(%d) size=(%d,%d,%d,%d)\n",
-      embed_vst3_result_name(get_size_result),
-      (int)get_size_result,
-      preferred.left,
-      preferred.top,
-      preferred.right,
-      preferred.bottom);
+      "[plugin-host] getSize result=%d width=%d height=%d\n",
+      have_preferred ? 0 : (int)get_size_result,
+      preferred_w,
+      preferred_h);
 
-  vst3_install_plug_frame(*attachment, child, parent);
-
-  // Attach the IPlugView to the CHILD HWND (never the parent / never a popup).
-  const auto attach_result =
-      attachment->view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
-  std::fprintf(
-      stderr,
-      "[vst3-editor-audit] attached result=%s(%d)\n",
-      embed_vst3_result_name(attach_result),
-      (int)attach_result);
-  std::fprintf(stderr,
-               "[vst3-editor] attached result=0x%x host=0x%p\n",
-               static_cast<unsigned>(attach_result),
-               static_cast<void*>(child));
-  if (attach_result != Steinberg::kResultTrue && attach_result != Steinberg::kResultOk) {
-    vst3_clear_plug_frame(*attachment);
-    std::fprintf(stderr, "[vst3-editor] attach failed error=IPlugView::attached(HWND) returned %d\n",
-                 (int)attach_result);
-    DestroyWindow(child);
-    return 0;
-  }
-  attachment->attached = true;
-
-  auto session = std::make_unique<EmbedSession>();
-  session->host_kind = host_kind;
-  session->child = child;
-  session->parent = parent;
-  session->host_x = x;
-  session->host_y = y;
-  session->host_w = region_w;
-  session->host_h = region_h;
-  session->window_id = window_id;
-  session->vst3 = std::move(attachment);
-
-  embed_force_show_child(session.get(), x, y, region_w, region_h);
-  embed_resize_view(session.get(), true);
-  const int pumped = embed_pump_child_messages(child);
-  std::fprintf(stderr, "[vst3-editor-audit] post-attach pump drained=%d messages\n", pumped);
-
-  Steinberg::ViewRect after{};
-  const auto after_result = session->vst3->view->getSize(&after);
-  std::fprintf(
-      stderr,
-      "[vst3-editor-audit] getSize after attach result=%s(%d) size=(%d,%d,%d,%d)\n",
-      embed_vst3_result_name(after_result),
-      (int)after_result,
-      after.left,
-      after.top,
-      after.right,
-      after.bottom);
-
-  embed_audit_log_child_state(child, parent);
-  embed_audit_enum_children(child);
-
-  // Never report ok if the child window is not actually visible.
-  if (!IsWindowVisible(child)) {
-    std::fprintf(
-        stderr,
-        "[vst3-editor] attach failed error=child HWND not visible after show (0x%p)\n",
-        static_cast<void*>(child));
-    if (session->vst3 && session->vst3->view && session->vst3->attached) {
-      vst3_clear_plug_frame(*session->vst3);
-      session->vst3->view->removed();
-      session->vst3->attached = false;
-    } else if (session->vst3) {
-      vst3_clear_plug_frame(*session->vst3);
-    }
-    session->vst3.reset();
-    DestroyWindow(child);
-    return 0;
-  }
-
-  // Phase 6: do NOT destroy on a momentarily-blank child here. WebView/CEF
-  // editors (UAD Native, some Slate/iZotope hosts) take 100–3000 ms after
-  // `attached()` before their Chromium child windows materialize, so an
-  // immediate failure would always lose them. We log the state and hand the
-  // session back to Rust; the host's delayed-ready poller (`embed_has_visible_ui`
-  // at 100/500/1000/3000/5000 ms) decides when to surface a failure UI.
-  if (!embed_has_visible_plugin_ui(child, session->vst3->view.get())) {
-    std::fprintf(
-        stderr,
-        "[vst3-editor] attach warn no visible plugin UI yet "
-        "(child visible but empty — deferring to delayed-ready poller)\n");
-  }
-
-  if (host_kind == EmbedHostKind::OwnedToolWindow) {
-    embed_apply_toolwindow_to_descendants(child);
-  }
-
-  const auto handle = g_next_handle.fetch_add(1);
-  {
-    std::lock_guard<std::mutex> lock(g_windows_mutex);
-    g_embed_sessions[handle] = std::move(session);
-  }
-  if (embed_debug()) {
-    std::fprintf(
-        stderr,
-        "[plugin-view] attach ok editor hwnd=0x%p owner hwnd=0x%p\n",
-        static_cast<void*>(child),
-        static_cast<void*>(parent));
-    embed_log_window_styles("editor", child);
-  }
-  std::fprintf(
-      stderr,
-      "[SpherePluginHost] embed_attach ok handle=%llu mode=%s plugin_view_hwnd=0x%p "
-      "host_hwnd=0x%p region=(%d,%d,%d,%d) path=%s\n",
-      handle,
-      embed_host_kind_name(host_kind),
-      static_cast<void*>(parent),
-      static_cast<void*>(child),
-      x,
-      y,
-      region_w,
-      region_h,
-      path.c_str());
-  (void)have_preferred;
-  return handle;
+  return embed_complete_attach(
+      parent, x, y, width, height, std::move(attachment), preferred_w, preferred_h, have_preferred);
 #else
   (void)parent_hwnd;
   (void)plugin_path;
@@ -3028,5 +3030,161 @@ extern "C" int sphere_plugin_editor_embed_has_visible_ui(unsigned long long hand
 #else
   (void)handle;
   return 0;
+#endif
+}
+
+extern "C" int sphere_plugin_editor_embed_preferred_size(
+    unsigned long long handle,
+    int* out_width,
+    int* out_height) {
+#ifdef _WIN32
+  std::lock_guard<std::mutex> lock(g_windows_mutex);
+  auto it = g_embed_sessions.find(handle);
+  if (it == g_embed_sessions.end() || !it->second || it->second->preferred_w <= 0 ||
+      it->second->preferred_h <= 0) {
+    return 0;
+  }
+  if (out_width) *out_width = it->second->preferred_w;
+  if (out_height) *out_height = it->second->preferred_h;
+  return 1;
+#else
+  (void)handle;
+  (void)out_width;
+  (void)out_height;
+  return 0;
+#endif
+}
+
+extern "C" unsigned long long sphere_plugin_editor_embed_prepare(
+    const char* plugin_path,
+    const char* class_id,
+    int* out_width,
+    int* out_height) {
+#ifdef _WIN32
+  embed_ensure_com_initialized();
+  const std::string path = plugin_path ? plugin_path : "";
+  const std::string cid = class_id ? class_id : "";
+  const std::string window_id = std::string("embed:") + path;
+  std::string error;
+  auto attachment = build_vst3_attachment(path, cid, window_id, error);
+  if (!attachment) {
+    std::fprintf(stderr, "[vst3-editor] prepare failed error=%s\n", error.c_str());
+    return 0;
+  }
+  Steinberg::ViewRect preferred{};
+  const auto get_size_result = attachment->view->getSize(&preferred);
+  const bool have_preferred = get_size_result == Steinberg::kResultTrue;
+  const int raw_preferred_w = preferred.right - preferred.left;
+  const int raw_preferred_h = preferred.bottom - preferred.top;
+  const int preferred_w = have_preferred ? (raw_preferred_w > 1 ? raw_preferred_w : 1) : 0;
+  const int preferred_h = have_preferred ? (raw_preferred_h > 1 ? raw_preferred_h : 1) : 0;
+  std::fprintf(
+      stderr,
+      "[plugin-host] prepare getSize result=%d width=%d height=%d\n",
+      have_preferred ? 0 : (int)get_size_result,
+      preferred_w,
+      preferred_h);
+  if (out_width) *out_width = preferred_w;
+  if (out_height) *out_height = preferred_h;
+
+  auto prepare = std::make_unique<PrepareSession>();
+  prepare->vst3 = std::move(attachment);
+  prepare->preferred_w = preferred_w;
+  prepare->preferred_h = preferred_h;
+  prepare->have_preferred = have_preferred;
+  prepare->window_id = window_id;
+  const auto prepare_id = g_next_prepare_handle.fetch_add(1);
+  {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    g_prepare_sessions[prepare_id] = std::move(prepare);
+  }
+  return prepare_id;
+#else
+  (void)plugin_path;
+  (void)class_id;
+  (void)out_width;
+  (void)out_height;
+  return 0;
+#endif
+}
+
+extern "C" void sphere_plugin_editor_embed_cancel_prepare(unsigned long long prepare_id) {
+#ifdef _WIN32
+  std::lock_guard<std::mutex> lock(g_windows_mutex);
+  g_prepare_sessions.erase(prepare_id);
+#else
+  (void)prepare_id;
+#endif
+}
+
+extern "C" unsigned long long sphere_plugin_editor_embed_attach_prepared(
+    unsigned long long prepare_id,
+    unsigned long long parent_hwnd,
+    int x,
+    int y,
+    int width,
+    int height) {
+#ifdef _WIN32
+  HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
+  if (!parent || !IsWindow(parent) || width <= 0 || height <= 0) return 0;
+
+  std::unique_ptr<PrepareSession> prepare;
+  {
+    std::lock_guard<std::mutex> lock(g_windows_mutex);
+    auto it = g_prepare_sessions.find(prepare_id);
+    if (it == g_prepare_sessions.end()) return 0;
+    prepare = std::move(it->second);
+    g_prepare_sessions.erase(it);
+  }
+  if (!prepare || !prepare->vst3) return 0;
+
+  return embed_complete_attach(
+      parent,
+      x,
+      y,
+      width,
+      height,
+      std::move(prepare->vst3),
+      prepare->preferred_w,
+      prepare->preferred_h,
+      prepare->have_preferred);
+#else
+  (void)prepare_id;
+  (void)parent_hwnd;
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
+  return 0;
+#endif
+}
+
+extern "C" unsigned long long sphere_plugin_editor_embed_host_hwnd(unsigned long long handle) {
+#ifdef _WIN32
+  std::lock_guard<std::mutex> lock(g_windows_mutex);
+  auto it = g_embed_sessions.find(handle);
+  if (it == g_embed_sessions.end() || !it->second || !it->second->child) return 0;
+  return static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(it->second->child));
+#else
+  (void)handle;
+  return 0;
+#endif
+}
+
+extern "C" void sphere_plugin_editor_embed_delayed_gpu_refresh(unsigned long long handle) {
+#ifdef _WIN32
+  std::lock_guard<std::mutex> lock(g_windows_mutex);
+  auto it = g_embed_sessions.find(handle);
+  if (it == g_embed_sessions.end() || !it->second || !it->second->child ||
+      !IsWindow(it->second->child)) {
+    return;
+  }
+  const int w = it->second->host_w > 0 ? it->second->host_w : 1;
+  const int h = it->second->host_h > 0 ? it->second->host_h : 1;
+  embed_resize_view(it->second.get(), true);
+  embed_post_attach_refresh(it->second->child, w, h);
+  std::fprintf(stderr, "[gpu-editor] delayed_redraw_100ms\n");
+#else
+  (void)handle;
 #endif
 }

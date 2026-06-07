@@ -311,6 +311,7 @@ impl StudioLayout {
                     // Close any open editor window for this slot before dropping
                     // the descriptor — every open pairs with a close.
                     this.close_insert_editor(&track_id, &insert_id, cx);
+                    this.unload_bridge_plugin(&insert_id);
                     this.timeline.update(cx, |timeline, _cx| {
                         timeline.state.remove_insert(&track_id, &insert_id);
                     });

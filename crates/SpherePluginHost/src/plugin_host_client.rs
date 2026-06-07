@@ -10,7 +10,7 @@
 //! existing behavior is unchanged. Wiring the GPUI editor window's content
 //! child HWND through `open_editor` is Slice 2.
 
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::JoinHandle;
@@ -18,6 +18,7 @@ use std::thread::JoinHandle;
 use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
+use crate::plugin_host_lifecycle::{self, BridgeHostManager};
 
 /// What the UI thread receives from [`PluginHostClient::try_recv_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,46 @@ impl std::error::Error for PluginHostClientError {}
 
 const BINARY_STEM: &str = "FutureboardPluginHost-x64";
 
+/// Strip main-app-only renderer/compositor environment from the plugin-host
+/// child process before spawning it.
+///
+/// The GPUI main app sets `GPUI_DISABLE_DIRECT_COMPOSITION=1` (and may set other
+/// `GPUI_*` renderer flags) for its *own* swap-chain / DirectComposition needs.
+/// Those flags are meaningless — and potentially harmful — inside the separate
+/// `FutureboardPluginHost-x64.exe`, which hosts arbitrary plugin GPU / WebView /
+/// DirectComposition UI frameworks. Inheriting them can leave the plugin editor
+/// blank. The host must run with a clean native environment by default (spec
+/// Part 1/2); a PluginHost-specific opt-in
+/// (`FUTUREBOARD_PLUGIN_HOST_DISABLE_DIRECT_COMPOSITION`) is the only supported
+/// way to re-enable the workaround for the host, and it never reuses the GPUI
+/// flag.
+fn sanitize_child_env(command: &mut Command) {
+    // Remove every `GPUI_*` variable: these are scoped to the main GPUI process
+    // only. Snapshot the current process env so we drop whatever it actually
+    // inherited, not just a hard-coded list.
+    for (key, _) in std::env::vars() {
+        if key.starts_with("GPUI_") {
+            command.env_remove(&key);
+            eprintln!("[plugin-bridge] child_env_remove {key}");
+        }
+    }
+    // Belt-and-braces: the headline offender, even if the loop above missed it.
+    command.env_remove("GPUI_DISABLE_DIRECT_COMPOSITION");
+
+    // Tag the child's role so host-side diagnostics / future behavior can branch
+    // on it without sniffing GPUI flags.
+    for key in ["WGPU_BACKEND", "LIBGL_ALWAYS_SOFTWARE", "DXGI_PRESENT_ALLOW_TEARING"] {
+        command.env_remove(key);
+    }
+    command.env("FUTUREBOARD_PROCESS_ROLE", "plugin_host");
+    // Native borderless shell owns the content HWND — the VST3 view must embed as
+    // WS_CHILD filling that rect, not as a floating tool window (default kind=1).
+    command.env("FUTUREBOARD_PLUGIN_EDITOR_MODE", "child");
+    eprintln!("[plugin-bridge] child_env_set FUTUREBOARD_PROCESS_ROLE=plugin_host");
+    eprintln!("[plugin-bridge] child_env_set FUTUREBOARD_PLUGIN_EDITOR_MODE=child");
+    eprintln!("[plugin-host-env] sanitized=true");
+}
+
 fn binary_name(dir: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -71,23 +112,38 @@ fn env_is_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the external plugin-host **bridge** is enabled
-/// (`FUTUREBOARD_PLUGIN_HOST_BRIDGE` truthy). When enabled, the editor flow MUST
-/// route through `FutureboardPluginHost-x64.exe` and MUST NOT fall back to the
-/// in-process VST3 editor path.
-pub fn plugin_host_bridge_enabled() -> bool {
-    env_is_truthy("FUTUREBOARD_PLUGIN_HOST_BRIDGE")
-        // Back-compat alias from the earlier slice.
-        || std::env::var("FUTUREBOARD_PLUGIN_EDITOR_OWNERSHIP")
-            .map(|v| v.eq_ignore_ascii_case("host_process"))
-            .unwrap_or(false)
+/// Whether the emergency legacy in-process VST3 runtime/editor path is enabled.
+/// This is intentionally opt-in only; the external bridge is mandatory by
+/// default.
+pub fn legacy_in_process_enabled() -> bool {
+    env_is_truthy("FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS")
 }
 
-/// One-time boot diagnostics for the bridge flag. Call early in app startup.
+/// Whether the external plugin-host bridge is active. This is the default and
+/// must not depend on `FUTUREBOARD_PLUGIN_HOST_BRIDGE`; that flag is deprecated
+/// and is ignored for backend selection.
+pub fn plugin_host_bridge_enabled() -> bool {
+    !legacy_in_process_enabled()
+}
+
+/// One-time boot diagnostics for plugin runtime selection. Call early in app
+/// startup.
 pub fn log_bridge_env() {
-    let raw = std::env::var("FUTUREBOARD_PLUGIN_HOST_BRIDGE").unwrap_or_else(|_| "<unset>".into());
-    eprintln!("[plugin-bridge] env FUTUREBOARD_PLUGIN_HOST_BRIDGE={raw}");
-    eprintln!("[plugin-bridge] enabled={}", plugin_host_bridge_enabled());
+    let legacy = legacy_in_process_enabled();
+    eprintln!("[plugin-runtime] default_backend=external_bridge");
+    eprintln!("[plugin-runtime] legacy_override={legacy}");
+    if let Ok(raw) = std::env::var("FUTUREBOARD_PLUGIN_HOST_BRIDGE") {
+        eprintln!(
+            "[plugin-runtime] deprecated_env_ignored FUTUREBOARD_PLUGIN_HOST_BRIDGE={raw}"
+        );
+    }
+    if legacy {
+        eprintln!("[plugin-runtime] backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1");
+        eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
+        eprintln!("[plugin-runtime] legacy path may hang GPU/OpenGL/JUCE plugin editors");
+    } else {
+        eprintln!("[plugin-runtime] backend=external_bridge reason=forced_default");
+    }
 }
 
 /// Resolve the host executable and whether it exists on disk. Resolution order
@@ -145,6 +201,7 @@ pub struct PluginHostClient {
     stdin: ChildStdin,
     events: Receiver<ClientEvent>,
     reader: Option<JoinHandle<()>>,
+    pub(crate) shutdown_started: bool,
 }
 
 impl PluginHostClient {
@@ -167,6 +224,7 @@ impl PluginHostClient {
         eprintln!("[plugin-bridge] exists={exists}");
         if !exists {
             let err = PluginHostClientError::BinaryMissing(exe.display().to_string());
+            eprintln!("[plugin-bridge] ERROR host exe not found; external bridge is mandatory");
             eprintln!("[plugin-bridge] spawn_failed error={err}");
             return Err(err);
         }
@@ -185,17 +243,24 @@ impl PluginHostClient {
 
     /// Spawn a specific host binary (used by tests).
     pub fn spawn_from(binary: &Path) -> Result<Self, PluginHostClientError> {
-        let mut child = Command::new(binary)
+        eprintln!("[plugin-bridge] ipc=stdio");
+        let parent_pid = std::process::id();
+        let mut command = Command::new(binary);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(PluginHostClientError::Spawn)?;
+            .arg("--parent-pid")
+            .arg(parent_pid.to_string());
+        sanitize_child_env(&mut command);
+        let mut child = command.spawn().map_err(PluginHostClientError::Spawn)?;
+        BridgeHostManager::global().on_host_spawned(&child);
 
         let stdin = child
             .stdin
             .take()
             .expect("child configured with piped stdin");
+        eprintln!("[plugin-bridge] stdin connected");
         let stdout = child
             .stdout
             .take()
@@ -205,6 +270,7 @@ impl PluginHostClient {
         let reader = std::thread::Builder::new()
             .name("plugin-host-events".into())
             .spawn(move || {
+                eprintln!("[plugin-bridge] stdout reader started");
                 let mut reader = BufReader::new(stdout);
                 loop {
                     match ipc::read_frame::<HostEvent, _>(&mut reader) {
@@ -228,6 +294,7 @@ impl PluginHostClient {
             stdin,
             events: rx,
             reader: Some(reader),
+            shutdown_started: false,
         };
         client.send(&HostCommand::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -249,6 +316,23 @@ impl PluginHostClient {
     /// channel; this call itself only writes the frame.
     pub fn send(&mut self, cmd: &HostCommand) -> Result<(), PluginHostClientError> {
         ipc::write_frame(&mut self.stdin, cmd).map_err(PluginHostClientError::Spawn)
+    }
+
+    pub fn load_plugin(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        plugin_path: impl Into<String>,
+        class_id: impl Into<String>,
+        sample_rate: u32,
+        max_block_size: u32,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::LoadPlugin {
+            plugin_instance_id: plugin_instance_id.into(),
+            plugin_path: plugin_path.into(),
+            class_id: class_id.into(),
+            sample_rate,
+            max_block_size,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -273,6 +357,36 @@ impl PluginHostClient {
         })
     }
 
+    pub fn prepare_editor_view(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        plugin_path: impl Into<String>,
+        class_id: impl Into<String>,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::PrepareEditorView {
+            plugin_instance_id: plugin_instance_id.into(),
+            plugin_path: plugin_path.into(),
+            class_id: class_id.into(),
+        })
+    }
+
+    pub fn confirm_editor_content_ready(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        parent_hwnd: u64,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::ConfirmEditorContentReady {
+            plugin_instance_id: plugin_instance_id.into(),
+            parent_hwnd,
+            width,
+            height,
+            dpi,
+        })
+    }
+
     pub fn resize_editor(
         &mut self,
         plugin_instance_id: impl Into<String>,
@@ -286,6 +400,104 @@ impl PluginHostClient {
             height,
             dpi,
         })
+    }
+
+    pub fn preview_note_on(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::PreviewNoteOn {
+            plugin_instance_id: plugin_instance_id.into(),
+            channel,
+            pitch,
+            velocity,
+        })
+    }
+
+    pub fn preview_note_off(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        channel: u8,
+        pitch: u8,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::PreviewNoteOff {
+            plugin_instance_id: plugin_instance_id.into(),
+            channel,
+            pitch,
+        })
+    }
+
+    pub fn preview_all_notes_off(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::PreviewAllNotesOff {
+            plugin_instance_id: plugin_instance_id.into(),
+        })
+    }
+
+    pub fn midi_panic(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::MidiPanic {
+            plugin_instance_id: plugin_instance_id.into(),
+        })
+    }
+
+    /// Stage 1 (shared audio bridge): tell the host the engine-owned sample rate
+    /// and block size to follow. Diagnostics-only at this stage.
+    pub fn configure_audio_bridge(
+        &mut self,
+        sample_rate: u32,
+        max_block_size: u32,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::ConfigureAudioBridge {
+            sample_rate,
+            max_block_size,
+        })
+    }
+
+    /// Stage 1 skeleton: ask the host to process one DSP block. The host replies
+    /// with [`crate::ipc::HostEvent::AudioBridgeStatus`] (`dsp_output=pending`
+    /// until Stage 3). No shared-memory transport exists yet.
+    pub fn process_block_shared(
+        &mut self,
+        block_id: u64,
+        frames: u32,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::ProcessBlockShared { block_id, frames })
+    }
+
+    /// Prepare plugin DSP at the engine-owned sample rate / block size.
+    pub fn prepare_processing(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        sample_rate: u32,
+        max_block_size: u32,
+        input_channels: u32,
+        output_channels: u32,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::PrepareProcessing {
+            plugin_instance_id: plugin_instance_id.into(),
+            sample_rate,
+            max_block_size,
+            input_channels,
+            output_channels,
+        })
+    }
+
+    /// Stage 2: ask the host to map the engine-created named shared-memory audio
+    /// region. The host replies [`crate::ipc::HostEvent::SharedAudioAttached`].
+    pub fn attach_shared_audio(
+        &mut self,
+        name: String,
+        bytes: u64,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::AttachSharedAudio { name, bytes })
     }
 
     pub fn close_editor(
@@ -332,21 +544,29 @@ impl PluginHostClient {
             Err(_) => None,
         }
     }
+
+    /// Force-terminate the host process (after graceful shutdown times out).
+    pub fn force_kill(&mut self) -> std::io::Result<()> {
+        self.child.kill()
+    }
+
+    /// Block until the host process has exited.
+    pub fn wait_for_exit(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.wait()
+    }
+
+    /// Join the stdout reader thread after the host has exited.
+    pub fn join_reader(&mut self) {
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
 }
 
 impl Drop for PluginHostClient {
     fn drop(&mut self) {
-        // Best-effort graceful shutdown, then ensure no orphan process.
-        let _ = ipc::write_frame(&mut self.stdin, &HostCommand::Shutdown);
-        let _ = self.stdin.flush();
-        // Closing stdin gives the host its EOF; give the reader a beat to drain,
-        // then force-kill if it is still alive.
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
+        plugin_host_lifecycle::shutdown_host_client(self);
+        let _ = self.wait_for_exit();
+        self.join_reader();
     }
 }

@@ -723,10 +723,14 @@ impl Render for StudioLayout {
                 }),
                 on_pick: Arc::new({
                     let this = cx.entity().clone();
-                    move |plugin_id: &String, _w, cx| {
+                    move |plugin_id: &String, w, cx| {
                         let plugin_id = plugin_id.clone();
                         let _ = this.update(cx, |this, cx| {
-                            this.apply_picked_insert(&plugin_id, cx);
+                            if let Some((track_id, insert_index, insert_id)) =
+                                this.apply_picked_insert(&plugin_id, cx)
+                            {
+                                this.open_insert_editor(&track_id, insert_index, &insert_id, w, cx);
+                            }
                         });
                     }
                 }),

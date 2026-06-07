@@ -16,8 +16,10 @@ fn main() {
         "[process] role=main pid={} exe=futureboard_native",
         std::process::id()
     );
-    // Plugin-host bridge selection diagnostics (FUTUREBOARD_PLUGIN_HOST_BRIDGE).
+    // Plugin runtime selection diagnostics. External PluginHost bridge is the
+    // default; legacy in-process VST3 requires FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1.
     sphere_ui_components::plugin_host_client::log_bridge_env();
+    sphere_ui_components::plugin_host_lifecycle::init_plugin_host_job();
 
     // Catch any panic that escapes the GPUI render loop so we see *why*
     // the window blanks out instead of getting a silent crash.
@@ -25,6 +27,7 @@ fn main() {
         eprintln!("[panic] {info}");
         let bt = std::backtrace::Backtrace::force_capture();
         eprintln!("[panic] backtrace:\n{bt}");
+        sphere_ui_components::plugin_host_lifecycle::BridgeHostManager::global().shutdown_all();
     }));
 
     // GPUI's default DirectComposition target is created with topmost=true, which

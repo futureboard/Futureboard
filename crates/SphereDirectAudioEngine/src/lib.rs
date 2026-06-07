@@ -33,13 +33,14 @@ mod graveyard;
 pub mod input_ring;
 mod latency_graph;
 pub mod native;
+pub mod plugin_bridge;
 pub mod recording;
 mod runtime;
 mod streaming_source;
 pub mod tempo_map;
 pub mod transport;
 pub mod types;
-mod vst3_processor;
+pub mod vst3_processor;
 
 // ── Native Rust facade ───────────────────────────────────────────────────
 //

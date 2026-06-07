@@ -1,0 +1,584 @@
+//! Stage 2: the lock-free **shared-memory audio bridge** layout between the main
+//! `SphereDirectAudioEngine` (in `futureboard_native.exe`) and the separated
+//! `FutureboardPluginHost-x64.exe`.
+//!
+//! The region is a single `#[repr(C)]` POD ([`SharedAudioBridge`]) placed in
+//! OS shared memory (a named, pagefile-backed file mapping on Windows). It
+//! carries, in one cache-coherent block both processes map:
+//!
+//! - **audio input buffer** (engine → host, the track's pre-plugin signal),
+//! - **audio output buffer** (host → engine, the plugin's processed signal),
+//! - **MIDI event ring** (engine → host, SPSC),
+//! - **parameter-automation ring** (engine → host, SPSC),
+//! - **status / latency / meter block** (atomics, both directions).
+//!
+//! # Realtime contract (spec Stage 2)
+//!
+//! Every accessor here is **wait-free**: no heap allocation, no locks, no
+//! syscalls, no blocking. Indices are plain atomics; the audio buffers are
+//! guarded by the `request_seq` / `done_seq` handshake (a single-producer /
+//! single-consumer protocol), so neither side ever waits on the other — the
+//! engine publishes a block and reads back whatever the host last produced
+//! (one-block latency), it never spins for the host.
+//!
+//! Stage 2 defines + maps the region and validates the handshake. Wiring it to
+//! the audio callback and the plugin `process()` is Stage 3, so the copy/exchange
+//! helpers exist but are not yet pumped.
+
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// Magic stamped in the header by the creator: `"FBAB"` (Futureboard Audio
+/// Bridge), little-endian.
+pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
+/// Layout version — bump on any change to [`SharedAudioBridge`] field order/size.
+pub const BRIDGE_LAYOUT_VERSION: u32 = 1;
+
+/// Maximum block size (frames) the region can carry. The engine's actual block
+/// must be `<=` this; the region is sized for the worst case so it never
+/// reallocates.
+pub const MAX_BLOCK_FRAMES: usize = 2048;
+/// Channels per audio buffer (stereo).
+pub const MAX_CHANNELS: usize = 2;
+/// Interleaved samples per audio buffer.
+pub const AUDIO_BUF_LEN: usize = MAX_BLOCK_FRAMES * MAX_CHANNELS;
+
+/// MIDI ring capacity (power of two).
+pub const MIDI_RING_CAP: usize = 1024;
+/// Parameter-automation ring capacity (power of two).
+pub const PARAM_RING_CAP: usize = 1024;
+
+/// `dsp_output_state` values.
+pub const DSP_OUTPUT_PENDING: u32 = 0;
+pub const DSP_OUTPUT_READY: u32 = 1;
+
+/// One MIDI event in the ring (POD, fixed size). `status`/`data1`/`data2` are
+/// raw MIDI bytes; `sample_offset` is the frame within the current block.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SharedMidiEvent {
+    pub sample_offset: u32,
+    pub status: u8,
+    pub data1: u8,
+    pub data2: u8,
+    pub _pad: u8,
+}
+
+/// One parameter-automation point in the ring (POD, fixed size).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SharedParamEvent {
+    pub sample_offset: u32,
+    pub param_id: u32,
+    pub value: f32,
+    pub _pad: u32,
+}
+
+/// Generic single-producer / single-consumer ring stored inline in shared
+/// memory. `head` is the consumer cursor, `tail` the producer cursor; both wrap
+/// at `2 * CAP` so the empty/full distinction needs no extra flag (the mask is
+/// applied only when indexing the storage).
+#[repr(C)]
+pub struct SpscRing<T: Copy, const CAP: usize> {
+    /// Consumer index (monotonic, wraps at `u32`).
+    head: AtomicU32,
+    /// Producer index (monotonic, wraps at `u32`).
+    tail: AtomicU32,
+    /// Backing storage. `UnsafeCell` because the producer writes a slot through a
+    /// shared reference; the SPSC index protocol guarantees no slot is read and
+    /// written concurrently.
+    slots: [UnsafeCell<T>; CAP],
+}
+
+// The SPSC index protocol (one producer, one consumer, `Acquire`/`Release`
+// publication) makes concurrent access sound; the region itself lives in shared
+// memory that both processes treat under the same contract.
+unsafe impl<T: Copy + Send, const CAP: usize> Sync for SpscRing<T, CAP> {}
+
+impl<T: Copy + Default, const CAP: usize> SpscRing<T, CAP> {
+    const MASK: u32 = (CAP as u32) - 1;
+
+    /// Compile-time guard: `CAP` must be a non-zero power of two.
+    const ASSERT_POW2: () = assert!(CAP.is_power_of_two() && CAP > 1);
+
+    /// Producer side: append `value`. Returns `false` (dropping the event) when
+    /// the ring is full — wait-free, never blocks the audio thread.
+    pub fn try_push(&self, value: T) -> bool {
+        let () = Self::ASSERT_POW2;
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        if tail.wrapping_sub(head) >= CAP as u32 {
+            return false; // full
+        }
+        let idx = (tail & Self::MASK) as usize;
+        // SAFETY: single producer owns `tail`; this slot is not being read
+        // because the consumer only reads indices `< tail` (published below).
+        unsafe {
+            self.slots[idx].get().write(value);
+        }
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+        true
+    }
+
+    /// Consumer side: pop the oldest value, or `None` when empty. Wait-free.
+    pub fn try_pop(&self) -> Option<T> {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if head == tail {
+            return None; // empty
+        }
+        let idx = (head & Self::MASK) as usize;
+        // SAFETY: single consumer owns `head`; slot was published by the producer
+        // before it bumped `tail` (Release/Acquire pair above).
+        let value = unsafe { self.slots[idx].get().read() };
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+        Some(value)
+    }
+
+    /// Drop every queued value (consumer side). Used on reset / panic.
+    pub fn clear(&self) {
+        while self.try_pop().is_some() {}
+    }
+
+    /// Approximate number of queued items (diagnostics only).
+    pub fn len(&self) -> u32 {
+        self.tail
+            .load(Ordering::Acquire)
+            .wrapping_sub(self.head.load(Ordering::Acquire))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Interleaved audio buffer stored inline. Plain `f32` guarded by the
+/// `request_seq`/`done_seq` handshake — not atomic, because exactly one side
+/// touches it between sequence bumps.
+#[repr(C)]
+pub struct SharedAudioBuffer {
+    samples: [UnsafeCell<f32>; AUDIO_BUF_LEN],
+}
+
+unsafe impl Sync for SharedAudioBuffer {}
+
+impl SharedAudioBuffer {
+    /// Copy `src` (interleaved, `<= AUDIO_BUF_LEN`) into the buffer. The caller
+    /// must own the buffer per the seq handshake (no concurrent reader).
+    ///
+    /// # Safety
+    /// SPSC contract: only the producing side may call this, and only while it
+    /// holds the block (before publishing `request_seq` / after the consumer
+    /// released it).
+    pub unsafe fn write_interleaved(&self, src: &[f32]) {
+        let n = src.len().min(AUDIO_BUF_LEN);
+        let dst = self.samples.as_ptr() as *mut f32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, n);
+        }
+    }
+
+    /// Copy `count` interleaved samples into `dst`.
+    ///
+    /// # Safety
+    /// SPSC contract: only the consuming side may call this while it holds the
+    /// block.
+    pub unsafe fn read_interleaved(&self, dst: &mut [f32], count: usize) {
+        let n = count.min(AUDIO_BUF_LEN).min(dst.len());
+        let src = self.samples.as_ptr() as *const f32;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), n);
+        }
+    }
+
+    /// Read up to `frames` stereo frames split into `out_l` / `out_r`. Returns
+    /// the number of frames written. Wait-free (raw load + arithmetic).
+    ///
+    /// # Safety
+    /// SPSC contract: only the consuming side (engine) may call this while it
+    /// holds the block.
+    pub unsafe fn read_deinterleaved(
+        &self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        frames: usize,
+    ) -> usize {
+        let n = frames
+            .min(MAX_BLOCK_FRAMES)
+            .min(out_l.len())
+            .min(out_r.len());
+        let src = self.samples.as_ptr() as *const f32;
+        for i in 0..n {
+            unsafe {
+                out_l[i] = *src.add(i * 2);
+                out_r[i] = *src.add(i * 2 + 1);
+            }
+        }
+        n
+    }
+
+    /// Copy deinterleaved stereo into the buffer (engine → host `audio_in`).
+    ///
+    /// # Safety
+    /// SPSC contract: only the producing side (engine) may call this while it
+    /// holds the block.
+    pub unsafe fn write_deinterleaved(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
+        let n = frames
+            .min(MAX_BLOCK_FRAMES)
+            .min(in_l.len())
+            .min(in_r.len());
+        let dst = self.samples.as_ptr() as *mut f32;
+        for i in 0..n {
+            unsafe {
+                *dst.add(i * 2) = in_l[i];
+                *dst.add(i * 2 + 1) = in_r[i];
+            }
+        }
+    }
+}
+
+/// The full shared region. Created (zeroed) by the OS mapping; the creator
+/// stamps the header. Field order is the wire layout — do not reorder without
+/// bumping [`BRIDGE_LAYOUT_VERSION`].
+#[repr(C)]
+pub struct SharedAudioBridge {
+    // --- Header (creator-stamped, read-only afterwards) ---
+    pub magic: AtomicU32,
+    pub layout_version: AtomicU32,
+    pub sample_rate: AtomicU32,
+    pub max_block_size: AtomicU32,
+    pub in_channels: AtomicU32,
+    pub out_channels: AtomicU32,
+
+    // --- Block handshake (lock-free, one-block latency) ---
+    /// Bumped by the engine after it writes `audio_in` + the rings for a block.
+    pub request_seq: AtomicU64,
+    /// Bumped by the host after it writes `audio_out` for that block.
+    pub done_seq: AtomicU64,
+    /// Frames in the current block (`<= max_block_size`).
+    pub block_frames: AtomicU32,
+    pub _pad0: AtomicU32,
+
+    // --- Status / latency / meters (atomics, both directions) ---
+    /// [`DSP_OUTPUT_PENDING`] / [`DSP_OUTPUT_READY`].
+    pub dsp_output_state: AtomicU32,
+    /// Plugin reported latency in samples (Stage 4).
+    pub latency_samples: AtomicU32,
+    /// Output peak meters, `f32` bits (host → engine).
+    pub meter_peak_l: AtomicU32,
+    pub meter_peak_r: AtomicU32,
+    /// Count of dropped/late blocks (diagnostics).
+    pub xrun_count: AtomicU32,
+    pub _pad1: AtomicU32,
+
+    // --- Lock-free rings (engine → host) ---
+    pub midi: SpscRing<SharedMidiEvent, MIDI_RING_CAP>,
+    pub params: SpscRing<SharedParamEvent, PARAM_RING_CAP>,
+
+    // --- Audio buffers ---
+    pub audio_in: SharedAudioBuffer,
+    pub audio_out: SharedAudioBuffer,
+}
+
+impl SharedAudioBridge {
+    /// Total region size in bytes.
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Stamp the header (creator side) and zero the dynamic state. Called once,
+    /// right after the zeroed region is mapped.
+    pub fn init_header(&self, sample_rate: u32, max_block_size: u32, channels: u32) {
+        self.sample_rate.store(sample_rate, Ordering::Relaxed);
+        self.max_block_size
+            .store(max_block_size.min(MAX_BLOCK_FRAMES as u32), Ordering::Relaxed);
+        self.in_channels.store(channels, Ordering::Relaxed);
+        self.out_channels.store(channels, Ordering::Relaxed);
+        self.layout_version
+            .store(BRIDGE_LAYOUT_VERSION, Ordering::Relaxed);
+        self.dsp_output_state
+            .store(DSP_OUTPUT_PENDING, Ordering::Relaxed);
+        // Publish magic last (Release) so an opener that sees the magic also sees
+        // a fully-stamped header.
+        self.magic.store(BRIDGE_MAGIC, Ordering::Release);
+    }
+
+    /// Opener-side validation: the header magic + layout version match.
+    pub fn header_valid(&self) -> bool {
+        self.magic.load(Ordering::Acquire) == BRIDGE_MAGIC
+            && self.layout_version.load(Ordering::Relaxed) == BRIDGE_LAYOUT_VERSION
+    }
+
+    pub fn set_dsp_output_ready(&self, ready: bool) {
+        self.dsp_output_state.store(
+            if ready {
+                DSP_OUTPUT_READY
+            } else {
+                DSP_OUTPUT_PENDING
+            },
+            Ordering::Release,
+        );
+    }
+
+    pub fn dsp_output_ready(&self) -> bool {
+        self.dsp_output_state.load(Ordering::Acquire) == DSP_OUTPUT_READY
+    }
+
+    /// Store the host output peak meters (host side).
+    pub fn store_meters(&self, peak_l: f32, peak_r: f32) {
+        self.meter_peak_l
+            .store(peak_l.to_bits(), Ordering::Relaxed);
+        self.meter_peak_r
+            .store(peak_r.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Read the host output peak meters (engine side).
+    pub fn meters(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.meter_peak_l.load(Ordering::Relaxed)),
+            f32::from_bits(self.meter_peak_r.load(Ordering::Relaxed)),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-process region handle.
+// ---------------------------------------------------------------------------
+
+/// Owns a mapped [`SharedAudioBridge`] region plus its backing (an OS file
+/// mapping, or a heap allocation for tests / single-process use). Deref-style
+/// access via [`Self::bridge`]. `Send`/`Sync` because the bridge enforces its
+/// own realtime SPSC contract.
+pub struct SharedAudioRegion {
+    ptr: *mut SharedAudioBridge,
+    backing: Backing,
+}
+
+unsafe impl Send for SharedAudioRegion {}
+unsafe impl Sync for SharedAudioRegion {}
+
+enum Backing {
+    /// Heap-allocated (aligned, zeroed) — tests and in-process fallback.
+    Heap(std::alloc::Layout),
+    /// OS file mapping; held only to keep the view alive (unmapped on drop).
+    #[cfg(windows)]
+    Mapping(#[allow(dead_code)] imp::WinMapping),
+}
+
+impl SharedAudioRegion {
+    /// Borrow the mapped bridge. Valid for the lifetime of the region.
+    pub fn bridge(&self) -> &SharedAudioBridge {
+        // SAFETY: `ptr` points at a live, correctly-sized mapping owned by
+        // `backing` for the lifetime of `self`.
+        unsafe { &*self.ptr }
+    }
+
+    /// Region byte size.
+    pub fn bytes(&self) -> u64 {
+        SharedAudioBridge::SIZE as u64
+    }
+
+    /// Allocate an in-process, zeroed region (tests / single-process fallback).
+    /// The header is left blank; call [`SharedAudioBridge::init_header`].
+    pub fn new_in_process() -> Self {
+        let layout = std::alloc::Layout::new::<SharedAudioBridge>();
+        // SAFETY: non-zero layout; `alloc_zeroed` yields a properly-aligned,
+        // zero-initialized block, which is a valid all-atomics-zero
+        // `SharedAudioBridge` (magic 0 = "not yet stamped").
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) as *mut SharedAudioBridge };
+        assert!(!ptr.is_null(), "audio bridge allocation failed");
+        Self {
+            ptr,
+            backing: Backing::Heap(layout),
+        }
+    }
+
+    /// Create a **named** shared region (engine side). Stamps the header.
+    #[cfg(windows)]
+    pub fn create_named(
+        name: &str,
+        sample_rate: u32,
+        max_block_size: u32,
+        channels: u32,
+    ) -> std::io::Result<Self> {
+        let mapping = imp::WinMapping::create(name, SharedAudioBridge::SIZE)?;
+        let region = Self {
+            ptr: mapping.ptr() as *mut SharedAudioBridge,
+            backing: Backing::Mapping(mapping),
+        };
+        region
+            .bridge()
+            .init_header(sample_rate, max_block_size, channels);
+        Ok(region)
+    }
+
+    /// Open an existing **named** shared region (host side). Validates the header.
+    #[cfg(windows)]
+    pub fn open_named(name: &str) -> std::io::Result<Self> {
+        let mapping = imp::WinMapping::open(name, SharedAudioBridge::SIZE)?;
+        let region = Self {
+            ptr: mapping.ptr() as *mut SharedAudioBridge,
+            backing: Backing::Mapping(mapping),
+        };
+        if !region.bridge().header_valid() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "shared audio bridge header invalid (magic/version mismatch)",
+            ));
+        }
+        Ok(region)
+    }
+}
+
+impl Drop for SharedAudioRegion {
+    fn drop(&mut self) {
+        match &self.backing {
+            Backing::Heap(layout) => unsafe {
+                std::alloc::dealloc(self.ptr as *mut u8, *layout);
+            },
+            #[cfg(windows)]
+            Backing::Mapping(_) => { /* WinMapping::Drop unmaps + closes handles */
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
+        MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+    };
+
+    /// A pagefile-backed named file mapping + its mapped view. Drop unmaps the
+    /// view and closes the section handle.
+    pub struct WinMapping {
+        handle: HANDLE,
+        view: MEMORY_MAPPED_VIEW_ADDRESS,
+    }
+
+    // The mapped memory is shared; access is governed by the bridge's SPSC
+    // contract, not by this handle.
+    unsafe impl Send for WinMapping {}
+    unsafe impl Sync for WinMapping {}
+
+    impl WinMapping {
+        pub fn create(name: &str, size: usize) -> std::io::Result<Self> {
+            let wide = HSTRING::from(name);
+            // SAFETY: INVALID_HANDLE_VALUE backs the mapping with the pagefile.
+            let handle = unsafe {
+                CreateFileMappingW(
+                    INVALID_HANDLE_VALUE,
+                    None,
+                    PAGE_READWRITE,
+                    (size >> 32) as u32,
+                    size as u32,
+                    &wide,
+                )
+            }
+            .map_err(std::io::Error::other)?;
+            let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
+            if view.Value.is_null() {
+                let err = std::io::Error::last_os_error();
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                return Err(err);
+            }
+            Ok(Self { handle, view })
+        }
+
+        pub fn open(name: &str, size: usize) -> std::io::Result<Self> {
+            let wide = HSTRING::from(name);
+            let handle = unsafe { OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, false, &wide) }
+                .map_err(std::io::Error::other)?;
+            let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
+            if view.Value.is_null() {
+                let err = std::io::Error::last_os_error();
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                return Err(err);
+            }
+            Ok(Self { handle, view })
+        }
+
+        pub fn ptr(&self) -> *mut core::ffi::c_void {
+            self.view.Value
+        }
+    }
+
+    impl Drop for WinMapping {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = UnmapViewOfFile(self.view);
+                let _ = CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_round_trips_in_process() {
+        let region = SharedAudioRegion::new_in_process();
+        let bridge = region.bridge();
+        assert!(!bridge.header_valid(), "blank region must not validate");
+        bridge.init_header(48_000, 256, 2);
+        assert!(bridge.header_valid());
+        assert_eq!(bridge.sample_rate.load(Ordering::Relaxed), 48_000);
+        assert_eq!(bridge.max_block_size.load(Ordering::Relaxed), 256);
+        assert!(!bridge.dsp_output_ready());
+        bridge.set_dsp_output_ready(true);
+        assert!(bridge.dsp_output_ready());
+    }
+
+    #[test]
+    fn midi_ring_is_spsc_fifo_and_bounded() {
+        let region = SharedAudioRegion::new_in_process();
+        let ring = &region.bridge().midi;
+        assert!(ring.is_empty());
+        for i in 0..8u32 {
+            assert!(ring.try_push(SharedMidiEvent {
+                sample_offset: i,
+                status: 0x90,
+                data1: 60,
+                data2: 100,
+                _pad: 0,
+            }));
+        }
+        assert_eq!(ring.len(), 8);
+        let first = ring.try_pop().unwrap();
+        assert_eq!(first.sample_offset, 0);
+        // Fill to capacity, then the next push is dropped (wait-free, no block).
+        let mut pushed = 1; // one popped above leaves room for one more than CAP-8
+        while ring.try_push(SharedMidiEvent::default()) {
+            pushed += 1;
+        }
+        assert!(pushed <= MIDI_RING_CAP, "ring must be bounded");
+        ring.clear();
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn audio_buffer_copies_within_bounds() {
+        let region = SharedAudioRegion::new_in_process();
+        let buf = &region.bridge().audio_in;
+        let src: Vec<f32> = (0..AUDIO_BUF_LEN).map(|i| i as f32).collect();
+        unsafe { buf.write_interleaved(&src) };
+        let mut dst = vec![0.0f32; AUDIO_BUF_LEN];
+        unsafe { buf.read_interleaved(&mut dst, AUDIO_BUF_LEN) };
+        assert_eq!(src, dst);
+    }
+
+    #[test]
+    fn meters_round_trip_through_bits() {
+        let region = SharedAudioRegion::new_in_process();
+        let bridge = region.bridge();
+        bridge.store_meters(0.5, 0.25);
+        assert_eq!(bridge.meters(), (0.5, 0.25));
+    }
+}

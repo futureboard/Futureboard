@@ -526,6 +526,32 @@ impl InsertPluginFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginRuntimeBackend {
+    InProcess,
+    ExternalBridge,
+}
+
+impl PluginRuntimeBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            PluginRuntimeBackend::InProcess => "in_process",
+            PluginRuntimeBackend::ExternalBridge => "external_bridge",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginRuntimeState {
+    Loading,
+    Ready,
+    EditorOpening,
+    EditorOpen,
+    Failed(String),
+    Crashed,
+    Unloaded,
+}
+
 /// Load progress of an insert slot. Drives the chip color / label.
 /// `Loading` is reserved for Phase 2 when actual plugin instantiation
 /// runs on a worker thread. Phase 1 transitions Empty → Ready directly
@@ -571,6 +597,9 @@ pub struct InsertSlotState {
     pub enabled: bool,
     pub bypassed: bool,
     pub load_status: InsertLoadStatus,
+    pub runtime_backend: PluginRuntimeBackend,
+    pub runtime_state: PluginRuntimeState,
+    pub host_pid: Option<u32>,
     pub parameters: Vec<PluginParameterState>,
 }
 
@@ -585,6 +614,9 @@ impl InsertSlotState {
             enabled: true,
             bypassed: false,
             load_status: InsertLoadStatus::Empty,
+            runtime_backend: PluginRuntimeBackend::InProcess,
+            runtime_state: PluginRuntimeState::Unloaded,
+            host_pid: None,
             parameters: Vec::new(),
         }
     }
@@ -832,6 +864,11 @@ pub struct TrackState {
     /// only descriptor + transient state; the runtime owns the actual
     /// plugin processor.
     pub inserts: Vec<InsertSlotState>,
+    /// Canonical MIDI destination for this instrument track — the
+    /// `plugin_instance_id` of the first enabled instrument insert (e.g.
+    /// `insert-track-1-1`). Set when a VSTi is assigned; used for piano
+    /// preview, clip playback, and external-bridge routing.
+    pub instrument_plugin_instance_id: Option<String>,
     /// Aux sends to Bus/Return tracks (Phase 3). Empty for most tracks.
     pub sends: Vec<SendSlotState>,
     /// Persisted routing choices. Device discovery is not wired yet, so device
@@ -1285,6 +1322,7 @@ impl TimelineState {
             inserts: Vec::new(),
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(TrackType::Audio),
+            instrument_plugin_instance_id: None,
         };
 
         let track2 = TrackState {
@@ -1326,6 +1364,7 @@ impl TimelineState {
             inserts: Vec::new(),
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(TrackType::Audio),
+            instrument_plugin_instance_id: None,
         };
 
         let track3 = TrackState {
@@ -1375,6 +1414,7 @@ impl TimelineState {
             inserts: Vec::new(),
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(TrackType::Midi),
+            instrument_plugin_instance_id: None,
         };
 
         Self {
@@ -2649,6 +2689,7 @@ impl TimelineState {
             inserts: Vec::new(),
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(track_type),
+            instrument_plugin_instance_id: None,
         });
         id
     }
@@ -2961,22 +3002,75 @@ impl TimelineState {
         let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
             return;
         };
+        let is_instrument_slot = matches!(
+            track.track_type,
+            TrackType::Instrument | TrackType::Midi
+        ) && track
+            .inserts
+            .first()
+            .map(|first| first.id == insert_id)
+            .unwrap_or(false);
         let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
             return;
         };
         slot.plugin_id = Some(plugin_id);
         slot.plugin_path = plugin_path;
         slot.plugin_format = Some(plugin_format);
+        let display_name_log = display_name.clone();
         slot.display_name = display_name;
         slot.load_status = InsertLoadStatus::Ready;
+        slot.runtime_backend = PluginRuntimeBackend::InProcess;
+        slot.runtime_state = PluginRuntimeState::Ready;
+        slot.host_pid = None;
         slot.bypassed = false;
         slot.parameters.clear();
+        if is_instrument_slot {
+            track.instrument_plugin_instance_id = Some(insert_id.to_string());
+            eprintln!(
+                "[instrument-route] track={track_id} instrument_instance={insert_id} plugin={display_name_log}"
+            );
+            eprintln!("[instrument-route] midi_destination={insert_id}");
+        }
         if plugin_debug_enabled() {
             eprintln!(
                 "[plugin] set_insert_plugin track={} slot={} -> {}",
                 track_id, insert_id, slot.display_name
             );
         }
+    }
+
+    pub fn set_insert_runtime(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        backend: PluginRuntimeBackend,
+        state: PluginRuntimeState,
+        host_pid: Option<u32>,
+    ) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return false;
+        };
+        let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+            return false;
+        };
+        let status = match &state {
+            PluginRuntimeState::Loading | PluginRuntimeState::EditorOpening => {
+                InsertLoadStatus::Loading
+            }
+            PluginRuntimeState::Ready | PluginRuntimeState::EditorOpen => InsertLoadStatus::Ready,
+            PluginRuntimeState::Failed(message) => InsertLoadStatus::Failed(message.clone()),
+            PluginRuntimeState::Crashed => InsertLoadStatus::Failed("Plugin host crashed".to_string()),
+            PluginRuntimeState::Unloaded => InsertLoadStatus::Disabled,
+        };
+        let changed = slot.runtime_backend != backend
+            || slot.runtime_state != state
+            || slot.host_pid != host_pid
+            || slot.load_status != status;
+        slot.runtime_backend = backend;
+        slot.runtime_state = state;
+        slot.host_pid = host_pid;
+        slot.load_status = status;
+        changed
     }
 
     pub fn remove_insert(&mut self, track_id: &str, insert_id: &str) {

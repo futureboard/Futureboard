@@ -210,6 +210,9 @@ impl StudioLayout {
         shutdown::log("phase: plugin editors");
         self.shutdown_plugin_editors(cx);
 
+        shutdown::log("phase: plugin bridge hosts");
+        super::plugin_bridge_runtime::shutdown_plugin_bridge(&mut self.plugin_bridge_runtime);
+
         shutdown::log("shutdown_studio end");
     }
 

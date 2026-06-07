@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// [`HostEvent`]. The client sends it in [`HostCommand::Hello`] and the host
 /// echoes its own in [`HostEvent::Ready`]; a mismatch should be surfaced, not
 /// silently tolerated.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Commands sent **client → host** (written to the host's stdin).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +37,16 @@ pub enum HostCommand {
     /// the bridge client right after spawn to confirm the process is alive and
     /// speaking the protocol before any editor command.
     Ping,
+    /// Load a plugin instance into the external host runtime. The main app
+    /// sends this as soon as a VST3 insert is created; editor attachment is a
+    /// later command against the same `plugin_instance_id`.
+    LoadPlugin {
+        plugin_instance_id: String,
+        plugin_path: String,
+        class_id: String,
+        sample_rate: u32,
+        max_block_size: u32,
+    },
     /// Attach a VST3 editor view into an HWND owned by the main app.
     ///
     /// `parent_hwnd` is the main-app-created **content child HWND**
@@ -47,6 +57,20 @@ pub enum HostCommand {
         plugin_instance_id: String,
         plugin_path: String,
         class_id: String,
+        parent_hwnd: u64,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    },
+    /// Phase 1: `createView` + `getSize` only; host emits [`HostEvent::EditorPreferredSize`].
+    PrepareEditorView {
+        plugin_instance_id: String,
+        plugin_path: String,
+        class_id: String,
+    },
+    /// Phase 2: attach after main app resized content HWND to preferred size.
+    ConfirmEditorContentReady {
+        plugin_instance_id: String,
         parent_hwnd: u64,
         width: u32,
         height: u32,
@@ -63,6 +87,61 @@ pub enum HostCommand {
     CloseEditor { plugin_instance_id: String },
     /// Detach (if attached) and release the plugin instance entirely.
     UnloadPlugin { plugin_instance_id: String },
+    /// Preview a single MIDI note on a loaded VSTi instance (transport may be stopped).
+    PreviewNoteOn {
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    PreviewNoteOff {
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+    },
+    PreviewAllNotesOff {
+        plugin_instance_id: String,
+    },
+    MidiPanic {
+        plugin_instance_id: String,
+    },
+    /// Stage 1 (shared audio bridge): the **main engine owns** the sample rate
+    /// and block size; the host must *follow* these for all plugin DSP. Sent
+    /// before the first `LoadPlugin` and whenever the engine's audio config
+    /// changes. Diagnostics-only at this stage — the host applies the config and
+    /// replies [`HostEvent::AudioBridgeConfigured`]; no shared-memory audio
+    /// transport exists yet (that is Stage 2).
+    ConfigureAudioBridge {
+        sample_rate: u32,
+        max_block_size: u32,
+    },
+    /// Prepare plugin DSP at the engine-owned sample rate / block size.
+    PrepareProcessing {
+        plugin_instance_id: String,
+        sample_rate: u32,
+        max_block_size: u32,
+        input_channels: u32,
+        output_channels: u32,
+    },
+    /// Stage 1 skeleton: request the host to process one DSP block of `frames`
+    /// samples. The lock-free shared-memory audio/MIDI transport is Stage 2/3;
+    /// for now the host acknowledges with [`HostEvent::AudioBridgeStatus`]
+    /// reporting `dsp_output=pending` (plugin output is NOT yet mixed into the
+    /// main engine — never faked through a second device stream).
+    ProcessBlockShared {
+        block_id: u64,
+        frames: u32,
+    },
+    /// Stage 2: the engine created a named shared-memory region
+    /// ([`crate::audio_bridge::SharedAudioBridge`]) and asks the host to map it.
+    /// `bytes` is the region size for validation. The host replies
+    /// [`HostEvent::SharedAudioAttached`]. The lock-free buffers carry audio
+    /// in/out, the MIDI ring, the parameter-automation ring, and the
+    /// status/latency/meter block — no heap alloc or blocking on the audio thread.
+    AttachSharedAudio {
+        name: String,
+        bytes: u64,
+    },
     /// Graceful host shutdown: detach everything and exit 0.
     Shutdown,
 }
@@ -75,6 +154,25 @@ pub enum HostEvent {
     Ready { protocol_version: u32, pid: u32 },
     /// Reply to [`HostCommand::Ping`] — confirms the bridge is live.
     Pong { pid: u32 },
+    /// Host accepted a load request and is resolving the plugin.
+    PluginLoading { plugin_instance_id: String },
+    /// Plugin runtime is available in the host process.
+    PluginLoaded {
+        plugin_instance_id: String,
+        name: String,
+    },
+    /// [`HostCommand::LoadPlugin`] for an instance that is already loaded —
+    /// the host reuses the existing component/controller (no second create).
+    PluginAlreadyLoaded {
+        plugin_instance_id: String,
+        name: String,
+    },
+    /// Plugin load failed; the main app should surface this and must not
+    /// silently fall back to in-process hosting while the bridge is enabled.
+    PluginLoadFailed {
+        plugin_instance_id: String,
+        error: String,
+    },
     /// Editor view attached to the supplied HWND. `result` is the raw VST3
     /// `tresult` from `attached` (0 == `kResultOk`).
     EditorAttached {
@@ -82,6 +180,9 @@ pub enum HostEvent {
         result: i32,
         preferred_width: u32,
         preferred_height: u32,
+        /// Plugin-host child HWND (`IPlugView::attached` target); 0 if unknown.
+        #[serde(default)]
+        host_hwnd: u64,
     },
     /// Attach failed (bad HWND, plugin load failure, no view, …).
     EditorAttachFailed {
@@ -101,6 +202,39 @@ pub enum HostEvent {
     PluginUnloaded { plugin_instance_id: String },
     /// Out-of-band log line (host-side diagnostics surfaced to the client).
     Log { level: String, message: String },
+    /// Stage 1 reply to [`HostCommand::ConfigureAudioBridge`]: the host accepted
+    /// the engine-owned sample rate / block size and is following them.
+    AudioBridgeConfigured {
+        sample_rate: u32,
+        max_block_size: u32,
+        /// True once the host's plugin DSP runs at the engine's rate/block.
+        follows_engine: bool,
+    },
+    /// Stage 1 status for the shared audio bridge. `dsp_output` is `"pending"`
+    /// until plugin DSP output is actually mixed into the main engine
+    /// (Stage 3) — it is never `"ready"` while audio only plays through a
+    /// separate device stream. `latency_samples` is the reported plugin latency
+    /// (0 until Stage 4).
+    AudioBridgeStatus {
+        block_id: u64,
+        dsp_output: String,
+        latency_samples: u32,
+    },
+    /// Stage 2 reply to [`HostCommand::AttachSharedAudio`]: whether the host
+    /// mapped the shared-memory region and validated its header.
+    SharedAudioAttached {
+        attached: bool,
+        name: String,
+        bytes: u64,
+    },
+    /// Reply to [`HostCommand::PrepareProcessing`]: plugin DSP is active at the
+    /// engine-owned rate/block.
+    ProcessingPrepared {
+        plugin_instance_id: String,
+        sample_rate: u32,
+        max_block_size: u32,
+        output_channels: u32,
+    },
 }
 
 /// Serialize `msg` as a single JSON line (object + `\n`) and flush.
@@ -139,14 +273,12 @@ mod tests {
 
     #[test]
     fn command_round_trips_through_frame() {
-        let cmd = HostCommand::OpenEditorWithParentHwnd {
+        let cmd = HostCommand::LoadPlugin {
             plugin_instance_id: "track1:insert2".into(),
             plugin_path: "C:/VST3/Example.vst3".into(),
             class_id: "ABCDEF0123456789".into(),
-            parent_hwnd: 0x00BB_BBBB,
-            width: 1236,
-            height: 736,
-            dpi: 96,
+            sample_rate: 48_000,
+            max_block_size: 256,
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &cmd).unwrap();
@@ -164,6 +296,7 @@ mod tests {
             result: 0,
             preferred_width: 1236,
             preferred_height: 736,
+            host_hwnd: 0,
         };
         let mut buf = Vec::new();
         // Leading blank lines must be tolerated.
@@ -191,6 +324,6 @@ mod tests {
             pid: 42,
         })
         .unwrap();
-        assert_eq!(json, r#"{"event":"Ready","protocol_version":1,"pid":42}"#);
+        assert_eq!(json, r#"{"event":"Ready","protocol_version":3,"pid":42}"#);
     }
 }

@@ -390,6 +390,7 @@ impl StudioLayout {
             let insert_id = insert_id.clone();
             StudioLayout::defer_update(&owner, cx, move |this, cx| {
                 this.close_insert_editor(&track_id, &insert_id, cx);
+                this.unload_bridge_plugin(&insert_id);
                 this.timeline.update(cx, |timeline, cx| {
                     timeline.state.remove_insert(&track_id, &insert_id);
                     cx.notify();

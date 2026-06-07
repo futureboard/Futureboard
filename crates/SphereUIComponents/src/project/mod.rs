@@ -740,12 +740,15 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         .collect(),
                 })
                 .collect();
-            let inserts = pt
+            let inserts: Vec<
+                crate::components::timeline::timeline_state::InsertSlotState,
+            > = pt
                 .inserts
                 .iter()
                 .map(|pi| {
                     use crate::components::timeline::timeline_state::{
                         InsertLoadStatus, InsertPluginFormat, InsertSlotState,
+                        PluginRuntimeBackend, PluginRuntimeState,
                     };
                     match &pi.plugin {
                         Some(plugin) => InsertSlotState {
@@ -763,6 +766,9 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                             enabled: true,
                             bypassed: pi.bypassed,
                             load_status: InsertLoadStatus::Ready,
+                            runtime_backend: PluginRuntimeBackend::InProcess,
+                            runtime_state: PluginRuntimeState::Ready,
+                            host_pid: None,
                             parameters: Vec::new(),
                         },
                         None => InsertSlotState::empty(pi.id.clone()),
@@ -790,6 +796,14 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                     }
                 })
                 .collect();
+            let instrument_plugin_instance_id = match track_type {
+                crate::components::timeline::timeline_state::TrackType::Instrument
+                | crate::components::timeline::timeline_state::TrackType::Midi => inserts
+                    .first()
+                    .filter(|slot| slot.plugin_id.is_some())
+                    .map(|slot| slot.id.clone()),
+                _ => None,
+            };
             TrackState {
                 id: pt.id.clone(),
                 name: pt.name.clone(),
@@ -818,6 +832,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 inserts,
                 sends,
                 routing: project_routing_to_timeline(&pt.routing, track_type),
+                instrument_plugin_instance_id,
             }
         })
         .collect();

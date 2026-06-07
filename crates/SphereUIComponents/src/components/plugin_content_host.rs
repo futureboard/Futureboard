@@ -37,17 +37,70 @@ fn debug_enabled() -> bool {
 
 #[cfg(target_os = "windows")]
 mod imp {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Once;
+
     use super::{debug_enabled, ContentRect};
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HWND;
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        FillRect, GetStockObject, HBRUSH, HDC, BLACK_BRUSH,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GetParent, IsChild, IsWindow, SetWindowPos, HMENU,
-        SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-        WS_VISIBLE,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent,
+        GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow, RegisterClassW, SetWindowPos,
+        GWL_STYLE, HMENU, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WM_ERASEBKGND, WNDCLASSW,
+        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
     };
 
     fn hwnd_from(handle: u64) -> HWND {
         HWND(handle as *mut core::ffi::c_void)
+    }
+
+    /// Dedicated window class for the content host. We do NOT use the predefined
+    /// `STATIC` class: a blank static control fills its client area with a
+    /// light/system background, which appears as the "blank white" the plugin
+    /// editor showed before the host's view painted (spec Part 5). This class
+    /// paints solid black instead, matching the host's embed child, so there is
+    /// no white flash and any area outside the plugin's own view stays dark.
+    const CONTENT_HOST_CLASS: PCWSTR = w!("SpherePluginContentHost");
+
+    fn ensure_content_host_class() {
+        static REGISTER: Once = Once::new();
+        REGISTER.call_once(|| {
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(content_host_wndproc),
+                lpszClassName: CONTENT_HOST_CLASS,
+                hbrBackground: HBRUSH(unsafe { GetStockObject(BLACK_BRUSH) }.0),
+                ..Default::default()
+            };
+            unsafe { RegisterClassW(&wc) };
+        });
+    }
+
+    /// Suppress the default white erase: fill the content host's client area
+    /// black so the plugin's WS_CHILD view (created by the host process) is never
+    /// preceded by a white flash, and any uncovered region stays dark. WS_CLIPCHILDREN
+    /// on this window keeps us from painting over the plugin's own child.
+    unsafe extern "system" fn content_host_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_ERASEBKGND {
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let mut rc = RECT::default();
+            let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+            let brush = HBRUSH(unsafe { GetStockObject(BLACK_BRUSH) }.0);
+            unsafe { FillRect(hdc, &rc, brush) };
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!("[plugin-content-hwnd] WM_ERASEBKGND suppressed=true");
+            }
+            return LRESULT(1);
+        }
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
     }
 
     /// A real `WS_CHILD` content window parented to a main-app top HWND. Drop
@@ -59,6 +112,46 @@ mod imp {
     }
 
     impl ContentChildHwnd {
+        fn log_diagnostics(&self, rect: ContentRect) {
+            unsafe {
+                let top = hwnd_from(self.top_hwnd);
+                let content = hwnd_from(self.content_hwnd);
+                let parent = GetParent(content).map(|p| p.0 as u64).unwrap_or(0);
+                let is_child = IsChild(top, content).as_bool();
+                let style = GetWindowLongPtrW(content, GWL_STYLE);
+                let mut shell_rect = windows::Win32::Foundation::RECT::default();
+                let mut content_screen = windows::Win32::Foundation::RECT::default();
+                let mut content_client = windows::Win32::Foundation::RECT::default();
+                let _ = GetWindowRect(top, &mut shell_rect);
+                let _ = GetWindowRect(content, &mut content_screen);
+                let _ = GetClientRect(content, &mut content_client);
+                eprintln!("[plugin-editor-window] shell_hwnd=0x{:x}", self.top_hwnd);
+                eprintln!("[plugin-editor-window] content_hwnd=0x{:x}", self.content_hwnd);
+                eprintln!("[plugin-editor-window] GetParent(content_hwnd)=0x{parent:x}");
+                eprintln!("[plugin-editor-window] content_is_child={is_child}");
+                eprintln!(
+                    "[plugin-editor-window] content_style=0x{style:08x} WS_CHILD={} WS_VISIBLE={}",
+                    (style & WS_CHILD.0 as isize) != 0,
+                    (style & WS_VISIBLE.0 as isize) != 0
+                );
+                eprintln!(
+                    "[plugin-editor-window] shell_screen_rect=({},{},{},{})",
+                    shell_rect.left, shell_rect.top, shell_rect.right, shell_rect.bottom
+                );
+                eprintln!(
+                    "[plugin-editor-window] content_screen_rect=({},{},{},{})",
+                    content_screen.left,
+                    content_screen.top,
+                    content_screen.right,
+                    content_screen.bottom
+                );
+                eprintln!(
+                    "[plugin-editor-window] content_client_rect=({}, {}, {}x{})",
+                    rect.x, rect.y, rect.width, rect.height
+                );
+            }
+        }
+
         /// Create the content child window under `top_hwnd`. Returns `None` if
         /// `top_hwnd` is not a window or window creation fails.
         pub fn create(top_hwnd: u64, rect: ContentRect) -> Option<Self> {
@@ -66,16 +159,18 @@ mod imp {
                 return None;
             }
             let top = hwnd_from(top_hwnd);
-            // Safety: all args are validated; `STATIC` is a predefined window
-            // class so no registration/WndProc is required. The plugin paints
-            // its own child into this HWND after the host attaches the view.
+            ensure_content_host_class();
+            // Safety: all args are validated; the content host class is
+            // registered above. The plugin paints its own child into this HWND
+            // after the host attaches the view; this window only provides a
+            // black, non-erasing backing (no white flash — spec Part 5).
             unsafe {
                 if !IsWindow(Some(top)).as_bool() {
                     return None;
                 }
                 let content = CreateWindowExW(
                     WINDOW_EX_STYLE(0),
-                    windows::core::w!("STATIC"),
+                    CONTENT_HOST_CLASS,
                     PCWSTR::null(),
                     WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                     rect.x,
@@ -97,24 +192,15 @@ mod imp {
                     return None;
                 }
 
-                if debug_enabled() {
-                    let parent = GetParent(content).map(|p| p.0 as u64).unwrap_or(0);
-                    let is_child = IsChild(top, content).as_bool();
-                    eprintln!("[PluginEditorWindow] top_hwnd=0x{top_hwnd:x}");
-                    eprintln!("[PluginEditorWindow] content_hwnd=0x{content_u64:x}");
-                    eprintln!("[PluginEditorWindow] content_hwnd != top_hwnd");
-                    eprintln!("[PluginEditorWindow] content_parent=0x{parent:x}");
-                    eprintln!(
-                        "[PluginEditorWindow] content_rect=({},{},{}x{})",
-                        rect.x, rect.y, rect.width, rect.height
-                    );
-                    eprintln!("[PluginEditorWindow] content_is_child={is_child} owner=main_app");
-                }
-
-                Some(Self {
+                let result = Self {
                     top_hwnd,
                     content_hwnd: content_u64,
-                })
+                };
+                if debug_enabled() {
+                    eprintln!("[PluginEditorWindow] content_hwnd != top_hwnd");
+                }
+                result.log_diagnostics(rect);
+                Some(result)
             }
         }
 
@@ -141,6 +227,11 @@ mod imp {
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
+            eprintln!(
+                "[plugin-editor-window] resize content_hwnd=0x{:x} rect=({},{},{}x{})",
+                self.content_hwnd, rect.x, rect.y, rect.width, rect.height
+            );
+            self.log_diagnostics(rect);
         }
 
         /// True while the content HWND is still a valid window.

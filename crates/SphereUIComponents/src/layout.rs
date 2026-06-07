@@ -46,6 +46,7 @@ mod helpers;
 mod input_ops;
 mod inspector_ops;
 mod mixer_ops;
+pub(crate) mod plugin_bridge_runtime;
 mod plugin_ops;
 mod project_ops;
 mod recording_ops;
@@ -353,6 +354,13 @@ pub struct StudioLayout {
     /// a native child region. Dropping the window entity detaches the view.
     open_plugin_editors:
         std::collections::HashMap<(String, String), WindowHandle<PluginEditorWindow>>,
+    /// Native main-owned plugin editor shells for the external-bridge path. The
+    /// editor lives in a real Win32 top-level window (no GPUI flip-model swap
+    /// chain over it), so the host process's `IPlugView` child actually paints.
+    /// Keyed by `(track_id, plugin_instance_id)`.
+    bridge_editors:
+        std::collections::HashMap<(String, String), plugin_ops::BridgeEditorSession>,
+    plugin_bridge_runtime: Option<plugin_bridge_runtime::SharedPluginBridgeRuntime>,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
     /// Detached mixer window for multi-monitor layouts.
@@ -546,8 +554,8 @@ impl StudioLayout {
             let target = cx.entity().clone();
             let preview_handler = Arc::new(
                 move |command: components::piano_roll::UiMidiPreviewCommand, cx: &mut gpui::App| {
-                    let _ = target.update(cx, |layout, _cx| {
-                        layout.dispatch_midi_preview_command(command);
+                    let _ = target.update(cx, |layout, cx| {
+                        layout.dispatch_midi_preview_command(command, cx);
                     });
                 },
             );
@@ -678,6 +686,8 @@ impl StudioLayout {
             plugin_cache_present: false,
             plugin_catalog_status: PluginCatalogStatus::Loading,
             open_plugin_editors: std::collections::HashMap::new(),
+            bridge_editors: std::collections::HashMap::new(),
+            plugin_bridge_runtime: None,
             settings_window: None,
             mixer_window: None,
             pending_mixer_external_open: None,

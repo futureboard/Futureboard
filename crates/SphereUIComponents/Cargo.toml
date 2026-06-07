@@ -46,3 +46,4 @@ crc32fast.workspace = true
 # editor ownership). Same workspace version the app already links transitively.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+windows-core = { workspace = true }

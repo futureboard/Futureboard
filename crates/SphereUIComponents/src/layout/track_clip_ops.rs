@@ -101,6 +101,7 @@ impl StudioLayout {
         }
 
         for plugin_id in &plugin_ids {
+            self.unload_bridge_plugin(plugin_id);
             eprintln!("[GraphUpdate] remove_plugin_node={plugin_id}");
             eprintln!("[PluginUnload] plugin={plugin_id} released=pending_runtime_reconcile");
         }

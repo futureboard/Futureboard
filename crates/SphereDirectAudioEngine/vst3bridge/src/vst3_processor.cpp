@@ -3133,17 +3133,20 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   daux_editor_install_frame(processor);
 
   Steinberg::ViewRect preferred{};
-  int editor_w = width;
-  int editor_h = height;
+  // The main app sizes the shell content HWND before attach — honour that region
+  // instead of re-applying createView getSize (which would desync host/plugin).
+  int editor_w = width > 0 ? width : 640;
+  int editor_h = height > 0 ? height : 480;
   const auto get_size_result = processor->editor_view->getSize(&preferred);
+  int preferred_w = 0;
+  int preferred_h = 0;
   if (get_size_result == Steinberg::kResultTrue || get_size_result == Steinberg::kResultOk) {
-    const int preferred_w = daux_view_rect_width(preferred);
-    const int preferred_h = daux_view_rect_height(preferred);
-    if (preferred_w > 0 && preferred_h > 0) {
-      editor_w = preferred_w;
-      editor_h = preferred_h;
-    }
+    preferred_w = daux_view_rect_width(preferred);
+    preferred_h = daux_view_rect_height(preferred);
   }
+  std::fprintf(stderr,
+               "[vst3-editor] host_region=%dx%d preferred=%dx%d using_host=true\n",
+               editor_w, editor_h, preferred_w, preferred_h);
   std::fprintf(
       stderr,
       "[vst3-editor] getSize result=0x%x width=%d height=%d rect=(%d,%d,%d,%d)\n",
@@ -3343,17 +3346,19 @@ extern "C" void sphere_daux_vst3_embed_set_bounds(
     SphereDauxVst3Processor* processor, int x, int y, int width, int height) {
 #ifdef _WIN32
   if (!processor || !processor->embed_mode) return;
-  if (processor->embed_content_w > 0 && processor->embed_content_h > 0) {
-    if (daux_embed_apply_content_size(processor,
-                                      processor->embed_content_w,
-                                      processor->embed_content_h,
-                                      "set_bounds")) {
-      resize_editor_view(processor);
-    }
-    return;
-  }
+  if (width <= 0 || height <= 0) return;
+  processor->embed_host_x = x;
+  processor->embed_host_y = y;
+  processor->embed_host_w = width;
+  processor->embed_host_h = height;
+  processor->embed_content_w = width;
+  processor->embed_content_h = height;
+  processor->embed_geometry_valid = false;
   if (daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug())) {
     resize_editor_view(processor);
+    std::fprintf(stderr,
+                 "[plugin-host] host_hwnd resize %dx%d\n",
+                 width, height);
   }
 #else
   (void)processor; (void)x; (void)y; (void)width; (void)height;

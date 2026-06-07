@@ -683,6 +683,25 @@ impl EngineInner {
         self.send_command(EngineCommand::SetBpm(bpm))
     }
 
+    /// Stage 3b: install (or clear, with `None`) the realtime sink for
+    /// `track_id` — the audio callback mixes its external plugin-host DSP output
+    /// into the master. Applied between blocks; no realtime allocation.
+    pub fn set_plugin_bridge_sink(
+        &self,
+        track_id: String,
+        sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetPluginBridgeSink { track_id, sink })
+    }
+
+    pub fn set_bridge_editor_active(
+        &self,
+        track_id: String,
+        active: bool,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetBridgeEditorActive { track_id, active })
+    }
+
     pub fn set_time_signature(
         &self,
         numerator: u32,
@@ -740,6 +759,52 @@ impl EngineInner {
 
     pub fn midi_preview_all_notes_off(&self, track_id: String) -> Result<(), SphereAudioError> {
         self.send_command(EngineCommand::MidiPreviewAllNotesOff { track_id })
+    }
+
+    pub fn plugin_preview_note_on(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    ) -> Result<(), SphereAudioError> {
+        eprintln!(
+            "[midi-preview-engine] queued note_on instance={plugin_instance_id} pitch={pitch} velocity={velocity}"
+        );
+        self.send_command(EngineCommand::PluginPreviewNoteOn {
+            track_id,
+            plugin_instance_id,
+            channel,
+            pitch,
+            velocity,
+        })
+    }
+
+    pub fn plugin_preview_note_off(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::PluginPreviewNoteOff {
+            track_id,
+            plugin_instance_id,
+            channel,
+            pitch,
+        })
+    }
+
+    pub fn plugin_preview_all_notes_off(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::PluginPreviewAllNotesOff {
+            track_id,
+            plugin_instance_id,
+        })
     }
 
     /// Read the current transport/clock snapshot for UI polling.
@@ -2251,6 +2316,9 @@ impl EngineInner {
                 EngineCommand::MidiPreviewNoteOn { .. } => "MidiPreviewNoteOn",
                 EngineCommand::MidiPreviewNoteOff { .. } => "MidiPreviewNoteOff",
                 EngineCommand::MidiPreviewAllNotesOff { .. } => "MidiPreviewAllNotesOff",
+                EngineCommand::PluginPreviewNoteOn { .. } => "PluginPreviewNoteOn",
+                EngineCommand::PluginPreviewNoteOff { .. } => "PluginPreviewNoteOff",
+                EngineCommand::PluginPreviewAllNotesOff { .. } => "PluginPreviewAllNotesOff",
                 EngineCommand::StartTransport => "StartTransport",
                 EngineCommand::StopTransport => "StopTransport",
                 EngineCommand::Seek { .. } => "Seek",
@@ -2258,6 +2326,8 @@ impl EngineInner {
                 EngineCommand::SetBpm(_) => "SetBpm",
                 EngineCommand::SetTimeSignature(_, _) => "SetTimeSignature",
                 EngineCommand::SetLoop { .. } => "SetLoop",
+                EngineCommand::SetPluginBridgeSink { .. } => "SetPluginBridgeSink",
+                EngineCommand::SetBridgeEditorActive { .. } => "SetBridgeEditorActive",
             };
             eprintln!("[play-debug engine] send_command {label}");
         }
@@ -2607,6 +2677,36 @@ fn route_main_output(
 /// pre-fader sends read the post-insert signal, post-fader sends read the
 /// post-fader signal. No allocation.
 #[inline]
+fn mix_bridged_sink_into_track(
+    track: &mut RuntimeTrack,
+    frames: usize,
+    sink: &dyn crate::plugin_bridge::PluginBridgeSink,
+) {
+    const MAX: usize = 2048;
+    let n = frames.min(MAX);
+    let mut scratch_l = [0.0f32; MAX];
+    let mut scratch_r = [0.0f32; MAX];
+    let got = sink.read_output(&mut scratch_l[..n], &mut scratch_r[..n], n);
+    if got == 0 {
+        return;
+    }
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    for i in 0..got {
+        track.block_l[i] += scratch_l[i];
+        track.block_r[i] += scratch_r[i];
+        peak_l = peak_l.max(scratch_l[i].abs());
+        peak_r = peak_r.max(scratch_r[i].abs());
+    }
+    if crate::runtime::midi_verbose_enabled() && (peak_l > 0.0001 || peak_r > 0.0001) {
+        eprintln!(
+            "[SphereAudio] external bridge output_peak track={} peak_l={:.6} peak_r={:.6}",
+            track.id, peak_l, peak_r
+        );
+    }
+    sink.request_block(frames as u32);
+}
+
 fn process_track_block(
     runtime: &mut RuntimeProject,
     track_index: usize,
@@ -2615,7 +2715,27 @@ fn process_track_block(
     channels: usize,
     beat: f64,
 ) {
-    apply_track_chain_block(&mut runtime.tracks[track_index], frames);
+    let track_id = runtime.tracks[track_index].id.clone();
+    let bridge_sink = runtime
+        .plugin_bridge_sinks
+        .get(&track_id)
+        .map(|s| std::sync::Arc::clone(s));
+    let has_bridge_insert = runtime.tracks[track_index]
+        .inserts
+        .iter()
+        .any(|insert| insert.kind.eq_ignore_ascii_case("external-bridge-plugin"));
+    apply_track_chain_block(
+        &mut runtime.tracks[track_index],
+        frames,
+        bridge_sink.as_deref(),
+    );
+    // Fallback: if the runtime graph has no bridge insert yet (sync pending),
+    // still mix the host's returned audio into this track.
+    if !has_bridge_insert {
+        if let Some(sink) = bridge_sink.as_deref() {
+            mix_bridged_sink_into_track(&mut runtime.tracks[track_index], frames, sink);
+        }
+    }
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
     apply_fader(&mut runtime.tracks[track_index], frames, beat);
@@ -2884,7 +3004,7 @@ pub fn render_project_block_interleaved(
                 master.block_l[i] = frame[0];
                 master.block_r[i] = frame[1];
             }
-            apply_track_chain_block(master, frames);
+            apply_track_chain_block(master, frames, None);
             // Write back, accumulate master meter, apply preview mode.
             for i in 0..frames {
                 let (l, r) =
@@ -2945,7 +3065,11 @@ pub fn apply_track_chain_at_beat(
     (l * volume * pan_l, r * volume * pan_r)
 }
 
-pub fn apply_track_chain_block(track: &mut RuntimeTrack, frames: usize) {
+pub fn apply_track_chain_block(
+    track: &mut RuntimeTrack,
+    frames: usize,
+    bridge_sink: Option<&dyn crate::plugin_bridge::PluginBridgeSink>,
+) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
         track.callback_insert_log_done = true;
         if callback_debug_enabled() {
@@ -2963,13 +3087,118 @@ pub fn apply_track_chain_block(track: &mut RuntimeTrack, frames: usize) {
         let midi = instrument_ix
             .filter(|&i| i == ix)
             .map(|_| midi_events.as_slice());
-        apply_insert_block(
-            &mut track.block_l[..frames],
-            &mut track.block_r[..frames],
-            insert,
-            midi,
+        if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
+            apply_external_bridge_insert_block(
+                &mut track.block_l[..frames],
+                &mut track.block_r[..frames],
+                insert,
+                midi,
+                bridge_sink,
+            );
+        } else {
+            apply_insert_block(
+                &mut track.block_l[..frames],
+                &mut track.block_r[..frames],
+                insert,
+                midi,
+            );
+        }
+    }
+}
+
+fn push_vst3_midi_to_sink(
+    sink: &dyn crate::plugin_bridge::PluginBridgeSink,
+    events: &[crate::vst3_processor::Vst3MidiEvent],
+    instance_id: &str,
+) {
+    let verbose = crate::runtime::midi_verbose_enabled();
+    for ev in events {
+        crate::runtime::push_vst3_midi_event_to_sink(sink, ev, instance_id, verbose);
+    }
+}
+
+fn apply_external_bridge_insert_block(
+    block_l: &mut [f32],
+    block_r: &mut [f32],
+    insert: &mut RuntimeInsert,
+    midi_events: Option<&[crate::vst3_processor::Vst3MidiEvent]>,
+    bridge_sink: Option<&dyn crate::plugin_bridge::PluginBridgeSink>,
+) {
+    let frames = block_l.len().min(block_r.len());
+    if frames == 0 || !insert.enabled {
+        return;
+    }
+    let Some(sink) = bridge_sink else {
+        return;
+    };
+
+    // Clip MIDI for bridged plugins is pushed in schedule_midi_block. Preview
+    // MIDI is pushed in drain_commands. Non-bridge inserts still use midi_block_events.
+    if let Some(events) = midi_events.filter(|e| !e.is_empty()) {
+        let verbose = crate::runtime::midi_verbose_enabled();
+        if verbose {
+            eprintln!(
+                "[plugin-dsp-midi] write block instance={} events={}",
+                insert.id,
+                events.len()
+            );
+        }
+        push_vst3_midi_to_sink(sink, events, &insert.id);
+    }
+
+    let role = insert
+        .params
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("instrument");
+    let is_effect = role.eq_ignore_ascii_case("effect");
+
+    if is_effect {
+        sink.write_input(&block_l[..frames], &block_r[..frames], frames);
+    }
+
+    if insert.scratch_l.len() < frames {
+        insert.scratch_l.resize(frames, 0.0);
+        insert.scratch_r.resize(frames, 0.0);
+    }
+    let got = sink.read_output(
+        &mut insert.scratch_l[..frames],
+        &mut insert.scratch_r[..frames],
+        frames,
+    );
+
+    let mut out_peak_l = 0.0f32;
+    let mut out_peak_r = 0.0f32;
+    if is_effect && got > 0 {
+        block_l[..got].copy_from_slice(&insert.scratch_l[..got]);
+        block_r[..got].copy_from_slice(&insert.scratch_r[..got]);
+        out_peak_l = insert.scratch_l[..got]
+            .iter()
+            .fold(0.0f32, |p, s| p.max(s.abs()));
+        out_peak_r = insert.scratch_r[..got]
+            .iter()
+            .fold(0.0f32, |p, s| p.max(s.abs()));
+    } else if !is_effect {
+        for i in 0..got {
+            block_l[i] += insert.scratch_l[i];
+            block_r[i] += insert.scratch_r[i];
+            out_peak_l = out_peak_l.max(insert.scratch_l[i].abs());
+            out_peak_r = out_peak_r.max(insert.scratch_r[i].abs());
+        }
+    }
+    if crate::runtime::midi_verbose_enabled() && (out_peak_l > 0.0001 || out_peak_r > 0.0001) {
+        eprintln!(
+            "[SphereAudio] external bridge output_peak insert={} peak_l={:.6} peak_r={:.6}",
+            insert.id, out_peak_l, out_peak_r
+        );
+        eprintln!(
+            "[plugin-bridge-dsp] response_peak_l={:.6} response_peak_r={:.6}",
+            out_peak_l, out_peak_r
         );
     }
+
+    // Drive the host DSP handshake: MIDI was already pushed to the shared ring.
+    sink.request_block(frames as u32);
 }
 
 #[inline]
@@ -3320,6 +3549,9 @@ where
                             // and must not run here. See `crate::graveyard`.
                             let old = std::mem::replace(&mut runtime, *next_runtime);
                             runtime.sample_rate = output_sample_rate;
+                            // Preserve the plugin-bridge sinks across reloads (Stage 3b).
+                            runtime.plugin_bridge_sinks = old.plugin_bridge_sinks.clone();
+                            runtime.bridge_editor_active = old.bridge_editor_active.clone();
                             crate::graveyard::retire(old);
                             if crate::runtime::midi_engine_debug_enabled() {
                                 let notes: usize =
@@ -3421,6 +3653,17 @@ where
                                 .master_volume
                                 .store(f32_store(value), Ordering::Relaxed);
                         }
+                        EngineCommand::SetPluginBridgeSink { track_id, sink } => match sink {
+                            Some(sink) => {
+                                runtime.plugin_bridge_sinks.insert(track_id, sink);
+                            }
+                            None => {
+                                runtime.plugin_bridge_sinks.remove(&track_id);
+                            }
+                        },
+                        EngineCommand::SetBridgeEditorActive { track_id, active } => {
+                            runtime.set_bridge_editor_active(&track_id, active);
+                        }
                         EngineCommand::SetTrackVolume { track_id, value } => {
                             runtime.update_track_volume(&track_id, value);
                         }
@@ -3461,6 +3704,40 @@ where
                         }
                         EngineCommand::MidiPreviewAllNotesOff { track_id } => {
                             runtime.midi_preview_all_notes_off(&track_id);
+                        }
+                        EngineCommand::PluginPreviewNoteOn {
+                            track_id,
+                            plugin_instance_id,
+                            channel,
+                            pitch,
+                            velocity,
+                        } => {
+                            runtime.bridge_preview_note_on(
+                                &track_id,
+                                &plugin_instance_id,
+                                channel,
+                                pitch,
+                                velocity,
+                            );
+                        }
+                        EngineCommand::PluginPreviewNoteOff {
+                            track_id,
+                            plugin_instance_id,
+                            channel,
+                            pitch,
+                        } => {
+                            runtime.bridge_preview_note_off(
+                                &track_id,
+                                &plugin_instance_id,
+                                channel,
+                                pitch,
+                            );
+                        }
+                        EngineCommand::PluginPreviewAllNotesOff {
+                            track_id,
+                            plugin_instance_id,
+                        } => {
+                            runtime.bridge_preview_all_notes_off(&track_id, &plugin_instance_id);
                         }
                     }
                 }
@@ -3507,21 +3784,51 @@ where
                     metronome.preview_tail_samples =
                         (runtime.sample_rate as u64).saturating_mul(2);
                 }
-                let preview_render_active =
-                    has_preview || pending_midi || metronome.preview_tail_samples > 0;
-                if preview_render_active && !playing_local {
+                let bridge_editor_wakeup = runtime.has_bridge_editor_active();
+                let preview_render_active = has_preview
+                    || pending_midi
+                    || metronome.preview_tail_samples > 0
+                    || bridge_editor_wakeup;
+                if preview_render_active
+                    && !playing_local
+                    && (has_preview || pending_midi || metronome.preview_tail_samples > 0)
+                {
                     let active_notes: usize = runtime
                         .midi_tracks
                         .iter()
                         .map(|mt| mt.preview_active.len())
                         .sum();
-                    eprintln!(
-                        "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
-                        active_notes, metronome.preview_tail_samples
-                    );
+                    let active_u32 = active_notes as u32;
+                    let changed = active_u32 != metronome.prev_logged_preview_notes;
+                    if changed {
+                        eprintln!(
+                            "[PreviewRenderWake] active_preview_notes changed {} -> {} tail_samples={}",
+                            metronome.prev_logged_preview_notes,
+                            active_u32,
+                            metronome.preview_tail_samples
+                        );
+                        metronome.prev_logged_preview_notes = active_u32;
+                        metronome.preview_wake_log_cooldown = 0;
+                    } else if active_notes > 0 {
+                        metronome.preview_wake_log_cooldown =
+                            metronome.preview_wake_log_cooldown.saturating_add(1);
+                        let sr = runtime.sample_rate.max(1);
+                        let log_interval_blocks =
+                            (sr / frames_in_block.max(1) as u32).max(1);
+                        if metronome.preview_wake_log_cooldown >= log_interval_blocks {
+                            metronome.preview_wake_log_cooldown = 0;
+                            eprintln!(
+                                "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
+                                active_notes, metronome.preview_tail_samples
+                            );
+                        }
+                    }
                     if !has_preview && !pending_midi {
                         metronome.preview_tail_samples =
                             metronome.preview_tail_samples.saturating_sub(frames_in_block);
+                        if metronome.preview_tail_samples == 0 {
+                            metronome.prev_logged_preview_notes = u32::MAX;
+                        }
                     }
                 }
 

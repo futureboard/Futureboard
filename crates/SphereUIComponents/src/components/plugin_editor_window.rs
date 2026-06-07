@@ -33,6 +33,7 @@ use sphere_plugin_host::native_editor::PluginEditorPresentationMode;
 use sphere_plugin_host::plugin_host_client::{
     plugin_host_bridge_enabled, ClientEvent, PluginHostClient,
 };
+use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
 
 /// Physical-pixel host region under the GPUI window. (Local mirror of the
 /// backend's region struct — the editor is now driven by the DAUx runtime
@@ -62,7 +63,8 @@ fn presentation_mode_from_host_kind(kind: i32) -> PluginEditorPresentationMode {
 struct HostEditorBackend {
     /// One host process per open editor (simplest lifecycle + crash isolation;
     /// a shared host is a later optimization). Drop shuts it down.
-    client: PluginHostClient,
+    client: Option<PluginHostClient>,
+    shared: Option<SharedPluginBridgeRuntime>,
     /// Main-app-owned `WS_CHILD` content HWND the host attaches the view into.
     content: Option<ContentChildHwnd>,
     plugin_path: String,
@@ -74,13 +76,27 @@ struct HostEditorBackend {
 }
 
 /// Spawn the bridge host and complete a Ping/Pong handshake. Returns `None` on
-/// any failure — but the caller's `bridge_required` gate ensures we NEVER fall
-/// back to the in-process editor path when the bridge is enabled (spec point 6:
-/// no silent fallback). `[plugin-bridge]` diagnostics are emitted throughout.
+/// any failure. The caller's mandatory bridge gate ensures we NEVER fall back to
+/// the in-process editor path unless the explicit legacy override is enabled.
+/// `[plugin-bridge]` diagnostics are emitted throughout.
 fn build_host_backend(
-    processor: &DAUx::Vst3RuntimeProcessor,
+    processor: Option<&DAUx::Vst3RuntimeProcessor>,
     _display_name: &str,
+    shared: Option<SharedPluginBridgeRuntime>,
 ) -> Option<HostEditorBackend> {
+    if let Some(shared) = shared {
+        let host_pid = shared.lock().ok().and_then(|runtime| runtime.host_pid());
+        return Some(HostEditorBackend {
+            client: None,
+            shared: Some(shared),
+            content: None,
+            plugin_path: String::new(),
+            class_id: String::new(),
+            host_pid,
+            last_region: None,
+        });
+    }
+    let processor = processor?;
     let plugin_path = processor.plugin_path().map(|s| s.to_string());
     let class_id = processor.class_id().map(|s| s.to_string());
 
@@ -125,7 +141,8 @@ fn build_host_backend(
     // The bridge is live. If plugin identity is missing we still go through the
     // bridge (skeleton OpenEditor) — we must never touch the in-process path.
     Some(HostEditorBackend {
-        client,
+        client: Some(client),
+        shared: None,
         content: None,
         plugin_path: plugin_path.unwrap_or_default(),
         class_id: class_id.unwrap_or_default(),
@@ -164,7 +181,7 @@ enum PluginEditorStatus {
     /// IPlugView::attached returned ok but no visible plug-in UI yet. We poll
     /// `embed_has_visible_ui` at the Phase-6 milestones below; the editor is
     /// promoted to `Attached` as soon as a visible UI appears. WebView/CEF
-    /// editors (UAD Native) regularly land here for hundreds of ms.
+    /// WebView/CEF-backed editors regularly land here for hundreds of ms.
     ProbingReady {
         mode: PluginEditorPresentationMode,
         probe_index: u8,
@@ -179,6 +196,7 @@ enum PluginEditorStatus {
 /// `IPlugView::attached`. Cap at the last entry — anything still blank past
 /// that turns into a surfaced failure.
 const READY_PROBE_DELAYS_MS: &[u64] = &[100, 500, 1000, 3000, 5000];
+const MAX_PLUGIN_EDITOR_PREFERRED_SIZE: i32 = 4096;
 
 pub struct PluginEditorWindow {
     pub track_id: String,
@@ -188,7 +206,7 @@ pub struct PluginEditorWindow {
     /// is created from THIS instance's controller — never a new one — so GUI
     /// edits drive the actual audio processor. Holding the clone keeps the C++
     /// instance alive while the editor is open.
-    processor: DAUx::Vst3RuntimeProcessor,
+    processor: Option<DAUx::Vst3RuntimeProcessor>,
     /// Editor handle from the embed attach; `None` until first attach.
     embed_handle: Option<u64>,
     status: PluginEditorStatus,
@@ -200,31 +218,41 @@ pub struct PluginEditorWindow {
     /// Logged the "host region mounted" line once bounds first went non-zero.
     host_mounted_logged: bool,
     last_region: Option<(i32, i32, i32, i32)>,
+    /// Forced content size used for initial bridge auto-size. Cleared after the
+    /// first successful auto-size so manual user resize controls the session.
     editor_content_size: Option<(i32, i32)>,
+    host_preferred_size: Option<(i32, i32)>,
+    host_auto_size_applied: bool,
+    host_auto_size_settled: bool,
     /// Editor quirk resolved from the plug-in path + name at construction.
     /// Drives the delayed-ready ramp and informs failure messaging.
     quirk: PluginEditorQuirk,
     /// `Some` when the bridge is active and the host spawned. When `None` and
-    /// `bridge_required` is false, the in-process path runs unchanged.
+    /// `bridge_required` is false, the explicit legacy in-process path runs.
     host: Option<HostEditorBackend>,
-    /// True when `FUTUREBOARD_PLUGIN_HOST_BRIDGE` is enabled. Hard gate: while
-    /// set, the in-process editor path is NEVER used — if `host` is `None` the
-    /// window surfaces a failure instead of silently embedding in-process.
+    /// True for the default mandatory external bridge. Hard gate: while set,
+    /// the in-process editor path is NEVER used — if `host` is `None` the window
+    /// surfaces a failure instead of silently embedding in-process.
     bridge_required: bool,
     focus_handle: FocusHandle,
 }
 
 impl PluginEditorWindow {
-    pub fn new(
+    pub(crate) fn new(
         track_id: String,
         insert_id: String,
         display_name: String,
-        processor: DAUx::Vst3RuntimeProcessor,
+        processor: Option<DAUx::Vst3RuntimeProcessor>,
+        shared_bridge: Option<SharedPluginBridgeRuntime>,
         cx: &mut Context<Self>,
     ) -> Self {
         let quirk = processor
-            .plugin_path()
-            .map(|p| match_quirk(std::path::Path::new(p), Some(&display_name), None))
+            .as_ref()
+            .and_then(|processor| {
+                processor
+                    .plugin_path()
+                    .map(|p| match_quirk(std::path::Path::new(p), Some(&display_name), None))
+            })
             .unwrap_or_default();
         if plugin_view_debug() {
             eprintln!(
@@ -241,18 +269,18 @@ impl PluginEditorWindow {
         }
         let bridge_required = plugin_host_bridge_enabled();
         let host = if bridge_required {
-            build_host_backend(&processor, &display_name)
+            build_host_backend(processor.as_ref(), &display_name, shared_bridge)
         } else {
             None
         };
-        // Bridge enabled but host unavailable → fail visibly; never fall back to
-        // the in-process path (spec point 6).
+        // Bridge mandatory but host unavailable → fail visibly; never fall back
+        // to the in-process path.
         let status = if bridge_required && host.is_none() {
-            eprintln!("[plugin-view] editor open failed because bridge enabled but unavailable");
+            eprintln!("[plugin-view] editor open failed because mandatory bridge is unavailable");
             PluginEditorStatus::Failed(
-                "Plugin host bridge is enabled (FUTUREBOARD_PLUGIN_HOST_BRIDGE=1) but the \
-                 FutureboardPluginHost-x64 process could not be started. The in-process editor \
-                 is disabled while the bridge is enabled."
+                "External PluginHost bridge is mandatory, but the FutureboardPluginHost-x64 \
+                 process could not be started. The in-process editor is disabled unless \
+                 FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1 is set."
                     .to_string(),
             )
         } else {
@@ -270,6 +298,9 @@ impl PluginEditorWindow {
             host_mounted_logged: false,
             last_region: None,
             editor_content_size: None,
+            host_preferred_size: None,
+            host_auto_size_applied: false,
+            host_auto_size_settled: false,
             quirk,
             host,
             bridge_required,
@@ -279,6 +310,20 @@ impl PluginEditorWindow {
 
     fn editor_id(&self) -> String {
         format!("{}::{}", self.track_id, self.insert_id)
+    }
+
+    fn valid_preferred_size(width: u32, height: u32) -> Option<(i32, i32)> {
+        let width = i32::try_from(width).ok()?;
+        let height = i32::try_from(height).ok()?;
+        if width > 0
+            && height > 0
+            && width <= MAX_PLUGIN_EDITOR_PREFERRED_SIZE
+            && height <= MAX_PLUGIN_EDITOR_PREFERRED_SIZE
+        {
+            Some((width, height))
+        } else {
+            None
+        }
     }
 
     /// Physical-pixel host region under the GPUI window: full client width, from
@@ -380,13 +425,21 @@ impl PluginEditorWindow {
             self.drive_host(window, cx);
             return;
         }
-        // Hard gate: bridge enabled but no host process → never touch the
+        let Some(processor) = self.processor.as_ref() else {
+            self.status = PluginEditorStatus::Failed(
+                "Plugin editor requires a runtime processor when the external bridge is disabled."
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        // Hard gate: mandatory bridge but no host process → never touch the
         // in-process editor path. Stay in a surfaced failure (set in `new`).
         if self.bridge_required {
             if !matches!(self.status, PluginEditorStatus::Failed(_)) {
                 self.status = PluginEditorStatus::Failed(
-                    "Plugin host bridge enabled but host process is unavailable; \
-                     in-process editor is disabled."
+                    "External PluginHost bridge is mandatory but host process is unavailable; \
+                     in-process editor is disabled unless FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1."
                         .to_string(),
                 );
                 cx.notify();
@@ -399,7 +452,7 @@ impl PluginEditorWindow {
                 // watches for the user closing that window (WM_CLOSE) or the
                 // native window vanishing, then tears the editor down.
                 if self.embed_handle.is_some()
-                    && (self.processor.embed_take_user_close() || !self.processor.embed_is_valid())
+                    && (processor.embed_take_user_close() || !processor.embed_is_valid())
                 {
                     if plugin_view_debug() {
                         eprintln!(
@@ -481,6 +534,12 @@ impl PluginEditorWindow {
     }
 
     fn perform_attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(processor) = self.processor.clone() else {
+            self.status =
+                PluginEditorStatus::Failed("missing in-process runtime processor".to_string());
+            cx.notify();
+            return;
+        };
         let Some(parent) = Self::native_parent_handle(window) else {
             // Lost the handle between scheduling and now — go back to waiting.
             self.status = PluginEditorStatus::WaitingForHostHandle;
@@ -495,15 +554,12 @@ impl PluginEditorWindow {
         }
         // Attach the editor view of the EXISTING runtime instance into our GPUI
         // window — never create a new VST3 component/controller for the editor.
-        match self
-            .processor
-            .embed_editor(parent, region.x, region.y, region.width, region.height)
-        {
+        match processor.embed_editor(parent, region.x, region.y, region.width, region.height) {
             Some(handle) => {
                 self.embed_handle = Some(handle);
                 // Record the single presentation mode the host selected so we
                 // never drive both a child-HWND embed and a tool-window overlay.
-                let mode = presentation_mode_from_host_kind(self.processor.embed_host_kind());
+                let mode = presentation_mode_from_host_kind(processor.embed_host_kind());
                 let detached = mode == PluginEditorPresentationMode::DetachedNativeWindow;
                 if detached {
                     // The plug-in lives in its own standalone OS window; the GPUI
@@ -520,15 +576,15 @@ impl PluginEditorWindow {
                         applied_region.height,
                     ));
                     // Re-apply bounds + z-order after attach (plugins may resize the host).
-                    self.processor.embed_set_bounds(
+                    processor.embed_set_bounds(
                         applied_region.x,
                         applied_region.y,
                         applied_region.width,
                         applied_region.height,
                     );
-                    self.processor.embed_refresh();
+                    processor.embed_refresh();
                 }
-                let visible = self.processor.embed_has_visible_ui();
+                let visible = processor.embed_has_visible_ui();
                 if visible {
                     self.status = PluginEditorStatus::Attached(mode);
                     if plugin_view_debug() {
@@ -539,8 +595,8 @@ impl PluginEditorWindow {
                     }
                 } else {
                     // Phase 6: enter the delayed-ready probe. WebView/CEF
-                    // editors (UAD Native) routinely take 100–3000 ms before
-                    // any visible child window materializes — failing now
+                    // WebView/CEF-backed editors routinely take 100–3000 ms
+                    // before any visible child window materializes — failing now
                     // would always lose them.
                     self.status = PluginEditorStatus::ProbingReady {
                         mode,
@@ -558,7 +614,8 @@ impl PluginEditorWindow {
             None => {
                 let err = self
                     .processor
-                    .last_error()
+                    .as_ref()
+                    .and_then(|processor| processor.last_error())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| {
                         "failed to attach editor to runtime plugin instance \
@@ -578,7 +635,7 @@ impl PluginEditorWindow {
     }
 
     fn apply_native_auto_size(&mut self, window: &mut Window) -> Option<EmbedRegion> {
-        let (content_w, content_h) = self.processor.embed_content_size()?;
+        let (content_w, content_h) = self.processor.as_ref()?.embed_content_size()?;
         self.editor_content_size = Some((content_w, content_h));
 
         let scale = window.scale_factor().max(0.5);
@@ -606,13 +663,18 @@ impl PluginEditorWindow {
     fn retry(&mut self, cx: &mut Context<Self>) {
         if self.embed_handle.take().is_some() {
             // Detach the editor view only — the runtime processor keeps running.
-            self.processor.embed_detach();
+            if let Some(processor) = self.processor.as_ref() {
+                processor.embed_detach();
+            }
         }
         self.status = PluginEditorStatus::Opening;
         self.wait_ticks = 0;
         self.host_mounted_logged = false;
         self.last_region = None;
         self.editor_content_size = None;
+        self.host_preferred_size = None;
+        self.host_auto_size_applied = false;
+        self.host_auto_size_settled = false;
         if plugin_view_debug() {
             eprintln!(
                 "[plugin-view] retry requested editor_id={}",
@@ -623,7 +685,7 @@ impl PluginEditorWindow {
     }
 
     /// Phase 6: schedule a deferred visible-UI re-check. WebView/CEF editors
-    /// (UAD Native, Slate, some iZotope) routinely take 100–3000 ms after
+    /// WebView/CEF-backed editors routinely take 100–3000 ms after
     /// `IPlugView::attached()` before any visible child window materializes.
     /// We poll at the Phase-6 milestones (100/500/1000/3000/5000 ms); the
     /// first probe to see visible UI promotes the editor to `Attached`. The
@@ -657,15 +719,21 @@ impl PluginEditorWindow {
         if current != probe_index {
             return;
         }
+        let Some(processor) = self.processor.as_ref() else {
+            self.status =
+                PluginEditorStatus::Failed("missing in-process runtime processor".to_string());
+            cx.notify();
+            return;
+        };
         // Extra refresh nudges any pending message queue and re-applies bounds.
-        self.processor.embed_refresh();
-        // Quirked plug-ins (UAD Native and other CEF/WebView editors) benefit
+        processor.embed_refresh();
+        // Quirked CEF/WebView editors benefit
         // from a second pump on each probe step — Chromium often delivers its
         // first child window during a later message dispatch.
         if self.quirk.extra_message_pump {
-            self.processor.embed_refresh();
+            processor.embed_refresh();
         }
-        let visible = self.processor.embed_has_visible_ui();
+        let visible = processor.embed_has_visible_ui();
         let is_last = probe_index as usize + 1 >= READY_PROBE_DELAYS_MS.len();
         if plugin_view_debug() {
             eprintln!(
@@ -685,7 +753,7 @@ impl PluginEditorWindow {
         if is_last {
             // Cap reached and still blank — detach + show fallback panel.
             if self.embed_handle.take().is_some() {
-                self.processor.embed_detach();
+                processor.embed_detach();
             }
             let msg = format!(
                 "Editor attached but no visible WebView/editor window appeared \
@@ -713,15 +781,18 @@ impl PluginEditorWindow {
         ) {
             return;
         }
-        if self.embed_handle.is_none() || !self.processor.embed_is_valid() {
+        let Some(processor) = self.processor.as_ref() else {
+            return;
+        };
+        if self.embed_handle.is_none() || !processor.embed_is_valid() {
             return;
         }
         // Detached: the plug-in's standalone window owns its own size/position.
         // Never resize the GPUI shell to it or push host bounds.
-        if self.processor.embed_host_kind() == 2 {
+        if processor.embed_host_kind() == 2 {
             return;
         }
-        if let Some(plugin_size) = self.processor.embed_content_size() {
+        if let Some(plugin_size) = processor.embed_content_size() {
             if self.editor_content_size != Some(plugin_size) {
                 self.editor_content_size = Some(plugin_size);
                 let scale = window.scale_factor().max(0.5);
@@ -758,15 +829,14 @@ impl PluginEditorWindow {
                     self.editor_id()
                 );
             }
-            self.processor
-                .embed_set_bounds(region.x, region.y, region.width, region.height);
+            processor.embed_set_bounds(region.x, region.y, region.width, region.height);
         }
         // Cheap per-frame poll so the overlay still tracks a *parent window move*
         // (screen coords change while our client-relative region does not). The
         // C++ side compares the recomputed screen rect against the last applied
         // one and no-ops when unchanged, so idle frames do no SetWindowPos /
         // onSize / raise work — no flicker, no resize spam.
-        self.processor.embed_refresh();
+        processor.embed_refresh();
     }
 
     // --- Host-process editor path (gated; in-process path above is untouched) ---
@@ -776,16 +846,27 @@ impl PluginEditorWindow {
     /// content child HWND under its GPUI window and hands the handle to the host
     /// over IPC. Attach is event-driven (`HostEvent::EditorAttached`).
     fn drive_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 1. Drain host → client events into the shared status state machine.
+        // 1. In CLIENT mode this editor solely owns the IPC channel, so it drains
+        //    its own events here. In SHARED-bridge mode the shared runtime queue
+        //    has exactly ONE drain — `StudioLayout::poll_plugin_bridge_runtime` —
+        //    which routes editor-targeted events to us via `ingest_host_event`.
+        //    Draining the shared queue here too would race that poll and silently
+        //    swallow `EditorAttached`/`EditorPreferredSize`, leaving us stuck on
+        //    "Loading" (spec Part 2/5/6).
         let mut events = Vec::new();
         if let Some(host) = self.host.as_ref() {
-            while let Some(ev) = host.client.try_recv_event() {
-                events.push(ev);
+            if host.shared.is_none() {
+                if let Some(client) = host.client.as_ref() {
+                    while let Some(ev) = client.try_recv_event() {
+                        events.push(ev);
+                    }
+                }
             }
         }
         for ev in events {
             self.on_host_event(ev, cx);
         }
+        self.apply_host_preferred_size(window);
 
         match self.status.clone() {
             PluginEditorStatus::Attached(_) => {
@@ -834,6 +915,10 @@ impl PluginEditorWindow {
         eprintln!(
             "[plugin-view][host] top_hwnd=0x{top:x} content_hwnd=0x{content_hwnd:x} editor_id={id}"
         );
+        eprintln!("[plugin-editor-window] ownership=main_owned");
+        eprintln!("[plugin-editor-window] shell_hwnd=0x{top:x}");
+        eprintln!("[plugin-editor-window] content_hwnd=0x{content_hwnd:x}");
+        eprintln!("[plugin-editor-window] content_parent=shell_hwnd");
 
         // 4. Send OpenEditorWithParentHwnd to the host process.
         let (path, class_id) = {
@@ -850,15 +935,37 @@ impl PluginEditorWindow {
             eprintln!(
                 "[plugin-bridge] sending OpenEditorWithParentHwnd instance={id} hwnd=0x{content_hwnd:x}"
             );
-            match host.client.open_editor(
-                id.clone(),
-                path,
-                class_id,
-                content_hwnd,
-                rect.width as u32,
-                rect.height as u32,
-                dpi,
-            ) {
+            let open_result = if let Some(shared) = host.shared.as_ref() {
+                shared
+                    .lock()
+                    .map_err(|_| "bridge runtime lock poisoned".to_string())
+                    .and_then(|mut runtime| {
+                        runtime
+                            .open_editor_with_parent(
+                                self.insert_id.clone(),
+                                content_hwnd,
+                                rect.width as u32,
+                                rect.height as u32,
+                                dpi,
+                            )
+                            .map_err(|e| e.to_string())
+                    })
+            } else if let Some(client) = host.client.as_mut() {
+                client
+                    .open_editor(
+                        id.clone(),
+                        path,
+                        class_id,
+                        content_hwnd,
+                        rect.width as u32,
+                        rect.height as u32,
+                        dpi,
+                    )
+                    .map_err(|e| e.to_string())
+            } else {
+                Err("bridge host client unavailable".to_string())
+            };
+            match open_result {
                 Ok(()) => {
                     host.last_region = Some(rect);
                     eprintln!(
@@ -878,6 +985,47 @@ impl PluginEditorWindow {
         self.status = PluginEditorStatus::Attaching;
         self.schedule_tick(cx);
         cx.notify();
+    }
+
+    /// Entry point for events routed by `StudioLayout` in shared-bridge mode.
+    /// The shared runtime queue is drained in exactly one place (StudioLayout),
+    /// which dispatches each editor-targeted event here so this window can leave
+    /// "Loading" and apply the plug-in's preferred size. Mirrors the client-mode
+    /// self-drain in `drive_host` (spec Part 2/4/5/6).
+    pub(crate) fn ingest_host_event(
+        &mut self,
+        event: ClientEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_host_event(event, cx);
+        // Preferred-size events arrive here; auto-size the shell as soon as one
+        // lands (Part 3) rather than only on the next render-driven `drive_host`.
+        self.apply_host_preferred_size(window);
+    }
+
+    /// The plugin instance id an editor-targeted host event refers to, if any.
+    /// Used by `StudioLayout` to route to the owning editor window.
+    pub(crate) fn editor_event_instance_id(event: &ClientEvent) -> Option<&str> {
+        match event {
+            ClientEvent::Host(HostEvent::EditorAttached {
+                plugin_instance_id,
+                ..
+            })
+            | ClientEvent::Host(HostEvent::EditorAttachFailed {
+                plugin_instance_id,
+                ..
+            })
+            | ClientEvent::Host(HostEvent::EditorClosed {
+                plugin_instance_id,
+                ..
+            })
+            | ClientEvent::Host(HostEvent::EditorPreferredSize {
+                plugin_instance_id,
+                ..
+            }) => Some(plugin_instance_id.as_str()),
+            _ => None,
+        }
     }
 
     /// Fold a host event into the existing `PluginEditorStatus` state machine.
@@ -907,8 +1055,29 @@ impl PluginEditorWindow {
                      preferred={preferred_width}x{preferred_height}"
                 );
                 // Content is a WS_CHILD embed under the GPUI window.
+                if !self.host_auto_size_applied {
+                    if let Some(size) =
+                        Self::valid_preferred_size(preferred_width, preferred_height)
+                    {
+                        self.host_preferred_size = Some(size);
+                    } else {
+                        eprintln!("[plugin-editor-window] preferred_size_invalid using_default");
+                    }
+                }
+                let was = self.status.clone();
                 self.status =
                     PluginEditorStatus::Attached(PluginEditorPresentationMode::ChildHwndEmbed);
+                if !matches!(was, PluginEditorStatus::Attached(_)) {
+                    eprintln!(
+                        "[plugin-editor-window] plugin_instance_id={} editor_window_id={id}",
+                        self.insert_id
+                    );
+                    eprintln!("[plugin-editor-window] state {was:?} -> Attached");
+                    eprintln!(
+                        "[plugin-editor-window] hide_loading_overlay instance={}",
+                        self.insert_id
+                    );
+                }
                 cx.notify();
             }
             ClientEvent::Host(HostEvent::EditorAttachFailed { error, .. }) => {
@@ -919,12 +1088,34 @@ impl PluginEditorWindow {
             ClientEvent::Host(HostEvent::EditorClosed { .. }) => {
                 eprintln!("[plugin-view][host] EditorClosed editor_id={id}");
             }
-            ClientEvent::Host(HostEvent::EditorPreferredSize { width, height, .. }) => {
+            ClientEvent::Host(HostEvent::EditorPreferredSize {
+                plugin_instance_id,
+                width,
+                height,
+            }) => {
                 eprintln!(
-                    "[plugin-view][host] EditorPreferredSize editor_id={id} {width}x{height}"
+                    "[plugin-bridge] event EditorPreferredSize instance={plugin_instance_id} width={width} height={height}"
                 );
+                if let Some(size) = Self::valid_preferred_size(width, height) {
+                    self.host_preferred_size = Some(size);
+                    if !self.host_auto_size_applied {
+                        self.editor_content_size = Some(size);
+                    }
+                } else {
+                    eprintln!("[plugin-editor-window] preferred_size_invalid using_default");
+                }
+                cx.notify();
             }
+            ClientEvent::Host(HostEvent::PluginLoading { .. })
+            | ClientEvent::Host(HostEvent::PluginLoaded { .. })
+            | ClientEvent::Host(HostEvent::PluginAlreadyLoaded { .. })
+            | ClientEvent::Host(HostEvent::PluginLoadFailed { .. }) => {}
             ClientEvent::Host(HostEvent::PluginUnloaded { .. }) => {}
+            // Audio-bridge events are handled by StudioLayout, not the editor window.
+            ClientEvent::Host(HostEvent::AudioBridgeConfigured { .. })
+            | ClientEvent::Host(HostEvent::AudioBridgeStatus { .. })
+            | ClientEvent::Host(HostEvent::SharedAudioAttached { .. })
+            | ClientEvent::Host(HostEvent::ProcessingPrepared { .. }) => {}
             ClientEvent::Host(HostEvent::Log { level, message }) => {
                 eprintln!("[plugin-view][host][{level}] {message}");
             }
@@ -945,6 +1136,7 @@ impl PluginEditorWindow {
     /// Push a resized content rect to both the content child HWND (geometry,
     /// owned by the main app) and the host (`ResizeEditor` → `onSize`).
     fn sync_host_region(&mut self, window: &mut Window) {
+        self.maybe_release_initial_preferred_size(window);
         let region = self.host_region_for(window);
         let rect = ContentRect {
             x: region.x,
@@ -960,6 +1152,10 @@ impl PluginEditorWindow {
         if host.last_region == Some(rect) {
             return;
         }
+        let size_changed = host
+            .last_region
+            .map(|previous| previous.width != rect.width || previous.height != rect.height)
+            .unwrap_or(true);
         host.last_region = Some(rect);
         if let Some(content) = host.content.as_ref() {
             if !content.is_valid() {
@@ -967,15 +1163,90 @@ impl PluginEditorWindow {
             }
             content.set_bounds(rect);
         }
-        let _ = host
-            .client
-            .resize_editor(id.clone(), rect.width as u32, rect.height as u32, dpi);
+        if size_changed {
+            eprintln!(
+                "[plugin-bridge] sending ResizeEditor instance={} width={} height={} dpi={dpi}",
+                self.insert_id, rect.width, rect.height
+            );
+            if let Some(shared) = host.shared.as_ref() {
+                if let Ok(mut runtime) = shared.lock() {
+                    runtime.resize_editor(
+                        self.insert_id.clone(),
+                        rect.width as u32,
+                        rect.height as u32,
+                        dpi,
+                    );
+                }
+            } else if let Some(client) = host.client.as_mut() {
+                let _ =
+                    client.resize_editor(id.clone(), rect.width as u32, rect.height as u32, dpi);
+            }
+        }
         if plugin_view_debug() {
             eprintln!(
                 "[plugin-view][host] resize editor_id={id} content=({},{},{}x{})",
                 rect.x, rect.y, rect.width, rect.height
             );
         }
+    }
+
+    fn viewport_content_size(&self, window: &Window) -> (i32, i32) {
+        let scale = window.scale_factor().max(0.5);
+        let viewport = window.viewport_size();
+        let w: f32 = viewport.width.into();
+        let h: f32 = viewport.height.into();
+        let header_px = HEADER_H * scale;
+        (
+            (w * scale).round().max(1.0) as i32,
+            ((h * scale) - header_px).round().max(1.0) as i32,
+        )
+    }
+
+    fn maybe_release_initial_preferred_size(&mut self, window: &Window) {
+        if !self.bridge_required || !self.host_auto_size_applied {
+            return;
+        }
+        let Some((preferred_w, preferred_h)) = self.editor_content_size else {
+            return;
+        };
+        let (viewport_w, viewport_h) = self.viewport_content_size(window);
+        let close_to_preferred =
+            (viewport_w - preferred_w).abs() <= 2 && (viewport_h - preferred_h).abs() <= 2;
+        if !self.host_auto_size_settled {
+            if close_to_preferred {
+                self.host_auto_size_settled = true;
+            }
+            return;
+        }
+        if !close_to_preferred {
+            self.editor_content_size = None;
+        }
+    }
+
+    fn apply_host_preferred_size(&mut self, window: &mut Window) {
+        if self.host_auto_size_applied {
+            return;
+        }
+        let Some((content_w, content_h)) = self.host_preferred_size else {
+            return;
+        };
+        self.editor_content_size = Some((content_w, content_h));
+        let scale = window.scale_factor().max(0.5);
+        let shell_w = (content_w as f32 / scale).max(EDITOR_WINDOW_MIN_WIDTH);
+        let shell_h = ((content_h as f32 / scale) + HEADER_H).max(EDITOR_WINDOW_MIN_HEIGHT);
+        let viewport = window.viewport_size();
+        let current_w: f32 = viewport.width.into();
+        let current_h: f32 = viewport.height.into();
+        if (current_w - shell_w).abs() > 1.0 || (current_h - shell_h).abs() > 1.0 {
+            eprintln!(
+                "[plugin-editor-window] auto_size content={}x{} shell={:.0}x{:.0}",
+                content_w, content_h, shell_w, shell_h
+            );
+            window.resize(size(px(shell_w), px(shell_h)));
+        }
+        self.sync_host_region(window);
+        self.host_auto_size_applied = true;
+        self.host_auto_size_settled = false;
     }
 }
 
@@ -988,14 +1259,22 @@ impl Drop for PluginEditorWindow {
         // let the backend's Drop tear down the content HWND + the host process.
         if let Some(host) = self.host.as_mut() {
             let id = format!("{}::{}", self.track_id, self.insert_id);
-            let _ = host.client.close_editor(id.clone());
+            if let Some(shared) = host.shared.as_ref() {
+                if let Ok(mut runtime) = shared.lock() {
+                    runtime.close_editor(self.insert_id.clone());
+                }
+            } else if let Some(client) = host.client.as_mut() {
+                let _ = client.close_editor(id.clone());
+            }
             eprintln!("[plugin-view][host] CloseEditor sent editor_id={id} (drop) — tearing down content HWND + host process");
             return;
         }
         if self.embed_handle.take().is_some() {
             // Detach the editor view + destroy the host window. The runtime
             // processor (and audio) keep running — only insert removal destroys it.
-            self.processor.embed_detach();
+            if let Some(processor) = self.processor.as_ref() {
+                processor.embed_detach();
+            }
             if plugin_view_debug() {
                 eprintln!(
                     "[plugin-view] close editor_id={} (drop → detach view only, processor kept)",
@@ -1116,12 +1395,23 @@ impl Render for PluginEditorWindow {
         // native plugin even when attach reports ok. Only draw overlays while
         // opening / waiting / attaching / failed.
         let content_overlay: Option<gpui::AnyElement> = match &self.status {
+            PluginEditorStatus::Opening if self.bridge_required => {
+                Some(self.render_status_message(&format!("Loading: {}", self.display_name)))
+            }
             PluginEditorStatus::Opening => Some(self.render_status_message("Opening editor…")),
             PluginEditorStatus::WaitingForHostHandle => {
-                Some(self.render_status_message("Opening editor… (waiting for host window)"))
+                if self.bridge_required {
+                    Some(self.render_status_message(&format!("Loading: {}", self.display_name)))
+                } else {
+                    Some(self.render_status_message("Opening editor… (waiting for host window)"))
+                }
             }
             PluginEditorStatus::Attaching => {
-                Some(self.render_status_message("Attaching plugin editor…"))
+                if self.bridge_required {
+                    Some(self.render_status_message(&format!("Loading: {}", self.display_name)))
+                } else {
+                    Some(self.render_status_message("Attaching plugin editor…"))
+                }
             }
             PluginEditorStatus::ProbingReady { probe_index, .. } => {
                 let step = (*probe_index as usize).saturating_add(1);
@@ -1204,23 +1494,26 @@ impl Render for PluginEditorWindow {
 /// (StudioLayout) keeps the returned handle to dedupe/close. Drop of the entity
 /// detaches the native view.
 #[allow(clippy::too_many_arguments)]
-pub fn open_plugin_editor_window(
+pub(crate) fn open_plugin_editor_window(
     owner_bounds: Bounds<gpui::Pixels>,
     track_id: String,
     insert_id: String,
     display_name: String,
-    processor: DAUx::Vst3RuntimeProcessor,
+    processor: Option<DAUx::Vst3RuntimeProcessor>,
+    shared_bridge: Option<SharedPluginBridgeRuntime>,
     cx: &mut App,
 ) -> Result<WindowHandle<PluginEditorWindow>, String> {
     if plugin_host_bridge_enabled() {
         eprintln!(
-            "[plugin-view] editor_backend=external_bridge reason=FUTUREBOARD_PLUGIN_HOST_BRIDGE=1 \
+            "[plugin-view] editor_backend=external_bridge reason=forced_default \
              instance={track_id}::{insert_id}"
         );
     } else {
         eprintln!(
-            "[plugin-view] editor_backend=in_process reason=env_disabled instance={track_id}::{insert_id}"
+            "[plugin-view] editor_backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1 instance={track_id}::{insert_id}"
         );
+        eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
+        eprintln!("[plugin-runtime] legacy path may hang GPU/OpenGL/JUCE plugin editors");
     }
     if plugin_view_debug() {
         eprintln!(
@@ -1257,7 +1550,9 @@ pub fn open_plugin_editor_window(
 
     let editor_id = format!("{track_id}::{insert_id}");
     let result = cx.open_window(options, |_window, cx| {
-        cx.new(|cx| PluginEditorWindow::new(track_id, insert_id, display_name, processor, cx))
+        cx.new(|cx| {
+            PluginEditorWindow::new(track_id, insert_id, display_name, processor, shared_bridge, cx)
+        })
     });
     if plugin_view_debug() {
         match &result {

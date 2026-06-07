@@ -1,4 +1,4 @@
-use gpui::Context;
+use gpui::{Context, App};
 
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,112 @@ impl StudioLayout {
     pub(super) fn dispatch_midi_preview_command(
         &mut self,
         command: components::piano_roll::UiMidiPreviewCommand,
+        cx: &App,
     ) {
+        let track_id = match &command {
+            components::piano_roll::UiMidiPreviewCommand::NoteOn { track_id, .. }
+            | components::piano_roll::UiMidiPreviewCommand::NoteOff { track_id, .. }
+            | components::piano_roll::UiMidiPreviewCommand::AllNotesOff { track_id }
+            | components::piano_roll::UiMidiPreviewCommand::MidiPanic { track_id } => {
+                track_id.clone()
+            }
+        };
+        let bridge_instance = self.resolve_track_instrument_plugin(&track_id, cx);
+        let sink_ready = self
+            .plugin_bridge_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.lock().ok())
+            .and_then(|bridge| bridge.audio_sink().map(|_| ()))
+            .is_some();
+
+        if sink_ready {
+            // Shared-memory bridge is live — always route through the main DAW
+            // engine (track → mixer → master), even if timeline runtime_backend
+            // has not caught up yet.
+            let Some(engine) = self.audio_engine.as_ref() else {
+                eprintln!("[midi-preview-ui] engine_command_bus_connected=false");
+                return;
+            };
+            let instance_id = bridge_instance
+                .clone()
+                .unwrap_or_else(|| "bridge".to_string());
+            let result = match &command {
+                components::piano_roll::UiMidiPreviewCommand::NoteOn {
+                    channel,
+                    pitch,
+                    velocity,
+                    ..
+                } => {
+                    eprintln!(
+                        "[midi-preview-ui] source=piano_key type=note_on track={track_id} instance={instance_id} pitch={pitch} velocity={velocity} sink_ready=true"
+                    );
+                    engine.plugin_preview_note_on(
+                        track_id.clone(),
+                        instance_id.clone(),
+                        *channel,
+                        *pitch,
+                        *velocity,
+                    )
+                }
+                components::piano_roll::UiMidiPreviewCommand::NoteOff {
+                    channel, pitch, ..
+                } => {
+                    eprintln!(
+                        "[midi-preview-ui] source=piano_key type=note_off track={track_id} instance={instance_id} pitch={pitch} sink_ready=true"
+                    );
+                    engine.plugin_preview_note_off(
+                        track_id.clone(),
+                        instance_id.clone(),
+                        *channel,
+                        *pitch,
+                    )
+                }
+                components::piano_roll::UiMidiPreviewCommand::AllNotesOff { .. } => {
+                    engine.plugin_preview_all_notes_off(track_id.clone(), instance_id.clone())
+                }
+                components::piano_roll::UiMidiPreviewCommand::MidiPanic { .. } => {
+                    engine.plugin_preview_all_notes_off(track_id.clone(), instance_id.clone())
+                }
+            };
+            if let Err(error) = result {
+                eprintln!("[EngineMidiPreview] bridge dispatch failed: {error}");
+            }
+            return;
+        }
+
+        if let Some(instance_id) = bridge_instance {
+            if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
+                if let Ok(mut bridge) = runtime.lock() {
+                    let result = match command {
+                        components::piano_roll::UiMidiPreviewCommand::NoteOn {
+                            channel,
+                            pitch,
+                            velocity,
+                            ..
+                        } => {
+                            eprintln!(
+                                "[midi-preview-ui] note_on source=piano_roll pitch={pitch} velocity={velocity} instance={instance_id} (IPC fallback — DSP bridge pending)"
+                            );
+                            bridge.preview_note_on(instance_id.clone(), channel, pitch, velocity)
+                        }
+                        components::piano_roll::UiMidiPreviewCommand::NoteOff {
+                            channel, pitch, ..
+                        } => bridge.preview_note_off(instance_id.clone(), channel, pitch),
+                        components::piano_roll::UiMidiPreviewCommand::AllNotesOff { .. } => {
+                            bridge.preview_all_notes_off(instance_id.clone())
+                        }
+                        components::piano_roll::UiMidiPreviewCommand::MidiPanic { .. } => {
+                            bridge.midi_panic(instance_id.clone())
+                        }
+                    };
+                    if let Err(error) = result {
+                        eprintln!("[plugin-bridge] midi preview dispatch failed: {error}");
+                    }
+                    return;
+                }
+            }
+        }
+
         let Some(engine) = self.audio_engine.as_ref() else {
             eprintln!("[PopoutMidiEditor] engine_command_bus_connected=false");
             return;
@@ -21,10 +126,10 @@ impl StudioLayout {
         eprintln!("[PopoutMidiEditor] engine_command_bus_connected=true");
         let result = match command {
             components::piano_roll::UiMidiPreviewCommand::NoteOn {
-                track_id,
                 channel,
                 pitch,
                 velocity,
+                ..
             } => {
                 eprintln!(
                     "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOn -> engine",
@@ -33,9 +138,7 @@ impl StudioLayout {
                 engine.midi_preview_note_on(track_id, channel, pitch, velocity)
             }
             components::piano_roll::UiMidiPreviewCommand::NoteOff {
-                track_id,
-                channel,
-                pitch,
+                channel, pitch, ..
             } => {
                 eprintln!(
                     "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOff -> engine",
@@ -43,17 +146,73 @@ impl StudioLayout {
                 );
                 engine.midi_preview_note_off(track_id, channel, pitch)
             }
-            components::piano_roll::UiMidiPreviewCommand::AllNotesOff { track_id } => {
+            components::piano_roll::UiMidiPreviewCommand::AllNotesOff { .. } => {
                 eprintln!(
                     "[PopoutMidiEditor] active_track_id={} dispatch PreviewAllNotesOff -> engine",
                     track_id
                 );
                 engine.midi_preview_all_notes_off(track_id)
             }
+            components::piano_roll::UiMidiPreviewCommand::MidiPanic { .. } => {
+                engine.midi_preview_all_notes_off(track_id)
+            }
         };
         if let Err(error) = result {
             eprintln!("[EngineMidiPreview] dispatch failed: {error}");
         }
+    }
+
+    fn bridge_instrument_instance_id(&self, track_id: &str, cx: &App) -> Option<String> {
+        use crate::components::timeline::timeline_state::{
+            PluginRuntimeBackend, TrackType,
+        };
+        let timeline = self.timeline.read(cx);
+        let track = timeline.state.find_track(track_id)?;
+        let insert = match track.track_type {
+            TrackType::Instrument => track.instrument_insert()?,
+            TrackType::Midi => track.inserts.first()?,
+            _ => return None,
+        };
+        if insert.runtime_backend != PluginRuntimeBackend::ExternalBridge {
+            return None;
+        }
+        Some(insert.id.clone())
+    }
+
+    pub(super) fn resolve_track_instrument_plugin(
+        &self,
+        track_id: &str,
+        cx: &App,
+    ) -> Option<String> {
+        let timeline = self.timeline.read(cx);
+        let track = timeline.state.find_track(track_id)?;
+        if let Some(instance_id) = track.instrument_plugin_instance_id.as_ref() {
+            return Some(instance_id.clone());
+        }
+        if let Some(instance_id) = self.bridge_instrument_instance_id(track_id, cx) {
+            return Some(instance_id);
+        }
+        match track.track_type {
+            crate::components::timeline::timeline_state::TrackType::Instrument => track
+                .instrument_insert()
+                .filter(|slot| slot.plugin_id.is_some())
+                .map(|slot| slot.id.clone()),
+            crate::components::timeline::timeline_state::TrackType::Midi => track
+                .inserts
+                .first()
+                .filter(|slot| slot.plugin_id.is_some())
+                .map(|slot| slot.id.clone()),
+            _ => None,
+        }
+        .or_else(|| {
+            self.plugin_bridge_runtime.as_ref().and_then(|runtime| {
+                runtime
+                    .lock()
+                    .ok()
+                    .and_then(|bridge| bridge.loaded_for_track(track_id))
+                    .map(|loaded| loaded.descriptor.insert_id)
+            })
+        })
     }
 
     pub(super) fn spawn_audio_poll(cx: &mut Context<Self>) {
@@ -112,6 +271,9 @@ impl StudioLayout {
         // (notably the track-header delete button, which mutates the Timeline
         // entity directly and never reaches the StudioLayout delete commands).
         self.reconcile_open_plugin_editors(cx);
+        self.poll_plugin_bridge_runtime(cx);
+        // Drive native main-owned editor shells: honor OS close + forward resizes.
+        self.drive_bridge_editors(cx);
 
         let engine = self.audio_engine.as_ref().expect("checked above");
         // Throttled raw/bus input-peak trace (gated by FUTUREBOARD_INPUT_DEBUG).

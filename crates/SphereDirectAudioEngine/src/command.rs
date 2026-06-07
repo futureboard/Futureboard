@@ -44,6 +44,25 @@ pub enum EngineCommand {
     },
     /// Panic/cleanup for preview notes on one track.
     MidiPreviewAllNotesOff { track_id: String },
+    /// Sample-synchronous bridged-plugin preview note-on (audio callback writes
+    /// into the shared MIDI ring before the next process block).
+    PluginPreviewNoteOn {
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    PluginPreviewNoteOff {
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+    },
+    PluginPreviewAllNotesOff {
+        track_id: String,
+        plugin_instance_id: String,
+    },
     /// Start transport (playback) from current position.
     StartTransport,
     /// Stop transport (but keep position).
@@ -61,5 +80,19 @@ pub enum EngineCommand {
         enabled: bool,
         start_seconds: f64,
         end_seconds: f64,
+    },
+    /// Stage 3b: install (or clear, with `sink = None`) the realtime
+    /// plugin-bridge sink for `track_id`. Keyed per track so multiple bridged
+    /// instruments do not clobber one another. Applied between blocks; the audio
+    /// callback then reads external plugin DSP output from each and mixes it in.
+    SetPluginBridgeSink {
+        track_id: String,
+        sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
+    },
+    /// Keep rendering a bridged track while its plugin editor is open (VSTi
+    /// internal keyboard / groove preview needs a live DSP loop).
+    SetBridgeEditorActive {
+        track_id: String,
+        active: bool,
     },
 }

@@ -38,7 +38,20 @@ use crate::theme::Colors;
 const ROW_H: f32 = 14.0; // px per semitone
 const PITCH_CNT: i32 = 128;
 const TOTAL_H: f32 = PITCH_CNT as f32 * ROW_H;
-const KEY_W: f32 = 56.0; // piano key lane width
+/// Piano-roll chrome theme (spec Part 7).
+struct PianoRollTheme {
+    key_lane_width: f32,
+}
+
+fn piano_roll_theme() -> PianoRollTheme {
+    PianoRollTheme {
+        key_lane_width: 72.0,
+    }
+}
+
+fn key_lane_width() -> f32 {
+    piano_roll_theme().key_lane_width
+}
 /// Height of the single unified controller lane (velocity / CC / pitch-bend /
 /// pressure). Replaces the old stacked velocity + CC lanes — one lane at a time.
 const LANE_H: f32 = 140.0;
@@ -181,6 +194,20 @@ pub enum UiMidiPreviewCommand {
     AllNotesOff {
         track_id: String,
     },
+    MidiPanic {
+        track_id: String,
+    },
+}
+
+impl UiMidiPreviewCommand {
+    pub fn track_id(&self) -> &str {
+        match self {
+            Self::NoteOn { track_id, .. }
+            | Self::NoteOff { track_id, .. }
+            | Self::AllNotesOff { track_id }
+            | Self::MidiPanic { track_id } => track_id,
+        }
+    }
 }
 
 impl GridRes {
@@ -380,6 +407,8 @@ pub struct PianoRoll {
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
     active_preview_note: Option<(String, u8, u8)>,
+    /// Pitch held in the left key lane (for drag-across-key preview).
+    key_lane_pressed_pitch: Option<u8>,
     focus: FocusHandle,
     focus_lost_subscription: Option<Subscription>,
 }
@@ -418,6 +447,7 @@ impl PianoRoll {
             cc_edit_prev: None,
             last_editing_clip: None,
             active_preview_note: None,
+            key_lane_pressed_pitch: None,
             focus: cx.focus_handle(),
             focus_lost_subscription: None,
         }
@@ -671,21 +701,37 @@ impl PianoRoll {
     }
 
     fn preview_target(&self, cx: &Context<Self>) -> Option<(String, u8)> {
+        use crate::components::timeline::timeline_state::{ClipType, TrackType};
         let tl = self.timeline.read(cx);
-        let clip_id = tl.state.selection.selected_clip_ids.first()?;
-        let (track, clip) = tl.state.find_clip(clip_id)?;
-        if !matches!(
-            clip.clip_type,
-            crate::components::timeline::timeline_state::ClipType::Midi { .. }
-        ) {
-            return None;
+        let channel_for = |track: &crate::components::timeline::timeline_state::TrackState| {
+            track
+                .routing
+                .midi_channel
+                .map(|ch| ch.saturating_sub(1).min(15))
+                .unwrap_or(0)
+        };
+        if let Some(clip_id) = tl.state.selection.selected_clip_ids.first() {
+            if let Some((track, clip)) = tl.state.find_clip(clip_id) {
+                if matches!(clip.clip_type, ClipType::Midi { .. }) {
+                    return Some((track.id.clone(), channel_for(track)));
+                }
+            }
         }
-        let channel = track
-            .routing
-            .midi_channel
-            .map(|ch| ch.saturating_sub(1).min(15))
-            .unwrap_or(0);
-        Some((track.id.clone(), channel))
+        if let Some(track_id) = tl.state.selection.selected_track_id.as_deref() {
+            if let Some(track) = tl.state.find_track(track_id) {
+                if matches!(track.track_type, TrackType::Instrument | TrackType::Midi) {
+                    return Some((track.id.clone(), channel_for(track)));
+                }
+            }
+        }
+        tl.state
+            .tracks
+            .iter()
+            .find(|track| {
+                matches!(track.track_type, TrackType::Instrument | TrackType::Midi)
+                    && track.instrument_insert().is_some()
+            })
+            .map(|track| (track.id.clone(), channel_for(track)))
     }
 
     fn begin_preview_note(
@@ -757,6 +803,26 @@ impl PianoRoll {
         );
         if let Some(handler) = self.on_midi_preview.clone() {
             handler(UiMidiPreviewCommand::AllNotesOff { track_id }, cx);
+        }
+    }
+
+    pub fn midi_panic(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let target = self
+            .active_preview_note
+            .as_ref()
+            .map(|(track_id, _, _)| track_id.clone())
+            .or_else(|| self.preview_target(cx).map(|(track_id, _)| track_id));
+        self.active_preview_note = None;
+        self.key_lane_pressed_pitch = None;
+        let Some(track_id) = target else {
+            return;
+        };
+        eprintln!(
+            "[MidiEditor] sending MidiPanic track_id={} reason={}",
+            track_id, reason
+        );
+        if let Some(handler) = self.on_midi_preview.clone() {
+            handler(UiMidiPreviewCommand::MidiPanic { track_id }, cx);
         }
     }
 
@@ -3239,22 +3305,25 @@ impl PianoRoll {
                         cx.listener(move |this, _event, _window, cx| {
                             if let Some((track_id, channel)) = this.preview_target(cx) {
                                 eprintln!(
-                                    "[MidiEditor] piano_key_down pitch={} velocity=100 track_id={} channel={}",
+                                    "[midi-preview-ui] note_on source=piano_key pitch={} velocity=100 instance_track={} channel={}",
                                     p, track_id, channel
                                 );
                             }
+                            this.key_lane_pressed_pitch = Some(p as u8);
                             this.begin_preview_note(p as u8, 100, "piano_key_down", cx);
                         }),
                     )
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _event, _window, cx| {
+                            this.key_lane_pressed_pitch = None;
                             this.end_preview_note("piano_key_up", cx);
                         }),
                     )
                     .on_mouse_up_out(
                         MouseButton::Left,
                         cx.listener(|this, _event, _window, cx| {
+                            this.key_lane_pressed_pitch = None;
                             this.end_preview_note("piano_key_up_out", cx);
                         }),
                     )
@@ -3393,7 +3462,7 @@ impl PianoRoll {
             // Left: piano keys.
             .child(
                 div()
-                    .w(px(KEY_W))
+                    .w(px(key_lane_width()))
                     .h_full()
                     .flex()
                     .flex_col()
@@ -3417,6 +3486,17 @@ impl PianoRoll {
                             .bg(Colors::surface_panel())
                             .border_r(px(1.0))
                             .border_color(Colors::panel_border())
+                            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                                if this.key_lane_pressed_pitch.is_none() {
+                                    return;
+                                }
+                                let local_y: f32 = event.position.y.into();
+                                let pitch = this.y_to_pitch(local_y);
+                                if this.key_lane_pressed_pitch != Some(pitch) {
+                                    this.key_lane_pressed_pitch = Some(pitch);
+                                    this.begin_preview_note(pitch, 100, "piano_key_drag", cx);
+                                }
+                            }))
                             .children(keys),
                     )
                     // Single unified controller-lane header (name + range).

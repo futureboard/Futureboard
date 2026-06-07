@@ -63,6 +63,28 @@ extern "C" {
     fn sphere_plugin_editor_embed_has_visible_ui(handle: c_ulonglong) -> c_int;
     fn sphere_plugin_editor_embed_host_kind(handle: c_ulonglong) -> c_int;
     fn sphere_plugin_editor_embed_refresh(handle: c_ulonglong);
+    fn sphere_plugin_editor_embed_preferred_size(
+        handle: c_ulonglong,
+        out_width: *mut c_int,
+        out_height: *mut c_int,
+    ) -> c_int;
+    fn sphere_plugin_editor_embed_prepare(
+        plugin_path: *const c_char,
+        class_id: *const c_char,
+        out_width: *mut c_int,
+        out_height: *mut c_int,
+    ) -> c_ulonglong;
+    fn sphere_plugin_editor_embed_cancel_prepare(prepare_id: c_ulonglong);
+    fn sphere_plugin_editor_embed_attach_prepared(
+        prepare_id: c_ulonglong,
+        parent_hwnd: c_ulonglong,
+        x: c_int,
+        y: c_int,
+        width: c_int,
+        height: c_int,
+    ) -> c_ulonglong;
+    fn sphere_plugin_editor_embed_host_hwnd(handle: c_ulonglong) -> c_ulonglong;
+    fn sphere_plugin_editor_embed_delayed_gpu_refresh(handle: c_ulonglong);
 }
 
 /// Which native presentation backs an attached embed session. Exactly one mode
@@ -192,6 +214,109 @@ pub fn refresh_editor_host(handle: u64) {
         return;
     }
     unsafe { sphere_plugin_editor_embed_refresh(handle as c_ulonglong) };
+}
+
+/// Phase 1 of two-phase attach: load plugin, `createView`, `getSize` only.
+/// Returns `(prepare_id, preferred_width, preferred_height)`.
+pub fn prepare_editor_view(plugin_path: &str, class_id: &str) -> Result<(u64, u32, u32), String> {
+    let path = to_cstring("plugin_path", plugin_path.to_string())?;
+    let class = to_cstring("class_id", class_id.to_string())?;
+    let mut width: c_int = 0;
+    let mut height: c_int = 0;
+    let prepare_id = unsafe {
+        sphere_plugin_editor_embed_prepare(
+            path.as_ptr(),
+            class.as_ptr(),
+            &mut width as *mut c_int,
+            &mut height as *mut c_int,
+        )
+    };
+    if prepare_id == 0 {
+        return Err("prepare_editor_view failed".to_string());
+    }
+    Ok((
+        prepare_id,
+        width.max(0) as u32,
+        height.max(0) as u32,
+    ))
+}
+
+/// Cancel a pending prepare session (editor closed before attach).
+pub fn cancel_prepared_editor(prepare_id: u64) {
+    if prepare_id == 0 {
+        return;
+    }
+    unsafe { sphere_plugin_editor_embed_cancel_prepare(prepare_id as c_ulonglong) };
+}
+
+/// Phase 2: attach a prepared view into `parent_hwnd` at `region` size.
+pub fn attach_prepared_editor(
+    prepare_id: u64,
+    parent_hwnd: u64,
+    region: EmbedRegion,
+) -> Result<u64, String> {
+    if prepare_id == 0 {
+        return Err("attach_prepared_editor: null prepare_id".to_string());
+    }
+    if parent_hwnd == 0 {
+        return Err("attach_prepared_editor: null parent handle".to_string());
+    }
+    let handle = unsafe {
+        sphere_plugin_editor_embed_attach_prepared(
+            prepare_id as c_ulonglong,
+            parent_hwnd as c_ulonglong,
+            region.x as c_int,
+            region.y as c_int,
+            region.width as c_int,
+            region.height as c_int,
+        )
+    };
+    if handle == 0 {
+        Err("attach_prepared_editor failed".to_string())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Host child HWND backing an attached embed session (`IPlugView::attached` target).
+pub fn editor_host_hwnd(handle: u64) -> Option<u64> {
+    if handle == 0 {
+        return None;
+    }
+    let hwnd = unsafe { sphere_plugin_editor_embed_host_hwnd(handle as c_ulonglong) };
+    if hwnd == 0 {
+        None
+    } else {
+        Some(hwnd)
+    }
+}
+
+/// Repeat show/resize/redraw once (~100ms after attach) for GPU-heavy editors.
+pub fn delayed_gpu_refresh(handle: u64) {
+    if handle == 0 {
+        return;
+    }
+    unsafe { sphere_plugin_editor_embed_delayed_gpu_refresh(handle as c_ulonglong) };
+}
+
+pub fn editor_preferred_size(handle: u64) -> Option<(u32, u32)> {
+    if handle == 0 {
+        return None;
+    }
+    let mut width: c_int = 0;
+    let mut height: c_int = 0;
+    let ok = unsafe {
+        sphere_plugin_editor_embed_preferred_size(
+            handle as c_ulonglong,
+            &mut width as *mut c_int,
+            &mut height as *mut c_int,
+        )
+    };
+    if ok == 0 || width <= 0 || height <= 0 {
+        None
+    } else {
+        Some((width as u32, height as u32))
+    }
 }
 
 /// Options accepted by the native editor window. `width`/`height` default

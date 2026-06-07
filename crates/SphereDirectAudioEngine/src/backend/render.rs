@@ -76,6 +76,10 @@ pub struct LocalAudioState {
     /// dead when transport is stopped. Counts down per block; refreshed while a
     /// preview note is held.
     pub preview_tail_samples: u64,
+    /// Last logged preview-note count (gates PreviewRenderWake spam).
+    pub prev_logged_preview_notes: u32,
+    /// Blocks until next PreviewRenderWake log while preview is active.
+    pub preview_wake_log_cooldown: u32,
     pub metronome_enabled: bool,
     pub metronome_bpm: f64,
     pub metronome_ts_num: u32,
@@ -103,6 +107,8 @@ impl LocalAudioState {
             prev_input_bus_r: 0.0,
             render_path_logged: false,
             preview_tail_samples: 0,
+            prev_logged_preview_notes: u32::MAX,
+            preview_wake_log_cooldown: 0,
             metronome_enabled: false,
             metronome_bpm: 120.0,
             metronome_ts_num: 4,
@@ -234,6 +240,10 @@ pub fn drain_commands(
                 runtime.all_notes_off("project_load");
                 let old = std::mem::replace(runtime, *next_runtime);
                 runtime.sample_rate = output_sample_rate;
+                // Preserve the plugin-bridge sinks across reloads (Stage 3b) — a
+                // freshly built project never carries them.
+                runtime.plugin_bridge_sinks = old.plugin_bridge_sinks.clone();
+                runtime.bridge_editor_active = old.bridge_editor_active.clone();
                 crate::graveyard::retire(old);
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 runtime.reset_midi_playback(pos);
@@ -317,6 +327,17 @@ pub fn drain_commands(
                     .master_volume
                     .store(f32_store(value), Ordering::Relaxed);
             }
+            EngineCommand::SetPluginBridgeSink { track_id, sink } => match sink {
+                Some(sink) => {
+                    runtime.plugin_bridge_sinks.insert(track_id, sink);
+                }
+                None => {
+                    runtime.plugin_bridge_sinks.remove(&track_id);
+                }
+            },
+            EngineCommand::SetBridgeEditorActive { track_id, active } => {
+                runtime.set_bridge_editor_active(&track_id, active);
+            }
             EngineCommand::SetTrackVolume { track_id, value } => {
                 runtime.update_track_volume(&track_id, value);
             }
@@ -363,6 +384,40 @@ pub fn drain_commands(
             EngineCommand::MidiPreviewAllNotesOff { track_id } => {
                 runtime.midi_preview_all_notes_off(&track_id);
             }
+            EngineCommand::PluginPreviewNoteOn {
+                track_id,
+                plugin_instance_id,
+                channel,
+                pitch,
+                velocity,
+            } => {
+                runtime.bridge_preview_note_on(
+                    &track_id,
+                    &plugin_instance_id,
+                    channel,
+                    pitch,
+                    velocity,
+                );
+            }
+            EngineCommand::PluginPreviewNoteOff {
+                track_id,
+                plugin_instance_id,
+                channel,
+                pitch,
+            } => {
+                runtime.bridge_preview_note_off(
+                    &track_id,
+                    &plugin_instance_id,
+                    channel,
+                    pitch,
+                );
+            }
+            EngineCommand::PluginPreviewAllNotesOff {
+                track_id,
+                plugin_instance_id,
+            } => {
+                runtime.bridge_preview_all_notes_off(&track_id, &plugin_instance_id);
+            }
         }
     }
     false
@@ -404,10 +459,6 @@ pub fn fill_output_f32(
     let mut frames = 0u64;
     runtime.begin_meter_block();
 
-    for track in &mut runtime.tracks {
-        track.midi_block_events.clear();
-    }
-
     if local.playing_local {
         let frames_needed = data.len().checked_div(channels).unwrap_or(0) as u64;
         if frames_needed > 0 {
@@ -430,21 +481,47 @@ pub fn fill_output_f32(
         // queued to render the instrument's release after the eventual note-off.
         local.preview_tail_samples = (runtime.sample_rate as u64).saturating_mul(2);
     }
-    let preview_render_active = has_preview || pending_midi || local.preview_tail_samples > 0;
-    if preview_render_active && !local.playing_local {
+    let bridge_editor_wakeup = runtime.has_bridge_editor_active();
+    let preview_render_active = has_preview
+        || pending_midi
+        || local.preview_tail_samples > 0
+        || bridge_editor_wakeup;
+    if preview_render_active && !local.playing_local && (has_preview || pending_midi || local.preview_tail_samples > 0) {
         let active_notes: usize = runtime
             .midi_tracks
             .iter()
             .map(|mt| mt.preview_active.len())
             .sum();
-        eprintln!(
-            "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
-            active_notes, local.preview_tail_samples
-        );
+        let active_u32 = active_notes as u32;
+        let changed = active_u32 != local.prev_logged_preview_notes;
+        if changed {
+            eprintln!(
+                "[PreviewRenderWake] active_preview_notes changed {} -> {} tail_samples={}",
+                local.prev_logged_preview_notes,
+                active_u32,
+                local.preview_tail_samples
+            );
+            local.prev_logged_preview_notes = active_u32;
+            local.preview_wake_log_cooldown = 0;
+        } else if active_notes > 0 {
+            local.preview_wake_log_cooldown = local.preview_wake_log_cooldown.saturating_add(1);
+            let sr = runtime.sample_rate.max(1);
+            let log_interval_blocks = (sr / frames_in_block.max(1) as u32).max(1);
+            if local.preview_wake_log_cooldown >= log_interval_blocks {
+                local.preview_wake_log_cooldown = 0;
+                eprintln!(
+                    "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
+                    active_notes, local.preview_tail_samples
+                );
+            }
+        }
         // Once no note is held and nothing is queued, the remaining tail is pure
         // decay — count it down so processing eventually stops.
         if !has_preview && !pending_midi {
             local.preview_tail_samples = local.preview_tail_samples.saturating_sub(frames_in_block);
+            if local.preview_tail_samples == 0 {
+                local.prev_logged_preview_notes = u32::MAX;
+            }
         }
     }
 
@@ -572,6 +649,15 @@ pub fn fill_output_f32(
         local.prev_input_bus_r = 0.0;
     }
 
+    // Legacy master-bus bridge fallback (disabled by default — per-track routing
+    // through external-bridge-plugin inserts is the normal path).
+    if plugin_bridge_master_fallback_enabled() {
+        let (bridge_peak_l, bridge_peak_r) =
+            mix_plugin_bridge(data, channels, runtime, master_vol);
+        peak_l = peak_l.max(bridge_peak_l);
+        peak_r = peak_r.max(bridge_peak_r);
+    }
+
     // Update meters.
     let rms_l = if frames > 0 {
         (sum_sq_l / frames as f32).sqrt()
@@ -613,7 +699,80 @@ pub fn fill_output_f32(
         });
     }
 
+    // Consumed for this block — clear AFTER render so drain_commands preview
+    // events queued earlier in the same callback survive until apply_insert.
+    for track in &mut runtime.tracks {
+        track.midi_block_events.clear();
+    }
+
     frames
+}
+
+/// Largest block the bridge mix reads in one callback (stack scratch bound).
+const BRIDGE_MAX_FRAMES: usize = 2048;
+
+/// Whether the legacy master-bus bridge mix fallback is enabled. Bridge DSP is
+/// normally routed per-track through `external-bridge-plugin` inserts; set
+/// `FUTUREBOARD_PLUGIN_BRIDGE_AUDIO=0` to disable the master fallback.
+fn plugin_bridge_master_fallback_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("FUTUREBOARD_PLUGIN_BRIDGE_AUDIO")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !matches!(v.as_str(), "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Stage 3b: read the external plugin host's previously produced block from the
+/// shared region and mix it into the master output `data`, returning the mixed
+/// peak so the caller can fold it into the master meter. Then request the next
+/// block (one-block latency — never blocks the audio thread).
+///
+/// Realtime-safe: fixed stack scratch, atomics + arithmetic only, no allocation
+/// or locking. No-op unless the bridge audio path is enabled and a sink is set.
+fn mix_plugin_bridge(
+    data: &mut [f32],
+    channels: usize,
+    runtime: &RuntimeProject,
+    master_vol: f32,
+) -> (f32, f32) {
+    if runtime.plugin_bridge_sinks.is_empty() {
+        return (0.0, 0.0);
+    }
+    let ch = channels.max(1);
+    let frames = data.len() / ch;
+    if frames == 0 {
+        return (0.0, 0.0);
+    }
+    let n = frames.min(BRIDGE_MAX_FRAMES);
+    let mut scratch_l = [0.0f32; BRIDGE_MAX_FRAMES];
+    let mut scratch_r = [0.0f32; BRIDGE_MAX_FRAMES];
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    // Mix every registered track's bridged plugin output into the master.
+    // (Per-track routing through each track's fader/mute/solo is a later,
+    // runtime-validated step; this sums them onto the master bus for now.)
+    for sink in runtime.plugin_bridge_sinks.values() {
+        let got = sink.read_output(&mut scratch_l[..n], &mut scratch_r[..n], n);
+        for i in 0..got {
+            let l = scratch_l[i] * master_vol;
+            let r = scratch_r[i] * master_vol;
+            let base = i * ch;
+            data[base] += l;
+            if ch > 1 {
+                data[base + 1] += r;
+            }
+            peak_l = peak_l.max(l.abs());
+            peak_r = peak_r.max(r.abs());
+        }
+        // Request the next block (the host fills it asynchronously for next time).
+        sink.request_block(frames as u32);
+    }
+    (peak_l, peak_r)
 }
 
 /// Drain the shared input ring into the output buffer (Layers 4 + 7).

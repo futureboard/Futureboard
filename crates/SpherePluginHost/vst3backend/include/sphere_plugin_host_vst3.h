@@ -65,5 +65,25 @@ SPHERE_PLUGIN_HOST_API int sphere_plugin_editor_embed_host_kind(unsigned long lo
 // Reposition (if needed), onSize, WM_SIZE/WM_SHOWWINDOW to plugin children, and pump
 // pending paint messages. Call from the GPUI UI thread while Attached.
 SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_refresh(unsigned long long handle);
+SPHERE_PLUGIN_HOST_API int sphere_plugin_editor_embed_preferred_size(
+    unsigned long long handle,
+    int* out_width,
+    int* out_height);
+// Two-phase attach: createView + getSize without attached(); returns prepare_id.
+SPHERE_PLUGIN_HOST_API unsigned long long sphere_plugin_editor_embed_prepare(
+    const char* plugin_path,
+    const char* class_id,
+    int* out_width,
+    int* out_height);
+SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_cancel_prepare(unsigned long long prepare_id);
+SPHERE_PLUGIN_HOST_API unsigned long long sphere_plugin_editor_embed_attach_prepared(
+    unsigned long long prepare_id,
+    unsigned long long parent_hwnd,
+    int x,
+    int y,
+    int width,
+    int height);
+SPHERE_PLUGIN_HOST_API unsigned long long sphere_plugin_editor_embed_host_hwnd(unsigned long long handle);
+SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_embed_delayed_gpu_refresh(unsigned long long handle);
 
 }

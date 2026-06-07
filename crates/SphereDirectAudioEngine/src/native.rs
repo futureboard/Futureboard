@@ -254,6 +254,25 @@ impl AudioEngine {
         self.inner.set_bpm(bpm)
     }
 
+    /// Stage 3b: install (or clear) the realtime plugin-bridge sink for
+    /// `track_id` so the audio callback mixes its external plugin-host DSP
+    /// output into the master.
+    pub fn set_plugin_bridge_sink(
+        &self,
+        track_id: String,
+        sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_plugin_bridge_sink(track_id, sink)
+    }
+
+    pub fn set_bridge_editor_active(
+        &self,
+        track_id: String,
+        active: bool,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_bridge_editor_active(track_id, active)
+    }
+
     pub fn set_time_signature(
         &self,
         numerator: u32,
@@ -293,6 +312,43 @@ impl AudioEngine {
 
     pub fn midi_preview_all_notes_off(&self, track_id: String) -> Result<(), SphereAudioError> {
         self.inner.midi_preview_all_notes_off(track_id)
+    }
+
+    pub fn plugin_preview_note_on(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.plugin_preview_note_on(
+            track_id,
+            plugin_instance_id,
+            channel,
+            pitch,
+            velocity,
+        )
+    }
+
+    pub fn plugin_preview_note_off(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        pitch: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .plugin_preview_note_off(track_id, plugin_instance_id, channel, pitch)
+    }
+
+    pub fn plugin_preview_all_notes_off(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .plugin_preview_all_notes_off(track_id, plugin_instance_id)
     }
 
     /// Toggle the transport between play and pause. Returns the new playing

@@ -5744,14 +5744,17 @@ name = "sphere-plugin-host"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "cpal",
  "crossbeam-channel",
  "dirs 5.0.1",
  "napi",
  "napi-build",
  "napi-derive",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
+ "sphere-direct-audio-engine",
  "windows 0.61.3",
 ]
 
@@ -5772,6 +5775,7 @@ dependencies = [
  "sphere-plugin-host",
  "wgpu",
  "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

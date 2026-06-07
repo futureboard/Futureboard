@@ -244,11 +244,11 @@ fn service_audio_bridge(region: &SharedAudioRegion, preview: &SharedPluginHostPr
         count
     };
     if midi_count > 0 {
+        let block_seq = bridge.request_seq.load(Ordering::Relaxed);
         let instances = preview.lock().loaded_instance_ids();
         for instance_id in instances {
             eprintln!(
-                "[plugin-host-midi] consume instance={instance_id} block_seq={} events={midi_count}",
-                bridge.request_seq.load(Ordering::Relaxed)
+                "[plugin-host-midi-consume] seq={block_seq} instance={instance_id} events={midi_count}"
             );
         }
     }
@@ -298,7 +298,7 @@ fn service_audio_bridge(region: &SharedAudioRegion, preview: &SharedPluginHostPr
     if peak_l > 0.0001 || peak_r > 0.0001 {
         for instance_id in preview.lock().loaded_instance_ids() {
             eprintln!(
-                "[plugin-host-dsp] process instance={instance_id} frames={frames} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
+                "[vst3-process] instance={instance_id} frames={frames} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
             );
         }
     }
@@ -635,6 +635,7 @@ fn dispatch(
                 &plugin_instance_id,
                 &plugin_instance_id,
                 &plugin_instance_id,
+                &plugin_instance_id,
             );
             let (preferred_width, preferred_height) =
                 preview.lock().default_editor_size();
@@ -922,6 +923,7 @@ fn attach_unified_editor(
         .lock()
         .editor_content_size_for_instance(plugin_instance_id);
     sphere_plugin_host::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
+        plugin_instance_id,
         plugin_instance_id,
         plugin_instance_id,
         plugin_instance_id,

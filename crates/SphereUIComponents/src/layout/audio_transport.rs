@@ -15,6 +15,7 @@ impl StudioLayout {
         command: components::piano_roll::UiMidiPreviewCommand,
         cx: &App,
     ) {
+        let ui_start = Instant::now();
         let track_id = match &command {
             components::piano_roll::UiMidiPreviewCommand::NoteOn { track_id, .. }
             | components::piano_roll::UiMidiPreviewCommand::NoteOff { track_id, .. }
@@ -50,7 +51,7 @@ impl StudioLayout {
                     ..
                 } => {
                     eprintln!(
-                        "[midi-preview-ui] source=piano_key type=note_on track={track_id} instance={instance_id} pitch={pitch} velocity={velocity} sink_ready=true"
+                        "[midi-preview-ui] note_on track={track_id} pitch={pitch} velocity={velocity} source=piano_key"
                     );
                     engine.plugin_preview_note_on(
                         track_id.clone(),
@@ -64,7 +65,7 @@ impl StudioLayout {
                     channel, pitch, ..
                 } => {
                     eprintln!(
-                        "[midi-preview-ui] source=piano_key type=note_off track={track_id} instance={instance_id} pitch={pitch} sink_ready=true"
+                        "[midi-preview-ui] note_off track={track_id} pitch={pitch} source=piano_key"
                     );
                     engine.plugin_preview_note_off(
                         track_id.clone(),
@@ -82,6 +83,12 @@ impl StudioLayout {
             };
             if let Err(error) = result {
                 eprintln!("[EngineMidiPreview] bridge dispatch failed: {error}");
+            }
+            if crate::forensic_trace::preview_perf_trace_enabled() {
+                eprintln!(
+                    "[preview-perf] ui_handler_ms={:.3}",
+                    ui_start.elapsed().as_secs_f64() * 1000.0
+                );
             }
             return;
         }
@@ -437,6 +444,21 @@ impl StudioLayout {
         }
         self.last_meter_apply = Instant::now();
         let meters = engine.meters();
+        if crate::forensic_trace::forensic_trace_enabled() {
+            for track_meter in &meters.tracks {
+                let peak = track_meter.peak_l.max(track_meter.peak_r);
+                if peak > 0.0001 {
+                    eprintln!(
+                        "[Meter] track={} peak={peak:.6}",
+                        track_meter.track_id
+                    );
+                }
+            }
+            let master_peak = meters.master_peak_l.max(meters.master_peak_r);
+            if master_peak > 0.0001 {
+                eprintln!("[Meter] master peak={master_peak:.6}");
+            }
+        }
         self.timeline.update(cx, |timeline, _cx| {
             let mut changed = false;
             for track_meter in meters.tracks {
@@ -722,6 +744,10 @@ impl StudioLayout {
         transport_freeze_debug::reset_sequence();
         transport_freeze_debug::log("Play requested");
         eprintln!("[transport] Play requested");
+        {
+            let timeline = self.timeline.read(cx);
+            crate::forensic_trace::dump_midi_model(&timeline.state);
+        }
 
         if self.audio_engine.is_none() {
             self.audio_last_error = Some("audio engine unavailable".to_string());

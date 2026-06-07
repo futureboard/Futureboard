@@ -391,6 +391,11 @@ pub fn drain_commands(
                 pitch,
                 velocity,
             } => {
+                if crate::forensic_trace::engine_midi_verbose_enabled() {
+                    eprintln!(
+                        "[midi-preview-audio] dequeue note_on instance={plugin_instance_id} pitch={pitch}"
+                    );
+                }
                 runtime.bridge_preview_note_on(
                     &track_id,
                     &plugin_instance_id,
@@ -405,6 +410,11 @@ pub fn drain_commands(
                 channel,
                 pitch,
             } => {
+                if crate::forensic_trace::engine_midi_verbose_enabled() {
+                    eprintln!(
+                        "[midi-preview-audio] dequeue note_off instance={plugin_instance_id} pitch={pitch}"
+                    );
+                }
                 runtime.bridge_preview_note_off(
                     &track_id,
                     &plugin_instance_id,

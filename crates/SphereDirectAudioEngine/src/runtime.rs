@@ -24,13 +24,19 @@ use crate::vst3_processor::{vst3_midi_debug_enabled, Vst3MidiEvent, Vst3RuntimeP
 /// never touches the environment.
 pub fn midi_engine_debug_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_ENGINE_DEBUG").is_some())
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
+            || std::env::var_os("FUTUREBOARD_MIDI_ENGINE_DEBUG").is_some()
+    })
 }
 
 /// Verbose MIDI/bridge tracing (off by default — safe for realtime audio).
 pub fn midi_verbose_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some())
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
+            || std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -808,6 +814,25 @@ impl RuntimeProject {
         };
         let (midi_clips, midi_tracks) = build_midi_runtime(&snapshot.midi_clips, samples_per_beat);
 
+        if crate::forensic_trace::engine_midi_trace_enabled() {
+            for track in &snapshot.tracks {
+                let track_clip_count = snapshot
+                    .midi_clips
+                    .iter()
+                    .filter(|c| c.track_id == track.id)
+                    .count();
+                crate::forensic_trace::log_runtime_midi_track_summary(&track.id, track_clip_count);
+            }
+            for clip in &snapshot.midi_clips {
+                crate::forensic_trace::log_runtime_midi_clip(
+                    &clip.track_id,
+                    clip,
+                    samples_per_beat,
+                    |beat| beat_to_sample(beat, samples_per_beat),
+                );
+            }
+        }
+
         if midi_engine_debug_enabled() {
             let total_events: usize = midi_clips.iter().map(|c| c.events.len()).sum();
             for c in &midi_clips {
@@ -1013,18 +1038,20 @@ impl RuntimeProject {
         }
         let block_end = base_sample.saturating_add(frames);
         let debug = midi_engine_debug_enabled();
-        let verbose = midi_verbose_enabled();
+        let verbose = crate::forensic_trace::engine_midi_verbose_enabled();
+        let trace = crate::forensic_trace::engine_midi_trace_enabled();
         let vst3_debug = vst3_midi_debug_enabled();
         let spb = self.samples_per_beat.max(1.0);
-        if verbose {
-            eprintln!(
-                "[midi-playback] transport_playing=true block_start={base_sample} block_end={block_end}"
-            );
-        }
+        let bpm = if spb > 0.0 {
+            self.sample_rate as f64 * 60.0 / spb
+        } else {
+            120.0
+        };
+        let heartbeat = trace && crate::forensic_trace::scheduler_heartbeat_due();
         for mt in &mut self.midi_tracks {
             let mut scheduled = 0u32;
-            let mut notes_on = 0u32;
-            let mut notes_off = 0u32;
+            let mut _notes_on = 0u32;
+            let mut _notes_off = 0u32;
             let bridged = self.plugin_bridge_sinks.contains_key(&mt.track_id);
             let instrument_instance = self
                 .tracks
@@ -1034,23 +1061,46 @@ impl RuntimeProject {
                     t.midi_instrument_insert_ix
                         .and_then(|ix| t.inserts.get(ix).map(|i| i.id.clone()))
                 });
-            let clips_active = self
+            let overlapping: Vec<_> = self
                 .midi_clips
                 .iter()
                 .filter(|c| {
                     c.track_id == mt.track_id
                         && block_end > beat_to_sample(c.start_beat, spb)
-                        && base_sample
-                            < beat_to_sample(c.end_beat, spb)
+                        && base_sample < beat_to_sample(c.end_beat, spb)
                 })
-                .count();
-            if verbose && bridged {
+                .collect();
+            let _clips_active = overlapping.len();
+            let block_has_note = overlapping.iter().any(|c| {
+                c.events.iter().any(|ev| {
+                    ev.sample >= base_sample
+                        && ev.sample < block_end
+                        && matches!(ev.kind, RuntimeMidiEventKind::NoteOn)
+                })
+            });
+            if trace && (block_has_note || heartbeat) {
                 eprintln!(
-                    "[midi-playback] track={} clips_active={} events_total={}",
-                    mt.track_id,
-                    clips_active,
-                    mt.events.len(),
+                    "[midi-scheduler] playing=true bpm={bpm:.1} sr={} block_start={base_sample} block_end={block_end}",
+                    self.sample_rate
                 );
+            }
+            if trace && !overlapping.is_empty() && (block_has_note || heartbeat) {
+                for clip in &overlapping {
+                    eprintln!(
+                        "[midi-scheduler] track={} clip={} overlaps=true",
+                        mt.track_id, clip.id
+                    );
+                }
+            }
+            if trace && bridged {
+                if let Some(ref instance_id) = instrument_instance {
+                    eprintln!(
+                        "[instrument-route] track={} instrument_instance={}",
+                        mt.track_id, instance_id
+                    );
+                    eprintln!("[instrument-route] plugin_instance_id={instance_id}");
+                    eprintln!("[instrument-route] route_ok=true");
+                }
             }
             while mt.cursor < mt.events.len() && mt.events[mt.cursor].sample < block_end {
                 let ev = mt.events[mt.cursor].clone();
@@ -1090,20 +1140,24 @@ impl RuntimeProject {
                                 }
                                 match ev.kind {
                                     RuntimeMidiEventKind::NoteOn => {
-                                        notes_on += 1;
-                                        if verbose {
+                                        _notes_on += 1;
+                                        if trace {
+                                            let abs = base_sample + u64::from(offset);
                                             eprintln!(
-                                                "[midi-playback] note_on pitch={} offset={} instance={instance_id}",
-                                                ev.pitch, offset
+                                                "[midi-scheduler] note_on pitch={} offset={offset} \
+                                                 absolute_sample={abs} instance={instance_id}",
+                                                ev.pitch
                                             );
                                         }
                                     }
                                     RuntimeMidiEventKind::NoteOff => {
-                                        notes_off += 1;
-                                        if verbose {
+                                        _notes_off += 1;
+                                        if trace {
+                                            let abs = base_sample + u64::from(offset);
                                             eprintln!(
-                                                "[midi-playback] note_off pitch={} offset={} instance={instance_id}",
-                                                ev.pitch, offset
+                                                "[midi-scheduler] note_off pitch={} offset={offset} \
+                                                 absolute_sample={abs} instance={instance_id}",
+                                                ev.pitch
                                             );
                                         }
                                     }
@@ -1155,22 +1209,6 @@ impl RuntimeProject {
                     "[DAUx MIDI] block events={} track={}",
                     scheduled, mt.track_id
                 );
-            }
-            if bridged && (notes_on > 0 || notes_off > 0) {
-                if let Some(ref instance_id) = instrument_instance {
-                    if verbose {
-                        let bs = base_sample as f64 / spb;
-                        let be = block_end as f64 / spb;
-                        eprintln!(
-                            "[midi-playback] block beat={bs:.3}..{be:.3} track={} notes_on={notes_on} notes_off={notes_off}",
-                            mt.track_id
-                        );
-                        eprintln!(
-                            "[midi-playback] route track={} -> plugin_instance_id={}",
-                            mt.track_id, instance_id
-                        );
-                    }
-                }
             }
             if vst3_debug {
                 if let Some(ti) = self.tracks.iter().position(|t| t.id == mt.track_id) {
@@ -1325,14 +1363,18 @@ impl RuntimeProject {
             return;
         };
         sink.push_midi(status, data1, data2, 0);
-        if midi_verbose_enabled() {
+        if crate::forensic_trace::engine_midi_verbose_enabled() {
             let instance = if plugin_instance_id.is_empty() {
                 "unknown"
             } else {
                 plugin_instance_id
             };
+            let seq = MIDI_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
             eprintln!(
-                "[plugin-dsp-midi] write preview event instance={instance} events=1 {kind} pitch={data1} velocity={data2}"
+                "[plugin-dsp-midi-write] preview {kind} instance={instance} pitch={data1} offset=0"
+            );
+            eprintln!(
+                "[plugin-dsp-midi-write] seq={seq} instance={instance} events=1"
             );
         }
     }
@@ -1663,6 +1705,8 @@ impl RuntimeProject {
     }
 }
 
+static MIDI_WRITE_SEQ: AtomicU32 = AtomicU32::new(0);
+
 pub fn push_vst3_midi_event_to_sink(
     sink: &dyn crate::plugin_bridge::PluginBridgeSink,
     ev: &Vst3MidiEvent,
@@ -1670,6 +1714,7 @@ pub fn push_vst3_midi_event_to_sink(
     verbose: bool,
 ) {
     let channel = ev.channel & 0x0F;
+    let seq = MIDI_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
     match ev.kind {
         1 => {
             let vel = (ev.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
@@ -1677,7 +1722,10 @@ pub fn push_vst3_midi_event_to_sink(
                 sink.push_midi(0x90 | channel, ev.pitch, vel, ev.sample_offset);
                 if verbose {
                     eprintln!(
-                        "[plugin-dsp-midi] write instance={instance_id} events=1 note_on pitch={} offset={}",
+                        "[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1"
+                    );
+                    eprintln!(
+                        "[plugin-dsp-midi-write] note_on pitch={} offset={} ch={channel}",
                         ev.pitch, ev.sample_offset
                     );
                 }
@@ -1685,7 +1733,10 @@ pub fn push_vst3_midi_event_to_sink(
                 sink.push_midi(0x80 | channel, ev.pitch, 0, ev.sample_offset);
                 if verbose {
                     eprintln!(
-                        "[plugin-dsp-midi] write instance={instance_id} events=1 note_off pitch={} offset={}",
+                        "[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1"
+                    );
+                    eprintln!(
+                        "[plugin-dsp-midi-write] note_off pitch={} offset={} ch={channel}",
                         ev.pitch, ev.sample_offset
                     );
                 }
@@ -1695,7 +1746,10 @@ pub fn push_vst3_midi_event_to_sink(
             sink.push_midi(0x80 | channel, ev.pitch, 0, ev.sample_offset);
             if verbose {
                 eprintln!(
-                    "[plugin-dsp-midi] write instance={instance_id} events=1 note_off pitch={} offset={}",
+                    "[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1"
+                );
+                eprintln!(
+                    "[plugin-dsp-midi-write] note_off pitch={} offset={} ch={channel}",
                     ev.pitch, ev.sample_offset
                 );
             }
@@ -1705,7 +1759,7 @@ pub fn push_vst3_midi_event_to_sink(
             sink.push_midi(0xB0 | channel, ev.pitch, val, ev.sample_offset);
             if verbose {
                 eprintln!(
-                    "[plugin-dsp-midi] write instance={instance_id} events=1 cc={} val={val}",
+                    "[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1 cc={} val={val}",
                     ev.pitch
                 );
             }

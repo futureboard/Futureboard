@@ -8,6 +8,14 @@ use DAUx::vst3_processor::{Vst3MidiEvent, Vst3RuntimeProcessor};
 
 use crate::audio_bridge::SharedMidiEvent;
 
+fn forensic_trace_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
+            || std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some()
+    })
+}
+
 const PREVIEW_TAIL_BLOCKS: u32 = 8;
 const CC_SUSTAIN: u16 = 64;
 const CC_ALL_SOUND_OFF: u16 = 120;
@@ -110,6 +118,7 @@ impl PluginHostPreviewEngine {
             plugin_instance_id,
             plugin_instance_id,
             plugin_instance_id,
+            plugin_instance_id,
         );
     }
 
@@ -120,26 +129,41 @@ impl PluginHostPreviewEngine {
         plugin_instance_id: &str,
         editor_instance: &str,
         dsp_instance: &str,
-        midi_instance: &str,
+        midi_playback_instance: &str,
+        preview_instance: &str,
         shared_audio_instance: &str,
     ) {
         let unified = editor_instance == plugin_instance_id
             && dsp_instance == plugin_instance_id
-            && midi_instance == plugin_instance_id
+            && midi_playback_instance == plugin_instance_id
+            && preview_instance == plugin_instance_id
             && shared_audio_instance == plugin_instance_id;
         eprintln!(
             "[plugin-runtime-id] track_id={track_id} insert_id={insert_id} plugin_instance_id={plugin_instance_id}"
         );
         eprintln!("[plugin-runtime-id] editor_instance={editor_instance}");
         eprintln!("[plugin-runtime-id] dsp_instance={dsp_instance}");
-        eprintln!("[plugin-runtime-id] midi_instance={midi_instance}");
+        eprintln!("[plugin-runtime-id] midi_playback_instance={midi_playback_instance}");
+        eprintln!("[plugin-runtime-id] preview_instance={preview_instance}");
         eprintln!("[plugin-runtime-id] shared_audio_instance={shared_audio_instance}");
         eprintln!("[plugin-runtime-id] unified={unified}");
         if !unified {
             eprintln!(
                 "[plugin-runtime-id] ERROR duplicate runtime refused \
                  expected={plugin_instance_id} editor={editor_instance} dsp={dsp_instance} \
-                 midi={midi_instance} shared_audio={shared_audio_instance}"
+                 midi_playback={midi_playback_instance} preview={preview_instance} \
+                 shared_audio={shared_audio_instance}"
+            );
+        }
+    }
+
+    pub fn log_host_registry(&self) {
+        eprintln!("[plugin-host-registry] instances={}", self.instances.len());
+        for (id, instance) in &self.instances {
+            let editor = instance.processor.embed_is_valid();
+            let dsp = instance.processor.is_ready();
+            eprintln!(
+                "[plugin-host-registry] instance={id} loaded=true editor={editor} dsp={dsp}"
             );
         }
     }
@@ -187,6 +211,7 @@ impl PluginHostPreviewEngine {
             "[plugin-host-midi] preview processor loaded instance={plugin_instance_id} dsp_output={}",
             if self.dsp_ready { "ready" } else { "pending" }
         );
+        self.log_host_registry();
         true
     }
 
@@ -224,10 +249,19 @@ impl PluginHostPreviewEngine {
             instance.processor.embed_set_bounds(0, 0, width, height);
             instance.processor.embed_refresh();
             let host_hwnd = instance.processor.handle_value();
-            eprintln!(
-                "[plugin-host] SetWindowPos host_hwnd=0x{host_hwnd:x} x=0 y=0 w={width} h={height}"
-            );
-            eprintln!("[plugin-host] onSize result=0 rect=(0,0,{width},{height})");
+            eprintln!("[plugin-host-layout] host_hwnd=0x{host_hwnd:x}");
+            eprintln!("[plugin-host-layout] host_client=({width},{height})");
+            if let Some((child_w, child_h)) = instance.processor.embed_content_size() {
+                eprintln!("[plugin-host-layout] plugin_child_count=1");
+                eprintln!(
+                    "[plugin-host-layout] child=plugin_view client=({child_w},{child_h})"
+                );
+                let child_matches = child_w == width && child_h == height;
+                eprintln!("[plugin-host-layout] child_matches_host={child_matches}");
+            } else {
+                eprintln!("[plugin-host-layout] plugin_child_count=0");
+                eprintln!("[plugin-host-layout] child_matches_host=false");
+            }
         }
     }
 
@@ -263,7 +297,7 @@ impl PluginHostPreviewEngine {
         velocity: u8,
     ) {
         eprintln!(
-            "[plugin-host-midi] preview note_on instance={plugin_instance_id} ch={channel} pitch={pitch} vel={velocity}"
+            "[plugin-host-midi-consume] preview note_on instance={plugin_instance_id} pitch={pitch}"
         );
         let Some(instance) = self.instances.get_mut(plugin_instance_id) else {
             eprintln!(
@@ -304,7 +338,7 @@ impl PluginHostPreviewEngine {
         pitch: u8,
     ) {
         eprintln!(
-            "[plugin-host-midi] preview note_off instance={plugin_instance_id} ch={channel} pitch={pitch}"
+            "[plugin-host-midi-consume] preview note_off instance={plugin_instance_id} pitch={pitch}"
         );
         let Some(instance) = self.instances.get_mut(plugin_instance_id) else {
             return;
@@ -377,14 +411,12 @@ impl PluginHostPreviewEngine {
                 // Note-on with velocity 0 is a note-off (running-status idiom).
                 0x90 if ev.data2 > 0 => {
                     let vel = ev.data2.clamp(1, 127) as f32 / 127.0;
-                    eprintln!(
-                        "[plugin-host-midi] consume events=1 note_on instance={id} pitch={} velocity={} offset={}",
-                        ev.data1, ev.data2, ev.sample_offset
-                    );
-                    eprintln!(
-                        "[plugin-host-midi] vst_event_queue note_on pitch={} velocity={}",
-                        ev.data1, ev.data2
-                    );
+                    if forensic_trace_enabled() {
+                        eprintln!(
+                            "[plugin-host-midi-consume] note_on instance={id} pitch={} offset={}",
+                            ev.data1, ev.sample_offset
+                        );
+                    }
                     instance.pending_events.push(Vst3MidiEvent::note_on(
                         ev.sample_offset,
                         channel,
@@ -401,10 +433,12 @@ impl PluginHostPreviewEngine {
                     instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
                 }
                 0x80 | 0x90 => {
-                    eprintln!(
-                        "[plugin-host-midi] consume events=1 note_off instance={id} pitch={} offset={}",
-                        ev.data1, ev.sample_offset
-                    );
+                    if forensic_trace_enabled() {
+                        eprintln!(
+                            "[plugin-host-midi-consume] note_off instance={id} pitch={} offset={}",
+                            ev.data1, ev.sample_offset
+                        );
+                    }
                     instance.pending_events.push(Vst3MidiEvent::note_off(
                         ev.sample_offset,
                         channel,

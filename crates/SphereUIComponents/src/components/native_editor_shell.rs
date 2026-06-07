@@ -213,6 +213,20 @@ mod imp {
         content_h: i32,
     }
 
+    /// Authoritative shell layout: content rect below titlebar (spec Bug 3).
+    fn compute_plugin_shell_layout(
+        shell_client_w: i32,
+        shell_client_h: i32,
+        titlebar_h: i32,
+        border: i32,
+    ) -> (i32, i32, i32, i32) {
+        let content_x = 0;
+        let content_y = titlebar_h;
+        let content_w = shell_client_w.max(1);
+        let content_h = (shell_client_h - titlebar_h - border).max(1);
+        (content_x, content_y, content_w, content_h)
+    }
+
     fn compute_shell_layout(top: HWND) -> ShellLayout {
         let mut client = RECT::default();
         unsafe {
@@ -222,10 +236,8 @@ mod imp {
         let client_h = client.bottom.max(0);
         let th = titlebar_h(top);
         let bw = border_w(top);
-        let content_x = 0;
-        let content_y = th;
-        let content_w = client_w.max(1);
-        let content_h = (client_h - th - bw).max(1);
+        let (content_x, content_y, content_w, content_h) =
+            compute_plugin_shell_layout(client_w, client_h, th, bw);
         ShellLayout {
             client_w,
             client_h,
@@ -247,7 +259,7 @@ mod imp {
     }
 
     /// Recompute `content_rect`, position the content HWND, and queue resize.
-    unsafe fn apply_shell_layout(top: HWND, inner: &ShellInner) -> (i32, i32) {
+    unsafe fn apply_shell_layout(top: HWND, inner: &ShellInner, reason: &str) -> (i32, i32) {
         let layout = compute_shell_layout(top);
         let content_raw = inner.content_hwnd.load(Ordering::Relaxed);
         let prev_x = inner.last_layout_x.load(Ordering::Relaxed);
@@ -286,9 +298,17 @@ mod imp {
         if changed {
             inner.resize_pending.store(true, Ordering::Relaxed);
         }
-        if changed {
+        if changed || crate::forensic_trace::shell_layout_trace_enabled() {
+            let shell_raw = top.0 as u64;
+            let mut content_client_w = 0i32;
+            let mut content_client_h = 0i32;
             let screen = if content_raw != 0 {
-                let scr = content_screen_rect(hwnd_from(content_raw));
+                let content = hwnd_from(content_raw);
+                let mut cr = RECT::default();
+                let _ = GetClientRect(content, &mut cr);
+                content_client_w = (cr.right - cr.left).max(0);
+                content_client_h = (cr.bottom - cr.top).max(0);
+                let scr = content_screen_rect(content);
                 format!(
                     "({},{},{},{})",
                     scr.left, scr.top, scr.right, scr.bottom
@@ -296,19 +316,35 @@ mod imp {
             } else {
                 "none".to_string()
             };
-            eprintln!(
-                "[plugin-shell-layout] client={}x{} titlebar_h={} border={}",
-                layout.client_w, layout.client_h, layout.titlebar_h, layout.border
-            );
-            eprintln!(
-                "[plugin-shell-layout] content_rect x={} y={} w={} h={} content_hwnd=0x{content_raw:x} content_screen_rect={screen}",
-                layout.content_x, layout.content_y, layout.content_w, layout.content_h
-            );
+            if crate::forensic_trace::shell_layout_trace_enabled() || changed {
+                eprintln!("[plugin-shell-layout] reason={reason}");
+                eprintln!("[plugin-shell-layout] shell_hwnd=0x{shell_raw:x}");
+                eprintln!(
+                    "[plugin-shell-layout] shell_client=(0,0,{},{})",
+                    layout.client_w, layout.client_h
+                );
+                eprintln!("[plugin-shell-layout] titlebar_h={}", layout.titlebar_h);
+                eprintln!("[plugin-shell-layout] border={}", layout.border);
+                eprintln!(
+                    "[plugin-shell-layout] computed_content=({},{},{},{})",
+                    layout.content_x,
+                    layout.content_y,
+                    layout.content_w,
+                    layout.content_h
+                );
+                eprintln!("[plugin-shell-layout] content_hwnd=0x{content_raw:x}");
+                eprintln!(
+                    "[plugin-shell-layout] content_client=({content_client_w},{content_client_h})"
+                );
+                eprintln!("[plugin-shell-layout] content_screen={screen}");
+            }
             let attached = inner.attached.load(Ordering::Relaxed);
-            eprintln!(
-                "[plugin-shell-render] titlebar_only=true content_paint={}",
-                !attached
-            );
+            if changed {
+                eprintln!(
+                    "[plugin-shell-render] titlebar_only=true content_paint={}",
+                    !attached
+                );
+            }
         }
         (layout.content_w, layout.content_h)
     }
@@ -918,17 +954,36 @@ mod imp {
             WM_SIZE => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     inner.size_count.fetch_add(1, Ordering::Relaxed);
+                    let reason = if unsafe { IsZoomed(hwnd) }.as_bool() {
+                        "WM_SIZE:maximize"
+                    } else {
+                        "WM_SIZE"
+                    };
                     unsafe {
-                        apply_shell_layout(hwnd, inner);
+                        apply_shell_layout(hwnd, inner, reason);
                     }
                     invalidate_titlebar(hwnd);
                 }
                 LRESULT(0)
             }
-            0x0003 /* WM_MOVE */ | 0x0047 /* WM_WINDOWPOSCHANGED */ | 0x0018 /* WM_SHOWWINDOW */ => {
+            0x0003 /* WM_MOVE */ => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     unsafe {
-                        apply_shell_layout(hwnd, inner);
+                        apply_shell_layout(hwnd, inner, "WM_MOVE");
+                    }
+                    invalidate_titlebar(hwnd);
+                }
+                LRESULT(0)
+            }
+            0x0047 /* WM_WINDOWPOSCHANGED */ | 0x0018 /* WM_SHOWWINDOW */ => {
+                if let Some(inner) = unsafe { inner_ref(hwnd) } {
+                    let reason = if msg == 0x0047 {
+                        "WM_WINDOWPOSCHANGED"
+                    } else {
+                        "WM_SHOWWINDOW"
+                    };
+                    unsafe {
+                        apply_shell_layout(hwnd, inner, reason);
                     }
                     invalidate_titlebar(hwnd);
                 }
@@ -941,7 +996,7 @@ mod imp {
             0x02E0 /* WM_DPICHANGED */ => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     unsafe {
-                        apply_shell_layout(hwnd, inner);
+                        apply_shell_layout(hwnd, inner, "WM_DPICHANGED");
                     }
                     invalidate_titlebar(hwnd);
                 }
@@ -1389,6 +1444,7 @@ mod imp {
                 };
                 install_inner(content, &inner);
                 inner.content_hwnd.store(content.0 as u64, Ordering::Relaxed);
+                apply_shell_layout(top, &inner, "initial_open");
 
                 let _ = ShowWindow(top, SW_SHOW);
                 let _ = UpdateWindow(top);
@@ -1442,7 +1498,7 @@ mod imp {
         /// Recompute and apply the authoritative content rect (spec Part 1/2).
         pub fn apply_content_layout(&self) -> (i32, i32) {
             let top = hwnd_from(self.top_hwnd);
-            unsafe { apply_shell_layout(top, &self.inner) }
+            unsafe { apply_shell_layout(top, &self.inner, "apply_content_layout") }
         }
 
         /// Gap diagnostics between shell content, host HWND, and plugin child (spec Part 3).
@@ -1494,25 +1550,16 @@ mod imp {
                     }
                 }
             }
-            eprintln!(
-                "[plugin-shell-gap-check] client_w={} client_h={} content_x={} content_y={} \
-                 content_w={} content_h={} host_w={} host_h={} plugin_child_w={} plugin_child_h={} \
-                 gap_left={} gap_top={} gap_right={} gap_bottom={}",
-                layout.client_w,
-                layout.client_h,
-                layout.content_x,
-                layout.content_y,
-                layout.content_w,
-                layout.content_h,
-                host_w,
-                host_h,
-                plugin_child_w,
-                plugin_child_h,
-                gap_left,
-                gap_top,
-                gap_right,
-                gap_bottom,
-            );
+            eprintln!("[plugin-shell-gap-check] content_w={}", layout.content_w);
+            eprintln!("[plugin-shell-gap-check] content_h={}", layout.content_h);
+            eprintln!("[plugin-shell-gap-check] host_w={host_w}");
+            eprintln!("[plugin-shell-gap-check] host_h={host_h}");
+            eprintln!("[plugin-shell-gap-check] child_w={plugin_child_w}");
+            eprintln!("[plugin-shell-gap-check] child_h={plugin_child_h}");
+            eprintln!("[plugin-shell-gap-check] gap_left={gap_left}");
+            eprintln!("[plugin-shell-gap-check] gap_top={gap_top}");
+            eprintln!("[plugin-shell-gap-check] gap_right={gap_right}");
+            eprintln!("[plugin-shell-gap-check] gap_bottom={gap_bottom}");
             if host_hwnd != 0 {
                 let host_fits = host_w == layout.content_w && host_h == layout.content_h;
                 let child_fits = plugin_child_w == 0

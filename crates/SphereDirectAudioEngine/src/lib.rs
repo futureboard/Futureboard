@@ -26,6 +26,7 @@ pub mod backend;
 mod command;
 pub mod device;
 mod dsp;
+pub mod forensic_trace;
 pub mod engine;
 pub mod error;
 mod graph;

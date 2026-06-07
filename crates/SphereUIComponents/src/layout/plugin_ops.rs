@@ -380,6 +380,7 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         eprintln!("[plugin-editor-window] ownership=main_owned forced=true");
+        crate::forensic_trace::log_trace_plugin(track_id, instance_id);
         let key = (track_id.to_string(), instance_id.to_string());
         if let Some(session) = self.bridge_editors.get(&key) {
             session.shell.focus();
@@ -1100,6 +1101,9 @@ impl StudioLayout {
                                 eprintln!("[plugin-runtime] external bridge runtime lock poisoned");
                             }
                         }
+                        crate::forensic_trace::log_trace_plugin(&track_id, &slot_id);
+                        let timeline_state = self.timeline.read(cx).state.clone();
+                        crate::forensic_trace::log_plugin_main_registry(&timeline_state);
                         sphere_plugin_host::plugin_host_preview::PluginHostPreviewEngine::log_unified_runtime(
                             &track_id,
                             &slot_id,

@@ -40,6 +40,7 @@ pub mod color;
 pub mod components;
 pub mod embedded_assets;
 pub mod feeds;
+pub mod forensic_trace;
 pub mod i18n;
 pub mod keymap;
 pub mod layout;

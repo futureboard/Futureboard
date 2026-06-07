@@ -40,7 +40,10 @@ impl TrackType {
 /// mutations (mirrors the plugin/routing debug flags). Cached on first read.
 pub fn midi_debug_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_DEBUG").is_some())
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
+            || std::env::var_os("FUTUREBOARD_MIDI_DEBUG").is_some()
+    })
 }
 
 /// `FUTUREBOARD_AUTOMATION_DEBUG=1` enables eprintln traces for automation
@@ -2109,10 +2112,10 @@ impl TimelineState {
         }
         self.selection.selected_track_id = Some(track_id.to_string());
         self.selection.selected_clip_ids = vec![clip_id.clone()];
-        if midi_debug_enabled() {
+        if crate::forensic_trace::midi_model_trace_enabled() {
             eprintln!(
-                "[midi] create_midi_clip track={} clip={} start={:.3} len={:.3}",
-                track_id, clip_id, start_beat, length_beats
+                "[midi-model] clip_created track={track_id} clip={clip_id} \
+                 start_beats={start_beat:.3} length_beats={length_beats:.3}"
             );
         }
         Some(clip_id)
@@ -2238,14 +2241,11 @@ impl TimelineState {
         let id = note.id;
         let notes = self.midi_clip_notes_mut(clip_id)?;
         notes.push(note);
-        if midi_debug_enabled() {
+        if crate::forensic_trace::midi_model_trace_enabled() {
             eprintln!(
-                "[midi] add_note clip={} id={} pitch={} start={:.3} dur={:.3} vel={}",
-                clip_id,
-                id,
+                "[midi-model] note_added clip={clip_id} pitch={} start_beats={start:.3} \
+                 length_beats={duration:.3} velocity={}",
                 pitch.min(127),
-                start,
-                duration,
                 velocity.clamp(1, 127)
             );
         }
@@ -2961,6 +2961,7 @@ impl TimelineState {
             eprintln!("[plugin] add_insert track={} slot_id={}", track_id, slot_id);
         }
         track.inserts.push(slot);
+        crate::forensic_trace::log_trace_plugin(track_id, &slot_id);
         Some(slot_id)
     }
 
@@ -3016,7 +3017,6 @@ impl TimelineState {
         slot.plugin_id = Some(plugin_id);
         slot.plugin_path = plugin_path;
         slot.plugin_format = Some(plugin_format);
-        let display_name_log = display_name.clone();
         slot.display_name = display_name;
         slot.load_status = InsertLoadStatus::Ready;
         slot.runtime_backend = PluginRuntimeBackend::InProcess;
@@ -3024,12 +3024,14 @@ impl TimelineState {
         slot.host_pid = None;
         slot.bypassed = false;
         slot.parameters.clear();
+        crate::forensic_trace::log_trace_plugin(track_id, insert_id);
         if is_instrument_slot {
             track.instrument_plugin_instance_id = Some(insert_id.to_string());
             eprintln!(
-                "[instrument-route] track={track_id} instrument_instance={insert_id} plugin={display_name_log}"
+                "[instrument-route] track={track_id} instrument_instance={insert_id}"
             );
-            eprintln!("[instrument-route] midi_destination={insert_id}");
+            eprintln!("[instrument-route] plugin_instance_id={insert_id}");
+            eprintln!("[instrument-route] route_ok=true");
         }
         if plugin_debug_enabled() {
             eprintln!(

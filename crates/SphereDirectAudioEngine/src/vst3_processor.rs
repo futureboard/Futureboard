@@ -7,7 +7,10 @@ use serde_json::Value;
 /// `FUTUREBOARD_VST3_MIDI_DEBUG=1` enables VST3 MIDI bridge traces.
 pub fn vst3_midi_debug_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_VST3_MIDI_DEBUG").is_some())
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
+            || std::env::var_os("FUTUREBOARD_VST3_MIDI_DEBUG").is_some()
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

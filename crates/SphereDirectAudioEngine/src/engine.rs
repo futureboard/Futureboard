@@ -770,7 +770,7 @@ impl EngineInner {
         velocity: u8,
     ) -> Result<(), SphereAudioError> {
         eprintln!(
-            "[midi-preview-engine] queued note_on instance={plugin_instance_id} pitch={pitch} velocity={velocity}"
+            "[midi-preview-engine] queued note_on track={track_id} instance={plugin_instance_id} pitch={pitch}"
         );
         self.send_command(EngineCommand::PluginPreviewNoteOn {
             track_id,
@@ -788,6 +788,9 @@ impl EngineInner {
         channel: u8,
         pitch: u8,
     ) -> Result<(), SphereAudioError> {
+        eprintln!(
+            "[midi-preview-engine] queued note_off track={track_id} instance={plugin_instance_id} pitch={pitch}"
+        );
         self.send_command(EngineCommand::PluginPreviewNoteOff {
             track_id,
             plugin_instance_id,
@@ -3138,7 +3141,7 @@ fn apply_external_bridge_insert_block(
         let verbose = crate::runtime::midi_verbose_enabled();
         if verbose {
             eprintln!(
-                "[plugin-dsp-midi] write block instance={} events={}",
+                "[plugin-dsp-midi-write] instance={} events={}",
                 insert.id,
                 events.len()
             );
@@ -3186,13 +3189,15 @@ fn apply_external_bridge_insert_block(
             out_peak_r = out_peak_r.max(insert.scratch_r[i].abs());
         }
     }
-    if crate::runtime::midi_verbose_enabled() && (out_peak_l > 0.0001 || out_peak_r > 0.0001) {
+    if crate::forensic_trace::engine_midi_verbose_enabled()
+        && (out_peak_l > 0.0001 || out_peak_r > 0.0001)
+    {
         eprintln!(
-            "[SphereAudio] external bridge output_peak insert={} peak_l={:.6} peak_r={:.6}",
-            insert.id, out_peak_l, out_peak_r
+            "[SphereAudio] external_bridge output_peak_l={:.6} output_peak_r={:.6}",
+            out_peak_l, out_peak_r
         );
         eprintln!(
-            "[plugin-bridge-dsp] response_peak_l={:.6} response_peak_r={:.6}",
+            "[plugin-host-dsp] response_peak_l={:.6} response_peak_r={:.6}",
             out_peak_l, out_peak_r
         );
     }

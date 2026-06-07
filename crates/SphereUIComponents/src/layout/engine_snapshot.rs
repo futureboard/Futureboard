@@ -465,6 +465,7 @@ pub(super) fn log_engine_sync_snapshot(
         .count();
     let insert_count: usize = snapshot.tracks.iter().map(|t| t.inserts.len()).sum();
     let midi_note_count: usize = snapshot.midi_clips.iter().map(|c| c.notes.len()).sum();
+    DAUx::forensic_trace::log_engine_sync_midi(snapshot);
     eprintln!(
         "[engine-sync] reason={} tracks={} clips={} clips_with_path={} inserts={} midi_clips={} midi_notes={} dirty={}",
         reason,

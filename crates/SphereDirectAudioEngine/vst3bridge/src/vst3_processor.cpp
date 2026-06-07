@@ -426,7 +426,9 @@ struct SimpleEventList final : Steinberg::Vst::IEventList {
 namespace {
 
 bool daux_vst3_midi_debug() {
-  static const bool enabled = std::getenv("FUTUREBOARD_VST3_MIDI_DEBUG") != nullptr;
+  static const bool enabled =
+      std::getenv("FUTUREBOARD_FORENSIC_TRACE") != nullptr ||
+      std::getenv("FUTUREBOARD_VST3_MIDI_DEBUG") != nullptr;
   return enabled;
 }
 
@@ -847,19 +849,21 @@ struct SphereDauxVst3Processor {
 
       if (daux_vst3_midi_debug()) {
         std::fprintf(stderr,
-                     "[VST3 MIDI] block notes=%d cc=%d eventInputBuses=%d\n",
-                     input_events_obj.count, cc_mapped, event_input_bus_count);
+                     "[vst3-midi] input_events=%d event_bus=%d active=%s\n",
+                     input_events_obj.count,
+                     event_input_bus_count,
+                     event_input_bus_count > 0 ? "true" : "false");
         for (int i = 0; i < input_events_obj.count; ++i) {
           const auto& e = input_events_obj.events[i];
           if (e.type == Steinberg::Vst::Event::kNoteOnEvent) {
             std::fprintf(stderr,
-                         "[VST3 MIDI] send note_on pitch=%d vel=%.2f offset=%d\n",
+                         "[vst3-midi] add note_on pitch=%d velocity=%.2f sampleOffset=%d\n",
                          (int)e.noteOn.pitch,
                          e.noteOn.velocity,
                          (int)e.sampleOffset);
           } else if (e.type == Steinberg::Vst::Event::kNoteOffEvent) {
             std::fprintf(stderr,
-                         "[VST3 MIDI] send note_off pitch=%d offset=%d\n",
+                         "[vst3-midi] add note_off pitch=%d sampleOffset=%d\n",
                          (int)e.noteOff.pitch,
                          (int)e.sampleOffset);
           }
@@ -2580,7 +2584,11 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
   const auto result = processor->processor->process(processor->process_data);
 
   if (daux_vst3_midi_debug() && event_count > 0) {
-    std::fprintf(stderr, "[VST3 MIDI] process result=%d\n", (int)result);
+    std::fprintf(stderr,
+                 "[vst3-process] frames=%d midi_events=%d result=%d\n",
+                 frames,
+                 event_count,
+                 (int)result);
   }
 
   double input_peak_l = 0.0;

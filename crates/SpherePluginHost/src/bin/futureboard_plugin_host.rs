@@ -97,6 +97,7 @@ fn main() {
     // spawning us (spec Part 1). The host must run with a clean native
     // environment so plugin GPU/WebView/DirectComposition UI can paint.
     log_renderer_env();
+    log_runtime_policy();
 
     if selftest {
         let code = run_selftest();
@@ -124,6 +125,21 @@ fn main() {
 
     run_ipc_loop(out, shutdown);
     platform::com_uninit();
+}
+
+/// Announce the runtime-ownership policy this host enforces. The external
+/// bridge is always authoritative: there is no in-process VST3 runtime and no
+/// legacy editor unless `FUTUREBOARD_LEGACY_PLUGIN_EDITOR` is explicitly set.
+fn log_runtime_policy() {
+    let legacy_enabled = std::env::var_os("FUTUREBOARD_LEGACY_PLUGIN_EDITOR").is_some();
+    eprintln!("[plugin-runtime-policy] external_bridge_forced=true");
+    eprintln!("[plugin-runtime-policy] legacy_editor_enabled={legacy_enabled}");
+    eprintln!("[plugin-runtime-policy] in_process_runtime_allowed=false");
+    if legacy_enabled {
+        eprintln!(
+            "[plugin-runtime-policy] WARNING legacy plugin editor/runtime enabled by FUTUREBOARD_LEGACY_PLUGIN_EDITOR=1"
+        );
+    }
 }
 
 /// Report whether the main-app-only renderer environment leaked into this

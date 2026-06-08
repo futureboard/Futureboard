@@ -61,12 +61,7 @@ pub use scan::{
 pub use scanner::{discover_plugin_bundles, scan_plugin_bundle};
 
 #[cfg(feature = "napi")]
-pub use editor_window::{
-    attach_vst3_editor_view, close_plugin_editor_window, drain_plugin_editor_param_events,
-    focus_plugin_editor_window, get_plugin_editor_attach_handle, open_plugin_editor_for_path,
-    open_plugin_editor_window, resize_plugin_editor_window, PluginEditorParamEvent,
-    PluginEditorWindowOptions,
-};
+pub use editor_window::{drain_plugin_editor_param_events, PluginEditorParamEvent};
 
 #[cfg(feature = "napi")]
 use napi_derive::napi;

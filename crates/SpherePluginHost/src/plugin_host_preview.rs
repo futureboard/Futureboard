@@ -178,9 +178,13 @@ impl PluginHostPreviewEngine {
     ) -> bool {
         self.sample_rate = sample_rate.max(44_100);
         self.block_size = max_block_size.max(64).min(2048);
+        eprintln!("[plugin-host-registry] load begin instance={plugin_instance_id}");
         if self.instances.contains_key(plugin_instance_id) {
             eprintln!(
                 "[plugin-host] LoadPlugin instance={plugin_instance_id} already_loaded=true reuse=true"
+            );
+            eprintln!(
+                "[plugin-host-registry] already_loaded instance={plugin_instance_id} reuse=true"
             );
             eprintln!(
                 "[plugin-host-vst3] create skipped reason=instance_exists instance={plugin_instance_id}"
@@ -211,17 +215,20 @@ impl PluginHostPreviewEngine {
             "[plugin-host-midi] preview processor loaded instance={plugin_instance_id} dsp_output={}",
             if self.dsp_ready { "ready" } else { "pending" }
         );
+        eprintln!("[plugin-host-registry] loaded instance={plugin_instance_id}");
         self.log_host_registry();
         true
     }
 
     pub fn unload_instance(&mut self, plugin_instance_id: &str) {
+        eprintln!("[plugin-host-registry] unload instance={plugin_instance_id}");
         if let Some(instance) = self.instances.get(plugin_instance_id) {
             instance.processor.embed_detach();
         }
         if let Some(mut instance) = self.instances.remove(plugin_instance_id) {
             Self::panic_instance(&mut instance);
         }
+        eprintln!("[plugin-host-registry] instances={}", self.instances.len());
     }
 
     pub fn default_editor_size(&self) -> (u32, u32) {
@@ -235,7 +242,21 @@ impl PluginHostPreviewEngine {
         width: i32,
         height: i32,
     ) -> Option<u64> {
-        let instance = self.instances.get(plugin_instance_id)?;
+        let Some(instance) = self.instances.get(plugin_instance_id) else {
+            eprintln!(
+                "[plugin-host-registry] get found=false instance={plugin_instance_id}"
+            );
+            eprintln!(
+                "[plugin-editor] open ERROR instance not loaded instance={plugin_instance_id} uses_runtime_instance=false"
+            );
+            return None;
+        };
+        eprintln!("[plugin-host-registry] get found=true instance={plugin_instance_id}");
+        eprintln!(
+            "[plugin-editor] open instance={plugin_instance_id} uses_runtime_instance=true"
+        );
+        eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
+        eprintln!("[plugin-editor] no_duplicate_component_created=true");
         instance
             .processor
             .embed_editor(parent_hwnd, 0, 0, width, height)

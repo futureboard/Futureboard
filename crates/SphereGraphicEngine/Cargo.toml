@@ -1,0 +1,24 @@
+[package]
+name = "sphere-graphic-engine"
+version.workspace = true
+# Edition 2021 (matching SphereUIComponents): this crate hosts ported native
+# `unsafe` COM/Win32 code whose proven form predates edition-2024's
+# `unsafe_op_in_unsafe_fn` requirements.
+edition = "2021"
+publish.workspace = true
+
+[lib]
+name = "sphere_graphic_engine"
+path = "src/lib.rs"
+
+[dependencies]
+
+# Native graphics infrastructure (DirectWrite text, DWM chrome, GDI paint) is
+# Windows-only. Non-Windows targets compile the platform-neutral surface
+# (theme, asset registry) with no-op/absent backends.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+windows-core = { workspace = true }
+
+[lints]
+workspace = true

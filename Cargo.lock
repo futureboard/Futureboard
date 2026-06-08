@@ -5740,6 +5740,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sphere-graphic-engine"
+version = "0.1.0"
+dependencies = [
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+]
+
+[[package]]
 name = "sphere-plugin-host"
 version = "0.1.0"
 dependencies = [
@@ -5772,6 +5780,7 @@ dependencies = [
  "serde_json",
  "sphere-audio-editor",
  "sphere-direct-audio-engine",
+ "sphere-graphic-engine",
  "sphere-plugin-host",
  "wgpu",
  "windows 0.61.3",

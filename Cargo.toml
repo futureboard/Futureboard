@@ -38,6 +38,7 @@ sphere-direct-audio-engine = { path = "crates/SphereDirectAudioEngine", default-
 sphere-audio-editor = { path = "crates/SphereAudioEditor" }
 sphere-audio-plugins = { path = "crates/SphereAudioPlugins" }
 sphere-plugin-host = { path = "crates/SpherePluginHost", default-features = false }
+sphere-graphic-engine = { path = "crates/SphereGraphicEngine" }
 napi = { version = "2", features = ["napi4"] }
 napi-derive = "2"
 napi-build = "2"

@@ -380,37 +380,9 @@ mod imp {
     }
 
     unsafe fn paint_shell_border(hdc: HDC, cw: i32, ch: i32, bw: i32, color: COLORREF) {
-        let brush = CreateSolidBrush(color);
-        let strips = [
-            RECT {
-                left: 0,
-                top: 0,
-                right: cw,
-                bottom: bw,
-            },
-            RECT {
-                left: 0,
-                top: ch - bw,
-                right: cw,
-                bottom: ch,
-            },
-            RECT {
-                left: 0,
-                top: 0,
-                right: bw,
-                bottom: ch,
-            },
-            RECT {
-                left: cw - bw,
-                top: 0,
-                right: cw,
-                bottom: ch,
-            },
-        ];
-        for strip in strips {
-            FillRect(hdc, &strip, brush);
-        }
-        let _ = DeleteObject(brush.into());
+        // Themed window border: delegate the GDI strip-fill to the engine's
+        // reusable software painter.
+        sphere_graphic_engine::SoftwarePainter::frame_inset(hdc, cw, ch, bw, color);
     }
     fn button_w(hwnd: HWND) -> i32 {
         scaled(hwnd, theme().button_w)
@@ -1279,68 +1251,31 @@ mod imp {
         });
     }
 
-    /// Apply DWM window polish (spec Part 4). Each attribute is best-effort and
-    /// runtime-guarded; unsupported attributes on older Windows are ignored.
+    /// Apply DWM window polish (spec Part 4) via the engine's reusable window
+    /// effects. Each attribute is best-effort and runtime-guarded; unsupported
+    /// attributes on older Windows are ignored.
     fn apply_dwm_polish(hwnd: HWND, t: &PluginShellTheme) {
-        use core::ffi::c_void;
-        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
-        // Documented attribute ids (avoid depending on specific named-constant
-        // exports across windows-crate/SDK versions).
-        const DWMWA_USE_IMMERSIVE_DARK_MODE: i32 = 20;
-        const DWMWA_BORDER_COLOR: i32 = 34;
-        const DWMWA_CAPTION_COLOR: i32 = 35;
-        const DWMWA_WINDOW_CORNER_PREFERENCE: i32 = 33;
-        const DWMWA_NCRENDERING_POLICY: i32 = 2;
-        const DWMNCRP_DISABLED: i32 = 1;
-        const DWMWCP_ROUND: i32 = 2;
-        unsafe {
-            let nc_policy = DWMNCRP_DISABLED;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWINDOWATTRIBUTE(DWMWA_NCRENDERING_POLICY),
-                &nc_policy as *const _ as *const c_void,
-                std::mem::size_of::<i32>() as u32,
-            );
-            let dark: BOOL = true.into();
-            let dark_ok = DwmSetWindowAttribute(
-                hwnd,
-                DWMWINDOWATTRIBUTE(DWMWA_USE_IMMERSIVE_DARK_MODE),
-                &dark as *const _ as *const c_void,
-                std::mem::size_of::<BOOL>() as u32,
-            )
-            .is_ok();
-            let corner: i32 = DWMWCP_ROUND;
-            let round_ok = DwmSetWindowAttribute(
-                hwnd,
-                DWMWINDOWATTRIBUTE(DWMWA_WINDOW_CORNER_PREFERENCE),
-                &corner as *const _ as *const c_void,
-                std::mem::size_of::<i32>() as u32,
-            )
-            .is_ok();
-            let border = t.border;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWINDOWATTRIBUTE(DWMWA_BORDER_COLOR),
-                &border as *const _ as *const c_void,
-                std::mem::size_of::<COLORREF>() as u32,
-            );
-            let caption = t.titlebar_bg;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWINDOWATTRIBUTE(DWMWA_CAPTION_COLOR),
-                &caption as *const _ as *const c_void,
-                std::mem::size_of::<COLORREF>() as u32,
-            );
-            eprintln!(
-                "[plugin-shell-dwm] dark_mode={dark_ok} rounded_corner={} border_color=theme available={}",
-                if round_ok { "round" } else { "none" },
-                dark_ok || round_ok
-            );
-            eprintln!(
-                "[plugin-shell-text] renderer=DirectWriteCustomRenderer d2d=false font={}",
-                t.font.family_primary
-            );
-        }
+        use sphere_graphic_engine::{CornerPreference, DwmChromeOptions, DwmWindowEffects};
+        let result = DwmWindowEffects::apply(
+            hwnd,
+            &DwmChromeOptions {
+                dark_mode: true,
+                corner: CornerPreference::Round,
+                border_color: Some(t.border.0),
+                caption_color: Some(t.titlebar_bg.0),
+                disable_nc_rendering: true,
+            },
+        );
+        eprintln!(
+            "[plugin-shell-dwm] dark_mode={} rounded_corner={} border_color=theme available={}",
+            result.dark_ok,
+            if result.rounded { "round" } else { "none" },
+            result.available
+        );
+        eprintln!(
+            "[plugin-shell-text] renderer=DirectWriteCustomRenderer d2d=false font={}",
+            t.font.family_primary
+        );
     }
 
     pub struct NativeEditorShell {

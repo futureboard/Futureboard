@@ -26,6 +26,8 @@ pub mod plugin_bridge_sink;
 pub mod plugin_db;
 /// Main-app client that spawns and drives the separated plugin host process.
 pub mod plugin_host_client;
+/// File logging for the separated plugin host process (hidden console builds).
+pub mod plugin_host_logging;
 /// Windows job object + coordinated plugin-host shutdown for the main app.
 pub mod plugin_host_lifecycle;
 #[cfg(feature = "plugin-host-bin")]

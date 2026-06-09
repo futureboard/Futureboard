@@ -103,9 +103,13 @@ pub fn log_plugin_main_registry(state: &TimelineState) {
             let backend = slot.runtime_backend.label().to_string();
             let state_tag = match &slot.runtime_state {
                 PluginRuntimeState::Loading => "loading",
+                PluginRuntimeState::Loaded => "loaded",
+                PluginRuntimeState::Active => "active",
                 PluginRuntimeState::Ready => "ready",
                 PluginRuntimeState::EditorOpening => "editor_opening",
                 PluginRuntimeState::EditorOpen => "editor_open",
+                PluginRuntimeState::EditorClosed => "editor_closed",
+                PluginRuntimeState::Bypassed => "bypassed",
                 PluginRuntimeState::Failed(_) => "failed",
                 PluginRuntimeState::Crashed => "crashed",
                 PluginRuntimeState::Unloaded => "unloaded",

@@ -196,6 +196,60 @@ pub fn external_window_titlebar_with_icon(
     bar
 }
 
+/// Close-only compact title bar for native message boxes (no min/max controls).
+pub fn external_window_titlebar_compact(
+    title: impl Into<String>,
+    close_id: impl Into<gpui::ElementId>,
+    on_close: impl Fn(&mut Window, &mut App) + 'static + Clone,
+) -> impl IntoElement {
+    let policy = PlatformChromePolicy::external_dialog();
+    let on_close = on_close.clone();
+    let title_text = title.into();
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(policy.titlebar_height_px))
+        .pl(policy.external_titlebar_left_padding())
+        .pr(px(CHROME_PAD_X))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_titlebar())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .h_full()
+                .flex_shrink_0()
+                .text_size(px(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_primary())
+                .child(title_text),
+        )
+        .child(draggable_spacer())
+        .child(
+            div()
+                .id(close_id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(TITLEBAR_HEIGHT))
+                .h(px(TITLEBAR_HEIGHT))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.bg(Colors::surface_control_hover()))
+                .occlude()
+                .on_click(move |_, window, cx| on_close(window, cx))
+                .child(
+                    svg()
+                        .path(assets::ICON_X_PATH)
+                        .w(px(11.0))
+                        .h(px(11.0))
+                        .text_color(Colors::text_faint()),
+                ),
+        )
+}
+
 fn external_window_control_button(
     area: WindowControlArea,
     id: impl Into<gpui::ElementId>,

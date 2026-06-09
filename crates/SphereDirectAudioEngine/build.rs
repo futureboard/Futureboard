@@ -21,6 +21,7 @@ fn main() {
         );
     }
 
+    // Baseline x64 VST3 bridge — no /arch:AVX2 or target-cpu=native.
     let mut build = cc::Build::new();
     build
         .cpp(true)

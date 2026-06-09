@@ -12,7 +12,7 @@
 //!   - Stream lifecycle (open/close) is guarded by `parking_lot::Mutex`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -106,6 +106,47 @@ fn atomic_max_f32_bits(target: &AtomicU32, value: f32) {
     }
 }
 
+// ── Audio engine lifecycle (control → audio, Relaxed reads in callback) ───────
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioEngineState {
+    Running = 0,
+    Paused = 1,
+    LoadingProject = 2,
+    ClosingProject = 3,
+    DeviceSwitching = 4,
+    Suspended = 5,
+}
+
+impl AudioEngineState {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Paused,
+            2 => Self::LoadingProject,
+            3 => Self::ClosingProject,
+            4 => Self::DeviceSwitching,
+            5 => Self::Suspended,
+            _ => Self::Running,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+            Self::LoadingProject => "LoadingProject",
+            Self::ClosingProject => "ClosingProject",
+            Self::DeviceSwitching => "DeviceSwitching",
+            Self::Suspended => "Suspended",
+        }
+    }
+
+    pub fn outputs_silence(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
 // ── Shared state (accessed by both control and audio threads) ─────────────────
 
 pub struct SharedState {
@@ -120,6 +161,8 @@ pub struct SharedState {
     pub test_tone_freq: AtomicU32, // Hz as f32 bits
     pub master_volume: AtomicU32,  // linear f32 bits
     pub playing: AtomicBool,
+    /// Lifecycle gate for realtime output (see [`AudioEngineState`]).
+    pub engine_state: AtomicU8,
     pub position_samples: AtomicU64, // samples elapsed from start
     pub sample_rate: AtomicU32,
 
@@ -206,6 +249,7 @@ impl Default for SharedState {
             test_tone_freq: AtomicU32::new(f32_store(440.0)),
             master_volume: AtomicU32::new(f32_store(1.0)),
             playing: AtomicBool::new(false),
+            engine_state: AtomicU8::new(AudioEngineState::Paused as u8),
             position_samples: AtomicU64::new(0),
             sample_rate: AtomicU32::new(44100),
             bpm_bits: AtomicU64::new(120.0_f64.to_bits()),
@@ -642,6 +686,10 @@ impl EngineInner {
     /// Explicit shutdown for application exit — do not rely on `Drop` alone.
     /// Stops transport, pauses the device stream, and releases realtime resources.
     pub fn shutdown(&self) {
+        self.shared
+            .engine_state
+            .store(AudioEngineState::ClosingProject as u8, Ordering::Relaxed);
+        eprintln!("[AudioEngine] state -> ClosingProject");
         self.shared.playing.store(false, Ordering::Relaxed);
         let _ = self.send_command(EngineCommand::StopTransport);
         self.stop();
@@ -1271,6 +1319,10 @@ impl EngineInner {
     // ── Project snapshot ───────────────────────────────────────────────────
 
     pub fn load_project(&self, snapshot: EngineProjectSnapshot) -> Result<(), SphereAudioError> {
+        self.shared
+            .engine_state
+            .store(AudioEngineState::LoadingProject as u8, Ordering::Relaxed);
+        eprintln!("[AudioEngine] state -> LoadingProject");
         let output_sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
 
         // Log how many clips have paths before building runtime.

@@ -17,6 +17,11 @@
 //! are written to **stdout**, human logs go to **stderr** behind
 //! `FUTUREBOARD_PLUGIN_VIEW_DEBUG`. See [`sphere_plugin_host::ipc`].
 
+#![cfg_attr(
+    all(windows, not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use std::collections::HashMap;
 use std::io::{self, BufReader};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -84,6 +89,9 @@ fn parse_parent_pid() -> Option<u32> {
 fn main() {
     let selftest = std::env::args().any(|a| a == "--selftest");
     let parent_pid = parse_parent_pid();
+
+    let _log_path = sphere_plugin_host::plugin_host_logging::init_host_logging();
+    sphere_plugin_host::plugin_host_logging::log_startup_environment();
 
     platform::com_init();
     let pid = std::process::id();
@@ -463,6 +471,21 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
             for instance_id in registry.keys() {
                 engine.embed_refresh_for_instance(instance_id);
             }
+            let resizes = engine.poll_pending_editor_resizes();
+            for (instance_id, width, height) in resizes {
+                eprintln!(
+                    "[PluginEditor] top window resize notify instance={instance_id} content={width}x{height}"
+                );
+                let _ = ipc::write_frame(
+                    &mut out,
+                    &HostEvent::EditorContentResize {
+                        plugin_instance_id: instance_id,
+                        width,
+                        height,
+                        dpi: 96,
+                    },
+                );
+            }
         }
         let now = Instant::now();
         delayed_redraws.retain(|entry| {
@@ -592,7 +615,7 @@ fn dispatch(
                     max_block_size,
                 },
             );
-            {
+            let load_ok = {
                 let mut preview_engine = preview.lock();
                 preview_engine.load_instance(
                     &plugin_instance_id,
@@ -600,8 +623,26 @@ fn dispatch(
                     &class_id_loaded,
                     sample_rate,
                     max_block_size,
+                )
+            };
+            if !load_ok {
+                loaded.remove(&plugin_instance_id);
+                let error = format!(
+                    "Plugin failed to load. It may require a newer CPU instruction set \
+                     or a missing runtime dependency. path={plugin_path_loaded}"
                 );
+                eprintln!("[PluginHost] instance load failed id={plugin_instance_id} error={error}");
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginLoadFailed {
+                        plugin_instance_id,
+                        error,
+                    },
+                );
+                return;
             }
+            eprintln!("[PluginHost] instance created id={plugin_instance_id}");
+            preview.lock().set_continuous_mode(true);
             let _ = ipc::write_frame(
                 out,
                 &HostEvent::PluginLoaded {
@@ -633,6 +674,7 @@ fn dispatch(
         HostCommand::PrepareEditorView {
             plugin_instance_id, ..
         } => {
+            eprintln!("[PluginHost] editor open requested id={plugin_instance_id}");
             if !preview.lock().has_instance(&plugin_instance_id) {
                 emit_attach_failed(
                     out,
@@ -652,7 +694,9 @@ fn dispatch(
                 &plugin_instance_id,
                 &plugin_instance_id,
             );
-            let (preferred_width, preferred_height) = preview.lock().default_editor_size();
+            let (preferred_width, preferred_height) = preview
+                .lock()
+                .editor_content_size_for_instance(&plugin_instance_id);
             let _ = ipc::write_frame(
                 out,
                 &HostEvent::EditorPreferredSize {
@@ -699,13 +743,17 @@ fn dispatch(
             );
         }
         HostCommand::CloseEditor { plugin_instance_id } => {
+            eprintln!("[PluginHost] editor close requested id={plugin_instance_id}");
             preview.lock().preview_all_notes_off(&plugin_instance_id);
             registry.remove(&plugin_instance_id);
             preview
                 .lock()
-                .embed_detach_for_instance(&plugin_instance_id);
+                .editor_detach_for_instance(&plugin_instance_id);
             delayed_redraws.retain(|entry| entry.instance_id != plugin_instance_id);
-            preview.lock().set_continuous_mode(!registry.is_empty());
+            let still_active = preview.lock().has_instance(&plugin_instance_id);
+            eprintln!(
+                "[PluginHost] editor closed id={plugin_instance_id} instance_still_active={still_active}"
+            );
             let _ = ipc::write_frame(out, &HostEvent::EditorClosed { plugin_instance_id });
         }
         HostCommand::PreviewNoteOn {
@@ -749,9 +797,17 @@ fn dispatch(
             preview.lock().midi_panic(&plugin_instance_id);
         }
         HostCommand::UnloadPlugin { plugin_instance_id } => {
+            eprintln!(
+                "[PluginHost] unload requested id={plugin_instance_id} reason=user_removed_insert"
+            );
             registry.remove(&plugin_instance_id);
             preview.lock().unload_instance(&plugin_instance_id);
             loaded.remove(&plugin_instance_id);
+            let instance_count = preview.lock().loaded_instance_ids().len();
+            eprintln!(
+                "[PluginHost] host shutdown deferred instance_count={instance_count} editor_count={}",
+                registry.len()
+            );
             hlog!(
                 "[PluginHostEditor] unload plugin_instance_id={plugin_instance_id} released=true"
             );

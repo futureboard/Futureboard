@@ -21,6 +21,8 @@ fn main() {
             .display()
     );
 
+    // Baseline x64 only — do not add /arch:AVX2 or target-cpu=native here.
+    // Distributed plugin host must run on CPUs without AVX2.
     let mut build = cc::Build::new();
     build
         .cpp(true)

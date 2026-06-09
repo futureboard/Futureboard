@@ -1085,6 +1085,21 @@ impl PluginEditorWindow {
             ClientEvent::Host(HostEvent::EditorClosed { .. }) => {
                 eprintln!("[plugin-view][host] EditorClosed editor_id={id}");
             }
+            ClientEvent::Host(HostEvent::EditorContentResize {
+                plugin_instance_id,
+                width,
+                height,
+                dpi: _,
+            }) => {
+                eprintln!(
+                    "[plugin-bridge] event EditorContentResize instance={plugin_instance_id} width={width} height={height}"
+                );
+                if let Some(size) = Self::valid_preferred_size(width, height) {
+                    self.host_preferred_size = Some(size);
+                    self.editor_content_size = Some(size);
+                    cx.notify();
+                }
+            }
             ClientEvent::Host(HostEvent::EditorPreferredSize {
                 plugin_instance_id,
                 width,

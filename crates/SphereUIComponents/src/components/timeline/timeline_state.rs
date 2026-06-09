@@ -1561,9 +1561,17 @@ impl PluginRuntimeBackend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginRuntimeState {
     Loading,
+    /// DSP instance loaded in host; not yet in audio graph.
+    Loaded,
+    /// DSP active in audio graph (processing).
+    Active,
+    /// Legacy alias — treated as Active in UI status.
     Ready,
     EditorOpening,
     EditorOpen,
+    /// Editor UI closed; DSP instance still loaded and processing.
+    EditorClosed,
+    Bypassed,
     Failed(String),
     Crashed,
     Unloaded,
@@ -4529,7 +4537,12 @@ impl TimelineState {
             PluginRuntimeState::Loading | PluginRuntimeState::EditorOpening => {
                 InsertLoadStatus::Loading
             }
-            PluginRuntimeState::Ready | PluginRuntimeState::EditorOpen => InsertLoadStatus::Ready,
+            PluginRuntimeState::Loaded
+            | PluginRuntimeState::Active
+            | PluginRuntimeState::Ready
+            | PluginRuntimeState::EditorOpen
+            | PluginRuntimeState::EditorClosed
+            | PluginRuntimeState::Bypassed => InsertLoadStatus::Ready,
             PluginRuntimeState::Failed(message) => InsertLoadStatus::Failed(message.clone()),
             PluginRuntimeState::Crashed => {
                 InsertLoadStatus::Failed("Plugin host crashed".to_string())

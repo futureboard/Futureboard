@@ -162,6 +162,20 @@ extern "C" {
         out_width: *mut i32,
         out_height: *mut i32,
     ) -> i32;
+    fn sphere_daux_vst3_embed_set_instance_label(
+        processor: *mut SphereDauxVst3Processor,
+        instance_id: *const c_char,
+    );
+    fn sphere_daux_vst3_prepare_editor_view(
+        processor: *mut SphereDauxVst3Processor,
+        out_width: *mut i32,
+        out_height: *mut i32,
+    ) -> i32;
+    fn sphere_daux_vst3_take_pending_shell_resize(
+        processor: *mut SphereDauxVst3Processor,
+        out_width: *mut i32,
+        out_height: *mut i32,
+    ) -> i32;
 }
 
 #[derive(Debug)]
@@ -599,6 +613,51 @@ impl Vst3RuntimeProcessor {
         let mut height = 0;
         let ok =
             unsafe { sphere_daux_vst3_embed_content_size(self.inner.raw, &mut width, &mut height) };
+        if ok != 0 && width > 0 && height > 0 {
+            Some((width, height))
+        } else {
+            None
+        }
+    }
+
+    pub fn embed_set_instance_label(&self, instance_id: &str) {
+        if self.inner.raw.is_null() {
+            return;
+        }
+        if let Ok(label) = CString::new(instance_id) {
+            unsafe {
+                sphere_daux_vst3_embed_set_instance_label(self.inner.raw, label.as_ptr());
+            }
+        }
+    }
+
+    /// `createView` + `setFrame` + `getSize` without HWND attach (PrepareEditorView).
+    pub fn prepare_editor_view(&self) -> Option<(i32, i32)> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        let mut width = 0;
+        let mut height = 0;
+        let ok = unsafe {
+            sphere_daux_vst3_prepare_editor_view(self.inner.raw, &mut width, &mut height)
+        };
+        if ok != 0 && width > 0 && height > 0 {
+            Some((width, height))
+        } else {
+            None
+        }
+    }
+
+    /// Poll plug-in `resizeView` requests for main-owned shell resizing.
+    pub fn take_pending_shell_resize(&self) -> Option<(i32, i32)> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        let mut width = 0;
+        let mut height = 0;
+        let ok = unsafe {
+            sphere_daux_vst3_take_pending_shell_resize(self.inner.raw, &mut width, &mut height)
+        };
         if ok != 0 && width > 0 && height > 0 {
             Some((width, height))
         } else {

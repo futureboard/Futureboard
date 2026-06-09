@@ -281,6 +281,11 @@ pub fn drain_commands(
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 runtime.reset_midi_playback(pos);
                 local.set_tempo_map(runtime.tempo_map.clone(), pos, output_sample_rate);
+                shared.engine_state.store(
+                    crate::engine::AudioEngineState::Paused as u8,
+                    Ordering::Relaxed,
+                );
+                eprintln!("[AudioEngine] graph swap complete state -> Paused");
             }
             EngineCommand::SetTestTone { enabled, frequency } => {
                 local.osc_on = enabled;
@@ -306,6 +311,11 @@ pub fn drain_commands(
                 }
                 local.playing_local = true;
                 shared.playing.store(true, Ordering::Relaxed);
+                shared.engine_state.store(
+                    crate::engine::AudioEngineState::Running as u8,
+                    Ordering::Relaxed,
+                );
+                eprintln!("[AudioEngine] state -> Running");
                 runtime.reset_midi_playback(pos);
             }
             EngineCommand::StopTransport => {
@@ -314,6 +324,11 @@ pub fn drain_commands(
                 }
                 local.playing_local = false;
                 shared.playing.store(false, Ordering::Relaxed);
+                shared.engine_state.store(
+                    crate::engine::AudioEngineState::Paused as u8,
+                    Ordering::Relaxed,
+                );
+                eprintln!("[AudioEngine] state -> Paused");
                 runtime.all_notes_off("stop");
             }
             EngineCommand::Seek { position_seconds } => {
@@ -495,6 +510,30 @@ pub fn fill_output_f32(
     local: &mut LocalAudioState,
 ) -> u64 {
     shared.output_cb_count.fetch_add(1, Ordering::Relaxed);
+    let engine_state =
+        crate::engine::AudioEngineState::from_u8(shared.engine_state.load(Ordering::Relaxed));
+    if engine_state.outputs_silence() {
+        for sample in data.iter_mut() {
+            *sample = 0.0;
+        }
+        local.preview_tail_samples = 0;
+        local.prev_peak_l = 0.0;
+        local.prev_peak_r = 0.0;
+        shared.peak_l.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+        shared.peak_r.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+        shared.rms_l.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+        shared.rms_r.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+        runtime.end_meter_block(0);
+        let frames = data.len() / channels.max(1);
+        if shared.output_cb_count.load(Ordering::Relaxed) % 400 == 1 {
+            eprintln!(
+                "[AudioEngine] callback silence reason={} frames={frames}",
+                engine_state.as_str()
+            );
+            eprintln!("[AudioEngine] output cleared");
+        }
+        return frames as u64;
+    }
     if local.playing_local {
         log_post_play_callback("block entered");
     }
@@ -539,9 +578,8 @@ pub fn fill_output_f32(
         // queued to render the instrument's release after the eventual note-off.
         local.preview_tail_samples = (runtime.sample_rate as u64).saturating_mul(2);
     }
-    let bridge_editor_wakeup = runtime.has_bridge_editor_active();
     let preview_render_active =
-        has_preview || pending_midi || local.preview_tail_samples > 0 || bridge_editor_wakeup;
+        has_preview || pending_midi || local.preview_tail_samples > 0;
     if preview_render_active
         && !local.playing_local
         && (has_preview || pending_midi || local.preview_tail_samples > 0)

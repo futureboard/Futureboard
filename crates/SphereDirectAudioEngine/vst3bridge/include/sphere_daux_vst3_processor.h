@@ -147,6 +147,18 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_host_kind(
 SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_take_user_close(
     SphereDauxVst3Processor* processor);
 
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_embed_set_instance_label(
+    SphereDauxVst3Processor* processor, const char* instance_id);
+
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_prepare_editor_view(
+    SphereDauxVst3Processor* processor, int* out_width, int* out_height);
+
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_take_pending_shell_resize(
+    SphereDauxVst3Processor* processor, int* out_width, int* out_height);
+
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_embed_content_size(
+    SphereDauxVst3Processor* processor, int* out_width, int* out_height);
+
 /// Returns 1 if the processor has not been destroyed, 0 if it has.
 /// The audio callback should call this before processing and bypass the insert
 /// if it returns 0, to avoid use-after-free crashes.

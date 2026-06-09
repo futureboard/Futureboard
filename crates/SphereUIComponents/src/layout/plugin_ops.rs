@@ -1,5 +1,8 @@
 use gpui::{Bounds, Context, Window};
 
+use crate::components::timeline::timeline_state::{
+    PluginRuntimeBackend, PluginRuntimeState,
+};
 use crate::components::native_editor_shell::{shell_defaults, NativeEditorShell};
 use crate::components::plugin_manager::open_plugin_manager_window;
 use crate::components::plugin_picker::{
@@ -142,18 +145,26 @@ impl StudioLayout {
                                 &track_id,
                                 &plugin_instance_id,
                                 PluginRuntimeBackend::ExternalBridge,
-                                PluginRuntimeState::Ready,
+                                PluginRuntimeState::Active,
                                 host_pid,
                             )
                         })
                     });
-                    eprintln!("[plugin-runtime] state Loading -> Ready");
+                    eprintln!("[plugin-runtime] state Loading -> Active");
                 }
                 ClientEvent::Host(HostEvent::PluginLoadFailed {
                     plugin_instance_id,
                     error,
                 }) => {
                     eprintln!("[plugin-bridge] event PluginLoadFailed instance={plugin_instance_id} error={error}");
+                    let user_error = if error.contains("CPU") || error.contains("runtime") {
+                        error.clone()
+                    } else {
+                        format!(
+                            "Plugin failed to load. It may require a newer CPU instruction set \
+                             or a missing runtime dependency. ({error})"
+                        )
+                    };
                     let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
                     changed |= self.timeline.update(cx, |timeline, _cx| {
                         let track_ids: Vec<String> = timeline
@@ -173,7 +184,7 @@ impl StudioLayout {
                                 &track_id,
                                 &plugin_instance_id,
                                 PluginRuntimeBackend::ExternalBridge,
-                                PluginRuntimeState::Failed(error.clone()),
+                                PluginRuntimeState::Failed(user_error.clone()),
                                 host_pid,
                             )
                         })
@@ -274,6 +285,33 @@ impl StudioLayout {
                 session.state = BridgeEditorState::Attached;
                 session.host_hwnd = host_hwnd;
                 session.shell.mark_attached();
+                let _ = self.timeline.update(cx, |timeline, _cx| {
+                    let track_ids: Vec<String> = timeline
+                        .state
+                        .tracks
+                        .iter()
+                        .filter(|track| {
+                            track
+                                .inserts
+                                .iter()
+                                .any(|slot| slot.id == plugin_instance_id)
+                        })
+                        .map(|track| track.id.clone())
+                        .collect();
+                    let host_pid = runtime.as_ref().and_then(|rt| rt.lock().ok()).and_then(|r| r.host_pid());
+                    track_ids.into_iter().any(|track_id| {
+                        timeline.state.set_insert_runtime(
+                            &track_id,
+                            plugin_instance_id,
+                            PluginRuntimeBackend::ExternalBridge,
+                            PluginRuntimeState::EditorOpen,
+                            host_pid,
+                        )
+                    })
+                });
+                eprintln!(
+                    "[PluginHost] editor opened id={plugin_instance_id} hwnd=0x{host_hwnd:x}"
+                );
                 if was != BridgeEditorState::Attached {
                     eprintln!(
                         "[plugin-editor-window] plugin_instance_id={plugin_instance_id} editor_window_id=0x{:x}",
@@ -309,6 +347,29 @@ impl StudioLayout {
                 }
                 log_bridge_gpu_diagnostics(session, plugin_instance_id, &plugin_path);
                 log_bridge_paint_stats(session);
+            }
+            ClientEvent::Host(HostEvent::EditorContentResize {
+                width, height, ..
+            }) => {
+                eprintln!(
+                    "[plugin-bridge] event EditorContentResize instance={plugin_instance_id} width={width} height={height}"
+                );
+                if width > 0 && height > 0 {
+                    resize_shell_before_attach(session, width, height);
+                    if session.state == BridgeEditorState::Attached {
+                        if let Some(rt) = runtime.as_ref() {
+                            if let Ok(mut r) = rt.lock() {
+                                let (cw, ch) = session.shell.content_size();
+                                r.resize_editor(
+                                    session.instance_id.clone(),
+                                    cw as u32,
+                                    ch as u32,
+                                    BRIDGE_EDITOR_DPI,
+                                );
+                            }
+                        }
+                    }
+                }
             }
             ClientEvent::Host(HostEvent::EditorPreferredSize { width, height, .. }) => {
                 eprintln!(
@@ -361,6 +422,33 @@ impl StudioLayout {
             }
             ClientEvent::Host(HostEvent::EditorClosed { .. }) => {
                 eprintln!("[plugin-view][host] EditorClosed instance={plugin_instance_id}");
+                let host_pid = runtime.as_ref().and_then(|rt| rt.lock().ok()).and_then(|r| r.host_pid());
+                self.timeline.update(cx, |timeline, _cx| {
+                    let track_ids: Vec<String> = timeline
+                        .state
+                        .tracks
+                        .iter()
+                        .filter(|track| {
+                            track
+                                .inserts
+                                .iter()
+                                .any(|slot| slot.id == plugin_instance_id)
+                        })
+                        .map(|track| track.id.clone())
+                        .collect();
+                    for track_id in track_ids {
+                        timeline.state.set_insert_runtime(
+                            &track_id,
+                            plugin_instance_id,
+                            PluginRuntimeBackend::ExternalBridge,
+                            PluginRuntimeState::EditorClosed,
+                            host_pid,
+                        );
+                    }
+                });
+                eprintln!(
+                    "[PluginHost] editor closed id={plugin_instance_id} instance_still_active=true"
+                );
             }
             _ => {}
         }
@@ -443,6 +531,17 @@ impl StudioLayout {
             });
         match open_result {
             Ok(()) => {
+                let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
+                self.timeline.update(cx, |timeline, _cx| {
+                    timeline.state.set_insert_runtime(
+                        track_id,
+                        instance_id,
+                        PluginRuntimeBackend::ExternalBridge,
+                        PluginRuntimeState::EditorOpening,
+                        host_pid,
+                    );
+                });
+                eprintln!("[PluginHost] editor reopen requested id={instance_id}");
                 self.bridge_editors.insert(
                     key,
                     BridgeEditorSession {
@@ -518,7 +617,7 @@ impl StudioLayout {
             }
         }
         for key in to_close {
-            self.close_bridge_editor(&key.0, &key.1);
+            self.close_bridge_editor(cx, &key.0, &key.1);
             changed = true;
         }
         if changed {
@@ -529,7 +628,12 @@ impl StudioLayout {
     /// Close a native editor session: send `CloseEditor` to the host (view
     /// `removed()`), then drop the session so the shell window is destroyed.
     /// Only called on genuine close (user / replace / track-delete / shutdown).
-    pub(super) fn close_bridge_editor(&mut self, track_id: &str, instance_id: &str) {
+    pub(super) fn close_bridge_editor(
+        &mut self,
+        cx: &mut Context<Self>,
+        track_id: &str,
+        instance_id: &str,
+    ) {
         let key = (track_id.to_string(), instance_id.to_string());
         if let Some(session) = self.bridge_editors.remove(&key) {
             if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
@@ -537,12 +641,24 @@ impl StudioLayout {
                     r.close_editor(session.instance_id.clone());
                 }
             }
-            if let Some(engine) = self.audio_engine.as_ref() {
-                let _ = engine.set_bridge_editor_active(track_id.to_string(), false);
-            }
             eprintln!(
-                "[plugin-editor-window] close native editor instance={instance_id} (CloseEditor sent, shell destroyed)"
+                "[plugin-editor-window] close native editor instance={instance_id} (CloseEditor sent, shell destroyed, DSP remains active)"
             );
+            let host_pid = self
+                .plugin_bridge_runtime
+                .as_ref()
+                .and_then(|rt| rt.lock().ok())
+                .and_then(|r| r.host_pid());
+            let _ = self.timeline.update(cx, |timeline, cx| {
+                timeline.state.set_insert_runtime(
+                    track_id,
+                    instance_id,
+                    PluginRuntimeBackend::ExternalBridge,
+                    PluginRuntimeState::EditorClosed,
+                    host_pid,
+                );
+                cx.notify();
+            });
         }
     }
 
@@ -715,7 +831,7 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         // Native main-owned bridge editor (default path).
-        self.close_bridge_editor(track_id, insert_id);
+        self.close_bridge_editor(cx, track_id, insert_id);
         // Legacy GPUI-window editor (FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS only).
         let key = (track_id.to_string(), insert_id.to_string());
         if let Some(handle) = self.open_plugin_editors.remove(&key) {

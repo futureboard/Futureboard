@@ -19,6 +19,7 @@ use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
 use crate::plugin_host_lifecycle::{self, BridgeHostManager};
+use crate::plugin_host_logging;
 
 /// What the UI thread receives from [`PluginHostClient::try_recv_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,13 +250,28 @@ impl PluginHostClient {
     pub fn spawn_from(binary: &Path) -> Result<Self, PluginHostClientError> {
         eprintln!("[plugin-bridge] ipc=stdio");
         let parent_pid = std::process::id();
+        let hidden = !plugin_host_logging::host_console_enabled();
+        eprintln!(
+            "[PluginHost] spawn hidden={hidden} path={}",
+            binary.display()
+        );
         let mut command = Command::new(binary);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if hidden {
+                Stdio::null()
+            } else {
+                Stdio::inherit()
+            })
             .arg("--parent-pid")
             .arg(parent_pid.to_string());
+        #[cfg(windows)]
+        if hidden {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
         sanitize_child_env(&mut command);
         let mut child = command.spawn().map_err(PluginHostClientError::Spawn)?;
         BridgeHostManager::global().on_host_spawned(&child);

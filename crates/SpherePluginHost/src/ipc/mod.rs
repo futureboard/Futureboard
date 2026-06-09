@@ -202,6 +202,14 @@ pub enum HostEvent {
         width: u32,
         height: u32,
     },
+    /// Plug-in called `IPlugFrame::resizeView` — main app should resize shell.
+    EditorContentResize {
+        plugin_instance_id: String,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        dpi: u32,
+    },
     /// Editor view detached (`IPlugView::removed` called).
     EditorClosed { plugin_instance_id: String },
     /// Plugin instance released.

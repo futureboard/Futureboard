@@ -196,6 +196,7 @@ impl PluginHostPreviewEngine {
             );
             return false;
         };
+        processor.embed_set_instance_label(plugin_instance_id);
         self.instances.insert(
             plugin_instance_id.to_string(),
             PreviewInstance {
@@ -210,6 +211,7 @@ impl PluginHostPreviewEngine {
             if self.dsp_ready { "ready" } else { "pending" }
         );
         eprintln!("[plugin-host-registry] loaded instance={plugin_instance_id}");
+        self.set_continuous_mode(true);
         self.log_host_registry();
         true
     }
@@ -221,6 +223,9 @@ impl PluginHostPreviewEngine {
         }
         if let Some(mut instance) = self.instances.remove(plugin_instance_id) {
             Self::panic_instance(&mut instance);
+        }
+        if self.instances.is_empty() {
+            self.set_continuous_mode(false);
         }
         eprintln!("[plugin-host-registry] instances={}", self.instances.len());
     }
@@ -247,6 +252,7 @@ impl PluginHostPreviewEngine {
         eprintln!("[plugin-editor] open instance={plugin_instance_id} uses_runtime_instance=true");
         eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
         eprintln!("[plugin-editor] no_duplicate_component_created=true");
+        instance.processor.embed_set_instance_label(plugin_instance_id);
         instance
             .processor
             .embed_editor(parent_hwnd, 0, 0, width, height)
@@ -280,6 +286,18 @@ impl PluginHostPreviewEngine {
         }
     }
 
+    /// Detach editor UI only — processor stays loaded and active.
+    pub fn editor_detach_for_instance(&mut self, plugin_instance_id: &str) {
+        if let Some(instance) = self.instances.get(plugin_instance_id) {
+            instance.processor.embed_detach();
+        }
+        eprintln!(
+            "[PluginHost] editor closed id={plugin_instance_id} instance_still_active={}",
+            self.has_instance(plugin_instance_id)
+        );
+    }
+
+    /// Full detach + MIDI panic (unload / crash paths).
     pub fn embed_detach_for_instance(&mut self, plugin_instance_id: &str) {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
             instance.processor.embed_detach();
@@ -294,8 +312,31 @@ impl PluginHostPreviewEngine {
             if let Some((w, h)) = instance.processor.embed_content_size() {
                 return (w.max(1) as u32, h.max(1) as u32);
             }
+            if let Some((w, h)) = instance.processor.prepare_editor_view() {
+                return (w.max(1) as u32, h.max(1) as u32);
+            }
         }
         self.default_editor_size()
+    }
+
+    pub fn take_pending_editor_resize_for_instance(
+        &self,
+        plugin_instance_id: &str,
+    ) -> Option<(u32, u32)> {
+        self.instances
+            .get(plugin_instance_id)
+            .and_then(|instance| instance.processor.take_pending_shell_resize())
+            .map(|(w, h)| (w.max(1) as u32, h.max(1) as u32))
+    }
+
+    pub fn poll_pending_editor_resizes(&self) -> Vec<(String, u32, u32)> {
+        let mut out = Vec::new();
+        for (id, instance) in &self.instances {
+            if let Some((w, h)) = instance.processor.take_pending_shell_resize() {
+                out.push((id.clone(), w.max(1) as u32, h.max(1) as u32));
+            }
+        }
+        out
     }
 
     pub fn preview_note_on(
@@ -514,9 +555,8 @@ impl PluginHostPreviewEngine {
             let has_work = !instance.pending_events.is_empty()
                 || !instance.active_notes.is_empty()
                 || instance.tail_blocks > 0;
-            if !has_work && !self.continuous_mode {
-                continue;
-            }
+            // Loaded instances always process on bridge blocks (effect passthrough).
+            let _ = has_work;
             let events = std::mem::take(&mut instance.pending_events);
             let _ = instance
                 .processor

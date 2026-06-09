@@ -7,29 +7,37 @@
 
 use std::sync::Arc;
 
-use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
+use crate::components::title_bar::{external_window_titlebar_compact, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
 use gpui::{
     div, px, App, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, StatefulInteractiveElement, Styled, Window, WindowHandle,
 };
 
-pub const MESSAGE_BOX_WIDTH: f32 = 460.0;
-const BODY_PAD_X: f32 = 18.0;
-const BODY_PAD_Y: f32 = 16.0;
-const FOOTER_PAD_X: f32 = 16.0;
-const FOOTER_PAD_Y: f32 = 10.0;
+pub const MESSAGE_BOX_WIDTH: f32 = 450.0;
+const BODY_PAD_X: f32 = 14.0;
+const BODY_PAD_Y: f32 = 12.0;
+const FOOTER_PAD_X: f32 = 12.0;
+const FOOTER_PAD_Y: f32 = 8.0;
+const FOOTER_GAP: f32 = 6.0;
 const BUTTON_H: f32 = 27.0;
+const BUTTON_PAD_X: f32 = 12.0;
+const BUTTON_RADIUS: f32 = 5.0;
 /// Compact native-control min width. Wider labels (e.g. "Don't Save") grow past
 /// this from their own content + padding rather than forcing every button up.
-const BUTTON_MIN_W: f32 = 84.0;
+const BUTTON_MIN_W: f32 = 80.0;
 const FOOTER_H: f32 = BUTTON_H + FOOTER_PAD_Y * 2.0;
-/// Vertical room reserved for the message — enough for up to two wrapped lines
-/// at the 13px / 19px line-height used below, so the fixed-size window doesn't
-/// clip the copy.
-const MESSAGE_BLOCK_H: f32 = 46.0;
-const DETAIL_LINE_H: f32 = 34.0;
-const WARNING_TOKEN_SIZE: f32 = 30.0;
+const MESSAGE_TEXT_SIZE: f32 = 12.0;
+const MESSAGE_LINE_H: f32 = 18.0;
+/// Vertical room for up to two wrapped message lines at 12px / 18px line-height.
+const MESSAGE_BLOCK_H: f32 = MESSAGE_LINE_H * 2.0;
+const DETAIL_TEXT_SIZE: f32 = 11.0;
+const DETAIL_LINE_H: f32 = 16.0;
+const DETAIL_BLOCK_H: f32 = DETAIL_LINE_H * 2.0;
+const ICON_GAP: f32 = 10.0;
+const BODY_TEXT_GAP: f32 = 4.0;
+const WARNING_TOKEN_SIZE: f32 = 28.0;
+const ICON_GLYPH_SIZE: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MessageBoxKind {
@@ -122,7 +130,7 @@ enum MessageBoxButtonStyle {
 fn message_box_height(options: &MessageBoxOptions) -> f32 {
     let mut h = TITLEBAR_HEIGHT + BODY_PAD_Y + MESSAGE_BLOCK_H + BODY_PAD_Y + FOOTER_H;
     if options.detail.as_ref().is_some_and(|d| !d.is_empty()) {
-        h += DETAIL_LINE_H;
+        h += BODY_TEXT_GAP + DETAIL_BLOCK_H;
     }
     h
 }
@@ -211,13 +219,13 @@ fn message_box_button(
         .justify_center()
         .h(px(BUTTON_H))
         .min_w(px(BUTTON_MIN_W))
-        .px(px(13.0))
-        .rounded(px(6.0))
+        .px(px(BUTTON_PAD_X))
+        .rounded(px(BUTTON_RADIUS))
         .border(px(1.0))
         .border_color(border)
         .bg(bg)
-        .text_size(px(12.5))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_size(px(MESSAGE_TEXT_SIZE))
+        .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(move |s| s.bg(hover_bg))
@@ -231,10 +239,9 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
     let accent = kind_accent(options.kind);
     let glyph = kind_glyph(options.kind);
 
-    // Body: warning token + message, top-aligned.
+    // Body: icon + message, top-aligned (no flex grow — native message-box density).
     let content = div()
-        .flex()
-        .flex_1()
+        .flex_shrink_0()
         .px(px(BODY_PAD_X))
         .py(px(BODY_PAD_Y))
         .child(
@@ -244,10 +251,9 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
                 .items_start()
                 .w_full()
                 .min_w_0()
-                .gap(px(13.0))
+                .min_h(px(MESSAGE_BLOCK_H))
+                .gap(px(ICON_GAP))
                 .child(
-                    // Soft amber warning token — a low-contrast tinted circle
-                    // rather than a hard boxed badge.
                     div()
                         .flex_shrink_0()
                         .w(px(WARNING_TOKEN_SIZE))
@@ -259,8 +265,8 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(15.0))
-                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_size(px(ICON_GLYPH_SIZE))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(accent)
                         .child(glyph),
                 )
@@ -270,20 +276,20 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(6.0))
+                        .gap(px(BODY_TEXT_GAP))
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(MESSAGE_TEXT_SIZE))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .line_height(px(19.0))
+                                .line_height(px(MESSAGE_LINE_H))
                                 .text_color(Colors::text_primary())
                                 .child(options.message.clone()),
                         )
                         .children(options.detail.as_ref().filter(|d| !d.is_empty()).map(
                             |detail| {
                                 div()
-                                    .text_size(px(11.5))
-                                    .line_height(px(16.0))
+                                    .text_size(px(DETAIL_TEXT_SIZE))
+                                    .line_height(px(DETAIL_LINE_H))
                                     .text_color(Colors::text_muted())
                                     .child(detail.clone())
                             },
@@ -296,7 +302,7 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
         .flex_row()
         .justify_end()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(FOOTER_GAP))
         .h(px(FOOTER_H))
         .px(px(FOOTER_PAD_X))
         .py(px(FOOTER_PAD_Y))
@@ -318,7 +324,7 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
         .flex_col()
         .flex_1()
         .child(content)
-        .child(footer)
+        .child(footer.flex_shrink_0())
 }
 
 pub struct MessageBoxWindow {
@@ -396,8 +402,8 @@ impl Render for MessageBoxWindow {
             .border_color(Colors::border_subtle())
             .shadow(vec![gpui::BoxShadow {
                 color: Colors::surface_overlay().into(),
-                offset: gpui::point(px(0.0), px(12.0)),
-                blur_radius: px(36.0),
+                offset: gpui::point(px(0.0), px(6.0)),
+                blur_radius: px(20.0),
                 spread_radius: px(0.0),
                 inset: false,
             }])
@@ -408,7 +414,7 @@ impl Render for MessageBoxWindow {
                 }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
-            .child(external_window_titlebar(title, "message-box-close", {
+            .child(external_window_titlebar_compact(title, "message-box-close", {
                 let target = target.clone();
                 move |window, cx| {
                     let _ = target.update(cx, |this, cx| {

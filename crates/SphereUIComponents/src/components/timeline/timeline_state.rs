@@ -307,6 +307,13 @@ pub struct TempoPointDrag {
     pub moved: bool,
 }
 
+/// In-flight time-signature marker drag on the global Time Signature lane.
+#[derive(Debug, Clone)]
+pub struct TimeSignaturePointDrag {
+    pub point_id: String,
+    pub moved: bool,
+}
+
 /// In-flight automation marquee (rubber-band) selection in beat/value space.
 #[derive(Debug, Clone)]
 pub struct AutomationMarquee {
@@ -811,6 +818,511 @@ fn hold_segment_at_beat(segments: &[TempoHoldSegment], beat: f64) -> TempoHoldSe
         .partition_point(|seg| seg.start_beat <= beat)
         .saturating_sub(1);
     segments[idx.min(segments.len() - 1)]
+}
+
+// ── Time signature map ───────────────────────────────────────────────────────
+
+pub type TimeSignaturePointId = String;
+
+pub const TS_NUMERATOR_MIN: u16 = 1;
+pub const TS_NUMERATOR_MAX: u16 = 64;
+pub const TS_ALLOWED_DENOMINATORS: [u16; 6] = [1, 2, 4, 8, 16, 32];
+pub const TS_BEAT_EPSILON: f64 = 1e-6;
+
+fn next_time_signature_point_id() -> TimeSignaturePointId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("ts-{ts:x}-{seq:x}")
+}
+
+/// Normalize a denominator to one of the allowed note values.
+pub fn normalize_time_signature_denominator(denominator: u16) -> u16 {
+    TS_ALLOWED_DENOMINATORS
+        .iter()
+        .copied()
+        .min_by_key(|allowed| (denominator as i32 - *allowed as i32).unsigned_abs())
+        .unwrap_or(4)
+}
+
+/// Quarter-note beats per bar for a time signature.
+pub fn beats_per_bar_from_sig(numerator: u16, denominator: u16) -> f64 {
+    let num = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX) as f64;
+    let den = normalize_time_signature_denominator(denominator).max(1) as f64;
+    num * (4.0 / den)
+}
+
+/// One denominator-note unit expressed in quarter-note beats (N/D => 4/D).
+pub fn denominator_unit_quarter_beats(denominator: u16) -> f64 {
+    4.0 / normalize_time_signature_denominator(denominator).max(1) as f64
+}
+
+/// Default accent grouping for a meter. Sum always equals `numerator`.
+pub fn default_time_signature_grouping(numerator: u16, denominator: u16) -> Vec<u16> {
+    let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
+    let denominator = normalize_time_signature_denominator(denominator);
+    match (numerator, denominator) {
+        (2, 4) => vec![2],
+        (3, 4) => vec![3],
+        (4, 4) => vec![4],
+        (5, 8) => vec![2, 3],
+        (6, 8) => vec![3, 3],
+        (7, 8) => vec![2, 2, 3],
+        (9, 8) => vec![3, 3, 3],
+        (12, 8) => vec![3, 3, 3, 3],
+        (n, 8) if n % 2 == 1 && n > 3 => {
+            let pairs = ((n - 3) / 2) as usize;
+            let mut groups = vec![2; pairs];
+            groups.push(3);
+            groups
+        }
+        _ => vec![numerator],
+    }
+}
+
+pub fn normalize_time_signature_grouping(
+    numerator: u16,
+    denominator: u16,
+    grouping: &[u16],
+) -> Vec<u16> {
+    let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
+    if grouping.is_empty()
+        || grouping.iter().any(|&g| g == 0)
+        || grouping.iter().map(|&g| g as u32).sum::<u32>() != numerator as u32
+    {
+        default_time_signature_grouping(numerator, denominator)
+    } else {
+        grouping.to_vec()
+    }
+}
+
+/// Cumulative denominator-beat indices (0-based) where each accent group begins.
+pub fn time_signature_group_starts(grouping: &[u16]) -> Vec<u16> {
+    let mut starts = vec![0u16];
+    let mut acc = 0u16;
+    for (i, &grp) in grouping.iter().enumerate() {
+        if i > 0 {
+            starts.push(acc);
+        }
+        acc = acc.saturating_add(grp);
+    }
+    starts
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeSignaturePoint {
+    pub id: TimeSignaturePointId,
+    pub beat: f64,
+    pub numerator: u16,
+    pub denominator: u16,
+    /// Accent grouping in denominator-beat units (e.g. 5/8 => [2, 3]).
+    pub grouping: Vec<u16>,
+}
+
+impl TimeSignaturePoint {
+    pub fn new(beat: f64, numerator: u16, denominator: u16) -> Self {
+        let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
+        let denominator = normalize_time_signature_denominator(denominator);
+        Self {
+            id: next_time_signature_point_id(),
+            beat: beat.max(0.0),
+            numerator,
+            denominator,
+            grouping: default_time_signature_grouping(numerator, denominator),
+        }
+    }
+
+    pub fn with_id(
+        id: impl Into<String>,
+        beat: f64,
+        numerator: u16,
+        denominator: u16,
+    ) -> Self {
+        let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
+        let denominator = normalize_time_signature_denominator(denominator);
+        Self {
+            id: id.into(),
+            beat: beat.max(0.0),
+            numerator,
+            denominator,
+            grouping: default_time_signature_grouping(numerator, denominator),
+        }
+    }
+
+    pub fn with_grouping(
+        id: impl Into<String>,
+        beat: f64,
+        numerator: u16,
+        denominator: u16,
+        grouping: Vec<u16>,
+    ) -> Self {
+        let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
+        let denominator = normalize_time_signature_denominator(denominator);
+        Self {
+            id: id.into(),
+            beat: beat.max(0.0),
+            numerator,
+            denominator,
+            grouping: normalize_time_signature_grouping(numerator, denominator, &grouping),
+        }
+    }
+
+    pub fn effective_grouping(&self) -> Vec<u16> {
+        normalize_time_signature_grouping(self.numerator, self.denominator, &self.grouping)
+    }
+
+    pub fn group_starts(&self) -> Vec<u16> {
+        time_signature_group_starts(&self.effective_grouping())
+    }
+
+    pub fn label(&self) -> String {
+        TimeSignatureMap::format_marker_label(self.numerator, self.denominator)
+    }
+}
+
+/// One arrangement bar background span in quarter-note beats.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BarBackgroundRect {
+    pub bar: i64,
+    pub start_beat: f64,
+    pub end_beat: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarBeat {
+    pub bar: i64,
+    /// 1-based denominator-beat index within the bar (1 = downbeat).
+    pub beat_in_bar: u16,
+    /// Fractional position within the current denominator beat (0..1).
+    pub sub_beat_fraction: f64,
+    pub numerator: u16,
+    pub denominator: u16,
+}
+
+/// Project-level time signature markers. Global timing data — not owned by any
+/// track. Ruler labels, grid grouping, transport display, and metronome accents
+/// all evaluate this map at the relevant beat.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TimeSignatureMap {
+    pub points: Vec<TimeSignaturePoint>,
+    revision: u64,
+}
+
+impl TimeSignatureMap {
+    pub fn new() -> Self {
+        Self {
+            points: Vec::new(),
+            revision: 0,
+        }
+    }
+
+    pub fn with_default_4_4() -> Self {
+        let mut map = Self::new();
+        map.points.push(TimeSignaturePoint::new(0.0, 4, 4));
+        map.bump_revision();
+        map
+    }
+
+    pub fn with_points(points: Vec<TimeSignaturePoint>) -> Self {
+        let mut map = Self::new();
+        map.points = points;
+        map.sort();
+        map.bump_revision();
+        map
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn has_markers(&self) -> bool {
+        !self.points.is_empty()
+    }
+
+    pub fn format_marker_label(numerator: u16, denominator: u16) -> String {
+        format!(
+            "{}/{}",
+            numerator,
+            normalize_time_signature_denominator(denominator)
+        )
+    }
+
+    pub fn ensure_point_ids(&mut self) {
+        for point in &mut self.points {
+            if point.id.is_empty() {
+                point.id = next_time_signature_point_id();
+            }
+        }
+    }
+
+    /// Seed beat-0 4/4 when empty (legacy projects / first show).
+    pub fn ensure_default_point(&mut self) {
+        if self.points.is_empty() {
+            self.points.push(TimeSignaturePoint::new(0.0, 4, 4));
+            self.bump_revision();
+        }
+        self.ensure_point_ids();
+    }
+
+    pub fn time_signature_at_beat(&self, beat: f64) -> TimeSignaturePoint {
+        let beat = beat.max(0.0);
+        if self.points.is_empty() {
+            return TimeSignaturePoint::with_id("implicit-4-4", 0.0, 4, 4);
+        }
+        let mut idx = 0usize;
+        for (i, p) in self.points.iter().enumerate() {
+            if p.beat <= beat + TS_BEAT_EPSILON {
+                idx = i;
+            } else {
+                break;
+            }
+        }
+        self.points[idx].clone()
+    }
+
+    pub fn beats_per_bar_at_beat(&self, beat: f64) -> f64 {
+        let pt = self.time_signature_at_beat(beat);
+        beats_per_bar_from_sig(pt.numerator, pt.denominator)
+    }
+
+    pub fn bar_beat_at_beat(&self, beat: f64) -> BarBeat {
+        let beat = beat.max(0.0);
+        let points = self.sorted_points();
+        let mut global_bar: i64 = 1;
+
+        for (i, pt) in points.iter().enumerate() {
+            let seg_start = pt.beat;
+            let seg_end = points
+                .get(i + 1)
+                .map(|p| p.beat)
+                .unwrap_or(f64::INFINITY);
+            if beat + TS_BEAT_EPSILON < seg_start {
+                continue;
+            }
+            let bpb = beats_per_bar_from_sig(pt.numerator, pt.denominator);
+            let denom_unit = denominator_unit_quarter_beats(pt.denominator);
+            if beat < seg_end - TS_BEAT_EPSILON || i + 1 == points.len() {
+                let rel = (beat - seg_start).max(0.0);
+                let bar_offset = (rel / bpb).floor() as i64;
+                let beat_in_bar_q = rel - bar_offset as f64 * bpb;
+                let denom_idx = (beat_in_bar_q / denom_unit).floor();
+                let sub_frac = if denom_unit > TS_BEAT_EPSILON {
+                    (beat_in_bar_q / denom_unit).fract()
+                } else {
+                    0.0
+                };
+                return BarBeat {
+                    bar: global_bar + bar_offset,
+                    beat_in_bar: (denom_idx as u16).saturating_add(1),
+                    sub_beat_fraction: sub_frac,
+                    numerator: pt.numerator,
+                    denominator: pt.denominator,
+                };
+            }
+            let bars_in_seg = ((seg_end - seg_start) / bpb).floor() as i64;
+            global_bar += bars_in_seg.max(0);
+        }
+
+        BarBeat {
+            bar: 1,
+            beat_in_bar: 1,
+            sub_beat_fraction: 0.0,
+            numerator: 4,
+            denominator: 4,
+        }
+    }
+
+    pub fn beat_at_bar_beat(&self, bar: i64, beat_in_bar: u16) -> f64 {
+        let bar = bar.max(1);
+        let beat_in_bar = beat_in_bar.max(1);
+        let points = self.sorted_points();
+        let mut global_bar: i64 = 1;
+
+        for (i, pt) in points.iter().enumerate() {
+            let seg_start = pt.beat;
+            let seg_end = points
+                .get(i + 1)
+                .map(|p| p.beat)
+                .unwrap_or(f64::INFINITY);
+            let bpb = beats_per_bar_from_sig(pt.numerator, pt.denominator);
+            let denom_unit = denominator_unit_quarter_beats(pt.denominator);
+            let bars_in_seg = if seg_end.is_finite() {
+                ((seg_end - seg_start) / bpb).floor() as i64
+            } else {
+                i64::MAX / 2
+            };
+
+            if bar < global_bar + bars_in_seg || i + 1 == points.len() {
+                let bar_offset = (bar - global_bar).max(0);
+                return seg_start
+                    + bar_offset as f64 * bpb
+                    + (beat_in_bar.saturating_sub(1) as f64) * denom_unit;
+            }
+            global_bar += bars_in_seg;
+        }
+        0.0
+    }
+
+    /// Snap a marker beat to the start of its current bar (MVP bar-boundary insert).
+    pub fn snap_marker_beat_to_bar_boundary(&self, beat: f64) -> f64 {
+        let bb = self.bar_beat_at_beat(beat.max(0.0));
+        self.bar_start_beat(bb.bar)
+    }
+
+    pub fn bar_start_beat(&self, bar: i64) -> f64 {
+        self.beat_at_bar_beat(bar, 1)
+    }
+
+    pub fn next_bar_beat(&self, beat: f64) -> f64 {
+        let bb = self.bar_beat_at_beat(beat);
+        let bpb = beats_per_bar_from_sig(bb.numerator, bb.denominator);
+        self.bar_start_beat(bb.bar) + bpb
+    }
+
+    pub fn previous_bar_beat(&self, beat: f64) -> f64 {
+        let bb = self.bar_beat_at_beat(beat);
+        if bb.bar <= 1 {
+            return 0.0;
+        }
+        self.bar_start_beat(bb.bar - 1)
+    }
+
+    pub fn format_position_at_beat(&self, beat: f64) -> String {
+        let bb = self.bar_beat_at_beat(beat);
+        format!("{}.{}", bb.bar, bb.beat_in_bar)
+    }
+
+    /// Global bar number containing `beat`.
+    pub fn bar_at_beat(&self, beat: f64) -> i64 {
+        self.bar_beat_at_beat(beat).bar
+    }
+
+    /// Enumerate bar spans intersecting a visible beat range for background paint.
+    pub fn visible_bar_rects(&self, visible_start: f64, visible_end: f64) -> Vec<BarBackgroundRect> {
+        const MAX_BARS: i64 = 4096;
+        let visible_start = visible_start.max(0.0);
+        let visible_end = visible_end.max(visible_start);
+        let mut bar = self.bar_at_beat(visible_start);
+        let mut rects = Vec::new();
+        for _ in 0..MAX_BARS {
+            let start_beat = self.bar_start_beat(bar);
+            if start_beat >= visible_end - TS_BEAT_EPSILON {
+                break;
+            }
+            let end_beat = self.bar_start_beat(bar + 1);
+            if end_beat > visible_start + TS_BEAT_EPSILON
+                && start_beat < visible_end - TS_BEAT_EPSILON
+            {
+                rects.push(BarBackgroundRect {
+                    bar,
+                    start_beat,
+                    end_beat,
+                });
+            }
+            bar += 1;
+        }
+        rects
+    }
+
+    pub fn add_or_update_point(&mut self, beat: f64, numerator: u16, denominator: u16) {
+        let beat = self.snap_marker_beat_to_bar_boundary(beat.max(0.0));
+        let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
+        let denominator = normalize_time_signature_denominator(denominator);
+        if let Some(existing) = self
+            .points
+            .iter_mut()
+            .find(|p| (p.beat - beat).abs() < TS_BEAT_EPSILON)
+        {
+            existing.numerator = numerator;
+            existing.denominator = denominator;
+            existing.grouping = default_time_signature_grouping(numerator, denominator);
+        } else {
+            self.points
+                .push(TimeSignaturePoint::new(beat, numerator, denominator));
+        }
+        self.sort();
+        self.bump_revision();
+    }
+
+    pub fn update_point_by_id(
+        &mut self,
+        id: &str,
+        numerator: u16,
+        denominator: u16,
+    ) -> bool {
+        let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
+        let denominator = normalize_time_signature_denominator(denominator);
+        if let Some(point) = self.points.iter_mut().find(|p| p.id == id) {
+            point.numerator = numerator;
+            point.denominator = denominator;
+            point.grouping = default_time_signature_grouping(numerator, denominator);
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn move_point_by_id(&mut self, id: &str, beat: f64) -> bool {
+        let beat = self.snap_marker_beat_to_bar_boundary(beat.max(0.0));
+        if self
+            .points
+            .iter()
+            .any(|p| p.id != id && (p.beat - beat).abs() < TS_BEAT_EPSILON)
+        {
+            return false;
+        }
+        if let Some(point) = self.points.iter_mut().find(|p| p.id == id) {
+            point.beat = beat;
+            self.sort();
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_point_by_id(&mut self, id: &str) -> bool {
+        if let Some(idx) = self.points.iter().position(|p| p.id == id) {
+            self.points.remove(idx);
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn reset_to_single_point(&mut self, beat: f64, numerator: u16, denominator: u16) {
+        self.points.clear();
+        self.points
+            .push(TimeSignaturePoint::new(beat, numerator, denominator));
+        self.sort();
+        self.bump_revision();
+    }
+
+    fn sort(&mut self) {
+        self.points
+            .sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    fn sorted_points(&self) -> Vec<TimeSignaturePoint> {
+        let mut points = if self.points.is_empty() {
+            vec![TimeSignaturePoint::with_id("implicit-4-4", 0.0, 4, 4)]
+        } else {
+            self.points.clone()
+        };
+        points.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+        points
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
 }
 
 /// BPM clamp range for tempo points (matches the audio engine spec).
@@ -1660,6 +2172,10 @@ pub struct TimelineState {
     /// the TempoTrack (when shown) is only a view/editor over this. When empty
     /// the project plays at the static `bpm`.
     pub tempo_map: TempoMap,
+    /// Global time signature markers (authoritative for bar/beat layout).
+    pub time_signature_map: TimeSignatureMap,
+    /// Legacy single signature — kept in sync with the marker at beat 0 for
+    /// templates and engine fallbacks.
     pub time_signature_num: u32,
     pub time_signature_den: u32,
     pub viewport: TimelineViewport,
@@ -1688,6 +2204,9 @@ pub struct TimelineState {
     pub tempo_track_collapsed: bool,
     /// Selected tempo marker on the Tempo Track (stable persisted id).
     pub selected_tempo_point_id: Option<String>,
+    pub show_time_signature_track: bool,
+    pub time_signature_track_collapsed: bool,
+    pub selected_time_signature_point_id: Option<String>,
 }
 
 impl Default for TimelineState {
@@ -1698,6 +2217,7 @@ impl Default for TimelineState {
         Self {
             bpm: 120.0,
             tempo_map: TempoMap::new(),
+            time_signature_map: TimeSignatureMap::with_default_4_4(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -1747,6 +2267,9 @@ impl Default for TimelineState {
             show_tempo_track: false,
             tempo_track_collapsed: false,
             selected_tempo_point_id: None,
+            show_time_signature_track: false,
+            time_signature_track_collapsed: false,
+            selected_time_signature_point_id: None,
         }
     }
 }
@@ -1921,6 +2444,7 @@ impl TimelineState {
         Self {
             bpm: 120.0,
             tempo_map: TempoMap::new(),
+            time_signature_map: TimeSignatureMap::with_default_4_4(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -1970,6 +2494,9 @@ impl TimelineState {
             show_tempo_track: false,
             tempo_track_collapsed: false,
             selected_tempo_point_id: None,
+            show_time_signature_track: false,
+            time_signature_track_collapsed: false,
+            selected_time_signature_point_id: None,
         }
     }
 
@@ -2109,7 +2636,142 @@ impl TimelineState {
     }
 
     pub fn beats_per_bar(&self) -> f32 {
-        self.time_signature_num as f32 * (4.0 / self.time_signature_den as f32)
+        self.beats_per_bar_at_beat(self.transport.playhead_beats as f64) as f32
+    }
+
+    pub fn beats_per_bar_at_beat(&self, beat: f64) -> f64 {
+        self.time_signature_map.beats_per_bar_at_beat(beat)
+    }
+
+    pub fn time_signature_at_playhead(&self) -> TimeSignaturePoint {
+        self.time_signature_map
+            .time_signature_at_beat(self.transport.playhead_beats as f64)
+    }
+
+    pub fn time_signature_has_markers(&self) -> bool {
+        self.time_signature_map.points.len() > 1
+            || self
+                .time_signature_map
+                .points
+                .first()
+                .is_some_and(|p| p.beat > TS_BEAT_EPSILON)
+    }
+
+    pub fn sync_legacy_time_signature_fields(&mut self) {
+        let pt = self
+            .time_signature_map
+            .time_signature_at_beat(0.0);
+        self.time_signature_num = pt.numerator as u32;
+        self.time_signature_den = pt.denominator as u32;
+    }
+
+    pub const TIME_SIGNATURE_TRACK_HEIGHT: f32 = 48.0;
+    pub const TIME_SIGNATURE_TRACK_HEIGHT_COLLAPSED: f32 = 36.0;
+
+    pub fn time_signature_track_height(&self) -> f32 {
+        if !self.show_time_signature_track {
+            return 0.0;
+        }
+        if self.time_signature_track_collapsed {
+            Self::TIME_SIGNATURE_TRACK_HEIGHT_COLLAPSED
+        } else {
+            Self::TIME_SIGNATURE_TRACK_HEIGHT
+        }
+    }
+
+    pub fn global_lanes_height(&self) -> f32 {
+        self.tempo_track_height() + self.time_signature_track_height()
+    }
+
+    pub fn show_time_signature_track_lane(&mut self) {
+        self.show_time_signature_track = true;
+        self.time_signature_map.ensure_default_point();
+    }
+
+    pub fn hide_time_signature_track_lane(&mut self) {
+        self.show_time_signature_track = false;
+        self.selected_time_signature_point_id = None;
+    }
+
+    pub fn select_time_signature_point(&mut self, id: &str) {
+        self.selected_time_signature_point_id = Some(id.to_string());
+    }
+
+    pub fn add_time_signature_point(
+        &mut self,
+        beat: f64,
+        numerator: u16,
+        denominator: u16,
+    ) -> Option<String> {
+        self.time_signature_map
+            .add_or_update_point(beat, numerator, denominator);
+        self.time_signature_map.ensure_point_ids();
+        self.sync_legacy_time_signature_fields();
+        self.time_signature_map
+            .points
+            .iter()
+            .find(|p| (p.beat - beat).abs() < TS_BEAT_EPSILON)
+            .map(|p| p.id.clone())
+    }
+
+    pub fn move_time_signature_point(&mut self, id: &str, beat: f64) -> bool {
+        if self.time_signature_map.move_point_by_id(id, beat) {
+            self.sync_legacy_time_signature_fields();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn update_time_signature_point(
+        &mut self,
+        id: &str,
+        numerator: u16,
+        denominator: u16,
+    ) -> bool {
+        if self
+            .time_signature_map
+            .update_point_by_id(id, numerator, denominator)
+        {
+            self.sync_legacy_time_signature_fields();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn delete_time_signature_point(&mut self, id: &str) -> bool {
+        if self.time_signature_map.remove_point_by_id(id) {
+            if self.selected_time_signature_point_id.as_deref() == Some(id) {
+                self.selected_time_signature_point_id = None;
+            }
+            self.time_signature_map.ensure_default_point();
+            self.sync_legacy_time_signature_fields();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear_time_signature_markers(&mut self, playhead_beat: f64) {
+        let pt = self
+            .time_signature_map
+            .time_signature_at_beat(playhead_beat);
+        self.time_signature_map.reset_to_single_point(
+            0.0,
+            pt.numerator,
+            pt.denominator,
+        );
+        self.sync_legacy_time_signature_fields();
+        self.selected_time_signature_point_id = None;
+    }
+
+    pub fn time_signature_point_at(&self, beat: f64, beat_tol: f64) -> Option<String> {
+        self.time_signature_map
+            .points
+            .iter()
+            .find(|p| (p.beat - beat).abs() <= beat_tol)
+            .map(|p| p.id.clone())
     }
 
     pub fn time_to_content_x(&self, time_sec: f32) -> f32 {
@@ -2154,14 +2816,17 @@ impl TimelineState {
 
     /// Y offset from the timeline top to the track-list content area.
     pub fn arrangement_content_top(&self) -> f32 {
-        RULER_HEIGHT + self.tempo_track_height()
+        RULER_HEIGHT + self.global_lanes_height()
     }
 
-    /// Visible global/system lanes (Tempo Track first when shown).
+    /// Visible global/system lanes (Tempo then Time Signature when shown).
     pub fn visible_global_lanes(&self) -> Vec<GlobalLaneKind> {
         let mut lanes = Vec::new();
         if self.show_tempo_track {
             lanes.push(GlobalLaneKind::Tempo);
+        }
+        if self.show_time_signature_track {
+            lanes.push(GlobalLaneKind::TimeSignature);
         }
         lanes
     }
@@ -2208,6 +2873,10 @@ impl TimelineState {
 
     pub fn select_tempo_point(&mut self, id: &str) {
         self.selected_tempo_point_id = Some(id.to_string());
+    }
+
+    pub fn clear_time_signature_point_selection(&mut self) {
+        self.selected_time_signature_point_id = None;
     }
 
     pub fn clear_tempo_point_selection(&mut self) {
@@ -2406,17 +3075,17 @@ impl TimelineState {
         let max_grid_lines = (MAX_GRID_LINES_BASE as f32 * power.grid_line_budget_scale()) as usize;
 
         let ppb = self.pixels_per_beat().max(0.0001);
-        let bpb = self.beats_per_bar();
         let viewport_width = viewport_width.max(1.0);
         let (start_beat, end_beat) = self.visible_beat_range(viewport_width);
         let start_beat = start_beat.max(0.0);
         let end_beat = end_beat.max(start_beat);
+        let max_bpb = self.beats_per_bar_at_beat(end_beat as f64).max(1.0) as f32;
 
         let mut lines: Vec<GridLine> = Vec::new();
         let mut occupied_x: Vec<i32> = Vec::new();
 
         let mut add_line = |beat: f32, level: GridLineLevel| {
-            if beat < start_beat - bpb || beat > end_beat + bpb {
+            if beat < start_beat - max_bpb || beat > end_beat + max_bpb {
                 return;
             }
             let rb = (beat * 100000.0).round() / 100000.0;
@@ -2440,32 +3109,51 @@ impl TimelineState {
             });
         };
 
-        // Strongest level first. Later, weaker levels skip duplicate pixel x
-        // positions, so a bar line can never be overpainted by a beat/sub line.
-        let first_bar = (start_beat / bpb).floor() - 1.0;
-        let last_bar = (end_beat / bpb).ceil() + 1.0;
-        let mut bar = first_bar;
-        while bar <= last_bar {
-            add_line(bar * bpb, GridLineLevel::Bar);
-            bar += 1.0;
-        }
-
-        if ppb >= 12.0 {
-            let first_beat = start_beat.floor() - 1.0;
-            let last_beat = end_beat.ceil() + 1.0;
-            let mut beat = first_beat;
-            while beat <= last_beat {
-                add_line(beat, GridLineLevel::Beat);
-                beat += 1.0;
+        // Bar + denominator-beat lines follow time-signature segments.
+        let ts_points = if self.time_signature_map.points.is_empty() {
+            vec![TimeSignaturePoint::with_id("implicit-4-4", 0.0, 4, 4)]
+        } else {
+            self.time_signature_map.points.clone()
+        };
+        for (i, pt) in ts_points.iter().enumerate() {
+            let seg_start = pt.beat as f32;
+            let seg_end = ts_points
+                .get(i + 1)
+                .map(|p| p.beat as f32)
+                .unwrap_or(f32::INFINITY);
+            let bpb = beats_per_bar_from_sig(pt.numerator, pt.denominator) as f32;
+            let denom_unit = denominator_unit_quarter_beats(pt.denominator) as f32;
+            if seg_end < start_beat {
+                continue;
+            }
+            let rel_start = start_beat.max(seg_start);
+            let first_bar = ((rel_start - seg_start) / bpb).floor() - 1.0;
+            let rel_end = end_beat.min(seg_end);
+            let last_bar = ((rel_end - seg_start) / bpb).ceil() + 1.0;
+            let mut bar = first_bar;
+            while bar <= last_bar {
+                let bar_start = seg_start + bar * bpb;
+                if bar_start >= seg_start - TS_BEAT_EPSILON as f32
+                    && bar_start < seg_end - TS_BEAT_EPSILON as f32
+                {
+                    add_line(bar_start, GridLineLevel::Bar);
+                    for beat_idx in 1..pt.numerator {
+                        let tick = bar_start + beat_idx as f32 * denom_unit;
+                        if tick < seg_end - TS_BEAT_EPSILON as f32 {
+                            add_line(tick, GridLineLevel::Beat);
+                        }
+                    }
+                }
+                bar += 1.0;
             }
         }
 
         let sub_step = if !power.allow_sub_grid_lines() {
             None
         } else if ppb >= 96.0 {
-            Some(1.0 / 16.0)
-        } else if ppb >= 32.0 {
-            Some(1.0 / 4.0)
+            Some(0.25_f32)
+        } else if ppb >= 48.0 {
+            Some(0.5_f32)
         } else {
             None
         };
@@ -2475,7 +3163,21 @@ impl TimelineState {
             let last_sub = (end_beat / step).ceil() + 1.0;
             let mut slot = first_sub;
             while slot <= last_sub {
-                add_line(slot * step, GridLineLevel::Sub);
+                let beat = slot * step;
+                let denom_unit = denominator_unit_quarter_beats(
+                    self.time_signature_map
+                        .time_signature_at_beat(beat as f64)
+                        .denominator,
+                ) as f32;
+                let on_denom_grid = if denom_unit > TS_BEAT_EPSILON as f32 {
+                    ((beat / denom_unit).fract()).abs() < 1e-4
+                        || ((beat / denom_unit).fract() - 1.0).abs() < 1e-4
+                } else {
+                    false
+                };
+                if !on_denom_grid {
+                    add_line(beat, GridLineLevel::Sub);
+                }
                 slot += 1.0;
             }
         }
@@ -2489,9 +3191,14 @@ impl TimelineState {
         let mut last_label_x = f32::NEG_INFINITY;
         let mut ruler_labels = 0u64;
         for line in &mut lines {
+            let denom_unit = denominator_unit_quarter_beats(
+                self.time_signature_map
+                    .time_signature_at_beat(line.beat as f64)
+                    .denominator,
+            ) as f32;
             let can_label_level = match line.level {
                 GridLineLevel::Bar => true,
-                GridLineLevel::Beat => ppb >= 48.0,
+                GridLineLevel::Beat => denom_unit * ppb >= 24.0,
                 GridLineLevel::Sub => false,
             };
             if can_label_level && line.x - last_label_x >= MIN_LABEL_SPACING_PX {
@@ -2516,10 +3223,12 @@ impl TimelineState {
     }
 
     pub fn format_bar_beat(&self, beats: f32) -> String {
-        let bpb = self.beats_per_bar();
-        let bar = (beats / bpb).floor() as i32 + 1;
-        let beat = (beats % bpb).floor() as i32 + 1;
-        format!("{}.{}", bar, beat)
+        self.format_bar_beat_at(beats as f64)
+    }
+
+    pub fn format_bar_beat_at(&self, beats: f64) -> String {
+        let bb = self.time_signature_map.bar_beat_at_beat(beats);
+        format!("{}.{}", bb.bar, bb.beat_in_bar)
     }
 
     // ── Identity helpers ─────────────────────────────────────────────────────
@@ -2625,7 +3334,9 @@ impl TimelineState {
 
     /// Snap a beat value to the current grid (or return it unchanged when snap is off).
     pub fn snap_beats(&self, beats: f32) -> f32 {
-        snap_beat(beats as f64, SnapSettings::from_timeline(self)) as f32
+        let mut snap = SnapSettings::from_timeline(self);
+        snap.beats_per_bar = self.beats_per_bar_at_beat(beats as f64);
+        snap_beat(beats as f64, snap) as f32
     }
 
     pub fn selected_range_track_ids(&self) -> Vec<String> {
@@ -5184,6 +5895,137 @@ mod tempo_track_tests {
         for bpm in samples {
             assert!((bpm - 120.0).abs() < 1e-6);
         }
+    }
+}
+
+#[cfg(test)]
+mod time_signature_map_tests {
+    use super::*;
+
+    #[test]
+    fn default_4_4_bar_boundaries() {
+        let map = TimeSignatureMap::with_default_4_4();
+        assert!((map.bar_start_beat(1) - 0.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(2) - 4.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(3) - 8.0).abs() < 1e-9);
+        let bb0 = map.bar_beat_at_beat(0.0);
+        assert_eq!(bb0.bar, 1);
+        assert_eq!(bb0.beat_in_bar, 1);
+        let bb4 = map.bar_beat_at_beat(4.0);
+        assert_eq!(bb4.bar, 2);
+        assert_eq!(bb4.beat_in_bar, 1);
+    }
+
+    #[test]
+    fn change_from_4_4_to_3_4() {
+        let mut map = TimeSignatureMap::with_default_4_4();
+        map.add_or_update_point(16.0, 3, 4);
+        assert_eq!(map.format_position_at_beat(0.0), "1.1");
+        assert_eq!(map.format_position_at_beat(4.0), "2.1");
+        assert_eq!(map.format_position_at_beat(8.0), "3.1");
+        assert_eq!(map.format_position_at_beat(12.0), "4.1");
+        assert_eq!(map.format_position_at_beat(16.0), "5.1");
+        assert_eq!(map.format_position_at_beat(19.0), "6.1");
+        assert_eq!(map.format_position_at_beat(22.0), "7.1");
+    }
+
+    #[test]
+    fn seven_eight_beats_per_bar() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 7, 8);
+        assert!((map.beats_per_bar_at_beat(0.0) - 3.5).abs() < 1e-9);
+        assert!((map.bar_start_beat(1) - 0.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(2) - 3.5).abs() < 1e-9);
+        assert!((map.bar_start_beat(3) - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn marker_bpm_values_are_independent() {
+        let mut map = TimeSignatureMap::with_default_4_4();
+        map.add_or_update_point(16.0, 3, 4);
+        map.ensure_point_ids();
+        assert_eq!(map.points[0].label(), "4/4");
+        assert_eq!(map.points[1].label(), "3/4");
+        let id_b = map.points[1].id.clone();
+        assert!(map.update_point_by_id(&id_b, 7, 8));
+        assert_eq!(map.points[0].label(), "4/4");
+        assert_eq!(map.points[1].label(), "7/8");
+    }
+
+    #[test]
+    fn five_eight_ruler_denominator_ticks() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        assert!((map.bar_start_beat(1) - 0.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(2) - 2.5).abs() < 1e-9);
+        assert_eq!(map.format_position_at_beat(0.0), "1.1");
+        assert_eq!(map.format_position_at_beat(0.5), "1.2");
+        assert_eq!(map.format_position_at_beat(1.0), "1.3");
+        assert_eq!(map.format_position_at_beat(1.5), "1.4");
+        assert_eq!(map.format_position_at_beat(2.0), "1.5");
+        assert_eq!(map.format_position_at_beat(2.5), "2.1");
+    }
+
+    #[test]
+    fn six_eight_ruler_denominator_ticks() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 6, 8);
+        assert!((map.bar_start_beat(2) - 3.0).abs() < 1e-9);
+        assert_eq!(map.format_position_at_beat(2.5), "1.6");
+        assert_eq!(map.format_position_at_beat(3.0), "2.1");
+    }
+
+    #[test]
+    fn default_grouping_for_compound_meters() {
+        let pt = TimeSignaturePoint::new(0.0, 5, 8);
+        assert_eq!(pt.effective_grouping(), vec![2, 3]);
+        let pt6 = TimeSignaturePoint::new(0.0, 6, 8);
+        assert_eq!(pt6.effective_grouping(), vec![3, 3]);
+        let pt7 = TimeSignaturePoint::new(0.0, 7, 8);
+        assert_eq!(pt7.effective_grouping(), vec![2, 2, 3]);
+    }
+
+    #[test]
+    fn marker_boundary_label_meter_change() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        map.add_or_update_point(2.5, 6, 8);
+        assert_eq!(map.format_position_at_beat(2.0), "1.5");
+        assert_eq!(map.format_position_at_beat(2.5), "2.1");
+        assert_eq!(map.format_position_at_beat(3.0), "2.2");
+    }
+
+    #[test]
+    fn visible_bar_background_rects_across_changing_meters() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        map.add_or_update_point(2.5, 6, 8);
+        map.add_or_update_point(5.5, 5, 8);
+        let rects = map.visible_bar_rects(0.0, 8.0);
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[0].bar, 1);
+        assert!((rects[0].start_beat - 0.0).abs() < 1e-9);
+        assert!((rects[0].end_beat - 2.5).abs() < 1e-9);
+        assert_eq!(rects[1].bar, 2);
+        assert!((rects[1].start_beat - 2.5).abs() < 1e-9);
+        assert!((rects[1].end_beat - 5.5).abs() < 1e-9);
+        assert_eq!(rects[2].bar, 3);
+        assert!((rects[2].start_beat - 5.5).abs() < 1e-9);
+        assert!((rects[2].end_beat - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn visible_bar_rects_follow_scroll_window() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        map.add_or_update_point(2.5, 6, 8);
+        map.add_or_update_point(5.5, 5, 8);
+        let rects = map.visible_bar_rects(3.0, 6.0);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].bar, 2);
+        assert!((rects[0].start_beat - 2.5).abs() < 1e-9);
+        assert_eq!(rects[1].bar, 3);
+        assert!((rects[1].start_beat - 5.5).abs() < 1e-9);
     }
 }
 

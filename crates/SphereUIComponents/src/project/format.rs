@@ -18,7 +18,7 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v7 adds project-level tempo automation markers (TempoMap); pre-v7 files have
 /// no tempo points and play at the static `bpm`.
 /// v8 adds stable ids on tempo points for independent marker editing.
-pub const PROJECT_VERSION: u32 = 8;
+pub const PROJECT_VERSION: u32 = 10;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -598,6 +598,19 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         w.write_u8(p.curve);
     }
 
+    // Time signature markers (v9+).
+    w.write_u32(project.settings.time_signature_points.len() as u32);
+    for p in &project.settings.time_signature_points {
+        w.write_str(&p.id);
+        w.write_f64(p.beat);
+        w.write_u32(p.numerator as u32);
+        w.write_u32(p.denominator as u32);
+        w.write_u32(p.grouping.len() as u32);
+        for g in &p.grouping {
+            w.write_u32(*g as u32);
+        }
+    }
+
     w.into_bytes()
 }
 
@@ -1082,6 +1095,35 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         Vec::new()
     };
 
+    let time_signature_points = if version >= 9 {
+        let count = r.read_u32()? as usize;
+        let mut points = Vec::with_capacity(count);
+        for _ in 0..count {
+            let numerator = r.read_u32()? as u16;
+            let denominator = r.read_u32()? as u16;
+            let grouping = if version >= 10 {
+                let count = r.read_u32()? as usize;
+                let mut groups = Vec::with_capacity(count);
+                for _ in 0..count {
+                    groups.push(r.read_u32()? as u16);
+                }
+                groups
+            } else {
+                Vec::new()
+            };
+            points.push(super::ProjectTimeSignaturePoint {
+                id: r.read_str()?,
+                beat: r.read_f64()?,
+                numerator,
+                denominator,
+                grouping,
+            });
+        }
+        points
+    } else {
+        Vec::new()
+    };
+
     Ok(FutureboardProject {
         id,
         name,
@@ -1090,6 +1132,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         settings: super::ProjectSettings {
             bpm,
             tempo_points,
+            time_signature_points,
             time_sig_num,
             time_sig_den,
             sample_rate,

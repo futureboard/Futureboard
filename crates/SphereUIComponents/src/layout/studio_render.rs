@@ -373,6 +373,9 @@ impl Render for StudioLayout {
                                 bpm,
                                 point_id,
                             },
+                            TimelineContextTarget::TimeSignatureTrack { beat, point_id } => {
+                                ContextTarget::TimeSignatureTrack { beat, point_id }
+                            }
                         };
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
@@ -888,6 +891,7 @@ impl Render for StudioLayout {
             .capture_key_down(move |event, window, cx| {
                 let handled = shortcut_target.update(cx, |this, cx| {
                     let handled = this.handle_bpm_edit_key(event, window, cx)
+                        || this.handle_ts_edit_key(event, window, cx)
                         || this.handle_settings_dialog_key(event, window, cx)
                         || this.handle_add_track_dialog_key(event, window, cx)
                         || this.handle_plugin_picker_key(event, window, cx)

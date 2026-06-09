@@ -156,6 +156,7 @@ impl StudioLayout {
             bpm_label,
             bpm_has_automation,
             time_signature_label,
+            ts_has_markers,
             recording,
             loop_enabled,
             metronome_enabled,
@@ -178,10 +179,11 @@ impl StudioLayout {
                 bpm,
                 bpm_label,
                 bpm_has_automation,
-                format!(
-                    "{}/{}",
-                    timeline.state.time_signature_num, timeline.state.time_signature_den
-                ),
+                {
+                    let pt = timeline.state.time_signature_at_playhead();
+                    format!("{}/{}", pt.numerator, pt.denominator)
+                },
+                timeline.state.time_signature_has_markers(),
                 timeline.state.transport.recording
                     || self
                         .audio_engine
@@ -261,6 +263,27 @@ impl StudioLayout {
             })
         };
 
+        let on_ts_menu: components::BpmMenuCb = {
+            let this = cx.entity().clone();
+            Arc::new(
+                move |pos: &(f32, f32), _window: &mut Window, cx: &mut gpui::App| {
+                    let (x, y) = *pos;
+                    let _ = this.update(cx, |this, cx| {
+                        this.open_time_signature_menu(x, y, cx);
+                    });
+                },
+            )
+        };
+
+        let on_ts_edit_start: components::ChromeActionCb = {
+            let this = cx.entity().clone();
+            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| {
+                    this.begin_ts_edit(None, cx);
+                });
+            })
+        };
+
         components::TransportChromeState {
             playing,
             recording,
@@ -277,6 +300,13 @@ impl StudioLayout {
             // caret whenever the editor is open.
             bpm_edit_focused: self.bpm_editing,
             time_signature_label,
+            ts_has_markers,
+            ts_editing: self.ts_editing,
+            ts_num_input: self.ts_num_input.clone(),
+            ts_den_input: self.ts_den_input.clone(),
+            ts_edit_focus_num: self.ts_edit_focus_num,
+            on_ts_menu,
+            on_ts_edit_start,
             on_return_to_start,
             on_play_toggle,
             on_stop,

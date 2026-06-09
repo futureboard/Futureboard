@@ -11,41 +11,38 @@ pub fn timeline_grid(
     let lines = state.get_arrangement_grid_lines(grid_width);
     crate::perf::count("grid_lines", lines.len() as u64);
 
-    // Alternating bar shading
     let ppb = state.viewport.pixels_per_second * state.seconds_per_beat();
-    let bpb = state.beats_per_bar();
-    let bar_w = bpb * ppb;
+    let (visible_start, visible_end) = state.visible_beat_range(grid_width);
+    let bar_rects = state
+        .time_signature_map
+        .visible_bar_rects(visible_start as f64, visible_end as f64);
 
     let mut shading_elements = Vec::new();
-    if bar_w >= 2.0 {
-        let start_beat = state.viewport.scroll_x / ppb;
-        let first_bar = (start_beat / bpb).floor() as i32;
-        let last_bar = ((state.viewport.scroll_x + grid_width) / bar_w).ceil() as i32;
-
-        for bar in first_bar..=last_bar {
-            if bar % 2 == 0 {
-                let bx = (bar as f32 * bar_w - state.viewport.scroll_x).round();
-                shading_elements.push(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(px(bx))
-                        .w(px(bar_w.round()))
-                        .bg(Colors::with_alpha(Colors::text_primary(), 0.022)), // matching "rgba(255,255,255,0.022)"
-                );
-            }
+    for rect in bar_rects {
+        if rect.bar % 2 != 0 {
+            continue;
         }
+        let x0 = (rect.start_beat as f32 * ppb - state.viewport.scroll_x).round();
+        let x1 = (rect.end_beat as f32 * ppb - state.viewport.scroll_x).round();
+        let width = x1 - x0;
+        if width < 2.0 {
+            continue;
+        }
+        shading_elements.push(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(x0))
+                .w(px(width))
+                .bg(Colors::with_alpha(Colors::text_primary(), 0.022)),
+        );
     }
 
     div()
         .absolute()
         .inset_0()
-        // Layer 1: alternating bar fills. This layer is always behind every
-        // grid line, including the first visible bar at x=0.
         .child(div().absolute().inset_0().children(shading_elements))
-        // Layer 2: grid lines. Keep these as a separate later child so no bar
-        // fill can accidentally cover the first-column/bar line.
         .child(
             div()
                 .absolute()

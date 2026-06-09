@@ -83,6 +83,7 @@ pub struct LocalAudioState {
     pub metronome_enabled: bool,
     pub metronome_ts_num: u32,
     pub metronome_ts_den: u32,
+    pub time_signature_map: crate::time_signature_map::RuntimeTimeSignatureMapSnapshot,
     /// Next click position in quarter-note beats.
     pub metronome_next_beat: f64,
     pub tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot,
@@ -113,6 +114,9 @@ impl LocalAudioState {
             metronome_enabled: false,
             metronome_ts_num: 4,
             metronome_ts_den: 4,
+            time_signature_map: crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::static_sig(
+                4, 4,
+            ),
             metronome_next_beat: 0.0,
             tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(120.0),
             metronome_click_remaining: 0,
@@ -153,29 +157,34 @@ impl LocalAudioState {
     ) {
         self.metronome_ts_num = numerator.clamp(1, 64);
         self.metronome_ts_den = denominator.clamp(1, 64);
+        self.time_signature_map =
+            crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::static_sig(
+                self.metronome_ts_num as u16,
+                self.metronome_ts_den as u16,
+            );
+        self.reset_metronome_schedule(position_sample, sample_rate);
+    }
+
+    pub fn set_time_signature_map(
+        &mut self,
+        map: crate::time_signature_map::RuntimeTimeSignatureMapSnapshot,
+        position_sample: u64,
+        sample_rate: u32,
+    ) {
+        self.time_signature_map = map;
+        if let Some(pt) = self.time_signature_map.points().first() {
+            self.metronome_ts_num = pt.numerator as u32;
+            self.metronome_ts_den = pt.denominator as u32;
+        }
         self.reset_metronome_schedule(position_sample, sample_rate);
     }
 
     pub fn reset_metronome_schedule(&mut self, position_sample: u64, sample_rate: u32) {
         let sr = sample_rate.max(1) as f64;
         let current_beat = self.tempo_map.beat_at_samples(position_sample, sr);
-        let step = self.metronome_beat_step();
-        if step <= 0.0 {
-            self.metronome_next_beat = current_beat;
-            return;
-        }
-        let index = (current_beat / step).floor();
-        let on_grid = (current_beat - index * step).abs() < 1e-6;
-        self.metronome_next_beat = if on_grid {
-            index * step
-        } else {
-            (index + 1.0) * step
-        };
-    }
-
-    #[inline]
-    fn metronome_beat_step(&self) -> f64 {
-        4.0 / self.metronome_ts_den.max(1) as f64
+        self.metronome_next_beat = self
+            .time_signature_map
+            .next_metronome_click_at_or_after(current_beat);
     }
 
     #[inline]
@@ -185,16 +194,22 @@ impl LocalAudioState {
         }
 
         let sr = sample_rate.max(1) as f64;
-        let step = self.metronome_beat_step();
         while project_sample >= self.tempo_map.samples_at_beat(self.metronome_next_beat, sr) {
-            let click_index = (self.metronome_next_beat / step).round() as u64;
-            let accent = click_index.is_multiple_of(self.metronome_ts_num.max(1) as u64);
-            let freq = if accent { 1760.0 } else { 980.0 };
+            let accent = self
+                .time_signature_map
+                .metronome_accent_at_beat(self.metronome_next_beat);
+            let (freq, gain) = match accent {
+                crate::time_signature_map::MetronomeAccent::Downbeat => (1760.0, 0.34),
+                crate::time_signature_map::MetronomeAccent::Group => (1320.0, 0.28),
+                crate::time_signature_map::MetronomeAccent::Normal => (980.0, 0.22),
+            };
             self.metronome_click_phase = 0.0;
             self.metronome_click_phase_inc = freq / sr;
-            self.metronome_click_gain = if accent { 0.34 } else { 0.22 };
+            self.metronome_click_gain = gain;
             self.metronome_click_remaining = self.metronome_click_len;
-            self.metronome_next_beat += step;
+            self.metronome_next_beat = self
+                .time_signature_map
+                .next_metronome_click_after(self.metronome_next_beat);
         }
 
         if self.metronome_click_remaining == 0 {
@@ -335,6 +350,18 @@ pub fn drain_commands(
                 shared.time_sig_num.store(num.max(1), Ordering::Relaxed);
                 shared.time_sig_den.store(den.max(1), Ordering::Relaxed);
                 local.set_time_signature(num, den, pos, output_sample_rate);
+            }
+            EngineCommand::SetTimeSignatureMap(map) => {
+                let pos = shared.position_samples.load(Ordering::Relaxed);
+                if let Some(pt) = map.points().first() {
+                    shared
+                        .time_sig_num
+                        .store(pt.numerator.max(1) as u32, Ordering::Relaxed);
+                    shared
+                        .time_sig_den
+                        .store(pt.denominator.max(1) as u32, Ordering::Relaxed);
+                }
+                local.set_time_signature_map(map, pos, output_sample_rate);
             }
             EngineCommand::SetLoop {
                 enabled,

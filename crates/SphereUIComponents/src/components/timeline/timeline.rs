@@ -3,9 +3,11 @@ use crate::components::edit::{normalize_range, ClipSnapshot, EditCommand, EditHi
 use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::tempo_track::tempo_track_lane;
+use crate::components::timeline::time_signature_track::time_signature_track_lane;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipResizeDrag, SnapDivision, TempoPointDrag, TimelineRangeSelection,
+    ClipDragItem, ClipResizeDrag, SnapDivision, TempoPointDrag, TimeSignaturePointDrag,
+    TimelineRangeSelection,
     TimelineState, TimelineTool, TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT,
     TEMPO_LANE_PAD, TRACK_HEIGHT,
 };
@@ -80,6 +82,7 @@ pub struct Timeline {
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
     on_project_changed: Option<TimelineProjectChangedCb>,
     on_tempo_map_changed: Option<TimelineProjectChangedCb>,
+    on_time_signature_map_changed: Option<TimelineProjectChangedCb>,
     on_media_changed: Option<TimelineProjectChangedCb>,
     on_add_track: Option<TimelineAddTrackCb>,
     /// Window-space position of the last drag-move event while files are
@@ -107,6 +110,8 @@ pub struct Timeline {
     automation_marquee: Option<crate::components::timeline::timeline_state::AutomationMarquee>,
     /// In-flight tempo-point drag on the global Tempo Track lane.
     tempo_drag: Option<TempoPointDrag>,
+    /// In-flight time-signature marker drag on the global Time Signature lane.
+    ts_drag: Option<TimeSignaturePointDrag>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     on_context_menu: Option<TimelineContextMenuCb>,
     /// Invoked when the user double-clicks a MIDI clip — `StudioLayout` uses it
@@ -129,6 +134,11 @@ pub enum TimelineContextTarget {
     TempoTrack {
         beat: f64,
         bpm: f64,
+        point_id: Option<String>,
+    },
+    /// Right-click on the global Time Signature Track lane.
+    TimeSignatureTrack {
+        beat: f64,
         point_id: Option<String>,
     },
 }
@@ -210,6 +220,7 @@ impl Timeline {
         self.automation_drag = None;
         self.automation_marquee = None;
         self.tempo_drag = None;
+        self.ts_drag = None;
         self.pan_last_position = None;
         self.state.clear_track_drag();
         self.log_input_state("reset-after");
@@ -232,6 +243,7 @@ impl Timeline {
             on_track_param_change: None,
             on_project_changed: None,
             on_tempo_map_changed: None,
+            on_time_signature_map_changed: None,
             on_media_changed: None,
             on_add_track: None,
             last_drag_position: None,
@@ -244,6 +256,7 @@ impl Timeline {
             automation_drag: None,
             automation_marquee: None,
             tempo_drag: None,
+            ts_drag: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -262,6 +275,7 @@ impl Timeline {
             on_track_param_change: None,
             on_project_changed: None,
             on_tempo_map_changed: None,
+            on_time_signature_map_changed: None,
             on_media_changed: None,
             on_add_track: None,
             last_drag_position: None,
@@ -274,6 +288,7 @@ impl Timeline {
             automation_drag: None,
             automation_marquee: None,
             tempo_drag: None,
+            ts_drag: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -362,12 +377,27 @@ impl Timeline {
         self.on_tempo_map_changed = callback;
     }
 
+    pub fn set_time_signature_map_changed_callback(
+        &mut self,
+        callback: Option<TimelineProjectChangedCb>,
+    ) {
+        self.on_time_signature_map_changed = callback;
+    }
+
     pub fn set_media_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
         self.on_media_changed = callback;
     }
 
     pub(crate) fn mark_tempo_map_changed(&self, cx: &mut gpui::App) {
         if let Some(callback) = self.on_tempo_map_changed.as_ref() {
+            callback(cx);
+        } else {
+            self.mark_project_changed(cx);
+        }
+    }
+
+    pub(crate) fn mark_time_signature_map_changed(&self, cx: &mut gpui::App) {
+        if let Some(callback) = self.on_time_signature_map_changed.as_ref() {
             callback(cx);
         } else {
             self.mark_project_changed(cx);
@@ -615,6 +645,82 @@ impl Timeline {
         if let Some(drag) = self.tempo_drag.take() {
             if drag.moved {
                 self.mark_tempo_map_changed(cx);
+            }
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn begin_time_signature_track_interaction(
+        &mut self,
+        beat: f64,
+        point_id: Option<String>,
+        click_count: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if click_count >= 2 {
+            if let Some(id) = point_id {
+                self.state.select_time_signature_point(&id);
+            } else {
+                let pt = self.state.time_signature_map.time_signature_at_beat(beat);
+                if let Some(id) = self.state.add_time_signature_point(
+                    beat,
+                    pt.numerator,
+                    pt.denominator,
+                ) {
+                    self.state.select_time_signature_point(&id);
+                    self.ts_drag = Some(TimeSignaturePointDrag {
+                        point_id: id,
+                        moved: true,
+                    });
+                    self.mark_time_signature_map_changed(cx);
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        if let Some(id) = point_id {
+            self.state.select_time_signature_point(&id);
+            self.ts_drag = Some(TimeSignaturePointDrag {
+                point_id: id,
+                moved: false,
+            });
+            cx.notify();
+            return;
+        }
+
+        self.state.clear_time_signature_point_selection();
+        cx.notify();
+    }
+
+    fn update_time_signature_track_interaction(
+        &mut self,
+        window_x: f32,
+        _window_y: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(drag) = self.ts_drag.clone() else {
+            return false;
+        };
+        let beat = self.snap_beat(self.beat_from_window_x(window_x)).max(0.0) as f64;
+        if self.state.move_time_signature_point(&drag.point_id, beat) {
+            if let Some(d) = self.ts_drag.as_mut() {
+                d.moved = true;
+            }
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn finish_time_signature_track_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(drag) = self.ts_drag.take() {
+            if drag.moved {
+                self.mark_time_signature_map_changed(cx);
             }
             cx.notify();
             true
@@ -1151,6 +1257,7 @@ impl Render for Timeline {
                     || this.automation_drag.is_some()
                     || this.automation_marquee.is_some()
                     || this.tempo_drag.is_some()
+                    || this.ts_drag.is_some()
                     || this.pan_last_position.is_some())
             {
                 this.reset_input_state();
@@ -1160,10 +1267,17 @@ impl Render for Timeline {
             if event.pressed_button == Some(gpui::MouseButton::Left)
                 && (this.automation_drag.is_some()
                     || this.automation_marquee.is_some()
-                    || this.tempo_drag.is_some())
+                    || this.tempo_drag.is_some()
+                    || this.ts_drag.is_some())
             {
                 if this.tempo_drag.is_some() {
                     this.update_tempo_track_interaction(
+                        event.position.x.into(),
+                        event.position.y.into(),
+                        cx,
+                    );
+                } else if this.ts_drag.is_some() {
+                    this.update_time_signature_track_interaction(
                         event.position.x.into(),
                         event.position.y.into(),
                         cx,
@@ -1257,8 +1371,9 @@ impl Render for Timeline {
         let on_pen_mouse_up = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
             this.log_input_state("mouse-up-left");
             let finished_tempo = this.finish_tempo_track_interaction(cx);
+            let finished_ts = this.finish_time_signature_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
-            if !finished_tempo && !finished_automation {
+            if !finished_tempo && !finished_ts && !finished_automation {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
                 if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
@@ -1277,8 +1392,9 @@ impl Render for Timeline {
         let on_pen_mouse_up_out = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
             this.log_input_state("mouse-up-left-out");
             let finished_tempo = this.finish_tempo_track_interaction(cx);
+            let finished_ts = this.finish_time_signature_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
-            if !finished_tempo && !finished_automation {
+            if !finished_tempo && !finished_ts && !finished_automation {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
                 if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
@@ -1559,6 +1675,45 @@ impl Render for Timeline {
             dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_tempo_toggle_collapsed);
 
+        let on_ts_down = cx.listener(
+            |this, payload: &(f64, Option<String>, bool, u32), _window, cx| {
+                let (beat, point_id, _additive, click_count) =
+                    (payload.0, payload.1.clone(), payload.2, payload.3);
+                this.begin_time_signature_track_interaction(beat, point_id, click_count, cx);
+            },
+        );
+        let on_ts_down: crate::components::timeline::time_signature_track::TimeSignatureTrackDownCallback =
+            std::sync::Arc::new(on_ts_down);
+
+        let on_ts_context = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |(beat, point_id, x, y): &(f64, Option<String>, f32, f32),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    cb(
+                        &(
+                            TimelineContextTarget::TimeSignatureTrack {
+                                beat: *beat,
+                                point_id: point_id.clone(),
+                            },
+                            *x,
+                            *y,
+                        ),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::time_signature_track::TimeSignatureTrackContextCallback
+        });
+
+        let on_ts_hide = cx.listener(|this, _: &(), _window, cx| {
+            this.state.hide_time_signature_track_lane();
+            cx.notify();
+        });
+        let on_ts_hide: std::sync::Arc<
+            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_ts_hide);
+
         let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
             on_select_track: on_select_track.clone(),
             on_toggle_mute: on_toggle_mute.clone(),
@@ -1573,6 +1728,7 @@ impl Render for Timeline {
 
         let state = &self.state;
         let tempo_h = state.tempo_track_height();
+        let ts_h = state.time_signature_track_height();
         let content_top = state.arrangement_content_top();
         // Live pen-draw ghost clip (built before the chain to keep the borrow of
         // `self.pen_clip_draw` separate from the render closures).
@@ -1882,6 +2038,15 @@ impl Render for Timeline {
                     on_tempo_context.clone(),
                     Some(on_tempo_hide.clone()),
                     Some(on_tempo_toggle_collapsed.clone()),
+                ))
+            })
+            .when(state.show_time_signature_track, |this| {
+                this.child(time_signature_track_lane(
+                    state,
+                    ts_h,
+                    Some(on_ts_down.clone()),
+                    on_ts_context.clone(),
+                    Some(on_ts_hide.clone()),
                 ))
             })
             // 2. Track List Scroll Area

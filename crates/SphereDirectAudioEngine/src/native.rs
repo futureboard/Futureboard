@@ -289,6 +289,13 @@ impl AudioEngine {
         self.inner.set_time_signature(numerator, denominator)
     }
 
+    pub fn set_time_signature_map(
+        &self,
+        points: Vec<crate::time_signature_map::RuntimeTimeSignaturePointSnapshot>,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_time_signature_map(points)
+    }
+
     pub fn set_loop(
         &self,
         enabled: bool,

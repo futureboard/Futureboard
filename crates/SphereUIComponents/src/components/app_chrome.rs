@@ -101,6 +101,13 @@ pub struct TransportChromeState {
     pub bpm_input: TextInputState,
     pub bpm_edit_focused: bool,
     pub time_signature_label: String,
+    pub ts_has_markers: bool,
+    pub ts_editing: bool,
+    pub ts_num_input: TextInputState,
+    pub ts_den_input: TextInputState,
+    pub ts_edit_focus_num: bool,
+    pub on_ts_menu: BpmMenuCb,
+    pub on_ts_edit_start: ChromeActionCb,
     pub on_return_to_start: ChromeActionCb,
     pub on_play_toggle: ChromeActionCb,
     pub on_stop: ChromeActionCb,
@@ -320,6 +327,13 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let bpm_editing = state.bpm_editing;
     let bpm_input = state.bpm_input.clone();
     let bpm_edit_focused = state.bpm_edit_focused;
+    let ts_has_markers = state.ts_has_markers;
+    let on_ts_menu = state.on_ts_menu.clone();
+    let on_ts_edit_start = state.on_ts_edit_start.clone();
+    let ts_editing = state.ts_editing;
+    let ts_num_input = state.ts_num_input.clone();
+    let ts_den_input = state.ts_den_input.clone();
+    let ts_edit_focus_num = state.ts_edit_focus_num;
 
     div()
         .flex()
@@ -491,52 +505,112 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                 .items_center()
                 .gap(px(2.0))
                 .px(px(4.0))
-                .child(
-                    div()
-                        .w(px(18.0))
-                        .h(px(19.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .bg(Colors::surface_input())
-                        .text_color(Colors::text_primary())
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(
-                            state
-                                .time_signature_label
-                                .split_once('/')
-                                .map(|(num, _)| num.to_string())
-                                .unwrap_or_else(|| "4".to_string()),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_color(Colors::text_muted())
-                        .text_size(px(10.0))
-                        .child("/"),
-                )
-                .child(
-                    div()
-                        .w(px(18.0))
-                        .h(px(19.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .bg(Colors::surface_input())
-                        .text_color(Colors::text_primary())
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(
-                            state
-                                .time_signature_label
-                                .split_once('/')
-                                .map(|(_, den)| den.to_string())
-                                .unwrap_or_else(|| "4".to_string()),
-                        ),
-                ),
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    on_ts_menu(&(x, y), window, cx);
+                })
+                .children(if ts_has_markers {
+                    Some(
+                        div()
+                            .px(px(3.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(Colors::with_alpha(Colors::accent_primary(), 0.16))
+                            .text_size(px(8.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::accent_primary())
+                            .child("AUTO")
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                })
+                .children(if ts_editing {
+                    vec![
+                        div()
+                            .w(px(22.0))
+                            .child(crate::components::text_input::text_field(
+                                &ts_num_input,
+                                ts_edit_focus_num,
+                            ))
+                            .into_any_element(),
+                        div()
+                            .text_color(Colors::text_muted())
+                            .text_size(px(10.0))
+                            .child("/")
+                            .into_any_element(),
+                        div()
+                            .w(px(22.0))
+                            .child(crate::components::text_input::text_field(
+                                &ts_den_input,
+                                !ts_edit_focus_num,
+                            ))
+                            .into_any_element(),
+                    ]
+                } else {
+                    let on_ts_edit = on_ts_edit_start.clone();
+                    vec![
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(2.0))
+                            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                                if event.click_count >= 2 {
+                                    on_ts_edit(&(), window, cx);
+                                }
+                            })
+                            .child(
+                                div()
+                                    .w(px(18.0))
+                                    .h(px(19.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .bg(Colors::surface_input())
+                                    .text_color(Colors::text_primary())
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(
+                                        state
+                                            .time_signature_label
+                                            .split_once('/')
+                                            .map(|(num, _)| num.to_string())
+                                            .unwrap_or_else(|| "4".to_string()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_color(Colors::text_muted())
+                                    .text_size(px(10.0))
+                                    .child("/"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(18.0))
+                                    .h(px(19.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .bg(Colors::surface_input())
+                                    .text_color(Colors::text_primary())
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(
+                                        state
+                                            .time_signature_label
+                                            .split_once('/')
+                                            .map(|(_, den)| den.to_string())
+                                            .unwrap_or_else(|| "4".to_string()),
+                                    ),
+                            )
+                            .into_any_element(),
+                    ]
+                }),
         )
 }
 

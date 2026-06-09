@@ -790,8 +790,7 @@ impl StudioLayout {
             loop_enabled,
             loop_start_beats,
             loop_end_beats,
-            ts_num,
-            ts_den,
+            ts_points,
         ) = {
             transport_freeze_debug::log("before timeline.read");
             let timeline = self.timeline.read(cx);
@@ -806,6 +805,18 @@ impl StudioLayout {
                     bpm: p.bpm,
                 })
                 .collect::<Vec<_>>();
+            let ts_points = timeline
+                .state
+                .time_signature_map
+                .points
+                .iter()
+                .map(|p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                    beat: p.beat,
+                    numerator: p.numerator,
+                    denominator: p.denominator,
+                    grouping: p.effective_grouping(),
+                })
+                .collect::<Vec<_>>();
             (
                 timeline.state.transport.playhead_beats,
                 timeline.state.bpm,
@@ -814,8 +825,7 @@ impl StudioLayout {
                 timeline.state.transport.loop_enabled,
                 timeline.state.transport.loop_start_beats,
                 timeline.state.transport.loop_end_beats,
-                timeline.state.time_signature_num,
-                timeline.state.time_signature_den,
+                ts_points,
             )
         };
 
@@ -830,9 +840,9 @@ impl StudioLayout {
                 eprintln!("[audio] set tempo map failed: {error}");
             }
         }
-        if let Err(error) = engine.set_time_signature(ts_num, ts_den) {
+        if let Err(error) = engine.set_time_signature_map(ts_points) {
             if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
-                eprintln!("[audio] set time signature failed: {error}");
+                eprintln!("[audio] set time signature map failed: {error}");
             }
         }
         if let Err(error) = engine.set_metronome_enabled(metronome_enabled) {
@@ -938,13 +948,11 @@ impl StudioLayout {
         let Some(engine) = self.audio_engine.as_ref() else {
             return;
         };
-        let (enabled, bpm, num, den) = {
+        let (enabled, bpm) = {
             let timeline = self.timeline.read(cx);
             (
                 timeline.state.transport.metronome_enabled,
                 timeline.state.bpm as f64,
-                timeline.state.time_signature_num,
-                timeline.state.time_signature_den,
             )
         };
         if let Err(error) = engine.set_bpm(bpm) {
@@ -952,16 +960,12 @@ impl StudioLayout {
                 eprintln!("[audio] set BPM failed: {error}");
             }
         }
-        if let Err(error) = engine.set_time_signature(num, den) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
-                eprintln!("[audio] set time signature failed: {error}");
-            }
-        }
         if let Err(error) = engine.set_metronome_enabled(enabled) {
             if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set metronome failed: {error}");
             }
         }
+        self.sync_time_signature_map_to_engine(cx);
     }
 
     pub(super) fn sync_loop_controls(&mut self, cx: &mut Context<Self>) {
@@ -1521,6 +1525,258 @@ impl StudioLayout {
                 }
             }
         }
+    }
+
+    pub(super) fn sync_time_signature_map_to_engine(&mut self, cx: &mut Context<Self>) {
+        let points = {
+            let state = &self.timeline.read(cx).state;
+            state
+                .time_signature_map
+                .points
+                .iter()
+                .map(|p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                    beat: p.beat,
+                    numerator: p.numerator,
+                    denominator: p.denominator,
+                    grouping: p.effective_grouping(),
+                })
+                .collect::<Vec<_>>()
+        };
+        if let Some(engine) = self.audio_engine.as_ref() {
+            if let Err(error) = engine.set_time_signature_map(points) {
+                if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                    eprintln!("[audio] sync time signature map failed: {error}");
+                }
+            }
+        }
+    }
+
+    pub(super) fn open_time_signature_menu(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        self.open_popover = Some(OpenPopover::Context {
+            target: ContextTarget::TimeSignature,
+            x,
+            y,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn show_time_signature_track(&mut self, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.state.show_time_signature_track_lane();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    pub(super) fn hide_time_signature_track(&mut self, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.state.hide_time_signature_track_lane();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    pub(super) fn add_time_signature_marker_at_playhead(&mut self, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let beat = timeline.state.transport.playhead_beats as f64;
+            let pt = timeline.state.time_signature_map.time_signature_at_beat(beat);
+            timeline
+                .state
+                .add_time_signature_point(beat, pt.numerator, pt.denominator);
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_time_signature_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn add_time_signature_point_at_beat(&mut self, beat: f64, cx: &mut Context<Self>) {
+        let beat = beat.max(0.0);
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let pt = timeline.state.time_signature_map.time_signature_at_beat(beat);
+            timeline
+                .state
+                .add_time_signature_point(beat, pt.numerator, pt.denominator);
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_time_signature_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn clear_time_signature_markers(&mut self, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let beat = timeline.state.transport.playhead_beats as f64;
+            timeline.state.clear_time_signature_markers(beat);
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_time_signature_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn delete_time_signature_point(&mut self, id: &str, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if timeline.state.delete_time_signature_point(id) {
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_time_signature_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn move_time_signature_point_to_playhead(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let beat = timeline.state.transport.playhead_beats as f64;
+            if timeline.state.move_time_signature_point(id, beat) {
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_time_signature_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn ts_track_context_position(&self) -> Option<f64> {
+        match &self.open_popover {
+            Some(OpenPopover::Context {
+                target:
+                    ContextTarget::TimeSignatureTrack { beat, .. }
+                    | ContextTarget::TimeSignaturePoint { beat, .. },
+                ..
+            }) => Some(*beat),
+            Some(OpenPopover::Context {
+                target: ContextTarget::TimelineRuler { beat },
+                ..
+            }) => Some(*beat),
+            _ => None,
+        }
+    }
+
+    pub(super) fn ts_track_context_point_id(&self) -> Option<String> {
+        match &self.open_popover {
+            Some(OpenPopover::Context {
+                target: ContextTarget::TimeSignatureTrack { point_id, .. },
+                ..
+            }) => point_id.clone(),
+            Some(OpenPopover::Context {
+                target: ContextTarget::TimeSignaturePoint { point_id, .. },
+                ..
+            }) => Some(point_id.clone()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn begin_ts_edit(&mut self, point_id: Option<String>, cx: &mut Context<Self>) {
+        let (num, den) = {
+            let state = &self.timeline.read(cx).state;
+            if let Some(id) = point_id.as_deref().or(
+                state.selected_time_signature_point_id.as_deref(),
+            ) {
+                if let Some(pt) = state.time_signature_map.points.iter().find(|p| p.id == id) {
+                    (pt.numerator, pt.denominator)
+                } else {
+                    let pt = state.time_signature_at_playhead();
+                    (pt.numerator, pt.denominator)
+                }
+            } else {
+                let pt = state.time_signature_at_playhead();
+                (pt.numerator, pt.denominator)
+            }
+        };
+        self.ts_edit_point_id = point_id.or_else(|| {
+            self.timeline
+                .read(cx)
+                .state
+                .selected_time_signature_point_id
+                .clone()
+        });
+        self.ts_num_input.set_value(num.to_string());
+        self.ts_den_input.set_value(den.to_string());
+        self.ts_num_input.select_all();
+        self.ts_editing = true;
+        self.ts_edit_focus_num = true;
+        cx.notify();
+    }
+
+    pub(super) fn commit_ts_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.ts_editing {
+            return;
+        }
+        let num = self.ts_num_input.value.trim().parse::<u16>().ok();
+        let den = self.ts_den_input.value.trim().parse::<u16>().ok();
+        self.ts_editing = false;
+        self.ts_edit_focus_num = true;
+        let Some(num) = num.filter(|n| (1..=64).contains(n)) else {
+            cx.notify();
+            return;
+        };
+        let den = den
+            .map(crate::components::timeline::timeline_state::normalize_time_signature_denominator)
+            .filter(|d| crate::components::timeline::timeline_state::TS_ALLOWED_DENOMINATORS.contains(d));
+        let Some(den) = den else {
+            cx.notify();
+            return;
+        };
+
+        let point_id = self.ts_edit_point_id.clone();
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let changed = if let Some(id) = point_id {
+                timeline
+                    .state
+                    .update_time_signature_point(&id, num, den)
+            } else {
+                let beat = timeline.state.transport.playhead_beats as f64;
+                timeline
+                    .state
+                    .add_time_signature_point(beat, num, den);
+                true
+            };
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        self.ts_edit_point_id = None;
+        if changed {
+            self.mark_dirty();
+            self.sync_time_signature_map_to_engine(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn cancel_ts_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.ts_editing {
+            return;
+        }
+        self.ts_editing = false;
+        self.ts_edit_point_id = None;
+        self.ts_edit_focus_num = true;
+        cx.notify();
     }
 
     pub(super) fn stop_native_playback(&mut self, cx: &mut Context<Self>) {

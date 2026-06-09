@@ -92,6 +92,7 @@ pub struct GridLineSnapshot {
 pub struct BarShadeSnapshot {
     pub x: f32,
     pub width: f32,
+    pub bar: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -112,6 +113,7 @@ pub struct TimelineRenderSnapshot {
     pub viewport: TimelineViewport,
     pub bpm: f32,
     pub beats_per_bar: f32,
+    pub time_signature_revision: u64,
     pub visible_tracks: VisibleTrackRange,
     pub visible_beats: VisibleBeatRange,
     pub lanes: Vec<RenderLaneSnapshot>,
@@ -172,7 +174,7 @@ impl TimelineRenderSnapshot {
                 level: line.level,
             })
             .collect();
-        let bar_shades = build_bar_shades(&viewport, state.beats_per_bar());
+        let bar_shades = build_bar_shades(state, &viewport);
 
         let playhead = PlayheadSnapshot {
             beat: state.transport.playhead_beats,
@@ -193,6 +195,7 @@ impl TimelineRenderSnapshot {
             viewport,
             bpm: state.bpm,
             beats_per_bar: state.beats_per_bar(),
+            time_signature_revision: state.time_signature_map.revision(),
             visible_tracks,
             visible_beats,
             lanes,
@@ -381,22 +384,28 @@ fn time_to_peak_index(time_sec: f64, sample_rate: u32, samples_per_peak: usize) 
     frame / samples_per_peak.max(1)
 }
 
-fn build_bar_shades(viewport: &TimelineViewport, beats_per_bar: f32) -> Vec<BarShadeSnapshot> {
-    let bar_w = beats_per_bar * viewport.pixels_per_beat;
-    if bar_w < 2.0 {
-        return Vec::new();
-    }
-    let start_beat = viewport.scroll_x / viewport.pixels_per_beat;
-    let first_bar = (start_beat / beats_per_bar).floor() as i32;
-    let last_bar = ((viewport.scroll_x + viewport.width) / bar_w).ceil() as i32;
-    let mut shades = Vec::new();
-    for bar in first_bar..=last_bar {
-        if bar % 2 == 0 {
-            shades.push(BarShadeSnapshot {
-                x: (bar as f32 * bar_w - viewport.scroll_x).round(),
-                width: bar_w.round(),
-            });
+fn build_bar_shades(state: &TimelineState, viewport: &TimelineViewport) -> Vec<BarShadeSnapshot> {
+    let (visible_start, visible_end) = viewport.visible_beat_range();
+    let rects = state
+        .time_signature_map
+        .visible_bar_rects(visible_start as f64, visible_end as f64);
+    let mut shades = Vec::with_capacity(rects.len());
+    for rect in rects {
+        // Alternate by global bar number: even bars get the subtle region fill.
+        if rect.bar % 2 != 0 {
+            continue;
         }
+        let x0 = viewport.beat_to_x(rect.start_beat as f32);
+        let x1 = viewport.beat_to_x(rect.end_beat as f32);
+        let width = x1 - x0;
+        if width < 2.0 {
+            continue;
+        }
+        shades.push(BarShadeSnapshot {
+            x: x0.round(),
+            width: width.round(),
+            bar: rect.bar,
+        });
     }
     shades
 }

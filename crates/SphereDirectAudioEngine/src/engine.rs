@@ -731,6 +731,23 @@ impl EngineInner {
         self.send_command(EngineCommand::SetTimeSignature(numerator, denominator))
     }
 
+    pub fn set_time_signature_map(
+        &self,
+        points: Vec<crate::time_signature_map::RuntimeTimeSignaturePointSnapshot>,
+    ) -> Result<(), SphereAudioError> {
+        let snapshot =
+            crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::from_points(points);
+        if let Some(pt) = snapshot.points().first() {
+            self.shared
+                .time_sig_num
+                .store(pt.numerator.max(1) as u32, Ordering::Relaxed);
+            self.shared
+                .time_sig_den
+                .store(pt.denominator.max(1) as u32, Ordering::Relaxed);
+        }
+        self.send_command(EngineCommand::SetTimeSignatureMap(snapshot))
+    }
+
     pub fn set_loop(
         &self,
         enabled: bool,
@@ -2346,6 +2363,7 @@ impl EngineInner {
                 EngineCommand::SetBpm(_) => "SetBpm",
                 EngineCommand::SetTempoMap(_) => "SetTempoMap",
                 EngineCommand::SetTimeSignature(_, _) => "SetTimeSignature",
+                EngineCommand::SetTimeSignatureMap(_) => "SetTimeSignatureMap",
                 EngineCommand::SetLoop { .. } => "SetLoop",
                 EngineCommand::SetPluginBridgeSink { .. } => "SetPluginBridgeSink",
                 EngineCommand::SetBridgeEditorActive { .. } => "SetBridgeEditorActive",
@@ -3689,6 +3707,18 @@ where
                             shared.time_sig_num.store(num.max(1), Ordering::Relaxed);
                             shared.time_sig_den.store(den.max(1), Ordering::Relaxed);
                             metronome.set_time_signature(num, den, pos, output_sample_rate);
+                        }
+                        EngineCommand::SetTimeSignatureMap(map) => {
+                            let pos = shared.position_samples.load(Ordering::Relaxed);
+                            if let Some(pt) = map.points().first() {
+                                shared
+                                    .time_sig_num
+                                    .store(pt.numerator.max(1) as u32, Ordering::Relaxed);
+                                shared
+                                    .time_sig_den
+                                    .store(pt.denominator.max(1) as u32, Ordering::Relaxed);
+                            }
+                            metronome.set_time_signature_map(map, pos, output_sample_rate);
                         }
                         EngineCommand::SetLoop {
                             enabled,

@@ -425,6 +425,12 @@ pub struct StudioLayout {
     /// double-click on the BPM display or the "Edit BPM…" menu item.
     bpm_input: TextInputState,
     bpm_editing: bool,
+    /// Inline time-signature editor (numerator / denominator).
+    ts_num_input: TextInputState,
+    ts_den_input: TextInputState,
+    ts_editing: bool,
+    ts_edit_point_id: Option<String>,
+    ts_edit_focus_num: bool,
     /// Last time we sent `engine.set_bpm` during a live BPM drag. Throttles
     /// audio-engine tempo commits to ~30 Hz; the UI state still updates
     /// every event, but we don't flood the engine with sub-perceptual
@@ -600,6 +606,20 @@ impl StudioLayout {
         {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_time_signature_map_changed_callback(Some(Arc::new(move |cx| {
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            this.mark_dirty();
+                            this.sync_time_signature_map_to_engine(cx);
+                        });
+                    });
+                })));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_project_changed_callback(Some(Arc::new(move |cx| {
                     // DEFER the parent update. This callback runs from inside
                     // `Timeline::update` (gesture commits) AND from inside
@@ -754,6 +774,11 @@ impl StudioLayout {
             bpm_drag_start_value: 120.0,
             bpm_input: TextInputState::new("transport-bpm-input", cx.focus_handle()),
             bpm_editing: false,
+            ts_num_input: TextInputState::new("transport-ts-num-input", cx.focus_handle()),
+            ts_den_input: TextInputState::new("transport-ts-den-input", cx.focus_handle()),
+            ts_editing: false,
+            ts_edit_point_id: None,
+            ts_edit_focus_num: true,
             last_engine_bpm_commit: None,
             focus_handle: cx.focus_handle(),
             clip_clipboard: Vec::new(),
@@ -980,6 +1005,42 @@ impl StudioLayout {
             "ruler:add-tempo-marker" => {
                 if let Some(beat) = self.ruler_context_beat() {
                     self.add_tempo_point_at_beat(beat, false, cx);
+                }
+            }
+
+            "ts:add-marker" => {
+                self.add_time_signature_marker_at_playhead(cx);
+            }
+            "ts:edit" => {
+                self.begin_ts_edit(self.ts_track_context_point_id(), cx);
+            }
+            "ts:clear" => {
+                self.clear_time_signature_markers(cx);
+            }
+            "ts:open-track" => {
+                self.show_time_signature_track(cx);
+            }
+            "ts:hide-track" => {
+                self.hide_time_signature_track(cx);
+            }
+            "ts:add-point-here" => {
+                if let Some(beat) = self.ts_track_context_position() {
+                    self.add_time_signature_point_at_beat(beat, cx);
+                }
+            }
+            "ts:delete-point" => {
+                if let Some(id) = self.ts_track_context_point_id() {
+                    self.delete_time_signature_point(&id, cx);
+                }
+            }
+            "ts:move-to-playhead" => {
+                if let Some(id) = self.ts_track_context_point_id() {
+                    self.move_time_signature_point_to_playhead(&id, cx);
+                }
+            }
+            "ruler:add-ts-marker" => {
+                if let Some(beat) = self.ruler_context_beat() {
+                    self.add_time_signature_point_at_beat(beat, cx);
                 }
             }
 

@@ -1,7 +1,7 @@
 use crate::assets;
 use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::timeline_state::{
-    GridLineLevel, TempoMap, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
+    GridLineLevel, TempoMap, TimeSignatureMap, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::{
@@ -271,6 +271,34 @@ pub fn timeline_ruler(
                 // the top. Visible whenever the project has tempo automation,
                 // even when the Tempo Track lane is hidden. Only markers inside
                 // the visible viewport are emitted.
+                .children(state.time_signature_map.points.iter().filter_map(|point| {
+                    let x = state.beats_to_x(point.beat as f32);
+                    if x < -24.0 || x > ruler_grid_width + 24.0 {
+                        return None;
+                    }
+                    let label = TimeSignatureMap::format_marker_label(
+                        point.numerator,
+                        point.denominator,
+                    );
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x + 1.0))
+                            .top(px(14.0))
+                            .flex()
+                            .items_center()
+                            .h(px(12.0))
+                            .px(px(3.0))
+                            .rounded(px(3.0))
+                            .bg(Colors::with_alpha(Colors::text_muted(), 0.12))
+                            .border_l(px(1.0))
+                            .border_color(Colors::with_alpha(Colors::text_muted(), 0.35))
+                            .text_size(px(9.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::text_secondary())
+                            .child(label),
+                    )
+                }))
                 .children(state.tempo_map.points.iter().filter_map(|point| {
                     let x = state.beats_to_x(point.beat as f32);
                     if x < -24.0 || x > ruler_grid_width + 24.0 {

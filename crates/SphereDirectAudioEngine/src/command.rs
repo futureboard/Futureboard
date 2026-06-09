@@ -77,6 +77,8 @@ pub enum EngineCommand {
     SetTempoMap(crate::tempo_map::RuntimeTempoMapSnapshot),
     /// Set project time signature for metronome accent scheduling.
     SetTimeSignature(u32, u32),
+    /// Replace the authoritative time-signature map for metronome accents.
+    SetTimeSignatureMap(crate::time_signature_map::RuntimeTimeSignatureMapSnapshot),
     /// Enable/disable loop region and set its bounds in seconds.
     SetLoop {
         enabled: bool,

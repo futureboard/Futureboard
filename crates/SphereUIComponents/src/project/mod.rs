@@ -401,11 +401,22 @@ pub struct ProjectTempoPoint {
     pub curve: u8,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectTimeSignaturePoint {
+    pub id: String,
+    pub beat: f64,
+    pub numerator: u16,
+    pub denominator: u16,
+    pub grouping: Vec<u16>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectSettings {
     pub bpm: f64,
     /// Project-level tempo automation markers. Empty = static tempo at `bpm`.
     pub tempo_points: Vec<ProjectTempoPoint>,
+    /// Global time signature markers. Empty on disk = migrate from legacy pair.
+    pub time_signature_points: Vec<ProjectTimeSignaturePoint>,
     pub time_sig_num: u32,
     pub time_sig_den: u32,
     pub sample_rate: u32,
@@ -417,6 +428,7 @@ impl Default for ProjectSettings {
         Self {
             bpm: 120.0,
             tempo_points: Vec::new(),
+            time_signature_points: Vec::new(),
             time_sig_num: 4,
             time_sig_den: 4,
             sample_rate: 48000,
@@ -642,6 +654,18 @@ impl From<&TimelineState> for FutureboardProject {
                 curve: p.curve.to_tag(),
             })
             .collect();
+        project.settings.time_signature_points = tl
+            .time_signature_map
+            .points
+            .iter()
+            .map(|p| ProjectTimeSignaturePoint {
+                id: p.id.clone(),
+                beat: p.beat,
+                numerator: p.numerator,
+                denominator: p.denominator,
+                grouping: p.effective_grouping(),
+            })
+            .collect();
         project.settings.time_sig_num = tl.time_signature_num;
         project.settings.time_sig_den = tl.time_signature_den;
         project.tracks = tracks;
@@ -675,8 +699,36 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
             .collect(),
     );
     tl.tempo_map.ensure_point_ids();
-    tl.time_signature_num = project.settings.time_sig_num;
-    tl.time_signature_den = project.settings.time_sig_den;
+    if project.settings.time_signature_points.is_empty() {
+        tl.time_signature_map =
+            crate::components::timeline::timeline_state::TimeSignatureMap::with_default_4_4();
+        tl.time_signature_map.points[0].numerator =
+            project.settings.time_sig_num.clamp(1, 64) as u16;
+        tl.time_signature_map.points[0].denominator = project
+            .settings
+            .time_sig_den
+            .clamp(1, 32) as u16;
+    } else {
+        tl.time_signature_map =
+            crate::components::timeline::timeline_state::TimeSignatureMap::with_points(
+                project
+                    .settings
+                    .time_signature_points
+                    .iter()
+                    .map(|p| {
+                        crate::components::timeline::timeline_state::TimeSignaturePoint::with_grouping(
+                            p.id.clone(),
+                            p.beat,
+                            p.numerator,
+                            p.denominator,
+                            p.grouping.clone(),
+                        )
+                    })
+                    .collect(),
+            );
+        tl.time_signature_map.ensure_point_ids();
+    }
+    tl.sync_legacy_time_signature_fields();
     tl.master.volume = project.mixer.master_volume_norm;
 
     tl.tracks = project

@@ -113,6 +113,47 @@ impl StudioLayout {
         true
     }
 
+    pub(super) fn handle_ts_edit_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.ts_editing {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        if event.keystroke.key == "escape" {
+            self.cancel_ts_edit(cx);
+            return true;
+        }
+        if event.keystroke.key == "tab" {
+            self.ts_edit_focus_num = !self.ts_edit_focus_num;
+            if self.ts_edit_focus_num {
+                self.ts_num_input.select_all();
+            } else {
+                self.ts_den_input.select_all();
+            }
+            cx.notify();
+            return true;
+        }
+        let active = if self.ts_edit_focus_num {
+            &mut self.ts_num_input
+        } else {
+            &mut self.ts_den_input
+        };
+        let action = active.handle_key_with_clipboard(event, Some(cx));
+        match action {
+            TextInputAction::Submit => self.commit_ts_edit(cx),
+            TextInputAction::Cancel => self.cancel_ts_edit(cx),
+            TextInputAction::Consumed | TextInputAction::Pass => {}
+        }
+        cx.notify();
+        true
+    }
+
     pub(super) fn handle_browser_key(
         &mut self,
         event: &KeyDownEvent,
@@ -721,6 +762,95 @@ impl StudioLayout {
                 ContextMenuEntry::item("Mute", "track:mute"),
                 ContextMenuEntry::item("Solo", "track:solo"),
             ],
+            ContextTarget::TimeSignature => {
+                let state = &self.timeline.read(cx).state;
+                let pt = state.time_signature_at_playhead();
+                let label = pt.label();
+                let has_markers = state.time_signature_has_markers();
+                let mut entries = vec![
+                    ContextMenuEntry::disabled_item(format!("Time Signature: {label}"), "noop"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Edit Time Signature…", "ts:edit"),
+                    ContextMenuEntry::item(
+                        "Add Time Signature Marker at Playhead",
+                        "ts:add-marker",
+                    ),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Show Time Signature Track", "ts:open-track"),
+                ];
+                if has_markers {
+                    entries.push(ContextMenuEntry::danger_item(
+                        "Clear Time Signature Markers",
+                        "ts:clear",
+                    ));
+                }
+                entries
+            }
+            ContextTarget::TimeSignaturePoint { point_id, beat } => {
+                let state = &self.timeline.read(cx).state;
+                let label = state.format_bar_beat_at(*beat);
+                let sig = state
+                    .time_signature_map
+                    .points
+                    .iter()
+                    .find(|p| p.id == *point_id)
+                    .map(|p| p.label())
+                    .unwrap_or_else(|| "4/4".to_string());
+                vec![
+                    ContextMenuEntry::disabled_item(
+                        format!("Time signature: {sig} at {label}"),
+                        "noop",
+                    ),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Edit Time Signature…", "ts:edit"),
+                    ContextMenuEntry::item("Delete Time Signature Marker", "ts:delete-point"),
+                    ContextMenuEntry::item("Move to Playhead", "ts:move-to-playhead"),
+                ]
+            }
+            ContextTarget::TimeSignatureTrack { beat, point_id } => {
+                let state = &self.timeline.read(cx).state;
+                let label = state.format_bar_beat_at(*beat);
+                if point_id.is_some() {
+                    let sig = point_id
+                        .as_ref()
+                        .and_then(|id| {
+                            state
+                                .time_signature_map
+                                .points
+                                .iter()
+                                .find(|p| p.id == *id)
+                                .map(|p| p.label())
+                        })
+                        .unwrap_or_else(|| "4/4".to_string());
+                    vec![
+                        ContextMenuEntry::disabled_item(
+                            format!("Time signature: {sig} at {label}"),
+                            "noop",
+                        ),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Edit Time Signature…", "ts:edit"),
+                        ContextMenuEntry::item("Delete Time Signature Marker", "ts:delete-point"),
+                        ContextMenuEntry::item("Move to Playhead", "ts:move-to-playhead"),
+                    ]
+                } else {
+                    let sig = state
+                        .time_signature_map
+                        .time_signature_at_beat(*beat)
+                        .label();
+                    vec![
+                        ContextMenuEntry::disabled_item(
+                            format!("Time signature at {label}: {sig}"),
+                            "noop",
+                        ),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Add Time Signature Marker Here", "ts:add-point-here"),
+                        ContextMenuEntry::item("Edit Time Signature…", "ts:edit"),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Show Time Signature Track", "ts:open-track"),
+                        ContextMenuEntry::item("Hide Time Signature Track", "ts:hide-track"),
+                    ]
+                }
+            }
             ContextTarget::Tempo => {
                 let state = &self.timeline.read(cx).state;
                 let bpm = state.effective_bpm_at_playhead();
@@ -821,15 +951,14 @@ impl StudioLayout {
                     "tempo:open-track",
                 ));
                 entries.push(ContextMenuEntry::Separator);
-                // Time-signature editing is not implemented yet — keep the
-                // entries visible but disabled so the menu reads complete.
-                entries.push(ContextMenuEntry::disabled_item(
-                    "Edit Time Signature…",
-                    "noop",
+                entries.push(ContextMenuEntry::item(
+                    "Add Time Signature Marker Here",
+                    "ruler:add-ts-marker",
                 ));
-                entries.push(ContextMenuEntry::disabled_item(
-                    "Create Time Signature Change Here",
-                    "noop",
+                entries.push(ContextMenuEntry::item("Edit Time Signature…", "ts:edit"));
+                entries.push(ContextMenuEntry::item(
+                    "Show Time Signature Track",
+                    "ts:open-track",
                 ));
                 entries
             }

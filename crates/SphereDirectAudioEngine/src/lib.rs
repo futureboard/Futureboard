@@ -37,6 +37,7 @@ pub mod native;
 pub mod plugin_bridge;
 pub mod recording;
 mod runtime;
+pub mod time_signature_map;
 mod streaming_source;
 pub mod tempo_map;
 pub mod transport;

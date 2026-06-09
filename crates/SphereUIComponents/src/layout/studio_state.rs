@@ -50,6 +50,13 @@ pub enum ContextTarget {
     Mixer(String),
     /// The compact tempo menu opened from the transport BPM display.
     Tempo,
+    /// The compact time signature menu from the transport display.
+    TimeSignature,
+    /// Right-click on a time signature marker on the ruler or lane.
+    TimeSignaturePoint {
+        point_id: String,
+        beat: f64,
+    },
     /// Right-click on the timeline ruler. Carries the beat under the cursor so
     /// tempo/time-signature actions are position-aware.
     TimelineRuler {
@@ -59,6 +66,11 @@ pub enum ContextTarget {
     TempoTrack {
         beat: f64,
         bpm: f64,
+        point_id: Option<String>,
+    },
+    /// Right-click on the global Time Signature Track lane.
+    TimeSignatureTrack {
+        beat: f64,
         point_id: Option<String>,
     },
 }

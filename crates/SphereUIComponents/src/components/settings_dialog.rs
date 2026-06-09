@@ -3568,11 +3568,14 @@ impl Render for SettingsWindow {
             on_refresh_midi: Some(Arc::new({
                 let target = target.clone();
                 move |_w: &mut Window, cx: &mut App| {
+                    // Manual refresh runs a real off-render MIDI scan, then a
+                    // single notify so the cached list re-renders once (no loop).
+                    let revision = crate::device_registry::scan_midi();
                     let _ = target.update(cx, |this, cx| {
                         this.midi_refresh_nonce = this.midi_refresh_nonce.wrapping_add(1);
                         if midi_settings_debug_enabled() {
                             eprintln!(
-                                "[MIDI settings] refresh requested (nonce={})",
+                                "[MIDI settings] refresh requested (nonce={} registry_revision={revision})",
                                 this.midi_refresh_nonce
                             );
                         }

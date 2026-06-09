@@ -40,30 +40,15 @@ fn stable_id(direction: MidiDeviceDirection, name: &str) -> String {
     format!("{prefix}-{slug}")
 }
 
-fn placeholder_devices() -> Vec<DetectedMidiDevice> {
-    vec![
-        DetectedMidiDevice {
-            id: stable_id(MidiDeviceDirection::Input, "Keyboard Controller"),
-            name: "Keyboard Controller".to_string(),
-            direction: MidiDeviceDirection::Input,
-        },
-        DetectedMidiDevice {
-            id: stable_id(MidiDeviceDirection::Input, "Midi Device 2"),
-            name: "Midi Device 2".to_string(),
-            direction: MidiDeviceDirection::Input,
-        },
-        DetectedMidiDevice {
-            id: stable_id(MidiDeviceDirection::Output, "Interface"),
-            name: "Interface".to_string(),
-            direction: MidiDeviceDirection::Output,
-        },
-    ]
-}
-
-/// Enumerate MIDI ports. Returns an empty list (never panics) when enumeration fails.
-pub fn enumerate_midi_devices() -> Vec<DetectedMidiDevice> {
-    let result = std::panic::catch_unwind(placeholder_devices);
-    match result {
+/// Real MIDI port scan via `midir` (WinMM on Windows, CoreMIDI on macOS, ALSA on
+/// Linux). Enumeration only reads port names — it never opens the hardware.
+/// Wrapped in `catch_unwind` so a misbehaving backend yields an empty list and a
+/// warning rather than taking down the UI thread.
+///
+/// Prefer [`crate::device_registry::scan_midi`] / `cached_midi_devices` over
+/// calling this directly: those cache the result so rendering never re-scans.
+pub fn scan_midi_ports() -> Vec<DetectedMidiDevice> {
+    match std::panic::catch_unwind(real_scan_midi_ports) {
         Ok(devices) => {
             if midi_settings_debug_enabled() {
                 eprintln!("[MIDI settings] detected devices ({})", devices.len());
@@ -77,12 +62,61 @@ pub fn enumerate_midi_devices() -> Vec<DetectedMidiDevice> {
             devices
         }
         Err(_) => {
-            if midi_settings_debug_enabled() {
-                eprintln!("[MIDI settings] enumeration failed — returning empty list");
-            }
+            eprintln!("[MidiDeviceScan] enumeration panicked — returning empty list");
             Vec::new()
         }
     }
+}
+
+/// macOS placeholder: midir's CoreMIDI backend currently conflicts with gpui's
+/// pinned `core-foundation` version, so the macOS port scan is unavailable. We
+/// return an empty list (no mock data) until that dependency pin is reconciled.
+#[cfg(target_os = "macos")]
+fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
+    Vec::new()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
+    use midir::{MidiInput, MidiOutput};
+
+    let mut devices = Vec::new();
+    match MidiInput::new("Futureboard MIDI scan (in)") {
+        Ok(input) => {
+            for port in input.ports() {
+                if let Ok(name) = input.port_name(&port) {
+                    devices.push(DetectedMidiDevice {
+                        id: stable_id(MidiDeviceDirection::Input, &name),
+                        name,
+                        direction: MidiDeviceDirection::Input,
+                    });
+                }
+            }
+        }
+        Err(e) => eprintln!("[MidiDeviceScan] MIDI input backend unavailable: {e}"),
+    }
+    match MidiOutput::new("Futureboard MIDI scan (out)") {
+        Ok(output) => {
+            for port in output.ports() {
+                if let Ok(name) = output.port_name(&port) {
+                    devices.push(DetectedMidiDevice {
+                        id: stable_id(MidiDeviceDirection::Output, &name),
+                        name,
+                        direction: MidiDeviceDirection::Output,
+                    });
+                }
+            }
+        }
+        Err(e) => eprintln!("[MidiDeviceScan] MIDI output backend unavailable: {e}"),
+    }
+    devices
+}
+
+/// Detected MIDI devices for rendering. Cheap: returns the registry's cached
+/// snapshot from the last scan (run at startup / Refresh) and never re-scans the
+/// OS on a hot render path. See [`crate::device_registry`].
+pub fn enumerate_midi_devices() -> Vec<DetectedMidiDevice> {
+    crate::device_registry::cached_midi_devices()
 }
 
 /// Merge saved preferences with freshly detected devices. Saved-only entries stay visible as missing.

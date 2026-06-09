@@ -174,34 +174,13 @@ pub struct MidiHardwareSettings {
 
 impl Default for MidiHardwareSettings {
     fn default() -> Self {
+        // No mock devices: the real list comes from the startup device scan
+        // (`device_registry::scan_midi`). Any device the user has enabled is
+        // persisted here and re-surfaced (as Missing if absent) by
+        // `midi_devices::resolve_midi_devices`.
         Self {
-            devices: vec![
-                MidiDeviceSetting {
-                    id: "midi-in-keyboard-controller".to_string(),
-                    name: "Keyboard Controller".to_string(),
-                    direction: MidiDeviceDirection::Input,
-                    enabled: true,
-                    connected: true,
-                    clock_enabled: false,
-                },
-                MidiDeviceSetting {
-                    id: "midi-in-midi-device-2".to_string(),
-                    name: "Midi Device 2".to_string(),
-                    direction: MidiDeviceDirection::Input,
-                    enabled: true,
-                    connected: true,
-                    clock_enabled: false,
-                },
-                MidiDeviceSetting {
-                    id: "midi-out-interface".to_string(),
-                    name: "Interface".to_string(),
-                    direction: MidiDeviceDirection::Output,
-                    enabled: true,
-                    connected: true,
-                    clock_enabled: true,
-                },
-            ],
-            clock_sync: true,
+            devices: Vec::new(),
+            clock_sync: false,
             enabled_inputs: Vec::new(),
             enabled_outputs: Vec::new(),
         }

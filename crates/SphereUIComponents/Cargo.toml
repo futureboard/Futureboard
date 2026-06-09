@@ -50,3 +50,11 @@ crc32fast.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 windows-core = { workspace = true }
+
+# Real MIDI port enumeration (WinMM on Windows, ALSA on Linux) for the device
+# registry that replaces the Preferences mock lists. Scoped to non-macOS because
+# midir's macOS backend (coremidi) pulls core-foundation 0.10.1, which conflicts
+# with gpui's pinned core-foundation =0.10.0. macOS falls back to an empty scan
+# until that pin is reconciled.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+midir.workspace = true

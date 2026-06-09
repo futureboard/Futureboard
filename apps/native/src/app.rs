@@ -94,6 +94,33 @@ fn open_welcome_window(cx: &mut App, skip_splash: bool) {
             });
         }
 
+        // Real device initialization. Audio + MIDI are scanned into the process
+        // device registry so Preferences renders real devices (no mocks) and
+        // never scans on a render path. Scans run on the background executor;
+        // failures are non-fatal (empty registry + warning) so startup always
+        // continues into the workspace.
+        let _ = welcome.update(cx, |welcome, _window, cx| {
+            welcome.set_loading_status("Scanning audio devices");
+            cx.notify();
+        });
+        boot::log("[Startup] phase=ScanAudio");
+        executor
+            .spawn(async {
+                sphere_ui_components::device_registry::scan_audio();
+            })
+            .await;
+
+        let _ = welcome.update(cx, |welcome, _window, cx| {
+            welcome.set_loading_status("Scanning MIDI devices");
+            cx.notify();
+        });
+        boot::log("[Startup] phase=ScanMidi");
+        executor
+            .spawn(async {
+                sphere_ui_components::device_registry::scan_midi();
+            })
+            .await;
+
         // Warm the GPU renderer here — on the loading screen — so the first
         // studio frame doesn't stall on adapter/device creation. The warm-up
         // runs on the main thread (inside the window update) and reuses the

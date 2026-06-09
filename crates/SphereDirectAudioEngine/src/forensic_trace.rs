@@ -124,7 +124,5 @@ pub fn log_runtime_midi_track_summary(track_id: &str, runtime_clips: usize) {
     if !engine_midi_trace_enabled() {
         return;
     }
-    eprintln!(
-        "[runtime-midi] track={track_id} runtime_clips={runtime_clips}"
-    );
+    eprintln!("[runtime-midi] track={track_id} runtime_clips={runtime_clips}");
 }

@@ -1,7 +1,7 @@
 use crate::assets;
 use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::timeline_state::{
-    GridLineLevel, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
+    GridLineLevel, TempoMap, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::{
@@ -24,6 +24,9 @@ pub fn timeline_ruler(
     on_toggle_snap: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_cycle_grid: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_ruler_context: std::sync::Arc<
+        dyn Fn(&(f32, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TimelineRuler");
     let on_toggle_snap_clone = on_toggle_snap.clone();
@@ -172,6 +175,16 @@ pub fn timeline_ruler(
                         on_seek_clone(&click_x, window, cx);
                     },
                 )
+                // Right-click → position-aware tempo menu.
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    move |event: &gpui::MouseDownEvent, window, cx| {
+                        let x: f32 = event.position.x.into();
+                        let y: f32 = event.position.y.into();
+                        let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
+                        on_ruler_context(&(click_x, x, y), window, cx);
+                    },
+                )
                 .on_drag(RulerSeekDrag, |_, _offset, _window, cx| {
                     cx.new(|_| RulerSeekDrag)
                 })
@@ -252,6 +265,36 @@ pub fn timeline_ruler(
                         .font_weight(font_weight)
                         .text_color(text_color)
                         .child(label)
+                }))
+                // Tempo markers — lightweight BPM labels anchored to the bottom
+                // of the ruler so they never collide with the bar/beat labels at
+                // the top. Visible whenever the project has tempo automation,
+                // even when the Tempo Track lane is hidden. Only markers inside
+                // the visible viewport are emitted.
+                .children(state.tempo_map.points.iter().filter_map(|point| {
+                    let x = state.beats_to_x(point.beat as f32);
+                    if x < -24.0 || x > ruler_grid_width + 24.0 {
+                        return None;
+                    }
+                    let label = TempoMap::format_marker_label(point.bpm);
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x + 1.0))
+                            .bottom(px(1.0))
+                            .flex()
+                            .items_center()
+                            .h(px(12.0))
+                            .px(px(3.0))
+                            .rounded(px(3.0))
+                            .bg(Colors::with_alpha(Colors::accent_primary(), 0.18))
+                            .border_l(px(1.0))
+                            .border_color(Colors::with_alpha(Colors::accent_primary(), 0.6))
+                            .text_size(px(9.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::accent_primary())
+                            .child(label),
+                    )
                 })),
         )
 }

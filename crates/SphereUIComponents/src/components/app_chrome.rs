@@ -8,6 +8,7 @@ use gpui::{
 
 use crate::assets;
 use crate::components::menu_bar;
+use crate::components::text_input::TextInputState;
 use crate::components::title_bar::{
     chrome_button, draggable_spacer, section_separator, window_control_button, CHROME_PAD_X,
     CHROME_TITLE_SIZE,
@@ -23,9 +24,12 @@ pub type ChromeActionCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 pub type ProjectOpenCb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
 pub type BpmChangeCb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
 pub type BpmDragCb = Arc<dyn Fn(&BpmDragSample, &mut Window, &mut App) + 'static>;
+/// Opens the compact tempo menu. Payload is the (x, y) screen position used to
+/// anchor the popover beneath the BPM display.
+pub type BpmMenuCb = Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>;
 
 pub const BPM_MIN: f32 = 20.0;
-pub const BPM_MAX: f32 = 300.0;
+pub const BPM_MAX: f32 = 999.0;
 
 static BPM_DRAG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -45,6 +49,7 @@ pub struct BpmDragSample {
     pub shift: bool,
     pub control: bool,
     pub platform: bool,
+    pub alt: bool,
 }
 
 /// Drag state for the transport BPM display. Carries the unique `drag_id`
@@ -89,6 +94,12 @@ pub struct TransportChromeState {
     pub position_label: String,
     pub bpm: f32,
     pub bpm_label: String,
+    /// True when tempo automation is active — drives the small "AUTO" badge.
+    pub bpm_has_automation: bool,
+    /// Inline BPM editor state (open flag, field contents, focus).
+    pub bpm_editing: bool,
+    pub bpm_input: TextInputState,
+    pub bpm_edit_focused: bool,
     pub time_signature_label: String,
     pub on_return_to_start: ChromeActionCb,
     pub on_play_toggle: ChromeActionCb,
@@ -99,6 +110,9 @@ pub struct TransportChromeState {
     pub on_follow_toggle: ChromeActionCb,
     pub on_set_bpm: BpmChangeCb,
     pub on_bpm_drag: BpmDragCb,
+    pub on_bpm_menu: BpmMenuCb,
+    /// Opens the inline numeric BPM editor (double-click / "Edit BPM…").
+    pub on_bpm_edit_start: ChromeActionCb,
 }
 
 fn transport_debug_enabled() -> bool {
@@ -106,8 +120,31 @@ fn transport_debug_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_TRANSPORT_DEBUG").is_some())
 }
 
-fn bpm_display(state_bpm: f32, label: String, on_bpm_drag: BpmDragCb) -> impl IntoElement {
+fn bpm_display(
+    state_bpm: f32,
+    label: String,
+    on_bpm_drag: BpmDragCb,
+    on_bpm_menu: BpmMenuCb,
+    on_bpm_edit_start: ChromeActionCb,
+    editing: bool,
+    bpm_input: &TextInputState,
+    edit_focused: bool,
+) -> gpui::AnyElement {
+    // Inline numeric editor: replaces the draggable box while open. Keys are
+    // routed to the input by the layout's key handler; Enter commits, Escape
+    // cancels.
+    if editing {
+        return div()
+            .w(px(48.0))
+            .child(crate::components::text_input::text_field(
+                bpm_input,
+                edit_focused,
+            ))
+            .into_any_element();
+    }
+
     let on_bpm_drag_move = on_bpm_drag.clone();
+    let on_bpm_menu_down = on_bpm_menu.clone();
     div()
         .id("transport-bpm")
         .w(px(36.0))
@@ -124,6 +161,20 @@ fn bpm_display(state_bpm: f32, label: String, on_bpm_drag: BpmDragCb) -> impl In
         .hover(|s| s.bg(Colors::surface_control_hover()))
         .child(label)
         .occlude()
+        // Double-click opens inline numeric edit; left-drag scrubs the value;
+        // right-click opens the tempo menu.
+        .on_click(move |event: &gpui::ClickEvent, window, cx| {
+            if event.click_count() >= 2 {
+                on_bpm_edit_start(&(), window, cx);
+            }
+        })
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                let pos = event.position;
+                on_bpm_menu_down(&(pos.x.into(), pos.y.into()), window, cx);
+            },
+        )
         .on_drag(
             BpmDrag {
                 drag_id: 0,
@@ -148,23 +199,24 @@ fn bpm_display(state_bpm: f32, label: String, on_bpm_drag: BpmDragCb) -> impl In
                 shift: mods.shift,
                 control: mods.control,
                 platform: mods.platform,
+                alt: mods.alt,
             };
             on_bpm_drag_move(&sample, window, cx);
         })
+        .into_any_element()
 }
 
-/// Per-pixel BPM sensitivity for a given modifier combination. These are
-/// chosen low on purpose: the same pixel delta means the same BPM change
-/// whether the window is 600 px or 1800 px tall (maximized). Previously
-/// 0.5 BPM/px felt fine windowed but ran away at full-screen heights;
-/// 0.15 BPM/px gives a consistent feel.
-pub fn bpm_drag_sensitivity(shift: bool, control_or_platform: bool) -> f32 {
+/// Per-(logical)-pixel BPM sensitivity for a given modifier combination.
+/// DAW-style feel: normal ≈ 1 BPM / 10 px, Shift = fine, Ctrl/Alt = coarse.
+/// Because the BPM drag now warps the OS cursor (Windows), the per-pixel feel
+/// is screen-height independent — the cursor never reaches the screen edge.
+pub fn bpm_drag_sensitivity(shift: bool, coarse: bool) -> f32 {
     if shift {
-        0.03
-    } else if control_or_platform {
+        0.02
+    } else if coarse {
         0.5
     } else {
-        0.15
+        0.1
     }
 }
 
@@ -260,8 +312,14 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let on_metronome = state.on_metronome_toggle.clone();
     let on_follow = state.on_follow_toggle.clone();
     let on_bpm_drag = state.on_bpm_drag.clone();
+    let on_bpm_menu = state.on_bpm_menu.clone();
+    let on_bpm_edit_start = state.on_bpm_edit_start.clone();
     let bpm_value = state.bpm;
     let bpm_label = state.bpm_label.clone();
+    let bpm_has_automation = state.bpm_has_automation;
+    let bpm_editing = state.bpm_editing;
+    let bpm_input = state.bpm_input.clone();
+    let bpm_edit_focused = state.bpm_edit_focused;
 
     div()
         .flex()
@@ -392,7 +450,38 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child("BPM"),
                 )
-                .child(bpm_display(bpm_value, bpm_label, on_bpm_drag)),
+                .child(bpm_display(
+                    bpm_value,
+                    bpm_label,
+                    on_bpm_drag,
+                    on_bpm_menu,
+                    on_bpm_edit_start,
+                    bpm_editing,
+                    &bpm_input,
+                    bpm_edit_focused,
+                ))
+                // AUTO badge — shown only when tempo automation is active so the
+                // single-tempo case stays clean.
+                .children(if bpm_has_automation {
+                    Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(13.0))
+                            .px(px(3.0))
+                            .rounded(px(3.0))
+                            .bg(Colors::with_alpha(Colors::accent_primary(), 0.18))
+                            .border(px(1.0))
+                            .border_color(Colors::with_alpha(Colors::accent_primary(), 0.45))
+                            .text_color(Colors::accent_primary())
+                            .text_size(px(8.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("AUTO"),
+                    )
+                } else {
+                    None
+                }),
         )
         // Time signature
         .child(

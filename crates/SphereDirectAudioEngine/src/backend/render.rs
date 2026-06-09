@@ -81,10 +81,11 @@ pub struct LocalAudioState {
     /// Blocks until next PreviewRenderWake log while preview is active.
     pub preview_wake_log_cooldown: u32,
     pub metronome_enabled: bool,
-    pub metronome_bpm: f64,
     pub metronome_ts_num: u32,
     pub metronome_ts_den: u32,
-    pub metronome_next_sample: u64,
+    /// Next click position in quarter-note beats.
+    pub metronome_next_beat: f64,
+    pub tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot,
     pub metronome_click_remaining: u32,
     pub metronome_click_len: u32,
     pub metronome_click_phase: f64,
@@ -110,10 +111,10 @@ impl LocalAudioState {
             prev_logged_preview_notes: u32::MAX,
             preview_wake_log_cooldown: 0,
             metronome_enabled: false,
-            metronome_bpm: 120.0,
             metronome_ts_num: 4,
             metronome_ts_den: 4,
-            metronome_next_sample: 0,
+            metronome_next_beat: 0.0,
+            tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(120.0),
             metronome_click_remaining: 0,
             metronome_click_len: (sample_rate * 0.024).round().max(1.0) as u32,
             metronome_click_phase: 0.0,
@@ -129,7 +130,17 @@ impl LocalAudioState {
     }
 
     pub fn set_bpm(&mut self, bpm: f64, position_sample: u64, sample_rate: u32) {
-        self.metronome_bpm = bpm.clamp(1.0, 999.0);
+        self.tempo_map = crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(bpm);
+        self.reset_metronome_schedule(position_sample, sample_rate);
+    }
+
+    pub fn set_tempo_map(
+        &mut self,
+        tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot,
+        position_sample: u64,
+        sample_rate: u32,
+    ) {
+        self.tempo_map = tempo_map;
         self.reset_metronome_schedule(position_sample, sample_rate);
     }
 
@@ -146,19 +157,25 @@ impl LocalAudioState {
     }
 
     pub fn reset_metronome_schedule(&mut self, position_sample: u64, sample_rate: u32) {
-        let interval = self.metronome_interval_samples(sample_rate);
-        self.metronome_next_sample = position_sample
-            .saturating_add(interval - 1)
-            .saturating_div(interval)
-            .saturating_mul(interval);
+        let sr = sample_rate.max(1) as f64;
+        let current_beat = self.tempo_map.beat_at_samples(position_sample, sr);
+        let step = self.metronome_beat_step();
+        if step <= 0.0 {
+            self.metronome_next_beat = current_beat;
+            return;
+        }
+        let index = (current_beat / step).floor();
+        let on_grid = (current_beat - index * step).abs() < 1e-6;
+        self.metronome_next_beat = if on_grid {
+            index * step
+        } else {
+            (index + 1.0) * step
+        };
     }
 
     #[inline]
-    fn metronome_interval_samples(&self, sample_rate: u32) -> u64 {
-        let beat_unit_quarters = 4.0 / self.metronome_ts_den.max(1) as f64;
-        ((sample_rate.max(1) as f64 * 60.0 / self.metronome_bpm.max(1.0)) * beat_unit_quarters)
-            .round()
-            .max(1.0) as u64
+    fn metronome_beat_step(&self) -> f64 {
+        4.0 / self.metronome_ts_den.max(1) as f64
     }
 
     #[inline]
@@ -167,16 +184,17 @@ impl LocalAudioState {
             return 0.0;
         }
 
-        let interval = self.metronome_interval_samples(sample_rate);
-        while project_sample >= self.metronome_next_sample {
-            let beat_index = self.metronome_next_sample / interval.max(1);
-            let accent = beat_index.is_multiple_of(self.metronome_ts_num.max(1) as u64);
+        let sr = sample_rate.max(1) as f64;
+        let step = self.metronome_beat_step();
+        while project_sample >= self.tempo_map.samples_at_beat(self.metronome_next_beat, sr) {
+            let click_index = (self.metronome_next_beat / step).round() as u64;
+            let accent = click_index.is_multiple_of(self.metronome_ts_num.max(1) as u64);
             let freq = if accent { 1760.0 } else { 980.0 };
             self.metronome_click_phase = 0.0;
-            self.metronome_click_phase_inc = freq / sample_rate.max(1) as f64;
+            self.metronome_click_phase_inc = freq / sr;
             self.metronome_click_gain = if accent { 0.34 } else { 0.22 };
             self.metronome_click_remaining = self.metronome_click_len;
-            self.metronome_next_sample = self.metronome_next_sample.saturating_add(interval);
+            self.metronome_next_beat += step;
         }
 
         if self.metronome_click_remaining == 0 {
@@ -247,6 +265,7 @@ pub fn drain_commands(
                 crate::graveyard::retire(old);
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 runtime.reset_midi_playback(pos);
+                local.set_tempo_map(runtime.tempo_map.clone(), pos, output_sample_rate);
             }
             EngineCommand::SetTestTone { enabled, frequency } => {
                 local.osc_on = enabled;
@@ -300,8 +319,15 @@ pub fn drain_commands(
             EngineCommand::SetBpm(bpm) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 transport::store_f64_bits(&shared.bpm_bits, bpm);
-                local.set_bpm(bpm, pos, output_sample_rate);
-                let next_pos = runtime.set_static_midi_tempo(bpm, pos);
+                let map = crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(bpm);
+                local.set_tempo_map(map.clone(), pos, output_sample_rate);
+                let next_pos = runtime.apply_tempo_map(map, pos);
+                shared.position_samples.store(next_pos, Ordering::Relaxed);
+            }
+            EngineCommand::SetTempoMap(map) => {
+                let pos = shared.position_samples.load(Ordering::Relaxed);
+                local.set_tempo_map(map.clone(), pos, output_sample_rate);
+                let next_pos = runtime.apply_tempo_map(map, pos);
                 shared.position_samples.store(next_pos, Ordering::Relaxed);
             }
             EngineCommand::SetTimeSignature(num, den) => {
@@ -415,12 +441,7 @@ pub fn drain_commands(
                         "[midi-preview-audio] dequeue note_off instance={plugin_instance_id} pitch={pitch}"
                     );
                 }
-                runtime.bridge_preview_note_off(
-                    &track_id,
-                    &plugin_instance_id,
-                    channel,
-                    pitch,
-                );
+                runtime.bridge_preview_note_off(&track_id, &plugin_instance_id, channel, pitch);
             }
             EngineCommand::PluginPreviewAllNotesOff {
                 track_id,
@@ -492,11 +513,12 @@ pub fn fill_output_f32(
         local.preview_tail_samples = (runtime.sample_rate as u64).saturating_mul(2);
     }
     let bridge_editor_wakeup = runtime.has_bridge_editor_active();
-    let preview_render_active = has_preview
-        || pending_midi
-        || local.preview_tail_samples > 0
-        || bridge_editor_wakeup;
-    if preview_render_active && !local.playing_local && (has_preview || pending_midi || local.preview_tail_samples > 0) {
+    let preview_render_active =
+        has_preview || pending_midi || local.preview_tail_samples > 0 || bridge_editor_wakeup;
+    if preview_render_active
+        && !local.playing_local
+        && (has_preview || pending_midi || local.preview_tail_samples > 0)
+    {
         let active_notes: usize = runtime
             .midi_tracks
             .iter()
@@ -507,9 +529,7 @@ pub fn fill_output_f32(
         if changed {
             eprintln!(
                 "[PreviewRenderWake] active_preview_notes changed {} -> {} tail_samples={}",
-                local.prev_logged_preview_notes,
-                active_u32,
-                local.preview_tail_samples
+                local.prev_logged_preview_notes, active_u32, local.preview_tail_samples
             );
             local.prev_logged_preview_notes = active_u32;
             local.preview_wake_log_cooldown = 0;
@@ -662,8 +682,7 @@ pub fn fill_output_f32(
     // Legacy master-bus bridge fallback (disabled by default — per-track routing
     // through external-bridge-plugin inserts is the normal path).
     if plugin_bridge_master_fallback_enabled() {
-        let (bridge_peak_l, bridge_peak_r) =
-            mix_plugin_bridge(data, channels, runtime, master_vol);
+        let (bridge_peak_l, bridge_peak_r) = mix_plugin_bridge(data, channels, runtime, master_vol);
         peak_l = peak_l.max(bridge_peak_l);
         peak_r = peak_r.max(bridge_peak_r);
     }

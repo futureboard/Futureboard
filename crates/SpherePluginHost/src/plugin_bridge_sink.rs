@@ -27,10 +27,13 @@ impl std::fmt::Debug for SharedRegionSink {
 }
 
 impl SharedRegionSink {
-    /// Build a sink the engine can hold. Returns the trait object so DAUx never
-    /// needs to name the concrete type.
-    pub fn new(region: Arc<SharedAudioRegion>) -> SharedPluginBridgeSink {
-        Arc::new(Self { region })
+    pub fn new(region: Arc<SharedAudioRegion>) -> Self {
+        Self { region }
+    }
+
+    /// Wrap as the trait object the engine holds.
+    pub fn into_shared(region: Arc<SharedAudioRegion>) -> SharedPluginBridgeSink {
+        Arc::new(Self::new(region))
     }
 }
 

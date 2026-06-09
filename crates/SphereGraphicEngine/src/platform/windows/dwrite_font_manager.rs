@@ -58,7 +58,9 @@ pub struct DWriteFontManager {
 impl Drop for DWriteFontManager {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.factory.UnregisterFontFileLoader(&self.in_memory_loader);
+            let _ = self
+                .factory
+                .UnregisterFontFileLoader(&self.in_memory_loader);
         }
     }
 }
@@ -198,8 +200,7 @@ unsafe fn make_font_manager(
     factory.RegisterFontFileLoader(&in_memory_loader).ok()?;
     let builder = factory.CreateFontSetBuilder().ok()?;
 
-    let font_bytes_loaded =
-        load_embedded_fonts(&factory, &in_memory_loader, &builder, font_blobs);
+    let font_bytes_loaded = load_embedded_fonts(&factory, &in_memory_loader, &builder, font_blobs);
 
     let custom_font_set = builder.CreateFontSet().ok()?;
     let custom_collection = factory

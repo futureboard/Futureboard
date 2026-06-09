@@ -172,6 +172,7 @@ fn log_renderer_env() {
 type Registry = HashMap<String, u64>;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct LoadedPlugin {
     plugin_path: String,
     class_id: String,
@@ -183,6 +184,7 @@ struct LoadedPlugin {
 type LoadedRegistry = HashMap<String, LoadedPlugin>;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct PendingEditorPrepare {
     prepare_id: u64,
     preferred_width: u32,
@@ -298,8 +300,7 @@ fn service_audio_bridge(region: &SharedAudioRegion, preview: &SharedPluginHostPr
         }
         let (pl, pr) = (peak_l, peak_r);
         (
-            engine.dsp_ready()
-                && (engine.has_loaded_instances() || engine.continuous_mode()),
+            engine.dsp_ready() && (engine.has_loaded_instances() || engine.continuous_mode()),
             pl,
             pr,
         )
@@ -481,7 +482,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         // rate is met instead of throttled to this ~120 Hz idle loop.
 
         let tick = IDLE_TICK.fetch_add(1, Ordering::Relaxed);
-        if tick % 60 == 0 {
+        if tick.is_multiple_of(60) {
             eprintln!("[plugin-host-ui-thread] message_loop_running=true");
             eprintln!("[plugin-host-ui-thread] editor_count={}", registry.len());
             eprintln!("[plugin-host-ui-thread] idle_tick={tick}");
@@ -502,6 +503,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     cmd: HostCommand,
     registry: &mut Registry,
@@ -629,8 +631,7 @@ fn dispatch(
             );
         }
         HostCommand::PrepareEditorView {
-            plugin_instance_id,
-            ..
+            plugin_instance_id, ..
         } => {
             if !preview.lock().has_instance(&plugin_instance_id) {
                 emit_attach_failed(
@@ -640,9 +641,7 @@ fn dispatch(
                 );
                 return;
             }
-            eprintln!(
-                "[plugin-host] OpenEditor uses existing instance={plugin_instance_id}"
-            );
+            eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
             sphere_plugin_host::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
                 &plugin_instance_id,
                 &plugin_instance_id,
@@ -653,8 +652,7 @@ fn dispatch(
                 &plugin_instance_id,
                 &plugin_instance_id,
             );
-            let (preferred_width, preferred_height) =
-                preview.lock().default_editor_size();
+            let (preferred_width, preferred_height) = preview.lock().default_editor_size();
             let _ = ipc::write_frame(
                 out,
                 &HostEvent::EditorPreferredSize {
@@ -690,9 +688,11 @@ fn dispatch(
             height,
             dpi,
         } => {
-            preview
-                .lock()
-                .embed_resize_for_instance(&plugin_instance_id, width as i32, height as i32);
+            preview.lock().embed_resize_for_instance(
+                &plugin_instance_id,
+                width as i32,
+                height as i32,
+            );
             hlog!(
                 "[PluginHostEditor] resize plugin_instance_id={plugin_instance_id} \
                  onSize width={width} height={height} dpi={dpi}"
@@ -701,7 +701,9 @@ fn dispatch(
         HostCommand::CloseEditor { plugin_instance_id } => {
             preview.lock().preview_all_notes_off(&plugin_instance_id);
             registry.remove(&plugin_instance_id);
-            preview.lock().embed_detach_for_instance(&plugin_instance_id);
+            preview
+                .lock()
+                .embed_detach_for_instance(&plugin_instance_id);
             delayed_redraws.retain(|entry| entry.instance_id != plugin_instance_id);
             preview.lock().set_continuous_mode(!registry.is_empty());
             let _ = ipc::write_frame(out, &HostEvent::EditorClosed { plugin_instance_id });
@@ -727,12 +729,9 @@ fn dispatch(
                      (separate CPAL preview disabled; set FUTUREBOARD_PLUGIN_HOST_CPAL_PREVIEW=1 to audition)"
                 );
             }
-            preview.lock().preview_note_on(
-                &plugin_instance_id,
-                channel,
-                pitch,
-                velocity,
-            );
+            preview
+                .lock()
+                .preview_note_on(&plugin_instance_id, channel, pitch, velocity);
         }
         HostCommand::PreviewNoteOff {
             plugin_instance_id,
@@ -753,7 +752,9 @@ fn dispatch(
             registry.remove(&plugin_instance_id);
             preview.lock().unload_instance(&plugin_instance_id);
             loaded.remove(&plugin_instance_id);
-            hlog!("[PluginHostEditor] unload plugin_instance_id={plugin_instance_id} released=true");
+            hlog!(
+                "[PluginHostEditor] unload plugin_instance_id={plugin_instance_id} released=true"
+            );
             let _ = ipc::write_frame(out, &HostEvent::PluginUnloaded { plugin_instance_id });
         }
         HostCommand::ConfigureAudioBridge {
@@ -891,6 +892,7 @@ fn dispatch(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attach_unified_editor(
     plugin_instance_id: &str,
     parent_hwnd: u64,
@@ -905,9 +907,7 @@ fn attach_unified_editor(
     eprintln!("[plugin-host] editor_ownership=main_owned forced=true");
     eprintln!("[plugin-host] using provided parent_hwnd=0x{parent_hwnd:x}");
     eprintln!("[plugin-host] not creating top-level editor window");
-    eprintln!(
-        "[plugin-host] OpenEditor uses existing instance={plugin_instance_id}"
-    );
+    eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
     if !preview.lock().has_instance(plugin_instance_id) {
         emit_attach_failed(
             out,
@@ -1014,8 +1014,12 @@ fn run_selftest() -> i32 {
                     width: 800,
                     height: 600,
                 };
-                match native_editor::attach_editor_into_parent(content_hwnd, &path, &class_id, region)
-                {
+                match native_editor::attach_editor_into_parent(
+                    content_hwnd,
+                    &path,
+                    &class_id,
+                    region,
+                ) {
                     Ok(handle) => {
                         eprintln!("[vst3-editor] attached begin parent=0x{content_hwnd:x}");
                         eprintln!("[vst3-editor] attached result=ok handle=0x{handle:x}");
@@ -1052,11 +1056,9 @@ fn run_selftest() -> i32 {
 #[cfg(windows)]
 mod platform {
     use windows::core::{w, PCWSTR};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Com::{
-        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
-    };
     use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     use windows::Win32::System::Threading::{
         GetCurrentThreadId, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -1092,10 +1094,11 @@ mod platform {
                 return false;
             };
             let mut code = 0u32;
-            let alive = GetExitCodeProcess(handle, &mut code)
-                .is_ok()
-                .then_some(code == STILL_ACTIVE)
-                .unwrap_or(false);
+            let alive = if GetExitCodeProcess(handle, &mut code).is_ok() {
+                code == STILL_ACTIVE
+            } else {
+                false
+            };
             let _ = CloseHandle(handle);
             alive
         }

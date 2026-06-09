@@ -31,16 +31,17 @@ impl RuntimeTransportSnapshot {
         let position_seconds = position_samples as f64 / sample_rate;
         let loop_start_samples = shared.loop_start_samples.load(Ordering::Relaxed);
         let loop_end_samples = shared.loop_end_samples.load(Ordering::Relaxed);
+        let position_beats = tempo_map.beat_at_seconds(position_seconds);
 
         Self {
             playing: shared.playing.load(Ordering::Relaxed),
             position_samples,
             position_seconds,
-            position_beats: tempo_map.beat_at_seconds(position_seconds),
+            position_beats,
             loop_enabled: shared.loop_enabled.load(Ordering::Relaxed),
             loop_start_seconds: loop_start_samples as f64 / sample_rate,
             loop_end_seconds: loop_end_samples as f64 / sample_rate,
-            bpm: f64_from_bits(shared.bpm_bits.load(Ordering::Relaxed)),
+            bpm: tempo_map.bpm_at_beat(position_beats),
             time_signature: [
                 shared.time_sig_num.load(Ordering::Relaxed).max(1),
                 shared.time_sig_den.load(Ordering::Relaxed).max(1),

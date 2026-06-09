@@ -7,7 +7,7 @@ use DAUx::types::{
     EngineAutomationLaneSnapshot, EngineAutomationPointSnapshot, EngineAutomationTargetSnapshot,
     EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineMidiClipSnapshot,
     EngineMidiControllerLane, EngineMidiControllerPoint, EngineMidiNoteSnapshot,
-    EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot,
+    EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot, EngineTempoPointSnapshot,
     EngineTrackInputSourceSnapshot, EngineTrackSnapshot,
 };
 
@@ -108,10 +108,7 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
                     .filter(|p| !p.trim().is_empty())?;
 
                 use crate::components::timeline::timeline_state::TrackType;
-                let role = if matches!(
-                    track.track_type,
-                    TrackType::Instrument | TrackType::Midi
-                ) {
+                let role = if matches!(track.track_type, TrackType::Instrument | TrackType::Midi) {
                     "instrument"
                 } else {
                     "effect"
@@ -435,6 +432,15 @@ pub(super) fn build_engine_project_snapshot(
             .map(str::to_string)
             .filter(|d| !d.trim().is_empty()),
         bpm: state.bpm.max(1.0) as f64,
+        tempo_points: state
+            .tempo_map
+            .points
+            .iter()
+            .map(|p| EngineTempoPointSnapshot {
+                beat: p.beat,
+                bpm: p.bpm,
+            })
+            .collect(),
         time_signature: [state.time_signature_num, state.time_signature_den],
         sample_rate: sample_rate.max(1),
         tracks,

@@ -216,11 +216,7 @@ pub fn prepare_editor_view(plugin_path: &str, class_id: &str) -> Result<(u64, u3
     if prepare_id == 0 {
         return Err("prepare_editor_view failed".to_string());
     }
-    Ok((
-        prepare_id,
-        width.max(0) as u32,
-        height.max(0) as u32,
-    ))
+    Ok((prepare_id, width.max(0) as u32, height.max(0) as u32))
 }
 
 /// Cancel a pending prepare session (editor closed before attach).

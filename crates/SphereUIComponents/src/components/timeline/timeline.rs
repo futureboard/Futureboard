@@ -2,10 +2,12 @@ use crate::assets;
 use crate::components::edit::{normalize_range, ClipSnapshot, EditCommand, EditHistory};
 use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
+use crate::components::timeline::tempo_track::tempo_track_lane;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipResizeDrag, SnapDivision, TimelineRangeSelection, TimelineState,
-    TimelineTool, TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+    ClipDragItem, ClipResizeDrag, SnapDivision, TempoPointDrag, TimelineRangeSelection,
+    TimelineState, TimelineTool, TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT,
+    TEMPO_LANE_PAD, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -77,6 +79,7 @@ pub struct Timeline {
     on_track_param_change:
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
     on_project_changed: Option<TimelineProjectChangedCb>,
+    on_tempo_map_changed: Option<TimelineProjectChangedCb>,
     on_media_changed: Option<TimelineProjectChangedCb>,
     on_add_track: Option<TimelineAddTrackCb>,
     /// Window-space position of the last drag-move event while files are
@@ -102,6 +105,8 @@ pub struct Timeline {
     automation_drag: Option<crate::components::timeline::timeline_state::AutomationPointDrag>,
     /// In-flight automation marquee (rubber-band) selection. UI-only.
     automation_marquee: Option<crate::components::timeline::timeline_state::AutomationMarquee>,
+    /// In-flight tempo-point drag on the global Tempo Track lane.
+    tempo_drag: Option<TempoPointDrag>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     on_context_menu: Option<TimelineContextMenuCb>,
     /// Invoked when the user double-clicks a MIDI clip — `StudioLayout` uses it
@@ -118,6 +123,14 @@ pub enum TimelineContextTarget {
     TimelineEmpty,
     TrackHeader(String),
     Clip(String),
+    /// Right-click on the arrangement ruler. Carries the beat under the cursor.
+    Ruler(f64),
+    /// Right-click on the global Tempo Track lane.
+    TempoTrack {
+        beat: f64,
+        bpm: f64,
+        point_id: Option<String>,
+    },
 }
 
 pub type TimelineContextMenuCb = std::sync::Arc<
@@ -172,12 +185,13 @@ impl Timeline {
     fn log_input_state(&self, label: &str) {
         if Self::input_debug_enabled() {
             eprintln!(
-                "[timeline-input] {label} pen_drag={} range_drag={} erase_drag={} automation_drag={} automation_marquee={} clip_drag_origin={} pan_drag={}",
+                "[timeline-input] {label} pen_drag={} range_drag={} erase_drag={} automation_drag={} automation_marquee={} tempo_drag={} clip_drag_origin={} pan_drag={}",
                 self.pen_clip_draw.is_some(),
                 self.range_select_drag.is_some(),
                 self.erase_clip_drag.is_some(),
                 self.automation_drag.is_some(),
                 self.automation_marquee.is_some(),
+                self.tempo_drag.is_some(),
                 self.clip_drag_origin.is_some(),
                 self.pan_last_position.is_some(),
             );
@@ -195,6 +209,7 @@ impl Timeline {
         self.erase_preview_ids.clear();
         self.automation_drag = None;
         self.automation_marquee = None;
+        self.tempo_drag = None;
         self.pan_last_position = None;
         self.state.clear_track_drag();
         self.log_input_state("reset-after");
@@ -216,6 +231,7 @@ impl Timeline {
             on_seek_beats: None,
             on_track_param_change: None,
             on_project_changed: None,
+            on_tempo_map_changed: None,
             on_media_changed: None,
             on_add_track: None,
             last_drag_position: None,
@@ -227,6 +243,7 @@ impl Timeline {
             erase_preview_ids: HashSet::new(),
             automation_drag: None,
             automation_marquee: None,
+            tempo_drag: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -244,6 +261,7 @@ impl Timeline {
             on_seek_beats: None,
             on_track_param_change: None,
             on_project_changed: None,
+            on_tempo_map_changed: None,
             on_media_changed: None,
             on_add_track: None,
             last_drag_position: None,
@@ -255,6 +273,7 @@ impl Timeline {
             erase_preview_ids: HashSet::new(),
             automation_drag: None,
             automation_marquee: None,
+            tempo_drag: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -339,8 +358,20 @@ impl Timeline {
         self.on_project_changed = callback;
     }
 
+    pub fn set_tempo_map_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
+        self.on_tempo_map_changed = callback;
+    }
+
     pub fn set_media_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
         self.on_media_changed = callback;
+    }
+
+    pub(crate) fn mark_tempo_map_changed(&self, cx: &mut gpui::App) {
+        if let Some(callback) = self.on_tempo_map_changed.as_ref() {
+            callback(cx);
+        } else {
+            self.mark_project_changed(cx);
+        }
     }
 
     pub(crate) fn mark_project_changed(&self, cx: &mut gpui::App) {
@@ -507,9 +538,89 @@ impl Timeline {
             .iter()
             .position(|t| t.id == track_id)
             .unwrap_or(0);
-        let local_y = (window_y - APP_CHROME_HEIGHT - RULER_HEIGHT + self.state.viewport.scroll_y)
+        let local_y = (window_y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()
+            + self.state.viewport.scroll_y)
             - index as f32 * TRACK_HEIGHT;
         automation_y_to_value(local_y, TRACK_HEIGHT)
+    }
+
+    fn tempo_bpm_from_window_y(&self, window_y: f32) -> f64 {
+        use crate::components::timeline::timeline_state::y_to_bpm;
+        let lane_h = self.state.tempo_track_height();
+        let local_y = (window_y - APP_CHROME_HEIGHT - RULER_HEIGHT - TEMPO_LANE_PAD).max(0.0);
+        let (min_bpm, max_bpm) = self.state.tempo_lane_bpm_range();
+        y_to_bpm(local_y, lane_h, min_bpm, max_bpm)
+    }
+
+    fn begin_tempo_track_interaction(
+        &mut self,
+        beat: f64,
+        bpm: f64,
+        point_id: Option<String>,
+        click_count: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if click_count >= 2 {
+            if point_id.is_none() {
+                if let Some(id) = self.state.add_tempo_point(beat, bpm) {
+                    self.state.select_tempo_point(&id);
+                    self.tempo_drag = Some(TempoPointDrag {
+                        point_id: id,
+                        moved: true,
+                    });
+                    self.mark_tempo_map_changed(cx);
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        if let Some(id) = point_id {
+            self.state.select_tempo_point(&id);
+            self.tempo_drag = Some(TempoPointDrag {
+                point_id: id,
+                moved: false,
+            });
+            cx.notify();
+            return;
+        }
+
+        self.state.clear_tempo_point_selection();
+        cx.notify();
+    }
+
+    fn update_tempo_track_interaction(
+        &mut self,
+        window_x: f32,
+        window_y: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(drag) = self.tempo_drag.clone() else {
+            return false;
+        };
+        let beat = self.snap_beat(self.beat_from_window_x(window_x)).max(0.0) as f64;
+        let bpm = self.tempo_bpm_from_window_y(window_y);
+        if self.state.move_tempo_point(&drag.point_id, beat, bpm) {
+            if let Some(d) = self.tempo_drag.as_mut() {
+                d.moved = true;
+            }
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn finish_tempo_track_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(drag) = self.tempo_drag.take() {
+            if drag.moved {
+                self.mark_tempo_map_changed(cx);
+            }
+            cx.notify();
+            true
+        } else {
+            false
+        }
     }
 
     /// Mouse-down inside an automation lane: hit-test a point (select + begin
@@ -706,7 +817,10 @@ impl Timeline {
         // 220 — the previous constant was stale whenever the bottom
         // panel was resized or hidden, which left the timeline either
         // too short (blank bottom area) or too tall (overflowing).
-        let used_v = APP_CHROME_HEIGHT + RULER_HEIGHT + m.bottom_panel_height + m.status_bar_height;
+        let used_v = APP_CHROME_HEIGHT
+            + self.state.arrangement_content_top()
+            + m.bottom_panel_height
+            + m.status_bar_height;
         let track_view_h = (window_h - used_v).max(TRACK_HEIGHT);
         let content_w = self.timeline_content_width();
         let content_h = self.state.tracks.len() as f32 * TRACK_HEIGHT;
@@ -774,9 +888,9 @@ impl Timeline {
         self.state.viewport.scroll_y = self.state.viewport.scroll_y.clamp(0.0, max_y);
     }
 
-    fn track_area_y_from_window(position: gpui::Point<gpui::Pixels>) -> f32 {
+    fn track_area_y_from_window(&self, position: gpui::Point<gpui::Pixels>) -> f32 {
         let y: f32 = position.y.into();
-        (y - APP_CHROME_HEIGHT - RULER_HEIGHT).max(0.0)
+        (y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()).max(0.0)
     }
 
     fn import_audio_path_at_last_drag(
@@ -802,7 +916,8 @@ impl Timeline {
                 let x: f32 = p.x.into();
                 let y: f32 = p.y.into();
                 let lane_x = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
-                let lane_y = (y - APP_CHROME_HEIGHT - RULER_HEIGHT).max(0.0);
+                let lane_y =
+                    (y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()).max(0.0);
                 (lane_x, lane_y)
             }
             _ => (0.0, 1.0e9_f32),
@@ -839,6 +954,7 @@ impl Render for Timeline {
                     || this.erase_clip_drag.is_some()
                     || this.automation_drag.is_some()
                     || this.automation_marquee.is_some()
+                    || this.tempo_drag.is_some()
                     || this.pan_last_position.is_some()
                 {
                     if Self::input_debug_enabled() {
@@ -1034,6 +1150,7 @@ impl Render for Timeline {
                     || this.erase_clip_drag.is_some()
                     || this.automation_drag.is_some()
                     || this.automation_marquee.is_some()
+                    || this.tempo_drag.is_some()
                     || this.pan_last_position.is_some())
             {
                 this.reset_input_state();
@@ -1041,13 +1158,23 @@ impl Render for Timeline {
                 return;
             }
             if event.pressed_button == Some(gpui::MouseButton::Left)
-                && (this.automation_drag.is_some() || this.automation_marquee.is_some())
+                && (this.automation_drag.is_some()
+                    || this.automation_marquee.is_some()
+                    || this.tempo_drag.is_some())
             {
-                this.update_automation_interaction(
-                    event.position.x.into(),
-                    event.position.y.into(),
-                    cx,
-                );
+                if this.tempo_drag.is_some() {
+                    this.update_tempo_track_interaction(
+                        event.position.x.into(),
+                        event.position.y.into(),
+                        cx,
+                    );
+                } else {
+                    this.update_automation_interaction(
+                        event.position.x.into(),
+                        event.position.y.into(),
+                        cx,
+                    );
+                }
                 return;
             }
             if event.pressed_button == Some(gpui::MouseButton::Right)
@@ -1059,7 +1186,7 @@ impl Render for Timeline {
                 && this.range_select_drag.is_some()
             {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-                let lane_y = Self::track_area_y_from_window(event.position);
+                let lane_y = this.track_area_y_from_window(event.position);
                 let current_track_id = this.state.lane_y_to_track_id(lane_y);
                 let mut overlay: Option<TimelineRangeSelection> = None;
                 if let Some(drag) = this.range_select_drag.as_mut() {
@@ -1129,8 +1256,9 @@ impl Render for Timeline {
 
         let on_pen_mouse_up = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
             this.log_input_state("mouse-up-left");
+            let finished_tempo = this.finish_tempo_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
-            if !finished_automation {
+            if !finished_tempo && !finished_automation {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
                 if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
@@ -1148,8 +1276,9 @@ impl Render for Timeline {
         });
         let on_pen_mouse_up_out = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
             this.log_input_state("mouse-up-left-out");
+            let finished_tempo = this.finish_tempo_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
-            if !finished_automation {
+            if !finished_tempo && !finished_automation {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
                 if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
@@ -1291,6 +1420,22 @@ impl Render for Timeline {
         > = std::sync::Arc::new(on_cycle_grid);
         let on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(on_seek);
+
+        // Right-click on the ruler → position-aware tempo menu. Converts the
+        // markings-area-local x to a beat and forwards the screen position so
+        // the overlay anchors under the cursor.
+        let on_ruler_context = cx.listener(
+            |this, payload: &(f32, f32, f32), window: &mut gpui::Window, cx| {
+                let (click_x, sx, sy) = *payload;
+                let beat = this.state.x_to_beats(click_x).max(0.0) as f64;
+                if let Some(cb) = this.on_context_menu.clone() {
+                    cb(&(TimelineContextTarget::Ruler(beat), sx, sy), window, cx);
+                }
+            },
+        );
+        let on_ruler_context: std::sync::Arc<
+            dyn Fn(&(f32, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_ruler_context);
         let on_select_tool: std::sync::Arc<
             dyn Fn(&TimelineTool, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_select_tool);
@@ -1361,6 +1506,59 @@ impl Render for Timeline {
         let on_automation_cycle: crate::components::timeline::track_lane::AutomationCycleCallback =
             std::sync::Arc::new(on_automation_cycle);
 
+        let on_tempo_down = cx.listener(
+            |this, payload: &(f64, f64, Option<String>, bool, u32), _window, cx| {
+                let (beat, bpm, point_id, _additive, click_count) = (
+                    payload.0,
+                    payload.1,
+                    payload.2.clone(),
+                    payload.3,
+                    payload.4,
+                );
+                this.begin_tempo_track_interaction(beat, bpm, point_id, click_count, cx);
+            },
+        );
+        let on_tempo_down: crate::components::timeline::tempo_track::TempoTrackDownCallback =
+            std::sync::Arc::new(on_tempo_down);
+
+        let on_tempo_context = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |(beat, bpm, point_id, x, y): &(f64, f64, Option<String>, f32, f32),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    cb(
+                        &(
+                            TimelineContextTarget::TempoTrack {
+                                beat: *beat,
+                                bpm: *bpm,
+                                point_id: point_id.clone(),
+                            },
+                            *x,
+                            *y,
+                        ),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::tempo_track::TempoTrackContextCallback
+        });
+
+        let on_tempo_hide = cx.listener(|this, _: &(), _window, cx| {
+            this.state.hide_tempo_track_lane();
+            cx.notify();
+        });
+        let on_tempo_hide: std::sync::Arc<
+            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_tempo_hide);
+
+        let on_tempo_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
+            this.state.tempo_track_collapsed = !this.state.tempo_track_collapsed;
+            cx.notify();
+        });
+        let on_tempo_toggle_collapsed: std::sync::Arc<
+            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_tempo_toggle_collapsed);
+
         let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
             on_select_track: on_select_track.clone(),
             on_toggle_mute: on_toggle_mute.clone(),
@@ -1374,6 +1572,8 @@ impl Render for Timeline {
         };
 
         let state = &self.state;
+        let tempo_h = state.tempo_track_height();
+        let content_top = state.arrangement_content_top();
         // Live pen-draw ghost clip (built before the chain to keep the borrow of
         // `self.pen_clip_draw` separate from the render closures).
         let pen_preview_overlay = self
@@ -1481,7 +1681,7 @@ impl Render for Timeline {
         let on_track_drag_move = cx.listener(
             |this, event: &gpui::DragMoveEvent<TrackDragItem>, _window, cx| {
                 let drag = event.drag(cx).clone();
-                let y = Self::track_area_y_from_window(event.event.position);
+                let y = this.track_area_y_from_window(event.event.position);
                 if this.state.dragging_track_id.as_deref() != Some(drag.track_id.as_str()) {
                     this.state
                         .begin_track_drag(&drag.track_id, drag.origin_index, y);
@@ -1671,7 +1871,19 @@ impl Render for Timeline {
                 on_toggle_snap.clone(),
                 on_cycle_grid.clone(),
                 on_seek.clone(),
+                on_ruler_context.clone(),
             ))
+            // 1b. Global Tempo Track lane (below ruler, above tracks)
+            .when(state.show_tempo_track, |this| {
+                this.child(tempo_track_lane(
+                    state,
+                    tempo_h,
+                    Some(on_tempo_down.clone()),
+                    on_tempo_context.clone(),
+                    Some(on_tempo_hide.clone()),
+                    Some(on_tempo_toggle_collapsed.clone()),
+                ))
+            })
             // 2. Track List Scroll Area
             .child(div().flex_1().min_h_0().relative().child(track_list(
                 state,
@@ -1703,7 +1915,7 @@ impl Render for Timeline {
                     .absolute()
                     .left(px(HEADER_WIDTH))
                     .right_0()
-                    .top(px(RULER_HEIGHT))
+                    .top(px(content_top))
                     .bottom_0()
                     .overflow_hidden()
                     .child(overlay)
@@ -1715,7 +1927,7 @@ impl Render for Timeline {
                     .absolute()
                     .left(px(HEADER_WIDTH))
                     .right_0()
-                    .top(px(RULER_HEIGHT))
+                    .top(px(content_top))
                     .bottom_0()
                     .overflow_hidden()
                     .child(overlay)
@@ -1747,7 +1959,7 @@ impl Render for Timeline {
                     .absolute()
                     .left(px(HEADER_WIDTH))
                     .right_0()
-                    .top(px(RULER_HEIGHT))
+                    .top(px(content_top))
                     .bottom_0()
                     .overflow_hidden()
                     .child({
@@ -1773,6 +1985,7 @@ impl Render for Timeline {
                 content_h,
                 lane_view_h,
                 scroll_max_y,
+                content_top,
             ))
             // 6. Horizontal scrollbar (bottom edge, over the lane area)
             .child(horizontal_scrollbar(
@@ -1887,6 +2100,7 @@ fn vertical_scrollbar(
     content_h: f32,
     view_h: f32,
     max_scroll: f32,
+    content_top: f32,
 ) -> gpui::AnyElement {
     if max_scroll <= 0.5 || view_h <= 0.0 {
         return Empty.into_any_element();
@@ -1906,7 +2120,7 @@ fn vertical_scrollbar(
         // Re-derive the local y by subtracting an estimated chrome
         // height; clamp with `max_scroll` so any over/under-estimate
         // still yields a valid scroll position.
-        let local = (click_y - 36.0 - RULER_HEIGHT).max(0.0);
+        let local = (click_y - 36.0 - content_top).max(0.0);
         let frac = (local / track_h.max(1.0)).clamp(0.0, 1.0);
         this.state.set_scroll_immediate(
             this.state.viewport.scroll_x,
@@ -1939,7 +2153,7 @@ fn vertical_scrollbar(
 
     div()
         .absolute()
-        .top(px(RULER_HEIGHT))
+        .top(px(content_top))
         .right(px(0.0))
         .bottom(px(0.0))
         .w(px(SCROLLBAR_THICKNESS))

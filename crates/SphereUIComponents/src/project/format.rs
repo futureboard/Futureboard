@@ -2,7 +2,7 @@ use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
     InputMonitorMode, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNote,
     PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer,
-    ProjectPluginInstance, ProjectSend, ProjectTrack, ProjectTrackAudioFormat,
+    ProjectPluginInstance, ProjectSend, ProjectTempoPoint, ProjectTrack, ProjectTrackAudioFormat,
     ProjectTrackInputRouting, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
     ProjectTrackType, TrackRouting,
 };
@@ -15,7 +15,10 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v4 adds a per-MIDI-note muted flag. v3 adds persisted track routing fields.
 /// Older files still load: v1/v2 use stable per-track routing defaults,
 /// v1/v2/v3 notes default to unmuted, and pre-v5 MIDI clips have no CC lanes.
-pub const PROJECT_VERSION: u32 = 6;
+/// v7 adds project-level tempo automation markers (TempoMap); pre-v7 files have
+/// no tempo points and play at the static `bpm`.
+/// v8 adds stable ids on tempo points for independent marker editing.
+pub const PROJECT_VERSION: u32 = 8;
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -583,6 +586,18 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         encode_asset(&mut w, a);
     }
 
+    // Tempo automation markers (v7+). Appended at the end of the body so older
+    // readers that stop after assets are unaffected. v8+ includes stable ids.
+    w.write_u32(project.settings.tempo_points.len() as u32);
+    for p in &project.settings.tempo_points {
+        if PROJECT_VERSION >= 8 {
+            w.write_str(&p.id);
+        }
+        w.write_f64(p.beat);
+        w.write_f64(p.bpm);
+        w.write_u8(p.curve);
+    }
+
     w.into_bytes()
 }
 
@@ -1042,6 +1057,31 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         assets.push(decode_asset(&mut r)?);
     }
 
+    // Tempo automation markers (v7+). Pre-v7 files have none. v8+ stores ids.
+    let tempo_points = if version >= 7 {
+        let count = r.read_u32()? as usize;
+        let mut points = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = if version >= 8 {
+                r.read_str()?
+            } else {
+                String::new()
+            };
+            let beat = r.read_f64()?;
+            let bpm = r.read_f64()?;
+            let curve = r.read_u8()?;
+            points.push(ProjectTempoPoint {
+                id,
+                beat,
+                bpm,
+                curve,
+            });
+        }
+        points
+    } else {
+        Vec::new()
+    };
+
     Ok(FutureboardProject {
         id,
         name,
@@ -1049,6 +1089,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         modified_at,
         settings: super::ProjectSettings {
             bpm,
+            tempo_points,
             time_sig_num,
             time_sig_den,
             sample_rate,
@@ -1216,6 +1257,28 @@ mod tests {
         let bytes = encode_project(&project);
         let version = peek_project_header(&bytes).expect("valid header");
         assert_eq!(version, PROJECT_VERSION);
+    }
+
+    #[test]
+    fn tempo_points_roundtrip_v8() {
+        let mut project = FutureboardProject::new("Tempo Test");
+        project.settings.tempo_points = vec![
+            ProjectTempoPoint {
+                id: "tempo-a".to_string(),
+                beat: 0.0,
+                bpm: 120.0,
+                curve: 0,
+            },
+            ProjectTempoPoint {
+                id: "tempo-b".to_string(),
+                beat: 8.0,
+                bpm: 140.0,
+                curve: 1,
+            },
+        ];
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode");
+        assert_eq!(decoded.settings.tempo_points, project.settings.tempo_points);
     }
 
     #[test]

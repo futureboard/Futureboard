@@ -48,6 +48,19 @@ pub enum ContextTarget {
     Clip(String),
     Browser(Option<PathBuf>),
     Mixer(String),
+    /// The compact tempo menu opened from the transport BPM display.
+    Tempo,
+    /// Right-click on the timeline ruler. Carries the beat under the cursor so
+    /// tempo/time-signature actions are position-aware.
+    TimelineRuler {
+        beat: f64,
+    },
+    /// Right-click on the global Tempo Track lane.
+    TempoTrack {
+        beat: f64,
+        bpm: f64,
+        point_id: Option<String>,
+    },
 }
 
 /// Which docked studio panels are visible in the main window.

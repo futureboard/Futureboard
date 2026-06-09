@@ -78,7 +78,11 @@ fn sanitize_child_env(command: &mut Command) {
 
     // Tag the child's role so host-side diagnostics / future behavior can branch
     // on it without sniffing GPUI flags.
-    for key in ["WGPU_BACKEND", "LIBGL_ALWAYS_SOFTWARE", "DXGI_PRESENT_ALLOW_TEARING"] {
+    for key in [
+        "WGPU_BACKEND",
+        "LIBGL_ALWAYS_SOFTWARE",
+        "DXGI_PRESENT_ALLOW_TEARING",
+    ] {
         command.env_remove(key);
     }
     command.env("FUTUREBOARD_PROCESS_ROLE", "plugin_host");
@@ -133,12 +137,12 @@ pub fn log_bridge_env() {
     eprintln!("[plugin-runtime] default_backend=external_bridge");
     eprintln!("[plugin-runtime] legacy_override={legacy}");
     if let Ok(raw) = std::env::var("FUTUREBOARD_PLUGIN_HOST_BRIDGE") {
-        eprintln!(
-            "[plugin-runtime] deprecated_env_ignored FUTUREBOARD_PLUGIN_HOST_BRIDGE={raw}"
-        );
+        eprintln!("[plugin-runtime] deprecated_env_ignored FUTUREBOARD_PLUGIN_HOST_BRIDGE={raw}");
     }
     if legacy {
-        eprintln!("[plugin-runtime] backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1");
+        eprintln!(
+            "[plugin-runtime] backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1"
+        );
         eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
         eprintln!("[plugin-runtime] legacy path may hang GPU/OpenGL/JUCE plugin editors");
     } else {

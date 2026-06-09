@@ -26,6 +26,7 @@ use gpui::{
 
 use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
+use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
 use crate::theme::{self, Colors};
 use sphere_plugin_host::editor_quirk::{match_quirk, PluginEditorQuirk};
 use sphere_plugin_host::ipc::HostEvent;
@@ -33,7 +34,6 @@ use sphere_plugin_host::native_editor::PluginEditorPresentationMode;
 use sphere_plugin_host::plugin_host_client::{
     plugin_host_bridge_enabled, ClientEvent, PluginHostClient,
 };
-use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
 
 /// Physical-pixel host region under the GPUI window. (Local mirror of the
 /// backend's region struct — the editor is now driven by the DAUx runtime
@@ -101,7 +101,7 @@ fn build_host_backend(
     let class_id = processor.class_id().map(|s| s.to_string());
 
     let mut client = match PluginHostClient::spawn_bridge() {
-        Ok(c) => c, // spawn_bridge logged current_exe/resolved/exists/spawned
+        Ok(c) => c,            // spawn_bridge logged current_exe/resolved/exists/spawned
         Err(_) => return None, // spawn_bridge already logged spawn_failed
     };
 
@@ -975,7 +975,8 @@ impl PluginEditorWindow {
                     );
                 }
                 Err(e) => {
-                    self.status = PluginEditorStatus::Failed(format!("send OpenEditor failed: {e}"));
+                    self.status =
+                        PluginEditorStatus::Failed(format!("send OpenEditor failed: {e}"));
                     cx.notify();
                     return;
                 }
@@ -1009,20 +1010,16 @@ impl PluginEditorWindow {
     pub(crate) fn editor_event_instance_id(event: &ClientEvent) -> Option<&str> {
         match event {
             ClientEvent::Host(HostEvent::EditorAttached {
-                plugin_instance_id,
-                ..
+                plugin_instance_id, ..
             })
             | ClientEvent::Host(HostEvent::EditorAttachFailed {
-                plugin_instance_id,
-                ..
+                plugin_instance_id, ..
             })
             | ClientEvent::Host(HostEvent::EditorClosed {
-                plugin_instance_id,
-                ..
+                plugin_instance_id, ..
             })
             | ClientEvent::Host(HostEvent::EditorPreferredSize {
-                plugin_instance_id,
-                ..
+                plugin_instance_id, ..
             }) => Some(plugin_instance_id.as_str()),
             _ => None,
         }
@@ -1551,7 +1548,14 @@ pub(crate) fn open_plugin_editor_window(
     let editor_id = format!("{track_id}::{insert_id}");
     let result = cx.open_window(options, |_window, cx| {
         cx.new(|cx| {
-            PluginEditorWindow::new(track_id, insert_id, display_name, processor, shared_bridge, cx)
+            PluginEditorWindow::new(
+                track_id,
+                insert_id,
+                display_name,
+                processor,
+                shared_bridge,
+                cx,
+            )
         })
     });
     if plugin_view_debug() {

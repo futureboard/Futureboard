@@ -154,6 +154,7 @@ impl StudioLayout {
             position_label,
             bpm_value,
             bpm_label,
+            bpm_has_automation,
             time_signature_label,
             recording,
             loop_enabled,
@@ -161,7 +162,10 @@ impl StudioLayout {
             follow_playhead,
         ) = {
             let timeline = self.timeline.read(cx);
-            let bpm = timeline.state.bpm;
+            // The transport always shows the *effective* BPM at the playhead so
+            // tempo automation is visible without opening the Tempo Track.
+            let bpm = timeline.state.effective_bpm_at_playhead() as f32;
+            let bpm_has_automation = timeline.state.tempo_has_automation();
             let bpm_label = if (bpm.fract()).abs() < 0.05 {
                 format!("{:.0}", bpm)
             } else {
@@ -173,6 +177,7 @@ impl StudioLayout {
                     .format_bar_beat(timeline.state.transport.playhead_beats),
                 bpm,
                 bpm_label,
+                bpm_has_automation,
                 format!(
                     "{}/{}",
                     timeline.state.time_signature_num, timeline.state.time_signature_den
@@ -235,6 +240,27 @@ impl StudioLayout {
             )
         };
 
+        let on_bpm_menu: components::BpmMenuCb = {
+            let this = cx.entity().clone();
+            Arc::new(
+                move |pos: &(f32, f32), _window: &mut Window, cx: &mut gpui::App| {
+                    let (x, y) = *pos;
+                    let _ = this.update(cx, |this, cx| {
+                        this.open_tempo_menu(x, y, cx);
+                    });
+                },
+            )
+        };
+
+        let on_bpm_edit_start: components::ChromeActionCb = {
+            let this = cx.entity().clone();
+            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| {
+                    this.begin_bpm_edit(cx);
+                });
+            })
+        };
+
         components::TransportChromeState {
             playing,
             recording,
@@ -244,6 +270,12 @@ impl StudioLayout {
             position_label,
             bpm: bpm_value,
             bpm_label,
+            bpm_has_automation,
+            bpm_editing: self.bpm_editing,
+            bpm_input: self.bpm_input.clone(),
+            // The layout's key handler routes keys while editing, so render the
+            // caret whenever the editor is open.
+            bpm_edit_focused: self.bpm_editing,
             time_signature_label,
             on_return_to_start,
             on_play_toggle,
@@ -254,6 +286,8 @@ impl StudioLayout {
             on_follow_toggle,
             on_set_bpm,
             on_bpm_drag,
+            on_bpm_menu,
+            on_bpm_edit_start,
         }
     }
 

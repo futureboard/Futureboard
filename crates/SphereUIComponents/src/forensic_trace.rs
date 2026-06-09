@@ -24,13 +24,11 @@ pub fn midi_model_trace_enabled() -> bool {
 }
 
 pub fn shell_layout_trace_enabled() -> bool {
-    forensic_trace_enabled()
-        || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+    forensic_trace_enabled() || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
 }
 
 pub fn preview_perf_trace_enabled() -> bool {
-    forensic_trace_enabled()
-        || std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some()
+    forensic_trace_enabled() || std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some()
 }
 
 /// Stable editor window id: `track_id::insert_id`.
@@ -82,18 +80,12 @@ pub fn dump_midi_model(state: &TimelineState) {
             let ClipType::Midi { notes, .. } = &clip.clip_type else {
                 continue;
             };
-            eprintln!(
-                "[midi-model-dump] clip={} notes={}",
-                clip.id,
-                notes.len()
-            );
+            eprintln!("[midi-model-dump] clip={} notes={}", clip.id, notes.len());
             for note in notes.iter().filter(|n| !n.muted) {
                 let end = note.start + note.duration;
                 eprintln!(
                     "[midi-model-dump] note pitch={} start={:.3} end={:.3}",
-                    note.pitch,
-                    note.start,
-                    end
+                    note.pitch, note.start, end
                 );
             }
         }

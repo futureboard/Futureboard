@@ -75,35 +75,33 @@ mod imp {
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-        GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx,
-        RedrawWindow, SelectObject, SetBkMode, SetTextColor, UpdateWindow, DT_END_ELLIPSIS,
-        DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, MONITOR_DEFAULTTOPRIMARY,
-        MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_INVALIDATE,
-        RDW_UPDATENOW, TRANSPARENT, BLACK_BRUSH,
+        GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
+        SelectObject, SetBkMode, SetTextColor, UpdateWindow, BLACK_BRUSH, DT_END_ELLIPSIS, DT_LEFT,
+        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, MONITOR_DEFAULTTONEAREST,
+        MONITOR_DEFAULTTOPRIMARY, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_INVALIDATE,
+        RDW_UPDATENOW, TRANSPARENT,
     };
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, ScreenToClient, MONITORINFO};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Controls::WM_MOUSELEAVE;
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE,
-        TRACKMOUSEEVENT,
+        GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-        GetWindowRect, IsZoomed, LoadCursorW, RegisterClassW, SetForegroundWindow,
-        SetWindowPos, ShowWindow, GetForegroundWindow, GetWindowLongPtrW, SetWindowLongPtrW,
-        GWL_EXSTYLE, GWL_STYLE,
-        GWLP_USERDATA, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
-        HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, MINMAXINFO, SWP_FRAMECHANGED,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_MAXIMIZE,
-        SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
-        WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
-        WM_NCMOUSEMOVE,
-        WM_NCPAINT, WM_PAINT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-        WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
-        WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+        GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsZoomed, LoadCursorW,
+        RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW,
+        MINMAXINFO, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_GETMINMAXINFO,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE,
+        WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT, WM_PAINT, WM_SIZE, WNDCLASSW,
+        WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME,
+        WS_EX_APPWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        WS_VISIBLE,
     };
 
     const SHELL_CLASS: PCWSTR = w!("SpherePluginEditorShell");
@@ -289,10 +287,18 @@ mod imp {
                 );
             }
         }
-        inner.last_layout_x.store(layout.content_x, Ordering::Relaxed);
-        inner.last_layout_y.store(layout.content_y, Ordering::Relaxed);
-        inner.last_layout_w.store(layout.content_w, Ordering::Relaxed);
-        inner.last_layout_h.store(layout.content_h, Ordering::Relaxed);
+        inner
+            .last_layout_x
+            .store(layout.content_x, Ordering::Relaxed);
+        inner
+            .last_layout_y
+            .store(layout.content_y, Ordering::Relaxed);
+        inner
+            .last_layout_w
+            .store(layout.content_w, Ordering::Relaxed);
+        inner
+            .last_layout_h
+            .store(layout.content_h, Ordering::Relaxed);
         inner.resize_w.store(layout.content_w, Ordering::Relaxed);
         inner.resize_h.store(layout.content_h, Ordering::Relaxed);
         if changed {
@@ -309,10 +315,7 @@ mod imp {
                 content_client_w = (cr.right - cr.left).max(0);
                 content_client_h = (cr.bottom - cr.top).max(0);
                 let scr = content_screen_rect(content);
-                format!(
-                    "({},{},{},{})",
-                    scr.left, scr.top, scr.right, scr.bottom
-                )
+                format!("({},{},{},{})", scr.left, scr.top, scr.right, scr.bottom)
             } else {
                 "none".to_string()
             };
@@ -327,10 +330,7 @@ mod imp {
                 eprintln!("[plugin-shell-layout] border={}", layout.border);
                 eprintln!(
                     "[plugin-shell-layout] computed_content=({},{},{},{})",
-                    layout.content_x,
-                    layout.content_y,
-                    layout.content_w,
-                    layout.content_h
+                    layout.content_x, layout.content_y, layout.content_w, layout.content_h
                 );
                 eprintln!("[plugin-shell-layout] content_hwnd=0x{content_raw:x}");
                 eprintln!(
@@ -548,10 +548,8 @@ mod imp {
         outer_h: i32,
         owner_hwnd: Option<u64>,
     ) -> (i32, i32, RECT) {
-        let owner = owner_hwnd
-            .map(hwnd_from)
-            .filter(|hwnd| hwnd.0 != std::ptr::null_mut());
-        let reference = owner.unwrap_or(HWND::default());
+        let owner = owner_hwnd.map(hwnd_from).filter(|hwnd| !hwnd.0.is_null());
+        let reference = owner.unwrap_or_default();
         let work = monitor_work_area_for(reference);
         let (mut x, mut y) = if let Some(owner) = owner {
             let mut owner_rect = RECT::default();
@@ -664,11 +662,7 @@ mod imp {
         let scale = dpi_scale(hwnd);
         let t = theme();
         let active = unsafe { GetForegroundWindow() == hwnd };
-        let title_fg = if active {
-            t.title_text
-        } else {
-            t.status_text
-        };
+        let title_fg = if active { t.title_text } else { t.status_text };
 
         // Futureboard border on all edges (no classic OS frame).
         unsafe {
@@ -1141,10 +1135,7 @@ mod imp {
                         let _ = unsafe { SetFocus(Some(child)) };
                     }
                     let focus_hwnd = unsafe { GetFocus() };
-                    eprintln!(
-                        "[plugin-input] host_focus=0x{:x}",
-                        focus_hwnd.0 as u64
-                    );
+                    eprintln!("[plugin-input] host_focus=0x{:x}", focus_hwnd.0 as u64);
                     eprintln!(
                         "[plugin-input] child_hwnd_under_cursor=0x{:x}",
                         if child != hwnd { child.0 as u64 } else { 0 }
@@ -1173,13 +1164,14 @@ mod imp {
                     }
                     // Loading / error overlay text — DirectWrite, GDI fallback.
                     if let Some(inner) = inner {
-                        let (text, is_error) = inner
-                            .status
-                            .lock()
-                            .map(|s| s.clone())
-                            .unwrap_or_default();
+                        let (text, is_error) =
+                            inner.status.lock().map(|s| s.clone()).unwrap_or_default();
                         if !text.is_empty() {
-                            let fg = if is_error { t.error_text } else { t.status_text };
+                            let fg = if is_error {
+                                t.error_text
+                            } else {
+                                t.status_text
+                            };
                             let scale = dpi_scale(hwnd);
                             let em = t.status_em * scale;
                             let drew = crate::components::plugin_shell_text::draw_text(
@@ -1298,10 +1290,7 @@ mod imp {
             ensure_classes();
             let status = format!("Loading: {title}");
             let inner = ShellInner::new(title.to_string(), status, owner_hwnd);
-            let scale = owner_hwnd
-                .map(hwnd_from)
-                .map(dpi_scale)
-                .unwrap_or(1.0);
+            let scale = owner_hwnd.map(hwnd_from).map(dpi_scale).unwrap_or(1.0);
             let th = (theme().titlebar_h as f32 * scale).round() as i32;
             let bw = (theme().border_px as f32 * scale).round().max(1.0) as i32;
             // Borderless: outer client = content + titlebar + bottom border strip.
@@ -1315,9 +1304,7 @@ mod imp {
             eprintln!(
                 "[plugin-editor-window] initial_size content={content_w}x{content_h} shell={win_w}x{win_h}"
             );
-            eprintln!(
-                "[plugin-editor-window] positioned x={pos_x} y={pos_y} w={win_w} h={win_h}"
-            );
+            eprintln!("[plugin-editor-window] positioned x={pos_x} y={pos_y} w={win_w} h={win_h}");
             let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
 
             unsafe {
@@ -1378,7 +1365,9 @@ mod imp {
                     }
                 };
                 install_inner(content, &inner);
-                inner.content_hwnd.store(content.0 as u64, Ordering::Relaxed);
+                inner
+                    .content_hwnd
+                    .store(content.0 as u64, Ordering::Relaxed);
                 apply_shell_layout(top, &inner, "initial_open");
 
                 let _ = ShowWindow(top, SW_SHOW);
@@ -1497,8 +1486,8 @@ mod imp {
             eprintln!("[plugin-shell-gap-check] gap_bottom={gap_bottom}");
             if host_hwnd != 0 {
                 let host_fits = host_w == layout.content_w && host_h == layout.content_h;
-                let child_fits = plugin_child_w == 0
-                    || (plugin_child_w == host_w && plugin_child_h == host_h);
+                let child_fits =
+                    plugin_child_w == 0 || (plugin_child_w == host_w && plugin_child_h == host_h);
                 eprintln!(
                     "[vst3-editor-audit] child hwnd rect matches host={}",
                     host_fits && child_fits
@@ -1556,10 +1545,7 @@ mod imp {
             content_h: i32,
         ) -> (i32, i32, bool) {
             let top = hwnd_from(self.top_hwnd);
-            let reference = self
-                .owner_hwnd()
-                .map(hwnd_from)
-                .unwrap_or(top);
+            let reference = self.owner_hwnd().map(hwnd_from).unwrap_or(top);
             let work = monitor_work_area_for(reference);
             let th = titlebar_h(top);
             let bw = border_w(top);
@@ -1604,8 +1590,7 @@ mod imp {
                 );
                 if recenter && !self.inner.has_user_moved.load(Ordering::Relaxed) {
                     let (outer_w, outer_h) = (win_w, win_h);
-                    let (x, y, _) =
-                        center_shell_open_position(outer_w, outer_h, self.owner_hwnd());
+                    let (x, y, _) = center_shell_open_position(outer_w, outer_h, self.owner_hwnd());
                     let _ = SetWindowPos(
                         top,
                         None,

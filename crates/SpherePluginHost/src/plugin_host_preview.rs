@@ -56,7 +56,7 @@ impl PluginHostPreviewEngine {
     pub fn new(sample_rate: u32, block_size: u32) -> Self {
         Self {
             sample_rate: sample_rate.max(44_100),
-            block_size: block_size.max(64).min(2048),
+            block_size: block_size.clamp(64, 2048),
             instances: HashMap::new(),
             dsp_ready: false,
             continuous_mode: false,
@@ -105,11 +105,7 @@ impl PluginHostPreviewEngine {
         self.instances.keys().cloned().collect()
     }
 
-    pub fn log_unified_runtime(
-        track_id: &str,
-        insert_id: &str,
-        plugin_instance_id: &str,
-    ) {
+    pub fn log_unified_runtime(track_id: &str, insert_id: &str, plugin_instance_id: &str) {
         Self::verify_unified_runtime(
             track_id,
             insert_id,
@@ -123,6 +119,7 @@ impl PluginHostPreviewEngine {
     }
 
     /// Strict instance identity check (spec Part 6).
+    #[allow(clippy::too_many_arguments)]
     pub fn verify_unified_runtime(
         track_id: &str,
         insert_id: &str,
@@ -162,9 +159,7 @@ impl PluginHostPreviewEngine {
         for (id, instance) in &self.instances {
             let editor = instance.processor.embed_is_valid();
             let dsp = instance.processor.is_ready();
-            eprintln!(
-                "[plugin-host-registry] instance={id} loaded=true editor={editor} dsp={dsp}"
-            );
+            eprintln!("[plugin-host-registry] instance={id} loaded=true editor={editor} dsp={dsp}");
         }
     }
 
@@ -177,7 +172,7 @@ impl PluginHostPreviewEngine {
         max_block_size: u32,
     ) -> bool {
         self.sample_rate = sample_rate.max(44_100);
-        self.block_size = max_block_size.max(64).min(2048);
+        self.block_size = max_block_size.clamp(64, 2048);
         eprintln!("[plugin-host-registry] load begin instance={plugin_instance_id}");
         if self.instances.contains_key(plugin_instance_id) {
             eprintln!(
@@ -194,8 +189,7 @@ impl PluginHostPreviewEngine {
         eprintln!(
             "[plugin-host-vst3] create entered instance={plugin_instance_id} path={plugin_path}"
         );
-        let Some(processor) =
-            Vst3RuntimeProcessor::new(plugin_path, class_id, self.sample_rate)
+        let Some(processor) = Vst3RuntimeProcessor::new(plugin_path, class_id, self.sample_rate)
         else {
             eprintln!(
                 "[plugin-host-midi] preview processor create failed instance={plugin_instance_id}"
@@ -243,18 +237,14 @@ impl PluginHostPreviewEngine {
         height: i32,
     ) -> Option<u64> {
         let Some(instance) = self.instances.get(plugin_instance_id) else {
-            eprintln!(
-                "[plugin-host-registry] get found=false instance={plugin_instance_id}"
-            );
+            eprintln!("[plugin-host-registry] get found=false instance={plugin_instance_id}");
             eprintln!(
                 "[plugin-editor] open ERROR instance not loaded instance={plugin_instance_id} uses_runtime_instance=false"
             );
             return None;
         };
         eprintln!("[plugin-host-registry] get found=true instance={plugin_instance_id}");
-        eprintln!(
-            "[plugin-editor] open instance={plugin_instance_id} uses_runtime_instance=true"
-        );
+        eprintln!("[plugin-editor] open instance={plugin_instance_id} uses_runtime_instance=true");
         eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
         eprintln!("[plugin-editor] no_duplicate_component_created=true");
         instance
@@ -274,9 +264,7 @@ impl PluginHostPreviewEngine {
             eprintln!("[plugin-host-layout] host_client=({width},{height})");
             if let Some((child_w, child_h)) = instance.processor.embed_content_size() {
                 eprintln!("[plugin-host-layout] plugin_child_count=1");
-                eprintln!(
-                    "[plugin-host-layout] child=plugin_view client=({child_w},{child_h})"
-                );
+                eprintln!("[plugin-host-layout] child=plugin_view client=({child_w},{child_h})");
                 let child_matches = child_w == width && child_h == height;
                 eprintln!("[plugin-host-layout] child_matches_host={child_matches}");
             } else {
@@ -331,20 +319,14 @@ impl PluginHostPreviewEngine {
             pitch: pitch.min(127),
         };
         if instance.active_notes.contains(&key) {
-            instance.pending_events.push(Vst3MidiEvent::note_off(
-                0,
-                key.channel,
-                key.pitch,
-                0.0,
-            ));
+            instance
+                .pending_events
+                .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
         }
         let vel = velocity.clamp(1, 127) as f32 / 127.0;
-        instance.pending_events.push(Vst3MidiEvent::note_on(
-            0,
-            key.channel,
-            key.pitch,
-            vel,
-        ));
+        instance
+            .pending_events
+            .push(Vst3MidiEvent::note_on(0, key.channel, key.pitch, vel));
         if !instance.active_notes.contains(&key) {
             instance.active_notes.push(key);
         }
@@ -352,12 +334,7 @@ impl PluginHostPreviewEngine {
         eprintln!("[plugin-host-midi] queued note_on to VSTi");
     }
 
-    pub fn preview_note_off(
-        &mut self,
-        plugin_instance_id: &str,
-        channel: u8,
-        pitch: u8,
-    ) {
+    pub fn preview_note_off(&mut self, plugin_instance_id: &str, channel: u8, pitch: u8) {
         eprintln!(
             "[plugin-host-midi-consume] preview note_off instance={plugin_instance_id} pitch={pitch}"
         );
@@ -368,20 +345,15 @@ impl PluginHostPreviewEngine {
             channel: channel.min(15),
             pitch: pitch.min(127),
         };
-        instance.pending_events.push(Vst3MidiEvent::note_off(
-            0,
-            key.channel,
-            key.pitch,
-            0.0,
-        ));
+        instance
+            .pending_events
+            .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
         instance.active_notes.retain(|n| *n != key);
         instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
     }
 
     pub fn preview_all_notes_off(&mut self, plugin_instance_id: &str) {
-        eprintln!(
-            "[plugin-host-midi] preview all_notes_off instance={plugin_instance_id}"
-        );
+        eprintln!("[plugin-host-midi] preview all_notes_off instance={plugin_instance_id}");
         let Some(instance) = self.instances.get_mut(plugin_instance_id) else {
             return;
         };
@@ -395,23 +367,20 @@ impl PluginHostPreviewEngine {
 
     fn panic_instance(instance: &mut PreviewInstance) {
         for key in instance.active_notes.drain(..) {
-            instance.pending_events.push(Vst3MidiEvent::note_off(
-                0,
-                key.channel,
-                key.pitch,
-                0.0,
-            ));
+            instance
+                .pending_events
+                .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
         }
         let ch = 0u8;
-        instance.pending_events.push(Vst3MidiEvent::control_change(
-            0, ch, CC_SUSTAIN, 0.0,
-        ));
-        instance.pending_events.push(Vst3MidiEvent::control_change(
-            0, ch, CC_ALL_NOTES_OFF, 0.0,
-        ));
-        instance.pending_events.push(Vst3MidiEvent::control_change(
-            0, ch, CC_ALL_SOUND_OFF, 0.0,
-        ));
+        instance
+            .pending_events
+            .push(Vst3MidiEvent::control_change(0, ch, CC_SUSTAIN, 0.0));
+        instance
+            .pending_events
+            .push(Vst3MidiEvent::control_change(0, ch, CC_ALL_NOTES_OFF, 0.0));
+        instance
+            .pending_events
+            .push(Vst3MidiEvent::control_change(0, ch, CC_ALL_SOUND_OFF, 0.0));
         instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
     }
 
@@ -549,13 +518,9 @@ impl PluginHostPreviewEngine {
                 continue;
             }
             let events = std::mem::take(&mut instance.pending_events);
-            let _ = instance.processor.process_stereo_block_with_midi(
-                in_l,
-                in_r,
-                &mut out_l,
-                &mut out_r,
-                &events,
-            );
+            let _ = instance
+                .processor
+                .process_stereo_block_with_midi(in_l, in_r, &mut out_l, &mut out_r, &events);
             for i in 0..frames {
                 mix_l[i] += out_l[i];
                 mix_r[i] += out_r[i];
@@ -630,11 +595,7 @@ pub fn try_start_preview_output(shared: &SharedPluginHostPreview) -> bool {
                     let l = mix_l.get(i).copied().unwrap_or(0.0);
                     let r = mix_r.get(i).copied().unwrap_or(0.0);
                     let mono = if ch == 1 { (l + r) * 0.5 } else { l };
-                    let sample = if ch == 1 {
-                        mono
-                    } else {
-                        l
-                    };
+                    let sample = if ch == 1 { mono } else { l };
                     frame[0] = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     if ch > 1 {
                         frame[1] = (r.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [features]
 default = ["gpu-renderer"]
 gpu-renderer = ["dep:pollster", "dep:raw-window-handle", "dep:wgpu"]
+plugin-host-bin = ["sphere-plugin-host/plugin-host-bin"]
 
 [dependencies]
 # NOTE: `default-features = false` opts out of gpui's `windows-manifest` feature.

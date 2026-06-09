@@ -104,9 +104,9 @@ mod imp {
         dpi_scale: f32,
     ) -> bool {
         with_renderer(|renderer| match renderer {
-            Some(renderer) => {
-                renderer.draw_text(hdc, rect, text, family, weight, em_px, bg, fg, align, dpi_scale)
-            }
+            Some(renderer) => renderer.draw_text(
+                hdc, rect, text, family, weight, em_px, bg, fg, align, dpi_scale,
+            ),
             None => false,
         })
     }

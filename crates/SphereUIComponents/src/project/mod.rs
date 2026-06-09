@@ -391,9 +391,21 @@ pub struct ProjectAsset {
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
+/// A persisted tempo marker. `curve` is the `TempoCurve` tag (0=Hold,
+/// 1=Linear, 2=Smooth). `id` is empty in v7 files and assigned on load.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectTempoPoint {
+    pub id: String,
+    pub beat: f64,
+    pub bpm: f64,
+    pub curve: u8,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectSettings {
     pub bpm: f64,
+    /// Project-level tempo automation markers. Empty = static tempo at `bpm`.
+    pub tempo_points: Vec<ProjectTempoPoint>,
     pub time_sig_num: u32,
     pub time_sig_den: u32,
     pub sample_rate: u32,
@@ -404,6 +416,7 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             bpm: 120.0,
+            tempo_points: Vec::new(),
             time_sig_num: 4,
             time_sig_den: 4,
             sample_rate: 48000,
@@ -618,6 +631,17 @@ impl From<&TimelineState> for FutureboardProject {
             .collect();
         let mut project = FutureboardProject::new("Untitled Project");
         project.settings.bpm = tl.bpm as f64;
+        project.settings.tempo_points = tl
+            .tempo_map
+            .points
+            .iter()
+            .map(|p| ProjectTempoPoint {
+                id: p.id.clone(),
+                beat: p.beat,
+                bpm: p.bpm,
+                curve: p.curve.to_tag(),
+            })
+            .collect();
         project.settings.time_sig_num = tl.time_signature_num;
         project.settings.time_sig_den = tl.time_signature_den;
         project.tracks = tracks;
@@ -635,6 +659,22 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
     };
 
     tl.bpm = project.settings.bpm as f32;
+    tl.tempo_map = crate::components::timeline::timeline_state::TempoMap::with_points(
+        project
+            .settings
+            .tempo_points
+            .iter()
+            .map(|p| {
+                crate::components::timeline::timeline_state::TempoPoint::with_id(
+                    p.id.clone(),
+                    p.beat,
+                    p.bpm,
+                    crate::components::timeline::timeline_state::TempoCurve::from_tag(p.curve),
+                )
+            })
+            .collect(),
+    );
+    tl.tempo_map.ensure_point_ids();
     tl.time_signature_num = project.settings.time_sig_num;
     tl.time_signature_den = project.settings.time_sig_den;
     tl.master.volume = project.mixer.master_volume_norm;

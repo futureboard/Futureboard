@@ -92,7 +92,10 @@ impl StudioLayout {
                             .tracks
                             .iter()
                             .filter(|track| {
-                                track.inserts.iter().any(|slot| slot.id == plugin_instance_id)
+                                track
+                                    .inserts
+                                    .iter()
+                                    .any(|slot| slot.id == plugin_instance_id)
                             })
                             .map(|track| track.id.clone())
                             .collect();
@@ -126,7 +129,12 @@ impl StudioLayout {
                             .state
                             .tracks
                             .iter()
-                            .filter(|track| track.inserts.iter().any(|slot| slot.id == plugin_instance_id))
+                            .filter(|track| {
+                                track
+                                    .inserts
+                                    .iter()
+                                    .any(|slot| slot.id == plugin_instance_id)
+                            })
                             .map(|track| track.id.clone())
                             .collect();
                         track_ids.into_iter().any(|track_id| {
@@ -152,7 +160,12 @@ impl StudioLayout {
                             .state
                             .tracks
                             .iter()
-                            .filter(|track| track.inserts.iter().any(|slot| slot.id == plugin_instance_id))
+                            .filter(|track| {
+                                track
+                                    .inserts
+                                    .iter()
+                                    .any(|slot| slot.id == plugin_instance_id)
+                            })
                             .map(|track| track.id.clone())
                             .collect();
                         track_ids.into_iter().any(|track_id| {
@@ -324,7 +337,9 @@ impl StudioLayout {
                                 eprintln!(
                                     "[plugin-bridge] ConfirmEditorContentReady FAILED instance={plugin_instance_id} err={e}"
                                 );
-                                session.shell.set_status(&format!("Editor failed: {e}"), true);
+                                session
+                                    .shell
+                                    .set_status(&format!("Editor failed: {e}"), true);
                                 session.state = BridgeEditorState::Failed(e.to_string());
                             } else {
                                 session.state = BridgeEditorState::AwaitingAttach;
@@ -339,7 +354,9 @@ impl StudioLayout {
                 eprintln!(
                     "[plugin-view][host] EditorAttachFailed instance={plugin_instance_id} error={error}"
                 );
-                session.shell.set_status(&format!("Editor failed: {error}"), true);
+                session
+                    .shell
+                    .set_status(&format!("Editor failed: {error}"), true);
                 session.state = BridgeEditorState::Failed(error);
             }
             ClientEvent::Host(HostEvent::EditorClosed { .. }) => {
@@ -734,12 +751,11 @@ impl StudioLayout {
         }
         let stale: Vec<(String, String)> = {
             let state = &self.timeline.read(cx).state;
-            let is_stale = |(track_id, insert_id): &&(String, String)| match state
-                .find_track(track_id)
-            {
-                None => true,
-                Some(track) => !track.inserts.iter().any(|insert| &insert.id == insert_id),
-            };
+            let is_stale =
+                |(track_id, insert_id): &&(String, String)| match state.find_track(track_id) {
+                    None => true,
+                    Some(track) => !track.inserts.iter().any(|insert| &insert.id == insert_id),
+                };
             self.open_plugin_editors
                 .keys()
                 .filter(is_stale)
@@ -1104,6 +1120,7 @@ impl StudioLayout {
                         crate::forensic_trace::log_trace_plugin(&track_id, &slot_id);
                         let timeline_state = self.timeline.read(cx).state.clone();
                         crate::forensic_trace::log_plugin_main_registry(&timeline_state);
+                        #[cfg(feature = "plugin-host-bin")]
                         sphere_plugin_host::plugin_host_preview::PluginHostPreviewEngine::log_unified_runtime(
                             &track_id,
                             &slot_id,
@@ -1126,7 +1143,9 @@ impl StudioLayout {
                         self.mark_dirty();
                     }
                     Err(error) => {
-                        eprintln!("[plugin-runtime] refusing in-process fallback while bridge is enabled");
+                        eprintln!(
+                            "[plugin-runtime] refusing in-process fallback while bridge is enabled"
+                        );
                         let _ = self.timeline.update(cx, |timeline, _cx| {
                             timeline.state.set_insert_runtime(
                                 &track_id,
@@ -1204,7 +1223,9 @@ impl StudioLayout {
 fn resize_shell_before_attach(session: &mut BridgeEditorSession, width: u32, height: u32) {
     let (req_w, req_h) = (width as i32, height as i32);
     if req_w <= 0 || req_h <= 0 {
-        eprintln!("[plugin-editor-window] preferred_size_invalid reason=non_positive ({req_w}x{req_h})");
+        eprintln!(
+            "[plugin-editor-window] preferred_size_invalid reason=non_positive ({req_w}x{req_h})"
+        );
         return;
     }
     eprintln!(

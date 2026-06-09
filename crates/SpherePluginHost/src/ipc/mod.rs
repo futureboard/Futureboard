@@ -32,7 +32,9 @@ pub const PROTOCOL_VERSION: u32 = 3;
 #[serde(tag = "cmd")]
 pub enum HostCommand {
     /// Handshake; carries the client's protocol version.
-    Hello { protocol_version: u32 },
+    Hello {
+        protocol_version: u32,
+    },
     /// Liveness handshake — the host replies with [`HostEvent::Pong`]. Sent by
     /// the bridge client right after spawn to confirm the process is alive and
     /// speaking the protocol before any editor command.
@@ -84,9 +86,13 @@ pub enum HostCommand {
         dpi: u32,
     },
     /// Detach the editor view (`IPlugView::removed`) but keep the plugin loaded.
-    CloseEditor { plugin_instance_id: String },
+    CloseEditor {
+        plugin_instance_id: String,
+    },
     /// Detach (if attached) and release the plugin instance entirely.
-    UnloadPlugin { plugin_instance_id: String },
+    UnloadPlugin {
+        plugin_instance_id: String,
+    },
     /// Preview a single MIDI note on a loaded VSTi instance (transport may be stopped).
     PreviewNoteOn {
         plugin_instance_id: String,

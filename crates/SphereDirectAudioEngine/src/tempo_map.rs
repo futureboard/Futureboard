@@ -29,11 +29,44 @@ pub struct TempoSegment {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTempoMapSnapshot {
     pub segments: Vec<TempoSegment>,
+    /// Bumped whenever segments are rebuilt so caches can invalidate.
+    pub revision: u64,
+}
+
+impl Default for RuntimeTempoMapSnapshot {
+    fn default() -> Self {
+        Self::static_tempo(120.0)
+    }
 }
 
 impl RuntimeTempoMapSnapshot {
     pub fn static_tempo(bpm: f64) -> Self {
         TempoMap::static_tempo(bpm).into_snapshot()
+    }
+
+    pub fn bpm_at_beat(&self, beat: f64) -> f64 {
+        segment_at_beat(&self.segments, beat).bpm
+    }
+
+    pub fn seconds_at_beat(&self, beat: f64) -> f64 {
+        let beat = beat.max(0.0);
+        let seg = segment_at_beat(&self.segments, beat);
+        seg.start_seconds + (beat - seg.start_beat) * 60.0 / seg.bpm.max(BPM_MIN)
+    }
+
+    pub fn beat_at_seconds(&self, seconds: f64) -> f64 {
+        beat_at_seconds_in_segments(&self.segments, seconds)
+    }
+
+    pub fn samples_at_beat(&self, beat: f64, sample_rate: f64) -> u64 {
+        (self.seconds_at_beat(beat) * sample_rate.max(1.0))
+            .round()
+            .max(0.0) as u64
+    }
+
+    pub fn beat_at_samples(&self, samples: u64, sample_rate: f64) -> f64 {
+        let seconds = samples as f64 / sample_rate.max(1.0);
+        self.beat_at_seconds(seconds)
     }
 }
 
@@ -46,6 +79,8 @@ pub struct TempoMap {
     pub points: Vec<TempoPoint>,
     #[serde(skip)]
     segments: Vec<TempoSegment>,
+    #[serde(skip)]
+    revision: u64,
 }
 
 impl TempoMap {
@@ -54,6 +89,7 @@ impl TempoMap {
             default_bpm: clamp_bpm(bpm),
             points: Vec::new(),
             segments: Vec::new(),
+            revision: 0,
         };
         map.rebuild_segments();
         map
@@ -73,14 +109,27 @@ impl TempoMap {
             default_bpm: clamp_bpm(default_bpm),
             points,
             segments: Vec::new(),
+            revision: 0,
         };
         map.rebuild_segments();
         map
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn into_snapshot(self) -> RuntimeTempoMapSnapshot {
         RuntimeTempoMapSnapshot {
             segments: self.segments,
+            revision: self.revision,
+        }
+    }
+
+    pub fn snapshot(&self) -> RuntimeTempoMapSnapshot {
+        RuntimeTempoMapSnapshot {
+            segments: self.segments.clone(),
+            revision: self.revision,
         }
     }
 
@@ -89,47 +138,39 @@ impl TempoMap {
     }
 
     pub fn tempo_at_beat(&self, beat: f64) -> f64 {
+        self.bpm_at_beat(beat)
+    }
+
+    pub fn bpm_at_beat(&self, beat: f64) -> f64 {
         let beat = beat.max(0.0);
-        self.segment_at_beat(beat).bpm
+        if self.segments.is_empty() {
+            return self.default_bpm;
+        }
+        segment_at_beat(&self.segments, beat).bpm
     }
 
     pub fn seconds_at_beat(&self, beat: f64) -> f64 {
         let beat = beat.max(0.0);
-        let seg = self.segment_at_beat(beat);
+        if self.segments.is_empty() {
+            return beat * 60.0 / self.default_bpm.max(BPM_MIN);
+        }
+        let seg = segment_at_beat(&self.segments, beat);
         seg.start_seconds + (beat - seg.start_beat) * 60.0 / seg.bpm.max(BPM_MIN)
     }
 
     pub fn beat_at_seconds(&self, seconds: f64) -> f64 {
-        let seconds = seconds.max(0.0);
-        if self.segments.is_empty() {
-            return 0.0;
-        }
-        if seconds <= self.segments[0].start_seconds {
-            return 0.0;
-        }
-        let idx = self
-            .segments
-            .partition_point(|seg| seg.start_seconds <= seconds)
-            .saturating_sub(1);
-        let seg = &self.segments[idx.min(self.segments.len() - 1)];
-        let elapsed = seconds - seg.start_seconds;
-        seg.start_beat + elapsed * seg.bpm.max(BPM_MIN) / 60.0
+        beat_at_seconds_in_segments(&self.segments, seconds)
     }
 
-    fn segment_at_beat(&self, beat: f64) -> TempoSegment {
-        if self.segments.is_empty() {
-            return TempoSegment {
-                start_beat: 0.0,
-                end_beat: f64::INFINITY,
-                start_seconds: 0.0,
-                bpm: self.default_bpm,
-            };
-        }
-        let idx = self
-            .segments
-            .partition_point(|seg| seg.start_beat <= beat)
-            .saturating_sub(1);
-        self.segments[idx.min(self.segments.len() - 1)]
+    pub fn samples_at_beat(&self, beat: f64, sample_rate: f64) -> u64 {
+        (self.seconds_at_beat(beat) * sample_rate.max(1.0))
+            .round()
+            .max(0.0) as u64
+    }
+
+    pub fn beat_at_samples(&self, samples: u64, sample_rate: f64) -> f64 {
+        let seconds = samples as f64 / sample_rate.max(1.0);
+        self.beat_at_seconds(seconds)
     }
 
     fn rebuild_segments(&mut self) {
@@ -166,7 +207,39 @@ impl TempoMap {
                 start_seconds += (end_beat - point.beat) * 60.0 / point.bpm.max(BPM_MIN);
             }
         }
+        self.revision = self.revision.wrapping_add(1);
     }
+}
+
+fn segment_at_beat(segments: &[TempoSegment], beat: f64) -> TempoSegment {
+    if segments.is_empty() {
+        return TempoSegment {
+            start_beat: 0.0,
+            end_beat: f64::INFINITY,
+            start_seconds: 0.0,
+            bpm: BPM_MIN,
+        };
+    }
+    let idx = segments
+        .partition_point(|seg| seg.start_beat <= beat)
+        .saturating_sub(1);
+    segments[idx.min(segments.len() - 1)]
+}
+
+fn beat_at_seconds_in_segments(segments: &[TempoSegment], seconds: f64) -> f64 {
+    let seconds = seconds.max(0.0);
+    if segments.is_empty() {
+        return 0.0;
+    }
+    if seconds <= segments[0].start_seconds {
+        return 0.0;
+    }
+    let idx = segments
+        .partition_point(|seg| seg.start_seconds <= seconds)
+        .saturating_sub(1);
+    let seg = &segments[idx.min(segments.len() - 1)];
+    let elapsed = seconds - seg.start_seconds;
+    seg.start_beat + elapsed * seg.bpm.max(BPM_MIN) / 60.0
 }
 
 fn clamp_bpm(bpm: f64) -> f64 {
@@ -210,6 +283,64 @@ mod tests {
         assert!((map.seconds_at_beat(8.0) - 6.0).abs() < 1e-6);
         assert!((map.beat_at_seconds(6.0) - 8.0).abs() < 1e-6);
         assert!((map.beat_at_seconds(1.0) - 2.0).abs() < 1e-6);
+    }
+
+    fn map_120_160() -> TempoMap {
+        TempoMap::from_points(
+            120.0,
+            vec![TempoPoint {
+                beat: 4.0,
+                bpm: 160.0,
+            }],
+        )
+    }
+
+    #[test]
+    fn step_tempo_seconds_and_beats() {
+        let map = map_120_160();
+        assert!((map.seconds_at_beat(0.0) - 0.0).abs() < 1e-9);
+        assert!((map.seconds_at_beat(4.0) - 2.0).abs() < 1e-9);
+        assert!((map.seconds_at_beat(8.0) - 3.5).abs() < 1e-9);
+        assert!((map.beat_at_seconds(2.0) - 4.0).abs() < 1e-9);
+        assert!((map.beat_at_seconds(3.5) - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step_tempo_sample_conversions() {
+        let map = map_120_160();
+        let sr = 48_000.0;
+        assert_eq!(map.samples_at_beat(4.0, sr), 96_000);
+        assert_eq!(map.samples_at_beat(8.0, sr), 168_000);
+        assert!((map.beat_at_samples(96_000, sr) - 4.0).abs() < 1e-6);
+        assert!((map.beat_at_samples(168_000, sr) - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn runtime_snapshot_matches_tempo_map() {
+        let map = map_120_160();
+        let snap = map.snapshot();
+        assert_eq!(snap.samples_at_beat(4.0, 48_000.0), 96_000);
+        assert_eq!(snap.samples_at_beat(8.0, 48_000.0), 168_000);
+    }
+
+    #[test]
+    fn metronome_click_samples_follow_tempo_map() {
+        let snap = map_120_160().snapshot();
+        let sr = 48_000.0;
+        let expected = [
+            (0.0, 0_u64),
+            (1.0, 24_000),
+            (2.0, 48_000),
+            (3.0, 72_000),
+            (4.0, 96_000),
+            (5.0, 114_000),
+            (6.0, 132_000),
+            (7.0, 150_000),
+            (8.0, 168_000),
+        ];
+        for (beat, samples) in expected {
+            assert_eq!(snap.samples_at_beat(beat, sr), samples, "beat {beat}");
+        }
     }
 
     #[test]

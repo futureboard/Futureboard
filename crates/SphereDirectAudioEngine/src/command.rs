@@ -71,8 +71,10 @@ pub enum EngineCommand {
     Seek { position_seconds: f64 },
     /// Enable or disable generated metronome clicks.
     SetMetronomeEnabled(bool),
-    /// Set project tempo for metronome scheduling.
+    /// Set project tempo for metronome scheduling (static tempo shortcut).
     SetBpm(f64),
+    /// Replace the authoritative tempo map used for beat/time/sample conversion.
+    SetTempoMap(crate::tempo_map::RuntimeTempoMapSnapshot),
     /// Set project time signature for metronome accent scheduling.
     SetTimeSignature(u32, u32),
     /// Enable/disable loop region and set its bounds in seconds.
@@ -91,8 +93,5 @@ pub enum EngineCommand {
     },
     /// Keep rendering a bridged track while its plugin editor is open (VSTi
     /// internal keyboard / groove preview needs a live DSP loop).
-    SetBridgeEditorActive {
-        track_id: String,
-        active: bool,
-    },
+    SetBridgeEditorActive { track_id: String, active: bool },
 }

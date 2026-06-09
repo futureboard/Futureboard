@@ -4,7 +4,7 @@ use crate::components::timeline::automation_lane::automation_overlay;
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
     automation_y_to_value, AutomationMarquee, ClipType, TimelineState, TimelineTool, TrackLaneMode,
-    TrackState, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+    TrackState, HEADER_WIDTH, TRACK_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
@@ -165,9 +165,10 @@ pub fn track_lane(
                         let snapped_sec =
                             state_auto.snap_time(raw_beat * state_auto.seconds_per_beat());
                         let beat = (snapped_sec / state_auto.seconds_per_beat()).max(0.0);
-                        let local_y = (wy - APP_CHROME_HEIGHT - RULER_HEIGHT
-                            + state_auto.viewport.scroll_y)
-                            - track_index as f32 * TRACK_HEIGHT;
+                        let local_y =
+                            (wy - APP_CHROME_HEIGHT - state_auto.arrangement_content_top()
+                                + state_auto.viewport.scroll_y)
+                                - track_index as f32 * TRACK_HEIGHT;
                         let value = automation_y_to_value(local_y, TRACK_HEIGHT);
                         let additive = event.modifiers.shift || event.modifiers.control;
                         cb(&(track_id_auto.clone(), beat, value, additive), window, cx);

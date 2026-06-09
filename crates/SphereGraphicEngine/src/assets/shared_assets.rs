@@ -8,8 +8,7 @@
 //! `include_bytes!`.
 
 /// Primary variable UI font (Inter).
-const INTER_VARIABLE: &[u8] =
-    include_bytes!("../../../../packages/shared/fonts/InterVariable.ttf");
+const INTER_VARIABLE: &[u8] = include_bytes!("../../../../packages/shared/fonts/InterVariable.ttf");
 
 /// Fallback variable font with Thai / extended Unicode coverage (Google Sans).
 const GOOGLE_SANS_VARIABLE: &[u8] =

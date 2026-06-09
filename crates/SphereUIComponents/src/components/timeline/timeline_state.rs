@@ -299,6 +299,14 @@ pub struct AutomationPointDrag {
     pub moved: bool,
 }
 
+/// In-flight tempo-point move on the global Tempo Track lane.
+#[derive(Debug, Clone)]
+pub struct TempoPointDrag {
+    pub point_id: String,
+    /// Set once the point has actually moved so a pure click never marks dirty.
+    pub moved: bool,
+}
+
 /// In-flight automation marquee (rubber-band) selection in beat/value space.
 #[derive(Debug, Clone)]
 pub struct AutomationMarquee {
@@ -367,6 +375,482 @@ impl AutomationCurve {
             AutomationCurve::Smooth => "Smooth",
         }
     }
+}
+
+// ── Tempo map ─────────────────────────────────────────────────────────────────
+
+/// How the timeline maps musical time to horizontal pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimelineTimebase {
+    /// Beat positions are spaced uniformly; tempo affects playback only.
+    #[default]
+    MusicalBeats,
+    /// Beat positions map through TempoMap seconds; faster sections shrink.
+    AbsoluteSeconds,
+}
+
+/// Whether a clip's anchor is stored in beats or wall-clock time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipTimebase {
+    #[default]
+    Musical,
+    Absolute,
+}
+
+/// Interpolation shape between a tempo point and the next one. Mirrors the
+/// audio engine's tempo concept. `Smooth` is stored/round-tripped even though
+/// it currently evaluates as `Linear` until the curve math lands engine-side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TempoCurve {
+    #[default]
+    Hold,
+    Linear,
+    Smooth,
+}
+
+impl TempoCurve {
+    pub fn to_tag(self) -> u8 {
+        match self {
+            TempoCurve::Hold => 0,
+            TempoCurve::Linear => 1,
+            TempoCurve::Smooth => 2,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => TempoCurve::Linear,
+            2 => TempoCurve::Smooth,
+            _ => TempoCurve::Hold,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TempoCurve::Hold => "Hold",
+            TempoCurve::Linear => "Linear",
+            TempoCurve::Smooth => "Smooth",
+        }
+    }
+}
+
+/// Monotonic source of stable tempo-point identities. Persisted in project
+/// files so edits target a point by id even after the user drags it to a new
+/// beat position.
+fn next_tempo_point_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("tempo-{ts:x}-{seq:x}")
+}
+
+/// A tempo change anchored at a musical beat. The `curve` describes how tempo
+/// moves from this point to the next one. Marker labels and the tempo-track
+/// editor read `bpm` directly — transport BPM uses [`TempoMap::bpm_at_beat`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempoPoint {
+    pub id: String,
+    pub beat: f64,
+    pub bpm: f64,
+    pub curve: TempoCurve,
+}
+
+impl TempoPoint {
+    pub fn new(beat: f64, bpm: f64, curve: TempoCurve) -> Self {
+        Self {
+            id: next_tempo_point_id(),
+            beat: beat.max(0.0),
+            bpm: bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX),
+            curve,
+        }
+    }
+
+    pub fn with_id(id: impl Into<String>, beat: f64, bpm: f64, curve: TempoCurve) -> Self {
+        Self {
+            id: id.into(),
+            beat: beat.max(0.0),
+            bpm: bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX),
+            curve,
+        }
+    }
+}
+
+/// Project-level tempo automation. This is global state owned by the project,
+/// not by any track — the TempoTrack is only a view/controller over this map.
+/// When `points` is empty the project plays at the timeline's base BPM; the
+/// base BPM is supplied by the caller (`TimelineState::bpm`) so this map stays
+/// self-contained and cheap to clone.
+/// Cached hold-mode segment for beat/time conversion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TempoHoldSegment {
+    start_beat: f64,
+    start_seconds: f64,
+    bpm: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TempoMap {
+    /// Sorted (by beat) tempo markers in addition to the implicit base point at
+    /// beat 0. Kept small; UI-thread only, so a linear scan is fine.
+    pub points: Vec<TempoPoint>,
+    /// Bumped on every edit so UI/engine caches can invalidate.
+    revision: u64,
+}
+
+impl TempoMap {
+    pub fn new() -> Self {
+        Self {
+            points: Vec::new(),
+            revision: 0,
+        }
+    }
+
+    pub fn with_points(points: Vec<TempoPoint>) -> Self {
+        let mut map = Self::new();
+        map.points = points;
+        map.sort();
+        map.bump_revision();
+        map
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// True when the map carries any tempo automation (one or more markers).
+    /// With no markers the project is a single static tempo.
+    pub fn has_automation(&self) -> bool {
+        !self.points.is_empty()
+    }
+
+    /// Hold-mode seconds at `beat` using step-hold segments between markers.
+    pub fn seconds_at_beat(&self, beat: f64, base_bpm: f64) -> f64 {
+        let beat = beat.max(0.0);
+        let segments = self.hold_segments(base_bpm);
+        let seg = hold_segment_at_beat(&segments, beat);
+        seg.start_seconds + (beat - seg.start_beat) * 60.0 / seg.bpm.max(TEMPO_BPM_MIN)
+    }
+
+    /// Inverse of [`Self::seconds_at_beat`] for hold-mode segments.
+    pub fn beat_at_seconds(&self, seconds: f64, base_bpm: f64) -> f64 {
+        let seconds = seconds.max(0.0);
+        let segments = self.hold_segments(base_bpm);
+        if segments.is_empty() {
+            return 0.0;
+        }
+        if seconds <= segments[0].start_seconds {
+            return 0.0;
+        }
+        let idx = segments
+            .partition_point(|seg| seg.start_seconds <= seconds)
+            .saturating_sub(1);
+        let seg = &segments[idx.min(segments.len() - 1)];
+        let elapsed = seconds - seg.start_seconds;
+        seg.start_beat + elapsed * seg.bpm.max(TEMPO_BPM_MIN) / 60.0
+    }
+
+    pub fn samples_at_beat(&self, beat: f64, base_bpm: f64, sample_rate: f64) -> u64 {
+        (self.seconds_at_beat(beat, base_bpm) * sample_rate.max(1.0))
+            .round()
+            .max(0.0) as u64
+    }
+
+    pub fn beat_at_samples(&self, samples: u64, base_bpm: f64, sample_rate: f64) -> f64 {
+        let seconds = samples as f64 / sample_rate.max(1.0);
+        self.beat_at_seconds(seconds, base_bpm)
+    }
+
+    /// Effective BPM at `beat`, evaluating curves between markers. `base_bpm`
+    /// is the implicit tempo at beat 0 (the timeline's nominal BPM).
+    pub fn bpm_at_beat(&self, beat: f64, base_bpm: f64) -> f64 {
+        if self.points.is_empty() {
+            return base_bpm;
+        }
+        let beat = beat.max(0.0);
+        // Build the effective point preceding `beat` and its successor without
+        // allocating: walk the implicit base point followed by the markers.
+        let first = &self.points[0];
+        if beat < first.beat {
+            // Before the first marker we sit on the implicit base point. The
+            // base point holds (Hold) up to the first marker.
+            return base_bpm;
+        }
+        // Find the last marker at or before `beat`.
+        let mut idx = 0usize;
+        for (i, p) in self.points.iter().enumerate() {
+            if p.beat <= beat {
+                idx = i;
+            } else {
+                break;
+            }
+        }
+        let cur = &self.points[idx];
+        let next = self.points.get(idx + 1);
+        match (cur.curve, next) {
+            (TempoCurve::Hold, _) | (_, None) => cur.bpm,
+            (curve, Some(next)) => {
+                let span = (next.beat - cur.beat).max(1e-9);
+                let t = ((beat - cur.beat) / span).clamp(0.0, 1.0);
+                let t = match curve {
+                    TempoCurve::Smooth => t * t * (3.0 - 2.0 * t),
+                    _ => t,
+                };
+                cur.bpm + (next.bpm - cur.bpm) * t
+            }
+        }
+    }
+
+    /// Ruler/tempo-track label for a stored marker BPM — never the transport
+    /// playhead-evaluated tempo.
+    pub fn format_marker_label(bpm: f64) -> String {
+        if bpm.fract().abs() < 0.05 {
+            format!("{bpm:.0}")
+        } else {
+            format!("{bpm:.1}")
+        }
+    }
+
+    /// Assign generated ids to legacy points loaded without one.
+    pub fn ensure_point_ids(&mut self) {
+        for point in &mut self.points {
+            if point.id.is_empty() {
+                point.id = next_tempo_point_id();
+            }
+        }
+    }
+
+    /// Id of the marker governing `beat` (last point at or before `beat`).
+    pub fn point_id_at_or_before_beat(&self, beat: f64) -> Option<&str> {
+        let beat = beat.max(0.0);
+        self.points
+            .iter()
+            .filter(|p| p.beat <= beat)
+            .last()
+            .map(|p| p.id.as_str())
+    }
+
+    /// Update only the matching tempo point's stored BPM by stable id.
+    pub fn update_point_bpm_by_id(&mut self, id: &str, bpm: f64) -> bool {
+        let bpm = bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        if let Some(point) = self.points.iter_mut().find(|p| p.id == id) {
+            point.bpm = bpm;
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Insert a tempo marker, replacing any existing marker within a small beat
+    /// epsilon. Keeps `points` sorted by beat.
+    pub fn add_or_update_point(&mut self, beat: f64, bpm: f64, curve: TempoCurve) {
+        let beat = beat.max(0.0);
+        let bpm = bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        if let Some(existing) = self
+            .points
+            .iter_mut()
+            .find(|p| (p.beat - beat).abs() < 1e-6)
+        {
+            existing.bpm = bpm;
+            existing.curve = curve;
+        } else {
+            self.points.push(TempoPoint::new(beat, bpm, curve));
+        }
+        self.sort();
+        self.bump_revision();
+    }
+
+    /// Remove the marker nearest `beat` within `epsilon` beats. Returns whether
+    /// a marker was removed.
+    pub fn remove_point_near(&mut self, beat: f64, epsilon: f64) -> bool {
+        if let Some(idx) = self
+            .points
+            .iter()
+            .position(|p| (p.beat - beat).abs() <= epsilon)
+        {
+            self.points.remove(idx);
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.points.clear();
+        self.bump_revision();
+    }
+
+    /// Replace the map with exactly one marker (fixed tempo automation).
+    pub fn reset_to_single_point(&mut self, beat: f64, bpm: f64, curve: TempoCurve) {
+        self.points.clear();
+        self.points.push(TempoPoint::new(beat, bpm, curve));
+        self.sort();
+        self.bump_revision();
+    }
+
+    pub fn remove_point_by_id(&mut self, id: &str) -> bool {
+        if let Some(idx) = self.points.iter().position(|p| p.id == id) {
+            self.points.remove(idx);
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn move_point_by_id(&mut self, id: &str, beat: f64, bpm: f64) -> bool {
+        let beat = beat.max(0.0);
+        let bpm = bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        if self
+            .points
+            .iter()
+            .any(|p| p.id != id && (p.beat - beat).abs() < TEMPO_BEAT_EPSILON)
+        {
+            return false;
+        }
+        if let Some(point) = self.points.iter_mut().find(|p| p.id == id) {
+            point.beat = beat;
+            point.bpm = bpm;
+            self.sort();
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn update_point_curve_by_id(&mut self, id: &str, curve: TempoCurve) -> bool {
+        if let Some(point) = self.points.iter_mut().find(|p| p.id == id) {
+            point.curve = curve;
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Hold a constant tempo from `beat` onward by removing later markers.
+    pub fn set_fixed_from_beat(&mut self, beat: f64, bpm: f64, base_bpm: f64) {
+        let beat = beat.max(0.0);
+        let bpm = bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        self.points.retain(|p| p.beat < beat - TEMPO_BEAT_EPSILON);
+        if beat <= TEMPO_BEAT_EPSILON {
+            self.reset_to_single_point(0.0, bpm, TempoCurve::Hold);
+            return;
+        }
+        if !self
+            .points
+            .iter()
+            .any(|p| (p.beat - beat).abs() < TEMPO_BEAT_EPSILON)
+        {
+            if self.points.is_empty() {
+                self.add_or_update_point(0.0, base_bpm, TempoCurve::Hold);
+            }
+            self.add_or_update_point(beat, bpm, TempoCurve::Hold);
+        } else {
+            self.add_or_update_point(beat, bpm, TempoCurve::Hold);
+        }
+    }
+
+    fn sort(&mut self) {
+        self.points.sort_by(|a, b| {
+            a.beat
+                .partial_cmp(&b.beat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn hold_segments(&self, base_bpm: f64) -> Vec<TempoHoldSegment> {
+        let base_bpm = base_bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        let mut markers: Vec<(f64, f64)> = Vec::new();
+        if self.points.is_empty() {
+            markers.push((0.0, base_bpm));
+        } else {
+            if self.points[0].beat > 0.0 {
+                markers.push((0.0, base_bpm));
+            }
+            for point in &self.points {
+                markers.push((point.beat, point.bpm));
+            }
+        }
+        let mut segments = Vec::with_capacity(markers.len());
+        let mut start_seconds = 0.0;
+        for (i, (beat, bpm)) in markers.iter().enumerate() {
+            segments.push(TempoHoldSegment {
+                start_beat: *beat,
+                start_seconds,
+                bpm: *bpm,
+            });
+            if let Some((next_beat, _)) = markers.get(i + 1) {
+                start_seconds += (next_beat - beat) * 60.0 / bpm.max(TEMPO_BPM_MIN);
+            }
+        }
+        segments
+    }
+}
+
+fn hold_segment_at_beat(segments: &[TempoHoldSegment], beat: f64) -> TempoHoldSegment {
+    if segments.is_empty() {
+        return TempoHoldSegment {
+            start_beat: 0.0,
+            start_seconds: 0.0,
+            bpm: TEMPO_BPM_MIN,
+        };
+    }
+    let idx = segments
+        .partition_point(|seg| seg.start_beat <= beat)
+        .saturating_sub(1);
+    segments[idx.min(segments.len() - 1)]
+}
+
+/// BPM clamp range for tempo points (matches the audio engine spec).
+pub const TEMPO_BPM_MIN: f64 = 20.0;
+pub const TEMPO_BPM_MAX: f64 = 999.0;
+
+/// Default expanded height for the global Tempo Track lane (px).
+pub const TEMPO_TRACK_HEIGHT: f32 = 72.0;
+/// Collapsed/minimal Tempo Track lane height (px).
+pub const TEMPO_TRACK_HEIGHT_COLLAPSED: f32 = 48.0;
+/// Vertical padding inside the tempo lane curve area (px).
+pub const TEMPO_LANE_PAD: f32 = 6.0;
+/// Two tempo points within this many beats are treated as the same slot.
+pub const TEMPO_BEAT_EPSILON: f64 = 1e-6;
+
+/// Global/system lanes rendered between the ruler and normal tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalLaneKind {
+    Tempo,
+    TimeSignature,
+    Marker,
+    Arranger,
+}
+
+/// Map a BPM value to a lane-local y coordinate (high BPM near the top).
+pub fn bpm_to_y(bpm: f64, lane_height: f32, min_bpm: f64, max_bpm: f64) -> f32 {
+    let pad = TEMPO_LANE_PAD;
+    let usable = (lane_height - 2.0 * pad).max(1.0);
+    let span = (max_bpm - min_bpm).max(1e-9);
+    let t = ((bpm - min_bpm) / span).clamp(0.0, 1.0);
+    pad + ((1.0 - t) as f32) * usable
+}
+
+/// Inverse of [`bpm_to_y`]: lane-local y → BPM.
+pub fn y_to_bpm(y: f32, lane_height: f32, min_bpm: f64, max_bpm: f64) -> f64 {
+    let pad = TEMPO_LANE_PAD;
+    let usable = (lane_height - 2.0 * pad).max(1.0);
+    let t = ((y - pad) / usable).clamp(0.0, 1.0);
+    let span = (max_bpm - min_bpm).max(1e-9);
+    (max_bpm - t as f64 * span).clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX)
 }
 
 /// What a single automation lane controls. `TrackVolume`/`TrackPan` are wired
@@ -1172,6 +1656,10 @@ pub struct MasterBusState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineState {
     pub bpm: f32,
+    /// Project-level tempo automation. Always active and owned by the project;
+    /// the TempoTrack (when shown) is only a view/editor over this. When empty
+    /// the project plays at the static `bpm`.
+    pub tempo_map: TempoMap,
     pub time_signature_num: u32,
     pub time_signature_den: u32,
     pub viewport: TimelineViewport,
@@ -1194,6 +1682,12 @@ pub struct TimelineState {
     /// Arrangement time-range selection in beats. UI-only; never marks the
     /// project or engine dirty by itself.
     pub arrangement_range: Option<TimelineRangeSelection>,
+    /// When true, the global Tempo Track lane is shown below the ruler.
+    pub show_tempo_track: bool,
+    /// Compact collapsed height for the Tempo Track lane header/curve.
+    pub tempo_track_collapsed: bool,
+    /// Selected tempo marker on the Tempo Track (stable persisted id).
+    pub selected_tempo_point_id: Option<String>,
 }
 
 impl Default for TimelineState {
@@ -1203,6 +1697,7 @@ impl Default for TimelineState {
     fn default() -> Self {
         Self {
             bpm: 120.0,
+            tempo_map: TempoMap::new(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -1249,6 +1744,9 @@ impl Default for TimelineState {
             follow_playhead: true,
             auto_scroll_mode: AutoScrollMode::Page,
             arrangement_range: None,
+            show_tempo_track: false,
+            tempo_track_collapsed: false,
+            selected_tempo_point_id: None,
         }
     }
 }
@@ -1422,6 +1920,7 @@ impl TimelineState {
 
         Self {
             bpm: 120.0,
+            tempo_map: TempoMap::new(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -1468,6 +1967,9 @@ impl TimelineState {
             follow_playhead: true,
             auto_scroll_mode: AutoScrollMode::Page,
             arrangement_range: None,
+            show_tempo_track: false,
+            tempo_track_collapsed: false,
+            selected_tempo_point_id: None,
         }
     }
 
@@ -1620,6 +2122,173 @@ impl TimelineState {
 
     pub fn beats_to_x(&self, beats: f32) -> f32 {
         beat_to_x(beats as f64, &self.viewport)
+    }
+
+    /// Effective BPM at a given beat, honoring tempo automation. Falls back to
+    /// the static `bpm` when the tempo map has no markers.
+    pub fn effective_bpm_at_beat(&self, beat: f64) -> f64 {
+        self.tempo_map.bpm_at_beat(beat, self.bpm as f64)
+    }
+
+    /// Effective BPM at the current playhead position.
+    pub fn effective_bpm_at_playhead(&self) -> f64 {
+        self.effective_bpm_at_beat(self.transport.playhead_beats as f64)
+    }
+
+    /// Whether tempo automation is active (one or more markers present).
+    pub fn tempo_has_automation(&self) -> bool {
+        self.tempo_map.has_automation()
+    }
+
+    /// Height of the global Tempo Track lane when visible, else 0.
+    pub fn tempo_track_height(&self) -> f32 {
+        if !self.show_tempo_track {
+            return 0.0;
+        }
+        if self.tempo_track_collapsed {
+            TEMPO_TRACK_HEIGHT_COLLAPSED
+        } else {
+            TEMPO_TRACK_HEIGHT
+        }
+    }
+
+    /// Y offset from the timeline top to the track-list content area.
+    pub fn arrangement_content_top(&self) -> f32 {
+        RULER_HEIGHT + self.tempo_track_height()
+    }
+
+    /// Visible global/system lanes (Tempo Track first when shown).
+    pub fn visible_global_lanes(&self) -> Vec<GlobalLaneKind> {
+        let mut lanes = Vec::new();
+        if self.show_tempo_track {
+            lanes.push(GlobalLaneKind::Tempo);
+        }
+        lanes
+    }
+
+    /// Auto-fit BPM range for the Tempo Track curve with padding.
+    pub fn tempo_lane_bpm_range(&self) -> (f64, f64) {
+        let mut min = self.bpm as f64;
+        let mut max = self.bpm as f64;
+        for p in &self.tempo_map.points {
+            min = min.min(p.bpm);
+            max = max.max(p.bpm);
+        }
+        let pad = ((max - min) * 0.15).max(10.0);
+        let mut min_bpm = (min - pad).clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        let mut max_bpm = (max + pad).clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        if (max_bpm - min_bpm) < 20.0 {
+            let mid = (min_bpm + max_bpm) * 0.5;
+            min_bpm = (mid - 10.0).max(TEMPO_BPM_MIN);
+            max_bpm = (mid + 10.0).min(TEMPO_BPM_MAX);
+        }
+        (min_bpm, max_bpm)
+    }
+
+    /// Show the Tempo Track lane and ensure at least one anchor point exists.
+    pub fn show_tempo_track_lane(&mut self) {
+        self.show_tempo_track = true;
+        self.ensure_tempo_anchor_point();
+    }
+
+    pub fn hide_tempo_track_lane(&mut self) {
+        self.show_tempo_track = false;
+        self.selected_tempo_point_id = None;
+    }
+
+    /// Seed beat-0 marker when the map is empty so the lane always has data.
+    pub fn ensure_tempo_anchor_point(&mut self) {
+        if self.tempo_map.points.is_empty() {
+            let bpm = self.bpm as f64;
+            self.tempo_map
+                .add_or_update_point(0.0, bpm, TempoCurve::Hold);
+        }
+        self.tempo_map.ensure_point_ids();
+    }
+
+    pub fn select_tempo_point(&mut self, id: &str) {
+        self.selected_tempo_point_id = Some(id.to_string());
+    }
+
+    pub fn clear_tempo_point_selection(&mut self) {
+        self.selected_tempo_point_id = None;
+    }
+
+    pub fn tempo_point_at(
+        &self,
+        beat: f64,
+        bpm: f64,
+        beat_tol: f64,
+        bpm_tol: f64,
+    ) -> Option<String> {
+        self.tempo_map
+            .points
+            .iter()
+            .find(|p| (p.beat - beat).abs() <= beat_tol && (p.bpm - bpm).abs() <= bpm_tol)
+            .map(|p| p.id.clone())
+    }
+
+    pub fn add_tempo_point(&mut self, beat: f64, bpm: f64) -> Option<String> {
+        let beat = beat.max(0.0);
+        let bpm = bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        if self.tempo_map.points.is_empty() && beat > TEMPO_BEAT_EPSILON {
+            self.tempo_map
+                .add_or_update_point(0.0, self.bpm as f64, TempoCurve::Hold);
+        }
+        self.tempo_map
+            .add_or_update_point(beat, bpm, TempoCurve::Hold);
+        self.tempo_map.ensure_point_ids();
+        self.tempo_map
+            .points
+            .iter()
+            .find(|p| (p.beat - beat).abs() < TEMPO_BEAT_EPSILON)
+            .map(|p| p.id.clone())
+    }
+
+    pub fn move_tempo_point(&mut self, id: &str, beat: f64, bpm: f64) -> bool {
+        self.tempo_map.move_point_by_id(id, beat, bpm)
+    }
+
+    pub fn delete_tempo_point(&mut self, id: &str) -> bool {
+        if self.tempo_map.remove_point_by_id(id) {
+            if self.selected_tempo_point_id.as_deref() == Some(id) {
+                self.selected_tempo_point_id = None;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_tempo_point_curve(&mut self, id: &str, curve: TempoCurve) -> bool {
+        self.tempo_map.update_point_curve_by_id(id, curve)
+    }
+
+    pub fn set_fixed_tempo_from_beat(&mut self, beat: f64, bpm: f64) {
+        let base = self.bpm as f64;
+        self.tempo_map.set_fixed_from_beat(beat, bpm, base);
+        self.tempo_map.ensure_point_ids();
+    }
+
+    /// BPM values rendered as tempo-track point handles (for tests/debug).
+    pub fn tempo_track_render_bpm_values(&self) -> Vec<f64> {
+        if self.tempo_map.points.is_empty() {
+            vec![self.bpm as f64]
+        } else {
+            self.tempo_map.points.iter().map(|p| p.bpm).collect()
+        }
+    }
+
+    /// Effective BPM across the visible beat range (flat line check for tests).
+    pub fn tempo_track_bpm_samples(&self, viewport_width: f32) -> Vec<f64> {
+        let (start, end) = self.visible_beat_range(viewport_width);
+        let cols = viewport_width.ceil().max(1.0) as usize;
+        (0..=cols)
+            .map(|col| {
+                let beat = start as f64 + (end - start) as f64 * (col as f64 / cols as f64);
+                self.effective_bpm_at_beat(beat)
+            })
+            .collect()
     }
 
     pub fn x_to_beats(&self, x: f32) -> f32 {
@@ -3003,14 +3672,13 @@ impl TimelineState {
         let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
             return;
         };
-        let is_instrument_slot = matches!(
-            track.track_type,
-            TrackType::Instrument | TrackType::Midi
-        ) && track
-            .inserts
-            .first()
-            .map(|first| first.id == insert_id)
-            .unwrap_or(false);
+        let is_instrument_slot =
+            matches!(track.track_type, TrackType::Instrument | TrackType::Midi)
+                && track
+                    .inserts
+                    .first()
+                    .map(|first| first.id == insert_id)
+                    .unwrap_or(false);
         let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
             return;
         };
@@ -3027,9 +3695,7 @@ impl TimelineState {
         crate::forensic_trace::log_trace_plugin(track_id, insert_id);
         if is_instrument_slot {
             track.instrument_plugin_instance_id = Some(insert_id.to_string());
-            eprintln!(
-                "[instrument-route] track={track_id} instrument_instance={insert_id}"
-            );
+            eprintln!("[instrument-route] track={track_id} instrument_instance={insert_id}");
             eprintln!("[instrument-route] plugin_instance_id={insert_id}");
             eprintln!("[instrument-route] route_ok=true");
         }
@@ -3061,7 +3727,9 @@ impl TimelineState {
             }
             PluginRuntimeState::Ready | PluginRuntimeState::EditorOpen => InsertLoadStatus::Ready,
             PluginRuntimeState::Failed(message) => InsertLoadStatus::Failed(message.clone()),
-            PluginRuntimeState::Crashed => InsertLoadStatus::Failed("Plugin host crashed".to_string()),
+            PluginRuntimeState::Crashed => {
+                InsertLoadStatus::Failed("Plugin host crashed".to_string())
+            }
             PluginRuntimeState::Unloaded => InsertLoadStatus::Disabled,
         };
         let changed = slot.runtime_backend != backend
@@ -4356,6 +5024,166 @@ impl TimelineState {
         eprintln!("[audio-import] bpm={:.3}", self.bpm);
         eprintln!("[audio-import] duration_beats={:.6}", duration_beats);
         eprintln!("[audio-import] bars_4_4={:.6}", bars_4_4);
+    }
+}
+
+#[cfg(test)]
+mod tempo_map_tests {
+    use super::*;
+
+    #[test]
+    fn empty_map_uses_base_bpm() {
+        let map = TempoMap::new();
+        assert!(!map.has_automation());
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(100.0, 120.0), 120.0);
+    }
+
+    #[test]
+    fn hold_marker_steps_bpm() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(8.0, 140.0, TempoCurve::Hold);
+        assert!(map.has_automation());
+        // Before the marker we sit on the implicit base point.
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(7.9, 120.0), 120.0);
+        // From the marker onward the held tempo applies.
+        assert_eq!(map.bpm_at_beat(8.0, 120.0), 140.0);
+        assert_eq!(map.bpm_at_beat(99.0, 120.0), 140.0);
+    }
+
+    #[test]
+    fn linear_curve_interpolates_between_markers() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(0.0, 100.0, TempoCurve::Linear);
+        map.add_or_update_point(4.0, 200.0, TempoCurve::Hold);
+        // Halfway between the two markers = midpoint BPM.
+        assert!((map.bpm_at_beat(2.0, 120.0) - 150.0).abs() < 1e-6);
+        // At/after the last marker the held value applies.
+        assert!((map.bpm_at_beat(4.0, 120.0) - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn add_replaces_marker_at_same_beat_and_clear_resets() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(4.0, 130.0, TempoCurve::Hold);
+        map.add_or_update_point(4.0, 150.0, TempoCurve::Linear);
+        assert_eq!(map.points.len(), 1);
+        assert_eq!(map.points[0].bpm, 150.0);
+        assert_eq!(map.points[0].curve, TempoCurve::Linear);
+
+        map.clear();
+        assert!(!map.has_automation());
+    }
+
+    #[test]
+    fn hold_tempo_time_conversions_match_engine() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(4.0, 160.0, TempoCurve::Hold);
+        assert!((map.seconds_at_beat(0.0, 120.0) - 0.0).abs() < 1e-9);
+        assert!((map.seconds_at_beat(4.0, 120.0) - 2.0).abs() < 1e-9);
+        assert!((map.seconds_at_beat(8.0, 120.0) - 3.5).abs() < 1e-9);
+        assert!((map.beat_at_seconds(2.0, 120.0) - 4.0).abs() < 1e-9);
+        assert!((map.beat_at_seconds(3.5, 120.0) - 8.0).abs() < 1e-9);
+        assert_eq!(map.samples_at_beat(4.0, 120.0, 48_000.0), 96_000);
+        assert_eq!(map.samples_at_beat(8.0, 120.0, 48_000.0), 168_000);
+    }
+
+    #[test]
+    fn tempo_marker_bpm_values_are_independent() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        map.add_or_update_point(4.0, 132.0, TempoCurve::Hold);
+        map.ensure_point_ids();
+
+        assert_eq!(map.points[0].bpm, 120.0);
+        assert_eq!(map.points[1].bpm, 132.0);
+        assert_eq!(TempoMap::format_marker_label(map.points[0].bpm), "120");
+        assert_eq!(TempoMap::format_marker_label(map.points[1].bpm), "132");
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(3.9, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(4.0, 120.0), 132.0);
+
+        let id_b = map.points[1].id.clone();
+        assert!(map.update_point_bpm_by_id(&id_b, 140.0));
+
+        assert_eq!(map.points[0].bpm, 120.0);
+        assert_eq!(map.points[1].bpm, 140.0);
+        assert_eq!(TempoMap::format_marker_label(map.points[0].bpm), "120");
+        assert_eq!(TempoMap::format_marker_label(map.points[1].bpm), "140");
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(4.0, 120.0), 140.0);
+    }
+}
+
+#[cfg(test)]
+mod tempo_track_tests {
+    use super::*;
+
+    #[test]
+    fn show_tempo_track_enables_global_lane() {
+        let mut state = TimelineState::default();
+        assert!(!state.show_tempo_track);
+        assert!(state.visible_global_lanes().is_empty());
+
+        state.show_tempo_track_lane();
+        assert!(state.show_tempo_track);
+        assert_eq!(state.visible_global_lanes(), vec![GlobalLaneKind::Tempo]);
+    }
+
+    #[test]
+    fn tempo_track_renders_two_point_bpm_values() {
+        let mut state = TimelineState::default();
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(4.0, 160.0, TempoCurve::Hold);
+        state.show_tempo_track_lane();
+
+        let values = state.tempo_track_render_bpm_values();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], 120.0);
+        assert_eq!(values[1], 160.0);
+        assert_eq!(TempoMap::format_marker_label(values[0]), "120");
+        assert_eq!(TempoMap::format_marker_label(values[1]), "160");
+    }
+
+    #[test]
+    fn editing_one_tempo_point_leaves_other_unchanged() {
+        let mut state = TimelineState::default();
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(4.0, 160.0, TempoCurve::Hold);
+        state.tempo_map.ensure_point_ids();
+        let id_b = state.tempo_map.points[1].id.clone();
+        let rev_before = state.tempo_map.revision();
+
+        assert!(state.move_tempo_point(&id_b, 4.0, 170.0));
+        assert_eq!(state.tempo_map.points[0].bpm, 120.0);
+        assert_eq!(state.tempo_map.points[1].bpm, 170.0);
+        assert!(state.tempo_map.revision() > rev_before);
+    }
+
+    #[test]
+    fn fixed_tempo_renders_flat_line_across_viewport() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state
+            .tempo_map
+            .reset_to_single_point(0.0, 120.0, TempoCurve::Hold);
+        state.show_tempo_track_lane();
+        state.update_viewport_size(800.0, 500.0);
+
+        let samples = state.tempo_track_bpm_samples(800.0);
+        assert!(!samples.is_empty());
+        for bpm in samples {
+            assert!((bpm - 120.0).abs() < 1e-6);
+        }
     }
 }
 

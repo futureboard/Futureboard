@@ -104,9 +104,7 @@ mod imp {
             eprintln!(
                 "[gpu-editor-diagnostics] paint_count={paint_count} erase_count={erase_count} size_count={size_count}"
             );
-            eprintln!(
-                "[gpu-editor-diagnostics] visible={visible} rect={w}x{h_px}"
-            );
+            eprintln!("[gpu-editor-diagnostics] visible={visible} rect={w}x{h_px}");
         }
     }
 
@@ -142,7 +140,10 @@ mod imp {
             );
         }
 
-        eprintln!("[gpu-editor-diagnostics] child_count={}", ctx.children.len());
+        eprintln!(
+            "[gpu-editor-diagnostics] child_count={}",
+            ctx.children.len()
+        );
         for child in &ctx.children {
             log_child(*child, paint_count, erase_count, size_count);
         }

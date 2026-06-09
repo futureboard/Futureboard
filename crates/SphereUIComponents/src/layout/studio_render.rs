@@ -361,6 +361,18 @@ impl Render for StudioLayout {
                                 });
                                 ContextTarget::Clip(id)
                             }
+                            TimelineContextTarget::Ruler(beat) => {
+                                ContextTarget::TimelineRuler { beat }
+                            }
+                            TimelineContextTarget::TempoTrack {
+                                beat,
+                                bpm,
+                                point_id,
+                            } => ContextTarget::TempoTrack {
+                                beat,
+                                bpm,
+                                point_id,
+                            },
                         };
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
@@ -875,7 +887,8 @@ impl Render for StudioLayout {
             .font(theme::ui_font())
             .capture_key_down(move |event, window, cx| {
                 let handled = shortcut_target.update(cx, |this, cx| {
-                    let handled = this.handle_settings_dialog_key(event, window, cx)
+                    let handled = this.handle_bpm_edit_key(event, window, cx)
+                        || this.handle_settings_dialog_key(event, window, cx)
                         || this.handle_add_track_dialog_key(event, window, cx)
                         || this.handle_plugin_picker_key(event, window, cx)
                         || this.handle_project_switcher_key(event, window, cx)
@@ -910,6 +923,9 @@ impl Render for StudioLayout {
                 }
                 if event.keystroke.key.as_str() == "escape" {
                     let _ = shortcut_target.update(cx, |this, cx| {
+                        // Cancel an active BPM scrub first, restoring the value
+                        // captured at drag start.
+                        this.cancel_bpm_drag(cx);
                         let _ = this.timeline.update(cx, |timeline, cx| {
                             timeline.reset_input_state();
                             cx.notify();

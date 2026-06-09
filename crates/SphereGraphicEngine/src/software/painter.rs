@@ -7,7 +7,7 @@
 
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, FillRect, HDC, LineTo, MoveToEx, SelectObject,
+    CreatePen, CreateSolidBrush, DeleteObject, FillRect, LineTo, MoveToEx, SelectObject, HDC,
     PS_SOLID,
 };
 
@@ -32,10 +32,30 @@ impl SoftwarePainter {
             return;
         }
         let strips = [
-            RECT { left: 0, top: 0, right: w, bottom: thickness },
-            RECT { left: 0, top: h - thickness, right: w, bottom: h },
-            RECT { left: 0, top: 0, right: thickness, bottom: h },
-            RECT { left: w - thickness, top: 0, right: w, bottom: h },
+            RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: thickness,
+            },
+            RECT {
+                left: 0,
+                top: h - thickness,
+                right: w,
+                bottom: h,
+            },
+            RECT {
+                left: 0,
+                top: 0,
+                right: thickness,
+                bottom: h,
+            },
+            RECT {
+                left: w - thickness,
+                top: 0,
+                right: w,
+                bottom: h,
+            },
         ];
         unsafe {
             let brush = CreateSolidBrush(color);

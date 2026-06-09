@@ -79,7 +79,11 @@ fn content_child_is_distinct_and_parented() {
     )
     .expect("create content child hwnd");
 
-    assert_ne!(content.hwnd(), top_u64, "content_hwnd must differ from top_hwnd");
+    assert_ne!(
+        content.hwnd(),
+        top_u64,
+        "content_hwnd must differ from top_hwnd"
+    );
     assert_eq!(content.top_hwnd(), top_u64);
     assert!(content.is_valid());
     unsafe {

@@ -25,7 +25,6 @@ mod mixer_window;
 pub(crate) use mixer_window::external_mixer_debug;
 pub mod gpu_editor_diagnostics;
 pub mod native_editor_shell;
-pub mod plugin_shell_text;
 pub mod panel;
 pub mod piano_roll;
 pub mod plugin_content_host;
@@ -33,6 +32,7 @@ pub mod plugin_editor_window;
 pub mod plugin_format_badge;
 pub mod plugin_manager;
 pub mod plugin_picker;
+pub mod plugin_shell_text;
 pub mod project_switcher;
 pub mod settings_components;
 pub mod settings_dialog;
@@ -50,8 +50,8 @@ pub use add_track_dialog::{
 };
 pub use app_chrome::{
     app_chrome, bpm_debug_enabled, bpm_drag_sensitivity, BpmChangeCb, BpmDragCb, BpmDragSample,
-    PanelChromeState, ProjectChromeState, TransportChromeState, BPM_DRAG_DEADZONE_PX, BPM_MAX,
-    BPM_MIN,
+    BpmMenuCb, ChromeActionCb, PanelChromeState, ProjectChromeState, TransportChromeState,
+    BPM_DRAG_DEADZONE_PX, BPM_MAX, BPM_MIN,
 };
 pub use audio_editor_host::AudioEditorHost;
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};

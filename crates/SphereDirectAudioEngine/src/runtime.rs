@@ -14,6 +14,7 @@ use crate::latency_graph::{plan_runtime_latency_graph, RuntimeLatencyGraph};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
 
+use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint};
 use crate::types::{
     EngineAutomationLaneSnapshot, EngineClipSnapshot, EngineMidiClipSnapshot, EngineProjectSnapshot,
 };
@@ -448,9 +449,8 @@ pub struct RuntimeProject {
     pub tracks: Vec<RuntimeTrack>,
     pub clips: Vec<RuntimeClip>,
     pub has_solo: bool,
-    /// Samples per beat at the current static BPM. MIDI event sample positions
-    /// are derived from event beats whenever tempo changes.
-    pub samples_per_beat: f64,
+    /// Authoritative hold-mode tempo map for beat/time/sample conversion.
+    pub tempo_map: RuntimeTempoMapSnapshot,
     /// Structural MIDI clips (logging / inspection).
     pub midi_clips: Vec<RuntimeMidiClip>,
     /// Per-track scheduling state driven by the audio callback.
@@ -462,8 +462,10 @@ pub struct RuntimeProject {
     /// Stage 3b: realtime sinks for external plugin-host DSP output, keyed by
     /// `track_id`. Set via [`crate::command::EngineCommand::SetPluginBridgeSink`]
     /// and preserved across project reloads. Empty until the bridge installs one.
-    pub plugin_bridge_sinks:
-        std::collections::HashMap<String, std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
+    pub plugin_bridge_sinks: std::collections::HashMap<
+        String,
+        std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>,
+    >,
     /// Tracks whose external-bridge plugin editor is open — keeps the audio
     /// callback rendering while stopped so VSTi internal keyboards stay audible.
     pub bridge_editor_active: std::collections::HashSet<String>,
@@ -807,12 +809,14 @@ impl RuntimeProject {
         }
 
         // ── MIDI runtime build (Phase 2) ────────────────────────────────────
+        let tempo_map = build_project_tempo_map(snapshot);
+        let (midi_clips, midi_tracks) =
+            build_midi_runtime(&snapshot.midi_clips, &tempo_map, output_sample_rate);
         let samples_per_beat = if snapshot.bpm > 0.0 {
             output_sample_rate as f64 * 60.0 / snapshot.bpm
         } else {
             0.0
         };
-        let (midi_clips, midi_tracks) = build_midi_runtime(&snapshot.midi_clips, samples_per_beat);
 
         if crate::forensic_trace::engine_midi_trace_enabled() {
             for track in &snapshot.tracks {
@@ -828,7 +832,7 @@ impl RuntimeProject {
                     &clip.track_id,
                     clip,
                     samples_per_beat,
-                    |beat| beat_to_sample(beat, samples_per_beat),
+                    |beat| tempo_map.samples_at_beat(beat, output_sample_rate as f64),
                 );
             }
         }
@@ -923,7 +927,7 @@ impl RuntimeProject {
             tracks,
             clips,
             has_solo,
-            samples_per_beat,
+            tempo_map,
             midi_clips,
             midi_tracks,
             audio_graph,
@@ -953,35 +957,39 @@ impl RuntimeProject {
         }
     }
 
-    /// Rebuild MIDI event sample positions from their canonical beat positions
-    /// after a static BPM change. Returns the sample position that preserves the
-    /// current musical playhead beat under the new tempo.
-    pub fn set_static_midi_tempo(&mut self, bpm: f64, position_sample: u64) -> u64 {
-        let previous_spb = self.samples_per_beat.max(1.0);
-        let current_beat = position_sample as f64 / previous_spb;
-        let next_spb = if bpm > 0.0 {
-            self.sample_rate.max(1) as f64 * 60.0 / bpm
-        } else {
-            previous_spb
-        };
+    /// Rebuild MIDI event sample positions from canonical beat positions after a
+    /// tempo-map change. Returns the sample position that preserves the current
+    /// musical playhead beat under the new map.
+    pub fn apply_tempo_map(
+        &mut self,
+        tempo_map: RuntimeTempoMapSnapshot,
+        position_sample: u64,
+    ) -> u64 {
+        let sr = self.sample_rate.max(1) as f64;
+        let current_beat = self.tempo_map.beat_at_samples(position_sample, sr);
         self.all_notes_off("tempo_change");
-        self.samples_per_beat = next_spb.max(1.0);
+        self.tempo_map = tempo_map;
         for clip in &mut self.midi_clips {
             for event in &mut clip.events {
-                event.sample = beat_to_sample(event.beat, self.samples_per_beat);
+                event.sample = self.tempo_map.samples_at_beat(event.beat, sr);
             }
             sort_midi_events(&mut clip.events);
         }
-        let next_position = beat_to_sample(current_beat, self.samples_per_beat);
+        let next_position = self.tempo_map.samples_at_beat(current_beat, sr);
         for mt in &mut self.midi_tracks {
             for event in &mut mt.events {
-                event.sample = beat_to_sample(event.beat, self.samples_per_beat);
+                event.sample = self.tempo_map.samples_at_beat(event.beat, sr);
             }
             sort_midi_events(&mut mt.events);
             mt.cursor = mt.events.partition_point(|ev| ev.sample < next_position);
             mt.active.clear();
         }
         next_position
+    }
+
+    /// Static-tempo shortcut used by legacy `SetBpm` commands.
+    pub fn set_static_midi_tempo(&mut self, bpm: f64, position_sample: u64) -> u64 {
+        self.apply_tempo_map(RuntimeTempoMapSnapshot::static_tempo(bpm), position_sample)
     }
 
     /// Emit note-off for all active notes on every MIDI track and clear the
@@ -1041,33 +1049,31 @@ impl RuntimeProject {
         let verbose = crate::forensic_trace::engine_midi_verbose_enabled();
         let trace = crate::forensic_trace::engine_midi_trace_enabled();
         let vst3_debug = vst3_midi_debug_enabled();
-        let spb = self.samples_per_beat.max(1.0);
-        let bpm = if spb > 0.0 {
-            self.sample_rate as f64 * 60.0 / spb
-        } else {
-            120.0
-        };
+        let sr = self.sample_rate.max(1) as f64;
+        let bpm = self
+            .tempo_map
+            .bpm_at_beat(self.tempo_map.beat_at_samples(base_sample, sr));
         let heartbeat = trace && crate::forensic_trace::scheduler_heartbeat_due();
         for mt in &mut self.midi_tracks {
             let mut scheduled = 0u32;
             let mut _notes_on = 0u32;
             let mut _notes_off = 0u32;
             let bridged = self.plugin_bridge_sinks.contains_key(&mt.track_id);
-            let instrument_instance = self
-                .tracks
-                .iter()
-                .find(|t| t.id == mt.track_id)
-                .and_then(|t| {
-                    t.midi_instrument_insert_ix
-                        .and_then(|ix| t.inserts.get(ix).map(|i| i.id.clone()))
-                });
+            let instrument_instance =
+                self.tracks
+                    .iter()
+                    .find(|t| t.id == mt.track_id)
+                    .and_then(|t| {
+                        t.midi_instrument_insert_ix
+                            .and_then(|ix| t.inserts.get(ix).map(|i| i.id.clone()))
+                    });
             let overlapping: Vec<_> = self
                 .midi_clips
                 .iter()
                 .filter(|c| {
                     c.track_id == mt.track_id
-                        && block_end > beat_to_sample(c.start_beat, spb)
-                        && base_sample < beat_to_sample(c.end_beat, spb)
+                        && block_end > self.tempo_map.samples_at_beat(c.start_beat, sr)
+                        && base_sample < self.tempo_map.samples_at_beat(c.end_beat, sr)
                 })
                 .collect();
             let _clips_active = overlapping.len();
@@ -1193,8 +1199,8 @@ impl RuntimeProject {
                 scheduled += 1;
             }
             if debug && scheduled > 0 {
-                let bs = base_sample as f64 / spb;
-                let be = block_end as f64 / spb;
+                let bs = self.tempo_map.beat_at_samples(base_sample, sr);
+                let be = self.tempo_map.beat_at_samples(block_end, sr);
                 eprintln!(
                     "[DAUx MIDI] block beat={:.3}..{:.3} track={} events={} active={}",
                     bs,
@@ -1322,7 +1328,9 @@ impl RuntimeProject {
             .unwrap_or_default();
         eprintln!(
             "[EngineMidiPreview] received all_notes_off track={} instance={} active_notes={}",
-            track_id, plugin_instance_id, active.len()
+            track_id,
+            plugin_instance_id,
+            active.len()
         );
         push_all_notes_off_for_track(self, track_id, &active);
         if let Some(sink) = self.plugin_bridge_sinks.get(track_id) {
@@ -1373,9 +1381,7 @@ impl RuntimeProject {
             eprintln!(
                 "[plugin-dsp-midi-write] preview {kind} instance={instance} pitch={data1} offset=0"
             );
-            eprintln!(
-                "[plugin-dsp-midi-write] seq={seq} instance={instance} events=1"
-            );
+            eprintln!("[plugin-dsp-midi-write] seq={seq} instance={instance} events=1");
         }
     }
 
@@ -1721,9 +1727,7 @@ pub fn push_vst3_midi_event_to_sink(
             if vel > 0 {
                 sink.push_midi(0x90 | channel, ev.pitch, vel, ev.sample_offset);
                 if verbose {
-                    eprintln!(
-                        "[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1"
-                    );
+                    eprintln!("[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1");
                     eprintln!(
                         "[plugin-dsp-midi-write] note_on pitch={} offset={} ch={channel}",
                         ev.pitch, ev.sample_offset
@@ -1732,9 +1736,7 @@ pub fn push_vst3_midi_event_to_sink(
             } else {
                 sink.push_midi(0x80 | channel, ev.pitch, 0, ev.sample_offset);
                 if verbose {
-                    eprintln!(
-                        "[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1"
-                    );
+                    eprintln!("[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1");
                     eprintln!(
                         "[plugin-dsp-midi-write] note_off pitch={} offset={} ch={channel}",
                         ev.pitch, ev.sample_offset
@@ -1745,9 +1747,7 @@ pub fn push_vst3_midi_event_to_sink(
         0 => {
             sink.push_midi(0x80 | channel, ev.pitch, 0, ev.sample_offset);
             if verbose {
-                eprintln!(
-                    "[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1"
-                );
+                eprintln!("[plugin-dsp-midi-write] seq={seq} instance={instance_id} events=1");
                 eprintln!(
                     "[plugin-dsp-midi-write] note_off pitch={} offset={} ch={channel}",
                     ev.pitch, ev.sample_offset
@@ -1857,9 +1857,29 @@ fn push_all_notes_off_for_track(project: &mut RuntimeProject, track_id: &str, ac
     }
 }
 
-#[inline]
-fn beat_to_sample(beat: f64, samples_per_beat: f64) -> u64 {
-    (beat.max(0.0) * samples_per_beat.max(1.0)).round().max(0.0) as u64
+pub fn build_tempo_map_from_points(
+    default_bpm: f64,
+    points: &[crate::types::EngineTempoPointSnapshot],
+) -> RuntimeTempoMapSnapshot {
+    if points.is_empty() {
+        RuntimeTempoMapSnapshot::static_tempo(default_bpm)
+    } else {
+        TempoMap::from_points(
+            default_bpm,
+            points
+                .iter()
+                .map(|p| TempoPoint {
+                    beat: p.beat,
+                    bpm: p.bpm,
+                })
+                .collect(),
+        )
+        .into_snapshot()
+    }
+}
+
+pub fn build_project_tempo_map(snapshot: &EngineProjectSnapshot) -> RuntimeTempoMapSnapshot {
+    build_tempo_map_from_points(snapshot.bpm, &snapshot.tempo_points)
 }
 
 fn sort_midi_events(events: &mut [RuntimeMidiEvent]) {
@@ -1895,8 +1915,10 @@ fn apply_active(active: &mut Vec<(u8, u8)>, ev: &RuntimeMidiEvent) {
 /// same sample to avoid retrigger glitches / stuck notes.
 fn build_midi_runtime(
     snapshot_clips: &[EngineMidiClipSnapshot],
-    samples_per_beat: f64,
+    tempo_map: &RuntimeTempoMapSnapshot,
+    sample_rate: u32,
 ) -> (Vec<RuntimeMidiClip>, Vec<RuntimeMidiTrack>) {
+    let sr = sample_rate.max(1) as f64;
     let mut clips: Vec<RuntimeMidiClip> = Vec::with_capacity(snapshot_clips.len());
     let mut by_track: HashMap<String, Vec<RuntimeMidiEvent>> = HashMap::new();
 
@@ -1911,8 +1933,8 @@ fn build_midi_runtime(
             let channel = note.channel.min(15);
             let abs_start = clip.start_beat + note.start_beat.max(0.0);
             let abs_end = abs_start + note.length_beats;
-            let on_sample = beat_to_sample(abs_start, samples_per_beat);
-            let off_sample = beat_to_sample(abs_end, samples_per_beat);
+            let on_sample = tempo_map.samples_at_beat(abs_start, sr);
+            let off_sample = tempo_map.samples_at_beat(abs_end, sr);
             events.push(RuntimeMidiEvent {
                 sample: on_sample,
                 beat: abs_start,
@@ -1941,7 +1963,7 @@ fn build_midi_runtime(
             let channel = lane.channel.min(15);
             for point in &lane.points {
                 let abs_beat = clip.start_beat + point.beat.max(0.0);
-                let sample = beat_to_sample(abs_beat, samples_per_beat);
+                let sample = tempo_map.samples_at_beat(abs_beat, sr);
                 events.push(RuntimeMidiEvent {
                     sample,
                     beat: abs_beat,
@@ -2124,9 +2146,6 @@ mod midi_tests {
         EngineMidiControllerPoint, EngineMidiNoteSnapshot,
     };
 
-    // 120 BPM @ 48 kHz → 24000 samples per beat.
-    const SPB: f64 = 24000.0;
-
     fn clip_with_one_note() -> EngineMidiClipSnapshot {
         EngineMidiClipSnapshot {
             id: "mc1".into(),
@@ -2146,10 +2165,11 @@ mod midi_tests {
     }
 
     fn project_with(clips: Vec<EngineMidiClipSnapshot>) -> RuntimeProject {
-        let (midi_clips, midi_tracks) = build_midi_runtime(&clips, SPB);
+        let tempo_map = RuntimeTempoMapSnapshot::static_tempo(120.0);
+        let (midi_clips, midi_tracks) = build_midi_runtime(&clips, &tempo_map, 48_000);
         RuntimeProject {
             sample_rate: 48_000,
-            samples_per_beat: SPB,
+            tempo_map,
             midi_clips,
             midi_tracks,
             ..Default::default()

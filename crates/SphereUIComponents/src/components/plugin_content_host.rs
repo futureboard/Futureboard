@@ -43,9 +43,7 @@ mod imp {
     use super::{debug_enabled, ContentRect};
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{
-        FillRect, GetStockObject, HBRUSH, HDC, BLACK_BRUSH,
-    };
+    use windows::Win32::Graphics::Gdi::{FillRect, GetStockObject, BLACK_BRUSH, HBRUSH, HDC};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent,
         GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow, RegisterClassW, SetWindowPos,
@@ -126,7 +124,10 @@ mod imp {
                 let _ = GetWindowRect(content, &mut content_screen);
                 let _ = GetClientRect(content, &mut content_client);
                 eprintln!("[plugin-editor-window] shell_hwnd=0x{:x}", self.top_hwnd);
-                eprintln!("[plugin-editor-window] content_hwnd=0x{:x}", self.content_hwnd);
+                eprintln!(
+                    "[plugin-editor-window] content_hwnd=0x{:x}",
+                    self.content_hwnd
+                );
                 eprintln!("[plugin-editor-window] GetParent(content_hwnd)=0x{parent:x}");
                 eprintln!("[plugin-editor-window] content_is_child={is_child}");
                 eprintln!(
@@ -243,7 +244,8 @@ mod imp {
     impl Drop for ContentChildHwnd {
         fn drop(&mut self) {
             unsafe {
-                if self.content_hwnd != 0 && IsWindow(Some(hwnd_from(self.content_hwnd))).as_bool() {
+                if self.content_hwnd != 0 && IsWindow(Some(hwnd_from(self.content_hwnd))).as_bool()
+                {
                     let _ = DestroyWindow(hwnd_from(self.content_hwnd));
                 }
             }

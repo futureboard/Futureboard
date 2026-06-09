@@ -31,7 +31,9 @@ fn ready_then_attach_failed_for_invalid_hwnd() {
 
     // Host announces itself on startup.
     match wait_event(&client, Duration::from_secs(10)) {
-        Some(ClientEvent::Host(HostEvent::Ready { protocol_version, .. })) => {
+        Some(ClientEvent::Host(HostEvent::Ready {
+            protocol_version, ..
+        })) => {
             assert_eq!(protocol_version, sphere_plugin_host::ipc::PROTOCOL_VERSION);
         }
         other => panic!("expected Ready, got {other:?}"),
@@ -39,13 +41,20 @@ fn ready_then_attach_failed_for_invalid_hwnd() {
 
     // Invalid parent HWND (0) → deterministic attach failure, no plugin needed.
     client
-        .open_editor("track1:insert1", "C:/does/not/exist.vst3", "DEADBEEF", 0, 800, 600, 96)
+        .open_editor(
+            "track1:insert1",
+            "C:/does/not/exist.vst3",
+            "DEADBEEF",
+            0,
+            800,
+            600,
+            96,
+        )
         .expect("send open_editor");
 
     match wait_event(&client, Duration::from_secs(10)) {
         Some(ClientEvent::Host(HostEvent::EditorAttachFailed {
-            plugin_instance_id,
-            ..
+            plugin_instance_id, ..
         })) => {
             assert_eq!(plugin_instance_id, "track1:insert1");
         }

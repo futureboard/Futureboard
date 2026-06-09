@@ -9,7 +9,7 @@ use crate::components::text_input::{TextInputAction, TextInputState};
 use crate::components::timeline::timeline_state::ClipType;
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
-use super::{ContextTarget, StudioLayout, TextMenuTarget};
+use super::{ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
 impl StudioLayout {
     pub(super) fn project_switcher_visible_count(&self) -> usize {
         1 + self
@@ -86,6 +86,31 @@ impl StudioLayout {
                 false
             }
         }
+    }
+
+    /// Routes keys to the inline BPM numeric editor while it is open. Enter
+    /// commits, Escape cancels, everything else edits the field. Runs first in
+    /// the key chain so it captures input without a GPUI focus grab.
+    pub(super) fn handle_bpm_edit_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.bpm_editing {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        let action = self.bpm_input.handle_key_with_clipboard(event, Some(cx));
+        match action {
+            TextInputAction::Submit => self.commit_bpm_edit(cx),
+            TextInputAction::Cancel => self.cancel_bpm_edit(cx),
+            TextInputAction::Consumed | TextInputAction::Pass => {}
+        }
+        cx.notify();
+        true
     }
 
     pub(super) fn handle_browser_key(
@@ -696,6 +721,129 @@ impl StudioLayout {
                 ContextMenuEntry::item("Mute", "track:mute"),
                 ContextMenuEntry::item("Solo", "track:solo"),
             ],
+            ContextTarget::Tempo => {
+                let state = &self.timeline.read(cx).state;
+                let bpm = state.effective_bpm_at_playhead();
+                let has_automation = state.tempo_has_automation();
+                let mut entries = vec![
+                    ContextMenuEntry::disabled_item(format!("Tempo: {bpm:.1} BPM"), "noop"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Edit BPM…", "tempo:edit-bpm"),
+                    ContextMenuEntry::item(
+                        "Add Tempo Automation Point at Playhead",
+                        "tempo:add-marker",
+                    ),
+                ];
+                // "Create Tempo Automation" only makes sense in fixed-tempo mode.
+                if !has_automation {
+                    entries.push(ContextMenuEntry::item(
+                        "Create Tempo Automation",
+                        "tempo:create",
+                    ));
+                }
+                entries.push(ContextMenuEntry::Separator);
+                entries.push(ContextMenuEntry::item(
+                    "Show Tempo Track",
+                    "tempo:open-track",
+                ));
+                if has_automation {
+                    entries.push(ContextMenuEntry::danger_item(
+                        "Clear Tempo Automation",
+                        "tempo:clear",
+                    ));
+                }
+                entries
+            }
+            ContextTarget::TempoTrack {
+                beat,
+                bpm,
+                point_id,
+            } => {
+                let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);
+                if point_id.is_some() {
+                    let bpm_label = if bpm.fract().abs() < 0.05 {
+                        format!("{bpm:.0}")
+                    } else {
+                        format!("{bpm:.1}")
+                    };
+                    vec![
+                        ContextMenuEntry::disabled_item(
+                            format!("Tempo point: {bpm_label} BPM at {label}"),
+                            "noop",
+                        ),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Edit BPM…", "tempo:edit-bpm"),
+                        ContextMenuEntry::item("Delete Tempo Point", "tempo:delete-point"),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Curve: Hold", "tempo:curve-hold"),
+                        ContextMenuEntry::item("Curve: Linear", "tempo:curve-linear"),
+                        ContextMenuEntry::item("Curve: Smooth", "tempo:curve-smooth"),
+                    ]
+                } else {
+                    let bpm_label = if bpm.fract().abs() < 0.05 {
+                        format!("{bpm:.0}")
+                    } else {
+                        format!("{bpm:.1}")
+                    };
+                    vec![
+                        ContextMenuEntry::disabled_item(
+                            format!("Tempo at {label}: {bpm_label} BPM"),
+                            "noop",
+                        ),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Add Tempo Point Here", "tempo:add-point-here"),
+                        ContextMenuEntry::item("Set Fixed Tempo From Here", "tempo:set-fixed-here"),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Hide Tempo Track", "tempo:hide-track"),
+                    ]
+                }
+            }
+            ContextTarget::TimelineRuler { beat } => {
+                let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);
+                let has_automation = self.timeline.read(cx).state.tempo_has_automation();
+                let mut entries = vec![
+                    ContextMenuEntry::disabled_item(format!("Tempo at {label}"), "noop"),
+                    ContextMenuEntry::Separator,
+                ];
+                if !has_automation {
+                    entries.push(ContextMenuEntry::item(
+                        "Create Tempo Automation Here",
+                        "ruler:create-tempo-here",
+                    ));
+                }
+                entries.push(ContextMenuEntry::item(
+                    "Add Tempo Marker Here",
+                    "ruler:add-tempo-marker",
+                ));
+                entries.push(ContextMenuEntry::Separator);
+                entries.push(ContextMenuEntry::item(
+                    "Show Tempo Track",
+                    "tempo:open-track",
+                ));
+                entries.push(ContextMenuEntry::Separator);
+                // Time-signature editing is not implemented yet — keep the
+                // entries visible but disabled so the menu reads complete.
+                entries.push(ContextMenuEntry::disabled_item(
+                    "Edit Time Signature…",
+                    "noop",
+                ));
+                entries.push(ContextMenuEntry::disabled_item(
+                    "Create Time Signature Change Here",
+                    "noop",
+                ));
+                entries
+            }
+        }
+    }
+
+    /// Beat under the cursor for the active timeline-ruler context menu, if any.
+    pub(super) fn ruler_context_beat(&self) -> Option<f64> {
+        match &self.open_popover {
+            Some(OpenPopover::Context {
+                target: ContextTarget::TimelineRuler { beat },
+                ..
+            }) => Some(*beat),
+            _ => None,
         }
     }
 }

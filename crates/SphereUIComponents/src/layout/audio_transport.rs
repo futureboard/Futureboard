@@ -1,4 +1,4 @@
-use gpui::{Context, App};
+use gpui::{App, Context};
 
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,7 @@ use crate::components;
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
 use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
 use super::transport_freeze_debug::{self, PlayWatchdog};
-use super::StudioLayout;
+use super::{ContextTarget, OpenPopover, StudioLayout};
 
 impl StudioLayout {
     pub(super) fn dispatch_midi_preview_command(
@@ -109,7 +109,9 @@ impl StudioLayout {
                             bridge.preview_note_on(instance_id.clone(), channel, pitch, velocity)
                         }
                         components::piano_roll::UiMidiPreviewCommand::NoteOff {
-                            channel, pitch, ..
+                            channel,
+                            pitch,
+                            ..
                         } => bridge.preview_note_off(instance_id.clone(), channel, pitch),
                         components::piano_roll::UiMidiPreviewCommand::AllNotesOff { .. } => {
                             bridge.preview_all_notes_off(instance_id.clone())
@@ -144,9 +146,7 @@ impl StudioLayout {
                 );
                 engine.midi_preview_note_on(track_id, channel, pitch, velocity)
             }
-            components::piano_roll::UiMidiPreviewCommand::NoteOff {
-                channel, pitch, ..
-            } => {
+            components::piano_roll::UiMidiPreviewCommand::NoteOff { channel, pitch, .. } => {
                 eprintln!(
                     "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOff -> engine",
                     track_id
@@ -170,9 +170,7 @@ impl StudioLayout {
     }
 
     fn bridge_instrument_instance_id(&self, track_id: &str, cx: &App) -> Option<String> {
-        use crate::components::timeline::timeline_state::{
-            PluginRuntimeBackend, TrackType,
-        };
+        use crate::components::timeline::timeline_state::{PluginRuntimeBackend, TrackType};
         let timeline = self.timeline.read(cx);
         let track = timeline.state.find_track(track_id)?;
         let insert = match track.track_type {
@@ -448,10 +446,7 @@ impl StudioLayout {
             for track_meter in &meters.tracks {
                 let peak = track_meter.peak_l.max(track_meter.peak_r);
                 if peak > 0.0001 {
-                    eprintln!(
-                        "[Meter] track={} peak={peak:.6}",
-                        track_meter.track_id
-                    );
+                    eprintln!("[Meter] track={} peak={peak:.6}", track_meter.track_id);
                 }
             }
             let master_peak = meters.master_peak_l.max(meters.master_peak_r);
@@ -790,6 +785,7 @@ impl StudioLayout {
         let (
             playhead_beats,
             bpm,
+            tempo_points,
             metronome_enabled,
             loop_enabled,
             loop_start_beats,
@@ -800,9 +796,20 @@ impl StudioLayout {
             transport_freeze_debug::log("before timeline.read");
             let timeline = self.timeline.read(cx);
             transport_freeze_debug::log("after timeline.read");
+            let tempo_points = timeline
+                .state
+                .tempo_map
+                .points
+                .iter()
+                .map(|p| DAUx::types::EngineTempoPointSnapshot {
+                    beat: p.beat,
+                    bpm: p.bpm,
+                })
+                .collect::<Vec<_>>();
             (
                 timeline.state.transport.playhead_beats,
                 timeline.state.bpm,
+                tempo_points,
                 timeline.state.transport.metronome_enabled,
                 timeline.state.transport.loop_enabled,
                 timeline.state.transport.loop_start_beats,
@@ -818,9 +825,9 @@ impl StudioLayout {
         };
 
         transport_freeze_debug::log("before engine transport sync");
-        if let Err(error) = engine.set_bpm(bpm as f64) {
+        if let Err(error) = engine.set_tempo_map(bpm as f64, tempo_points) {
             if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
-                eprintln!("[audio] set BPM failed: {error}");
+                eprintln!("[audio] set tempo map failed: {error}");
             }
         }
         if let Err(error) = engine.set_time_signature(ts_num, ts_den) {
@@ -833,9 +840,19 @@ impl StudioLayout {
                 eprintln!("[audio] set metronome failed: {error}");
             }
         }
-        let bpm_secs = bpm.max(1.0) as f64;
-        let loop_start_seconds = loop_start_beats as f64 * 60.0 / bpm_secs;
-        let loop_end_seconds = loop_end_beats as f64 * 60.0 / bpm_secs;
+        let (loop_start_seconds, loop_end_seconds, playhead_seconds) = {
+            let state = &self.timeline.read(cx).state;
+            let base = state.bpm as f64;
+            (
+                state
+                    .tempo_map
+                    .seconds_at_beat(loop_start_beats as f64, base),
+                state.tempo_map.seconds_at_beat(loop_end_beats as f64, base),
+                state
+                    .tempo_map
+                    .seconds_at_beat(playhead_beats.max(0.0) as f64, base),
+            )
+        };
         if let Err(error) = engine.set_loop(loop_enabled, loop_start_seconds, loop_end_seconds) {
             if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set loop failed: {error}");
@@ -843,9 +860,8 @@ impl StudioLayout {
         }
         transport_freeze_debug::log("after engine transport sync");
 
-        let seconds = playhead_beats.max(0.0) as f64 * 60.0 / bpm_secs;
         transport_freeze_debug::log("before engine.seek");
-        if let Err(error) = engine.seek(seconds) {
+        if let Err(error) = engine.seek(playhead_seconds) {
             self.audio_last_error = Some(error.to_string());
             eprintln!("[audio] seek before play failed: {error}");
             transport_freeze_debug::log("abort: seek failed");
@@ -860,7 +876,7 @@ impl StudioLayout {
                 self.current_audio_sample_rate(),
                 debug.loaded_clips,
                 debug.ready_clips,
-                seconds,
+                playhead_seconds,
                 bpm
             );
             if debug.loaded_clips == 0 {
@@ -972,10 +988,11 @@ impl StudioLayout {
         }
     }
 
-    /// Apply a delta-based BPM drag sample. Accumulates `cur_y - prev_y`
-    /// against the captured `start_bpm` so the BPM range is bounded by
-    /// modifier sensitivity, not by the window height — i.e. the cursor
-    /// hitting the screen edge no longer caps the value (FL Studio style).
+    /// Apply a BPM drag sample. The drag is screen-edge independent: on Windows
+    /// the OS cursor is warped back to a fixed anchor every move, so vertical
+    /// dragging accumulates unbounded relative motion (true DAW-style infinite
+    /// scrubbing). Tempo safety: when automation exists the drag edits the
+    /// active tempo marker at the playhead instead of the fixed project BPM.
     pub(super) fn apply_bpm_drag_sample(
         &mut self,
         sample: components::BpmDragSample,
@@ -987,59 +1004,166 @@ impl StudioLayout {
             self.bpm_drag_prev_y = sample.cur_y;
             self.bpm_drag_accum = 0.0;
             self.last_engine_bpm_commit = None;
+            // Capture the cursor anchor + window scale for warp-based dragging.
+            self.bpm_drag_anchor = cursor_pos_phys();
+            self.bpm_drag_scale = cx
+                .windows()
+                .first()
+                .and_then(|w| w.update(cx, |_, window, _| window.scale_factor()).ok())
+                .unwrap_or(1.0)
+                .max(0.1);
+            // Decide what this drag edits, and capture the start value there.
+            let (target_point_id, start_value) = {
+                let state = &self.timeline.read(cx).state;
+                if state.tempo_has_automation() {
+                    let beat = state.transport.playhead_beats as f64;
+                    match state.tempo_map.point_id_at_or_before_beat(beat) {
+                        Some(id) => {
+                            let bpm = state
+                                .tempo_map
+                                .points
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map(|p| p.bpm as f32)
+                                .unwrap_or(state.bpm);
+                            (Some(id.to_string()), bpm)
+                        }
+                        // Before the first marker → edit the fixed base tempo.
+                        None => (None, state.bpm),
+                    }
+                } else {
+                    (None, state.bpm)
+                }
+            };
+            self.bpm_drag_target_point_id = target_point_id;
+            self.bpm_drag_start_value = start_value;
             if components::bpm_debug_enabled() {
-                let maximized = cx.windows().iter().any(|w| {
-                    w.update(cx, |_, window, _| window.is_maximized())
-                        .unwrap_or(false)
-                });
-                let scale = cx
-                    .windows()
-                    .first()
-                    .and_then(|w| w.update(cx, |_, window, _| window.scale_factor()).ok())
-                    .unwrap_or(1.0);
                 eprintln!(
-                    "[transport-bpm] drag_start id={} start_bpm={:.2} maximized={} scale_factor={:.2}",
-                    sample.drag_id, sample.start_bpm, maximized, scale
+                    "[transport-bpm] drag_start id={} start_value={:.2} target_point_id={:?} scale={:.2} anchor={:?}",
+                    sample.drag_id,
+                    start_value,
+                    self.bpm_drag_target_point_id,
+                    self.bpm_drag_scale,
+                    self.bpm_drag_anchor
                 );
             }
             return;
         }
-        let raw_delta = sample.cur_y - self.bpm_drag_prev_y;
-        // Deadzone: ignore sub-pixel jitter / coalesced events with no real
-        // motion. Without this, OS event noise can wobble the accumulator.
-        if raw_delta.abs() < components::BPM_DRAG_DEADZONE_PX {
+
+        // Relative vertical movement in logical px. Prefer the warped OS cursor
+        // delta (edge-independent); fall back to the window-relative position.
+        let dy_logical = match self.warp_drag_delta_y() {
+            Some(dy) => dy,
+            None => {
+                let raw_delta = sample.cur_y - self.bpm_drag_prev_y;
+                if raw_delta.abs() < components::BPM_DRAG_DEADZONE_PX {
+                    return;
+                }
+                self.bpm_drag_prev_y = sample.cur_y;
+                raw_delta
+            }
+        };
+        if dy_logical == 0.0 {
             return;
         }
-        self.bpm_drag_prev_y = sample.cur_y;
-        let sensitivity =
-            components::bpm_drag_sensitivity(sample.shift, sample.control || sample.platform);
-        // Up = positive BPM change. Screen Y grows downward, so negate.
-        self.bpm_drag_accum -= raw_delta * sensitivity;
 
-        let raw = sample.start_bpm + self.bpm_drag_accum;
+        let coarse = sample.control || sample.platform || sample.alt;
+        let sensitivity = components::bpm_drag_sensitivity(sample.shift, coarse);
+        // Up = positive BPM change. Screen Y grows downward, so negate.
+        self.bpm_drag_accum -= dy_logical * sensitivity;
+
+        let raw = self.bpm_drag_start_value + self.bpm_drag_accum;
         let clamped = raw.clamp(components::BPM_MIN, components::BPM_MAX);
         let snapped = if sample.shift {
             (clamped * 10.0).round() / 10.0
+        } else if coarse {
+            (clamped / 5.0).round() * 5.0
         } else {
             clamped.round()
         };
-        if components::bpm_debug_enabled() {
-            eprintln!(
-                "[transport-bpm] move delta_y={:.2} accum={:.2} sens={:.3} computed={:.2}",
-                raw_delta, self.bpm_drag_accum, sensitivity, snapped
-            );
-        }
-        // While dragging, throttle engine tempo commits to ~30 Hz. UI state
-        // is updated every event for a smooth readout; the audio engine
-        // tempo only changes a few dozen times per second.
+
         let now = Instant::now();
         let engine_due = match self.last_engine_bpm_commit {
             Some(t) => now.duration_since(t) >= Duration::from_millis(33),
             None => true,
         };
-        self.set_native_bpm_inner(snapped, engine_due, cx);
+        let target_point_id = self.bpm_drag_target_point_id.clone();
+        self.apply_bpm_value(snapped, target_point_id.as_deref(), engine_due, cx);
         if engine_due {
             self.last_engine_bpm_commit = Some(now);
+        }
+    }
+
+    /// Edge-independent vertical drag delta (logical px) using OS cursor warp.
+    /// Reads the absolute cursor, computes the delta from the anchor, then
+    /// re-pins the cursor to the anchor so it can never reach the screen edge.
+    /// Returns `None` on platforms without cursor warp so callers fall back to
+    /// window-relative deltas.
+    fn warp_drag_delta_y(&mut self) -> Option<f32> {
+        let anchor = self.bpm_drag_anchor?;
+        let cur = cursor_pos_phys()?;
+        let dy_phys = cur.1 - anchor.1;
+        if dy_phys == 0 {
+            // Echo from our own warp, or no motion.
+            return Some(0.0);
+        }
+        set_cursor_pos_phys(anchor.0, anchor.1);
+        Some(dy_phys as f32 / self.bpm_drag_scale)
+    }
+
+    /// Cancel the active BPM drag, restoring the value captured at drag start.
+    /// Wired to Escape.
+    pub(super) fn cancel_bpm_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.bpm_drag_active_id.is_none() {
+            return false;
+        }
+        let start = self.bpm_drag_start_value;
+        let target_point_id = self.bpm_drag_target_point_id.clone();
+        self.apply_bpm_value(start, target_point_id.as_deref(), true, cx);
+        self.end_bpm_drag();
+        true
+    }
+
+    /// Clears transient BPM-drag bookkeeping. The next `on_drag` gets a fresh
+    /// `drag_id`, so this is only needed for explicit cancel.
+    pub(super) fn end_bpm_drag(&mut self) {
+        self.bpm_drag_active_id = None;
+        self.bpm_drag_anchor = None;
+        self.bpm_drag_accum = 0.0;
+    }
+
+    /// Apply a BPM value to the correct target: a tempo marker (mapped mode) or
+    /// the fixed project BPM. Centralizes the tempo-safety rule so dragging,
+    /// inline edit, and menu commands all behave consistently.
+    pub(super) fn apply_bpm_value(
+        &mut self,
+        bpm: f32,
+        target_point_id: Option<&str>,
+        commit_to_engine: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let bpm = bpm.clamp(components::BPM_MIN, components::BPM_MAX);
+        match target_point_id {
+            None => self.set_native_bpm_inner(bpm, commit_to_engine, cx),
+            Some(point_id) => {
+                let changed = self.timeline.update(cx, |timeline, cx| {
+                    let updated = timeline
+                        .state
+                        .tempo_map
+                        .update_point_bpm_by_id(point_id, bpm as f64);
+                    if updated {
+                        cx.notify();
+                    }
+                    updated
+                });
+                if changed {
+                    self.mark_dirty();
+                    if commit_to_engine {
+                        self.sync_tempo_map_to_engine(cx);
+                    }
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -1085,6 +1209,320 @@ impl StudioLayout {
         cx.notify();
     }
 
+    /// Open the compact tempo menu (anchored at screen `x`,`y`) from the
+    /// transport BPM display. Reuses the shared context-menu overlay.
+    pub(super) fn open_tempo_menu(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        self.open_popover = Some(OpenPopover::Context {
+            target: ContextTarget::Tempo,
+            x,
+            y,
+        });
+        cx.notify();
+    }
+
+    /// Add a tempo marker at the current playhead using the effective BPM there.
+    /// This is the primary way to introduce tempo automation from the transport.
+    pub(super) fn add_tempo_marker_at_playhead(&mut self, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let beat = timeline.state.transport.playhead_beats as f64;
+            let bpm = timeline.state.effective_bpm_at_beat(beat);
+            timeline.state.tempo_map.add_or_update_point(
+                beat,
+                bpm,
+                crate::components::timeline::timeline_state::TempoCurve::Hold,
+            );
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    /// Remove all tempo automation, keeping the playhead BPM as a single fixed
+    /// marker at beat 0.
+    pub(super) fn clear_tempo_automation(&mut self, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let bpm = timeline.state.effective_bpm_at_playhead();
+            if timeline.state.tempo_map.points.len() == 1
+                && timeline
+                    .state
+                    .tempo_map
+                    .points
+                    .first()
+                    .is_some_and(|p| p.beat <= 1e-6 && (p.bpm - bpm).abs() < 1e-6)
+            {
+                return false;
+            }
+            timeline.state.bpm = bpm as f32;
+            timeline.state.tempo_map.reset_to_single_point(
+                0.0,
+                bpm,
+                crate::components::timeline::timeline_state::TempoCurve::Hold,
+            );
+            timeline.state.selected_tempo_point_id = None;
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn show_tempo_track(&mut self, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.state.show_tempo_track_lane();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    pub(super) fn hide_tempo_track(&mut self, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.state.hide_tempo_track_lane();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    pub(super) fn tempo_track_context_position(&self) -> Option<(f64, f64)> {
+        match &self.open_popover {
+            Some(OpenPopover::Context {
+                target: ContextTarget::TempoTrack { beat, bpm, .. },
+                ..
+            }) => Some((*beat, *bpm)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn tempo_track_context_point_id(&self) -> Option<String> {
+        match &self.open_popover {
+            Some(OpenPopover::Context {
+                target: ContextTarget::TempoTrack { point_id, .. },
+                ..
+            }) => point_id.clone(),
+            _ => None,
+        }
+    }
+
+    pub(super) fn add_tempo_point_at_lane(&mut self, beat: f64, bpm: f64, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if let Some(id) = timeline.state.add_tempo_point(beat, bpm) {
+                timeline.state.select_tempo_point(&id);
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_fixed_tempo_from_lane(
+        &mut self,
+        beat: f64,
+        bpm: f64,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            timeline.state.set_fixed_tempo_from_beat(beat, bpm);
+            timeline.state.bpm = bpm as f32;
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn delete_tempo_point(&mut self, id: &str, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if timeline.state.delete_tempo_point(id) {
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_tempo_point_curve(
+        &mut self,
+        id: &str,
+        curve: crate::components::timeline::timeline_state::TempoCurve,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if timeline.state.set_tempo_point_curve(id, curve) {
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    /// Convert fixed-tempo mode into a tempo map by seeding an initial marker at
+    /// beat 0 using the current project BPM. No-op if automation already exists.
+    pub(super) fn create_tempo_automation(&mut self, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if timeline.state.tempo_map.has_automation() {
+                return false;
+            }
+            let bpm = timeline.state.bpm as f64;
+            timeline.state.tempo_map.add_or_update_point(
+                0.0,
+                bpm,
+                crate::components::timeline::timeline_state::TempoCurve::Hold,
+            );
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    /// Insert a tempo marker at an explicit beat using the effective BPM there
+    /// (used by the timeline ruler context menu). `create_first` seeds tempo
+    /// automation if none exists yet.
+    pub(super) fn add_tempo_point_at_beat(
+        &mut self,
+        beat: f64,
+        create_first: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let beat = beat.max(0.0);
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            use crate::components::timeline::timeline_state::TempoCurve;
+            if !timeline.state.tempo_map.has_automation() && create_first {
+                // Seed an anchor at beat 0 so the new marker reads as a change
+                // from the project's fixed tempo.
+                let base = timeline.state.bpm as f64;
+                if beat > 1e-6 {
+                    timeline
+                        .state
+                        .tempo_map
+                        .add_or_update_point(0.0, base, TempoCurve::Hold);
+                }
+            }
+            let bpm = timeline.state.effective_bpm_at_beat(beat);
+            timeline
+                .state
+                .tempo_map
+                .add_or_update_point(beat, bpm, TempoCurve::Hold);
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_tempo_map_to_engine(cx);
+            cx.notify();
+        }
+    }
+
+    /// Open the inline numeric BPM editor, seeded with the current effective
+    /// BPM at the playhead. Keys are routed by the layout's key handler while
+    /// `bpm_editing` is set, so no separate focus grab is needed.
+    pub(super) fn begin_bpm_edit(&mut self, cx: &mut Context<Self>) {
+        // A drag and an edit are mutually exclusive.
+        self.end_bpm_drag();
+        let bpm = self.timeline.read(cx).state.effective_bpm_at_playhead();
+        let text = if (bpm.fract()).abs() < 0.05 {
+            format!("{bpm:.0}")
+        } else {
+            format!("{bpm:.2}")
+        };
+        self.bpm_input.set_value(text);
+        self.bpm_input.select_all();
+        self.bpm_editing = true;
+        cx.notify();
+    }
+
+    /// Commit the inline BPM editor: parse the field and apply to the active
+    /// tempo target (marker at playhead when automation exists, else fixed BPM).
+    pub(super) fn commit_bpm_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.bpm_editing {
+            return;
+        }
+        let parsed = self.bpm_input.value.trim().parse::<f32>().ok();
+        self.bpm_editing = false;
+        if let Some(bpm) = parsed {
+            let target_point_id = {
+                let state = &self.timeline.read(cx).state;
+                if state.tempo_has_automation() {
+                    let beat = state.transport.playhead_beats as f64;
+                    state
+                        .tempo_map
+                        .point_id_at_or_before_beat(beat)
+                        .map(|id| id.to_string())
+                } else {
+                    None
+                }
+            };
+            self.apply_bpm_value(bpm, target_point_id.as_deref(), true, cx);
+        }
+        cx.notify();
+    }
+
+    /// Cancel the inline BPM editor without applying.
+    pub(super) fn cancel_bpm_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.bpm_editing {
+            return;
+        }
+        self.bpm_editing = false;
+        cx.notify();
+    }
+
+    /// Push the project TempoMap to the audio engine so playback, metronome,
+    /// and MIDI scheduling use the authoritative hold-mode segments.
+    pub(super) fn sync_tempo_map_to_engine(&mut self, cx: &mut Context<Self>) {
+        let (default_bpm, points) = {
+            let state = &self.timeline.read(cx).state;
+            (
+                state.bpm as f64,
+                state
+                    .tempo_map
+                    .points
+                    .iter()
+                    .map(|p| DAUx::types::EngineTempoPointSnapshot {
+                        beat: p.beat,
+                        bpm: p.bpm,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if let Some(engine) = self.audio_engine.as_ref() {
+            if let Err(error) = engine.set_tempo_map(default_bpm, points) {
+                if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                    eprintln!("[audio] sync tempo map failed: {error}");
+                }
+            }
+        }
+    }
+
     pub(super) fn stop_native_playback(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.audio_engine.as_ref() else {
             return;
@@ -1125,3 +1563,32 @@ impl StudioLayout {
         });
     }
 }
+
+/// Current OS cursor position in physical screen pixels, if the platform
+/// supports querying it. Used to drive screen-edge-independent BPM scrubbing.
+#[cfg(target_os = "windows")]
+fn cursor_pos_phys() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    unsafe { GetCursorPos(&mut p).ok()? };
+    Some((p.x, p.y))
+}
+
+/// Re-pin the OS cursor to `(x, y)` physical pixels so an active scrub never
+/// reaches the screen edge.
+#[cfg(target_os = "windows")]
+fn set_cursor_pos_phys(x: i32, y: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    unsafe {
+        let _ = SetCursorPos(x, y);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cursor_pos_phys() -> Option<(i32, i32)> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_cursor_pos_phys(_x: i32, _y: i32) {}

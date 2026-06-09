@@ -64,7 +64,13 @@ impl StudioLayout {
             .read(cx)
             .state
             .find_track(track_id)
-            .map(|track| track.inserts.iter().map(|insert| insert.id.clone()).collect())
+            .map(|track| {
+                track
+                    .inserts
+                    .iter()
+                    .map(|insert| insert.id.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         let insert_ids: Vec<String> = self
             .open_plugin_editors

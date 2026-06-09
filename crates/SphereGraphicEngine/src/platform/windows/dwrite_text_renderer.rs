@@ -13,7 +13,6 @@ use core::ffi::c_void;
 
 use windows::core::{implement, BOOL, HSTRING};
 use windows::Win32::Foundation::{COLORREF, RECT};
-use windows::Win32::Graphics::Gdi::{BitBlt, CreateSolidBrush, DeleteObject, FillRect, HDC, SRCCOPY};
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteBitmapRenderTarget, IDWritePixelSnapping_Impl, IDWriteRenderingParams,
     IDWriteTextFormat1, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
@@ -21,9 +20,14 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_MEASURING_MODE, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
 };
+use windows::Win32::Graphics::Gdi::{
+    BitBlt, CreateSolidBrush, DeleteObject, FillRect, HDC, SRCCOPY,
+};
 use windows_core::Interface;
 
-use super::dwrite_font_manager::{resolve_family_in_collection, DWriteFontManager, FontDiagnostics};
+use super::dwrite_font_manager::{
+    resolve_family_in_collection, DWriteFontManager, FontDiagnostics,
+};
 use super::FontConfig;
 use crate::TextAlign;
 
@@ -74,7 +78,16 @@ impl DWriteTextRenderer {
         }
 
         let layout = unsafe {
-            create_text_layout(&self.manager, text, family, weight, em_px, w as f32, h as f32, align)
+            create_text_layout(
+                &self.manager,
+                text,
+                family,
+                weight,
+                em_px,
+                w as f32,
+                h as f32,
+                align,
+            )
         };
         let Some(layout) = layout else {
             return false;
@@ -126,10 +139,7 @@ impl IDWritePixelSnapping_Impl for GlyphRunRenderer_Impl {
         Ok(())
     }
 
-    fn GetPixelsPerDip(
-        &self,
-        clientdrawingcontext: *const c_void,
-    ) -> windows::core::Result<f32> {
+    fn GetPixelsPerDip(&self, clientdrawingcontext: *const c_void) -> windows::core::Result<f32> {
         let ctx = unsafe { &*(clientdrawingcontext.cast::<DrawContext>()) };
         Ok(ctx.pixels_per_dip)
     }
@@ -258,7 +268,10 @@ unsafe fn create_text_layout(
         .ok()?;
     let _ = format.SetFontFallback(Some(&manager.font_fallback));
     let (text_align, para_align) = match align {
-        TextAlign::Left => (DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR),
+        TextAlign::Left => (
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+            DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+        ),
         TextAlign::Center => (
             DWRITE_TEXT_ALIGNMENT_CENTER,
             DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
@@ -286,7 +299,10 @@ unsafe fn draw_layout(
     fg: COLORREF,
     dpi_scale: f32,
 ) -> bool {
-    let Ok(brt) = manager.gdi.CreateBitmapRenderTarget(None, w as u32, h as u32) else {
+    let Ok(brt) = manager
+        .gdi
+        .CreateBitmapRenderTarget(None, w as u32, h as u32)
+    else {
         return false;
     };
     let mem = brt.GetMemoryDC();
@@ -311,7 +327,7 @@ unsafe fn draw_layout(
     let origin_y = ((h as f32 - metrics.height) / 2.0).max(0.0);
 
     let ctx = DrawContext {
-        brt: brt.clone(),
+        brt,
         params: manager.rendering_params.clone(),
         fg,
         pixels_per_dip: dpi_scale.max(1.0),

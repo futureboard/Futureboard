@@ -223,10 +223,7 @@ impl SharedAudioBuffer {
     /// SPSC contract: only the producing side (engine) may call this while it
     /// holds the block.
     pub unsafe fn write_deinterleaved(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
-        let n = frames
-            .min(MAX_BLOCK_FRAMES)
-            .min(in_l.len())
-            .min(in_r.len());
+        let n = frames.min(MAX_BLOCK_FRAMES).min(in_l.len()).min(in_r.len());
         let dst = self.samples.as_ptr() as *mut f32;
         for i in 0..n {
             unsafe {
@@ -288,8 +285,10 @@ impl SharedAudioBridge {
     /// right after the zeroed region is mapped.
     pub fn init_header(&self, sample_rate: u32, max_block_size: u32, channels: u32) {
         self.sample_rate.store(sample_rate, Ordering::Relaxed);
-        self.max_block_size
-            .store(max_block_size.min(MAX_BLOCK_FRAMES as u32), Ordering::Relaxed);
+        self.max_block_size.store(
+            max_block_size.min(MAX_BLOCK_FRAMES as u32),
+            Ordering::Relaxed,
+        );
         self.in_channels.store(channels, Ordering::Relaxed);
         self.out_channels.store(channels, Ordering::Relaxed);
         self.layout_version
@@ -324,10 +323,8 @@ impl SharedAudioBridge {
 
     /// Store the host output peak meters (host side).
     pub fn store_meters(&self, peak_l: f32, peak_r: f32) {
-        self.meter_peak_l
-            .store(peak_l.to_bits(), Ordering::Relaxed);
-        self.meter_peak_r
-            .store(peak_r.to_bits(), Ordering::Relaxed);
+        self.meter_peak_l.store(peak_l.to_bits(), Ordering::Relaxed);
+        self.meter_peak_r.store(peak_r.to_bits(), Ordering::Relaxed);
     }
 
     /// Read the host output peak meters (engine side).
@@ -435,8 +432,7 @@ impl Drop for SharedAudioRegion {
                 std::alloc::dealloc(self.ptr as *mut u8, *layout);
             },
             #[cfg(windows)]
-            Backing::Mapping(_) => { /* WinMapping::Drop unmaps + closes handles */
-            }
+            Backing::Mapping(_) => { /* WinMapping::Drop unmaps + closes handles */ }
         }
     }
 }

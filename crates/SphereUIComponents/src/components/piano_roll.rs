@@ -3486,17 +3486,19 @@ impl PianoRoll {
                             .bg(Colors::surface_panel())
                             .border_r(px(1.0))
                             .border_color(Colors::panel_border())
-                            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                                if this.key_lane_pressed_pitch.is_none() {
-                                    return;
-                                }
-                                let local_y: f32 = event.position.y.into();
-                                let pitch = this.y_to_pitch(local_y);
-                                if this.key_lane_pressed_pitch != Some(pitch) {
-                                    this.key_lane_pressed_pitch = Some(pitch);
-                                    this.begin_preview_note(pitch, 100, "piano_key_drag", cx);
-                                }
-                            }))
+                            .on_mouse_move(cx.listener(
+                                |this, event: &MouseMoveEvent, _window, cx| {
+                                    if this.key_lane_pressed_pitch.is_none() {
+                                        return;
+                                    }
+                                    let local_y: f32 = event.position.y.into();
+                                    let pitch = this.y_to_pitch(local_y);
+                                    if this.key_lane_pressed_pitch != Some(pitch) {
+                                        this.key_lane_pressed_pitch = Some(pitch);
+                                        this.begin_preview_note(pitch, 100, "piano_key_drag", cx);
+                                    }
+                                },
+                            ))
                             .children(keys),
                     )
                     // Single unified controller-lane header (name + range).

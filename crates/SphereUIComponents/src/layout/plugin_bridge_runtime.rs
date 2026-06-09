@@ -81,9 +81,7 @@ impl PluginBridgeRuntime {
     /// established (and on non-Windows, where the mapping is unavailable).
     pub fn audio_sink(&self) -> Option<DAUx::plugin_bridge::SharedPluginBridgeSink> {
         let region = self.shared_audio.as_ref()?;
-        Some(sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::new(
-            region.clone(),
-        ))
+        Some(sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::into_shared(region.clone()))
     }
 
     pub fn loaded_descriptor(&self, instance: &str) -> Option<BridgeLoadedPlugin> {
@@ -136,7 +134,9 @@ impl PluginBridgeRuntime {
                     eprintln!(
                         "[plugin-bridge] shared audio region created name={name} bytes={bytes} sr={sample_rate} block={max_block_size}"
                     );
-                    eprintln!("[plugin-bridge] sending AttachSharedAudio name={name} bytes={bytes}");
+                    eprintln!(
+                        "[plugin-bridge] sending AttachSharedAudio name={name} bytes={bytes}"
+                    );
                     match self.client.attach_shared_audio(name.clone(), bytes) {
                         Ok(()) => self.shared_audio = Some(Arc::new(region)),
                         Err(error) => {
@@ -297,27 +297,16 @@ impl PluginBridgeRuntime {
         &mut self,
         plugin_instance_id: String,
     ) -> Result<(), PluginHostClientError> {
-        eprintln!(
-            "[plugin-bridge] sending PreviewAllNotesOff instance={plugin_instance_id}"
-        );
+        eprintln!("[plugin-bridge] sending PreviewAllNotesOff instance={plugin_instance_id}");
         self.client.preview_all_notes_off(plugin_instance_id)
     }
 
-    pub fn midi_panic(
-        &mut self,
-        plugin_instance_id: String,
-    ) -> Result<(), PluginHostClientError> {
+    pub fn midi_panic(&mut self, plugin_instance_id: String) -> Result<(), PluginHostClientError> {
         eprintln!("[plugin-bridge] sending MidiPanic instance={plugin_instance_id}");
         self.client.midi_panic(plugin_instance_id)
     }
 
-    pub fn resize_editor(
-        &mut self,
-        plugin_instance_id: String,
-        width: u32,
-        height: u32,
-        dpi: u32,
-    ) {
+    pub fn resize_editor(&mut self, plugin_instance_id: String, width: u32, height: u32, dpi: u32) {
         let _ = self
             .client
             .resize_editor(plugin_instance_id, width, height, dpi);

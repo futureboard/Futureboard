@@ -254,6 +254,14 @@ impl AudioEngine {
         self.inner.set_bpm(bpm)
     }
 
+    pub fn set_tempo_map(
+        &self,
+        default_bpm: f64,
+        points: Vec<crate::types::EngineTempoPointSnapshot>,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_tempo_map(default_bpm, points)
+    }
+
     /// Stage 3b: install (or clear) the realtime plugin-bridge sink for
     /// `track_id` so the audio callback mixes its external plugin-host DSP
     /// output into the master.
@@ -322,13 +330,8 @@ impl AudioEngine {
         pitch: u8,
         velocity: u8,
     ) -> Result<(), SphereAudioError> {
-        self.inner.plugin_preview_note_on(
-            track_id,
-            plugin_instance_id,
-            channel,
-            pitch,
-            velocity,
-        )
+        self.inner
+            .plugin_preview_note_on(track_id, plugin_instance_id, channel, pitch, velocity)
     }
 
     pub fn plugin_preview_note_off(

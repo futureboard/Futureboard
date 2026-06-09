@@ -37,7 +37,7 @@ use crate::graph::{MasterState, TrackState};
 use crate::latency_graph::apply_pdc_delay_block;
 use crate::recording::{self, RecordingSession};
 use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
-use crate::tempo_map::TempoMap;
+use crate::tempo_map::{TempoMap, TempoPoint};
 use crate::transport::{self, RuntimeTransportSnapshot};
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
@@ -679,8 +679,23 @@ impl EngineInner {
     }
 
     pub fn set_bpm(&self, bpm: f64) -> Result<(), SphereAudioError> {
-        transport::store_f64_bits(&self.shared.bpm_bits, bpm);
-        self.send_command(EngineCommand::SetBpm(bpm))
+        self.set_tempo_map(bpm, Vec::new())
+    }
+
+    /// Replace the authoritative tempo map used for playback, metronome, and
+    /// beat/time/sample conversion. `points` empty = static tempo at `default_bpm`.
+    pub fn set_tempo_map(
+        &self,
+        default_bpm: f64,
+        points: Vec<crate::types::EngineTempoPointSnapshot>,
+    ) -> Result<(), SphereAudioError> {
+        let snapshot = crate::runtime::build_tempo_map_from_points(default_bpm, &points);
+        transport::store_f64_bits(&self.shared.bpm_bits, default_bpm);
+        if let Some(project) = self.project.lock().as_mut() {
+            project.bpm = default_bpm;
+            project.tempo_points = points;
+        }
+        self.send_command(EngineCommand::SetTempoMap(snapshot))
     }
 
     /// Stage 3b: install (or clear, with `None`) the realtime sink for
@@ -819,7 +834,7 @@ impl EngineInner {
         self.project
             .lock()
             .as_ref()
-            .map(|project| TempoMap::static_tempo(project.bpm))
+            .map(tempo_map_from_project_snapshot)
             .unwrap_or_else(|| {
                 TempoMap::static_tempo(transport::f64_from_bits(
                     self.shared.bpm_bits.load(Ordering::Relaxed),
@@ -1380,7 +1395,7 @@ impl EngineInner {
             Err(e) => return Err(e),
         }
 
-        let _ = self.set_bpm(snapshot.bpm);
+        let _ = self.set_tempo_map(snapshot.bpm, snapshot.tempo_points.clone());
         let _ = self.set_time_signature(snapshot.time_signature[0], snapshot.time_signature[1]);
 
         Ok(())
@@ -1589,7 +1604,7 @@ impl EngineInner {
         let mut results = recording::stop_recording(session)?;
         let runtime = self.runtime.lock();
         let buffer_frames = self.status.lock().buffer_size;
-        let samples_per_beat = runtime.samples_per_beat.max(1.0);
+        let sample_rate = runtime.sample_rate.max(1) as f64;
         let round_trip_buffer = buffer_frames.saturating_mul(2);
         for result in &mut results {
             let Some(track_idx) = runtime
@@ -1611,7 +1626,9 @@ impl EngineInner {
                         .unwrap_or(0),
                 );
             let offset_samples = round_trip_buffer.saturating_add(path_samples);
-            let offset_beats = offset_samples as f64 / samples_per_beat;
+            let offset_beats = runtime
+                .tempo_map
+                .beat_at_samples(offset_samples as u64, sample_rate);
             result.start_beat = (result.start_beat - offset_beats).max(0.0);
         }
         drop(runtime);
@@ -2327,6 +2344,7 @@ impl EngineInner {
                 EngineCommand::Seek { .. } => "Seek",
                 EngineCommand::SetMetronomeEnabled(_) => "SetMetronomeEnabled",
                 EngineCommand::SetBpm(_) => "SetBpm",
+                EngineCommand::SetTempoMap(_) => "SetTempoMap",
                 EngineCommand::SetTimeSignature(_, _) => "SetTimeSignature",
                 EngineCommand::SetLoop { .. } => "SetLoop",
                 EngineCommand::SetPluginBridgeSink { .. } => "SetPluginBridgeSink",
@@ -2561,8 +2579,28 @@ fn two_mut<T>(v: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
 }
 
 #[inline]
+fn tempo_map_from_project_snapshot(project: &EngineProjectSnapshot) -> TempoMap {
+    if project.tempo_points.is_empty() {
+        TempoMap::static_tempo(project.bpm)
+    } else {
+        TempoMap::from_points(
+            project.bpm,
+            project
+                .tempo_points
+                .iter()
+                .map(|p| TempoPoint {
+                    beat: p.beat,
+                    bpm: p.bpm,
+                })
+                .collect(),
+        )
+    }
+}
+
 fn sample_to_beat(runtime: &RuntimeProject, sample: u64) -> f64 {
-    sample as f64 / runtime.samples_per_beat.max(1.0)
+    runtime
+        .tempo_map
+        .beat_at_samples(sample, runtime.sample_rate.max(1) as f64)
 }
 
 /// Linear clip-fade gain for a sample at offset `rel` from the clip start.
@@ -2722,7 +2760,7 @@ fn process_track_block(
     let bridge_sink = runtime
         .plugin_bridge_sinks
         .get(&track_id)
-        .map(|s| std::sync::Arc::clone(s));
+        .map(std::sync::Arc::clone);
     let has_bridge_insert = runtime.tracks[track_index]
         .inserts
         .iter()
@@ -3557,6 +3595,12 @@ where
                             // Preserve the plugin-bridge sinks across reloads (Stage 3b).
                             runtime.plugin_bridge_sinks = old.plugin_bridge_sinks.clone();
                             runtime.bridge_editor_active = old.bridge_editor_active.clone();
+                            let pos = shared.position_samples.load(Ordering::Relaxed);
+                            metronome.set_tempo_map(
+                                runtime.tempo_map.clone(),
+                                pos,
+                                output_sample_rate,
+                            );
                             crate::graveyard::retire(old);
                             if crate::runtime::midi_engine_debug_enabled() {
                                 let notes: usize =
@@ -3629,8 +3673,15 @@ where
                         EngineCommand::SetBpm(bpm) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
                             transport::store_f64_bits(&shared.bpm_bits, bpm);
-                            metronome.set_bpm(bpm, pos, output_sample_rate);
-                            let next_pos = runtime.set_static_midi_tempo(bpm, pos);
+                            let map = crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(bpm);
+                            metronome.set_tempo_map(map.clone(), pos, output_sample_rate);
+                            let next_pos = runtime.apply_tempo_map(map, pos);
+                            shared.position_samples.store(next_pos, Ordering::Relaxed);
+                        }
+                        EngineCommand::SetTempoMap(map) => {
+                            let pos = shared.position_samples.load(Ordering::Relaxed);
+                            metronome.set_tempo_map(map.clone(), pos, output_sample_rate);
+                            let next_pos = runtime.apply_tempo_map(map, pos);
                             shared.position_samples.store(next_pos, Ordering::Relaxed);
                         }
                         EngineCommand::SetTimeSignature(num, den) => {

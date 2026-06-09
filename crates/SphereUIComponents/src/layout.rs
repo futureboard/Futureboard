@@ -27,7 +27,7 @@ use crate::components::text_input::{
     text_input_context_entries, TextInputCallbacks, TextInputState,
 };
 use crate::components::timeline::timeline::TimelineContextTarget;
-use crate::components::timeline::timeline_state::ClipType;
+use crate::components::timeline::timeline_state::{ClipType, TempoCurve};
 use crate::components::MixerWindow;
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
 use crate::overlay::{project_title_anchor, titlebar_label_anchor};
@@ -358,8 +358,7 @@ pub struct StudioLayout {
     /// editor lives in a real Win32 top-level window (no GPUI flip-model swap
     /// chain over it), so the host process's `IPlugView` child actually paints.
     /// Keyed by `(track_id, plugin_instance_id)`.
-    bridge_editors:
-        std::collections::HashMap<(String, String), plugin_ops::BridgeEditorSession>,
+    bridge_editors: std::collections::HashMap<(String, String), plugin_ops::BridgeEditorSession>,
     plugin_bridge_runtime: Option<plugin_bridge_runtime::SharedPluginBridgeRuntime>,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
@@ -408,6 +407,24 @@ pub struct StudioLayout {
     bpm_drag_prev_y: f32,
     /// Accumulated BPM offset (signed) for the active drag.
     bpm_drag_accum: f32,
+    /// Screen-space cursor anchor (physical px) for the active BPM drag. On
+    /// Windows the OS cursor is warped back here every move so the drag never
+    /// stops at the screen edge — true DAW-style infinite scrubbing.
+    bpm_drag_anchor: Option<(i32, i32)>,
+    /// Window scale factor captured at drag start, used to convert physical
+    /// cursor deltas to a screen-independent BPM feel.
+    bpm_drag_scale: f32,
+    /// What the active BPM drag edits: `Some(id)` updates only that tempo
+    /// marker (mapped-tempo mode); `None` updates the fixed project BPM.
+    bpm_drag_target_point_id: Option<String>,
+    /// BPM value captured at drag start for the active drag target. The drag
+    /// accumulates against this rather than the displayed (possibly
+    /// interpolated) value.
+    bpm_drag_start_value: f32,
+    /// Inline numeric BPM editor state + whether it is open. Opened by
+    /// double-click on the BPM display or the "Edit BPM…" menu item.
+    bpm_input: TextInputState,
+    bpm_editing: bool,
     /// Last time we sent `engine.set_bpm` during a live BPM drag. Throttles
     /// audio-engine tempo commits to ~30 Hz; the UI state still updates
     /// every event, but we don't flood the engine with sub-perceptual
@@ -569,6 +586,20 @@ impl StudioLayout {
         {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_tempo_map_changed_callback(Some(Arc::new(move |cx| {
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            this.mark_dirty();
+                            this.sync_tempo_map_to_engine(cx);
+                        });
+                    });
+                })));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_project_changed_callback(Some(Arc::new(move |cx| {
                     // DEFER the parent update. This callback runs from inside
                     // `Timeline::update` (gesture commits) AND from inside
@@ -717,6 +748,12 @@ impl StudioLayout {
             bpm_drag_active_id: None,
             bpm_drag_prev_y: 0.0,
             bpm_drag_accum: 0.0,
+            bpm_drag_anchor: None,
+            bpm_drag_scale: 1.0,
+            bpm_drag_target_point_id: None,
+            bpm_drag_start_value: 120.0,
+            bpm_input: TextInputState::new("transport-bpm-input", cx.focus_handle()),
+            bpm_editing: false,
             last_engine_bpm_commit: None,
             focus_handle: cx.focus_handle(),
             clip_clipboard: Vec::new(),
@@ -886,6 +923,65 @@ impl StudioLayout {
         }
         match command_id {
             "noop" => {}
+
+            "tempo:add-marker" => {
+                self.add_tempo_marker_at_playhead(cx);
+            }
+            "tempo:create" => {
+                self.create_tempo_automation(cx);
+            }
+            "tempo:edit-bpm" => {
+                self.begin_bpm_edit(cx);
+            }
+            "tempo:clear" => {
+                self.clear_tempo_automation(cx);
+            }
+            "tempo:open-track" => {
+                self.show_tempo_track(cx);
+            }
+            "tempo:hide-track" => {
+                self.hide_tempo_track(cx);
+            }
+            "tempo:add-point-here" => {
+                if let Some((beat, bpm)) = self.tempo_track_context_position() {
+                    self.add_tempo_point_at_lane(beat, bpm, cx);
+                }
+            }
+            "tempo:set-fixed-here" => {
+                if let Some((beat, bpm)) = self.tempo_track_context_position() {
+                    self.set_fixed_tempo_from_lane(beat, bpm, cx);
+                }
+            }
+            "tempo:delete-point" => {
+                if let Some(id) = self.tempo_track_context_point_id() {
+                    self.delete_tempo_point(&id, cx);
+                }
+            }
+            "tempo:curve-hold" => {
+                if let Some(id) = self.tempo_track_context_point_id() {
+                    self.set_tempo_point_curve(&id, TempoCurve::Hold, cx);
+                }
+            }
+            "tempo:curve-linear" => {
+                if let Some(id) = self.tempo_track_context_point_id() {
+                    self.set_tempo_point_curve(&id, TempoCurve::Linear, cx);
+                }
+            }
+            "tempo:curve-smooth" => {
+                if let Some(id) = self.tempo_track_context_point_id() {
+                    self.set_tempo_point_curve(&id, TempoCurve::Smooth, cx);
+                }
+            }
+            "ruler:create-tempo-here" => {
+                if let Some(beat) = self.ruler_context_beat() {
+                    self.add_tempo_point_at_beat(beat, true, cx);
+                }
+            }
+            "ruler:add-tempo-marker" => {
+                if let Some(beat) = self.ruler_context_beat() {
+                    self.add_tempo_point_at_beat(beat, false, cx);
+                }
+            }
 
             "browser:import" => {
                 let path = match &self.open_popover {

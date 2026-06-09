@@ -897,7 +897,10 @@ impl StudioLayout {
     }
 
     pub(super) fn cmd_open_recent_project(&mut self, cx: &mut Context<Self>) {
-        self.recent_projects.refresh_missing();
+        // Note: no synchronous refresh_missing() here — that blocks the UI
+        // thread on per-entry filesystem stats (hundreds of ms on OneDrive).
+        // `load_project_from_path_with_options` already validates existence of
+        // the single chosen path and shows a friendly dialog if it's gone.
         let idx = self.project_switcher.selected_index;
         if idx == 0 {
             return;
@@ -933,8 +936,35 @@ impl StudioLayout {
         }
     }
 
+    /// Refresh the recent-projects `missing` flags off the UI thread.
+    ///
+    /// Per-entry `Path::exists()` stats are synchronous and can stall for
+    /// hundreds of ms on cloud-backed (OneDrive/Dropbox) paths, so we snapshot
+    /// the paths, stat them on the background executor, then apply the results
+    /// and re-sync the switcher on the foreground. Cheap no-op when empty.
+    pub(super) fn spawn_refresh_recent_missing(&mut self, cx: &mut Context<Self>) {
+        let paths = self.recent_projects.entry_paths();
+        if paths.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let missing: Vec<bool> = cx
+                .background_executor()
+                .spawn(async move { paths.iter().map(|p| !p.exists()).collect() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.recent_projects.apply_missing(&missing);
+                this.sync_recent_to_switcher();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn sync_recent_to_switcher(&mut self) {
-        self.recent_projects.refresh_missing();
+        // Pure / non-blocking: builds the switcher list from the already-cached
+        // `missing` flags. Freshness is refreshed separately and off-thread via
+        // `spawn_refresh_recent_missing` so this never stalls the UI on FS I/O.
         self.project_switcher.recent_projects = self
             .recent_projects
             .entries()

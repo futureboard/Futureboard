@@ -152,6 +152,16 @@ impl Collector {
         let now = Instant::now();
         if let Some(prev) = self.last_frame {
             let dt_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
+            // Stall attributor: a long gap with near-zero instrumented CPU means
+            // the UI thread was blocked outside the render scopes (sync FS I/O,
+            // GPU present, IPC). Log the bounding frame reasons so the next pass
+            // can attribute the freeze to a specific interaction.
+            if self.enabled && dt_ms > 80.0 && dt_ms < 5000.0 {
+                eprintln!(
+                    "[ui-stall] {dt_ms:.0}ms gap before frame (this_reason={reason} prev_reason={})",
+                    self.last_repaint_reason
+                );
+            }
             if dt_ms < 1000.0 {
                 self.frame_total_ms += dt_ms;
                 self.frame_count += 1;
@@ -529,6 +539,15 @@ pub fn perf_debug_enabled() -> bool {
 pub fn perf_hud_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PERF_HUD").is_some())
+}
+
+/// Whether to outline timeline clip rects (ruler markings, tempo / time-signature
+/// lane content, automation lanes). Enabled with `FUTUREBOARD_UI_DEBUG_CLIPS=1`;
+/// used to confirm marker overlays stay clipped to their content areas and never
+/// bleed over the left Arrangement / lane / track headers.
+pub fn ui_debug_clips_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_UI_DEBUG_CLIPS").is_some())
 }
 
 /// Returns whether perf instrumentation is active. Cheap — single TLS

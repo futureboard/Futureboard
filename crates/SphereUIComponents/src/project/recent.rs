@@ -72,11 +72,37 @@ impl RecentProjectsStore {
     }
 
     /// Marks entries whose files no longer exist, then saves.
+    ///
+    /// WARNING: blocking. Each `Path::exists()` is a synchronous filesystem
+    /// stat, and on cloud-backed paths (OneDrive/Dropbox placeholders) a single
+    /// call can stall for hundreds of milliseconds. Never call this on the UI
+    /// thread — use [`Self::entry_paths`] + a background stat + [`Self::apply_missing`]
+    /// (see `StudioLayout::spawn_refresh_recent_missing`). Retained for tests and
+    /// non-UI callers.
     pub fn refresh_missing(&mut self) {
         for entry in &mut self.entries {
             entry.missing = !entry.path.exists();
         }
         let _ = self.save();
+    }
+
+    /// Snapshot of the recent project file paths, in list order. Pair with
+    /// [`Self::apply_missing`] to refresh the `missing` flags off the UI thread.
+    pub fn entry_paths(&self) -> Vec<PathBuf> {
+        self.entries.iter().map(|e| e.path.clone()).collect()
+    }
+
+    /// Apply `missing` flags computed off-thread from [`Self::entry_paths`].
+    /// Indices align with the snapshot; a mismatched length (the list changed
+    /// meanwhile) is ignored so we never apply stale results to the wrong rows.
+    /// Transient UI state only — not persisted (the flag is recomputed on load).
+    pub fn apply_missing(&mut self, missing: &[bool]) {
+        if missing.len() != self.entries.len() {
+            return;
+        }
+        for (entry, &is_missing) in self.entries.iter_mut().zip(missing) {
+            entry.missing = is_missing;
+        }
     }
 
     /// Removes all entries and saves.

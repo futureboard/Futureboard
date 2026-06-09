@@ -500,6 +500,10 @@ impl Render for StudioLayout {
                         this.project_switcher_search_input.set_value("");
                         this.project_switcher_search_input.focus_handle.focus(w, cx);
                         this.project_switcher.selected_index = 0;
+                        // Refresh which recents still exist on disk — off the UI
+                        // thread, so opening the switcher never blocks on per-entry
+                        // filesystem stats (a multi-hundred-ms stall on OneDrive).
+                        this.spawn_refresh_recent_missing(cx);
                     }
                     cx.notify();
                 });

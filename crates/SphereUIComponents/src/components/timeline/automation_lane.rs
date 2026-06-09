@@ -60,7 +60,24 @@ pub fn automation_lane(
                         .child(lane.name.clone()),
                 ),
         )
-        .child(div().flex_1().h_full().relative().children(points_elements))
+        .child(
+            // Clip automation points to the lane content rect so a point whose x
+            // is at/left of the content edge (during scroll) never draws over the
+            // left lane header.
+            div()
+                .flex_1()
+                .h_full()
+                .relative()
+                .overflow_hidden()
+                .children(points_elements)
+                .children(crate::perf::ui_debug_clips_enabled().then(|| {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border(px(1.0))
+                        .border_color(gpui::rgb(0xff00ff))
+                })),
+        )
 }
 
 /// Draw the automation line + points for a track inside its own lane (the

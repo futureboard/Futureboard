@@ -277,6 +277,14 @@ pub fn tempo_track_lane(
                 .overflow_hidden()
                 .child(curve)
                 .children(markers)
-                .children(interaction),
+                .children(interaction)
+                // Debug: outline tempo_lane_content_rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
+                .children(crate::perf::ui_debug_clips_enabled().then(|| {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border(px(1.0))
+                        .border_color(gpui::rgb(0xff00ff))
+                })),
         )
 }

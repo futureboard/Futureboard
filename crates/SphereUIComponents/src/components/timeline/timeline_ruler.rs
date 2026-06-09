@@ -163,8 +163,22 @@ pub fn timeline_ruler(
                 .flex_1()
                 .h_full()
                 .relative()
+                // Clip all ruler ticks / bar-beat labels / tempo + time-signature
+                // marker pills to this content rect. Without this, a marker whose
+                // x is at or left of the content edge (during horizontal scroll)
+                // draws with a negative `left` straight over the left "Arrangement"
+                // ruler header. This is the ruler's `ruler_content_rect`.
+                .overflow_hidden()
                 .cursor(gpui::CursorStyle::Crosshair)
                 .id("ruler-markings-area")
+                // Debug: outline the ruler content clip rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
+                .children(crate::perf::ui_debug_clips_enabled().then(|| {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border(px(1.0))
+                        .border_color(gpui::rgb(0xff00ff))
+                }))
                 // Seek timeline position on click
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -283,7 +297,10 @@ pub fn timeline_ruler(
                     Some(
                         div()
                             .absolute()
-                            .left(px(x + 1.0))
+                            // Clamp the label to the left content edge so a marker
+                            // at/left of the viewport stays readable inside the ruler
+                            // content instead of being pushed under the header clip.
+                            .left(px((x + 1.0).max(0.0)))
                             .top(px(14.0))
                             .flex()
                             .items_center()
@@ -308,7 +325,10 @@ pub fn timeline_ruler(
                     Some(
                         div()
                             .absolute()
-                            .left(px(x + 1.0))
+                            // Clamp the label to the left content edge so a marker
+                            // at/left of the viewport stays readable inside the ruler
+                            // content instead of being pushed under the header clip.
+                            .left(px((x + 1.0).max(0.0)))
                             .bottom(px(1.0))
                             .flex()
                             .items_center()

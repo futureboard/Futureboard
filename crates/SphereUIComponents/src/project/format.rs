@@ -20,29 +20,83 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v8 adds stable ids on tempo points for independent marker editing.
 pub const PROJECT_VERSION: u32 = 10;
 
+/// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
+pub const PROJECT_HEADER_SIZE: usize = 20;
+
 #[derive(Debug)]
 pub enum ProjectError {
     Io(io::Error),
     InvalidMagic,
     UnsupportedVersion(u32),
+    /// File is shorter than the header or declared payload.
+    IncompleteFile { reason: String },
+    UnexpectedEof {
+        needed: usize,
+        remaining: usize,
+        field: &'static str,
+    },
     Corrupted(String),
     ChecksumMismatch { expected: u32, got: u32 },
 }
 
-impl std::fmt::Display for ProjectError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl ProjectError {
+    /// Primary message shown in UI dialogs (no raw parser tokens).
+    pub fn user_message(&self) -> &'static str {
         match self {
-            ProjectError::Io(e) => write!(f, "I/O error: {e}"),
-            ProjectError::InvalidMagic => write!(f, "Not a Futureboard project file"),
-            ProjectError::UnsupportedVersion(v) => write!(f, "Unsupported project version: {v}"),
-            ProjectError::Corrupted(msg) => write!(f, "Corrupted project: {msg}"),
-            ProjectError::ChecksumMismatch { expected, got } => {
-                write!(
-                    f,
-                    "Checksum mismatch: expected {expected:#010x}, got {got:#010x}"
-                )
+            ProjectError::Io(_) => {
+                "Could not read the project file. Check that the file exists and is accessible."
+            }
+            ProjectError::InvalidMagic => "This file is not a Futureboard project.",
+            ProjectError::UnsupportedVersion(version) if *version > PROJECT_VERSION => {
+                "This project was created by a newer unsupported version of Futureboard."
+            }
+            ProjectError::UnsupportedVersion(_) => {
+                "This project version is not supported by this build of Futureboard."
+            }
+            ProjectError::IncompleteFile { .. }
+            | ProjectError::UnexpectedEof { .. }
+            | ProjectError::ChecksumMismatch { .. } => {
+                "Could not open this project because the file appears to be incomplete or corrupted."
+            }
+            ProjectError::Corrupted(msg) if is_truncation_detail(msg) => {
+                "Could not open this project because the file appears to be incomplete or corrupted."
+            }
+            ProjectError::Corrupted(_) => {
+                "Could not open this project because the file appears to be incomplete or corrupted."
             }
         }
+    }
+
+    /// Optional secondary line for dialogs and logs.
+    pub fn technical_detail(&self) -> String {
+        match self {
+            ProjectError::Io(e) => format!("I/O error: {e}"),
+            ProjectError::InvalidMagic => "invalid magic bytes".to_string(),
+            ProjectError::UnsupportedVersion(v) => format!("unsupported version: {v}"),
+            ProjectError::IncompleteFile { reason } => reason.clone(),
+            ProjectError::UnexpectedEof {
+                needed,
+                remaining,
+                field,
+            } => format!("unexpected EOF reading {field} (needed {needed}, remaining {remaining})"),
+            ProjectError::Corrupted(msg) => msg.clone(),
+            ProjectError::ChecksumMismatch { expected, got } => {
+                format!("checksum mismatch: expected {expected:#010x}, got {got:#010x}")
+            }
+        }
+    }
+}
+
+fn is_truncation_detail(msg: &str) -> bool {
+    msg.contains("truncated")
+        || msg.contains("too small")
+        || msg.contains("file truncated")
+        || msg.contains("unexpected EOF")
+}
+
+impl std::fmt::Display for ProjectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.technical_detail())
     }
 }
 
@@ -168,43 +222,56 @@ impl<'a> FbReader<'a> {
         }
     }
 
+    fn remaining(&self) -> usize {
+        let pos = self.cur.position() as usize;
+        let len = self.cur.get_ref().len();
+        len.saturating_sub(pos)
+    }
+
+    fn read_exact_field(&mut self, buf: &mut [u8], field: &'static str) -> Result<(), ProjectError> {
+        let needed = buf.len();
+        let remaining = self.remaining();
+        if remaining < needed {
+            return Err(ProjectError::UnexpectedEof {
+                needed,
+                remaining,
+                field,
+            });
+        }
+        self.cur.read_exact(buf).map_err(|_| ProjectError::UnexpectedEof {
+            needed,
+            remaining,
+            field,
+        })
+    }
+
     fn read_u8(&mut self) -> Result<u8, ProjectError> {
         let mut b = [0u8; 1];
-        self.cur
-            .read_exact(&mut b)
-            .map_err(|_| ProjectError::Corrupted("truncated u8".into()))?;
+        self.read_exact_field(&mut b, "u8")?;
         Ok(b[0])
     }
 
     fn read_u32(&mut self) -> Result<u32, ProjectError> {
         let mut b = [0u8; 4];
-        self.cur
-            .read_exact(&mut b)
-            .map_err(|_| ProjectError::Corrupted("truncated u32".into()))?;
+        self.read_exact_field(&mut b, "u32")?;
         Ok(u32::from_le_bytes(b))
     }
 
     fn read_u64(&mut self) -> Result<u64, ProjectError> {
         let mut b = [0u8; 8];
-        self.cur
-            .read_exact(&mut b)
-            .map_err(|_| ProjectError::Corrupted("truncated u64".into()))?;
+        self.read_exact_field(&mut b, "u64")?;
         Ok(u64::from_le_bytes(b))
     }
 
     fn read_f32(&mut self) -> Result<f32, ProjectError> {
         let mut b = [0u8; 4];
-        self.cur
-            .read_exact(&mut b)
-            .map_err(|_| ProjectError::Corrupted("truncated f32".into()))?;
+        self.read_exact_field(&mut b, "f32")?;
         Ok(f32::from_le_bytes(b))
     }
 
     fn read_f64(&mut self) -> Result<f64, ProjectError> {
         let mut b = [0u8; 8];
-        self.cur
-            .read_exact(&mut b)
-            .map_err(|_| ProjectError::Corrupted("truncated f64".into()))?;
+        self.read_exact_field(&mut b, "f64")?;
         Ok(f64::from_le_bytes(b))
     }
 
@@ -215,9 +282,7 @@ impl<'a> FbReader<'a> {
     fn read_str(&mut self) -> Result<String, ProjectError> {
         let len = self.read_u32()? as usize;
         let mut buf = vec![0u8; len];
-        self.cur
-            .read_exact(&mut buf)
-            .map_err(|_| ProjectError::Corrupted("truncated string".into()))?;
+        self.read_exact_field(&mut buf, "string bytes")?;
         String::from_utf8(buf).map_err(|_| ProjectError::Corrupted("invalid UTF-8 string".into()))
     }
 
@@ -264,9 +329,7 @@ impl<'a> FbReader<'a> {
     fn read_bytes(&mut self) -> Result<Vec<u8>, ProjectError> {
         let len = self.read_u32()? as usize;
         let mut buf = vec![0u8; len];
-        self.cur
-            .read_exact(&mut buf)
-            .map_err(|_| ProjectError::Corrupted("truncated bytes".into()))?;
+        self.read_exact_field(&mut buf, "byte blob")?;
         Ok(buf)
     }
 }
@@ -1099,6 +1162,13 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         let count = r.read_u32()? as usize;
         let mut points = Vec::with_capacity(count);
         for _ in 0..count {
+            // Field order must match `encode_body`: id, beat, numerator,
+            // denominator, grouping. (A previous build read these out of order,
+            // which desynced the cursor and produced spurious EOF errors when a
+            // project contained any time-signature point — including the default
+            // 4/4 marker every new project carries.)
+            let id = r.read_str()?;
+            let beat = r.read_f64()?;
             let numerator = r.read_u32()? as u16;
             let denominator = r.read_u32()? as u16;
             let grouping = if version >= 10 {
@@ -1112,8 +1182,8 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
                 Vec::new()
             };
             points.push(super::ProjectTimeSignaturePoint {
-                id: r.read_str()?,
-                beat: r.read_f64()?,
+                id,
+                beat,
                 numerator,
                 denominator,
                 grouping,
@@ -1150,8 +1220,14 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
 /// validation (e.g. the Welcome → Open Project flow) so an invalid pick can be
 /// reported inline without reading/decoding the whole file.
 pub fn peek_project_header(data: &[u8]) -> Result<u32, ProjectError> {
-    if data.len() < 20 {
-        return Err(ProjectError::Corrupted("file too small".into()));
+    if data.len() < PROJECT_HEADER_SIZE {
+        return Err(ProjectError::IncompleteFile {
+            reason: format!(
+                "file too small for project header ({} bytes, need {})",
+                data.len(),
+                PROJECT_HEADER_SIZE
+            ),
+        });
     }
     if &data[0..8] != PROJECT_MAGIC {
         return Err(ProjectError::InvalidMagic);
@@ -1165,41 +1241,86 @@ pub fn peek_project_header(data: &[u8]) -> Result<u32, ProjectError> {
 
 /// Decodes a `.fbproj` binary blob into a `FutureboardProject`.
 pub fn decode_project(data: &[u8]) -> Result<FutureboardProject, ProjectError> {
-    if data.len() < 20 {
-        return Err(ProjectError::Corrupted("file too small".into()));
+    project_load_log(format_args!("file size: {} bytes", data.len()));
+
+    if data.len() < PROJECT_HEADER_SIZE {
+        let err = ProjectError::IncompleteFile {
+            reason: format!(
+                "file too small for project header ({} bytes, need {})",
+                data.len(),
+                PROJECT_HEADER_SIZE
+            ),
+        };
+        project_load_log(format_args!("failed: {}", err.technical_detail()));
+        return Err(err);
     }
 
-    // Magic
     if &data[0..8] != PROJECT_MAGIC {
-        return Err(ProjectError::InvalidMagic);
+        let err = ProjectError::InvalidMagic;
+        project_load_log(format_args!("failed: {}", err.technical_detail()));
+        return Err(err);
     }
 
-    // Version — accept any released version up to the current one so older
-    // projects keep loading. Newer-than-known files are rejected.
     let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
     if version == 0 || version > PROJECT_VERSION {
-        return Err(ProjectError::UnsupportedVersion(version));
+        let err = ProjectError::UnsupportedVersion(version);
+        project_load_log(format_args!("failed: {}", err.technical_detail()));
+        return Err(err);
     }
+    project_load_log(format_args!("header ok version={version}"));
 
-    // reserved (4 bytes) — skip
     let body_len = u32::from_le_bytes(data[16..20].try_into().unwrap()) as usize;
+    let required = PROJECT_HEADER_SIZE
+        .checked_add(body_len)
+        .and_then(|n| n.checked_add(4));
+    let Some(required) = required else {
+        let err = ProjectError::IncompleteFile {
+            reason: "project payload length overflow".to_string(),
+        };
+        project_load_log(format_args!("failed: {}", err.technical_detail()));
+        return Err(err);
+    };
 
-    if data.len() < 20 + body_len + 4 {
-        return Err(ProjectError::Corrupted("file truncated".into()));
+    if data.len() < required {
+        let err = ProjectError::IncompleteFile {
+            reason: format!(
+                "file truncated: declared payload {body_len} bytes but only {} bytes on disk",
+                data.len().saturating_sub(PROJECT_HEADER_SIZE + 4)
+            ),
+        };
+        project_load_log(format_args!("failed: {}", err.technical_detail()));
+        return Err(err);
     }
 
-    let body = &data[20..20 + body_len];
-    let stored_crc = u32::from_le_bytes(data[20 + body_len..20 + body_len + 4].try_into().unwrap());
+    let body = &data[PROJECT_HEADER_SIZE..PROJECT_HEADER_SIZE + body_len];
+    project_load_log(format_args!("payload bytes={body_len}"));
+    let stored_crc = u32::from_le_bytes(
+        data[PROJECT_HEADER_SIZE + body_len..PROJECT_HEADER_SIZE + body_len + 4]
+            .try_into()
+            .unwrap(),
+    );
     let computed_crc = crc32fast::hash(body);
 
     if computed_crc != stored_crc {
-        return Err(ProjectError::ChecksumMismatch {
+        let err = ProjectError::ChecksumMismatch {
             expected: stored_crc,
             got: computed_crc,
-        });
+        };
+        project_load_log(format_args!("failed: {}", err.technical_detail()));
+        return Err(err);
     }
 
-    decode_body(body, version)
+    match decode_body(body, version) {
+        Ok(project) => Ok(project),
+        Err(err) => {
+            project_load_log(format_args!("failed: {}", err.technical_detail()));
+            Err(err)
+        }
+    }
+}
+
+fn project_load_log(args: std::fmt::Arguments<'_>) {
+    eprintln!("[ProjectLoad] {args}");
 }
 
 #[cfg(test)]
@@ -1325,6 +1446,53 @@ mod tests {
     }
 
     #[test]
+    fn time_signature_points_roundtrip_v10() {
+        let mut project = FutureboardProject::new("TimeSig Test");
+        project.settings.time_signature_points = vec![
+            super::super::ProjectTimeSignaturePoint {
+                id: "ts-a".to_string(),
+                beat: 0.0,
+                numerator: 4,
+                denominator: 4,
+                grouping: Vec::new(),
+            },
+            super::super::ProjectTimeSignaturePoint {
+                id: "ts-b".to_string(),
+                beat: 16.0,
+                numerator: 7,
+                denominator: 8,
+                grouping: vec![2, 2, 3],
+            },
+        ];
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode");
+        assert_eq!(
+            decoded.settings.time_signature_points,
+            project.settings.time_signature_points
+        );
+    }
+
+    #[test]
+    fn default_project_with_time_signature_point_roundtrips() {
+        // Mirrors what New Project writes: a default 4/4 marker. This regressed
+        // because the decoder read time-signature fields out of order.
+        let mut project = FutureboardProject::new("Fresh");
+        project.settings.time_signature_points = vec![super::super::ProjectTimeSignaturePoint {
+            id: "ts-default".to_string(),
+            beat: 0.0,
+            numerator: 4,
+            denominator: 4,
+            grouping: vec![1, 1, 1, 1],
+        }];
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("default project must decode");
+        assert_eq!(decoded.name, "Fresh");
+        assert_eq!(decoded.settings.time_signature_points.len(), 1);
+        assert_eq!(decoded.settings.time_signature_points[0].numerator, 4);
+        assert_eq!(decoded.settings.time_signature_points[0].denominator, 4);
+    }
+
+    #[test]
     fn peek_header_rejects_bad_magic() {
         let mut bytes = encode_project(&FutureboardProject::new("X"));
         bytes[0] = b'Z'; // corrupt the magic
@@ -1347,7 +1515,26 @@ mod tests {
 
     #[test]
     fn peek_header_rejects_tiny_input() {
-        assert!(peek_project_header(&[0u8; 4]).is_err());
+        assert!(matches!(
+            peek_project_header(&[0u8; 4]),
+            Err(ProjectError::IncompleteFile { .. })
+        ));
+    }
+
+    #[test]
+    fn truncated_body_reports_unexpected_eof() {
+        let bytes = encode_project(&FutureboardProject::new("Body"));
+        let body = &bytes[PROJECT_HEADER_SIZE..bytes.len() - 4];
+        let truncated_body = &body[..body.len().saturating_sub(3).max(1)];
+        let err = decode_body(truncated_body, PROJECT_VERSION).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::UnexpectedEof { .. })
+                || matches!(err, ProjectError::Corrupted(_))
+        );
+        assert_eq!(
+            err.user_message(),
+            "Could not open this project because the file appears to be incomplete or corrupted."
+        );
     }
 
     #[test]

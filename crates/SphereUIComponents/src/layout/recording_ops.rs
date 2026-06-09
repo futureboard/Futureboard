@@ -44,8 +44,8 @@ impl StudioLayout {
             .recording
             .audio
             .save_before_recording;
-        if save_before_recording && self.project_switcher.current_project.is_dirty {
-            let Some(project_path) = self.project_path.clone() else {
+        if save_before_recording && self.project_session.is_dirty {
+            let Some(project_path) = self.project_session.project_file_path.clone() else {
                 self.fail_recording_start("save the project to a folder before recording", cx);
                 return;
             };
@@ -158,7 +158,7 @@ impl StudioLayout {
             .unwrap_or(0)
             .to_string();
         let session_id = format!("rec-{timestamp}");
-        let project_name = self.project_switcher.current_project.name.clone();
+        let project_name = self.project_session.name.clone();
 
         let config = JsStartRecordingConfig {
             project_root: project_root.to_string_lossy().into_owned(),

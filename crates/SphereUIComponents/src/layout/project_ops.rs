@@ -1,17 +1,28 @@
-use gpui::{px, size, Bounds, Context, Point};
+use gpui::Context;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::components::message_box_dialog::{
+    open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
+};
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::timeline::timeline_state::{
     self, CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
 };
 use crate::project::{
-    apply_to_timeline, io::create_project_folder, io::load_project, io::save_project, now_secs,
-    ClipSource, FutureboardProject, ProjectCreateOptions, ProjectTemplate,
+    apply_to_timeline, io::create_project_folder, io::load_project, io::project_backup_path,
+    io::save_project, io::verify_project_file, now_secs, ClipSource, FutureboardProject,
+    ProjectCreateOptions, ProjectSession, ProjectTemplate,
 };
 
 use super::StudioLayout;
+
+macro_rules! project_lifecycle_log {
+    ($($arg:tt)*) => {
+        eprintln!("[Project] {}", format!($($arg)*));
+    };
+}
 
 /// A project-lifecycle action that must be guarded by the unsaved-changes
 /// prompt (New / Open). Close / Quit use [`super::close_ops::PendingCloseAction`].
@@ -29,11 +40,9 @@ enum SaveThenAction {
     Lifecycle(LifecycleAction),
 }
 
-fn default_owner_bounds() -> Bounds<gpui::Pixels> {
-    Bounds {
-        origin: Point::default(),
-        size: size(px(1400.0), px(900.0)),
-    }
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProjectOpenOptions {
+    pub from_recent: bool,
 }
 
 fn project_save_path_from_picker(path: PathBuf) -> PathBuf {
@@ -60,6 +69,181 @@ fn project_save_path_from_picker(path: PathBuf) -> PathBuf {
 }
 
 impl StudioLayout {
+    /// Push the canonical [`ProjectSession`] into legacy workspace fields and UI
+    /// chrome so every surface reads the same binding.
+    pub(super) fn sync_project_session_to_workspace(&mut self, cx: &mut Context<Self>) {
+        let session = self.project_session.clone();
+        self.project_path = session.project_file_path.clone();
+        self.project_folder = session.folder_path.clone();
+        self.file_browser
+            .set_project_folder(session.folder_path.clone());
+
+        self.project_state = if session.project_file_path.is_some() && !session.is_untitled {
+            crate::app_state::ProjectState::SavedProject {
+                path: session.project_file_path.clone().unwrap(),
+            }
+        } else {
+            crate::app_state::ProjectState::UnsavedWorkspace
+        };
+
+        self.project_switcher.current_project.name = session.display_name().to_string();
+        self.project_switcher.current_project.path = session.project_file_path.clone();
+        self.project_switcher.current_project.is_dirty = session.is_dirty;
+        self.project_switcher.current_project.subtitle = session.subtitle().to_string();
+        cx.notify();
+    }
+
+    fn apply_template_tracks(
+        timeline: &mut crate::components::timeline::Timeline,
+        template: ProjectTemplate,
+        cx: &mut Context<crate::components::timeline::Timeline>,
+    ) {
+        let audio_count = template.audio_tracks();
+        let midi_count = template.midi_tracks();
+        for i in 0..audio_count {
+            let color = timeline.state.track_color_for_index(i as usize);
+            timeline.state.create_track(CreateTrackOptions {
+                track_type: TrackType::Audio,
+                name: format!("Audio {}", i + 1),
+                color,
+                volume: timeline_state::volume::db_to_norm(0.0),
+                pan: 0.0,
+                armed: false,
+                input_monitor: InputMonitorMode::Off,
+            });
+        }
+        for i in 0..midi_count {
+            let color = timeline
+                .state
+                .track_color_for_index((audio_count + i) as usize);
+            timeline.state.create_track(CreateTrackOptions {
+                track_type: TrackType::Midi,
+                name: format!("MIDI {}", i + 1),
+                color,
+                volume: timeline_state::volume::db_to_norm(0.0),
+                pan: 0.0,
+                armed: false,
+                input_monitor: InputMonitorMode::Off,
+            });
+        }
+        cx.notify();
+    }
+
+    fn initialize_timeline_for_new_workspace(
+        &mut self,
+        template: Option<ProjectTemplate>,
+        bpm: f32,
+        time_signature_num: u32,
+        time_signature_den: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.reset_input_state();
+            timeline.state = TimelineState::default();
+            timeline.state.bpm = bpm;
+            timeline.state.time_signature_num = time_signature_num;
+            timeline.state.time_signature_den = time_signature_den;
+            if let Some(template) = template {
+                Self::apply_template_tracks(timeline, template, cx);
+            }
+            cx.notify();
+        });
+    }
+
+    fn show_project_lifecycle_error(
+        &mut self,
+        title: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_project_open_failed_dialog(
+            title,
+            message,
+            None,
+            None,
+            ProjectOpenOptions::default(),
+            cx,
+        );
+    }
+
+    fn show_project_open_failed_dialog(
+        &mut self,
+        title: &str,
+        message: &str,
+        detail: Option<String>,
+        failed_path: Option<PathBuf>,
+        options: ProjectOpenOptions,
+        cx: &mut Context<Self>,
+    ) {
+        project_lifecycle_log!("error: {title}: {message}");
+        self.pending_failed_open_path = failed_path.clone();
+        let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
+            self.cached_studio_window_bounds,
+            self.studio_window_bounds(cx),
+            cx,
+        );
+        let mut buttons = Vec::new();
+        let mut backup_index = None;
+        let mut remove_recent_index = None;
+        let mut locate_index = None;
+
+        if let Some(path) = failed_path.as_ref() {
+            let backup = project_backup_path(path);
+            if backup.exists() {
+                backup_index = Some(buttons.len());
+                buttons.push("Open Backup".to_string());
+            }
+        }
+        if options.from_recent {
+            remove_recent_index = Some(buttons.len());
+            buttons.push("Remove from Recent".to_string());
+            locate_index = Some(buttons.len());
+            buttons.push("Locate Project".to_string());
+        }
+        buttons.push("OK".to_string());
+        let ok_index = buttons.len() - 1;
+
+        let dialog = MessageBoxOptions {
+            kind: MessageBoxKind::Error,
+            title: title.to_string(),
+            message: message.to_string(),
+            detail,
+            buttons,
+            default_id: ok_index,
+            cancel_id: Some(ok_index),
+        };
+
+        let owner = cx.entity().clone();
+        let failed_path_for_dialog = failed_path.clone();
+        let on_response: Arc<dyn Fn(MessageBoxResult, &mut gpui::Window, &mut gpui::App) + Send + Sync> =
+            Arc::new(move |result, _window, cx| {
+                let _ = owner.update(cx, |this, cx| {
+                    this.pending_failed_open_path = None;
+                    let Some(path) = failed_path_for_dialog.clone() else {
+                        return;
+                    };
+                    if backup_index == Some(result.response) {
+                        this.load_project_from_path_with_options(
+                            project_backup_path(&path),
+                            ProjectOpenOptions::default(),
+                            cx,
+                        );
+                        return;
+                    }
+                    if remove_recent_index == Some(result.response) {
+                        this.recent_projects.remove(&path);
+                        this.sync_recent_to_switcher();
+                        cx.notify();
+                        return;
+                    }
+                    if locate_index == Some(result.response) {
+                        this.cmd_open_project(cx);
+                    }
+                });
+            });
+        let _ = open_message_box_window(owner_bounds, dialog, on_response, cx);
+    }
+
     /// Resolve the directory new projects should default to. Reads the
     /// user-configured default project directory from settings (falling back to
     /// the platform default), then best-effort creates it so the save dialog
@@ -78,17 +262,22 @@ impl StudioLayout {
         &self.project_state
     }
 
+    /// Canonical project session for the current workspace.
+    pub fn project_session(&self) -> &ProjectSession {
+        &self.project_session
+    }
+
     /// OS window title derived from the lifecycle state + dirty bit, e.g.
     /// `"Untitled Project — Unsaved"` / `"My Song — Saved"` (Part H).
     pub fn window_title(&self) -> String {
         self.project_state.window_title(
-            &self.project_switcher.current_project.name,
-            self.project_switcher.current_project.is_dirty,
+            self.project_session.display_name(),
+            self.project_session.is_dirty,
         )
     }
 
     pub(super) fn reset_project(&mut self, cx: &mut Context<Self>) {
-        self.project_state = crate::app_state::ProjectState::NoProject;
+        self.project_session = ProjectSession::untitled();
         self.project_path = None;
         self.project_folder = None;
         self.file_browser.set_project_folder(None);
@@ -99,6 +288,7 @@ impl StudioLayout {
             timeline.state = TimelineState::default();
             cx.notify();
         });
+        self.project_state = crate::app_state::ProjectState::UnsavedWorkspace;
     }
 
     // ── New project (no wizard) ────────────────────────────────────────────────
@@ -109,11 +299,8 @@ impl StudioLayout {
     /// blank arrangement that is marked dirty/unsaved.
     pub fn new_empty_project(&mut self, cx: &mut Context<Self>) {
         self.reset_project(cx);
-        self.project_state = crate::app_state::ProjectState::UnsavedWorkspace;
-        self.project_switcher.current_project.name = "Untitled Project".to_string();
-        self.project_switcher.current_project.path = None;
-        self.project_switcher.current_project.is_dirty = false;
-        self.project_switcher.current_project.subtitle = "New project".to_string();
+        self.project_session.bind_untitled("Untitled Project", false);
+        self.sync_project_session_to_workspace(cx);
         self.mark_engine_media_dirty();
         self.schedule_audio_project_sync(cx, true, "new_empty_project");
         cx.notify();
@@ -122,55 +309,21 @@ impl StudioLayout {
     /// Create a new unsaved workspace pre-populated from a `ProjectTemplate`.
     /// Like `new_empty_project`, this stays entirely in memory — the user saves
     /// when ready. Sample rate follows the current app defaults.
-    ///
-    /// TODO: richer template presets (default inserts, sends, routing, master
-    /// chain) once the template/preset system lands. For now templates only set
-    /// tempo, time signature, and an initial track layout.
     pub fn new_project_from_template(&mut self, template: ProjectTemplate, cx: &mut Context<Self>) {
         self.reset_project(cx);
 
         let (ts_num, ts_den) = template.time_signature();
-        let audio_count = template.audio_tracks();
-        let midi_count = template.midi_tracks();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            timeline.state.bpm = template.default_bpm();
-            timeline.state.time_signature_num = ts_num;
-            timeline.state.time_signature_den = ts_den;
-            for i in 0..audio_count {
-                let color = timeline.state.track_color_for_index(i as usize);
-                timeline.state.create_track(CreateTrackOptions {
-                    track_type: TrackType::Audio,
-                    name: format!("Audio {}", i + 1),
-                    color,
-                    volume: timeline_state::volume::db_to_norm(0.0),
-                    pan: 0.0,
-                    armed: false,
-                    input_monitor: InputMonitorMode::Off,
-                });
-            }
-            for i in 0..midi_count {
-                let color = timeline
-                    .state
-                    .track_color_for_index((audio_count + i) as usize);
-                timeline.state.create_track(CreateTrackOptions {
-                    track_type: TrackType::Midi,
-                    name: format!("MIDI {}", i + 1),
-                    color,
-                    volume: timeline_state::volume::db_to_norm(0.0),
-                    pan: 0.0,
-                    armed: false,
-                    input_monitor: InputMonitorMode::Off,
-                });
-            }
-            cx.notify();
-        });
+        self.initialize_timeline_for_new_workspace(
+            Some(template),
+            template.default_bpm(),
+            ts_num,
+            ts_den,
+            cx,
+        );
 
-        self.project_state = crate::app_state::ProjectState::UnsavedWorkspace;
-        self.project_switcher.current_project.name =
-            format!("Untitled {} Project", template.label());
-        self.project_switcher.current_project.path = None;
-        self.project_switcher.current_project.is_dirty = true;
-        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        self.project_session
+            .bind_untitled(format!("Untitled {} Project", template.label()), true);
+        self.sync_project_session_to_workspace(cx);
         self.mark_engine_media_dirty();
         self.schedule_audio_project_sync(cx, true, "new_template_project");
         cx.notify();
@@ -184,17 +337,24 @@ impl StudioLayout {
         options: ProjectCreateOptions,
         cx: &mut Context<Self>,
     ) {
+        project_lifecycle_log!(
+            "create requested name={} dir={} template={}",
+            options.name,
+            options.base_dir.display(),
+            options.template.label()
+        );
         let safe_name = crate::project::io::sanitize_project_name(&options.name);
         let folder = match create_project_folder(&options.base_dir, &safe_name) {
             Ok(folder) => folder,
             Err(e) => {
-                eprintln!("[project] create project folder failed: {e}");
+                eprintln!("[Project] folder create failed: {e}");
                 self.project_state = crate::app_state::ProjectState::Error(e.to_string());
                 self.project_switcher.current_project.subtitle = format!("Create failed: {e}");
                 cx.notify();
                 return;
             }
         };
+        project_lifecycle_log!("folder created: {}", folder.display());
         let final_name = folder
             .file_name()
             .and_then(|name| name.to_str())
@@ -205,28 +365,58 @@ impl StudioLayout {
             final_name,
             crate::project::io::PROJECT_FILE_EXT
         ));
+        project_lifecycle_log!("file target: {}", path.display());
 
-        if options.template == ProjectTemplate::Empty {
-            self.new_empty_project(cx);
+        self.clip_clipboard.clear();
+        let template = if options.template == ProjectTemplate::Empty {
+            None
         } else {
-            self.new_project_from_template(options.template, cx);
-        }
+            Some(options.template)
+        };
+        self.initialize_timeline_for_new_workspace(
+            template,
+            options.bpm,
+            options.time_signature_num,
+            options.time_signature_den,
+            cx,
+        );
 
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            timeline.state.bpm = options.bpm;
-            timeline.state.time_signature_num = options.time_signature_num;
-            timeline.state.time_signature_den = options.time_signature_den;
-            cx.notify();
-        });
+        let now = now_secs();
+        self.project_session.bind_saved(
+            ProjectSession::fresh_id(),
+            final_name.clone(),
+            Some(folder.clone()),
+            path.clone(),
+            now,
+            now,
+        );
+        self.project_session.is_dirty = true;
+        project_lifecycle_log!(
+            "binding current session: name={} path={}",
+            final_name,
+            path.display()
+        );
+        self.sync_project_session_to_workspace(cx);
 
-        self.project_switcher.current_project.name = final_name;
-        self.project_switcher.current_project.path = Some(path.clone());
-        self.project_folder = Some(folder.clone());
-        self.file_browser.set_project_folder(Some(folder));
-
+        project_lifecycle_log!("save requested: mode=save path={}", path.display());
         if self.do_save_project(&path, cx) {
-            self.project_path = Some(path);
-            self.project_switcher.current_project.subtitle = "Saved".to_string();
+            project_lifecycle_log!("save complete: {}", path.display());
+            if let Err(e) = verify_project_file(&path) {
+                project_lifecycle_log!("verify after create failed: {}", e.technical_detail());
+                self.show_project_open_failed_dialog(
+                    "Create Project Failed",
+                    "The project folder was created, but the project file could not be verified.",
+                    Some(format!("Details: {}", e.technical_detail())),
+                    Some(path.clone()),
+                    ProjectOpenOptions::default(),
+                    cx,
+                );
+                return;
+            }
+            self.mark_engine_media_dirty();
+            self.schedule_audio_project_sync(cx, true, "project_created");
+        } else {
+            project_lifecycle_log!("save failed after create — session remains bound to {}", path.display());
         }
     }
 
@@ -250,13 +440,15 @@ impl StudioLayout {
     }
 
     fn save_then(&mut self, after_save: SaveThenAction, cx: &mut Context<Self>) {
-        if let Some(path) = self.project_path.clone() {
-            self.save_project_in_background_then(path, Some(after_save), cx);
-            return;
+        if !self.project_session.needs_save_as() {
+            if let Some(path) = self.project_session.project_file_path.clone() {
+                self.save_project_in_background_then(path, Some(after_save), cx);
+                return;
+            }
         }
 
         let default_dir = self.default_projects_dir(cx);
-        let name = self.project_switcher.current_project.name.clone();
+        let name = self.project_session.name.clone();
         let entity = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
             if crate::shutdown::ShutdownState::global().is_shutting_down() {
@@ -311,30 +503,18 @@ impl StudioLayout {
         if crate::shutdown::ShutdownState::global().is_shutting_down() {
             return;
         }
-        // 1. Stop transport (safe even when idle — engine pauses). Only reached
-        //    after the user has confirmed the close.
         self.stop_native_playback(cx);
 
-        // 2. Clear project-specific editor/timeline/mixer state.
         self.reset_project(cx);
         if !crate::shutdown::ShutdownState::global().is_shutting_down() {
             self.mark_engine_media_dirty();
             self.schedule_audio_project_sync(cx, true, "close_project");
         }
 
-        // 3. Return to Welcome by opening a fresh welcome window via the
-        //    app-level hook. Opening a new window from inside this update is
-        //    safe; it also guarantees a window is always present so the app
-        //    never quits during the handoff.
         if let Some(request_welcome) = self.on_request_welcome.clone() {
             request_welcome(cx);
         }
 
-        // 4. Close this workspace window. `do_close_project` runs inside this
-        //    window's own entity update, so removing it synchronously would
-        //    re-enter the active lease. Defer to the next cycle. `remove_window`
-        //    destroys the window directly (no WM_CLOSE), so the WCO
-        //    `on_window_should_close` guard does not re-fire here.
         if let Some(handle) = self.self_window.take() {
             cx.spawn(async move |_this, cx| {
                 cx.background_executor()
@@ -358,26 +538,34 @@ impl StudioLayout {
     // ── Save / load ───────────────────────────────────────────────────────────
 
     pub(super) fn mark_dirty(&mut self) {
+        self.project_session.mark_dirty();
         self.project_switcher.current_project.is_dirty = true;
         self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
         self.mark_engine_project_dirty();
     }
 
     pub(super) fn cmd_save_project(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.project_path.clone() {
+        if self.project_session.needs_save_as() {
+            project_lifecycle_log!("save requested: mode=save_as path=<none>");
+            self.cmd_save_project_as(cx);
+        } else if let Some(path) = self.project_session.project_file_path.clone() {
+            project_lifecycle_log!("save requested: mode=save path={}", path.display());
             self.save_project_in_background(path, cx);
         } else {
+            project_lifecycle_log!("save requested: mode=save_as path=<none>");
             self.cmd_save_project_as(cx);
         }
     }
 
     pub(super) fn cmd_save_project_as(&mut self, cx: &mut Context<Self>) {
         let default_dir = self
-            .project_path
+            .project_session
+            .project_file_path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| self.project_session.folder_path.clone())
             .unwrap_or_else(|| self.default_projects_dir(cx));
-        let name = self.project_switcher.current_project.name.clone();
+        let name = self.project_session.name.clone();
         let entity = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
             let result = rfd::AsyncFileDialog::new()
@@ -397,6 +585,7 @@ impl StudioLayout {
             if let Some(handle) = result {
                 let path = project_save_path_from_picker(handle.path().to_path_buf());
                 let _ = entity.update(cx, |this, cx| {
+                    project_lifecycle_log!("save requested: mode=save_as path={}", path.display());
                     this.save_project_in_background(path, cx);
                 });
             }
@@ -406,11 +595,13 @@ impl StudioLayout {
 
     pub(super) fn cmd_save_project_copy(&mut self, cx: &mut Context<Self>) {
         let default_dir = self
-            .project_path
+            .project_session
+            .project_file_path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| self.project_session.folder_path.clone())
             .unwrap_or_else(|| self.default_projects_dir(cx));
-        let name = self.project_switcher.current_project.name.clone();
+        let name = self.project_session.name.clone();
         let entity = cx.entity().clone();
         let tl_state = self.timeline.read(cx).state.clone();
         let sample_rate = self.current_audio_sample_rate();
@@ -435,7 +626,7 @@ impl StudioLayout {
                 project.settings.sample_rate = sample_rate;
                 let _ = entity.update(cx, |_this, _cx| {
                     if let Err(e) = save_project(&mut project, &path) {
-                        eprintln!("[project] save copy failed: {e}");
+                        eprintln!("[Project] save copy failed: {e}");
                     }
                 });
             }
@@ -481,6 +672,7 @@ impl StudioLayout {
             let _ = this.update(cx, move |this, cx| match result {
                 Ok(project) => {
                     this.finish_project_save(project, path, cx);
+                    project_lifecycle_log!("save complete");
                     if let Some(after_save) = after_save {
                         this.apply_save_then(after_save, cx);
                     }
@@ -494,7 +686,10 @@ impl StudioLayout {
     fn project_snapshot(&self, cx: &mut Context<Self>) -> FutureboardProject {
         let tl_state = self.timeline.read(cx).state.clone();
         let mut project = FutureboardProject::from(&tl_state);
-        project.name = self.project_switcher.current_project.name.clone();
+        project.id = self.project_session.id.clone();
+        project.name = self.project_session.name.clone();
+        project.created_at = self.project_session.created_at;
+        project.modified_at = self.project_session.modified_at;
         project.settings.sample_rate = self.current_audio_sample_rate();
         project
     }
@@ -506,21 +701,29 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         self.sync_timeline_audio_paths_after_save(&project, &path, cx);
-        self.project_state = crate::app_state::ProjectState::SavedProject { path: path.clone() };
-        self.project_path = Some(path.clone());
-        self.project_folder = path.parent().map(PathBuf::from);
-        self.file_browser
-            .set_project_folder(self.project_folder.clone());
-        self.project_switcher.current_project.is_dirty = false;
-        self.project_switcher.current_project.subtitle = "Saved".to_string();
-        self.project_switcher.current_project.path = Some(path.clone());
-        self.recent_projects.push(&project.name, path, now_secs());
+        let folder = path.parent().map(PathBuf::from);
+        self.project_session.bind_saved(
+            project.id,
+            project.name.clone(),
+            folder.clone(),
+            path.clone(),
+            project.created_at,
+            project.modified_at,
+        );
+        project_lifecycle_log!(
+            "current session updated: name={} path={}",
+            self.project_session.name,
+            path.display()
+        );
+        self.sync_project_session_to_workspace(cx);
+        self.recent_projects
+            .push(&project.name, path.clone(), now_secs());
         self.sync_recent_to_switcher();
         cx.notify();
     }
 
     fn handle_project_save_error(&mut self, error: String, cx: &mut Context<Self>) {
-        eprintln!("[project] save failed: {error}");
+        eprintln!("[Project] save failed: {error}");
         self.project_switcher.current_project.subtitle = format!("Save failed: {error}");
         cx.notify();
     }
@@ -594,9 +797,11 @@ impl StudioLayout {
 
     pub(super) fn cmd_open_project(&mut self, cx: &mut Context<Self>) {
         let default_dir = self
-            .project_path
+            .project_session
+            .project_file_path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| self.project_session.folder_path.clone())
             .unwrap_or_else(|| self.default_projects_dir(cx));
         let entity = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
@@ -620,35 +825,73 @@ impl StudioLayout {
     }
 
     pub fn load_project_from_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.load_project_from_path_with_options(path, ProjectOpenOptions::default(), cx);
+    }
+
+    pub fn load_project_from_path_with_options(
+        &mut self,
+        path: PathBuf,
+        open_options: ProjectOpenOptions,
+        cx: &mut Context<Self>,
+    ) {
+        project_lifecycle_log!("open requested: {}", path.display());
+        if !path.exists() {
+            self.show_project_open_failed_dialog(
+                "Open Project Failed",
+                "The project file could not be found at the saved location.",
+                Some(format!("Details: {}", path.display())),
+                Some(path),
+                open_options,
+                cx,
+            );
+            return;
+        }
+
+        let previous_session = self.project_session.clone();
         self.project_state = crate::app_state::ProjectState::Loading;
         self.clip_clipboard.clear();
         match load_project(&path) {
             Ok(project) => {
+                project_lifecycle_log!("loaded project file: {}", path.display());
                 let _ = self.timeline.update(cx, |timeline, cx| {
                     timeline.reset_input_state();
                     apply_to_timeline(&project, &mut timeline.state);
                     cx.notify();
                 });
-                self.project_state =
-                    crate::app_state::ProjectState::SavedProject { path: path.clone() };
-                self.project_path = Some(path.clone());
-                self.project_folder = path.parent().map(|p| p.to_path_buf());
-                self.file_browser
-                    .set_project_folder(self.project_folder.clone());
-                self.project_switcher.current_project.name = project.name.clone();
-                self.project_switcher.current_project.path = Some(path.clone());
-                self.project_switcher.current_project.is_dirty = false;
-                self.project_switcher.current_project.subtitle = "Opened".to_string();
-                self.recent_projects.push(&project.name, path, now_secs());
+                let folder = path.parent().map(PathBuf::from);
+                self.project_session.bind_saved(
+                    project.id,
+                    project.name.clone(),
+                    folder,
+                    path.clone(),
+                    project.created_at,
+                    project.modified_at,
+                );
+                project_lifecycle_log!(
+                    "current session updated: name={} path={}",
+                    self.project_session.name,
+                    path.display()
+                );
+                self.sync_project_session_to_workspace(cx);
+                self.recent_projects
+                    .push(&project.name, path.clone(), now_secs());
                 self.sync_recent_to_switcher();
                 self.mark_engine_media_dirty();
                 self.schedule_audio_project_sync(cx, true, "project_loaded");
                 cx.notify();
             }
             Err(e) => {
-                eprintln!("[project] load failed: {e}");
-                self.project_state = crate::app_state::ProjectState::Error(e.to_string());
-                cx.notify();
+                project_lifecycle_log!("load failed: {}", e.technical_detail());
+                self.project_session = previous_session;
+                self.sync_project_session_to_workspace(cx);
+                self.show_project_open_failed_dialog(
+                    "Open Project Failed",
+                    e.user_message(),
+                    Some(format!("Details: {}", e.technical_detail())),
+                    Some(path),
+                    open_options,
+                    cx,
+                );
             }
         }
     }
@@ -665,7 +908,13 @@ impl StudioLayout {
             .get(idx.saturating_sub(1))
             .map(|e| e.path.clone());
         if let Some(path) = path {
-            self.load_project_from_path(path, cx);
+            self.load_project_from_path_with_options(
+                path,
+                ProjectOpenOptions {
+                    from_recent: true,
+                },
+                cx,
+            );
         }
     }
 
@@ -693,7 +942,7 @@ impl StudioLayout {
             .map(|e| crate::components::project_switcher::ProjectSummary {
                 name: e.name.clone(),
                 path: Some(e.path.clone()),
-                is_current: self.project_path.as_ref() == Some(&e.path),
+                is_current: self.project_session.project_file_path.as_ref() == Some(&e.path),
                 is_dirty: false,
                 subtitle: if e.missing {
                     "Missing".to_string()

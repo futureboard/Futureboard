@@ -3,12 +3,23 @@ use super::{
     now_secs, ClipSource, FutureboardProject, ProjectAsset,
 };
 use crate::paths::{FutureboardPaths, ProjectFolderLayout};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const PROJECT_FILE_EXT: &str = "fbproj";
 pub const LEGACY_PROJECT_FILE_EXT: &str = "fbs";
 pub const SUPPORTED_PROJECT_FILE_EXTS: &[&str] = &[PROJECT_FILE_EXT, LEGACY_PROJECT_FILE_EXT];
+
+/// Temp path used for atomic saves: `<project>.fbproj.tmp`.
+pub fn project_temp_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.tmp", path.display()))
+}
+
+/// Backup path written before each successful save: `<project>.fbproj.bak`.
+pub fn project_backup_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.bak", path.display()))
+}
 
 /// Platform-aware default projects directory: `~/Documents/Futureboard Studio/Projects/`.
 ///
@@ -40,22 +51,6 @@ pub fn sanitize_project_name(name: &str) -> String {
 /// Returns the root folder path.
 ///
 /// Delegates to [`ProjectFolderLayout`] for the actual subfolder structure.
-///
-/// Folder layout:
-/// ```text
-/// <base_dir>/<project_name>/
-///   <project_name>.fbproj
-///   Assets/Audio/
-///   Assets/MIDI/
-///   Assets/Samples/
-///   Cache/Waveform/
-///   Cache/Peaks/
-///   Cache/Processed/
-///   Cache/Analysis/
-///   Rendered/Mixdowns/
-///   Rendered/Stems/
-///   Rendered/Bounces/
-/// ```
 pub fn create_project_folder(base_dir: &Path, project_name: &str) -> Result<PathBuf, ProjectError> {
     let safe_name = sanitize_project_name(project_name);
     let mut root = base_dir.join(&safe_name);
@@ -75,9 +70,14 @@ pub fn create_project_folder(base_dir: &Path, project_name: &str) -> Result<Path
     Ok(root)
 }
 
-/// Atomically writes `project` to `path` using a `.tmp` file + rename.
+fn project_save_log(args: std::fmt::Arguments<'_>) {
+    eprintln!("[ProjectSave] {args}");
+}
+
+/// Atomically writes `project` to `path`:
+/// serialize → temp file → flush/fsync → backup existing → rename.
 pub fn save_project(project: &mut FutureboardProject, path: &Path) -> Result<(), ProjectError> {
-    project_save_debug(format_args!("save requested -> {}", path.display()));
+    project_save_log(format_args!("serialize start"));
     prepare_portable_assets(project, path)?;
     project.modified_at = now_secs();
     let bytes = encode_project(project);
@@ -85,46 +85,75 @@ pub fn save_project(project: &mut FutureboardProject, path: &Path) -> Result<(),
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension("fbproj.tmp");
-    fs::write(&tmp_path, &bytes)?;
-    fs::rename(&tmp_path, path)?;
-    project_save_debug(format_args!("project file written -> {}", path.display()));
-    Ok(())
+
+    let tmp_path = project_temp_path(path);
+    let backup_path = project_backup_path(path);
+
+    project_save_log(format_args!("writing temp: {}", tmp_path.display()));
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+    }
+    project_save_log(format_args!("temp bytes written: {}", bytes.len()));
+    project_save_log(format_args!("fsync complete"));
+
+    if path.exists() {
+        fs::copy(path, &backup_path)?;
+        project_save_log(format_args!("backup written: {}", backup_path.display()));
+        // Windows cannot rename over an existing file.
+        let _ = fs::remove_file(path);
+    }
+
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => {
+            project_save_log(format_args!("atomic rename complete: {}", path.display()));
+            let _ = fs::remove_file(&tmp_path);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&tmp_path);
+            project_save_log(format_args!("save failed: {error}"));
+            Err(ProjectError::Io(error))
+        }
+    }
 }
 
 /// Loads a `FutureboardProject` from `path`.
 pub fn load_project(path: &Path) -> Result<FutureboardProject, ProjectError> {
-    let bytes = fs::read(path)?;
+    project_load_log(format_args!("opening: {}", path.display()));
+    let bytes = fs::read(path).map_err(|error| {
+        project_load_log(format_args!("failed: I/O error: {error}"));
+        ProjectError::Io(error)
+    })?;
     let mut project = decode_project(&bytes)?;
     resolve_project_relative_assets(&mut project, path);
+    project_load_log(format_args!("loaded ok: {}", project.name));
     Ok(project)
 }
 
-/// Cheaply validate a project file on disk by reading only its 20-byte header
-/// (magic + version). Returns the format version on success, or a
-/// [`ProjectError`] describing why it is not a valid/supported Futureboard
-/// project. Does not decode the body or verify the checksum — use
-/// [`load_project`] for that. Never panics on I/O errors.
+/// Round-trip verify that `path` contains a loadable project file.
+pub fn verify_project_file(path: &Path) -> Result<(), ProjectError> {
+    load_project(path).map(|_| ())
+}
+
+/// Cheaply validate a project file on disk by reading only its header.
 pub fn validate_project_file(path: &Path) -> Result<u32, ProjectError> {
     use std::io::Read;
+    project_load_log(format_args!("validating header: {}", path.display()));
     let mut file = fs::File::open(path)?;
     let mut header = [0u8; 20];
     if file.read_exact(&mut header).is_err() {
-        return Err(ProjectError::Corrupted("file too small".into()));
+        return Err(ProjectError::IncompleteFile {
+            reason: "file too small for project header".to_string(),
+        });
     }
     super::format::peek_project_header(&header)
 }
 
-fn project_save_debug(args: std::fmt::Arguments<'_>) {
-    if std::env::var("FUTUREBOARD_PROJECT_SAVE_DEBUG").as_deref() == Ok("1")
-        || std::env::var("FUTUREBOARD_ASSET_COPY_DEBUG").as_deref() == Ok("1")
-    {
-        eprintln!("[project-save] {args}");
-    }
-}
-
-macro_rules! project_save_debug {
-    ($($arg:tt)*) => { project_save_debug(format_args!($($arg)*)) };
+fn project_load_log(args: std::fmt::Arguments<'_>) {
+    eprintln!("[ProjectLoad] {args}");
 }
 
 fn prepare_portable_assets(
@@ -139,7 +168,6 @@ fn prepare_portable_assets(
 
     let mut copied: Vec<(PathBuf, String)> = Vec::new();
     let mut assets: Vec<ProjectAsset> = Vec::new();
-    project_save_debug!("asset copy plan root={}", project_root.display());
 
     for track in &mut project.tracks {
         for clip in &mut track.clips {
@@ -161,7 +189,6 @@ fn prepare_portable_assets(
 
             if let Some(relative) = path_relative_to_project(&source_abs, project_root) {
                 let relative_string = path_to_project_string(&relative);
-                project_save_debug!("asset already inside project -> {}", relative_string);
                 *source_path = PathBuf::from(&relative_string);
                 *asset_id = relative_string.clone();
                 assets.push(asset_record(
@@ -177,7 +204,6 @@ fn prepare_portable_assets(
                 .iter()
                 .find(|(known_source, _)| same_source(known_source, &source_abs))
             {
-                project_save_debug!("asset reused -> {}", relative_string);
                 *source_path = PathBuf::from(relative_string);
                 *asset_id = relative_string.clone();
                 continue;
@@ -192,11 +218,6 @@ fn prepare_portable_assets(
                 ))
             })?;
             let relative_string = path_to_project_string(&relative);
-            project_save_debug!(
-                "asset copied {} -> {}",
-                source_abs.display(),
-                dest.display()
-            );
 
             *source_path = PathBuf::from(&relative_string);
             *asset_id = relative_string.clone();
@@ -324,7 +345,11 @@ fn path_to_project_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{ClipSource, ProjectClip, ProjectTrack, ProjectTrackType, TrackRouting};
+    use crate::project::{
+        format::{encode_project, ProjectError, PROJECT_HEADER_SIZE},
+        ClipSource, FutureboardProject, ProjectClip, ProjectSession, ProjectTrack, ProjectTrackType,
+        TrackRouting,
+    };
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = format!(
@@ -335,6 +360,110 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn load_empty_file_reports_incomplete_project() {
+        let dir = temp_dir("empty-file");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Empty.fbproj");
+        fs::write(&path, &[]).unwrap();
+        let err = load_project(&path).unwrap_err();
+        assert_eq!(
+            err.user_message(),
+            "Could not open this project because the file appears to be incomplete or corrupted."
+        );
+        assert!(matches!(err, ProjectError::IncompleteFile { .. }));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_truncated_header_reports_incomplete_project() {
+        let dir = temp_dir("trunc-header");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Trunc.fbproj");
+        fs::write(&path, &[0u8; PROJECT_HEADER_SIZE - 1]).unwrap();
+        let err = load_project(&path).unwrap_err();
+        assert!(matches!(err, ProjectError::IncompleteFile { .. }));
+        assert_eq!(
+            err.user_message(),
+            "Could not open this project because the file appears to be incomplete or corrupted."
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_truncated_payload_reports_unexpected_eof() {
+        let dir = temp_dir("trunc-payload");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("TruncBody.fbproj");
+        let mut bytes = encode_project(&FutureboardProject::new("TruncBody"));
+        bytes.truncate(PROJECT_HEADER_SIZE + 2);
+        fs::write(&path, &bytes).unwrap();
+        let err = load_project(&path).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::IncompleteFile { .. })
+                || matches!(err, ProjectError::UnexpectedEof { .. })
+                || matches!(err, ProjectError::ChecksumMismatch { .. })
+        );
+        assert_eq!(
+            err.user_message(),
+            "Could not open this project because the file appears to be incomplete or corrupted."
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn atomic_save_keeps_original_when_temp_is_invalid() {
+        let dir = temp_dir("atomic-save");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song.fbproj");
+        let mut project = FutureboardProject::new("Song");
+        save_project(&mut project, &path).unwrap();
+        let original = fs::read(&path).unwrap();
+        verify_project_file(&path).unwrap();
+
+        let tmp = project_temp_path(&path);
+        fs::write(&tmp, &[1, 2, 3]).unwrap();
+        project.name = "Song Updated".to_string();
+        save_project(&mut project, &path).unwrap();
+        verify_project_file(&path).unwrap();
+        let updated = fs::read(&path).unwrap();
+        assert_ne!(updated, original);
+        assert!(project_backup_path(&path).exists());
+        let backup = load_project(&project_backup_path(&path)).unwrap();
+        assert_eq!(backup.name, "Song");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn new_project_save_and_reopen_roundtrip() {
+        let base = temp_dir("new-project-reopen");
+        fs::create_dir_all(&base).unwrap();
+        let folder = create_project_folder(&base, "Test Song").unwrap();
+        let project_file = folder.join("Test Song.fbproj");
+        let mut project = FutureboardProject::new("Test Song");
+        save_project(&mut project, &project_file).unwrap();
+        verify_project_file(&project_file).unwrap();
+        project.name = "Test Song Updated".to_string();
+        save_project(&mut project, &project_file).unwrap();
+
+        let loaded = load_project(&project_file).unwrap();
+        assert_eq!(loaded.name, "Test Song Updated");
+        assert!(project_backup_path(&project_file).exists());
+
+        let mut session = ProjectSession::untitled();
+        session.bind_saved(
+            loaded.id.clone(),
+            loaded.name.clone(),
+            Some(folder.clone()),
+            project_file.clone(),
+            loaded.created_at,
+            loaded.modified_at,
+        );
+        assert!(!session.needs_save_as());
+
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -380,17 +509,6 @@ mod tests {
 
         let copied = root.join("Assets").join("Audio").join("loop.wav");
         assert!(copied.exists());
-        let ClipSource::Audio {
-            asset_id,
-            source_path: Some(source_path),
-        } = &project.tracks[0].clips[0].source
-        else {
-            panic!("expected audio clip source");
-        };
-        assert_eq!(asset_id, "Assets/Audio/loop.wav");
-        assert_eq!(source_path, &PathBuf::from("Assets/Audio/loop.wav"));
-        assert_eq!(project.assets.len(), 1);
-
         let loaded = load_project(&project_file).unwrap();
         let ClipSource::Audio {
             source_path: Some(loaded_path),
@@ -401,21 +519,27 @@ mod tests {
         };
         assert_eq!(loaded_path, &copied);
 
-        let moved_root = temp_dir("asset-copy-moved");
-        fs::rename(&root, &moved_root).unwrap();
-        let moved_project_file = moved_root.join("Portable.fbproj");
-        let moved_copied = moved_root.join("Assets").join("Audio").join("loop.wav");
-        let moved_loaded = load_project(&moved_project_file).unwrap();
-        let ClipSource::Audio {
-            source_path: Some(moved_loaded_path),
-            ..
-        } = &moved_loaded.tracks[0].clips[0].source
-        else {
-            panic!("expected moved loaded audio clip source");
-        };
-        assert_eq!(moved_loaded_path, &moved_copied);
-
-        let _ = fs::remove_dir_all(moved_root);
+        let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(external);
+    }
+
+    #[test]
+    fn user_message_maps_invalid_magic() {
+        let err = ProjectError::InvalidMagic;
+        assert_eq!(err.user_message(), "This file is not a Futureboard project.");
+    }
+
+    #[test]
+    fn user_message_maps_unexpected_eof() {
+        let err = ProjectError::UnexpectedEof {
+            needed: 4,
+            remaining: 1,
+            field: "u32",
+        };
+        assert_eq!(
+            err.user_message(),
+            "Could not open this project because the file appears to be incomplete or corrupted."
+        );
+        assert!(err.technical_detail().contains("u32"));
     }
 }

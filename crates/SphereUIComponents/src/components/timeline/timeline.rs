@@ -141,6 +141,10 @@ pub enum TimelineContextTarget {
         beat: f64,
         point_id: Option<String>,
     },
+    /// Lane header menu button on the Tempo track.
+    TempoLaneHeader,
+    /// Lane header menu button on the Time Signature track.
+    TimeSignatureLaneHeader,
 }
 
 pub type TimelineContextMenuCb = std::sync::Arc<
@@ -714,6 +718,33 @@ impl Timeline {
             true
         } else {
             false
+        }
+    }
+
+    fn add_tempo_point_at_playhead_from_header(&mut self, cx: &mut Context<Self>) {
+        let beat = self.state.transport.playhead_beats as f64;
+        let bpm = self.state.effective_bpm_at_beat(beat);
+        if let Some(id) = self.state.add_tempo_point(beat, bpm) {
+            self.state.select_tempo_point(&id);
+            self.mark_tempo_map_changed(cx);
+            cx.notify();
+        }
+    }
+
+    fn add_time_signature_marker_at_playhead_from_header(&mut self, cx: &mut Context<Self>) {
+        let beat = self.state.transport.playhead_beats as f64;
+        let pt = self
+            .state
+            .time_signature_map
+            .time_signature_at_beat(beat);
+        if let Some(id) = self.state.add_time_signature_point(
+            beat,
+            pt.numerator,
+            pt.denominator,
+        ) {
+            self.state.select_time_signature_point(&id);
+            self.mark_time_signature_map_changed(cx);
+            cx.notify();
         }
     }
 
@@ -1659,21 +1690,37 @@ impl Render for Timeline {
             ) as crate::components::timeline::tempo_track::TempoTrackContextCallback
         });
 
+        let on_tempo_add = cx.listener(|this, _: &(), _window, cx| {
+            this.add_tempo_point_at_playhead_from_header(cx);
+        });
+        let on_tempo_add: crate::components::timeline::tempo_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_tempo_add);
+
+        let on_tempo_header_menu = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |pos: &(f32, f32), window: &mut gpui::Window, cx: &mut gpui::App| {
+                    cb(
+                        &(TimelineContextTarget::TempoLaneHeader, pos.0, pos.1),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::tempo_track::GlobalLaneMenuCallback
+        });
+
         let on_tempo_hide = cx.listener(|this, _: &(), _window, cx| {
             this.state.hide_tempo_track_lane();
             cx.notify();
         });
-        let on_tempo_hide: std::sync::Arc<
-            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
-        > = std::sync::Arc::new(on_tempo_hide);
+        let on_tempo_hide: crate::components::timeline::tempo_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_tempo_hide);
 
         let on_tempo_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
             this.state.tempo_track_collapsed = !this.state.tempo_track_collapsed;
             cx.notify();
         });
-        let on_tempo_toggle_collapsed: std::sync::Arc<
-            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
-        > = std::sync::Arc::new(on_tempo_toggle_collapsed);
+        let on_tempo_toggle_collapsed: crate::components::timeline::tempo_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_tempo_toggle_collapsed);
 
         let on_ts_down = cx.listener(
             |this, payload: &(f64, Option<String>, bool, u32), _window, cx| {
@@ -1706,13 +1753,42 @@ impl Render for Timeline {
             ) as crate::components::timeline::time_signature_track::TimeSignatureTrackContextCallback
         });
 
+        let on_ts_add = cx.listener(|this, _: &(), _window, cx| {
+            this.add_time_signature_marker_at_playhead_from_header(cx);
+        });
+        let on_ts_add: crate::components::timeline::time_signature_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_ts_add);
+
+        let on_ts_header_menu = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |pos: &(f32, f32), window: &mut gpui::Window, cx: &mut gpui::App| {
+                    cb(
+                        &(
+                            TimelineContextTarget::TimeSignatureLaneHeader,
+                            pos.0,
+                            pos.1,
+                        ),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::time_signature_track::GlobalLaneMenuCallback
+        });
+
         let on_ts_hide = cx.listener(|this, _: &(), _window, cx| {
             this.state.hide_time_signature_track_lane();
             cx.notify();
         });
-        let on_ts_hide: std::sync::Arc<
-            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
-        > = std::sync::Arc::new(on_ts_hide);
+        let on_ts_hide: crate::components::timeline::time_signature_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_ts_hide);
+
+        let on_ts_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
+            this.state.time_signature_track_collapsed =
+                !this.state.time_signature_track_collapsed;
+            cx.notify();
+        });
+        let on_ts_toggle_collapsed: crate::components::timeline::time_signature_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_ts_toggle_collapsed);
 
         let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
             on_select_track: on_select_track.clone(),
@@ -2036,6 +2112,8 @@ impl Render for Timeline {
                     tempo_h,
                     Some(on_tempo_down.clone()),
                     on_tempo_context.clone(),
+                    Some(on_tempo_add.clone()),
+                    on_tempo_header_menu.clone(),
                     Some(on_tempo_hide.clone()),
                     Some(on_tempo_toggle_collapsed.clone()),
                 ))
@@ -2046,7 +2124,10 @@ impl Render for Timeline {
                     ts_h,
                     Some(on_ts_down.clone()),
                     on_ts_context.clone(),
+                    Some(on_ts_add.clone()),
+                    on_ts_header_menu.clone(),
                     Some(on_ts_hide.clone()),
+                    Some(on_ts_toggle_collapsed.clone()),
                 ))
             })
             // 2. Track List Scroll Area

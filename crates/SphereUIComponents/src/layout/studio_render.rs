@@ -376,6 +376,10 @@ impl Render for StudioLayout {
                             TimelineContextTarget::TimeSignatureTrack { beat, point_id } => {
                                 ContextTarget::TimeSignatureTrack { beat, point_id }
                             }
+                            TimelineContextTarget::TempoLaneHeader => ContextTarget::Tempo,
+                            TimelineContextTarget::TimeSignatureLaneHeader => {
+                                ContextTarget::TimeSignature
+                            }
                         };
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
@@ -841,8 +845,8 @@ impl Render for StudioLayout {
                 .update(cx, |timeline, _cx| timeline.set_chrome_metrics(metrics));
         }
         let project_chrome = components::ProjectChromeState {
-            name: self.project_switcher.current_project.name.clone(),
-            is_dirty: self.project_switcher.current_project.is_dirty,
+            name: self.project_session.display_name().to_string(),
+            is_dirty: self.project_session.is_dirty,
             on_open_project_menu: on_project_open,
         };
         let (status_left, status_right) = self.status_text();

@@ -313,7 +313,11 @@ impl WelcomeWindow {
                     });
                 }
                 Err(e) => {
-                    let msg = format!("Not a valid Futureboard project: {e}");
+                    let msg = format!(
+                        "{} Details: {}",
+                        e.user_message(),
+                        e.technical_detail()
+                    );
                     welcome_debug!("open project rejected -> {msg}");
                     let _ = this.update(cx, |this, cx| {
                         this.open_error = Some(SharedString::from(msg));

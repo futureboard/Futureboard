@@ -457,6 +457,9 @@ pub struct StudioLayout {
     // ── Project file system ───────────────────────────────────────────────────
     /// Centralized filesystem paths for the entire application.
     paths: FutureboardPaths,
+    /// Canonical project session — single source of truth for name, paths,
+    /// untitled/dirty flags, and lifecycle binding.
+    project_session: crate::project::ProjectSession,
     /// Absolute path to the currently open `.fbproj` file, if any.
     project_path: Option<PathBuf>,
     /// Root folder of the current project (contains Media/, Cache/, etc.).
@@ -490,6 +493,8 @@ pub struct StudioLayout {
     project_state: crate::app_state::ProjectState,
     /// Last OS window title applied in render, to avoid redundant set calls.
     last_window_title: Option<String>,
+    /// Path of the last failed project open, used by recovery dialogs.
+    pending_failed_open_path: Option<PathBuf>,
 }
 
 impl StudioLayout {
@@ -786,6 +791,7 @@ impl StudioLayout {
             frame_diag: FrameDiagnostics::new(),
             mixer_scroll_x: 0.0,
             paths,
+            project_session: crate::project::ProjectSession::default(),
             project_path: None,
             project_folder: None,
             recent_projects: RecentProjectsStore::load(),
@@ -798,6 +804,7 @@ impl StudioLayout {
             active_keymap: crate::keymap::Keymap::bundled_default(),
             project_state: crate::app_state::ProjectState::NoProject,
             last_window_title: None,
+            pending_failed_open_path: None,
         };
 
         layout.spawn_audio_engine_warmup(cx);
@@ -966,6 +973,13 @@ impl StudioLayout {
             }
             "tempo:hide-track" => {
                 self.hide_tempo_track(cx);
+            }
+            "tempo:fit-range" => {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.fit_tempo_automation_in_view();
+                    cx.notify();
+                });
+                cx.notify();
             }
             "tempo:add-point-here" => {
                 if let Some((beat, bpm)) = self.tempo_track_context_position() {

@@ -770,18 +770,29 @@ impl StudioLayout {
                 let mut entries = vec![
                     ContextMenuEntry::disabled_item(format!("Time Signature: {label}"), "noop"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Edit Time Signature…", "ts:edit"),
                     ContextMenuEntry::item(
                         "Add Time Signature Marker at Playhead",
                         "ts:add-marker",
                     ),
+                    ContextMenuEntry::item("Edit Current Time Signature…", "ts:edit"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Show Time Signature Track", "ts:open-track"),
                 ];
                 if has_markers {
                     entries.push(ContextMenuEntry::danger_item(
                         "Clear Time Signature Markers",
                         "ts:clear",
+                    ));
+                    entries.push(ContextMenuEntry::Separator);
+                }
+                if state.show_time_signature_track {
+                    entries.push(ContextMenuEntry::item(
+                        "Hide Time Signature Track",
+                        "ts:hide-track",
+                    ));
+                } else {
+                    entries.push(ContextMenuEntry::item(
+                        "Show Time Signature Track",
+                        "ts:open-track",
                     ));
                 }
                 entries
@@ -858,28 +869,34 @@ impl StudioLayout {
                 let mut entries = vec![
                     ContextMenuEntry::disabled_item(format!("Tempo: {bpm:.1} BPM"), "noop"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Edit BPM…", "tempo:edit-bpm"),
                     ContextMenuEntry::item(
-                        "Add Tempo Automation Point at Playhead",
+                        "Add Tempo Point at Playhead",
                         "tempo:add-marker",
                     ),
+                    ContextMenuEntry::item("Edit Current BPM…", "tempo:edit-bpm"),
                 ];
-                // "Create Tempo Automation" only makes sense in fixed-tempo mode.
-                if !has_automation {
+                if has_automation {
+                    entries.push(ContextMenuEntry::item("Fit Tempo Range", "tempo:fit-range"));
+                    entries.push(ContextMenuEntry::danger_item(
+                        "Clear Tempo Automation",
+                        "tempo:clear",
+                    ));
+                } else {
                     entries.push(ContextMenuEntry::item(
                         "Create Tempo Automation",
                         "tempo:create",
                     ));
                 }
                 entries.push(ContextMenuEntry::Separator);
-                entries.push(ContextMenuEntry::item(
-                    "Show Tempo Track",
-                    "tempo:open-track",
-                ));
-                if has_automation {
-                    entries.push(ContextMenuEntry::danger_item(
-                        "Clear Tempo Automation",
-                        "tempo:clear",
+                if state.show_tempo_track {
+                    entries.push(ContextMenuEntry::item(
+                        "Hide Tempo Track",
+                        "tempo:hide-track",
+                    ));
+                } else {
+                    entries.push(ContextMenuEntry::item(
+                        "Show Tempo Track",
+                        "tempo:open-track",
                     ));
                 }
                 entries

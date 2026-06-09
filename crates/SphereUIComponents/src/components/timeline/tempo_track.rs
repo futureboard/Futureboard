@@ -1,8 +1,8 @@
+use crate::components::timeline::global_lane_header::{global_lane_header, GlobalLaneHeaderActions};
 use crate::components::timeline::timeline_state::{
-    bpm_to_y, TempoMap, TimelineState, HEADER_WIDTH, TEMPO_LANE_PAD,
+    bpm_to_y, TempoMap, TimelineState, TEMPO_LANE_PAD,
 };
 use crate::theme::Colors;
-use gpui::prelude::FluentBuilder;
 use gpui::{
     canvas, div, fill, point, px, size, Bounds, InteractiveElement, IntoElement, ParentElement,
     Pixels, Styled,
@@ -18,6 +18,11 @@ pub type TempoTrackContextCallback = std::sync::Arc<
     dyn Fn(&(f64, f64, Option<String>, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
 >;
 
+pub type GlobalLaneVoidCallback =
+    std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>;
+pub type GlobalLaneMenuCallback =
+    std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
+
 const APP_CHROME_HEIGHT: f32 = 36.0;
 
 /// Global Tempo Track lane — header + automation curve over the project TempoMap.
@@ -26,10 +31,10 @@ pub fn tempo_track_lane(
     lane_height: f32,
     on_down: Option<TempoTrackDownCallback>,
     on_context: Option<TempoTrackContextCallback>,
-    on_hide: Option<std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>>,
-    on_toggle_collapsed: Option<
-        std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
-    >,
+    on_add: Option<GlobalLaneVoidCallback>,
+    on_header_menu: Option<GlobalLaneMenuCallback>,
+    on_hide: Option<GlobalLaneVoidCallback>,
+    on_toggle_collapsed: Option<GlobalLaneVoidCallback>,
 ) -> impl IntoElement {
     let (min_bpm, max_bpm) = state.tempo_lane_bpm_range();
     let lane_w = state.viewport.viewport_width.max(1.0);
@@ -43,13 +48,14 @@ pub fn tempo_track_lane(
     }
 
     let line_color = Colors::accent_primary();
+    let fill_under = Colors::with_alpha(Colors::accent_primary(), 0.08);
     let baseline_bpm = if state.tempo_map.points.is_empty() {
         state.bpm as f64
     } else {
         state.tempo_map.points[0].bpm
     };
     let baseline_y = bpm_to_y(baseline_bpm, lane_height, min_bpm, max_bpm);
-    let baseline_color = Colors::with_alpha(Colors::text_primary(), 0.08);
+    let baseline_color = Colors::with_alpha(Colors::text_primary(), 0.12);
 
     let curve = canvas(
         |_b, _w, _cx| {},
@@ -63,12 +69,22 @@ pub fn tempo_track_lane(
                 let y0 = samples[col];
                 let y1 = samples[col + 1];
                 let top = y0.min(y1);
-                let h = (y0 - y1).abs().max(1.6);
+                let h = (y0 - y1).abs().max(2.0);
                 let r = Bounds::new(
                     bounds.origin + point(px(col as f32), px(top)),
-                    size(px(1.0), px(h)),
+                    size(px(2.0), px(h)),
                 );
                 window.paint_quad(fill(r, line_color));
+                if col % 3 == 0 {
+                    let fill_h = (lane_height - top).max(0.0);
+                    if fill_h > 0.5 {
+                        let fr = Bounds::new(
+                            bounds.origin + point(px(col as f32), px(top)),
+                            size(px(2.0), px(fill_h)),
+                        );
+                        window.paint_quad(fill(fr, fill_under));
+                    }
+                }
             }
         },
     )
@@ -77,54 +93,94 @@ pub fn tempo_track_lane(
 
     let points = state.tempo_map.points.clone();
     let selected_id = state.selected_tempo_point_id.clone();
-    let markers: Vec<_> = points
-        .iter()
-        .filter_map(|p| {
-            let x = state.beats_to_x(p.beat as f32);
-            if x < -12.0 || x > lane_w + 12.0 {
-                return None;
-            }
-            let y = bpm_to_y(p.bpm, lane_height, min_bpm, max_bpm);
-            let selected = selected_id.as_deref() == Some(p.id.as_str());
-            let (fill_color, ring) = if selected {
-                (Colors::text_primary(), Colors::accent_primary())
-            } else {
-                (Colors::accent_primary(), Colors::text_primary())
-            };
-            let size_px = if selected { 9.0 } else { 7.0 };
+    let show_all_labels = points.len() <= 1;
+    // Compact single-line pill geometry. The label is drawn as a sibling overlay
+    // (not a child of the tiny handle dot) so it is never width-constrained into
+    // a vertical character stack, and so it can be clamped inside the lane.
+    const TEMPO_LABEL_MIN_W: f32 = 44.0;
+    const TEMPO_LABEL_H: f32 = 16.0;
+    let mut markers: Vec<gpui::Div> = Vec::new();
+    for p in &points {
+        let x = state.beats_to_x(p.beat as f32);
+        if x < -16.0 || x > lane_w + 16.0 {
+            continue;
+        }
+        let y = bpm_to_y(p.bpm, lane_height, min_bpm, max_bpm);
+        let selected = selected_id.as_deref() == Some(p.id.as_str());
+        let show_label = selected || show_all_labels;
+        let size_px = if selected { 10.0 } else { 8.0 };
+        let (fill_color, ring) = if selected {
+            (Colors::text_primary(), Colors::accent_primary())
+        } else {
+            (Colors::accent_primary(), Colors::with_alpha(Colors::text_primary(), 0.65))
+        };
+
+        markers.push(
+            div()
+                .absolute()
+                .left(px(x - size_px / 2.0))
+                .top(px(y - size_px / 2.0))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .child(
+                    div()
+                        .w(px(size_px))
+                        .h(px(size_px))
+                        .rounded_full()
+                        .bg(fill_color)
+                        .border(px(1.5))
+                        .border_color(ring)
+                        .shadow(vec![gpui::BoxShadow {
+                            color: Colors::with_alpha(Colors::accent_primary(), 0.35).into(),
+                            offset: point(px(0.0), px(0.0)),
+                            blur_radius: px(4.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        }]),
+                ),
+        );
+
+        if show_label {
             let label = TempoMap::format_marker_label(p.bpm);
-            Some(
+            let label_text = format!("{label} BPM");
+            // Single-line pill width: estimate from glyph count, never below the
+            // minimum so it can't shrink to the handle width.
+            let pill_w =
+                (label_text.chars().count() as f32 * 5.5 + 14.0).max(TEMPO_LABEL_MIN_W);
+            // Center the pill over the handle, then clamp it inside the lane.
+            let pill_x =
+                (x - pill_w / 2.0).clamp(2.0, (lane_w - pill_w - 2.0).max(2.0));
+            // Prefer above the dot; drop below if there is no room, then clamp so
+            // it stays fully inside the lane content (no top/bottom clipping).
+            let mut pill_y = y - size_px / 2.0 - TEMPO_LABEL_H - 4.0;
+            if pill_y < 2.0 {
+                pill_y = y + size_px / 2.0 + 4.0;
+            }
+            pill_y = pill_y.clamp(2.0, (lane_height - TEMPO_LABEL_H - 2.0).max(2.0));
+
+            markers.push(
                 div()
                     .absolute()
-                    .left(px(x - size_px / 2.0))
-                    .top(px(y - size_px / 2.0))
-                    .child(
-                        div()
-                            .absolute()
-                            .bottom(px(size_px + 2.0))
-                            .left(px(-8.0))
-                            .text_size(px(8.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(Colors::text_secondary())
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .w(px(size_px))
-                            .h(px(size_px))
-                            .rounded_full()
-                            .bg(fill_color)
-                            .border(px(1.0))
-                            .border_color(ring),
-                    ),
-            )
-        })
-        .collect();
+                    .left(px(pill_x))
+                    .top(px(pill_y))
+                    .w(px(pill_w))
+                    .h(px(TEMPO_LABEL_H))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .bg(Colors::with_alpha(Colors::surface_raised(), 0.95))
+                    .border(px(1.0))
+                    .border_color(Colors::with_alpha(Colors::accent_primary(), 0.35))
+                    .text_size(px(9.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(Colors::text_primary())
+                    .whitespace_nowrap()
+                    .child(label_text),
+            );
+        }
+    }
 
-    let range_label = format!("{:.0}–{:.0}", min_bpm.round(), max_bpm.round());
-    let collapsed = state.tempo_track_collapsed;
-    let collapse_label = if collapsed { "▸" } else { "▾" };
-
+    let subtitle = state.tempo_lane_header_subtitle();
     let content_top = APP_CHROME_HEIGHT + crate::components::timeline::timeline_state::RULER_HEIGHT;
 
     let interaction = on_down.map(|cb| {
@@ -142,7 +198,7 @@ pub fn tempo_track_lane(
                     cx.stop_propagation();
                     let wx: f32 = event.position.x.into();
                     let wy: f32 = event.position.y.into();
-                    let lane_x = wx - crate::components::sidebar::SIDEBAR_WIDTH - HEADER_WIDTH;
+                    let lane_x = wx - crate::components::sidebar::SIDEBAR_WIDTH - crate::components::timeline::timeline_state::HEADER_WIDTH;
                     let beat = state_left.x_to_beat(lane_x).max(0.0);
                     let snapped = state_left.snap_beats(beat as f32) as f64;
                     let local_y = wy - content_top - TEMPO_LANE_PAD;
@@ -172,7 +228,7 @@ pub fn tempo_track_lane(
                     let wy: f32 = event.position.y.into();
                     let sx: f32 = event.position.x.into();
                     let sy: f32 = event.position.y.into();
-                    let lane_x = wx - crate::components::sidebar::SIDEBAR_WIDTH - HEADER_WIDTH;
+                    let lane_x = wx - crate::components::sidebar::SIDEBAR_WIDTH - crate::components::timeline::timeline_state::HEADER_WIDTH;
                     let beat = state_right.x_to_beat(lane_x).max(0.0);
                     let local_y = wy - content_top - TEMPO_LANE_PAD;
                     let bpm = crate::components::timeline::timeline_state::y_to_bpm(
@@ -190,6 +246,20 @@ pub fn tempo_track_lane(
         layer
     });
 
+    let header = global_lane_header(
+        "tempo",
+        "Tempo",
+        subtitle,
+        state.tempo_track_collapsed,
+        "Hide Tempo Track",
+        GlobalLaneHeaderActions {
+            on_add,
+            on_menu: on_header_menu,
+            on_hide,
+            on_toggle_collapsed,
+        },
+    );
+
     div()
         .flex()
         .flex_row()
@@ -198,71 +268,7 @@ pub fn tempo_track_lane(
         .bg(Colors::surface_panel_alt())
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
-        .child(
-            div()
-                .w(px(HEADER_WIDTH))
-                .h_full()
-                .border_r(px(1.0))
-                .border_color(Colors::border_subtle())
-                .flex()
-                .flex_col()
-                .justify_center()
-                .px(px(12.0))
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_primary())
-                                .child("Tempo"),
-                        )
-                        .when_some(on_toggle_collapsed, |row, toggle| {
-                            row.child(
-                                div()
-                                    .text_size(px(9.0))
-                                    .text_color(Colors::text_muted())
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .hover(|s| s.text_color(Colors::text_secondary()))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        move |_e, window, cx| {
-                                            cx.stop_propagation();
-                                            toggle(&(), window, cx);
-                                        },
-                                    )
-                                    .child(collapse_label),
-                            )
-                        })
-                        .when_some(on_hide, |row, hide| {
-                            row.child(
-                                div()
-                                    .text_size(px(8.0))
-                                    .text_color(Colors::text_muted())
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .hover(|s| s.text_color(Colors::text_secondary()))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        move |_e, window, cx| {
-                                            cx.stop_propagation();
-                                            hide(&(), window, cx);
-                                        },
-                                    )
-                                    .child("Hide"),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(8.0))
-                        .text_color(Colors::text_muted())
-                        .child(format!("{range_label} BPM")),
-                ),
-        )
+        .child(header)
         .child(
             div()
                 .flex_1()

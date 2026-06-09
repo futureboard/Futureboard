@@ -45,7 +45,7 @@ impl StudioLayout {
             shutdown::log("request_close ignored — already shutting down");
             return;
         }
-        let dirty = self.project_switcher.current_project.is_dirty;
+        let dirty = self.project_session.is_dirty;
         shutdown::log(&format!(
             "close requested action={} dirty={dirty}",
             action.label()
@@ -72,7 +72,7 @@ impl StudioLayout {
         if ShutdownState::global().is_shutting_down() {
             return;
         }
-        let dirty = self.project_switcher.current_project.is_dirty;
+        let dirty = self.project_session.is_dirty;
         shutdown::log(&format!("lifecycle guard action={action:?} dirty={dirty}"));
         if !dirty {
             self.run_lifecycle_action(action, cx);

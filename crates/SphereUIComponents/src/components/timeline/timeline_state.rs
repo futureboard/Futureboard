@@ -2831,6 +2831,81 @@ impl TimelineState {
         lanes
     }
 
+    /// Secondary label for the Tempo lane header (fixed BPM or automation range).
+    pub fn tempo_lane_header_subtitle(&self) -> String {
+        let bpm = self.effective_bpm_at_playhead();
+        if self.tempo_map.points.len() <= 1 {
+            if bpm.fract().abs() < 0.05 {
+                format!("Fixed {:.0} BPM", bpm)
+            } else {
+                format!("Fixed {:.1} BPM", bpm)
+            }
+        } else {
+            let mut min = bpm;
+            let mut max = bpm;
+            for p in &self.tempo_map.points {
+                min = min.min(p.bpm);
+                max = max.max(p.bpm);
+            }
+            if (max - min).abs() < 0.5 {
+                if bpm.fract().abs() < 0.05 {
+                    format!("{:.0} BPM", bpm)
+                } else {
+                    format!("{:.1} BPM", bpm)
+                }
+            } else {
+                format!("{:.0}–{:.0} BPM", min.round(), max.round())
+            }
+        }
+    }
+
+    /// Secondary label for the Time Signature lane header.
+    pub fn time_signature_lane_header_subtitle(&self) -> String {
+        let pt = self.time_signature_at_playhead();
+        if !self.time_signature_has_markers() {
+            format!("Fixed {}", pt.label())
+        } else {
+            let count = self.time_signature_map.points.len();
+            if count > 1 {
+                format!("{} · {} markers", pt.label(), count)
+            } else {
+                pt.label()
+            }
+        }
+    }
+
+    /// Scroll/zoom the arrangement so all tempo automation points are visible.
+    pub fn fit_tempo_automation_in_view(&mut self) {
+        if self.tempo_map.points.is_empty() {
+            return;
+        }
+        let min_beat = self
+            .tempo_map
+            .points
+            .iter()
+            .map(|p| p.beat)
+            .fold(f64::INFINITY, f64::min)
+            .max(0.0);
+        let max_beat = self
+            .tempo_map
+            .points
+            .iter()
+            .map(|p| p.beat)
+            .fold(0.0, f64::max);
+        let pad = 8.0;
+        let span_beats = (max_beat - min_beat + pad * 2.0).max(16.0);
+        let width = self.viewport.viewport_width.max(200.0);
+        let needed_ppb = width / span_beats as f32;
+        let current_ppb = self.pixels_per_beat().max(0.0001);
+        if needed_ppb < current_ppb {
+            let factor = (needed_ppb / current_ppb).clamp(0.05, 1.0);
+            self.zoom_by(factor, width * 0.5);
+        }
+        let scroll = ((min_beat - pad).max(0.0) as f32 * self.pixels_per_beat()).max(0.0);
+        self.viewport.scroll_x = scroll;
+        self.viewport.target_scroll_x = scroll;
+    }
+
     /// Auto-fit BPM range for the Tempo Track curve with padding.
     pub fn tempo_lane_bpm_range(&self) -> (f64, f64) {
         let mut min = self.bpm as f64;
@@ -5830,6 +5905,32 @@ mod tempo_map_tests {
 #[cfg(test)]
 mod tempo_track_tests {
     use super::*;
+
+    #[test]
+    fn tempo_lane_header_subtitle_fixed_and_range() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        assert_eq!(state.tempo_lane_header_subtitle(), "Fixed 120 BPM");
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(16.0, 160.0, TempoCurve::Hold);
+        assert_eq!(state.tempo_lane_header_subtitle(), "120–160 BPM");
+    }
+
+    #[test]
+    fn time_signature_lane_header_subtitle_fixed_and_markers() {
+        let mut state = TimelineState::default();
+        assert_eq!(state.time_signature_lane_header_subtitle(), "Fixed 4/4");
+        state.time_signature_map.add_or_update_point(0.0, 4, 4);
+        state.time_signature_map.add_or_update_point(16.0, 6, 8);
+        assert_eq!(
+            state.time_signature_lane_header_subtitle(),
+            "4/4 · 2 markers"
+        );
+    }
 
     #[test]
     fn show_tempo_track_enables_global_lane() {

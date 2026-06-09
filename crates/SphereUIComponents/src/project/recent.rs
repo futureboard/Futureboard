@@ -8,6 +8,10 @@ const MAX_RECENT: usize = 20;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentProject {
     pub name: String,
+    /// Project root folder (parent of the `.fbproj` file).
+    #[serde(default)]
+    pub folder_path: Option<PathBuf>,
+    /// Absolute path to the `.fbproj` file.
     pub path: PathBuf,
     pub last_opened_at: u64,
     /// Set to true when the file no longer exists at `path`.
@@ -51,11 +55,13 @@ impl RecentProjectsStore {
     /// Adds or updates an entry, then saves to disk.
     pub fn push(&mut self, name: impl Into<String>, path: PathBuf, last_opened_at: u64) {
         let path_clone = path.clone();
+        let folder_path = path.parent().map(PathBuf::from);
         self.entries.retain(|e| e.path != path_clone);
         self.entries.insert(
             0,
             RecentProject {
                 name: name.into(),
+                folder_path,
                 path,
                 last_opened_at,
                 missing: false,
@@ -92,5 +98,28 @@ impl RecentProjectsStore {
         let json = serde_json::to_string_pretty(&self.entries)?;
         fs::write(&self.config_path, json)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_records_folder_and_project_file_paths() {
+        let mut store = RecentProjectsStore {
+            entries: Vec::new(),
+            config_path: PathBuf::from("recent-test.json"),
+        };
+        let project_file = PathBuf::from("/tmp/Beat Demo/Beat Demo.fbproj");
+        store.push("Beat Demo", project_file.clone(), 42);
+        let entry = store.entries().first().expect("recent entry");
+        assert_eq!(entry.name, "Beat Demo");
+        assert_eq!(entry.path, project_file);
+        assert_eq!(
+            entry.folder_path.as_deref(),
+            Some(Path::new("/tmp/Beat Demo"))
+        );
+        assert_eq!(entry.last_opened_at, 42);
     }
 }

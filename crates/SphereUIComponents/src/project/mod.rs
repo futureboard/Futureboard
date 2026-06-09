@@ -1,14 +1,17 @@
 pub mod format;
 pub mod io;
 pub mod recent;
+pub mod session;
 pub mod template;
 
 pub use format::{decode_project, encode_project, ProjectError, PROJECT_MAGIC, PROJECT_VERSION};
 pub use io::{
-    create_project_folder, default_projects_dir, load_project, sanitize_project_name, save_project,
-    validate_project_file, LEGACY_PROJECT_FILE_EXT, PROJECT_FILE_EXT, SUPPORTED_PROJECT_FILE_EXTS,
+    create_project_folder, default_projects_dir, load_project, project_backup_path,
+    project_temp_path, sanitize_project_name, save_project, validate_project_file,
+    verify_project_file, LEGACY_PROJECT_FILE_EXT, PROJECT_FILE_EXT, SUPPORTED_PROJECT_FILE_EXTS,
 };
 pub use recent::{RecentProject, RecentProjectsStore};
+pub use session::ProjectSession;
 pub use template::{ProjectCreateOptions, ProjectTemplate};
 
 use std::path::PathBuf;

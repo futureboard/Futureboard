@@ -5,6 +5,7 @@ pub mod floating_tools_bar;
 pub mod midi_clip;
 pub mod playhead;
 pub mod render;
+pub mod global_lane_header;
 pub mod tempo_track;
 pub mod time_signature_track;
 pub mod timeline;

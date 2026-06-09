@@ -525,9 +525,9 @@ impl StudioLayout {
                     "routing input track={id} old={:?} new={:?}",
                     old, input
                 ));
-                StudioLayout::defer_update(&owner, cx, |this, _cx| {
-                    this.project_switcher.current_project.is_dirty = true;
-                    this.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
+                    this.mark_dirty();
+                    cx.notify();
                 });
             }
         })
@@ -618,10 +618,9 @@ impl StudioLayout {
                         "routing midi_input track={id} old={:?} new={:?}",
                         old, midi_input
                     ));
-                    StudioLayout::defer_update(&owner, cx, |this, _cx| {
-                        this.project_switcher.current_project.is_dirty = true;
-                        this.project_switcher.current_project.subtitle =
-                            "Unsaved changes".to_string();
+                    StudioLayout::defer_update(&owner, cx, |this, cx| {
+                        this.mark_dirty();
+                        cx.notify();
                     });
                 }
             },

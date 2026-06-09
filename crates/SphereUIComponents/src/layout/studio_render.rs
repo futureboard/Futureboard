@@ -844,9 +844,11 @@ impl Render for StudioLayout {
                 },
                 status_bar_height: STATUS_BAR_HEIGHT,
             };
-            let _ = self
-                .timeline
-                .update(cx, |timeline, _cx| timeline.set_chrome_metrics(metrics));
+            let project_root = self.project_session.folder_path.clone();
+            let _ = self.timeline.update(cx, |timeline, _cx| {
+                timeline.set_chrome_metrics(metrics);
+                timeline.set_project_root(project_root);
+            });
         }
         let project_chrome = components::ProjectChromeState {
             name: self.project_session.display_name().to_string(),

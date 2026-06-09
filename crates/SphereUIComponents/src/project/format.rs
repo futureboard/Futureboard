@@ -18,7 +18,9 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v7 adds project-level tempo automation markers (TempoMap); pre-v7 files have
 /// no tempo points and play at the static `bpm`.
 /// v8 adds stable ids on tempo points for independent marker editing.
-pub const PROJECT_VERSION: u32 = 10;
+/// v11 adds a content fingerprint per project asset for cross-session import
+/// dedup. Pre-v11 files have no asset fingerprint and load with `None`.
+pub const PROJECT_VERSION: u32 = 11;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -616,6 +618,7 @@ fn encode_asset(w: &mut FbWriter, a: &ProjectAsset) {
     w.write_opt_f64(&a.duration_secs);
     w.write_opt_u32(&a.sample_rate);
     w.write_opt_u8(&a.channels);
+    w.write_opt_str(&a.source_fingerprint); // v11
 }
 
 fn encode_body(project: &FutureboardProject) -> Vec<u8> {
@@ -1093,7 +1096,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     })
 }
 
-fn decode_asset(r: &mut FbReader) -> Result<ProjectAsset, ProjectError> {
+fn decode_asset(r: &mut FbReader, version: u32) -> Result<ProjectAsset, ProjectError> {
     Ok(ProjectAsset {
         id: r.read_str()?,
         original_filename: r.read_str()?,
@@ -1102,6 +1105,12 @@ fn decode_asset(r: &mut FbReader) -> Result<ProjectAsset, ProjectError> {
         duration_secs: r.read_opt_f64()?,
         sample_rate: r.read_opt_u32()?,
         channels: r.read_opt_u8()?,
+        // v11 appended a content fingerprint; older files stop before it.
+        source_fingerprint: if version >= 11 {
+            r.read_opt_str()?
+        } else {
+            None
+        },
     })
 }
 
@@ -1130,7 +1139,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
     let asset_count = r.read_u32()? as usize;
     let mut assets = Vec::with_capacity(asset_count);
     for _ in 0..asset_count {
-        assets.push(decode_asset(&mut r)?);
+        assets.push(decode_asset(&mut r, version)?);
     }
 
     // Tempo automation markers (v7+). Pre-v7 files have none. v8+ stores ids.

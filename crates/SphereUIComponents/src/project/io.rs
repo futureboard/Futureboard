@@ -3,8 +3,9 @@ use super::{
     now_secs, ClipSource, FutureboardProject, ProjectAsset,
 };
 use crate::paths::{FutureboardPaths, ProjectFolderLayout};
+use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const PROJECT_FILE_EXT: &str = "fbproj";
@@ -156,6 +157,56 @@ fn project_load_log(args: std::fmt::Arguments<'_>) {
     eprintln!("[ProjectLoad] {args}");
 }
 
+/// Copy an external audio file into a saved project's `Assets/Audio` folder,
+/// reusing an existing copy when the bytes already live there (content
+/// fingerprint dedup). Returns the absolute project-local path to use as the
+/// clip's `source_path`. If `source` is already inside `project_root`, it is
+/// returned unchanged. Heavy I/O (hash + copy) — call off the UI thread.
+///
+/// This is the eager, import-time counterpart to the copy that
+/// [`prepare_portable_assets`] performs at save time; both keep a project
+/// portable. The clip's asset id (`file_id`) is unaffected, so retargeting
+/// `source_path` to the returned path never disturbs the waveform binding.
+pub fn import_audio_file_to_project(
+    source: &Path,
+    project_root: &Path,
+) -> Result<PathBuf, ProjectError> {
+    if !source.exists() {
+        return Err(ProjectError::Corrupted(format!(
+            "missing audio source: {}",
+            source.display()
+        )));
+    }
+    // Already inside the project folder → nothing to copy.
+    if path_relative_to_project(source, project_root).is_some() {
+        return Ok(source.to_path_buf());
+    }
+
+    let layout = ProjectFolderLayout::from_root(project_root.to_path_buf());
+    layout.ensure_dirs()?;
+
+    if let Some(fingerprint) = audio_fingerprint(source) {
+        let index = scan_existing_audio_fingerprints(&layout.media_audio, project_root);
+        if let Some(relative) = index.get(&fingerprint) {
+            let existing = project_root.join(relative);
+            eprintln!(
+                "[AudioImport] cache hit (content) reuse={relative} source={}",
+                source.display()
+            );
+            return Ok(existing);
+        }
+    }
+
+    let dest = unique_asset_destination(&layout.media_audio, source)?;
+    fs::copy(source, &dest)?;
+    eprintln!(
+        "[AudioImport] copying to project={} source={}",
+        dest.display(),
+        source.display()
+    );
+    Ok(dest)
+}
+
 fn prepare_portable_assets(
     project: &mut FutureboardProject,
     project_file: &Path,
@@ -168,6 +219,31 @@ fn prepare_portable_assets(
 
     let mut copied: Vec<(PathBuf, String)> = Vec::new();
     let mut assets: Vec<ProjectAsset> = Vec::new();
+
+    // Fingerprints recorded by previous saves (v11+), keyed by project-relative
+    // path. Lets us carry a known fingerprint forward without re-hashing a file
+    // that is already inside the project folder.
+    let prev_fp_by_rel: HashMap<String, AudioFingerprint> = project
+        .assets
+        .iter()
+        .filter_map(|a| {
+            let rel = a.relative_path.clone()?;
+            let fp = a.source_fingerprint.as_deref().and_then(AudioFingerprint::parse)?;
+            Some((rel, fp))
+        })
+        .collect();
+
+    // Content fingerprint → existing project-relative path. Seeded cheaply from
+    // persisted fingerprints (no hashing) so re-imports of identical content
+    // dedup against bytes copied in an earlier session. The audio folder is only
+    // scanned/hashed lazily as a fallback for files that lack a persisted
+    // fingerprint (e.g. projects last saved by a pre-v11 build).
+    let mut content_index: HashMap<AudioFingerprint, String> = prev_fp_by_rel
+        .iter()
+        .filter(|(rel, _)| project_root.join(rel).exists())
+        .map(|(rel, fp)| (*fp, rel.clone()))
+        .collect();
+    let mut folder_scanned = false;
 
     for track in &mut project.tracks {
         for clip in &mut track.clips {
@@ -189,6 +265,15 @@ fn prepare_portable_assets(
 
             if let Some(relative) = path_relative_to_project(&source_abs, project_root) {
                 let relative_string = path_to_project_string(&relative);
+                // Carry a known fingerprint forward; only hash if this file was
+                // never fingerprinted (first save after a pre-v11 upgrade).
+                let fingerprint = prev_fp_by_rel
+                    .get(&relative_string)
+                    .copied()
+                    .or_else(|| audio_fingerprint(&source_abs));
+                if let Some(fp) = fingerprint {
+                    content_index.entry(fp).or_insert_with(|| relative_string.clone());
+                }
                 *source_path = PathBuf::from(&relative_string);
                 *asset_id = relative_string.clone();
                 assets.push(asset_record(
@@ -196,8 +281,36 @@ fn prepare_portable_assets(
                     &source_abs,
                     relative_string,
                     None,
+                    fingerprint,
                 )?);
                 continue;
+            }
+
+            // External source. Reuse an identical-content copy already in the
+            // project before falling back to path-equality dedup within this
+            // save. Mirrors the path-reuse branch: rewrite the reference only,
+            // without emitting a second asset record for the same file.
+            let fingerprint = audio_fingerprint(&source_abs);
+            if let Some(fp) = fingerprint {
+                if !content_index.contains_key(&fp) && !folder_scanned {
+                    // Persisted fingerprints missed; hash the folder once to
+                    // cover legacy/externally-added files before copying.
+                    for (existing_fp, rel) in
+                        scan_existing_audio_fingerprints(&layout.media_audio, project_root)
+                    {
+                        content_index.entry(existing_fp).or_insert(rel);
+                    }
+                    folder_scanned = true;
+                }
+                if let Some(existing_rel) = content_index.get(&fp) {
+                    eprintln!(
+                        "[AudioImport] cache hit (content) reuse={existing_rel} source={}",
+                        source_abs.display()
+                    );
+                    *source_path = PathBuf::from(existing_rel);
+                    *asset_id = existing_rel.clone();
+                    continue;
+                }
             }
 
             if let Some((_, relative_string)) = copied
@@ -211,6 +324,11 @@ fn prepare_portable_assets(
 
             let dest = unique_asset_destination(&layout.media_audio, &source_abs)?;
             fs::copy(&source_abs, &dest)?;
+            eprintln!(
+                "[AudioImport] copying to project={} source={}",
+                dest.display(),
+                source_abs.display()
+            );
             let relative = path_relative_to_project(&dest, project_root).ok_or_else(|| {
                 ProjectError::Corrupted(format!(
                     "copied asset escaped project folder: {}",
@@ -222,11 +340,18 @@ fn prepare_portable_assets(
             *source_path = PathBuf::from(&relative_string);
             *asset_id = relative_string.clone();
             copied.push((source_abs.clone(), relative_string.clone()));
+            // Prefer the fingerprint of the source we just read; fall back to the
+            // freshly-written copy.
+            let dest_fingerprint = fingerprint.or_else(|| audio_fingerprint(&dest));
+            if let Some(fp) = dest_fingerprint {
+                content_index.insert(fp, relative_string.clone());
+            }
             assets.push(asset_record(
                 asset_id.clone(),
                 &dest,
                 relative_string,
                 Some(source_abs),
+                dest_fingerprint,
             )?);
         }
     }
@@ -313,6 +438,7 @@ fn asset_record(
     copied_path: &Path,
     relative_path: String,
     original_path: Option<PathBuf>,
+    fingerprint: Option<AudioFingerprint>,
 ) -> Result<ProjectAsset, ProjectError> {
     Ok(ProjectAsset {
         id,
@@ -325,7 +451,84 @@ fn asset_record(
         duration_secs: None,
         sample_rate: None,
         channels: None,
+        source_fingerprint: fingerprint.map(|fp| fp.to_token()),
     })
+}
+
+/// Content identity for asset dedup: byte length + CRC32 of the file contents.
+/// Two files with the same fingerprint are treated as the same audio asset, so
+/// re-importing identical bytes reuses the existing project copy rather than
+/// writing a duplicate. (Distinct from `audio_import::stable_cache_key`, which
+/// keys the *waveform* cache on path + size + mtime.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AudioFingerprint {
+    len: u64,
+    crc: u32,
+}
+
+impl AudioFingerprint {
+    /// Persisted token form: `"<len:x>-<crc:08x>"`.
+    fn to_token(self) -> String {
+        format!("{:x}-{:08x}", self.len, self.crc)
+    }
+
+    /// Parse a token written by [`AudioFingerprint::to_token`]. Returns `None`
+    /// for malformed or pre-v11 (absent) values.
+    fn parse(token: &str) -> Option<Self> {
+        let (len, crc) = token.split_once('-')?;
+        Some(Self {
+            len: u64::from_str_radix(len, 16).ok()?,
+            crc: u32::from_str_radix(crc, 16).ok()?,
+        })
+    }
+}
+
+/// Stream `path` through CRC32 without loading it fully into memory. Returns
+/// `None` if the file cannot be read (caller falls back to path-equality dedup).
+fn audio_fingerprint(path: &Path) -> Option<AudioFingerprint> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return None,
+        }
+    }
+    Some(AudioFingerprint {
+        len,
+        crc: hasher.finalize(),
+    })
+}
+
+/// Fingerprint every file directly under the project's audio folder so external
+/// imports can be matched against bytes already copied in a previous session.
+/// On a fingerprint collision the first (lexically encountered) path wins.
+fn scan_existing_audio_fingerprints(
+    audio_dir: &Path,
+    project_root: &Path,
+) -> HashMap<AudioFingerprint, String> {
+    let mut index = HashMap::new();
+    let Ok(entries) = fs::read_dir(audio_dir) else {
+        return index;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(relative) = path_relative_to_project(&path, project_root) else {
+            continue;
+        };
+        if let Some(fingerprint) = audio_fingerprint(&path) {
+            index
+                .entry(fingerprint)
+                .or_insert_with(|| path_to_project_string(&relative));
+        }
+    }
+    index
 }
 
 fn same_source(a: &Path, b: &Path) -> bool {
@@ -521,6 +724,230 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(external);
+    }
+
+    fn audio_clip(id: &str, source: &Path) -> ProjectClip {
+        ProjectClip {
+            id: id.to_string(),
+            name: "loop".to_string(),
+            start_beat: 0.0,
+            duration_beats: 4.0,
+            offset_beats: 0.0,
+            gain: 1.0,
+            muted: false,
+            source: ClipSource::Audio {
+                asset_id: source.to_string_lossy().into_owned(),
+                source_path: Some(source.to_path_buf()),
+            },
+        }
+    }
+
+    fn audio_track(id: &str, clips: Vec<ProjectClip>) -> ProjectTrack {
+        ProjectTrack {
+            id: id.to_string(),
+            name: "Audio 1".to_string(),
+            track_type: ProjectTrackType::Audio,
+            color_hex: "#56C7C9".to_string(),
+            volume_norm: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_arm: false,
+            input_monitor: crate::project::InputMonitorMode::Off,
+            routing: TrackRouting::default(),
+            inserts: Vec::new(),
+            automation_lanes: Vec::new(),
+            clips,
+        }
+    }
+
+    fn audio_files_in(root: &Path) -> Vec<String> {
+        let dir = root.join("Assets").join("Audio");
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().is_file())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn save_project_dedups_identical_content_from_different_paths() {
+        // Two distinct external files (same name, different folders) with byte-
+        // identical content must collapse to a single project copy (spec #3).
+        let root = temp_dir("asset-dedup");
+        let ext_a = temp_dir("dedup-a");
+        let ext_b = temp_dir("dedup-b");
+        fs::create_dir_all(&ext_a).unwrap();
+        fs::create_dir_all(&ext_b).unwrap();
+        let source_a = ext_a.join("loop.wav");
+        let source_b = ext_b.join("loop.wav");
+        fs::write(&source_a, b"identical wav bytes").unwrap();
+        fs::write(&source_b, b"identical wav bytes").unwrap();
+
+        let mut project = FutureboardProject::new("Dedup");
+        project.tracks.push(audio_track(
+            "track-1",
+            vec![audio_clip("clip-a", &source_a), audio_clip("clip-b", &source_b)],
+        ));
+
+        let project_file = root.join("Dedup.fbproj");
+        save_project(&mut project, &project_file).unwrap();
+
+        assert_eq!(
+            audio_files_in(&root),
+            vec!["loop.wav".to_string()],
+            "identical content must be copied only once"
+        );
+
+        let loaded = load_project(&project_file).unwrap();
+        let paths: Vec<PathBuf> = loaded.tracks[0]
+            .clips
+            .iter()
+            .filter_map(|c| match &c.source {
+                ClipSource::Audio {
+                    source_path: Some(p),
+                    ..
+                } => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], paths[1], "both clips must reference the one copy");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(ext_a);
+        let _ = fs::remove_dir_all(ext_b);
+    }
+
+    #[test]
+    fn save_project_keeps_distinct_content_with_same_name() {
+        // Same filename, different content → both must coexist (spec #14).
+        let root = temp_dir("asset-collision");
+        let ext_a = temp_dir("collision-a");
+        let ext_b = temp_dir("collision-b");
+        fs::create_dir_all(&ext_a).unwrap();
+        fs::create_dir_all(&ext_b).unwrap();
+        let source_a = ext_a.join("loop.wav");
+        let source_b = ext_b.join("loop.wav");
+        fs::write(&source_a, b"first content").unwrap();
+        fs::write(&source_b, b"second different content").unwrap();
+
+        let mut project = FutureboardProject::new("Collision");
+        project.tracks.push(audio_track(
+            "track-1",
+            vec![audio_clip("clip-a", &source_a), audio_clip("clip-b", &source_b)],
+        ));
+
+        let project_file = root.join("Collision.fbproj");
+        save_project(&mut project, &project_file).unwrap();
+
+        assert_eq!(
+            audio_files_in(&root),
+            vec!["loop-1.wav".to_string(), "loop.wav".to_string()],
+            "distinct content with a colliding name must both be kept"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(ext_a);
+        let _ = fs::remove_dir_all(ext_b);
+    }
+
+    #[test]
+    fn import_audio_file_to_project_copies_dedups_and_passes_through() {
+        let root = temp_dir("eager-import");
+        let ext = temp_dir("eager-ext");
+        fs::create_dir_all(&ext).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let source = ext.join("loop.wav");
+        fs::write(&source, b"eager copy bytes").unwrap();
+
+        // External source → copied into Assets/Audio, returns the project-local path.
+        let dest = import_audio_file_to_project(&source, &root).unwrap();
+        let expected = root.join("Assets").join("Audio").join("loop.wav");
+        assert_eq!(dest, expected);
+        assert!(dest.exists());
+
+        // Identical content from a different external path → reuse, no second copy.
+        let ext2 = temp_dir("eager-ext2");
+        fs::create_dir_all(&ext2).unwrap();
+        let source2 = ext2.join("again.wav");
+        fs::write(&source2, b"eager copy bytes").unwrap();
+        let dest2 = import_audio_file_to_project(&source2, &root).unwrap();
+        assert_eq!(dest2, expected, "identical content must reuse the existing copy");
+        assert_eq!(audio_files_in(&root), vec!["loop.wav".to_string()]);
+
+        // A file already inside the project folder is returned unchanged.
+        let passthrough = import_audio_file_to_project(&dest, &root).unwrap();
+        assert_eq!(passthrough, dest);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(ext);
+        let _ = fs::remove_dir_all(ext2);
+    }
+
+    #[test]
+    fn audio_fingerprint_token_roundtrips() {
+        let fp = AudioFingerprint {
+            len: 0xDEAD_BEEF,
+            crc: 0x0042_00AB,
+        };
+        let token = fp.to_token();
+        assert_eq!(AudioFingerprint::parse(&token), Some(fp));
+        assert_eq!(AudioFingerprint::parse("not-a-fingerprint"), None);
+        assert_eq!(AudioFingerprint::parse("deadbeef"), None);
+    }
+
+    #[test]
+    fn save_persists_fingerprint_and_dedups_after_reload() {
+        // First save persists a content fingerprint (v11); a later session that
+        // re-imports identical bytes from a different path must reuse the copy
+        // via that persisted fingerprint instead of copying again (spec #3, #7).
+        let root = temp_dir("asset-fp");
+        let ext = temp_dir("fp-ext");
+        fs::create_dir_all(&ext).unwrap();
+        let source = ext.join("loop.wav");
+        fs::write(&source, b"fingerprint me please").unwrap();
+
+        let mut project = FutureboardProject::new("FP");
+        project
+            .tracks
+            .push(audio_track("track-1", vec![audio_clip("clip-a", &source)]));
+        let project_file = root.join("FP.fbproj");
+        save_project(&mut project, &project_file).unwrap();
+
+        let loaded = load_project(&project_file).unwrap();
+        assert_eq!(loaded.assets.len(), 1);
+        assert!(
+            loaded.assets[0].source_fingerprint.is_some(),
+            "asset fingerprint must persist across save/load (v11)"
+        );
+
+        let ext2 = temp_dir("fp-ext2");
+        fs::create_dir_all(&ext2).unwrap();
+        let source2 = ext2.join("again.wav");
+        fs::write(&source2, b"fingerprint me please").unwrap();
+
+        let mut reloaded = loaded;
+        reloaded.tracks[0]
+            .clips
+            .push(audio_clip("clip-b", &source2));
+        save_project(&mut reloaded, &project_file).unwrap();
+
+        assert_eq!(
+            audio_files_in(&root),
+            vec!["loop.wav".to_string()],
+            "identical content re-imported after reload must not be re-copied"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(ext);
+        let _ = fs::remove_dir_all(ext2);
     }
 
     #[test]

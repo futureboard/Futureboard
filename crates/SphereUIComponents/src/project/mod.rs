@@ -6,7 +6,8 @@ pub mod template;
 
 pub use format::{decode_project, encode_project, ProjectError, PROJECT_MAGIC, PROJECT_VERSION};
 pub use io::{
-    create_project_folder, default_projects_dir, load_project, project_backup_path,
+    create_project_folder, default_projects_dir, import_audio_file_to_project, load_project,
+    project_backup_path,
     project_temp_path, sanitize_project_name, save_project, validate_project_file,
     verify_project_file, LEGACY_PROJECT_FILE_EXT, PROJECT_FILE_EXT, SUPPORTED_PROJECT_FILE_EXTS,
 };
@@ -390,6 +391,11 @@ pub struct ProjectAsset {
     pub duration_secs: Option<f64>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
+    /// Content fingerprint (`"<len:x>-<crc:08x>"`) of the copied audio bytes.
+    /// Persisted from project version 11 so re-imports of identical content can
+    /// be deduplicated without re-hashing the whole asset folder on save.
+    /// `None` for assets written by older versions.
+    pub source_fingerprint: Option<String>,
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

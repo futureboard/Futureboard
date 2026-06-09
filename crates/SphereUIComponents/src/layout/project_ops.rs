@@ -770,14 +770,16 @@ impl StudioLayout {
                         continue;
                     };
                     let crate::components::timeline::timeline_state::ClipType::Audio {
-                        file_id,
                         source_path,
+                        ..
                     } = &mut clip.clip_type
                     else {
                         continue;
                     };
+                    // Only update the resolvable location. `file_id` (the asset
+                    // key) must stay stable so the waveform cache binding — keyed
+                    // on `file_id`, not the path — survives the path rewrite.
                     if source_path.as_deref() != Some(new_path.as_str()) {
-                        *file_id = new_path.clone();
                         *source_path = Some(new_path.clone());
                         changed = true;
                     }

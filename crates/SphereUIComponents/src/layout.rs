@@ -1588,8 +1588,13 @@ impl StudioLayout {
         path: PathBuf,
         _path_key: String,
     ) {
+        let project_root = owner.read(cx).project_session.folder_path.clone();
         components::timeline::audio_import::spawn_timeline_import_from_layout(
-            path, timeline, owner, cx,
+            path,
+            project_root,
+            timeline,
+            owner,
+            cx,
         );
     }
 }

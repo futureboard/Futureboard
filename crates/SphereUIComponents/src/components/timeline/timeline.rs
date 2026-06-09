@@ -118,6 +118,10 @@ pub struct Timeline {
     /// to switch the bottom panel to the piano-roll Editor tab.
     on_open_editor: Option<TimelineOpenEditorCb>,
     chrome_metrics: TimelineChromeMetrics,
+    /// Absolute root folder of the saved project, pushed by `StudioLayout` each
+    /// render. `None` for an Untitled (unsaved) project. Used to eagerly copy
+    /// dropped audio into the project's `Assets/Audio` folder.
+    project_root: Option<std::path::PathBuf>,
     focus_lost_subscription: Option<Subscription>,
 }
 
@@ -265,6 +269,7 @@ impl Timeline {
             on_context_menu: None,
             on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
+            project_root: None,
             focus_lost_subscription: None,
         }
     }
@@ -297,6 +302,7 @@ impl Timeline {
             on_context_menu: None,
             on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
+            project_root: None,
             focus_lost_subscription: None,
         }
     }
@@ -361,6 +367,13 @@ impl Timeline {
         self.chrome_metrics = metrics;
     }
 
+    /// Push the current project's root folder (or `None` when Untitled). Called
+    /// by `StudioLayout` each render — cheap, no notify. Drives eager
+    /// copy-into-project for dropped audio.
+    pub fn set_project_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.project_root = root;
+    }
+
     pub fn set_context_menu_callback(&mut self, callback: Option<TimelineContextMenuCb>) {
         self.on_context_menu = callback;
     }
@@ -414,7 +427,7 @@ impl Timeline {
         }
     }
 
-    fn mark_media_changed(&self, cx: &mut gpui::App) {
+    pub(crate) fn mark_media_changed(&self, cx: &mut gpui::App) {
         if let Some(callback) = self.on_media_changed.as_ref() {
             callback(cx);
         }
@@ -1066,6 +1079,7 @@ impl Timeline {
         self.mark_media_changed(cx);
         super::audio_import::spawn_timeline_import(
             path.to_path_buf(),
+            self.project_root.clone(),
             cx.entity().clone(),
             None,
             cx,

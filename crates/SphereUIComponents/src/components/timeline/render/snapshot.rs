@@ -44,7 +44,9 @@ pub enum WaveformReadyKind {
 /// Opaque handle to precomputed peak chunks — WGPU path binds GPU buffers from cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaveformChunkHandle {
-    pub source_path: String,
+    /// Stable waveform-cache key (clip `file_id` / asset id), not the on-disk
+    /// path — so the GPU binding survives a `source_path` rewrite.
+    pub asset_key: String,
     pub samples_per_peak: u32,
     pub chunk_index_start: u32,
     pub chunk_index_end: u32,
@@ -303,13 +305,9 @@ fn build_clip_snapshot(
         ClipType::Audio { .. } => RenderClipKind::Audio,
         ClipType::Midi { .. } => RenderClipKind::Midi,
     };
-    let waveform = match &clip.clip_type {
-        ClipType::Audio {
-            source_path: Some(path),
-            ..
-        } => Some(waveform_handle_for_clip(path, clip, state, viewport)),
-        _ => None,
-    };
+    let waveform = clip
+        .audio_asset_key()
+        .map(|asset_key| waveform_handle_for_clip(asset_key, clip, state, viewport));
 
     RenderClipSnapshot {
         id: clip.id.clone(),
@@ -329,12 +327,12 @@ fn build_clip_snapshot(
 }
 
 fn waveform_handle_for_clip(
-    path: &str,
+    asset_key: &str,
     clip: &ClipState,
     state: &TimelineState,
     viewport: &TimelineViewport,
 ) -> WaveformChunkHandle {
-    let status = waveform_cache::get_file_status(path);
+    let status = waveform_cache::get_file_status(asset_key);
     let ready = match &status {
         WaveformDisplayStatus::Ready { .. } => WaveformReadyKind::Ready,
         WaveformDisplayStatus::Partial { .. } => WaveformReadyKind::Partial,
@@ -359,7 +357,7 @@ fn waveform_handle_for_clip(
     let frac1 = 1.0_f64;
     let t0 = src_start + frac0 * clip_dur;
     let t1 = src_start + frac1 * clip_dur;
-    let sample_rate = waveform_cache::get_file_status(path)
+    let sample_rate = waveform_cache::get_file_status(asset_key)
         .ready_meta()
         .map(|m| m.sample_rate)
         .unwrap_or(48_000);
@@ -369,7 +367,7 @@ fn waveform_handle_for_clip(
         .min(peak_count.saturating_sub(1));
 
     WaveformChunkHandle {
-        source_path: path.to_string(),
+        asset_key: asset_key.to_string(),
         samples_per_peak,
         chunk_index_start: (p0 / CHUNK_PEAKS) as u32,
         chunk_index_end: (p1 / CHUNK_PEAKS) as u32,

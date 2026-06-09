@@ -254,6 +254,24 @@ pub struct ClipState {
     pub audio_import: AudioImportState,
 }
 
+impl ClipState {
+    /// Stable key for an imported audio clip's waveform peaks and import state.
+    ///
+    /// Keyed on the asset id (`file_id`), **not** the on-disk path, so the
+    /// waveform binding survives a later change of `source_path` (e.g. copying
+    /// the source into the project folder). Returns `None` for clips with no
+    /// real source (placeholder / live-recording preview).
+    pub fn audio_asset_key(&self) -> Option<&str> {
+        match &self.clip_type {
+            ClipType::Audio {
+                file_id,
+                source_path: Some(_),
+            } if !file_id.is_empty() => Some(file_id.as_str()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClipDragItem {
     pub clip_id: String,
@@ -5668,6 +5686,17 @@ impl TimelineState {
             audio_import: AudioImportState::Pending,
         };
 
+        if let ClipType::Audio {
+            source_path: Some(path),
+            ..
+        } = &new_clip.clip_type
+        {
+            eprintln!(
+                "[Timeline] created audio clip clip_id={clip_id} source={path} start_beat={:.3} duration_beats={:.3}",
+                new_clip.start_beat, new_clip.duration_beats
+            );
+        }
+
         if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {
             track.clips.push(new_clip);
         }
@@ -5708,9 +5737,13 @@ impl TimelineState {
         )
     }
 
+    /// Apply decoded source metadata to every clip sharing `asset_key`
+    /// (`ClipState::audio_asset_key`, i.e. the clip's `file_id`). Keyed on the
+    /// asset id rather than the path so it still matches after a clip's
+    /// `source_path` is rewritten (e.g. copy-into-project).
     pub fn update_audio_clip_metadata(
         &mut self,
-        source_path: &str,
+        asset_key: &str,
         format: &str,
         sample_rate: u32,
         channels: u16,
@@ -5725,25 +5758,19 @@ impl TimelineState {
         let mut matched = false;
         for track in &mut self.tracks {
             for clip in &mut track.clips {
-                if let ClipType::Audio {
-                    source_path: Some(path),
-                    ..
-                } = &clip.clip_type
-                {
-                    if path == source_path {
-                        matched = true;
-                        clip.source_duration_seconds = Some(duration_seconds);
-                        if (clip.duration_beats - duration_beats).abs() > 0.001 {
-                            clip.duration_beats = duration_beats;
-                            changed = true;
-                        }
+                if clip.audio_asset_key() == Some(asset_key) {
+                    matched = true;
+                    clip.source_duration_seconds = Some(duration_seconds);
+                    if (clip.duration_beats - duration_beats).abs() > 0.001 {
+                        clip.duration_beats = duration_beats;
+                        changed = true;
                     }
                 }
             }
         }
         if matched {
             self.log_audio_meta(
-                source_path,
+                asset_key,
                 format,
                 sample_rate,
                 channels,
@@ -5755,33 +5782,44 @@ impl TimelineState {
         changed
     }
 
-    pub fn set_audio_import_for_path(&mut self, source_path: &str, state: AudioImportState) {
+    /// Point every clip sharing `asset_key` at a new resolvable `source_path`
+    /// (e.g. after copying the source into the project folder). The asset id
+    /// (`file_id`) is left untouched, so the waveform/import binding — keyed on
+    /// the asset id — is unaffected. Returns `true` if any clip changed.
+    pub fn retarget_audio_source(&mut self, asset_key: &str, new_source_path: &str) -> bool {
+        let mut changed = false;
         for track in &mut self.tracks {
             for clip in &mut track.clips {
-                if let ClipType::Audio {
-                    source_path: Some(path),
-                    ..
-                } = &clip.clip_type
-                {
-                    if path == source_path {
-                        clip.audio_import = state.clone();
+                if clip.audio_asset_key() != Some(asset_key) {
+                    continue;
+                }
+                if let ClipType::Audio { source_path, .. } = &mut clip.clip_type {
+                    if source_path.as_deref() != Some(new_source_path) {
+                        *source_path = Some(new_source_path.to_string());
+                        changed = true;
                     }
+                }
+            }
+        }
+        changed
+    }
+
+    /// Set the import state on every clip sharing `asset_key` (the `file_id`).
+    pub fn set_audio_import_for_asset(&mut self, asset_key: &str, state: AudioImportState) {
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if clip.audio_asset_key() == Some(asset_key) {
+                    clip.audio_import = state.clone();
                 }
             }
         }
     }
 
-    pub fn audio_source_duration_seconds(&self, source_path: &str) -> Option<f64> {
+    pub fn audio_source_duration_seconds(&self, asset_key: &str) -> Option<f64> {
         self.tracks.iter().find_map(|track| {
             track.clips.iter().find_map(|clip| {
-                if let ClipType::Audio {
-                    source_path: Some(path),
-                    ..
-                } = &clip.clip_type
-                {
-                    if path == source_path {
-                        return clip.source_duration_seconds;
-                    }
+                if clip.audio_asset_key() == Some(asset_key) {
+                    return clip.source_duration_seconds;
                 }
                 None
             })
@@ -5899,6 +5937,83 @@ mod tempo_map_tests {
         assert_eq!(TempoMap::format_marker_label(map.points[1].bpm), "140");
         assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
         assert_eq!(map.bpm_at_beat(4.0, 120.0), 140.0);
+    }
+}
+
+#[cfg(test)]
+mod audio_asset_key_tests {
+    use super::*;
+
+    fn audio_clip(file_id: &str, source: Option<&str>) -> ClipState {
+        ClipState {
+            id: "c1".to_string(),
+            name: "loop".to_string(),
+            start_beat: 0.0,
+            duration_beats: 4.0,
+            source_duration_seconds: None,
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Audio {
+                file_id: file_id.to_string(),
+                source_path: source.map(str::to_string),
+            },
+            muted: false,
+            audio_import: AudioImportState::Pending,
+        }
+    }
+
+    #[test]
+    fn asset_key_is_file_id_and_requires_a_real_source() {
+        assert_eq!(
+            audio_clip("asset-1", Some("C:/a/loop.wav")).audio_asset_key(),
+            Some("asset-1")
+        );
+        // Placeholder / live-preview clip (no source) → no key.
+        assert_eq!(audio_clip("asset-1", None).audio_asset_key(), None);
+        // Empty asset id → no key.
+        assert_eq!(audio_clip("", Some("C:/a/loop.wav")).audio_asset_key(), None);
+    }
+
+    #[test]
+    fn binding_survives_source_path_rewrite() {
+        // The whole point of keying on the asset id: a clip's waveform/import
+        // binding must not break when its `source_path` is later rewritten
+        // (e.g. copying the source into the project folder).
+        let mut state = TimelineState::default();
+        let clip_id =
+            state.import_audio_at("C:/ext/loop.wav".to_string(), "loop".to_string(), 0.0, 1.0e9);
+
+        let asset_key = state
+            .find_clip(&clip_id)
+            .and_then(|(_, clip)| clip.audio_asset_key())
+            .expect("new audio clip has an asset key")
+            .to_string();
+        assert_eq!(asset_key, "C:/ext/loop.wav");
+
+        // Simulate copy-into-project: rewrite source_path, keep file_id stable.
+        for track in &mut state.tracks {
+            for clip in &mut track.clips {
+                if clip.id == clip_id {
+                    if let ClipType::Audio { source_path, .. } = &mut clip.clip_type {
+                        *source_path = Some("C:/proj/Assets/Audio/loop.wav".to_string());
+                    }
+                }
+            }
+        }
+
+        // Asset key is unchanged despite the new path…
+        assert_eq!(
+            state
+                .find_clip(&clip_id)
+                .and_then(|(_, clip)| clip.audio_asset_key()),
+            Some(asset_key.as_str())
+        );
+        // …and asset-keyed state updates still reach the clip.
+        state.set_audio_import_for_asset(&asset_key, AudioImportState::Ready);
+        assert_eq!(
+            state.find_clip(&clip_id).map(|(_, clip)| &clip.audio_import),
+            Some(&AudioImportState::Ready)
+        );
     }
 }
 

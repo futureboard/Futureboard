@@ -250,15 +250,143 @@ fn run_peak_job(path: &Path, path_key: &str) -> Result<Arc<WaveformPreview>, Str
     Ok(preview)
 }
 
-/// Idempotent: one background job per absolute path. Call from any `cx.spawn`.
-pub async fn run_import_pipeline(
+/// Re-bind a freshly-dropped clip to an already-imported source's shared peaks.
+///
+/// Called when [`run_import_pipeline`] short-circuits on a cache hit. Pushes the
+/// cached metadata (so the new clip gets the correct duration instead of the
+/// placeholder) and flips its import state to `Ready`, then notifies the
+/// timeline. No decode/peak work runs — the peaks are reused as-is.
+fn rebind_cached_asset(
+    key: &str,
+    timeline: &WeakEntity<Timeline>,
+    layout: &Option<WeakEntity<StudioLayout>>,
+    cx: &mut AsyncApp,
+) {
+    let Some(preview) = waveform_cache::get_preview_arc(key) else {
+        // No finished preview yet → an import is genuinely still running and will
+        // bind this clip itself. Nothing to do.
+        return;
+    };
+    eprintln!(
+        "[AudioImport] cache hit key={key} sr={} ch={} duration={:.3}s — reusing shared peaks",
+        preview.sample_rate, preview.channels, preview.duration_seconds
+    );
+    let path_key = key.to_string();
+    let layout_weak = layout.clone();
+    let _ = timeline.update(cx, move |timeline, cx| {
+        let changed = timeline.state.update_audio_clip_metadata(
+            &path_key,
+            "cached",
+            preview.sample_rate,
+            preview.channels,
+            preview.total_frames,
+            preview.duration_seconds,
+        );
+        timeline
+            .state
+            .set_audio_import_for_asset(&path_key, AudioImportState::Ready);
+        if changed {
+            eprintln!("[AudioImport] cache hit clip metadata rebound path={path_key}");
+            if let Some(owner) = layout_weak.as_ref() {
+                let _ = owner.update(cx, |this, cx| {
+                    this.mark_engine_media_dirty();
+                    this.schedule_audio_project_sync(cx, false, "audio_import_cache_hit");
+                });
+            }
+        }
+        cx.notify();
+    });
+    throttled_timeline_notify(timeline, cx, true);
+}
+
+/// Opt-out kill switch for Phase D eager copy-into-project.
+fn eager_copy_disabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_DISABLE_EAGER_AUDIO_COPY").is_some())
+}
+
+/// Phase D: if the project is saved and the dropped file lives outside its
+/// folder, copy it into `Assets/Audio` (deduped) on a background thread and
+/// retarget every clip sharing `asset_key` to the project-local copy. The
+/// asset id (`file_id`) is untouched, so the waveform binding — keyed on the
+/// asset id — is unaffected. Returns the path to actually decode (the copy when
+/// copied, otherwise the original). Falls back to the original on any error so a
+/// failed copy never breaks the clip.
+async fn maybe_copy_into_project(
+    asset_key: &str,
     path: PathBuf,
+    project_root: Option<PathBuf>,
+    timeline: &WeakEntity<Timeline>,
+    cx: &mut AsyncApp,
+) -> PathBuf {
+    if eager_copy_disabled() {
+        return path;
+    }
+    let Some(root) = project_root else {
+        return path; // Untitled project → copy happens at save time instead.
+    };
+
+    let src = path.clone();
+    let copied = cx
+        .background_executor()
+        .spawn(async move { crate::project::import_audio_file_to_project(&src, &root) })
+        .await;
+
+    match copied {
+        Ok(dest) if dest != path => {
+            let dest_str = dest.to_string_lossy().to_string();
+            let asset = asset_key.to_string();
+            let _ = timeline.update(cx, |timeline, cx| {
+                if timeline.state.retarget_audio_source(&asset, &dest_str) {
+                    timeline.mark_media_changed(cx);
+                    timeline.mark_project_changed(cx);
+                    cx.notify();
+                }
+            });
+            eprintln!(
+                "[AudioImport] eager copy retargeted asset_id={asset_key} dest={}",
+                dest.display()
+            );
+            dest
+        }
+        Ok(_) => path, // already inside the project folder
+        Err(error) => {
+            eprintln!(
+                "[AudioImport] eager copy failed asset_id={asset_key} error={error}; using original source"
+            );
+            path
+        }
+    }
+}
+
+/// Idempotent: one background job per audio asset. `asset_key` is the clip's
+/// stable `file_id` (the waveform-cache + import-state key); `path` is the file
+/// to decode (the project-local copy once Phase D copies it in). They start
+/// equal but are kept separate so a `source_path` rewrite never changes the key.
+pub async fn run_import_pipeline(
+    asset_key: String,
+    path: PathBuf,
+    project_root: Option<PathBuf>,
     timeline: WeakEntity<Timeline>,
     layout: Option<WeakEntity<StudioLayout>>,
     cx: &mut AsyncApp,
 ) {
-    let key = path.to_string_lossy().to_string();
+    let key = asset_key;
+    // Phase D: copy the dropped file into the project folder before importing,
+    // and decode the copy. Keyed by `key` (the asset id), unchanged by the copy.
+    let path = maybe_copy_into_project(&key, path, project_root, &timeline, cx).await;
     if !waveform_cache::try_begin_import(&key) {
+        // Already imported, or an import is still in flight for this source path.
+        //
+        // Repeated drag of the same file lands here: a fresh clip referencing
+        // `key` was just inserted (fallback duration, `Pending` import) but the
+        // peak job will not run a second time. If a finished preview already
+        // exists in the shared cache, re-bind its metadata + `Ready` state onto
+        // the new clip so the waveform renders from the shared peaks instead of
+        // being stuck at the placeholder length. If an import is still running,
+        // its own `update_audio_clip_metadata`/`set_audio_import_for_asset` calls
+        // match by asset key and already cover the freshly-dropped clip.
+        rebind_cached_asset(&key, &timeline, &layout, cx);
         return;
     }
 
@@ -300,7 +428,7 @@ pub async fn run_import_pipeline(
                     info.total_frames,
                     info.duration_seconds,
                 );
-                timeline.state.set_audio_import_for_path(
+                timeline.state.set_audio_import_for_asset(
                     &path_key,
                     AudioImportState::Decoding { progress: 0.0 },
                 );
@@ -324,7 +452,7 @@ pub async fn run_import_pipeline(
             waveform_cache::install_failed(&key, error.to_string());
             let path_key = key.clone();
             let _ = timeline_probe.update(cx, move |timeline, cx| {
-                timeline.state.set_audio_import_for_path(
+                timeline.state.set_audio_import_for_asset(
                     &path_key,
                     AudioImportState::Failed {
                         message: "metadata read failed".to_string(),
@@ -356,7 +484,7 @@ pub async fn run_import_pipeline(
             let _ = timeline_peaks.update(cx, move |timeline, cx| {
                 timeline
                     .state
-                    .set_audio_import_for_path(&path_key, AudioImportState::Ready);
+                    .set_audio_import_for_asset(&path_key, AudioImportState::Ready);
                 cx.notify();
             });
             throttled_timeline_notify(&timeline_peaks, cx, true);
@@ -365,7 +493,7 @@ pub async fn run_import_pipeline(
             eprintln!("[audio-import] peak cache failed path={path_key} error={message}");
             waveform_cache::install_failed(&path_key, message.clone());
             let _ = timeline_peaks.update(cx, move |timeline, cx| {
-                timeline.state.set_audio_import_for_path(
+                timeline.state.set_audio_import_for_asset(
                     &path_key,
                     AudioImportState::Failed {
                         message: message.clone(),
@@ -385,16 +513,20 @@ pub async fn run_import_pipeline(
 /// Clip `audio_import` is set to `Pending` in `insert_audio_clip`.
 pub fn spawn_timeline_import(
     path: PathBuf,
+    project_root: Option<PathBuf>,
     _timeline: Entity<Timeline>,
     layout: Option<Entity<StudioLayout>>,
     cx: &mut Context<Timeline>,
 ) {
+    // The dropped clip's `file_id` is its `source_path` string at creation, so
+    // the asset key is derived from the same path here.
+    let asset_key = path.to_string_lossy().to_string();
     waveform_cache::request_decode_file(path.clone());
 
     let timeline_weak = _timeline.downgrade();
     let layout_weak = layout.map(|e| e.downgrade());
     cx.spawn(async move |_timeline, cx| {
-        run_import_pipeline(path, timeline_weak, layout_weak, cx).await;
+        run_import_pipeline(asset_key, path, project_root, timeline_weak, layout_weak, cx).await;
     })
     .detach();
 }
@@ -402,22 +534,25 @@ pub fn spawn_timeline_import(
 /// Browser / layout import entry (StudioLayout context).
 pub fn spawn_timeline_import_from_layout(
     path: PathBuf,
+    project_root: Option<PathBuf>,
     timeline: Entity<Timeline>,
     layout: Entity<StudioLayout>,
     cx: &mut Context<StudioLayout>,
 ) {
-    let path_key = path.to_string_lossy().to_string();
+    let asset_key = path.to_string_lossy().to_string();
+    let path_key = asset_key.clone();
     let _ = timeline.update(cx, |timeline, _cx| {
         timeline
             .state
-            .set_audio_import_for_path(&path_key, AudioImportState::Pending);
+            .set_audio_import_for_asset(&path_key, AudioImportState::Pending);
     });
     waveform_cache::request_decode_file(path.clone());
 
     let timeline_weak = timeline.downgrade();
     let layout_weak = layout.downgrade();
     cx.spawn(async move |_layout, cx| {
-        run_import_pipeline(path, timeline_weak, Some(layout_weak), cx).await;
+        run_import_pipeline(asset_key, path, project_root, timeline_weak, Some(layout_weak), cx)
+            .await;
     })
     .detach();
 }

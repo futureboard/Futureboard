@@ -1,4 +1,4 @@
-use super::timeline_state::{AudioImportState, ClipState, ClipType, TimelineState};
+use super::timeline_state::{AudioImportState, ClipState, TimelineState};
 use super::waveform_cache::{self, WaveformDisplayStatus, WaveformPeak};
 use crate::theme::Colors;
 use gpui::{
@@ -21,11 +21,8 @@ pub fn waveform_canvas(
     if let Some(preview) = waveform_cache::recording_preview(&clip.id) {
         return draw_preview_waveform(preview.as_ref(), color, state, clip_left, clip_width);
     }
-    match &clip.clip_type {
-        ClipType::Audio {
-            source_path: Some(path),
-            ..
-        } => waveform_cache::with_file_entry(path, |entry| {
+    match clip.audio_asset_key() {
+        Some(asset_key) => waveform_cache::with_file_entry(asset_key, |entry| {
             let Some(entry) = entry else {
                 waveform_cache::record_timeline_render(1, 0, false);
                 return import_status_canvas(&clip.audio_import, false, None);

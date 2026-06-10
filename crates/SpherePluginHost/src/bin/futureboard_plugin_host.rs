@@ -414,6 +414,9 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
     let mut loaded = LoadedRegistry::new();
     let mut pending_prepare = PendingPrepareRegistry::new();
     let mut delayed_redraws: Vec<DelayedGpuRedraw> = Vec::new();
+    // Latest requested editor size per instance (coalesced from ResizeEditor
+    // commands), applied below with a bounded preview try-lock.
+    let mut pending_resizes: HashMap<String, (u32, u32, u32)> = HashMap::new();
     let preview: SharedPluginHostPreview = PluginHostPreviewEngine::shared(48_000, 256);
     let mut preview_output_started = false;
     log_host_audio_mode();
@@ -506,6 +509,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                             &mut loaded,
                             &mut pending_prepare,
                             &mut delayed_redraws,
+                            &mut pending_resizes,
                             &preview,
                             &mut preview_output_started,
                             &region_slot,
@@ -528,6 +532,52 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                 }
             }
         }
+
+        // 1b. Apply coalesced editor resizes (latest size per instance). The
+        //     processor clone is fetched with a bounded try-lock so a busy DSP
+        //     block can never stall the pump during an interactive resize;
+        //     entries that miss the lock are retried next tick (≤8ms away).
+        timed_section!("editor_resize", {
+            if !pending_resizes.is_empty() {
+                // Clone processor handles under a short bounded lock, then
+                // apply the (possibly slow) onSize work with the lock RELEASED
+                // so the audio producer never waits on editor UI work.
+                type ResizeJob = (String, u32, u32, u32, DAUx::vst3_processor::Vst3RuntimeProcessor);
+                let jobs: Option<(Vec<ResizeJob>, Vec<String>)> = preview
+                    .try_lock_for(Duration::from_millis(2))
+                    .map(|engine| {
+                        let mut jobs = Vec::new();
+                        let mut gone = Vec::new();
+                        for (instance_id, (width, height, dpi)) in pending_resizes.iter() {
+                            match engine.clone_processor_for(instance_id) {
+                                Some(processor) => jobs.push((
+                                    instance_id.clone(),
+                                    *width,
+                                    *height,
+                                    *dpi,
+                                    processor,
+                                )),
+                                None => gone.push(instance_id.clone()),
+                            }
+                        }
+                        (jobs, gone)
+                    });
+                if let Some((jobs, gone)) = jobs {
+                    for instance_id in gone {
+                        pending_resizes.remove(&instance_id); // unloaded — drop request
+                    }
+                    for (instance_id, width, height, dpi, processor) in jobs {
+                        eprintln!(
+                            "[plugin-bridge] ResizeEditor instance={instance_id} \
+                             width={width} height={height} dpi={dpi}"
+                        );
+                        processor.embed_set_bounds(0, 0, width as i32, height as i32);
+                        processor.embed_refresh();
+                        pending_resizes.remove(&instance_id);
+                    }
+                }
+            }
+        });
 
         // 2. Keep attached editors painting / geometry in sync, and pump our own
         //    message queue so the foreign-parented IPlugView gets messages.
@@ -714,6 +764,7 @@ fn dispatch(
     loaded: &mut LoadedRegistry,
     _pending_prepare: &mut PendingPrepareRegistry,
     delayed_redraws: &mut Vec<DelayedGpuRedraw>,
+    pending_resizes: &mut HashMap<String, (u32, u32, u32)>,
     preview: &SharedPluginHostPreview,
     preview_output_started: &mut bool,
     region_slot: &SharedAudioSlot,
@@ -913,23 +964,21 @@ fn dispatch(
             height,
             dpi,
         } => {
-            let processor = preview.lock().clone_processor_for(&plugin_instance_id);
-            if let Some(processor) = processor {
-                eprintln!(
-                    "[plugin-bridge] ResizeEditor instance={plugin_instance_id} width={width} height={height}"
-                );
-                processor.embed_set_bounds(0, 0, width as i32, height as i32);
-                processor.embed_refresh();
-            }
+            // Coalesce into the pending map; applied by the UI loop with a
+            // bounded try-lock (spec item 9: resizing must never block the
+            // pump thread on the DSP/preview mutex). Interactive drags stream
+            // many ResizeEditor commands — only the latest size matters.
+            pending_resizes.insert(plugin_instance_id.clone(), (width, height, dpi));
             hlog!(
-                "[PluginHostEditor] resize plugin_instance_id={plugin_instance_id} \
-                 onSize width={width} height={height} dpi={dpi}"
+                "[PluginHostEditor] resize queued plugin_instance_id={plugin_instance_id} \
+                 width={width} height={height} dpi={dpi}"
             );
         }
         HostCommand::CloseEditor { plugin_instance_id } => {
             eprintln!("[PluginHost] editor close requested id={plugin_instance_id}");
             preview.lock().preview_all_notes_off(&plugin_instance_id);
             registry.remove(&plugin_instance_id);
+            pending_resizes.remove(&plugin_instance_id);
             if let Some(processor) = preview.lock().clone_processor_for(&plugin_instance_id) {
                 processor.embed_detach();
             }
@@ -1214,6 +1263,14 @@ fn attach_unified_editor(
     let (preferred_width, preferred_height) = preview
         .lock()
         .editor_content_size_for_instance(plugin_instance_id);
+    // Editor resize contract (spec item 1): IPlugView::canResize decides
+    // whether the main app may let the user drag-resize the wrapper. Unknown
+    // (no view) defaults to resizable so we never wrongly lock a window.
+    let resizable = processor.editor_resizable().unwrap_or(true);
+    eprintln!(
+        "[PluginEditorResize] instance={plugin_instance_id} canResize={resizable} \
+         preferred={preferred_width}x{preferred_height}"
+    );
     eprintln!(
         "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={plugin_instance_id}"
     );
@@ -1244,6 +1301,7 @@ fn attach_unified_editor(
             result: 0,
             preferred_width,
             preferred_height,
+            resizable,
             host_hwnd: attach_hwnd,
         },
     );

@@ -308,6 +308,7 @@ impl StudioLayout {
                 result,
                 preferred_width,
                 preferred_height,
+                resizable,
                 host_hwnd,
                 ..
             }) => {
@@ -315,6 +316,10 @@ impl StudioLayout {
                 session.state = BridgeEditorState::Attached;
                 session.host_hwnd = host_hwnd;
                 session.shell.mark_attached();
+                // VST3 resize contract (IPlugView::canResize): fixed-size
+                // editors lock the wrapper so dragging can never open blank
+                // area around the plugin view.
+                session.shell.set_resizable(resizable);
                 session.shell.focus();
                 session.shell.pump_messages();
                 let _ = self.timeline.update(cx, |timeline, _cx| {

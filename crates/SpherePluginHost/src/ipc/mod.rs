@@ -186,6 +186,12 @@ pub enum HostEvent {
         result: i32,
         preferred_width: u32,
         preferred_height: u32,
+        /// `IPlugView::canResize` at attach time. When false the main app must
+        /// lock the wrapper to the preferred content size (+ titlebar) instead
+        /// of letting the user drag-resize into blank/garbage area. Defaults
+        /// to true so a missing field never locks a resizable editor.
+        #[serde(default = "default_editor_resizable")]
+        resizable: bool,
         /// Plugin-host child HWND (`IPlugView::attached` target); 0 if unknown.
         #[serde(default)]
         host_hwnd: u64,
@@ -259,6 +265,10 @@ pub enum HostEvent {
     },
 }
 
+fn default_editor_resizable() -> bool {
+    true
+}
+
 /// Serialize `msg` as a single JSON line (object + `\n`) and flush.
 pub fn write_frame<W: Write>(writer: &mut W, msg: &impl Serialize) -> io::Result<()> {
     let line = serde_json::to_string(msg).map_err(io::Error::other)?;
@@ -318,6 +328,7 @@ mod tests {
             result: 0,
             preferred_width: 1236,
             preferred_height: 736,
+            resizable: true,
             host_hwnd: 0,
         };
         let mut buf = Vec::new();

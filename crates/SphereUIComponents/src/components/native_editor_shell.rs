@@ -488,6 +488,17 @@ mod imp {
                 "[PluginEditor] top_client={}x{}",
                 layout.client_w, layout.client_h
             );
+            eprintln!(
+                "[PluginEditorResize] wrapper_client={}x{} titlebar_h={} content={}x{} \
+                 child_pos=({},{})",
+                layout.client_w,
+                layout.client_h,
+                layout.titlebar_h,
+                layout.content_w,
+                layout.content_h,
+                layout.content_x,
+                content_y,
+            );
         }
         inner
             .last_layout_x
@@ -661,6 +672,15 @@ mod imp {
         has_user_moved: AtomicBool,
         has_user_resized: AtomicBool,
         initial_auto_size_done: AtomicBool,
+        /// `IPlugView::canResize` from the host. While false the wrapper is
+        /// size-locked: no resize hit-test edges, and WM_GETMINMAXINFO pins
+        /// min = max = current size so nothing (drag, snap, maximize) can open
+        /// blank area around a fixed-size plugin view.
+        resizable: AtomicBool,
+        /// True while the shell itself drives SetWindowPos (plugin-requested
+        /// resize, DPI change). Exempts programmatic resizes from the
+        /// fixed-size min/max lock above.
+        programmatic_resize: AtomicBool,
     }
 
     impl ShellInner {
@@ -688,6 +708,8 @@ mod imp {
                 has_user_moved: AtomicBool::new(false),
                 has_user_resized: AtomicBool::new(false),
                 initial_auto_size_done: AtomicBool::new(false),
+                resizable: AtomicBool::new(true),
+                programmatic_resize: AtomicBool::new(false),
             })
         }
     }
@@ -1100,7 +1122,13 @@ mod imp {
                 }
                 let (cw, ch) = (rc.right, rc.bottom);
                 let maximized = unsafe { IsZoomed(hwnd) }.as_bool();
-                if !maximized {
+                // Fixed-size editors (IPlugView::canResize == false) expose no
+                // resize edges at all — dragging must never open blank area
+                // around the plugin content (resize contract, spec item 1/8).
+                let resizable = unsafe { inner_ref(hwnd) }
+                    .map(|inner| inner.resizable.load(Ordering::Relaxed))
+                    .unwrap_or(true);
+                if !maximized && resizable {
                     let grab = scaled(hwnd, theme().resize_grab);
                     let l = pt.x < grab;
                     let r = pt.x >= cw - grab;
@@ -1158,8 +1186,33 @@ mod imp {
                 LRESULT(0)
             }
             WM_GETMINMAXINFO => {
-                // Maximize to the work area (don't cover the taskbar) and set a
-                // sensible minimum.
+                // Fixed-size editor: pin min = max = current outer size so no
+                // path (edge drag, Aero snap, maximize, dbl-click caption) can
+                // resize the wrapper away from the plugin view size. Shell-
+                // driven resizes (plugin resizeView, DPI change) set
+                // `programmatic_resize` and bypass the lock.
+                if lparam.0 != 0 {
+                    if let Some(inner) = unsafe { inner_ref(hwnd) } {
+                        if !inner.resizable.load(Ordering::Relaxed)
+                            && !inner.programmatic_resize.load(Ordering::Relaxed)
+                        {
+                            let mut wr = RECT::default();
+                            if unsafe { GetWindowRect(hwnd, &mut wr) }.is_ok() {
+                                let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                                let size = POINT {
+                                    x: (wr.right - wr.left).max(1),
+                                    y: (wr.bottom - wr.top).max(1),
+                                };
+                                mmi.ptMinTrackSize = size;
+                                mmi.ptMaxTrackSize = size;
+                                mmi.ptMaxSize = size;
+                                return LRESULT(0);
+                            }
+                        }
+                    }
+                }
+                // Resizable: maximize to the work area (don't cover the
+                // taskbar) and set a sensible minimum.
                 if lparam.0 != 0 {
                     let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
                     let mon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
@@ -1223,6 +1276,9 @@ mod imp {
             0x02E0 /* WM_DPICHANGED */ => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     let suggested = unsafe { *(lparam.0 as *const RECT) };
+                    // System-driven resize: exempt from the fixed-size lock
+                    // (titlebar height and outer bounds are DPI-dependent).
+                    inner.programmatic_resize.store(true, Ordering::Relaxed);
                     unsafe {
                         let _ = SetWindowPos(
                             hwnd,
@@ -1235,6 +1291,7 @@ mod imp {
                         );
                         apply_shell_layout(hwnd, inner, "WM_DPICHANGED");
                     }
+                    inner.programmatic_resize.store(false, Ordering::Relaxed);
                     invalidate_titlebar(hwnd);
                 }
                 LRESULT(0)
@@ -1342,10 +1399,14 @@ mod imp {
                                     let _ = ShowWindow(hwnd, SW_MINIMIZE);
                                 },
                                 BTN_MAX => unsafe {
-                                    if IsZoomed(hwnd).as_bool() {
-                                        let _ = ShowWindow(hwnd, SW_RESTORE);
-                                    } else {
-                                        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                                    // Fixed-size editors cannot maximize —
+                                    // it would only add blank area.
+                                    if inner.resizable.load(Ordering::Relaxed) {
+                                        if IsZoomed(hwnd).as_bool() {
+                                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                                        } else {
+                                            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                                        }
                                     }
                                 },
                                 BTN_CLOSE => {
@@ -1384,12 +1445,30 @@ mod imp {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     inner.content_erase.fetch_add(1, Ordering::Relaxed);
                     if inner.attached.load(Ordering::Relaxed) {
+                        // Plugin attached: fill with the editor wrapper
+                        // background so any area the plugin view does NOT
+                        // cover (constrained/fixed-size view smaller than the
+                        // wrapper for a frame, snap-back in flight) shows
+                        // clean background instead of stale garbage. The
+                        // plugin's own HWND sits above this surface
+                        // (WS_CLIPCHILDREN child or overlay), so this never
+                        // paints over plugin content.
+                        let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+                        let mut rc = RECT::default();
+                        let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+                        unsafe {
+                            let bg = CreateSolidBrush(theme().content_bg);
+                            FillRect(hdc, &rc, bg);
+                            let _ = DeleteObject(bg.into());
+                        }
                         static ERASE_RATE: crate::forensic_trace::LogRateLimiter =
                             crate::forensic_trace::LogRateLimiter::new(1);
                         if ERASE_RATE.allow() {
-                            eprintln!("[plugin-content-hwnd] WM_ERASEBKGND suppressed=true");
+                            eprintln!(
+                                "[plugin-content-hwnd] WM_ERASEBKGND fill=content_bg attached=true"
+                            );
                         }
-                        return LRESULT(1); // plugin owns the pixels now
+                        return LRESULT(1);
                     }
                 }
                 let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
@@ -1423,7 +1502,18 @@ mod imp {
                     .unwrap_or(false);
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-                if !attached {
+                if attached {
+                    // Clean background under/around the plugin view — exposed
+                    // strips after a resize must never keep stale pixels.
+                    let t = theme();
+                    let mut rc = RECT::default();
+                    let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+                    unsafe {
+                        let bg = CreateSolidBrush(t.content_bg);
+                        FillRect(hdc, &rc, bg);
+                        let _ = DeleteObject(bg.into());
+                    }
+                } else {
                     let t = theme();
                     let mut rc = RECT::default();
                     let _ = unsafe { GetClientRect(hwnd, &mut rc) };
@@ -1931,6 +2021,11 @@ mod imp {
             let bw = border_w(top);
             let (client_w, client_h) = shell_client_size(content_w, content_h, th, bw);
             let (win_w, win_h) = outer_size_for_client(top, client_w, client_h);
+            // Shell-driven resize (plugin resizeView / preferred size / snap-
+            // back): exempt from the fixed-size min/max lock for its duration.
+            self.inner
+                .programmatic_resize
+                .store(true, Ordering::Relaxed);
             unsafe {
                 let _ = SetWindowPos(
                     top,
@@ -1956,11 +2051,40 @@ mod imp {
                 }
             }
             self.inner
+                .programmatic_resize
+                .store(false, Ordering::Relaxed);
+            self.inner
                 .initial_auto_size_done
                 .store(true, Ordering::Relaxed);
             let _ = self.apply_content_layout();
             invalidate_titlebar(top);
             log_content_rect(top);
+        }
+
+        /// Apply the host-reported `IPlugView::canResize` (spec item 1/8).
+        /// `false` locks the wrapper: resize edges disappear, min = max =
+        /// current size, maximize is ignored. `true` restores normal resizing.
+        pub fn set_resizable(&self, resizable: bool) {
+            let was = self.inner.resizable.swap(resizable, Ordering::Relaxed);
+            if was != resizable {
+                eprintln!(
+                    "[PluginEditorResize] wrapper resizable={resizable} (IPlugView::canResize)"
+                );
+                // Re-evaluate the frame so the cursor stops offering resize
+                // arrows on the (now disabled) edges.
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd_from(self.top_hwnd),
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                            | SWP_FRAMECHANGED,
+                    );
+                }
+            }
         }
 
         pub fn pump_messages(&self) {
@@ -2063,6 +2187,7 @@ mod imp {
         }
         pub fn log_black_gap_check(&self, _host_hwnd: u64) {}
         pub fn resize_to_content(&self, _content_w: i32, _content_h: i32, _recenter: bool) {}
+        pub fn set_resizable(&self, _resizable: bool) {}
         pub fn pump_messages(&self) {}
         pub fn poll(&self) -> NativeShellPoll {
             NativeShellPoll::default()

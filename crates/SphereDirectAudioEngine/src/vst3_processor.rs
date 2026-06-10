@@ -177,6 +177,7 @@ extern "C" {
         out_width: *mut i32,
         out_height: *mut i32,
     ) -> i32;
+    fn sphere_daux_vst3_editor_resizable(processor: *mut SphereDauxVst3Processor) -> i32;
 }
 
 #[derive(Debug)]
@@ -674,6 +675,20 @@ impl Vst3RuntimeProcessor {
             Some((width, height))
         } else {
             None
+        }
+    }
+
+    /// `IPlugView::canResize` for the current editor view: `Some(true)` when
+    /// the editor supports host-driven resizing, `Some(false)` for fixed-size
+    /// editors, `None` when no view exists yet.
+    pub fn editor_resizable(&self) -> Option<bool> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        match unsafe { sphere_daux_vst3_editor_resizable(self.inner.raw) } {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
         }
     }
 }

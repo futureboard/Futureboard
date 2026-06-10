@@ -618,6 +618,12 @@ struct SphereDauxVst3Processor {
   int  embed_host_x{0}, embed_host_y{0}, embed_host_w{0}, embed_host_h{0};
   int  embed_content_w{0}, embed_content_h{0};
   bool embed_resize_in_progress{false};
+  // IPlugView::canResize, cached per created view (keyed on the view pointer
+  // so view re-creation re-queries automatically). Drives the generic resize
+  // contract: fixed-size views keep their getSize; resizable views go through
+  // checkSizeConstraint.
+  bool editor_resizable{false};
+  const void* editor_resizable_view{nullptr};
   // Main-owned shell (bridge): resizeView updates these; Rust polls and resizes
   // the NativeEditorShell outer window — never SetWindowPos on editor_parent_hwnd.
   std::atomic<bool> pending_main_shell_resize{false};
@@ -1431,6 +1437,90 @@ void destroy_fallback_controls(SphereDauxVst3Processor* processor) {
   processor->editor_fallback_close_hwnd = nullptr;
 }
 
+// ── Generic VST3 editor resize contract (no vendor/plugin logic) ─────────────
+
+// Resize-path log throttle: at most 4 [PluginEditorResize] bursts per second so
+// interactive drags never flood stderr.
+bool daux_resize_log_allow() {
+  static std::atomic<unsigned long long> window_start{0};
+  static std::atomic<unsigned> count{0};
+  const unsigned long long now = GetTickCount64();
+  const unsigned long long start = window_start.load(std::memory_order_relaxed);
+  if (now - start >= 1000) {
+    window_start.store(now, std::memory_order_relaxed);
+    count.store(1, std::memory_order_relaxed);
+    return true;
+  }
+  return count.fetch_add(1, std::memory_order_relaxed) < 4;
+}
+
+// IPlugView::canResize, queried once per created view and cached (spec item 1).
+// kResultTrue means the editor supports host-driven resizing; everything else
+// is treated as fixed-size.
+bool daux_editor_view_resizable(SphereDauxVst3Processor* p) {
+  if (!p || !p->editor_view) return false;
+  if (p->editor_resizable_view != p->editor_view.get()) {
+    const auto res = p->editor_view->canResize();
+    p->editor_resizable = (res == Steinberg::kResultTrue);
+    p->editor_resizable_view = p->editor_view.get();
+    std::fprintf(stderr,
+                 "[PluginEditorResize] canResize result=0x%x resizable=%d\n",
+                 static_cast<unsigned>(res),
+                 p->editor_resizable ? 1 : 0);
+  }
+  return p->editor_resizable;
+}
+
+// Host/user-driven resize contract (editorhost `constrainSize`, spec item 2):
+// fixed-size views snap to their current `getSize`; resizable views go through
+// `IPlugView::checkSizeConstraint` and use the plugin-adjusted rect. `w`/`h`
+// are PLUGIN CONTENT dimensions (never include titlebar/non-client frame).
+// Returns true when the constraint changed the requested size.
+bool daux_constrain_content_size(SphereDauxVst3Processor* p, int* w, int* h) {
+  if (!p || !p->editor_view || !w || !h || *w <= 0 || *h <= 0) return false;
+  const int want_w = *w;
+  const int want_h = *h;
+  if (!daux_editor_view_resizable(p)) {
+    Steinberg::ViewRect cur{};
+    const auto gs = p->editor_view->getSize(&cur);
+    if (gs == Steinberg::kResultTrue || gs == Steinberg::kResultOk) {
+      const int cw = daux_view_rect_width(cur);
+      const int ch = daux_view_rect_height(cur);
+      if (cw > 0 && ch > 0) {
+        *w = cw;
+        *h = ch;
+      }
+    }
+  } else {
+    Steinberg::ViewRect want{0, 0, want_w, want_h};
+    const auto res = p->editor_view->checkSizeConstraint(&want);
+    if (res == Steinberg::kResultTrue || res == Steinberg::kResultOk) {
+      const int cw = daux_view_rect_width(want);
+      const int ch = daux_view_rect_height(want);
+      if (cw > 0 && ch > 0) {
+        *w = cw;
+        *h = ch;
+      }
+    }
+    if (daux_resize_log_allow()) {
+      std::fprintf(stderr,
+                   "[PluginEditorResize] checkSizeConstraint result=0x%x\n",
+                   static_cast<unsigned>(res));
+    }
+  }
+  const bool changed = (*w != want_w || *h != want_h);
+  if (daux_resize_log_allow()) {
+    std::fprintf(stderr,
+                 "[PluginEditorResize] desired_plugin=%dx%d constrained_plugin=%dx%d resizable=%d\n",
+                 want_w,
+                 want_h,
+                 *w,
+                 *h,
+                 p->editor_resizable ? 1 : 0);
+  }
+  return changed;
+}
+
 void resize_editor_view(SphereDauxVst3Processor* processor) {
   if (!processor || !processor->editor_view || !processor->editor_attach_hwnd) return;
   RECT rc{};
@@ -1459,6 +1549,9 @@ void resize_editor_view(SphereDauxVst3Processor* processor) {
                  local.right,
                  local.bottom);
   }
+  // Repaint the freshly sized child — never leave stale pixels at the edges
+  // (spec item 3). FALSE: no background erase, the plugin owns its pixels.
+  InvalidateRect(processor->editor_attach_hwnd, nullptr, FALSE);
   static std::atomic<unsigned int> resize_log_count{0};
   const unsigned int count = resize_log_count.fetch_add(1);
   if (count < 12 || count % 50 == 0) {
@@ -1471,6 +1564,15 @@ void resize_editor_view(SphereDauxVst3Processor* processor) {
                  (int)local.right,
                  (int)local.bottom,
                  count + 1);
+  }
+  if (daux_resize_log_allow()) {
+    RECT after{};
+    GetClientRect(processor->editor_attach_hwnd, &after);
+    std::fprintf(stderr,
+                 "[PluginEditorResize] child_rect=(0,0,%ld,%ld) onSize result=0x%x\n",
+                 after.right - after.left,
+                 after.bottom - after.top,
+                 static_cast<unsigned>(resize_res));
   }
 }
 
@@ -2169,6 +2271,71 @@ LRESULT CALLBACK daux_detached_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
         if (processor->editor_attached) resize_editor_view(processor);
       }
       return 0;
+    case WM_GETMINMAXINFO:
+      // Fixed-size contract for the user-resizable detached window (spec
+      // items 1/8): lock min = max = current outer size so dragging edges
+      // can never open blank/garbage area. Programmatic resizes (plugin
+      // resizeView) run under embed_resize_in_progress and stay exempt.
+      if (live && processor->embed_host_kind == 2 && processor->editor_attached &&
+          processor->editor_view && !processor->embed_resize_in_progress &&
+          !daux_editor_view_resizable(processor) && lparam) {
+        RECT wr{};
+        if (GetWindowRect(hwnd, &wr)) {
+          auto* mmi = reinterpret_cast<MINMAXINFO*>(lparam);
+          const POINT size{wr.right - wr.left, wr.bottom - wr.top};
+          mmi->ptMinTrackSize = size;
+          mmi->ptMaxTrackSize = size;
+          mmi->ptMaxSize = size;
+          return 0;
+        }
+      }
+      break;
+    case WM_SIZING:
+      // Resizable contract for the detached window (spec item 2): constrain
+      // the in-drag rect through checkSizeConstraint so the user can only
+      // reach sizes the plugin accepts.
+      if (live && processor->embed_host_kind == 2 && processor->editor_attached &&
+          processor->editor_view && lparam && daux_editor_view_resizable(processor)) {
+        RECT* drag = reinterpret_cast<RECT*>(lparam);
+        RECT frame{0, 0, 0, 0};
+        const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+        const DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+        if (!daux_adjust_window_rect_for_dpi(hwnd, &frame, style, ex_style)) {
+          AdjustWindowRectEx(&frame, style, FALSE, ex_style);
+        }
+        const int nc_w = static_cast<int>((frame.right - frame.left));
+        const int nc_h = static_cast<int>((frame.bottom - frame.top));
+        int content_w = static_cast<int>(drag->right - drag->left) - nc_w;
+        int content_h = static_cast<int>(drag->bottom - drag->top) - nc_h;
+        if (content_w > 0 && content_h > 0 &&
+            daux_constrain_content_size(processor, &content_w, &content_h)) {
+          const int outer_w = content_w + nc_w;
+          const int outer_h = content_h + nc_h;
+          // Keep the anchored edges: move only the side(s) being dragged.
+          switch (wparam) {
+            case WMSZ_LEFT:
+            case WMSZ_TOPLEFT:
+            case WMSZ_BOTTOMLEFT:
+              drag->left = drag->right - outer_w;
+              break;
+            default:
+              drag->right = drag->left + outer_w;
+              break;
+          }
+          switch (wparam) {
+            case WMSZ_TOP:
+            case WMSZ_TOPLEFT:
+            case WMSZ_TOPRIGHT:
+              drag->top = drag->bottom - outer_h;
+              break;
+            default:
+              drag->bottom = drag->top + outer_h;
+              break;
+          }
+          return TRUE;
+        }
+      }
+      break;
     case WM_DPICHANGED: {
       if (!live || !lparam) break;
       const RECT* const suggested = reinterpret_cast<RECT*>(lparam);
@@ -3548,6 +3715,11 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   processor->embed_mode = true;
   processor->embed_geometry_valid = false;
   processor->editor_handle = g_next_editor_handle.fetch_add(1);
+  // Editor resize contract (spec item 1): query canResize once per view, after
+  // attach (some editors only report it reliably once attached). The flag is
+  // forwarded to the main app via EditorAttached so the wrapper can lock its
+  // size for fixed-size editors.
+  daux_editor_view_resizable(processor);
 
   daux_embed_apply_content_size(processor, editor_w, editor_h, "attached");
   {
@@ -3699,18 +3871,58 @@ extern "C" void sphere_daux_vst3_embed_set_bounds(
 #ifdef _WIN32
   if (!processor || !processor->embed_mode) return;
   if (width <= 0 || height <= 0) return;
+  if (daux_resize_log_allow()) {
+    std::fprintf(stderr,
+                 "[PluginEditorResize] wrapper_client=%dx%d origin=(%d,%d)\n",
+                 width, height, x, y);
+  }
+  // Generic VST3 resize contract (spec items 1/2): never hand the plugin a
+  // size it did not agree to. Fixed-size views snap back to their getSize;
+  // resizable views go through checkSizeConstraint. `width`/`height` arrive
+  // as the wrapper's CONTENT client size (titlebar already excluded by the
+  // main app), so this is plugin content size end to end.
+  int content_w = width;
+  int content_h = height;
+  if (processor->editor_view && processor->editor_attached) {
+    daux_constrain_content_size(processor, &content_w, &content_h);
+  }
+  const HWND focus_before = GetFocus();
   processor->embed_host_x = x;
   processor->embed_host_y = y;
-  processor->embed_host_w = width;
-  processor->embed_host_h = height;
-  processor->embed_content_w = width;
-  processor->embed_content_h = height;
+  processor->embed_host_w = content_w;
+  processor->embed_host_h = content_h;
+  processor->embed_content_w = content_w;
+  processor->embed_content_h = content_h;
   processor->embed_geometry_valid = false;
-  if (daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug())) {
+  if (daux_embed_sync_geometry(processor, x, y, content_w, content_h, daux_embed_debug())) {
     resize_editor_view(processor);
     std::fprintf(stderr,
                  "[plugin-host] host_hwnd resize %dx%d\n",
-                 width, height);
+                 content_w, content_h);
+    // Repaint everything the resize exposed — no stale edge pixels.
+    if (processor->editor_embed_top_hwnd && IsWindow(processor->editor_embed_top_hwnd)) {
+      InvalidateRect(processor->editor_embed_top_hwnd, nullptr, FALSE);
+    }
+    // Input contract after resize (spec item 10): a geometry change must not
+    // steal focus from the plugin subtree.
+    if (focus_before && IsWindow(focus_before) && processor->editor_attach_hwnd &&
+        (focus_before == processor->editor_attach_hwnd ||
+         IsChild(processor->editor_attach_hwnd, focus_before)) &&
+        GetFocus() != focus_before) {
+      SetFocus(focus_before);
+    }
+  }
+  // The wrapper asked for a size the plugin rejected or adjusted: tell the
+  // main app so the shell snaps to the constrained size instead of leaving
+  // blank/garbage area around the plugin content. This converges in one round
+  // trip — the next ResizeEditor arrives already constrained and is a no-op.
+  if (content_w != width || content_h != height) {
+    processor->pending_main_shell_w = content_w;
+    processor->pending_main_shell_h = content_h;
+    processor->pending_main_shell_resize.store(true, std::memory_order_release);
+    std::fprintf(stderr,
+                 "[PluginEditorResize] wrapper_snapback requested=%dx%d constrained=%dx%d\n",
+                 width, height, content_w, content_h);
   }
 #else
   (void)processor; (void)x; (void)y; (void)width; (void)height;
@@ -3876,6 +4088,19 @@ extern "C" int sphere_daux_vst3_take_pending_shell_resize(
   (void)out_width;
   (void)out_height;
   return 0;
+#endif
+}
+
+// IPlugView::canResize for the current editor view: 1 resizable, 0 fixed-size,
+// -1 unknown (no view). The main app uses this to lock the wrapper window for
+// fixed-size editors (spec item 1/8).
+extern "C" int sphere_daux_vst3_editor_resizable(SphereDauxVst3Processor* processor) {
+#ifdef _WIN32
+  if (!processor || !processor->editor_view) return -1;
+  return daux_editor_view_resizable(processor) ? 1 : 0;
+#else
+  (void)processor;
+  return -1;
 #endif
 }
 

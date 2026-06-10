@@ -464,7 +464,8 @@ pub struct RuntimeProject {
     /// Latency propagation and PDC delays (Phase V/W).
     pub latency_graph: RuntimeLatencyGraph,
     /// Stage 3b: realtime sinks for external plugin-host DSP output, keyed by
-    /// `track_id`. Set via [`crate::command::EngineCommand::SetPluginBridgeSink`]
+    /// insert `id` (one region + handshake per insert). Set via
+    /// [`crate::command::EngineCommand::SetPluginBridgeSink`]
     /// and preserved across project reloads. Empty until the bridge installs one.
     pub plugin_bridge_sinks: std::collections::HashMap<
         String,
@@ -1072,7 +1073,6 @@ impl RuntimeProject {
             let mut scheduled = 0u32;
             let mut _notes_on = 0u32;
             let mut _notes_off = 0u32;
-            let bridged = self.plugin_bridge_sinks.contains_key(&mt.track_id);
             let instrument_instance =
                 self.tracks
                     .iter()
@@ -1081,6 +1081,9 @@ impl RuntimeProject {
                         t.midi_instrument_insert_ix
                             .and_then(|ix| t.inserts.get(ix).map(|i| i.id.clone()))
                     });
+            let bridged = instrument_instance
+                .as_ref()
+                .is_some_and(|id| self.plugin_bridge_sinks.contains_key(id));
             let overlapping: Vec<_> = self
                 .midi_clips
                 .iter()
@@ -1150,7 +1153,9 @@ impl RuntimeProject {
                         };
                         if bridged {
                             if let Some(ref instance_id) = instrument_instance {
-                                if let Some(sink) = self.plugin_bridge_sinks.get(&mt.track_id) {
+                                if let Some(sink) =
+                                    self.plugin_bridge_sinks.get(instance_id.as_str())
+                                {
                                     push_vst3_midi_event_to_sink(
                                         sink.as_ref(),
                                         &midi_ev,
@@ -1270,12 +1275,11 @@ impl RuntimeProject {
         let channel = channel.min(15);
         let pitch = pitch.min(127);
         let velocity = velocity.clamp(1, 127);
-        let bridged = self.plugin_bridge_sinks.contains_key(track_id);
+        let bridged = self.plugin_bridge_sinks.contains_key(plugin_instance_id);
         if bridged {
             // Shared-memory path: always write into the realtime MIDI ring on the
             // audio thread. Do not rely on midi_block_events / runtime inserts.
             self.push_bridge_preview_midi(
-                track_id,
                 plugin_instance_id,
                 0x90 | channel,
                 pitch,
@@ -1309,10 +1313,9 @@ impl RuntimeProject {
             "[EngineMidiPreview] received note_off track={} instance={} ch={} pitch={}",
             track_id, plugin_instance_id, channel, pitch
         );
-        let bridged = self.plugin_bridge_sinks.contains_key(track_id);
+        let bridged = self.plugin_bridge_sinks.contains_key(plugin_instance_id);
         if bridged {
             self.push_bridge_preview_midi(
-                track_id,
                 plugin_instance_id,
                 0x80 | channel,
                 pitch,
@@ -1347,8 +1350,8 @@ impl RuntimeProject {
             active.len()
         );
         push_all_notes_off_for_track(self, track_id, &active);
-        if self.plugin_bridge_sinks.contains_key(track_id) {
-            if let Some(sink) = self.plugin_bridge_sinks.get(track_id) {
+        if self.plugin_bridge_sinks.contains_key(plugin_instance_id) {
+            if let Some(sink) = self.plugin_bridge_sinks.get(plugin_instance_id) {
                 for &(channel, pitch) in &active {
                     sink.push_midi(0x80 | (channel & 0x0F), pitch, 0, 0);
                 }
@@ -1371,17 +1374,16 @@ impl RuntimeProject {
 
     fn push_bridge_preview_midi(
         &self,
-        track_id: &str,
         plugin_instance_id: &str,
         status: u8,
         data1: u8,
         data2: u8,
         kind: &str,
     ) {
-        let Some(sink) = self.plugin_bridge_sinks.get(track_id) else {
+        let Some(sink) = self.plugin_bridge_sinks.get(plugin_instance_id) else {
             if midi_verbose_enabled() {
                 eprintln!(
-                    "[plugin-dsp-midi] write skipped track={track_id} reason=no_bridge_sink keys={:?}",
+                    "[plugin-dsp-midi] write skipped instance={plugin_instance_id} reason=no_bridge_sink keys={:?}",
                     self.plugin_bridge_sinks.keys().collect::<Vec<_>>()
                 );
             }
@@ -1845,25 +1847,25 @@ fn push_all_notes_off_for_track(project: &mut RuntimeProject, track_id: &str, ac
     let instance_id = project.tracks[ti]
         .midi_instrument_insert_ix
         .and_then(|ix| project.tracks[ti].inserts.get(ix).map(|i| i.id.clone()));
-    if let Some(sink) = project.plugin_bridge_sinks.get(track_id) {
-        if let Some(ref instance) = instance_id {
+    if let Some(ref instance) = instance_id {
+        if let Some(sink) = project.plugin_bridge_sinks.get(instance) {
             eprintln!(
                 "[midi-playback] transport_stop panic instance={instance} old_notes={}",
                 active.len()
             );
+            for &(channel, pitch) in active {
+                sink.push_midi(0x80 | (channel & 0x0F), pitch, 0, 0);
+            }
+            for ch in 0u8..16 {
+                sink.push_midi(0xB0 | (ch & 0x0F), 64, 0, 0);
+                sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, 0);
+                sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, 0);
+            }
+            // The host only drains the ring while blocks are requested — keep the
+            // handshake alive past this panic so it is actually delivered.
+            project.arm_bridge_panic_flush();
+            return;
         }
-        for &(channel, pitch) in active {
-            sink.push_midi(0x80 | (channel & 0x0F), pitch, 0, 0);
-        }
-        for ch in 0u8..16 {
-            sink.push_midi(0xB0 | (ch & 0x0F), 64, 0, 0);
-            sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, 0);
-            sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, 0);
-        }
-        // The host only drains the ring while blocks are requested — keep the
-        // handshake alive past this panic so it is actually delivered.
-        project.arm_bridge_panic_flush();
-        return;
     }
     for &(channel, pitch) in active {
         project.tracks[ti]
@@ -2530,7 +2532,7 @@ mod midi_tests {
         p.tracks.push(bridged_instrument_track("track-1"));
         let sink = Arc::new(RecordingSink::default());
         p.plugin_bridge_sinks
-            .insert("track-1".to_string(), sink.clone());
+            .insert("insert-1".to_string(), sink.clone());
         (p, sink)
     }
 

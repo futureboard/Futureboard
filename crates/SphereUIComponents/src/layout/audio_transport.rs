@@ -29,8 +29,13 @@ impl StudioLayout {
             .plugin_bridge_runtime
             .as_ref()
             .and_then(|runtime| runtime.lock().ok())
-            .and_then(|bridge| bridge.audio_sink().map(|_| ()))
-            .is_some();
+            .map(|bridge| {
+                bridge
+                    .loaded_instance_ids()
+                    .into_iter()
+                    .any(|id| bridge.audio_sink_for(&id).is_some())
+            })
+            .unwrap_or(false);
 
         if sink_ready {
             // Shared-memory bridge is live — always route through the main DAW
@@ -620,6 +625,12 @@ impl StudioLayout {
         // the engine reports as not-ready failed to instantiate — flip its
         // UI slot to `Failed` (no panic; just surfaces the error).
         self.apply_engine_insert_statuses(cx);
+
+        // Project load can finish plugin restore before the audio engine is
+        // warm; re-bind bridge sinks whenever a graph swap completes.
+        if self.sync_plugin_bridge_sinks_to_engine(cx, "audio_project_sync_complete") {
+            eprintln!("[PluginRestore] graph snapshot swapped generation=post_sync");
+        }
 
         let pending_sync = self.audio_sync_pending;
         self.audio_sync_pending = false;

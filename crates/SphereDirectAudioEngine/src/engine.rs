@@ -70,6 +70,11 @@ fn callback_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_CALLBACK_DEBUG").is_some())
 }
 
+fn plugin_restore_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some())
+}
+
 // ── Realtime constants shared with render.rs ──────────────────────────────────
 
 pub const TEST_TONE_AMPLITUDE: f32 = 0.125; // −18 dBFS  (safe default test level)
@@ -772,10 +777,10 @@ impl EngineInner {
     /// into the master. Applied between blocks; no realtime allocation.
     pub fn set_plugin_bridge_sink(
         &self,
-        track_id: String,
+        insert_id: String,
         sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
     ) -> Result<(), SphereAudioError> {
-        self.send_command(EngineCommand::SetPluginBridgeSink { track_id, sink })
+        self.send_command(EngineCommand::SetPluginBridgeSink { insert_id, sink })
     }
 
     pub fn set_bridge_editor_active(
@@ -2832,45 +2837,6 @@ fn route_main_output(
     }
 }
 
-/// Run a track's input block (already in `block_*`) through its insert chain
-/// then fader, route the post-fader signal to its output destination (master or
-/// a bus/group), with pre-fader and post-fader send taps in the correct order:
-/// pre-fader sends read the post-insert signal, post-fader sends read the
-/// post-fader signal. No allocation.
-#[inline]
-fn mix_bridged_sink_into_track(
-    track: &mut RuntimeTrack,
-    frames: usize,
-    sink: &dyn crate::plugin_bridge::PluginBridgeSink,
-) {
-    const MAX: usize = 2048;
-    let n = frames.min(MAX);
-    let mut scratch_l = [0.0f32; MAX];
-    let mut scratch_r = [0.0f32; MAX];
-    let got = sink.read_output(&mut scratch_l[..n], &mut scratch_r[..n], n);
-    // Always drive the handshake — even when this block was missed (got == 0)
-    // — so a stalled host resumes producing once it recovers instead of the
-    // request/done sequence wedging forever.
-    sink.request_block(frames as u32);
-    if got == 0 {
-        return;
-    }
-    let mut peak_l = 0.0f32;
-    let mut peak_r = 0.0f32;
-    for i in 0..got {
-        track.block_l[i] += scratch_l[i];
-        track.block_r[i] += scratch_r[i];
-        peak_l = peak_l.max(scratch_l[i].abs());
-        peak_r = peak_r.max(scratch_r[i].abs());
-    }
-    if crate::runtime::midi_verbose_enabled() && (peak_l > 0.0001 || peak_r > 0.0001) {
-        eprintln!(
-            "[SphereAudio] external bridge output_peak track={} peak_l={:.6} peak_r={:.6}",
-            track.id, peak_l, peak_r
-        );
-    }
-}
-
 fn process_track_block(
     runtime: &mut RuntimeProject,
     track_index: usize,
@@ -2879,27 +2845,11 @@ fn process_track_block(
     channels: usize,
     beat: f64,
 ) {
-    let track_id = runtime.tracks[track_index].id.clone();
-    let bridge_sink = runtime
-        .plugin_bridge_sinks
-        .get(&track_id)
-        .map(std::sync::Arc::clone);
-    let has_bridge_insert = runtime.tracks[track_index]
-        .inserts
-        .iter()
-        .any(|insert| insert.kind.eq_ignore_ascii_case("external-bridge-plugin"));
     apply_track_chain_block(
         &mut runtime.tracks[track_index],
         frames,
-        bridge_sink.as_deref(),
+        &runtime.plugin_bridge_sinks,
     );
-    // Fallback: if the runtime graph has no bridge insert yet (sync pending),
-    // still mix the host's returned audio into this track.
-    if !has_bridge_insert {
-        if let Some(sink) = bridge_sink.as_deref() {
-            mix_bridged_sink_into_track(&mut runtime.tracks[track_index], frames, sink);
-        }
-    }
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
     apply_fader(&mut runtime.tracks[track_index], frames, beat);
@@ -3178,7 +3128,7 @@ pub fn render_project_block_interleaved(
                 master.block_l[i] = frame[0];
                 master.block_r[i] = frame[1];
             }
-            apply_track_chain_block(master, frames, None);
+            apply_track_chain_block(master, frames, &std::collections::HashMap::new());
             // Write back, accumulate master meter, apply preview mode.
             for i in 0..frames {
                 let (l, r) =
@@ -3242,7 +3192,10 @@ pub fn apply_track_chain_at_beat(
 pub fn apply_track_chain_block(
     track: &mut RuntimeTrack,
     frames: usize,
-    bridge_sink: Option<&dyn crate::plugin_bridge::PluginBridgeSink>,
+    bridge_sinks: &std::collections::HashMap<
+        String,
+        std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>,
+    >,
 ) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
         track.callback_insert_log_done = true;
@@ -3262,12 +3215,14 @@ pub fn apply_track_chain_block(
             .filter(|&i| i == ix)
             .map(|_| midi_events.as_slice());
         if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
+            let bridge_sink = bridge_sinks.get(&insert.id).map(|s| s.as_ref());
             apply_external_bridge_insert_block(
                 &mut track.block_l[..frames],
                 &mut track.block_r[..frames],
                 insert,
                 midi,
                 bridge_sink,
+                ix,
             );
         } else {
             apply_insert_block(
@@ -3297,14 +3252,31 @@ fn apply_external_bridge_insert_block(
     insert: &mut RuntimeInsert,
     midi_events: Option<&[crate::vst3_processor::Vst3MidiEvent]>,
     bridge_sink: Option<&dyn crate::plugin_bridge::PluginBridgeSink>,
+    slot_index: usize,
 ) {
     let frames = block_l.len().min(block_r.len());
     if frames == 0 || !insert.enabled {
         return;
     }
     let Some(sink) = bridge_sink else {
+        if plugin_restore_debug_enabled() && insert.bridge_missed_blocks == 0 {
+            eprintln!(
+                "[AudioGraph] processing insert skipped instance={} reason=no_bridge_sink",
+                insert.id
+            );
+        }
         return;
     };
+    if plugin_restore_debug_enabled() && insert.bridge_missed_blocks == 0 {
+        let input_peak = block_l[..frames]
+            .iter()
+            .chain(block_r[..frames].iter())
+            .fold(0.0f32, |p, s| p.max(s.abs()));
+        eprintln!(
+            "[BridgeProcess] track=<chain> slot={slot_index} instance={} input_peak={input_peak:.6}",
+            insert.id
+        );
+    }
 
     // Clip MIDI for bridged plugins is pushed in schedule_midi_block. Preview
     // MIDI is pushed in drain_commands. Non-bridge inserts still use midi_block_events.
@@ -3350,6 +3322,16 @@ fn apply_external_bridge_insert_block(
     const BRIDGE_MISS_LOG_THRESHOLD: u32 = 8;
     if got == 0 {
         insert.bridge_missed_blocks = insert.bridge_missed_blocks.saturating_add(1);
+        if plugin_restore_debug_enabled()
+            && (insert.bridge_missed_blocks == 1
+                || insert.bridge_missed_blocks == BRIDGE_MISS_LOG_THRESHOLD
+                || insert.bridge_missed_blocks % 1024 == 0)
+        {
+            eprintln!(
+                "[Bridge] missed/bypass instance_id={} missed_blocks={}",
+                insert.id, insert.bridge_missed_blocks
+            );
+        }
         if insert.bridge_missed_blocks == BRIDGE_MISS_LOG_THRESHOLD
             || insert.bridge_missed_blocks % 1024 == 0
         {
@@ -3366,6 +3348,16 @@ fn apply_external_bridge_insert_block(
             }
         }
     } else {
+        if plugin_restore_debug_enabled() {
+            let out_peak = insert.scratch_l[..got]
+                .iter()
+                .chain(insert.scratch_r[..got].iter())
+                .fold(0.0f32, |p, s| p.max(s.abs()));
+            eprintln!(
+                "[BridgeProcess] track=<chain> slot={slot_index} instance={} fresh output_peak={out_peak:.6} frames={got}",
+                insert.id
+            );
+        }
         if insert.bridge_missed_blocks >= BRIDGE_MISS_LOG_THRESHOLD {
             if is_effect {
                 eprintln!(
@@ -3415,6 +3407,12 @@ fn apply_external_bridge_insert_block(
     }
 
     // Drive the host DSP handshake: MIDI was already pushed to the shared ring.
+    if plugin_restore_debug_enabled() && insert.bridge_missed_blocks == 0 {
+        eprintln!(
+            "[Bridge] request block instance_id={} frames={frames}",
+            insert.id
+        );
+    }
     sink.request_block(frames as u32);
 }
 
@@ -3898,12 +3896,12 @@ where
                                 .master_volume
                                 .store(f32_store(value), Ordering::Relaxed);
                         }
-                        EngineCommand::SetPluginBridgeSink { track_id, sink } => match sink {
+                        EngineCommand::SetPluginBridgeSink { insert_id, sink } => match sink {
                             Some(sink) => {
-                                runtime.plugin_bridge_sinks.insert(track_id, sink);
+                                runtime.plugin_bridge_sinks.insert(insert_id, sink);
                             }
                             None => {
-                                runtime.plugin_bridge_sinks.remove(&track_id);
+                                runtime.plugin_bridge_sinks.remove(&insert_id);
                             }
                         },
                         EngineCommand::SetBridgeEditorActive { track_id, active } => {
@@ -4301,6 +4299,357 @@ mod clip_fade_tests {
         assert!((clip_fade_gain(500, 1000, 100, 100) - 1.0).abs() < 1e-6);
         // Inside the fade-in region only the fade-in shapes the gain.
         assert!((clip_fade_gain(25, 1000, 100, 100) - 0.25).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod bridge_insert_tests {
+    use super::*;
+    use crate::plugin_bridge::PluginBridgeSink;
+    use crate::runtime::{InsertDspState, RuntimeInsert, RuntimePreviewMode, RuntimeTrack};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct WetEffectSink {
+        done_seq: AtomicU64,
+        requests: AtomicU64,
+    }
+
+    impl PluginBridgeSink for WetEffectSink {
+        fn dsp_ready(&self) -> bool {
+            true
+        }
+
+        fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
+            if self.done_seq.load(Ordering::Acquire) == 0 {
+                return 0;
+            }
+            for i in 0..frames.min(out_l.len()).min(out_r.len()) {
+                out_l[i] = 0.25;
+                out_r[i] = 0.25;
+            }
+            frames
+        }
+
+        fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+
+        fn write_input(&self, _: &[f32], _: &[f32], _: usize) {}
+
+        fn request_block(&self, _: u32) {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.done_seq.store(1, Ordering::Release);
+        }
+    }
+
+    fn bridge_effect_track(block: f32) -> RuntimeTrack {
+        let mut params = HashMap::new();
+        params.insert("role".to_string(), serde_json::json!("effect"));
+        RuntimeTrack {
+            id: "track-1".to_string(),
+            track_type: "audio".to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_armed: false,
+            monitor_enabled: false,
+            input_source: crate::runtime::RuntimeTrackInputSource::None,
+            preview_mode: RuntimePreviewMode::Stereo,
+            output_track_id: None,
+            inserts: vec![RuntimeInsert {
+                id: "insert-1".to_string(),
+                kind: "external-bridge-plugin".to_string(),
+                enabled: true,
+                params,
+                dsp: InsertDspState::default(),
+                vst3: None,
+                callback_process_log_done: false,
+                silent_process_blocks: 0,
+                bridge_missed_blocks: 0,
+                scratch_l: vec![0.0; 8],
+                scratch_r: vec![0.0; 8],
+            }],
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            meter: Arc::new(Default::default()),
+            meter_peak_l: 0.0,
+            meter_peak_r: 0.0,
+            meter_sum_sq_l: 0.0,
+            meter_sum_sq_r: 0.0,
+            callback_insert_log_done: false,
+            callback_clip_route_log_done: false,
+            block_l: vec![block; 8],
+            block_r: vec![block; 8],
+            recv_l: vec![0.0; 8],
+            recv_r: vec![0.0; 8],
+            midi_block_events: Vec::new(),
+            midi_instrument_insert_ix: None,
+            plugin_latency_samples: 0,
+            pdc_delay_l: Vec::new(),
+            pdc_delay_r: Vec::new(),
+            pdc_write_pos: 0,
+        }
+    }
+
+    #[test]
+    fn external_bridge_effect_processes_when_sink_is_bound() {
+        let mut track = bridge_effect_track(1.0);
+        let sink = WetEffectSink {
+            done_seq: AtomicU64::new(1),
+            requests: AtomicU64::new(0),
+        };
+        let mut sinks: std::collections::HashMap<
+            String,
+            std::sync::Arc<dyn PluginBridgeSink>,
+        > = std::collections::HashMap::new();
+        sinks.insert("insert-1".to_string(), std::sync::Arc::new(sink));
+        apply_track_chain_block(&mut track, 4, &sinks);
+        assert!((track.block_l[0] - 0.25).abs() < 1e-6);
+        assert!((track.block_r[0] - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn external_bridge_effect_stays_dry_without_sink() {
+        let mut track = bridge_effect_track(1.0);
+        apply_track_chain_block(&mut track, 4, &std::collections::HashMap::new());
+        assert!((track.block_l[0] - 1.0).abs() < 1e-6);
+        assert!((track.block_r[0] - 1.0).abs() < 1e-6);
+    }
+
+    fn bridge_effect_track_with_id(id: &str) -> RuntimeInsert {
+        let mut params = HashMap::new();
+        params.insert("role".to_string(), serde_json::json!("effect"));
+        RuntimeInsert {
+            id: id.to_string(),
+            kind: "external-bridge-plugin".to_string(),
+            enabled: true,
+            params,
+            dsp: InsertDspState::default(),
+            vst3: None,
+            callback_process_log_done: false,
+            silent_process_blocks: 0,
+            bridge_missed_blocks: 0,
+            scratch_l: vec![0.0; 8],
+            scratch_r: vec![0.0; 8],
+        }
+    }
+
+    #[test]
+    fn serial_bridge_effect_chain_applies_both_gains() {
+        #[derive(Debug)]
+        struct MultSink {
+            mult: f32,
+            done: AtomicU64,
+            buf_l: std::sync::Mutex<Vec<f32>>,
+            buf_r: std::sync::Mutex<Vec<f32>>,
+        }
+
+        impl PluginBridgeSink for MultSink {
+            fn dsp_ready(&self) -> bool {
+                true
+            }
+            fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
+                let done = self.done.load(Ordering::Acquire);
+                if done == 0 {
+                    return 0;
+                }
+                self.done.store(0, Ordering::Release);
+                let bl = self.buf_l.lock().unwrap();
+                let br = self.buf_r.lock().unwrap();
+                let n = frames.min(out_l.len()).min(out_r.len()).min(bl.len());
+                for i in 0..n {
+                    out_l[i] = bl[i] * self.mult;
+                    out_r[i] = br[i] * self.mult;
+                }
+                n
+            }
+            fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+            fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
+                let n = frames.min(in_l.len()).min(in_r.len());
+                *self.buf_l.lock().unwrap() = in_l[..n].to_vec();
+                *self.buf_r.lock().unwrap() = in_r[..n].to_vec();
+            }
+            fn request_block(&self, _: u32) {
+                self.done.store(1, Ordering::Release);
+            }
+        }
+
+        let mut track = RuntimeTrack {
+            id: "track-1".to_string(),
+            track_type: "audio".to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_armed: false,
+            monitor_enabled: false,
+            input_source: crate::runtime::RuntimeTrackInputSource::None,
+            preview_mode: RuntimePreviewMode::Stereo,
+            output_track_id: None,
+            inserts: vec![
+                bridge_effect_track_with_id("insert-a"),
+                bridge_effect_track_with_id("insert-b"),
+            ],
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            meter: Arc::new(Default::default()),
+            meter_peak_l: 0.0,
+            meter_peak_r: 0.0,
+            meter_sum_sq_l: 0.0,
+            meter_sum_sq_r: 0.0,
+            callback_insert_log_done: false,
+            callback_clip_route_log_done: false,
+            block_l: vec![1.0; 8],
+            block_r: vec![1.0; 8],
+            recv_l: vec![0.0; 8],
+            recv_r: vec![0.0; 8],
+            midi_block_events: Vec::new(),
+            midi_instrument_insert_ix: None,
+            plugin_latency_samples: 0,
+            pdc_delay_l: Vec::new(),
+            pdc_delay_r: Vec::new(),
+            pdc_write_pos: 0,
+        };
+        let sink_a = Arc::new(MultSink {
+            mult: 2.0,
+            done: AtomicU64::new(1),
+            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
+            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+        });
+        let sink_b = Arc::new(MultSink {
+            mult: 3.0,
+            done: AtomicU64::new(1),
+            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
+            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+        });
+        let mut sinks = std::collections::HashMap::new();
+        sinks.insert("insert-a".to_string(), sink_a as Arc<dyn PluginBridgeSink>);
+        sinks.insert("insert-b".to_string(), sink_b as Arc<dyn PluginBridgeSink>);
+        apply_track_chain_block(&mut track, 4, &sinks);
+        assert!(
+            (track.block_l[0] - 6.0).abs() < 1e-4,
+            "serial chain expected 1*2*3=6 got {}",
+            track.block_l[0]
+        );
+    }
+
+    #[test]
+    fn serial_bridge_effect_chain_bypasses_only_missed_middle_insert() {
+        #[derive(Debug)]
+        struct MultSink {
+            mult: f32,
+            done: AtomicU64,
+            buf_l: std::sync::Mutex<Vec<f32>>,
+            buf_r: std::sync::Mutex<Vec<f32>>,
+        }
+
+        impl PluginBridgeSink for MultSink {
+            fn dsp_ready(&self) -> bool {
+                true
+            }
+            fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
+                let done = self.done.load(Ordering::Acquire);
+                if done == 0 {
+                    return 0;
+                }
+                self.done.store(0, Ordering::Release);
+                let bl = self.buf_l.lock().unwrap();
+                let br = self.buf_r.lock().unwrap();
+                let n = frames.min(out_l.len()).min(out_r.len()).min(bl.len());
+                for i in 0..n {
+                    out_l[i] = bl[i] * self.mult;
+                    out_r[i] = br[i] * self.mult;
+                }
+                n
+            }
+            fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+            fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
+                let n = frames.min(in_l.len()).min(in_r.len());
+                *self.buf_l.lock().unwrap() = in_l[..n].to_vec();
+                *self.buf_r.lock().unwrap() = in_r[..n].to_vec();
+            }
+            fn request_block(&self, _: u32) {
+                self.done.store(1, Ordering::Release);
+            }
+        }
+
+        #[derive(Debug)]
+        struct MissSink;
+
+        impl PluginBridgeSink for MissSink {
+            fn dsp_ready(&self) -> bool {
+                true
+            }
+            fn read_output(&self, _: &mut [f32], _: &mut [f32], _: usize) -> usize {
+                0
+            }
+            fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+            fn write_input(&self, _: &[f32], _: &[f32], _: usize) {}
+            fn request_block(&self, _: u32) {}
+        }
+
+        let mut track = RuntimeTrack {
+            id: "track-1".to_string(),
+            track_type: "audio".to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_armed: false,
+            monitor_enabled: false,
+            input_source: crate::runtime::RuntimeTrackInputSource::None,
+            preview_mode: RuntimePreviewMode::Stereo,
+            output_track_id: None,
+            inserts: vec![
+                bridge_effect_track_with_id("insert-a"),
+                bridge_effect_track_with_id("insert-b"),
+                bridge_effect_track_with_id("insert-c"),
+            ],
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            meter: Arc::new(Default::default()),
+            meter_peak_l: 0.0,
+            meter_peak_r: 0.0,
+            meter_sum_sq_l: 0.0,
+            meter_sum_sq_r: 0.0,
+            callback_insert_log_done: false,
+            callback_clip_route_log_done: false,
+            block_l: vec![1.0; 8],
+            block_r: vec![1.0; 8],
+            recv_l: vec![0.0; 8],
+            recv_r: vec![0.0; 8],
+            midi_block_events: Vec::new(),
+            midi_instrument_insert_ix: None,
+            plugin_latency_samples: 0,
+            pdc_delay_l: Vec::new(),
+            pdc_delay_r: Vec::new(),
+            pdc_write_pos: 0,
+        };
+        let sink_a = Arc::new(MultSink {
+            mult: 2.0,
+            done: AtomicU64::new(1),
+            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
+            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+        });
+        let sink_b = Arc::new(MissSink);
+        let sink_c = Arc::new(MultSink {
+            mult: 5.0,
+            done: AtomicU64::new(1),
+            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
+            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+        });
+        let mut sinks = std::collections::HashMap::new();
+        sinks.insert("insert-a".to_string(), sink_a as Arc<dyn PluginBridgeSink>);
+        sinks.insert("insert-b".to_string(), sink_b as Arc<dyn PluginBridgeSink>);
+        sinks.insert("insert-c".to_string(), sink_c as Arc<dyn PluginBridgeSink>);
+        apply_track_chain_block(&mut track, 4, &sinks);
+        assert!(
+            (track.block_l[0] - 10.0).abs() < 1e-4,
+            "A x2, B missed, C x5 expected 1*2*5=10 got {}",
+            track.block_l[0]
+        );
     }
 }
 

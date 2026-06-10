@@ -75,12 +75,12 @@ mod imp {
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-        FillRect, GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
+        FillRect, GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx,
         SelectObject, SetBkMode, SetTextColor, UpdateWindow, BLACK_BRUSH, DEFAULT_CHARSET,
         CLIP_DEFAULT_PRECIS, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
         FF_DONTCARE, FONT_QUALITY,
         FW_MEDIUM, HBRUSH, HDC, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, OUT_TT_PRECIS,
-        PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
+        PAINTSTRUCT, PS_SOLID, TRANSPARENT,
     };
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, ScreenToClient, MONITORINFO};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -459,24 +459,27 @@ mod imp {
             || prev_w != layout.content_w
             || prev_h != layout.content_h;
         // Plugin child HWND must live strictly below the custom titlebar.
-        if content_raw != 0 {
+        // Only touch the window when the computed layout actually changed:
+        // SetWindowPos on a window with a cross-process child subtree is a
+        // synchronous send into the host UI thread. SWP_NOZORDER keeps normal
+        // layout updates from re-raising; the one explicit raise happens on
+        // attach (`mark_attached`).
+        if content_raw != 0 && changed {
             let content = hwnd_from(content_raw);
             let _ = SetWindowPos(
                 content,
-                Some(HWND_TOP),
+                None,
                 layout.content_x,
                 content_y,
                 layout.content_w,
                 layout.content_h,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
-            if changed {
-                eprintln!(
-                    "[plugin-editor-window] SetWindowPos content_hwnd=0x{content_raw:x} \
-                     x={} y={} w={} h={}",
-                    layout.content_x, content_y, layout.content_w, layout.content_h
-                );
-            }
+            eprintln!(
+                "[plugin-editor-window] SetWindowPos content_hwnd=0x{content_raw:x} \
+                 x={} y={} w={} h={}",
+                layout.content_x, content_y, layout.content_w, layout.content_h
+            );
         }
         if changed || crate::forensic_trace::shell_layout_trace_enabled() {
             eprintln!("[PluginEditor] titlebar_h={}", layout.titlebar_h);
@@ -1853,6 +1856,19 @@ mod imp {
             }
             eprintln!("[plugin-editor-window] loading_overlay_visible=false");
             invalidate_titlebar(hwnd_from(self.top_hwnd));
+            // Single explicit raise of the content child at attach time; normal
+            // layout updates use SWP_NOZORDER (see `apply_shell_layout`).
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd_from(self.content_hwnd),
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
             self.ensure_visible_zorder();
         }
 
@@ -1945,16 +1961,14 @@ mod imp {
         pub fn ensure_visible_zorder(&self) {
             let (cw, ch) = self.apply_content_layout();
             let content = hwnd_from(self.content_hwnd);
+            // Async invalidation only. No UpdateWindow / RDW_UPDATENOW /
+            // RDW_ALLCHILDREN here: the content child hosts a cross-process
+            // (host-owned) subtree, and a synchronous repaint from the main
+            // thread blocks until the host pump services WM_PAINT. The host
+            // repaints its own subtree from its own pump.
             unsafe {
                 let _ = ShowWindow(content, SW_SHOW);
-                let _ = UpdateWindow(content);
                 let _ = InvalidateRect(Some(content), None, false);
-                let _ = RedrawWindow(
-                    Some(content),
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN,
-                );
             }
             eprintln!(
                 "[plugin-editor-window] ensure_visible_zorder content_hwnd=0x{:x} size={cw}x{ch}",

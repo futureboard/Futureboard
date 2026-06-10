@@ -86,11 +86,10 @@ pub enum EngineCommand {
         end_seconds: f64,
     },
     /// Stage 3b: install (or clear, with `sink = None`) the realtime
-    /// plugin-bridge sink for `track_id`. Keyed per track so multiple bridged
-    /// instruments do not clobber one another. Applied between blocks; the audio
-    /// callback then reads external plugin DSP output from each and mixes it in.
+    /// plugin-bridge sink for `insert_id` (one shared-memory region + handshake
+    /// per insert so serial FX chains do not share `request_seq`/`done_seq`).
     SetPluginBridgeSink {
-        track_id: String,
+        insert_id: String,
         sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
     },
     /// Keep rendering a bridged track while its plugin editor is open (VSTi

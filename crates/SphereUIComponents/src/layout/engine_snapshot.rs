@@ -86,6 +86,22 @@ fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapsh
 /// `enabled` mirrors the UI bypass flag (`!bypassed`), so toggling bypass in
 /// the mixer changes the audio path on the next engine sync. This runs on the
 /// UI thread inside snapshot construction — never the audio callback.
+fn log_track_insert_chain(track_id: &str, inserts: &[EngineInsertSnapshot]) {
+    if inserts.is_empty() {
+        return;
+    }
+    let chain: Vec<String> = inserts
+        .iter()
+        .enumerate()
+        .map(|(i, ins)| format!("slot{i}:{}", ins.id))
+        .collect();
+    eprintln!(
+        "[GraphBuild] track={track_id} inserts=[{}] runtime_insert_count={}",
+        chain.join(", "),
+        inserts.len()
+    );
+}
+
 fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
     use crate::components::timeline::timeline_state::InsertPluginFormat;
 
@@ -130,10 +146,9 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
                 params.insert("role".to_string(), serde_json::json!(role));
 
                 eprintln!(
-                    "[SphereAudio] external bridged insert track={} insert={} instance={}",
+                    "[GraphBuild] track={} insert={} instance={} kind=external-bridge-plugin",
                     track.id, slot.id, slot.id
                 );
-                eprintln!("[SphereAudio] graph node ExternalBridgePlugin created");
 
                 Some(EngineInsertSnapshot {
                     id: slot.id.clone(),
@@ -292,7 +307,11 @@ pub(super) fn build_engine_project_snapshot(
                 | timeline_state::TrackOutputRouting::None
                 | timeline_state::TrackOutputRouting::HardwareOutput { .. } => None,
             },
-            inserts: build_engine_inserts(track),
+            inserts: {
+                let inserts = build_engine_inserts(track);
+                log_track_insert_chain(&track.id, &inserts);
+                inserts
+            },
             sends: build_engine_sends(track),
             automation_lanes: build_engine_automation_lanes(track),
         })
@@ -597,6 +616,60 @@ mod tests {
             .expect("CC11 lane");
         assert_eq!(cc11.points.len(), 2);
         assert!(clip.controllers.iter().any(|l| l.controller == 129));
+    }
+
+    #[test]
+    fn graph_snapshot_retains_all_vst_inserts_in_order() {
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "FX".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let slot_a = state
+            .ensure_insert_slot_at(&track_id, 0)
+            .expect("slot A");
+        let slot_b = state
+            .ensure_insert_slot_at(&track_id, 1)
+            .expect("slot B");
+        state.set_insert_plugin(
+            &track_id,
+            &slot_a,
+            "class-a".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/a.vst3")),
+            InsertPluginFormat::Vst3,
+            "Plugin A".to_string(),
+        );
+        state.set_insert_plugin(
+            &track_id,
+            &slot_b,
+            "class-b".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/b.vst3")),
+            InsertPluginFormat::Vst3,
+            "Plugin B".to_string(),
+        );
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let track = snap
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .expect("audio track in snapshot");
+        assert_eq!(track.inserts.len(), 2, "both inserts must survive graph build");
+        assert_eq!(track.inserts[0].id, slot_a);
+        assert_eq!(track.inserts[1].id, slot_b);
     }
 
     #[test]

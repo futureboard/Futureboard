@@ -834,6 +834,7 @@ impl StudioLayout {
                     this.audio_stats = Some(stats);
                     this.audio_last_error = None;
                     this.audio_engine = Some(engine);
+                    this.sync_plugin_bridge_sinks_to_engine(cx, "studio_audio_ready");
                     this.schedule_audio_project_sync(cx, true, "studio_audio_ready");
                     crate::boot::log("audio engine handle ready");
                     cx.notify();

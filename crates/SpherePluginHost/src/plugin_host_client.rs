@@ -516,8 +516,13 @@ impl PluginHostClient {
         &mut self,
         name: String,
         bytes: u64,
+        plugin_instance_id: impl Into<String>,
     ) -> Result<(), PluginHostClientError> {
-        self.send(&HostCommand::AttachSharedAudio { name, bytes })
+        self.send(&HostCommand::AttachSharedAudio {
+            name,
+            bytes,
+            plugin_instance_id: plugin_instance_id.into(),
+        })
     }
 
     pub fn close_editor(

@@ -32,7 +32,7 @@ use sphere_plugin_host::audio_bridge::{SharedAudioRegion, AUDIO_BUF_LEN, MAX_BLO
 use sphere_plugin_host::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
 use sphere_plugin_host::native_editor::{self, EmbedRegion};
 use sphere_plugin_host::plugin_host_preview::{
-    try_start_preview_output, PluginHostPreviewEngine, SharedPluginHostPreview,
+    try_start_preview_output, BridgeAudioShared, PluginHostPreviewEngine, SharedPluginHostPreview,
 };
 
 fn debug_enabled() -> bool {
@@ -253,49 +253,32 @@ fn shutdown_host(
 /// fast engine block rate will outrun it. Moving production onto a dedicated
 /// host audio thread (and removing the `render_block` Vec allocs) is the next
 /// refinement; until the engine drives `request_seq` (Stage 3b) this is a no-op.
-/// Consecutive bridge blocks skipped because the preview-engine lock was held
-/// too long by the IPC/editor thread (drives the throttled timeout log).
-static BRIDGE_LOCK_MISSES: AtomicU64 = AtomicU64::new(0);
-
-fn service_audio_bridge(region: &SharedAudioRegion, preview: &SharedPluginHostPreview) {
+fn service_audio_bridge(
+    region: &SharedAudioRegion,
+    dsp: &BridgeAudioShared,
+    plugin_instance_id: &str,
+) {
     let bridge = region.bridge();
     let req = bridge.request_seq.load(Ordering::Acquire);
     let done = bridge.done_seq.load(Ordering::Relaxed);
     if req == done {
         return; // no new block requested
     }
-    // Bounded wait for the preview engine. The IPC thread holds this lock for
-    // long operations (editor attach/detach, plugin load/unload), and the host
-    // must never wedge block production behind them: skip the block instead —
-    // the engine's `read_output` freshness guard turns a missed block into
-    // bypass/silence (never stale audio), and the next request resumes DSP.
-    let Some(mut engine) = preview.try_lock_for(Duration::from_millis(2)) else {
-        bridge.xrun_count.fetch_add(1, Ordering::Relaxed);
-        let misses = BRIDGE_LOCK_MISSES.fetch_add(1, Ordering::Relaxed) + 1;
-        if misses == 1 || misses % 256 == 0 {
-            eprintln!(
-                "[PluginHost] process timeout request_seq={req} done_seq={done} lock_misses={misses} (engine bypasses block)"
-            );
-        }
-        return;
-    };
-    let misses = BRIDGE_LOCK_MISSES.swap(0, Ordering::Relaxed);
-    if misses > 0 {
-        eprintln!("[PluginHost] process resumed after lock_misses={misses}");
-    }
+    // No engine mutex on the block path: the voice list is an Arc snapshot the
+    // engine republishes on load/unload only, so the IPC thread can hold the
+    // engine lock across editor attach / plugin load for seconds without
+    // starving block production (the old `lock_misses` dropouts).
     let frames = (bridge.block_frames.load(Ordering::Relaxed) as usize).min(MAX_BLOCK_FRAMES);
     // Drain engine-pushed MIDI (Stage 3b fills the ring; empty until then).
     let mut midi_count = 0u32;
     while let Some(ev) = bridge.midi.try_pop() {
-        engine.apply_shared_midi(ev);
+        dsp.apply_shared_midi(ev);
         midi_count += 1;
     }
     if midi_count > 0 {
-        for instance_id in engine.loaded_instance_ids() {
-            eprintln!(
-                "[plugin-host-midi-consume] seq={req} instance={instance_id} events={midi_count}"
-            );
-        }
+        eprintln!(
+            "[plugin-host-midi-consume] seq={req} instance={plugin_instance_id} events={midi_count}"
+        );
     }
     let mut in_l = [0.0f32; MAX_BLOCK_FRAMES];
     let mut in_r = [0.0f32; MAX_BLOCK_FRAMES];
@@ -307,7 +290,8 @@ fn service_audio_bridge(region: &SharedAudioRegion, preview: &SharedPluginHostPr
     }
     let mut interleaved = [0.0f32; AUDIO_BUF_LEN];
     let len = (frames * 2).min(AUDIO_BUF_LEN);
-    let (mix_l, mix_r) = engine.render_block_with_input(frames, &in_l[..frames], &in_r[..frames]);
+    let (mix_l, mix_r) =
+        dsp.render_single_voice(plugin_instance_id, frames, &in_l[..frames], &in_r[..frames]);
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     for i in 0..frames {
@@ -322,8 +306,7 @@ fn service_audio_bridge(region: &SharedAudioRegion, preview: &SharedPluginHostPr
         peak_l = peak_l.max(l.abs());
         peak_r = peak_r.max(r.abs());
     }
-    let dsp_ready =
-        engine.dsp_ready() && (engine.has_loaded_instances() || engine.continuous_mode());
+    let dsp_ready = dsp.dsp_ready() && (dsp.has_loaded_instances() || dsp.continuous_mode());
     // SAFETY: the host owns `audio_out` for this block — the engine waits on
     // `done_seq` (published below) before reading it.
     unsafe {
@@ -337,43 +320,41 @@ fn service_audio_bridge(region: &SharedAudioRegion, preview: &SharedPluginHostPr
     if (peak_l > 0.0001 || peak_r > 0.0001)
         && VST3_PROCESS_LOG_BLOCKS.fetch_add(1, Ordering::Relaxed) % 256 == 0
     {
-        for instance_id in engine.loaded_instance_ids() {
-            eprintln!(
-                "[vst3-process] instance={instance_id} frames={frames} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
-            );
-        }
+        eprintln!(
+            "[vst3-process] instance={plugin_instance_id} frames={frames} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
+        );
     }
     bridge.done_seq.store(req, Ordering::Release);
 }
 
-/// Shared slot handing the engine-mapped region from the IPC thread (which opens
-/// it on `AttachSharedAudio`) to the dedicated audio producer thread.
-type SharedAudioSlot = Arc<Mutex<Option<Arc<SharedAudioRegion>>>>;
+/// All mapped shared-audio regions, keyed by insert `plugin_instance_id`.
+type SharedAudioRegions = Arc<Mutex<HashMap<String, Arc<SharedAudioRegion>>>>;
 
 /// Dedicated host audio producer thread (Stage 3 cadence fix). Once the region
 /// is mapped it services blocks on a tight cadence instead of the ~120 Hz idle
 /// loop, so it can keep up with the engine's block rate. Servicing is a cheap
 /// no-op until the engine drives `request_seq`. VST3 `process()` runs only here
-/// (the editor stays on the STA main thread); the preview mutex serializes it
-/// against IPC MIDI so there is never a concurrent `process()`.
+/// (the editor stays on the STA main thread); the per-voice MIDI mutex inside
+/// `BridgeAudioShared` serializes it against IPC MIDI so there is never a
+/// concurrent `process()` — without coupling block production to the engine
+/// mutex held across plugin load / editor attach.
 fn run_audio_producer(
-    slot: SharedAudioSlot,
-    preview: SharedPluginHostPreview,
+    regions: SharedAudioRegions,
+    dsp: Arc<BridgeAudioShared>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut region: Option<Arc<SharedAudioRegion>> = None;
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        if region.is_none() {
-            if let Ok(guard) = slot.lock() {
-                region = guard.clone();
-            }
+        let snapshot = regions.lock().map(|map| map.clone()).unwrap_or_default();
+        for (instance_id, region) in snapshot {
+            service_audio_bridge(region.as_ref(), &dsp, &instance_id);
         }
-        if let Some(region) = region.as_ref() {
-            service_audio_bridge(region, &preview);
-        }
+        // Acknowledge the latest voice-snapshot publish now that any snapshot
+        // borrowed for this block has been dropped (lets unload hand the final
+        // processor release back to the IPC thread).
+        dsp.mark_snapshot_observed();
         // ~4 kHz poll: responsive to the engine's block requests without a full
         // busy-spin. No-op cost is one atomic load when no block is pending.
         std::thread::sleep(Duration::from_micros(250));
@@ -423,14 +404,14 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
     // Stage 2/3: the mapped shared-memory audio bridge (engine-created), shared
     // with the dedicated audio producer thread. The `Arc` keeps the view mapped
     // for the host's lifetime.
-    let region_slot: SharedAudioSlot = Arc::new(Mutex::new(None));
+    let region_slots: SharedAudioRegions = Arc::new(Mutex::new(HashMap::new()));
     {
-        let slot = region_slot.clone();
-        let preview = preview.clone();
+        let slots = region_slots.clone();
+        let dsp = preview.lock().bridge_shared();
         let shutdown = shutdown.clone();
         std::thread::Builder::new()
             .name("plugin-host-audio".into())
-            .spawn(move || run_audio_producer(slot, preview, shutdown))
+            .spawn(move || run_audio_producer(slots, dsp, shutdown))
             .expect("spawn plugin-host audio producer");
     }
 
@@ -512,7 +493,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                             &mut pending_resizes,
                             &preview,
                             &mut preview_output_started,
-                            &region_slot,
+                            &region_slots,
                             &mut out,
                         )
                     });
@@ -708,15 +689,25 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
             eprintln!("[plugin-host-ui-thread] message_loop_running=true");
             eprintln!("[plugin-host-ui-thread] editor_count={}", registry.len());
             eprintln!("[plugin-host-ui-thread] idle_tick={tick}");
-            if let Some(region) = region_slot.lock().ok().and_then(|g| g.clone()) {
-                let bridge = region.bridge();
-                let (peak_l, peak_r) = bridge.meters();
+            if let Ok(slots) = region_slots.lock() {
                 eprintln!(
-                    "[plugin-host-bridge] shared_audio mapped=true request_seq={} done_seq={} dsp_output={} peak_l={peak_l:.3} peak_r={peak_r:.3}",
-                    bridge.request_seq.load(Ordering::Relaxed),
-                    bridge.done_seq.load(Ordering::Relaxed),
-                    if bridge.dsp_output_ready() { "ready" } else { "pending" }
+                    "[plugin-host-bridge] shared_audio mapped_regions={}",
+                    slots.len()
                 );
+                for (instance_id, region) in slots.iter() {
+                    let bridge = region.bridge();
+                    let (peak_l, peak_r) = bridge.meters();
+                    eprintln!(
+                        "[plugin-host-bridge] instance={instance_id} request_seq={} done_seq={} dsp_output={} peak_l={peak_l:.3} peak_r={peak_r:.3}",
+                        bridge.request_seq.load(Ordering::Relaxed),
+                        bridge.done_seq.load(Ordering::Relaxed),
+                        if bridge.dsp_output_ready() {
+                            "ready"
+                        } else {
+                            "pending"
+                        }
+                    );
+                }
             }
         }
 
@@ -767,7 +758,7 @@ fn dispatch(
     pending_resizes: &mut HashMap<String, (u32, u32, u32)>,
     preview: &SharedPluginHostPreview,
     preview_output_started: &mut bool,
-    region_slot: &SharedAudioSlot,
+    region_slots: &SharedAudioRegions,
     out: &mut io::Stdout,
 ) {
     match cmd {
@@ -1036,6 +1027,9 @@ fn dispatch(
             registry.remove(&plugin_instance_id);
             preview.lock().unload_instance(&plugin_instance_id);
             loaded.remove(&plugin_instance_id);
+            if let Ok(mut slots) = region_slots.lock() {
+                slots.remove(&plugin_instance_id);
+            }
             let instance_count = preview.lock().loaded_instance_ids().len();
             eprintln!(
                 "[PluginHost] host shutdown deferred instance_count={instance_count} editor_count={}",
@@ -1083,7 +1077,11 @@ fn dispatch(
                 },
             );
         }
-        HostCommand::AttachSharedAudio { name, bytes } => {
+        HostCommand::AttachSharedAudio {
+            name,
+            bytes,
+            plugin_instance_id,
+        } => {
             #[cfg(windows)]
             {
                 match SharedAudioRegion::open_named(&name) {
@@ -1091,12 +1089,16 @@ fn dispatch(
                         let sr = region.bridge().sample_rate.load(Ordering::Relaxed);
                         let block = region.bridge().max_block_size.load(Ordering::Relaxed);
                         eprintln!(
-                            "[plugin-host-bridge] AttachSharedAudio name={name} bytes={bytes} attached=true header_sr={sr} header_block={block}"
+                            "[plugin-host-bridge] AttachSharedAudio instance={plugin_instance_id} name={name} bytes={bytes} attached=true header_sr={sr} header_block={block}"
                         );
                         region.bridge().set_dsp_output_ready(true);
-                        // Hand the region to the dedicated audio producer thread.
-                        if let Ok(mut slot) = region_slot.lock() {
-                            *slot = Some(Arc::new(region));
+                        if let Ok(mut slots) = region_slots.lock() {
+                            let key = if plugin_instance_id.is_empty() {
+                                name.clone()
+                            } else {
+                                plugin_instance_id.clone()
+                            };
+                            slots.insert(key, Arc::new(region));
                         }
                         preview.lock().set_dsp_ready(true);
                         log_host_audio_mode();
@@ -1126,7 +1128,7 @@ fn dispatch(
             }
             #[cfg(not(windows))]
             {
-                let _ = region_slot;
+                let _ = region_slots;
                 eprintln!("[plugin-host-bridge] AttachSharedAudio unsupported on this platform name={name}");
                 let _ = ipc::write_frame(
                     out,

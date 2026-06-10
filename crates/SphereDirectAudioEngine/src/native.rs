@@ -277,10 +277,10 @@ impl AudioEngine {
     /// output into the master.
     pub fn set_plugin_bridge_sink(
         &self,
-        track_id: String,
+        insert_id: String,
         sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
     ) -> Result<(), SphereAudioError> {
-        self.inner.set_plugin_bridge_sink(track_id, sink)
+        self.inner.set_plugin_bridge_sink(insert_id, sink)
     }
 
     pub fn set_bridge_editor_active(

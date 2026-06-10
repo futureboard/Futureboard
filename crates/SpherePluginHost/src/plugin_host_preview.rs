@@ -1,7 +1,9 @@
 //! VST3 MIDI preview + local audio output for the external PluginHost process.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use DAUx::vst3_processor::{Vst3MidiEvent, Vst3RuntimeProcessor};
@@ -29,12 +31,310 @@ struct PreviewNoteKey {
     pitch: u8,
 }
 
+/// Per-instance MIDI/note state shared between the IPC thread (which queues
+/// events) and the audio producer (which drains them per block). Its mutex is
+/// only ever held for queue push/drain or one block `process()` — never across
+/// plugin load, editor attach, or any other long host operation.
+#[derive(Debug, Default)]
+struct VoiceMidiState {
+    pending_events: Vec<Vst3MidiEvent>,
+    active_notes: Vec<PreviewNoteKey>,
+    tail_blocks: u32,
+}
+
+impl VoiceMidiState {
+    fn has_activity(&self) -> bool {
+        !self.pending_events.is_empty() || !self.active_notes.is_empty() || self.tail_blocks > 0
+    }
+
+    fn preview_note_on(&mut self, channel: u8, pitch: u8, velocity: u8) {
+        let key = PreviewNoteKey {
+            channel: channel.min(15),
+            pitch: pitch.min(127),
+        };
+        if self.active_notes.contains(&key) {
+            self.pending_events
+                .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
+        }
+        let vel = velocity.clamp(1, 127) as f32 / 127.0;
+        self.pending_events
+            .push(Vst3MidiEvent::note_on(0, key.channel, key.pitch, vel));
+        if !self.active_notes.contains(&key) {
+            self.active_notes.push(key);
+        }
+        self.tail_blocks = PREVIEW_TAIL_BLOCKS;
+    }
+
+    fn preview_note_off(&mut self, channel: u8, pitch: u8) {
+        let key = PreviewNoteKey {
+            channel: channel.min(15),
+            pitch: pitch.min(127),
+        };
+        self.pending_events
+            .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
+        self.active_notes.retain(|n| *n != key);
+        self.tail_blocks = PREVIEW_TAIL_BLOCKS;
+    }
+
+    fn panic(&mut self) {
+        let drained: Vec<PreviewNoteKey> = self.active_notes.drain(..).collect();
+        for key in drained {
+            self.pending_events
+                .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
+        }
+        let ch = 0u8;
+        self.pending_events
+            .push(Vst3MidiEvent::control_change(0, ch, CC_SUSTAIN, 0.0));
+        self.pending_events
+            .push(Vst3MidiEvent::control_change(0, ch, CC_ALL_NOTES_OFF, 0.0));
+        self.pending_events
+            .push(Vst3MidiEvent::control_change(0, ch, CC_ALL_SOUND_OFF, 0.0));
+        self.tail_blocks = PREVIEW_TAIL_BLOCKS;
+    }
+
+    /// Apply one engine-pushed shared-memory MIDI event. Raw status byte: high
+    /// nibble = message, low nibble = channel.
+    fn apply_shared(&mut self, ev: &SharedMidiEvent, instance_id: &str) {
+        let channel = ev.status & 0x0F;
+        let kind = ev.status & 0xF0;
+        match kind {
+            // Note-on with velocity 0 is a note-off (running-status idiom).
+            0x90 if ev.data2 > 0 => {
+                let vel = ev.data2.clamp(1, 127) as f32 / 127.0;
+                if forensic_trace_enabled() {
+                    eprintln!(
+                        "[plugin-host-midi-consume] note_on instance={instance_id} pitch={} offset={}",
+                        ev.data1, ev.sample_offset
+                    );
+                }
+                self.pending_events.push(Vst3MidiEvent::note_on(
+                    ev.sample_offset,
+                    channel,
+                    ev.data1.min(127),
+                    vel,
+                ));
+                let key = PreviewNoteKey {
+                    channel: channel.min(15),
+                    pitch: ev.data1.min(127),
+                };
+                if !self.active_notes.contains(&key) {
+                    self.active_notes.push(key);
+                }
+                self.tail_blocks = PREVIEW_TAIL_BLOCKS;
+            }
+            0x80 | 0x90 => {
+                if forensic_trace_enabled() {
+                    eprintln!(
+                        "[plugin-host-midi-consume] note_off instance={instance_id} pitch={} offset={}",
+                        ev.data1, ev.sample_offset
+                    );
+                }
+                self.pending_events.push(Vst3MidiEvent::note_off(
+                    ev.sample_offset,
+                    channel,
+                    ev.data1.min(127),
+                    0.0,
+                ));
+                let key = PreviewNoteKey {
+                    channel: channel.min(15),
+                    pitch: ev.data1.min(127),
+                };
+                self.active_notes.retain(|n| *n != key);
+                self.tail_blocks = PREVIEW_TAIL_BLOCKS;
+            }
+            0xB0 => {
+                self.pending_events.push(Vst3MidiEvent::control_change(
+                    ev.sample_offset,
+                    channel,
+                    ev.data1 as u16,
+                    ev.data2 as f32 / 127.0,
+                ));
+                self.tail_blocks = PREVIEW_TAIL_BLOCKS;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One entry of the published block-path snapshot: a shallow processor handle
+/// (refcounted over the same C++ instance) plus the shared per-voice MIDI state.
+#[derive(Debug, Clone)]
+struct BridgeVoice {
+    instance_id: String,
+    processor: Vst3RuntimeProcessor,
+    midi: Arc<Mutex<VoiceMidiState>>,
+}
+
+/// Render one voice block. The voice mutex is held across `process()`: it both
+/// hands the drained events to the plugin atomically and serializes `process()`
+/// between the bridge producer and the legacy debug CPAL preview path. Every
+/// holder is bounded (an event push or one block render) — never plugin load or
+/// editor attach, so this cannot starve block production the way the engine
+/// mutex did.
+fn render_voice(
+    processor: &Vst3RuntimeProcessor,
+    midi: &Mutex<VoiceMidiState>,
+    in_l: &[f32],
+    in_r: &[f32],
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+) {
+    let mut state = midi.lock();
+    let events = std::mem::take(&mut state.pending_events);
+    let mut processor = processor.clone();
+    let _ = processor.process_stereo_block_with_midi(in_l, in_r, out_l, out_r, &events);
+    if events.is_empty() && state.active_notes.is_empty() {
+        state.tail_blocks = state.tail_blocks.saturating_sub(1);
+    } else {
+        state.tail_blocks = PREVIEW_TAIL_BLOCKS;
+    }
+}
+
+/// Block-path handle for the audio producer thread. Replaces taking the whole
+/// `PluginHostPreviewEngine` mutex per block: the voice list is an `Arc`
+/// snapshot republished by the engine on load/unload only, and the flags are
+/// atomics. The IPC thread can hold the engine mutex across `LoadPlugin` /
+/// `IPlugView::attached` for seconds without ever stalling block production.
+#[derive(Debug)]
+pub struct BridgeAudioShared {
+    /// Swapped wholesale on load/unload; the mutex is held only to clone or
+    /// replace the `Arc` (nanoseconds), never across plugin or editor work.
+    voices: Mutex<Arc<Vec<BridgeVoice>>>,
+    dsp_ready: AtomicBool,
+    continuous_mode: AtomicBool,
+    /// Bumped on every publish; the producer echoes it after releasing its
+    /// previous snapshot so unload can hand the final processor release (VST3
+    /// terminate) back to the IPC thread. Bounded wait, never required for
+    /// correctness.
+    generation: AtomicU64,
+    observed_generation: AtomicU64,
+}
+
+impl BridgeAudioShared {
+    fn new() -> Self {
+        Self {
+            voices: Mutex::new(Arc::new(Vec::new())),
+            dsp_ready: AtomicBool::new(false),
+            continuous_mode: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            observed_generation: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> Arc<Vec<BridgeVoice>> {
+        self.voices.lock().clone()
+    }
+
+    fn publish(&self, voices: Vec<BridgeVoice>) {
+        *self.voices.lock() = Arc::new(voices);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Called by the producer once per loop iteration, after it has dropped any
+    /// snapshot it held for the block.
+    pub fn mark_snapshot_observed(&self) {
+        self.observed_generation
+            .store(self.generation.load(Ordering::Acquire), Ordering::Release);
+    }
+
+    /// Bounded wait until the producer has observed the latest publish (and so
+    /// released any retired voice's processor clone). Times out silently — the
+    /// worst case is the final release happening on the producer thread.
+    fn wait_snapshot_observed(&self, timeout: Duration) {
+        let target = self.generation.load(Ordering::Acquire);
+        let deadline = Instant::now() + timeout;
+        while self.observed_generation.load(Ordering::Acquire) < target {
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    }
+
+    pub fn dsp_ready(&self) -> bool {
+        self.dsp_ready.load(Ordering::Acquire)
+    }
+
+    pub fn continuous_mode(&self) -> bool {
+        self.continuous_mode.load(Ordering::Acquire)
+    }
+
+    pub fn has_loaded_instances(&self) -> bool {
+        !self.snapshot().is_empty()
+    }
+
+    pub fn loaded_instance_ids(&self) -> Vec<String> {
+        self.snapshot()
+            .iter()
+            .map(|v| v.instance_id.clone())
+            .collect()
+    }
+
+    /// Apply one engine-pushed MIDI event to every loaded voice (single VSTi is
+    /// the common case until per-instance routing exists in the ring).
+    pub fn apply_shared_midi(&self, ev: SharedMidiEvent) {
+        for voice in self.snapshot().iter() {
+            voice.midi.lock().apply_shared(&ev, &voice.instance_id);
+        }
+    }
+
+    /// Render one block for a single insert instance (serial FX chain path).
+    pub fn render_single_voice(
+        &self,
+        instance_id: &str,
+        frames: usize,
+        in_l: &[f32],
+        in_r: &[f32],
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut out_l = vec![0.0f32; frames];
+        let mut out_r = vec![0.0f32; frames];
+        if !self.dsp_ready() {
+            return (out_l, out_r);
+        }
+        let voices = self.snapshot();
+        if let Some(voice) = voices.iter().find(|v| v.instance_id == instance_id) {
+            render_voice(
+                &voice.processor,
+                &voice.midi,
+                in_l,
+                in_r,
+                &mut out_l,
+                &mut out_r,
+            );
+        }
+        (out_l, out_r)
+    }
+
+    /// Render one block of all loaded voices without touching the engine mutex.
+    pub fn render_block_with_input(
+        &self,
+        frames: usize,
+        in_l: &[f32],
+        in_r: &[f32],
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut mix_l = vec![0.0f32; frames];
+        let mut mix_r = vec![0.0f32; frames];
+        let voices = self.snapshot();
+        if voices.is_empty() || !self.dsp_ready() {
+            return (mix_l, mix_r);
+        }
+        let mut out_l = vec![0.0f32; frames];
+        let mut out_r = vec![0.0f32; frames];
+        for voice in voices.iter() {
+            render_voice(&voice.processor, &voice.midi, in_l, in_r, &mut out_l, &mut out_r);
+            for i in 0..frames {
+                mix_l[i] += out_l[i];
+                mix_r[i] += out_r[i];
+            }
+        }
+        (mix_l, mix_r)
+    }
+}
+
 #[derive(Debug)]
 struct PreviewInstance {
     processor: Vst3RuntimeProcessor,
-    active_notes: Vec<PreviewNoteKey>,
-    pending_events: Vec<Vst3MidiEvent>,
-    tail_blocks: u32,
+    midi: Arc<Mutex<VoiceMidiState>>,
 }
 
 #[derive(Debug)]
@@ -42,10 +342,9 @@ pub struct PluginHostPreviewEngine {
     sample_rate: u32,
     block_size: u32,
     instances: HashMap<String, PreviewInstance>,
-    dsp_ready: bool,
-    /// Keep processing loaded instances even without pending MIDI (VSTi editor
-    /// internal keyboard / groove preview needs a live `process()` loop).
-    continuous_mode: bool,
+    /// Block-path snapshot + flags shared with the audio producer thread.
+    /// `dsp_ready` / `continuous_mode` live in its atomics (single source).
+    bridge: Arc<BridgeAudioShared>,
 }
 
 impl PluginHostPreviewEngine {
@@ -58,9 +357,28 @@ impl PluginHostPreviewEngine {
             sample_rate: sample_rate.max(44_100),
             block_size: block_size.clamp(64, 2048),
             instances: HashMap::new(),
-            dsp_ready: false,
-            continuous_mode: false,
+            bridge: Arc::new(BridgeAudioShared::new()),
         }
+    }
+
+    /// Handle for the audio producer thread: block-path snapshot + flags,
+    /// readable without the engine mutex.
+    pub fn bridge_shared(&self) -> Arc<BridgeAudioShared> {
+        self.bridge.clone()
+    }
+
+    /// Republish the block-path voice snapshot. Called on load/unload only.
+    fn publish_bridge_snapshot(&self) {
+        let voices: Vec<BridgeVoice> = self
+            .instances
+            .iter()
+            .map(|(id, instance)| BridgeVoice {
+                instance_id: id.clone(),
+                processor: instance.processor.clone(),
+                midi: instance.midi.clone(),
+            })
+            .collect();
+        self.bridge.publish(voices);
     }
 
     /// Stage 1: follow the main engine's sample rate / block size (the engine
@@ -82,19 +400,19 @@ impl PluginHostPreviewEngine {
     }
 
     pub fn dsp_ready(&self) -> bool {
-        self.dsp_ready
+        self.bridge.dsp_ready()
     }
 
     pub fn set_dsp_ready(&mut self, ready: bool) {
-        self.dsp_ready = ready;
+        self.bridge.dsp_ready.store(ready, Ordering::Release);
     }
 
     pub fn set_continuous_mode(&mut self, enabled: bool) {
-        self.continuous_mode = enabled;
+        self.bridge.continuous_mode.store(enabled, Ordering::Release);
     }
 
     pub fn continuous_mode(&self) -> bool {
-        self.continuous_mode
+        self.bridge.continuous_mode()
     }
 
     pub fn has_instance(&self, plugin_instance_id: &str) -> bool {
@@ -211,14 +529,13 @@ impl PluginHostPreviewEngine {
             plugin_instance_id.to_string(),
             PreviewInstance {
                 processor,
-                active_notes: Vec::new(),
-                pending_events: Vec::new(),
-                tail_blocks: 0,
+                midi: Arc::new(Mutex::new(VoiceMidiState::default())),
             },
         );
+        self.publish_bridge_snapshot();
         eprintln!(
             "[plugin-host-midi] preview processor loaded instance={plugin_instance_id} dsp_output={}",
-            if self.dsp_ready { "ready" } else { "pending" }
+            if self.dsp_ready() { "ready" } else { "pending" }
         );
         eprintln!("[plugin-host-registry] loaded instance={plugin_instance_id}");
         self.set_continuous_mode(true);
@@ -231,12 +548,22 @@ impl PluginHostPreviewEngine {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
             instance.processor.embed_detach();
         }
-        if let Some(mut instance) = self.instances.remove(plugin_instance_id) {
-            Self::panic_instance(&mut instance);
+        let retired = self.instances.remove(plugin_instance_id);
+        if let Some(instance) = &retired {
+            instance.midi.lock().panic();
         }
         if self.instances.is_empty() {
             self.set_continuous_mode(false);
         }
+        if retired.is_some() {
+            // Publish the snapshot without this voice, then give the producer a
+            // bounded window to drop its block snapshot so the final processor
+            // release (VST3 terminate) happens on this thread, not mid-block on
+            // the audio producer.
+            self.publish_bridge_snapshot();
+            self.bridge.wait_snapshot_observed(Duration::from_millis(10));
+        }
+        drop(retired);
         eprintln!("[plugin-host-registry] instances={}", self.instances.len());
     }
 
@@ -311,9 +638,7 @@ impl PluginHostPreviewEngine {
     pub fn embed_detach_for_instance(&mut self, plugin_instance_id: &str) {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
             instance.processor.embed_detach();
-        }
-        if let Some(instance) = self.instances.get_mut(plugin_instance_id) {
-            Self::panic_instance(instance);
+            instance.midi.lock().panic();
         }
     }
 
@@ -359,29 +684,13 @@ impl PluginHostPreviewEngine {
         eprintln!(
             "[plugin-host-midi-consume] preview note_on instance={plugin_instance_id} pitch={pitch}"
         );
-        let Some(instance) = self.instances.get_mut(plugin_instance_id) else {
+        let Some(instance) = self.instances.get(plugin_instance_id) else {
             eprintln!(
                 "[plugin-host-midi] preview note_on dropped instance={plugin_instance_id} reason=unknown_instance"
             );
             return;
         };
-        let key = PreviewNoteKey {
-            channel: channel.min(15),
-            pitch: pitch.min(127),
-        };
-        if instance.active_notes.contains(&key) {
-            instance
-                .pending_events
-                .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
-        }
-        let vel = velocity.clamp(1, 127) as f32 / 127.0;
-        instance
-            .pending_events
-            .push(Vst3MidiEvent::note_on(0, key.channel, key.pitch, vel));
-        if !instance.active_notes.contains(&key) {
-            instance.active_notes.push(key);
-        }
-        instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
+        instance.midi.lock().preview_note_on(channel, pitch, velocity);
         eprintln!("[plugin-host-midi] queued note_on to VSTi");
     }
 
@@ -389,122 +698,23 @@ impl PluginHostPreviewEngine {
         eprintln!(
             "[plugin-host-midi-consume] preview note_off instance={plugin_instance_id} pitch={pitch}"
         );
-        let Some(instance) = self.instances.get_mut(plugin_instance_id) else {
+        let Some(instance) = self.instances.get(plugin_instance_id) else {
             return;
         };
-        let key = PreviewNoteKey {
-            channel: channel.min(15),
-            pitch: pitch.min(127),
-        };
-        instance
-            .pending_events
-            .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
-        instance.active_notes.retain(|n| *n != key);
-        instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
+        instance.midi.lock().preview_note_off(channel, pitch);
     }
 
     pub fn preview_all_notes_off(&mut self, plugin_instance_id: &str) {
         eprintln!("[plugin-host-midi] preview all_notes_off instance={plugin_instance_id}");
-        let Some(instance) = self.instances.get_mut(plugin_instance_id) else {
+        let Some(instance) = self.instances.get(plugin_instance_id) else {
             return;
         };
-        Self::panic_instance(instance);
+        instance.midi.lock().panic();
     }
 
     pub fn midi_panic(&mut self, plugin_instance_id: &str) {
         eprintln!("[plugin-host-midi] midi_panic instance={plugin_instance_id}");
         self.preview_all_notes_off(plugin_instance_id);
-    }
-
-    fn panic_instance(instance: &mut PreviewInstance) {
-        for key in instance.active_notes.drain(..) {
-            instance
-                .pending_events
-                .push(Vst3MidiEvent::note_off(0, key.channel, key.pitch, 0.0));
-        }
-        let ch = 0u8;
-        instance
-            .pending_events
-            .push(Vst3MidiEvent::control_change(0, ch, CC_SUSTAIN, 0.0));
-        instance
-            .pending_events
-            .push(Vst3MidiEvent::control_change(0, ch, CC_ALL_NOTES_OFF, 0.0));
-        instance
-            .pending_events
-            .push(Vst3MidiEvent::control_change(0, ch, CC_ALL_SOUND_OFF, 0.0));
-        instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
-    }
-
-    /// Stage 3: apply one engine-pushed MIDI event drained from the shared ring
-    /// to the loaded instrument instance(s). Until per-instance routing exists in
-    /// the ring, the event targets every loaded preview instance (a single VSTi
-    /// is the common case). Raw status byte: high nibble = message, low nibble =
-    /// channel. Wait-free (no alloc) apart from the existing event queues.
-    pub fn apply_shared_midi(&mut self, ev: SharedMidiEvent) {
-        let channel = ev.status & 0x0F;
-        let kind = ev.status & 0xF0;
-        let ids: Vec<String> = self.instances.keys().cloned().collect();
-        for id in ids {
-            let Some(instance) = self.instances.get_mut(&id) else {
-                continue;
-            };
-            match kind {
-                // Note-on with velocity 0 is a note-off (running-status idiom).
-                0x90 if ev.data2 > 0 => {
-                    let vel = ev.data2.clamp(1, 127) as f32 / 127.0;
-                    if forensic_trace_enabled() {
-                        eprintln!(
-                            "[plugin-host-midi-consume] note_on instance={id} pitch={} offset={}",
-                            ev.data1, ev.sample_offset
-                        );
-                    }
-                    instance.pending_events.push(Vst3MidiEvent::note_on(
-                        ev.sample_offset,
-                        channel,
-                        ev.data1.min(127),
-                        vel,
-                    ));
-                    let key = PreviewNoteKey {
-                        channel: channel.min(15),
-                        pitch: ev.data1.min(127),
-                    };
-                    if !instance.active_notes.contains(&key) {
-                        instance.active_notes.push(key);
-                    }
-                    instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
-                }
-                0x80 | 0x90 => {
-                    if forensic_trace_enabled() {
-                        eprintln!(
-                            "[plugin-host-midi-consume] note_off instance={id} pitch={} offset={}",
-                            ev.data1, ev.sample_offset
-                        );
-                    }
-                    instance.pending_events.push(Vst3MidiEvent::note_off(
-                        ev.sample_offset,
-                        channel,
-                        ev.data1.min(127),
-                        0.0,
-                    ));
-                    let key = PreviewNoteKey {
-                        channel: channel.min(15),
-                        pitch: ev.data1.min(127),
-                    };
-                    instance.active_notes.retain(|n| *n != key);
-                    instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
-                }
-                0xB0 => {
-                    instance.pending_events.push(Vst3MidiEvent::control_change(
-                        ev.sample_offset,
-                        channel,
-                        ev.data1 as u16,
-                        ev.data2 as f32 / 127.0,
-                    ));
-                    instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Stage 3: render one block of all preview instruments interleaved-stereo
@@ -530,9 +740,7 @@ impl PluginHostPreviewEngine {
     }
 
     pub fn has_active_preview(&self) -> bool {
-        self.instances.values().any(|i| {
-            !i.pending_events.is_empty() || !i.active_notes.is_empty() || i.tail_blocks > 0
-        })
+        self.instances.values().any(|i| i.midi.lock().has_activity())
     }
 
     pub fn has_loaded_instances(&self) -> bool {
@@ -553,32 +761,23 @@ impl PluginHostPreviewEngine {
     ) -> (Vec<f32>, Vec<f32>) {
         let mut mix_l = vec![0.0f32; frames];
         let mut mix_r = vec![0.0f32; frames];
-        if self.instances.is_empty() {
-            return (mix_l, mix_r);
-        }
-        if !self.dsp_ready {
+        if self.instances.is_empty() || !self.dsp_ready() {
             return (mix_l, mix_r);
         }
         let mut out_l = vec![0.0f32; frames];
         let mut out_r = vec![0.0f32; frames];
-        for instance in self.instances.values_mut() {
-            let has_work = !instance.pending_events.is_empty()
-                || !instance.active_notes.is_empty()
-                || instance.tail_blocks > 0;
-            // Loaded instances always process on bridge blocks (effect passthrough).
-            let _ = has_work;
-            let events = std::mem::take(&mut instance.pending_events);
-            let _ = instance
-                .processor
-                .process_stereo_block_with_midi(in_l, in_r, &mut out_l, &mut out_r, &events);
+        for instance in self.instances.values() {
+            render_voice(
+                &instance.processor,
+                &instance.midi,
+                in_l,
+                in_r,
+                &mut out_l,
+                &mut out_r,
+            );
             for i in 0..frames {
                 mix_l[i] += out_l[i];
                 mix_r[i] += out_r[i];
-            }
-            if events.is_empty() && instance.active_notes.is_empty() {
-                instance.tail_blocks = instance.tail_blocks.saturating_sub(1);
-            } else {
-                instance.tail_blocks = PREVIEW_TAIL_BLOCKS;
             }
         }
         (mix_l, mix_r)

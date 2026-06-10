@@ -420,12 +420,12 @@ pub fn drain_commands(
                     .master_volume
                     .store(f32_store(value), Ordering::Relaxed);
             }
-            EngineCommand::SetPluginBridgeSink { track_id, sink } => match sink {
+            EngineCommand::SetPluginBridgeSink { insert_id, sink } => match sink {
                 Some(sink) => {
-                    runtime.plugin_bridge_sinks.insert(track_id, sink);
+                    runtime.plugin_bridge_sinks.insert(insert_id, sink);
                 }
                 None => {
-                    runtime.plugin_bridge_sinks.remove(&track_id);
+                    runtime.plugin_bridge_sinks.remove(&insert_id);
                 }
             },
             EngineCommand::SetBridgeEditorActive { track_id, active } => {

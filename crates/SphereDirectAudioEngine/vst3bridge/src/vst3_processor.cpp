@@ -2398,8 +2398,10 @@ void register_detached_editor_class() {
 
 HWND daux_embed_create_content_child(HWND top, int w, int h) {
   if (!top || !IsWindow(top)) return nullptr;
+  // WS_EX_NOPARENTNOTIFY: never send synchronous WM_PARENTNOTIFY up a
+  // cross-process parent chain (main-app shell) on child create/destroy/click.
   return CreateWindowExW(
-      0,
+      WS_EX_NOPARENTNOTIFY,
       kDauxEditorContentClass,
       L"",
       WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
@@ -2412,7 +2414,10 @@ HWND daux_embed_create_content_child(HWND top, int w, int h) {
 HWND daux_embed_create_top(HWND parent, int kind, int x, int y, int w, int h) {
   register_detached_editor_class();
   DWORD style = WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-  DWORD ex_style = 0;
+  // WS_EX_NOPARENTNOTIFY: in embedded (WS_CHILD) mode the parent is the
+  // main-app content HWND in another process; WM_PARENTNOTIFY would be a
+  // synchronous cross-process send. Harmless for owned/top-level kinds.
+  DWORD ex_style = WS_EX_NOPARENTNOTIFY;
   HWND hwnd_parent = nullptr;
   if (kind == 2) {
     style |= WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX |

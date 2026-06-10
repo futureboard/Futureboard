@@ -505,6 +505,7 @@ impl StudioLayout {
         }
         self.stop_native_playback(cx);
 
+        self.unload_all_bridge_plugins_for_project_close(cx);
         self.reset_project(cx);
         if !crate::shutdown::ShutdownState::global().is_shutting_down() {
             self.mark_engine_media_dirty();

@@ -147,6 +147,10 @@ pub enum HostCommand {
     AttachSharedAudio {
         name: String,
         bytes: u64,
+        /// Insert slot / plugin runtime id this region serves (one region per
+        /// instance so multi-insert FX chains get independent request/done_seq).
+        #[serde(default)]
+        plugin_instance_id: String,
     },
     /// Graceful host shutdown: detach everything and exit 0.
     Shutdown,

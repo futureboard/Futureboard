@@ -31,10 +31,10 @@ pub(crate) struct PluginBridgeRuntime {
     /// host via `ConfigureAudioBridge`. `None` until the first configure so the
     /// next `LoadPlugin` sends it first.
     audio_bridge_config: Option<(u32, u32)>,
-    /// Stage 2: the engine-created shared-memory audio region, kept mapped for
-    /// the host's lifetime. `Arc` so a Stage-3b realtime sink can share it with
-    /// the audio engine. `None` until the first `AttachSharedAudio` succeeds.
-    shared_audio: Option<Arc<sphere_plugin_host::audio_bridge::SharedAudioRegion>>,
+    /// Stage 2: one shared-memory audio region per insert instance. Each region
+    /// carries its own `request_seq` / `done_seq` so serial FX chains on one
+    /// track do not clobber each other's handshake.
+    shared_audio: HashMap<String, Arc<sphere_plugin_host::audio_bridge::SharedAudioRegion>>,
 }
 
 pub(crate) type SharedPluginBridgeRuntime = Arc<Mutex<PluginBridgeRuntime>>;
@@ -45,6 +45,29 @@ pub(super) fn bridge_enabled() -> bool {
 
 pub(super) fn legacy_in_process_enabled() -> bool {
     sphere_plugin_host::plugin_host_client::legacy_in_process_enabled()
+}
+
+/// Named shared-memory region for one insert instance.
+pub(crate) fn bridge_region_name(instance_id: &str) -> String {
+    format!(
+        "Local\\FutureboardAudioBridge-{}__{}",
+        std::process::id(),
+        instance_id
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bridge_region_name;
+
+    #[test]
+    fn bridge_region_names_are_unique_per_insert_instance() {
+        let a = bridge_region_name("insert-track1-1");
+        let b = bridge_region_name("insert-track1-2");
+        assert_ne!(a, b, "each insert instance must get its own shared region name");
+        assert!(a.contains("insert-track1-1"));
+        assert!(b.contains("insert-track1-2"));
+    }
 }
 
 impl PluginBridgeRuntime {
@@ -66,7 +89,7 @@ impl PluginBridgeRuntime {
             loaded: HashMap::new(),
             queued_events: VecDeque::new(),
             audio_bridge_config: None,
-            shared_audio: None,
+            shared_audio: HashMap::new(),
         }));
         *slot = Some(runtime.clone());
         Ok(runtime)
@@ -76,12 +99,15 @@ impl PluginBridgeRuntime {
         self.host_pid
     }
 
-    /// Stage 3b: a realtime sink over the shared audio region for the engine to
-    /// mix plugin-host DSP output into the master. `None` until the region is
-    /// established (and on non-Windows, where the mapping is unavailable).
-    pub fn audio_sink(&self) -> Option<DAUx::plugin_bridge::SharedPluginBridgeSink> {
-        let region = self.shared_audio.as_ref()?;
-        Some(sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::into_shared(region.clone()))
+    /// Stage 3b: realtime sink for one insert instance.
+    pub fn audio_sink_for(
+        &self,
+        instance_id: &str,
+    ) -> Option<DAUx::plugin_bridge::SharedPluginBridgeSink> {
+        let region = self.shared_audio.get(instance_id)?;
+        Some(sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::into_shared(
+            region.clone(),
+        ))
     }
 
     pub fn loaded_descriptor(&self, instance: &str) -> Option<BridgeLoadedPlugin> {
@@ -116,46 +142,59 @@ impl PluginBridgeRuntime {
         self.client
             .configure_audio_bridge(sample_rate, max_block_size)?;
         self.audio_bridge_config = Some((sample_rate, max_block_size));
-        // Stage 2: stand up the shared-memory audio region and map it in the host.
-        self.establish_shared_audio(sample_rate, max_block_size);
         Ok(())
     }
 
-    /// Stage 2: create the engine-owned named shared-memory region (once) and
-    /// ask the host to map it. Idempotent; logs + retains the region so the
-    /// mapping stays alive. No-op on non-Windows (mapping is Windows-only here).
-    fn establish_shared_audio(&mut self, sample_rate: u32, max_block_size: u32) {
-        if self.shared_audio.is_some() {
+    /// Stage 2: create a named shared-memory region for one insert and map it in
+    /// the host. Idempotent per `instance_id`.
+    fn establish_shared_audio_for_instance(
+        &mut self,
+        instance_id: &str,
+        sample_rate: u32,
+        max_block_size: u32,
+    ) {
+        if self.shared_audio.contains_key(instance_id) {
             return;
         }
         #[cfg(windows)]
         {
             use sphere_plugin_host::audio_bridge::SharedAudioRegion;
-            let name = format!("Local\\FutureboardAudioBridge-{}", std::process::id());
+            let name = bridge_region_name(instance_id);
             match SharedAudioRegion::create_named(&name, sample_rate, max_block_size, 2) {
                 Ok(region) => {
                     let bytes = region.bytes();
                     eprintln!(
-                        "[plugin-bridge] shared audio region created name={name} bytes={bytes} sr={sample_rate} block={max_block_size}"
+                        "[plugin-bridge] shared audio region created instance={instance_id} name={name} bytes={bytes} sr={sample_rate} block={max_block_size}"
                     );
                     eprintln!(
-                        "[plugin-bridge] sending AttachSharedAudio name={name} bytes={bytes}"
+                        "[plugin-bridge] sending AttachSharedAudio instance={instance_id} name={name} bytes={bytes}"
                     );
-                    match self.client.attach_shared_audio(name.clone(), bytes) {
-                        Ok(()) => self.shared_audio = Some(Arc::new(region)),
+                    match self.client.attach_shared_audio(
+                        name.clone(),
+                        bytes,
+                        instance_id.to_string(),
+                    ) {
+                        Ok(()) => {
+                            self.shared_audio
+                                .insert(instance_id.to_string(), Arc::new(region));
+                        }
                         Err(error) => {
-                            eprintln!("[plugin-bridge] AttachSharedAudio send failed: {error}")
+                            eprintln!(
+                                "[plugin-bridge] AttachSharedAudio send failed instance={instance_id}: {error}"
+                            )
                         }
                     }
                 }
                 Err(error) => {
-                    eprintln!("[plugin-bridge] shared audio region create failed: {error}")
+                    eprintln!(
+                        "[plugin-bridge] shared audio region create failed instance={instance_id}: {error}"
+                    )
                 }
             }
         }
         #[cfg(not(windows))]
         {
-            let _ = (sample_rate, max_block_size);
+            let _ = (instance_id, sample_rate, max_block_size);
         }
     }
 
@@ -165,14 +204,13 @@ impl PluginBridgeRuntime {
         sample_rate: u32,
         max_block_size: u32,
     ) -> Result<(), PluginHostClientError> {
-        // Stage 1: the engine owns SR/block — make sure the host is following
-        // them before the first plugin loads.
         let _ = self.configure_audio_bridge(sample_rate, max_block_size);
         let instance = descriptor.insert_id.clone();
         eprintln!(
             "[plugin-bridge] sending LoadPlugin instance={} path={}",
             instance, descriptor.plugin_path
         );
+        self.establish_shared_audio_for_instance(&instance, sample_rate, max_block_size);
         self.loaded.insert(
             instance.clone(),
             BridgeLoadedPlugin {
@@ -187,7 +225,7 @@ impl PluginBridgeRuntime {
             sample_rate,
             max_block_size,
         )?;
-        let input_channels = 0u32;
+        let input_channels = 2u32;
         let output_channels = 2u32;
         eprintln!(
             "[plugin-bridge] sending PrepareProcessing instance={instance} sr={sample_rate} block={max_block_size}"
@@ -325,6 +363,7 @@ impl PluginBridgeRuntime {
         eprintln!("[plugin-bridge] UnloadPlugin instance={plugin_instance_id}");
         let _ = self.client.unload_plugin(plugin_instance_id.clone());
         self.loaded.remove(&plugin_instance_id);
+        self.shared_audio.remove(&plugin_instance_id);
     }
 
     pub fn poll(&mut self) {
@@ -362,6 +401,7 @@ impl PluginBridgeRuntime {
             plugin_host_lifecycle::shutdown_host_client(&mut bridge.client);
             bridge.client.join_reader();
             bridge.loaded.clear();
+            bridge.shared_audio.clear();
             bridge.queued_events.clear();
             bridge.host_pid = None;
         }

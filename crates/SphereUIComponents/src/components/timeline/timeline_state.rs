@@ -1560,6 +1560,8 @@ impl PluginRuntimeBackend {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginRuntimeState {
+    /// Persisted insert restored; runtime instance not created yet.
+    NotLoaded,
     Loading,
     /// DSP instance loaded in host; not yet in audio graph.
     Loaded,
@@ -1572,6 +1574,8 @@ pub enum PluginRuntimeState {
     /// Editor UI closed; DSP instance still loaded and processing.
     EditorClosed,
     Bypassed,
+    /// Plugin binary path no longer resolves.
+    Missing(String),
     Failed(String),
     Crashed,
     Unloaded,
@@ -1586,6 +1590,8 @@ pub enum InsertLoadStatus {
     Empty,
     Loading,
     Ready,
+    /// Persisted plugin metadata present but binary not found on disk.
+    Missing(String),
     Failed(String),
     Disabled,
 }
@@ -1626,6 +1632,8 @@ pub struct InsertSlotState {
     pub runtime_state: PluginRuntimeState,
     pub host_pid: Option<u32>,
     pub parameters: Vec<PluginParameterState>,
+    /// When true, open the plugin editor once runtime reaches Active/Loaded.
+    pub pending_open_editor: bool,
 }
 
 impl InsertSlotState {
@@ -1643,6 +1651,7 @@ impl InsertSlotState {
             runtime_state: PluginRuntimeState::Unloaded,
             host_pid: None,
             parameters: Vec::new(),
+            pending_open_editor: false,
         }
     }
 
@@ -4534,6 +4543,9 @@ impl TimelineState {
             return false;
         };
         let status = match &state {
+            PluginRuntimeState::NotLoaded | PluginRuntimeState::Unloaded => {
+                InsertLoadStatus::Loading
+            }
             PluginRuntimeState::Loading | PluginRuntimeState::EditorOpening => {
                 InsertLoadStatus::Loading
             }
@@ -4543,11 +4555,11 @@ impl TimelineState {
             | PluginRuntimeState::EditorOpen
             | PluginRuntimeState::EditorClosed
             | PluginRuntimeState::Bypassed => InsertLoadStatus::Ready,
+            PluginRuntimeState::Missing(message) => InsertLoadStatus::Missing(message.clone()),
             PluginRuntimeState::Failed(message) => InsertLoadStatus::Failed(message.clone()),
             PluginRuntimeState::Crashed => {
                 InsertLoadStatus::Failed("Plugin host crashed".to_string())
             }
-            PluginRuntimeState::Unloaded => InsertLoadStatus::Disabled,
         };
         let changed = slot.runtime_backend != backend
             || slot.runtime_state != state
@@ -4660,6 +4672,38 @@ impl TimelineState {
         }
         slot.load_status = status;
         true
+    }
+
+    pub fn set_insert_pending_editor_open(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        pending: bool,
+    ) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return false;
+        };
+        let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+            return false;
+        };
+        if slot.pending_open_editor == pending {
+            return false;
+        }
+        slot.pending_open_editor = pending;
+        true
+    }
+
+    pub fn take_pending_insert_editor_opens(&mut self) -> Vec<(String, usize, String)> {
+        let mut pending = Vec::new();
+        for track in &mut self.tracks {
+            for (index, slot) in track.inserts.iter_mut().enumerate() {
+                if slot.pending_open_editor {
+                    slot.pending_open_editor = false;
+                    pending.push((track.id.clone(), index, slot.id.clone()));
+                }
+            }
+        }
+        pending
     }
 
     /// Add an aux send from `track_id` to the first Bus/Return track that
@@ -5795,10 +5839,33 @@ impl TimelineState {
         changed
     }
 
+    /// Retarget the stable asset id (`file_id`) for every clip sharing `old_key`.
+    /// Used after copy-into-project so the cache key matches the saved project
+    /// relative path. Returns `true` if any clip changed.
+    pub fn retarget_audio_asset_id(&mut self, old_key: &str, new_key: &str) -> bool {
+        if old_key == new_key {
+            return false;
+        }
+        let mut changed = false;
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if clip.audio_asset_key() != Some(old_key) {
+                    continue;
+                }
+                if let ClipType::Audio { file_id, .. } = &mut clip.clip_type {
+                    if file_id.as_str() != new_key {
+                        *file_id = new_key.to_string();
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     /// Point every clip sharing `asset_key` at a new resolvable `source_path`
-    /// (e.g. after copying the source into the project folder). The asset id
-    /// (`file_id`) is left untouched, so the waveform/import binding — keyed on
-    /// the asset id — is unaffected. Returns `true` if any clip changed.
+    /// (e.g. after copying the source into the project folder). Returns `true`
+    /// if any clip changed.
     pub fn retarget_audio_source(&mut self, asset_key: &str, new_source_path: &str) -> bool {
         let mut changed = false;
         for track in &mut self.tracks {

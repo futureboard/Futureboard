@@ -993,7 +993,8 @@ fn plugin_state_label(slot: &InsertSlotState) -> String {
         InsertLoadStatus::Ready if slot.bypassed => "Bypassed".to_string(),
         InsertLoadStatus::Ready if !slot.enabled => "Disabled".to_string(),
         InsertLoadStatus::Ready => "Ready".to_string(),
-        InsertLoadStatus::Failed(message) => format!("Missing / Failed: {message}"),
+        InsertLoadStatus::Missing(message) => format!("Missing: {message}"),
+        InsertLoadStatus::Failed(message) => format!("Failed: {message}"),
         InsertLoadStatus::Disabled => "Disabled".to_string(),
     }
 }

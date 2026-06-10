@@ -11,17 +11,28 @@ pub const THAI_FONT_FAMILY: &str = "Google Sans";
 pub const WINDOWS_THAI_UI_FONT_FAMILY: &str = "Leelawadee UI";
 pub const WINDOWS_THAI_FALLBACK_FONT_FAMILY: &str = "Noto Sans Thai";
 
+/// System sans fallbacks when embedded fonts are unavailable.
+pub const SYSTEM_UI_FONT_FAMILY: &str = "Segoe UI";
+
 /// Alias kept for callsites that want an explicit "display" name. Points at
 /// the same variable family.
 pub const DISPLAY_FONT_FAMILY: &str = FONT_FAMILY;
 
-pub fn ui_font() -> Font {
-    let mut font = font(FONT_FAMILY);
-    font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+/// Central UI font fallback stack (Latin → Thai → system).
+pub fn ui_font_fallback_stack() -> Vec<String> {
+    vec![
+        FONT_FAMILY.to_string(),
         WINDOWS_THAI_UI_FONT_FAMILY.to_string(),
         WINDOWS_THAI_FALLBACK_FONT_FAMILY.to_string(),
         THAI_FONT_FAMILY.to_string(),
-    ]));
+        SYSTEM_UI_FONT_FAMILY.to_string(),
+        "Arial".to_string(),
+    ]
+}
+
+pub fn ui_font() -> Font {
+    let mut font = font(FONT_FAMILY);
+    font.fallbacks = Some(FontFallbacks::from_fonts(ui_font_fallback_stack()));
     font
 }
 
@@ -38,22 +49,41 @@ pub fn ui_font_for_language(language_code: &str) -> Font {
             WINDOWS_THAI_FALLBACK_FONT_FAMILY.to_string(),
             THAI_FONT_FAMILY.to_string(),
             FONT_FAMILY.to_string(),
+            SYSTEM_UI_FONT_FAMILY.to_string(),
         ]));
         return font;
     }
     ui_font()
 }
 
+/// Compact DAW typography tokens (logical px — GPUI/DWrite scale for DPI).
+pub mod typography {
+    /// Small metadata labels (dB scale, channel index).
+    pub const UI_XS: f32 = 11.0;
+    /// Default UI body / toolbar / track header label.
+    pub const UI_SM: f32 = 12.0;
+    /// Section headers, dialog titles, emphasized labels.
+    pub const UI_MD: f32 = 13.0;
+    /// Semibold section / panel titles.
+    pub const UI_TITLE: f32 = 13.0;
+    /// Native plugin editor wrapper titlebar (Pro-C 3, etc.).
+    pub const PLUGIN_TITLE: f32 = 12.0;
+    /// Default line-height ratio for single-line chrome text.
+    pub const LINE_HEIGHT: f32 = 1.3;
+}
+
 /// Recommended text sizes. Kept here so individual components don't drift.
 pub mod text {
+    use super::typography::*;
+
     /// Caps-style sublabels — INSERTS / SENDS / TRACK.
-    pub const CAPS: f32 = 8.0;
+    pub const CAPS: f32 = UI_XS;
     /// Small meta (CH 01, dB scale).
-    pub const META: f32 = 9.0;
+    pub const META: f32 = UI_XS;
     /// Standard UI label (track name, button label).
-    pub const UI: f32 = 11.0;
+    pub const UI: f32 = UI_SM;
     /// Inspector / title text.
-    pub const TITLE: f32 = 12.0;
+    pub const TITLE: f32 = UI_MD;
 }
 
 pub mod menu {
@@ -65,9 +95,9 @@ pub mod menu {
     pub const CHECK_SLOT_W: f32 = 18.0;
     pub const ICON_SIZE: f32 = 11.0;
     pub const CHEVRON_SIZE: f32 = 11.0;
-    pub const LABEL_TEXT_SIZE: f32 = 10.5;
-    pub const META_TEXT_SIZE: f32 = 10.0;
-    pub const HEADER_TEXT_SIZE: f32 = 10.0;
+    pub const LABEL_TEXT_SIZE: f32 = crate::theme::typography::UI_SM;
+    pub const META_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
+    pub const HEADER_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
     pub const HEADER_HEIGHT: f32 = 21.0;
     pub const SEPARATOR_MARGIN_Y: f32 = 3.0;
     pub const ITEM_GAP: f32 = 1.0;

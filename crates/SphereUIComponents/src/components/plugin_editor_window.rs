@@ -1020,6 +1020,9 @@ impl PluginEditorWindow {
             })
             | ClientEvent::Host(HostEvent::EditorPreferredSize {
                 plugin_instance_id, ..
+            })
+            | ClientEvent::Host(HostEvent::EditorUnresponsive {
+                plugin_instance_id, ..
             }) => Some(plugin_instance_id.as_str()),
             _ => None,
         }
@@ -1084,6 +1087,13 @@ impl PluginEditorWindow {
             }
             ClientEvent::Host(HostEvent::EditorClosed { .. }) => {
                 eprintln!("[plugin-view][host] EditorClosed editor_id={id}");
+            }
+            ClientEvent::Host(HostEvent::EditorUnresponsive { gap_ms, .. }) => {
+                // Freeze-watchdog notification; the host usually recovers, so
+                // log only — the close path stays available in this process.
+                eprintln!(
+                    "[plugin-view][host] EditorUnresponsive editor_id={id} gap_ms={gap_ms}"
+                );
             }
             ClientEvent::Host(HostEvent::EditorContentResize {
                 plugin_instance_id,
@@ -1310,14 +1320,14 @@ impl PluginEditorWindow {
             .p(px(20.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(crate::theme::typography::UI_MD))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(Colors::text_primary())
                     .child(self.display_name.clone()),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(crate::theme::typography::UI_SM))
                     .text_color(Colors::text_secondary())
                     .child(headline.to_string()),
             )
@@ -1332,7 +1342,7 @@ impl PluginEditorWindow {
             .rounded_md()
             .cursor(gpui::CursorStyle::PointingHand)
             .bg(Colors::accent_muted())
-            .text_size(px(11.0))
+            .text_size(px(crate::theme::typography::UI_SM))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(Colors::accent_primary())
             .hover(|s| s.bg(Colors::surface_control_hover()))
@@ -1346,7 +1356,7 @@ impl PluginEditorWindow {
             .rounded_md()
             .cursor(gpui::CursorStyle::PointingHand)
             .bg(Colors::surface_raised())
-            .text_size(px(11.0))
+            .text_size(px(crate::theme::typography::UI_SM))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(Colors::text_secondary())
             .hover(|s| s.bg(Colors::surface_control_hover()))
@@ -1364,14 +1374,14 @@ impl PluginEditorWindow {
             .p(px(20.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(crate::theme::typography::UI_MD))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(Colors::text_primary())
                     .child(self.display_name.clone()),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(crate::theme::typography::UI_SM))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(Colors::status_error())
                     .child("Editor failed to open"),
@@ -1379,7 +1389,7 @@ impl PluginEditorWindow {
             .child(
                 div()
                     .max_w(px(560.0))
-                    .text_size(px(11.0))
+                    .text_size(px(crate::theme::typography::UI_SM))
                     .text_color(Colors::text_secondary())
                     .child(err.to_string()),
             )

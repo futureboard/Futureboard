@@ -212,6 +212,14 @@ pub enum HostEvent {
     },
     /// Editor view detached (`IPlugView::removed` called).
     EditorClosed { plugin_instance_id: String },
+    /// Freeze watchdog: the host UI thread's message pump stalled for
+    /// `gap_ms` while this editor was open. The main app may surface a
+    /// "plugin editor not responding" hint; the editor close path stays
+    /// available because the wrapper window lives in the main process.
+    EditorUnresponsive {
+        plugin_instance_id: String,
+        gap_ms: u64,
+    },
     /// Plugin instance released.
     PluginUnloaded { plugin_instance_id: String },
     /// Out-of-band log line (host-side diagnostics surfaced to the client).

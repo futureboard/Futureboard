@@ -88,6 +88,10 @@ impl PluginBridgeRuntime {
         self.loaded.get(instance).cloned()
     }
 
+    pub fn loaded_instance_ids(&self) -> Vec<String> {
+        self.loaded.keys().cloned().collect()
+    }
+
     pub fn loaded_for_track(&self, track_id: &str) -> Option<BridgeLoadedPlugin> {
         self.loaded
             .values()

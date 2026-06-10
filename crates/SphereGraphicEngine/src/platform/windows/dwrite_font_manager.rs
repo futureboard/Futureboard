@@ -95,7 +95,7 @@ unsafe fn load_embedded_fonts(
         if bytes.is_empty() {
             continue;
         }
-        if loader
+        match loader
             .CreateInMemoryFontFileReference(
                 factory,
                 bytes.as_ptr().cast(),
@@ -103,9 +103,14 @@ unsafe fn load_embedded_fonts(
                 None,
             )
             .and_then(|file| builder.AddFontFile(&file))
-            .is_ok()
         {
-            loaded += 1;
+            Ok(()) => {
+                loaded += 1;
+                eprintln!("[Fonts] loaded embedded font bytes={}", bytes.len());
+            }
+            Err(err) => {
+                eprintln!("[Fonts] failed embedded font bytes={} error={err}", bytes.len());
+            }
         }
     }
     loaded

@@ -16,9 +16,10 @@ use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteBitmapRenderTarget, IDWritePixelSnapping_Impl, IDWriteRenderingParams,
     IDWriteTextFormat1, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_MATRIX,
-    DWRITE_MEASURING_MODE, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_METRICS,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateSolidBrush, DeleteObject, FillRect, HDC, SRCCOPY,
@@ -71,22 +72,54 @@ impl DWriteTextRenderer {
         align: TextAlign,
         dpi_scale: f32,
     ) -> bool {
+        self.draw_text_with_line_height(
+            hdc,
+            rect,
+            text,
+            family,
+            weight,
+            em_px,
+            bg,
+            fg,
+            align,
+            dpi_scale,
+            em_px * 1.3,
+        )
+    }
+
+    pub fn draw_text_with_line_height(
+        &self,
+        hdc: HDC,
+        rect: RECT,
+        text: &str,
+        family: &str,
+        weight: u32,
+        em_px: f32,
+        bg: COLORREF,
+        fg: COLORREF,
+        align: TextAlign,
+        dpi_scale: f32,
+        line_height_px: f32,
+    ) -> bool {
         let w = (rect.right - rect.left).max(0);
         let h = (rect.bottom - rect.top).max(0);
         if w == 0 || h == 0 || text.is_empty() {
             return false;
         }
 
+        let scaled_em = em_px * dpi_scale.max(1.0);
+        let scaled_line = line_height_px * dpi_scale.max(1.0);
         let layout = unsafe {
             create_text_layout(
                 &self.manager,
                 text,
                 family,
                 weight,
-                em_px,
+                scaled_em,
                 w as f32,
                 h as f32,
                 align,
+                scaled_line,
             )
         };
         let Some(layout) = layout else {
@@ -98,7 +131,7 @@ impl DWriteTextRenderer {
             return false;
         }
 
-        unsafe { draw_layout(&self.manager, hdc, rect, w, h, &layout, bg, fg, dpi_scale) }
+        unsafe { draw_layout(&self.manager, hdc, rect, w, h, &layout, bg, fg, align, dpi_scale) }
     }
 }
 
@@ -249,6 +282,7 @@ unsafe fn create_text_layout(
     max_w: f32,
     max_h: f32,
     align: TextAlign,
+    line_height_px: f32,
 ) -> Option<IDWriteTextLayout> {
     let (collection, resolved_name, _) = pick_collection(manager, family, weight);
     let family_h = HSTRING::from(resolved_name.as_str());
@@ -272,6 +306,10 @@ unsafe fn create_text_layout(
             DWRITE_TEXT_ALIGNMENT_LEADING,
             DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
         ),
+        TextAlign::LeftMiddle => (
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+        ),
         TextAlign::Center => (
             DWRITE_TEXT_ALIGNMENT_CENTER,
             DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
@@ -279,6 +317,12 @@ unsafe fn create_text_layout(
     };
     let _ = format.SetTextAlignment(text_align);
     let _ = format.SetParagraphAlignment(para_align);
+    let line_height = line_height_px.max(em_px);
+    let _ = format.SetLineSpacing(
+        DWRITE_LINE_SPACING_METHOD_UNIFORM,
+        line_height,
+        em_px,
+    );
 
     let wide: Vec<u16> = text.encode_utf16().collect();
     manager
@@ -297,6 +341,7 @@ unsafe fn draw_layout(
     layout: &IDWriteTextLayout,
     bg: COLORREF,
     fg: COLORREF,
+    align: TextAlign,
     dpi_scale: f32,
 ) -> bool {
     let Ok(brt) = manager
@@ -324,7 +369,12 @@ unsafe fn draw_layout(
         x if x.is_finite() => x.max(0.0),
         _ => 0.0,
     };
-    let origin_y = ((h as f32 - metrics.height) / 2.0).max(0.0);
+    // Paragraph CENTER alignment already vertically centers within the layout
+    // box — do not add a second offset or glyphs render outside the bitmap.
+    let origin_y = match align {
+        TextAlign::LeftMiddle | TextAlign::Center => 0.0,
+        TextAlign::Left => ((h as f32 - metrics.height) / 2.0).max(0.0),
+    };
 
     let ctx = DrawContext {
         brt,

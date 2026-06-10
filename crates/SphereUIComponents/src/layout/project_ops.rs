@@ -855,6 +855,7 @@ impl StudioLayout {
         match load_project(&path) {
             Ok(project) => {
                 project_lifecycle_log!("loaded project file: {}", path.display());
+                let project_for_restore = project.clone();
                 let _ = self.timeline.update(cx, |timeline, cx| {
                     timeline.reset_input_state();
                     apply_to_timeline(&project, &mut timeline.state);
@@ -879,7 +880,19 @@ impl StudioLayout {
                     .push(&project.name, path.clone(), now_secs());
                 self.sync_recent_to_switcher();
                 self.mark_engine_media_dirty();
+                self.restore_plugin_inserts_after_project_load(cx);
                 self.schedule_audio_project_sync(cx, true, "project_loaded");
+                if let Some(root) = path.parent().map(PathBuf::from) {
+                    let timeline = self.timeline.clone();
+                    let layout = cx.entity().clone();
+                    crate::components::timeline::audio_import::schedule_project_waveform_restore(
+                        &project_for_restore,
+                        root,
+                        timeline,
+                        layout,
+                        cx,
+                    );
+                }
                 cx.notify();
             }
             Err(e) => {

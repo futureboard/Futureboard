@@ -6,7 +6,7 @@
 //! request the next one. All methods are wait-free — they only touch the
 //! lock-free shared region (atomics + raw buffer copies), never allocate or lock.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use DAUx::plugin_bridge::{PluginBridgeSink, SharedPluginBridgeSink};
@@ -16,6 +16,13 @@ use crate::audio_bridge::{SharedAudioRegion, SharedMidiEvent, MAX_BLOCK_FRAMES};
 /// Wraps the engine-side shared audio region as a realtime [`PluginBridgeSink`].
 pub struct SharedRegionSink {
     region: Arc<SharedAudioRegion>,
+    /// `done_seq` of the last block this sink actually returned from
+    /// [`PluginBridgeSink::read_output`]. Freshness guard: when the host has
+    /// not produced a new block since the last read (its service thread is
+    /// stalled behind an editor open/close or a plugin load), `read_output`
+    /// returns 0 so the engine bypasses/silences the block instead of
+    /// replaying the stale `audio_out` contents every callback.
+    last_read_seq: AtomicU64,
 }
 
 impl std::fmt::Debug for SharedRegionSink {
@@ -28,7 +35,10 @@ impl std::fmt::Debug for SharedRegionSink {
 
 impl SharedRegionSink {
     pub fn new(region: Arc<SharedAudioRegion>) -> Self {
-        Self { region }
+        Self {
+            region,
+            last_read_seq: AtomicU64::new(0),
+        }
     }
 
     /// Wrap as the trait object the engine holds.
@@ -43,14 +53,19 @@ impl PluginBridgeSink for SharedRegionSink {
     }
 
     fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
+        let bridge = self.region.bridge();
+        // Freshness guard: only hand a produced block to the engine once. When
+        // the host misses its deadline (editor open/close or plugin load holds
+        // its engine lock), `done_seq` stops advancing and we return 0 — the
+        // engine bypasses/silences the block. Never replay stale output.
+        let done = bridge.done_seq.load(Ordering::Acquire);
+        if done == self.last_read_seq.load(Ordering::Relaxed) {
+            return 0;
+        }
+        self.last_read_seq.store(done, Ordering::Relaxed);
         // SAFETY: the engine consumes `audio_out` while it holds the block (the
         // host waits on `done_seq` before producing the next one).
-        unsafe {
-            self.region
-                .bridge()
-                .audio_out
-                .read_deinterleaved(out_l, out_r, frames)
-        }
+        unsafe { bridge.audio_out.read_deinterleaved(out_l, out_r, frames) }
     }
 
     fn push_midi(&self, status: u8, data1: u8, data2: u8, sample_offset: u32) {
@@ -110,6 +125,8 @@ mod tests {
         }
         // SAFETY: single-threaded test; no concurrent reader.
         unsafe { region.bridge().audio_out.write_interleaved(&interleaved) };
+        // The host publishes the produced block by bumping `done_seq`.
+        region.bridge().done_seq.store(1, Ordering::Release);
 
         let mut out_l = [0.0f32; 8];
         let mut out_r = [0.0f32; 8];
@@ -119,6 +136,15 @@ mod tests {
             assert_eq!(out_l[i], i as f32);
             assert_eq!(out_r[i], -(i as f32));
         }
+
+        // Freshness guard: the same produced block is never handed out twice —
+        // a stalled host yields 0 (engine bypasses) instead of stale audio.
+        let again = sink.read_output(&mut out_l[..frames], &mut out_r[..frames], frames);
+        assert_eq!(again, 0);
+        // Once the host produces the next block, reads resume.
+        region.bridge().done_seq.store(2, Ordering::Release);
+        let fresh = sink.read_output(&mut out_l[..frames], &mut out_r[..frames], frames);
+        assert_eq!(fresh, frames);
 
         // request_block sets block_frames and advances request_seq (the host's
         // service loop fires when request_seq != done_seq).

@@ -179,6 +179,16 @@ impl AudioEngine {
         self.inner.get_version()
     }
 
+    /// Current transport play flag (set/cleared only by Start/StopTransport).
+    pub fn transport_playing(&self) -> bool {
+        self.inner.transport_playing()
+    }
+
+    /// Current lifecycle gate of the realtime callback.
+    pub fn engine_state(&self) -> crate::engine::AudioEngineState {
+        self.inner.engine_state()
+    }
+
     /// Open the audio stream and start it. The stream stays paused at the
     /// transport level — use [`AudioEngine::play`] to advance the
     /// timeline once playback work is wired up.

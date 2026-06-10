@@ -74,28 +74,30 @@ mod imp {
     use windows::core::{w, BOOL, PCWSTR};
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-        GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
-        SelectObject, SetBkMode, SetTextColor, UpdateWindow, BLACK_BRUSH, DT_END_ELLIPSIS, DT_LEFT,
-        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, MONITOR_DEFAULTTONEAREST,
-        MONITOR_DEFAULTTOPRIMARY, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_INVALIDATE,
-        RDW_UPDATENOW, TRANSPARENT,
+        BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+        FillRect, GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
+        SelectObject, SetBkMode, SetTextColor, UpdateWindow, BLACK_BRUSH, DEFAULT_CHARSET,
+        CLIP_DEFAULT_PRECIS, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+        FF_DONTCARE, FONT_QUALITY,
+        FW_MEDIUM, HBRUSH, HDC, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, OUT_TT_PRECIS,
+        PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
     };
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, ScreenToClient, MONITORINFO};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+        ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-        GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsZoomed, LoadCursorW,
-        RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-        GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW,
-        MINMAXINFO, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE,
+        ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+        GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW,
+        IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU,
+        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+        HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG, PM_REMOVE,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, TranslateMessage, WINDOW_EX_STYLE,
         WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_GETMINMAXINFO,
         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE,
         WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT, WM_PAINT, WM_SIZE, WNDCLASSW,
@@ -158,13 +160,13 @@ mod imp {
             glyph_active: rgb(245, 246, 248),
             button_hover: rgb(45, 47, 53),
             close_hover: rgb(196, 43, 43),
-            titlebar_h: 34,
+            titlebar_h: 32,
             border_px: 1,
             button_w: 46,
             resize_grab: 6,
             title_pad: 12,
-            title_em: font.title_size,
-            status_em: font.body_size,
+            title_em: crate::theme::typography::PLUGIN_TITLE,
+            status_em: crate::theme::typography::UI_SM,
             font,
         }
     }
@@ -194,8 +196,195 @@ mod imp {
         scaled(hwnd, theme().titlebar_h)
     }
 
+    /// Logical title line height for vertically centered single-line chrome text.
+    fn title_line_height_logical() -> f32 {
+        16.0
+    }
+
+    /// Hit-test trace: WM_NCHITTEST fires on every mouse move, so this is
+    /// debug-gated AND throttled (max 2/sec) — never an unbounded flood.
+    fn log_hit_test(kind: &str, x: i32, y: i32) {
+        static HIT_TEST_RATE: crate::forensic_trace::LogRateLimiter =
+            crate::forensic_trace::LogRateLimiter::new(2);
+        if crate::forensic_trace::plugin_trace_enabled() && HIT_TEST_RATE.allow() {
+            eprintln!("[PluginEditor] hit_test {kind} x={x} y={y} (throttled 2/sec)");
+        }
+    }
+
+    /// Click-path diagnostic on the content window (spec item 9): where did
+    /// the click land, what would hit-test resolve to, and who holds focus and
+    /// capture. Throttled to 4/sec; kept in safe mode (it is the minimal
+    /// "focus/capture summary on click").
+    fn log_click_path(content: HWND, x: i32, y: i32) {
+        static CLICK_RATE: crate::forensic_trace::LogRateLimiter =
+            crate::forensic_trace::LogRateLimiter::new(4);
+        if !CLICK_RATE.allow() {
+            return;
+        }
+        use windows::Win32::Graphics::Gdi::ClientToScreen;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus, IsWindowEnabled};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetAncestor, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+            WindowFromPoint, GA_ROOT,
+        };
+        fn class_of(hwnd: HWND) -> String {
+            if hwnd.0.is_null() {
+                return String::new();
+            }
+            let mut buf = [0u16; 64];
+            let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+            if len > 0 {
+                String::from_utf16_lossy(&buf[..len as usize])
+            } else {
+                String::new()
+            }
+        }
+        unsafe {
+            let mut screen = POINT { x, y };
+            let _ = ClientToScreen(content, &mut screen);
+            let wfp = WindowFromPoint(screen);
+            let child = ChildWindowFromPoint(content, POINT { x, y });
+            let top = GetAncestor(content, GA_ROOT);
+            let focus = GetFocus();
+            let capture = GetCapture();
+            let mut wfp_pid = 0u32;
+            let wfp_tid = GetWindowThreadProcessId(wfp, Some(&mut wfp_pid));
+            eprintln!(
+                "[PluginClickPath][shell] client=({x},{y}) screen=({},{}) content=0x{:x} \
+                 top=0x{:x} child_from_point=0x{:x} child_class='{}'",
+                screen.x,
+                screen.y,
+                content.0 as u64,
+                top.0 as u64,
+                child.0 as u64,
+                class_of(child),
+            );
+            eprintln!(
+                "[PluginClickPath][shell] window_from_point=0x{:x} wfp_class='{}' wfp_enabled={} \
+                 wfp_visible={} wfp_tid={wfp_tid} wfp_pid={wfp_pid} our_pid={} focus=0x{:x} \
+                 capture=0x{:x}",
+                wfp.0 as u64,
+                class_of(wfp),
+                IsWindowEnabled(wfp).as_bool(),
+                IsWindowVisible(wfp).as_bool(),
+                std::process::id(),
+                focus.0 as u64,
+                capture.0 as u64,
+            );
+        }
+    }
+
+    fn focus_deepest_plugin_child(content: HWND, x: i32, y: i32) {
+        unsafe {
+            let pt = POINT { x, y };
+            let mut target = ChildWindowFromPoint(content, pt);
+            if target == content || target.0.is_null() {
+                target = content;
+            }
+            let _ = SetFocus(Some(target));
+            eprintln!(
+                "[PluginEditor] forwarding/focus plugin hwnd=0x{:x}",
+                target.0 as u64
+            );
+        }
+    }
+
+    /// True if `hwnd` is a real Win32 dialog (class `#32770`). The shell and
+    /// content windows are NOT dialogs; running `IsDialogMessageW` against them
+    /// swallows Tab/arrow/Enter/Escape keystrokes meant for plugin controls.
+    fn is_dialog_class(hwnd: HWND) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut buf = [0u16; 16];
+        let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+        len > 0 && String::from_utf16_lossy(&buf[..len as usize]) == "#32770"
+    }
+
+    /// Nearest `#32770` dialog in the parent chain (including `hwnd` itself).
+    /// `IsDialogMessageW` may only run against this — a message targeting a
+    /// dialog *descendant* (e.g. a button) still needs dialog routing, while a
+    /// non-dialog target must never be fed to IsDialogMessage.
+    fn dialog_ancestor(hwnd: HWND) -> Option<HWND> {
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_PARENT};
+        let mut cur = hwnd;
+        let mut depth = 0;
+        while !cur.0.is_null() && depth < 32 {
+            if is_dialog_class(cur) {
+                return Some(cur);
+            }
+            cur = unsafe { GetAncestor(cur, GA_PARENT) };
+            depth += 1;
+        }
+        None
+    }
+
+    fn pump_shell_messages(top: HWND, content: HWND) {
+        let _ = content;
+        // Bounded drain: a message storm can never wedge the GPUI main thread
+        // here; the caller re-pumps next tick.
+        const MAX_PUMP_PER_CALL: u32 = 256;
+        unsafe {
+            let mut msg = MSG::default();
+            let mut pumped = 0u32;
+            while pumped < MAX_PUMP_PER_CALL
+                && PeekMessageW(&mut msg, Some(top), 0, 0, PM_REMOVE).as_bool()
+            {
+                let _ = TranslateMessage(&msg);
+                if let Some(dialog) = dialog_ancestor(msg.hwnd) {
+                    if IsDialogMessageW(dialog, &mut msg).as_bool() {
+                        pumped += 1;
+                        continue;
+                    }
+                }
+                DispatchMessageW(&msg);
+                pumped += 1;
+            }
+            if pumped > 0 {
+                static PUMP_TICK: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let n = PUMP_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n % 120 == 0 {
+                    eprintln!("[PluginEditor] modal/dialog message pump active drained={pumped}");
+                }
+            }
+        }
+    }
+
     fn border_w(hwnd: HWND) -> i32 {
         scaled(hwnd, theme().border_px).max(1)
+    }
+
+    /// Desired shell **client** size from plugin content + chrome (spec Part 2).
+    fn shell_client_size(content_w: i32, content_h: i32, titlebar_h: i32, border: i32) -> (i32, i32) {
+        (
+            content_w.max(1),
+            (content_h.max(1) + titlebar_h + border).max(1),
+        )
+    }
+
+    /// Map a target client rect to outer window dimensions (DPI-aware).
+    fn outer_size_for_client(hwnd: HWND, client_w: i32, client_h: i32) -> (i32, i32) {
+        let style = unsafe { WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32) };
+        let ex_style = WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 });
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let dpi = if dpi == 0 { 96 } else { dpi };
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: client_w.max(1),
+            bottom: client_h.max(1),
+        };
+        unsafe {
+            if AdjustWindowRectExForDpi(&mut rect, style, false, ex_style, dpi).is_ok() {
+                return (
+                    (rect.right - rect.left).max(1),
+                    (rect.bottom - rect.top).max(1),
+                );
+            }
+        }
+        (client_w.max(1), client_h.max(1))
     }
 
     /// Authoritative layout for the native borderless shell (spec Part 1).
@@ -264,17 +453,19 @@ mod imp {
         let prev_y = inner.last_layout_y.load(Ordering::Relaxed);
         let prev_w = inner.last_layout_w.load(Ordering::Relaxed);
         let prev_h = inner.last_layout_h.load(Ordering::Relaxed);
+        let content_y = layout.titlebar_h.max(layout.content_y);
         let changed = prev_x != layout.content_x
-            || prev_y != layout.content_y
+            || prev_y != content_y
             || prev_w != layout.content_w
             || prev_h != layout.content_h;
+        // Plugin child HWND must live strictly below the custom titlebar.
         if content_raw != 0 {
             let content = hwnd_from(content_raw);
             let _ = SetWindowPos(
                 content,
                 Some(HWND_TOP),
                 layout.content_x,
-                layout.content_y,
+                content_y,
                 layout.content_w,
                 layout.content_h,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
@@ -283,16 +474,27 @@ mod imp {
                 eprintln!(
                     "[plugin-editor-window] SetWindowPos content_hwnd=0x{content_raw:x} \
                      x={} y={} w={} h={}",
-                    layout.content_x, layout.content_y, layout.content_w, layout.content_h
+                    layout.content_x, content_y, layout.content_w, layout.content_h
                 );
             }
+        }
+        if changed || crate::forensic_trace::shell_layout_trace_enabled() {
+            eprintln!("[PluginEditor] titlebar_h={}", layout.titlebar_h);
+            eprintln!(
+                "[PluginEditor] plugin_child_rect x={} y={} w={} h={}",
+                layout.content_x, content_y, layout.content_w, layout.content_h
+            );
+            eprintln!(
+                "[PluginEditor] top_client={}x{}",
+                layout.client_w, layout.client_h
+            );
         }
         inner
             .last_layout_x
             .store(layout.content_x, Ordering::Relaxed);
         inner
             .last_layout_y
-            .store(layout.content_y, Ordering::Relaxed);
+            .store(content_y, Ordering::Relaxed);
         inner
             .last_layout_w
             .store(layout.content_w, Ordering::Relaxed);
@@ -648,6 +850,58 @@ mod imp {
         }
     }
 
+    unsafe fn paint_title_gdi(
+        hdc: HDC,
+        trc: RECT,
+        title: &str,
+        em_px: f32,
+        fg: COLORREF,
+        dpi_scale: f32,
+    ) {
+        let mut buf: Vec<u16> = title.encode_utf16().collect();
+        let mut g = trc;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, fg);
+        let height = (-(em_px * dpi_scale).round() as i32).max(-1);
+        let family: Vec<u16> = crate::theme::SYSTEM_UI_FONT_FAMILY
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let font = CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            FW_MEDIUM.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_TT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            FONT_QUALITY(0),
+            FF_DONTCARE.0 as u32,
+            PCWSTR(family.as_ptr()),
+        );
+        let old_font = if font.is_invalid() {
+            None
+        } else {
+            Some(SelectObject(hdc, font.into()))
+        };
+        let _ = DrawTextW(
+            hdc,
+            &mut buf,
+            &mut g,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+        if let Some(old) = old_font {
+            let _ = SelectObject(hdc, old);
+        }
+        if !font.is_invalid() {
+            let _ = DeleteObject(font.into());
+        }
+    }
+
     fn paint_shell_titlebar(hwnd: HWND, inner: &ShellInner) {
         let mut ps = PAINTSTRUCT::default();
         let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
@@ -682,18 +936,29 @@ mod imp {
             let _ = DeleteObject(bg.into());
         }
 
-        // Title text — DirectWrite (spec Part 2), GDI fallback (Part 9).
+        // Title text — DirectWrite (spec Part 2), Segoe UI GDI fallback (Part 9).
         let title = inner.title.lock().map(|t| t.clone()).unwrap_or_default();
         if !title.is_empty() {
             let pad = (t.title_pad as f32 * scale).round() as i32;
+            let button_area = 3 * button_w(hwnd);
             let trc = RECT {
                 left: pad,
                 top: 0,
-                right: (cw - 3 * button_w(hwnd) - pad).max(pad),
+                right: (cw - button_area - pad).max(pad + 1),
                 bottom: th,
             };
-            let em = t.title_em * scale;
-            let drew = crate::components::plugin_shell_text::draw_text(
+            // Font size is logical px; DirectWrite scales via pixels_per_dip.
+            let em = t.title_em;
+            static TITLE_LOG: Once = Once::new();
+            TITLE_LOG.call_once(|| {
+                eprintln!(
+                    "[PluginEditor] title_font_family={}",
+                    t.font.family_primary
+                );
+                eprintln!("[PluginEditor] title_font_size={em}");
+                eprintln!("[PluginEditor] title_text={title}");
+            });
+            let drew = crate::components::plugin_shell_text::draw_text_with_line_height(
                 hdc,
                 trc,
                 &title,
@@ -702,21 +967,13 @@ mod imp {
                 em,
                 t.titlebar_bg,
                 title_fg,
-                crate::components::plugin_shell_text::TextAlign::Left,
+                crate::components::plugin_shell_text::TextAlign::LeftMiddle,
                 scale,
+                title_line_height_logical(),
             );
             if !drew {
-                let mut buf: Vec<u16> = title.encode_utf16().collect();
-                let mut g = trc;
                 unsafe {
-                    SetBkMode(hdc, TRANSPARENT);
-                    SetTextColor(hdc, title_fg);
-                    let _ = DrawTextW(
-                        hdc,
-                        &mut buf,
-                        &mut g,
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-                    );
+                    paint_title_gdi(hdc, trc, &title, em, title_fg, scale);
                 }
             }
         }
@@ -874,17 +1131,24 @@ mod imp {
                         return LRESULT(HTBOTTOM as isize);
                     }
                 }
-                if pt.y < titlebar_h(hwnd) {
+                let th = titlebar_h(hwnd);
+                if pt.y < th {
+                    log_hit_test("titlebar", pt.x, pt.y);
                     if button_at(hwnd, pt.x, pt.y) != BTN_NONE {
                         return LRESULT(HTCLIENT as isize); // we handle button clicks
                     }
                     return LRESULT(HTCAPTION as isize); // drag + dbl-click maximize
                 }
+                log_hit_test("content", pt.x, pt.y);
+                // Plugin content HWND owns input below the titlebar.
                 LRESULT(HTCLIENT as isize)
             }
             WM_ACTIVATE => {
+                // Repaint chrome, then let DefWindowProc run its default
+                // activation handling (focus management) — the shell does not
+                // own this message.
                 invalidate_titlebar(hwnd);
-                LRESULT(0)
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
             WM_ENTERSIZEMOVE => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
@@ -953,20 +1217,27 @@ mod imp {
                     }
                     invalidate_titlebar(hwnd);
                 }
-                if msg == 0x0047 /* WM_WINDOWPOSCHANGED */ {
-                    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-                } else {
-                    LRESULT(0)
-                }
+                // Not host-owned: always fall through to default handling.
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
             0x02E0 /* WM_DPICHANGED */ => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
+                    let suggested = unsafe { *(lparam.0 as *const RECT) };
                     unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            suggested.left,
+                            suggested.top,
+                            suggested.right - suggested.left,
+                            suggested.bottom - suggested.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
                         apply_shell_layout(hwnd, inner, "WM_DPICHANGED");
                     }
                     invalidate_titlebar(hwnd);
                 }
-                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+                LRESULT(0)
             }
             WM_ERASEBKGND => {
                 let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
@@ -1029,7 +1300,8 @@ mod imp {
                         invalidate_titlebar(hwnd);
                     }
                 }
-                LRESULT(0)
+                // Non-client move is not host-owned (resize/caption tracking).
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
             WM_MOUSELEAVE => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
@@ -1043,41 +1315,49 @@ mod imp {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     let btn = button_at(hwnd, loword(lparam), hiword(lparam));
                     if btn != BTN_NONE {
+                        // Chrome button press: this is the ONLY place the
+                        // shell takes mouse capture, and only for the duration
+                        // of the button press (released on WM_LBUTTONUP).
                         inner.pressed_btn.store(btn, Ordering::Relaxed);
                         unsafe {
                             let _ = SetCapture(hwnd);
                         }
+                        return LRESULT(0);
                     }
                 }
-                LRESULT(0)
+                // Not on a chrome button — not host-owned; don't consume.
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
             WM_LBUTTONUP => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     let pressed = inner.pressed_btn.swap(BTN_NONE, Ordering::Relaxed);
-                    unsafe {
-                        let _ = ReleaseCapture();
-                    }
-                    let over = button_at(hwnd, loword(lparam), hiword(lparam));
-                    if pressed != BTN_NONE && pressed == over {
-                        match pressed {
-                            BTN_MIN => unsafe {
-                                let _ = ShowWindow(hwnd, SW_MINIMIZE);
-                            },
-                            BTN_MAX => unsafe {
-                                if IsZoomed(hwnd).as_bool() {
-                                    let _ = ShowWindow(hwnd, SW_RESTORE);
-                                } else {
-                                    let _ = ShowWindow(hwnd, SW_MAXIMIZE);
-                                }
-                            },
-                            BTN_CLOSE => {
-                                inner.close_requested.store(true, Ordering::Relaxed);
-                            }
-                            _ => {}
+                    if pressed != BTN_NONE {
+                        unsafe {
+                            let _ = ReleaseCapture();
                         }
+                        let over = button_at(hwnd, loword(lparam), hiword(lparam));
+                        if pressed == over {
+                            match pressed {
+                                BTN_MIN => unsafe {
+                                    let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                                },
+                                BTN_MAX => unsafe {
+                                    if IsZoomed(hwnd).as_bool() {
+                                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                                    } else {
+                                        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                                    }
+                                },
+                                BTN_CLOSE => {
+                                    inner.close_requested.store(true, Ordering::Relaxed);
+                                }
+                                _ => {}
+                            }
+                        }
+                        return LRESULT(0);
                     }
                 }
-                LRESULT(0)
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
             WM_CLOSE => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
@@ -1104,7 +1384,11 @@ mod imp {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     inner.content_erase.fetch_add(1, Ordering::Relaxed);
                     if inner.attached.load(Ordering::Relaxed) {
-                        eprintln!("[plugin-content-hwnd] WM_ERASEBKGND suppressed=true");
+                        static ERASE_RATE: crate::forensic_trace::LogRateLimiter =
+                            crate::forensic_trace::LogRateLimiter::new(1);
+                        if ERASE_RATE.allow() {
+                            eprintln!("[plugin-content-hwnd] WM_ERASEBKGND suppressed=true");
+                        }
                         return LRESULT(1); // plugin owns the pixels now
                     }
                 }
@@ -1114,32 +1398,18 @@ mod imp {
                 unsafe { FillRect(hdc, &rc, black_brush()) };
                 LRESULT(1)
             }
-            WM_MOUSEACTIVATE => LRESULT(1),
+            WM_MOUSEACTIVATE => LRESULT(MA_ACTIVATE as isize),
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => {
                 let x = loword(lparam);
                 let y = hiword(lparam);
                 if msg == WM_LBUTTONDOWN {
-                    eprintln!("[plugin-input] content_mouse_down x={x} y={y}");
-                    let overlay_visible = inner_ref(hwnd)
-                        .map(|inner| !inner.attached.load(Ordering::Relaxed))
-                        .unwrap_or(true);
-                    eprintln!("[plugin-input] overlay_visible={overlay_visible}");
-                    let _ = unsafe { SetFocus(Some(hwnd)) };
-                    let pt = POINT { x, y };
-                    let child = unsafe { ChildWindowFromPoint(hwnd, pt) };
-                    if child != hwnd {
-                        eprintln!(
-                            "[plugin-input] forwarding/focus_to_host hwnd=0x{:x}",
-                            child.0 as u64
-                        );
-                        let _ = unsafe { SetFocus(Some(child)) };
+                    log_hit_test("content", x, y);
+                    // Focus/capture + hit-test summary on click (kept in safe
+                    // mode; throttled).
+                    log_click_path(hwnd, x, y);
+                    if !crate::forensic_trace::plugin_editor_safe_mode() {
+                        focus_deepest_plugin_child(hwnd, x, y);
                     }
-                    let focus_hwnd = unsafe { GetFocus() };
-                    eprintln!("[plugin-input] host_focus=0x{:x}", focus_hwnd.0 as u64);
-                    eprintln!(
-                        "[plugin-input] child_hwnd_under_cursor=0x{:x}",
-                        if child != hwnd { child.0 as u64 } else { 0 }
-                    );
                 }
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
@@ -1173,7 +1443,7 @@ mod imp {
                                 t.status_text
                             };
                             let scale = dpi_scale(hwnd);
-                            let em = t.status_em * scale;
+                            let em = t.status_em;
                             let drew = crate::components::plugin_shell_text::draw_text(
                                 hdc,
                                 rc,
@@ -1294,8 +1564,9 @@ mod imp {
             let th = (theme().titlebar_h as f32 * scale).round() as i32;
             let bw = (theme().border_px as f32 * scale).round().max(1.0) as i32;
             // Borderless: outer client = content + titlebar + bottom border strip.
-            let win_w = content_w.max(1);
-            let win_h = content_h.max(1) + th + bw;
+            let (client_w, client_h) = shell_client_size(content_w, content_h, th, bw);
+            let win_w = client_w;
+            let win_h = client_h;
             let (pos_x, pos_y, work) = center_shell_open_position(win_w, win_h, owner_hwnd);
             eprintln!(
                 "[plugin-editor-window] center_on_open monitor=work_area=({},{},{},{})",
@@ -1326,6 +1597,18 @@ mod imp {
                 )
                 .ok()?;
                 apply_borderless_styles(top);
+                let (outer_w, outer_h) = outer_size_for_client(top, client_w, client_h);
+                if outer_w != win_w || outer_h != win_h {
+                    let _ = SetWindowPos(
+                        top,
+                        None,
+                        pos_x,
+                        pos_y,
+                        outer_w,
+                        outer_h,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
                 install_inner(top, &inner);
                 // Native window polish: immersive dark mode, rounded corners,
                 // themed border (spec Part 4). Runtime-guarded — older Windows
@@ -1373,7 +1656,27 @@ mod imp {
                 let _ = ShowWindow(top, SW_SHOW);
                 let _ = UpdateWindow(top);
 
+                // The click that opened the editor may have left mouse capture
+                // on a GPUI surface of this thread; a stale capture steals the
+                // next click intended for the plugin content. Release it.
+                {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+                    let captured = GetCapture();
+                    if !captured.0.is_null() {
+                        let _ = ReleaseCapture();
+                        eprintln!(
+                            "[PluginEditorInput] released_stale_capture=0x{:x}",
+                            captured.0 as u64
+                        );
+                    }
+                }
+
                 eprintln!("[plugin-editor-window] shell_kind=native_borderless");
+                let top_style = GetWindowLongPtrW(top, GWL_STYLE);
+                let child_style = GetWindowLongPtrW(content, GWL_STYLE);
+                eprintln!(
+                    "[PluginEditor] window styles top=0x{top_style:08x} child=0x{child_style:08x}"
+                );
                 eprintln!(
                     "[plugin-editor-window] shell_hwnd=0x{:x} content_hwnd=0x{:x} content_parent=shell_hwnd titlebar_h={} content={}x{}",
                     top.0 as u64,
@@ -1382,8 +1685,51 @@ mod imp {
                     layout.content_w,
                     layout.content_h
                 );
+                eprintln!(
+                    "[PluginEditor] child rect=({},{},{},{})",
+                    layout.content_x,
+                    layout.content_y,
+                    layout.content_x + layout.content_w,
+                    layout.content_y + layout.content_h
+                );
                 eprintln!("[plugin-editor-window] native_content_region_reserved=true");
                 log_content_rect(top);
+                let dpi = GetDpiForWindow(top);
+                let dpi_scale = if dpi == 0 {
+                    1.0
+                } else {
+                    dpi as f32 / 96.0
+                };
+                eprintln!("[UI] dpi_scale={dpi_scale:.3}");
+                eprintln!("[UI] default_font={}", crate::theme::FONT_FAMILY);
+                eprintln!(
+                    "[UI] default_font_size={}",
+                    crate::theme::typography::UI_SM as u32
+                );
+                eprintln!(
+                    "[PluginEditor] wrapper_title_font_size={}",
+                    crate::theme::typography::PLUGIN_TITLE
+                );
+                eprintln!("[PluginEditor] dpi={dpi}");
+                eprintln!("[PluginEditor] titlebar_height={}", layout.titlebar_h);
+                eprintln!("[PluginEditor] title_text={title}");
+                eprintln!("[Fonts] default_ui_font={}", crate::theme::FONT_FAMILY);
+                eprintln!(
+                    "[PluginEditor] title_font_family={}",
+                    theme().font.family_primary
+                );
+                eprintln!(
+                    "[PluginEditor] title_font_size={}",
+                    crate::theme::typography::PLUGIN_TITLE
+                );
+                eprintln!(
+                    "[PluginEditor] plugin_child_rect x={} y={} w={} h={}",
+                    layout.content_x, layout.content_y, layout.content_w, layout.content_h
+                );
+                eprintln!(
+                    "[PluginEditor] top_client={}x{}",
+                    layout.client_w, layout.client_h
+                );
 
                 Some(Self {
                     inner,
@@ -1416,6 +1762,7 @@ mod imp {
                 *s = (String::new(), false);
             }
             eprintln!("[plugin-editor-window] loading_overlay_visible=false");
+            invalidate_titlebar(hwnd_from(self.top_hwnd));
             self.ensure_visible_zorder();
         }
 
@@ -1569,6 +1916,12 @@ mod imp {
             )
         }
 
+        pub fn shell_dpi(&self) -> u32 {
+            let top = hwnd_from(self.top_hwnd);
+            let dpi = unsafe { GetDpiForWindow(top) };
+            if dpi == 0 { 96 } else { dpi }
+        }
+
         /// Resize the window so the content area equals `content_w x content_h`
         /// (window height adds the titlebar). Recenters when `recenter` is true
         /// and the user has not moved the shell (spec Part 4/6).
@@ -1576,8 +1929,8 @@ mod imp {
             let top = hwnd_from(self.top_hwnd);
             let th = titlebar_h(top);
             let bw = border_w(top);
-            let win_w = content_w.max(1);
-            let win_h = content_h.max(1) + th + bw;
+            let (client_w, client_h) = shell_client_size(content_w, content_h, th, bw);
+            let (win_w, win_h) = outer_size_for_client(top, client_w, client_h);
             unsafe {
                 let _ = SetWindowPos(
                     top,
@@ -1606,7 +1959,12 @@ mod imp {
                 .initial_auto_size_done
                 .store(true, Ordering::Relaxed);
             let _ = self.apply_content_layout();
+            invalidate_titlebar(top);
             log_content_rect(top);
+        }
+
+        pub fn pump_messages(&self) {
+            pump_shell_messages(hwnd_from(self.top_hwnd), hwnd_from(self.content_hwnd));
         }
 
         pub fn poll(&self) -> NativeShellPoll {
@@ -1697,11 +2055,15 @@ mod imp {
         pub fn shell_outer_size(&self) -> (i32, i32) {
             (0, 0)
         }
+        pub fn shell_dpi(&self) -> u32 {
+            96
+        }
         pub fn apply_content_layout(&self) -> (i32, i32) {
             (0, 0)
         }
         pub fn log_black_gap_check(&self, _host_hwnd: u64) {}
         pub fn resize_to_content(&self, _content_w: i32, _content_h: i32, _recenter: bool) {}
+        pub fn pump_messages(&self) {}
         pub fn poll(&self) -> NativeShellPoll {
             NativeShellPoll::default()
         }

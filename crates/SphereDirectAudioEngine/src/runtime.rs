@@ -351,6 +351,10 @@ pub struct RuntimeInsert {
     pub vst3: Option<Vst3RuntimeProcessor>,
     pub callback_process_log_done: bool,
     pub silent_process_blocks: u32,
+    /// Consecutive blocks the external plugin host failed to deliver on time
+    /// (its `read_output` returned 0). Drives the throttled missed-deadline /
+    /// recovered logs in `apply_external_bridge_insert_block`.
+    pub bridge_missed_blocks: u32,
     pub scratch_l: Vec<f32>,
     pub scratch_r: Vec<f32>,
 }
@@ -469,6 +473,14 @@ pub struct RuntimeProject {
     /// Tracks whose external-bridge plugin editor is open — keeps the audio
     /// callback rendering while stopped so VSTi internal keyboards stay audible.
     pub bridge_editor_active: std::collections::HashSet<String>,
+    /// Samples of post-panic processing still owed to bridged plugin hosts.
+    /// Set whenever panic MIDI (note-offs + CC 64/123/120) is pushed into a
+    /// bridge sink's ring: the host only drains that ring while blocks are
+    /// being requested, so the callback must keep the handshake alive for this
+    /// long after a stop/seek/mute panic or the VSTi's voices stay stuck until
+    /// the next play. Counted down by the callback while the transport is
+    /// stopped; transient, never persisted.
+    pub bridge_panic_flush_samples: u64,
 }
 
 impl RuntimeProject {
@@ -662,6 +674,7 @@ impl RuntimeProject {
                     vst3,
                     callback_process_log_done: false,
                     silent_process_blocks: 0,
+                    bridge_missed_blocks: 0,
                     scratch_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                     scratch_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 });
@@ -936,6 +949,7 @@ impl RuntimeProject {
             // freshly built project (preserved across reloads in drain_commands).
             plugin_bridge_sinks: std::collections::HashMap::new(),
             bridge_editor_active: std::collections::HashSet::new(),
+            bridge_panic_flush_samples: 0,
         })
     }
 
@@ -1333,15 +1347,18 @@ impl RuntimeProject {
             active.len()
         );
         push_all_notes_off_for_track(self, track_id, &active);
-        if let Some(sink) = self.plugin_bridge_sinks.get(track_id) {
-            for &(channel, pitch) in &active {
-                sink.push_midi(0x80 | (channel & 0x0F), pitch, 0, 0);
+        if self.plugin_bridge_sinks.contains_key(track_id) {
+            if let Some(sink) = self.plugin_bridge_sinks.get(track_id) {
+                for &(channel, pitch) in &active {
+                    sink.push_midi(0x80 | (channel & 0x0F), pitch, 0, 0);
+                }
+                for ch in 0u8..16 {
+                    sink.push_midi(0xB0 | (ch & 0x0F), 64, 0, 0);
+                    sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, 0);
+                    sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, 0);
+                }
             }
-            for ch in 0u8..16 {
-                sink.push_midi(0xB0 | (ch & 0x0F), 64, 0, 0);
-                sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, 0);
-                sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, 0);
-            }
+            self.arm_bridge_panic_flush();
         }
         if let Some(mt) = self
             .midi_tracks
@@ -1389,6 +1406,15 @@ impl RuntimeProject {
         self.midi_tracks
             .iter()
             .any(|mt| !mt.preview_active.is_empty())
+    }
+
+    /// Arm the post-panic flush window after panic MIDI was pushed into a
+    /// bridge sink. ~250 ms of kept-alive block requests is plenty: the host
+    /// drains the ring on the first requested block and CC 120 (All Sound Off)
+    /// silences voices immediately; the rest of the window absorbs a host that
+    /// is momentarily stalled behind an editor open/close.
+    pub fn arm_bridge_panic_flush(&mut self) {
+        self.bridge_panic_flush_samples = (self.sample_rate.max(1) as u64) / 4;
     }
 
     fn queue_preview_event(
@@ -1834,6 +1860,9 @@ fn push_all_notes_off_for_track(project: &mut RuntimeProject, track_id: &str, ac
             sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, 0);
             sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, 0);
         }
+        // The host only drains the ring while blocks are requested — keep the
+        // handshake alive past this panic so it is actually delivered.
+        project.arm_bridge_panic_flush();
         return;
     }
     for &(channel, pitch) in active {
@@ -2413,5 +2442,170 @@ mod midi_tests {
         lane.target = RuntimeAutomationTarget::TrackPan;
         lane.enabled = false;
         assert!(lane.evaluate_normalized(0.0).is_none());
+    }
+
+    // ── VSTi bridge MIDI tests ───────────────────────────────────────────────
+
+    /// Test sink recording every `push_midi` call as (status, data1, data2, offset).
+    #[derive(Debug, Default)]
+    struct RecordingSink {
+        events: std::sync::Mutex<Vec<(u8, u8, u8, u32)>>,
+    }
+
+    impl RecordingSink {
+        fn take(&self) -> Vec<(u8, u8, u8, u32)> {
+            std::mem::take(&mut *self.events.lock().unwrap())
+        }
+    }
+
+    impl crate::plugin_bridge::PluginBridgeSink for RecordingSink {
+        fn dsp_ready(&self) -> bool {
+            true
+        }
+        fn read_output(&self, _out_l: &mut [f32], _out_r: &mut [f32], _frames: usize) -> usize {
+            0
+        }
+        fn push_midi(&self, status: u8, data1: u8, data2: u8, sample_offset: u32) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((status, data1, data2, sample_offset));
+        }
+        fn write_input(&self, _in_l: &[f32], _in_r: &[f32], _frames: usize) {}
+        fn request_block(&self, _frames: u32) {}
+    }
+
+    fn bridged_instrument_track(id: &str) -> RuntimeTrack {
+        RuntimeTrack {
+            id: id.to_string(),
+            track_type: "midi".to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_armed: false,
+            monitor_enabled: false,
+            input_source: RuntimeTrackInputSource::None,
+            preview_mode: RuntimePreviewMode::Stereo,
+            output_track_id: None,
+            inserts: vec![RuntimeInsert {
+                id: "insert-1".to_string(),
+                kind: "external-bridge-plugin".to_string(),
+                enabled: true,
+                params: HashMap::new(),
+                dsp: InsertDspState::default(),
+                vst3: None,
+                callback_process_log_done: false,
+                silent_process_blocks: 0,
+                bridge_missed_blocks: 0,
+                scratch_l: vec![0.0; 64],
+                scratch_r: vec![0.0; 64],
+            }],
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            meter: Arc::new(Default::default()),
+            meter_peak_l: 0.0,
+            meter_peak_r: 0.0,
+            meter_sum_sq_l: 0.0,
+            meter_sum_sq_r: 0.0,
+            callback_insert_log_done: false,
+            callback_clip_route_log_done: false,
+            block_l: vec![0.0; 64],
+            block_r: vec![0.0; 64],
+            recv_l: vec![0.0; 64],
+            recv_r: vec![0.0; 64],
+            midi_block_events: Vec::new(),
+            midi_instrument_insert_ix: Some(0),
+            plugin_latency_samples: 0,
+            pdc_delay_l: Vec::new(),
+            pdc_delay_r: Vec::new(),
+            pdc_write_pos: 0,
+        }
+    }
+
+    /// Project with the one-note clip on a bridged instrument track plus a
+    /// recording sink installed as its plugin-bridge sink.
+    fn bridged_project() -> (RuntimeProject, Arc<RecordingSink>) {
+        let mut p = project_with(vec![clip_with_one_note()]);
+        p.tracks.push(bridged_instrument_track("track-1"));
+        let sink = Arc::new(RecordingSink::default());
+        p.plugin_bridge_sinks
+            .insert("track-1".to_string(), sink.clone());
+        (p, sink)
+    }
+
+    #[test]
+    fn scheduled_bridge_events_carry_offset_velocity_and_channel() {
+        let (mut p, sink) = bridged_project();
+        p.reset_midi_playback(95_880);
+        sink.take(); // discard the seek panic CCs
+
+        // NoteOn at absolute sample 96_000 inside block 95_880..96_392.
+        p.schedule_midi_block(95_880, 512);
+        assert_eq!(sink.take(), vec![(0x90, 60, 100, 120)]);
+
+        // NoteOff at 120_000 inside block 119_900..120_412.
+        p.schedule_midi_block(119_900, 512);
+        assert_eq!(sink.take(), vec![(0x80, 60, 0, 100)]);
+    }
+
+    #[test]
+    fn stop_panic_pushes_note_offs_and_ccs_and_arms_bridge_flush() {
+        let (mut p, sink) = bridged_project();
+        p.reset_midi_playback(0);
+        p.schedule_midi_block(96_000, 512); // fires the NoteOn
+        assert_eq!(p.midi_tracks[0].active, vec![(0u8, 60u8)]);
+        sink.take();
+
+        p.all_notes_off("stop");
+
+        let events = sink.take();
+        // The tracked active note is released explicitly, first.
+        assert_eq!(events[0], (0x80, 60, 0, 0));
+        // Then Sustain Off / All Notes Off / All Sound Off on every channel.
+        for ch in 0u8..16 {
+            assert!(events.contains(&(0xB0 | ch, 64, 0, 0)), "sustain off ch={ch}");
+            assert!(events.contains(&(0xB0 | ch, 123, 0, 0)), "all notes off ch={ch}");
+            assert!(events.contains(&(0xB0 | ch, 120, 0, 0)), "all sound off ch={ch}");
+        }
+        assert!(p.midi_tracks[0].active.is_empty());
+        // The callback must keep requesting bridge blocks so the host actually
+        // drains this panic while the transport is stopped.
+        assert!(p.bridge_panic_flush_samples > 0);
+    }
+
+    #[test]
+    fn repeated_bridge_preview_cycle_leaves_no_stuck_notes() {
+        let (mut p, sink) = bridged_project();
+        for _ in 0..2 {
+            p.bridge_preview_note_on("track-1", "insert-1", 0, 64, 110);
+            assert!(p.has_active_midi_preview());
+            p.bridge_preview_note_off("track-1", "insert-1", 0, 64);
+            assert!(!p.has_active_midi_preview());
+        }
+        assert_eq!(
+            sink.take(),
+            vec![
+                (0x90, 64, 110, 0),
+                (0x80, 64, 0, 0),
+                (0x90, 64, 110, 0),
+                (0x80, 64, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_all_notes_off_releases_held_notes_and_arms_flush() {
+        let (mut p, sink) = bridged_project();
+        p.bridge_preview_note_on("track-1", "insert-1", 0, 72, 90);
+        sink.take();
+
+        p.bridge_preview_all_notes_off("track-1", "insert-1");
+
+        let events = sink.take();
+        assert_eq!(events[0], (0x80, 72, 0, 0));
+        assert!(events.contains(&(0xB0, 123, 0, 0)));
+        assert!(!p.has_active_midi_preview());
+        assert!(p.bridge_panic_flush_samples > 0);
     }
 }

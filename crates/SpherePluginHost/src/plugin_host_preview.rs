@@ -101,6 +101,16 @@ impl PluginHostPreviewEngine {
         self.instances.contains_key(plugin_instance_id)
     }
 
+    /// Clone the live processor handle for editor/UI work **outside** the preview
+    /// mutex. `Vst3RuntimeProcessor` is a shallow clone over the same C++
+    /// instance — safe for `embed_*` calls while the audio producer holds the
+    /// lock for `render_block`.
+    pub fn clone_processor_for(&self, plugin_instance_id: &str) -> Option<Vst3RuntimeProcessor> {
+        self.instances
+            .get(plugin_instance_id)
+            .map(|instance| instance.processor.clone())
+    }
+
     pub fn loaded_instance_ids(&self) -> Vec<String> {
         self.instances.keys().cloned().collect()
     }

@@ -20,7 +20,7 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v8 adds stable ids on tempo points for independent marker editing.
 /// v11 adds a content fingerprint per project asset for cross-session import
 /// dedup. Pre-v11 files have no asset fingerprint and load with `None`.
-pub const PROJECT_VERSION: u32 = 11;
+pub const PROJECT_VERSION: u32 = 12;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -205,6 +205,16 @@ impl FbWriter {
         }
     }
 
+    fn write_opt_u64(&mut self, v: &Option<u64>) {
+        match v {
+            None => self.write_u8(0),
+            Some(x) => {
+                self.write_u8(1);
+                self.write_u64(*x);
+            }
+        }
+    }
+
     fn write_bytes(&mut self, bytes: &[u8]) {
         self.write_u32(bytes.len() as u32);
         self.buf.extend_from_slice(bytes);
@@ -324,6 +334,14 @@ impl<'a> FbReader<'a> {
         match self.read_u8()? {
             0 => Ok(None),
             1 => Ok(Some(self.read_f64()?)),
+            t => Err(ProjectError::Corrupted(format!("bad option tag {t}"))),
+        }
+    }
+
+    fn read_opt_u64(&mut self) -> Result<Option<u64>, ProjectError> {
+        match self.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_u64()?)),
             t => Err(ProjectError::Corrupted(format!("bad option tag {t}"))),
         }
     }
@@ -619,6 +637,8 @@ fn encode_asset(w: &mut FbWriter, a: &ProjectAsset) {
     w.write_opt_u32(&a.sample_rate);
     w.write_opt_u8(&a.channels);
     w.write_opt_str(&a.source_fingerprint); // v11
+    w.write_opt_str(&a.waveform_peak_relative_path); // v12
+    w.write_opt_u64(&a.duration_samples); // v12
 }
 
 fn encode_body(project: &FutureboardProject) -> Vec<u8> {
@@ -1108,6 +1128,16 @@ fn decode_asset(r: &mut FbReader, version: u32) -> Result<ProjectAsset, ProjectE
         // v11 appended a content fingerprint; older files stop before it.
         source_fingerprint: if version >= 11 {
             r.read_opt_str()?
+        } else {
+            None
+        },
+        waveform_peak_relative_path: if version >= 12 {
+            r.read_opt_str()?
+        } else {
+            None
+        },
+        duration_samples: if version >= 12 {
+            r.read_opt_u64()?
         } else {
             None
         },

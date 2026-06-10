@@ -396,7 +396,14 @@ pub struct ProjectAsset {
     /// be deduplicated without re-hashing the whole asset folder on save.
     /// `None` for assets written by older versions.
     pub source_fingerprint: Option<String>,
+    /// Project-relative peak cache path, e.g. `Cache/Waveforms/Assets__Audio__kick.wav.peaks`.
+    pub waveform_peak_relative_path: Option<String>,
+    /// Total PCM frames in the asset (v12+).
+    pub duration_samples: Option<u64>,
 }
+
+/// Alias used in specs/docs for persisted audio registry entries.
+pub type AudioAsset = ProjectAsset;
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -852,26 +859,61 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         PluginRuntimeBackend, PluginRuntimeState,
                     };
                     match &pi.plugin {
-                        Some(plugin) => InsertSlotState {
-                            id: pi.id.clone(),
-                            plugin_id: Some(plugin.plugin_uid.clone()),
-                            plugin_path: plugin.plugin_path.clone(),
-                            plugin_format: Some(match plugin.format {
+                        Some(plugin) => {
+                            let plugin_format = match plugin.format {
                                 PluginFormat::Vst3 => InsertPluginFormat::Vst3,
                                 PluginFormat::Clap => InsertPluginFormat::Clap,
                                 PluginFormat::Au => InsertPluginFormat::Au,
                                 PluginFormat::Lv2 => InsertPluginFormat::Lv2,
                                 PluginFormat::Unknown => InsertPluginFormat::Unknown,
-                            }),
-                            display_name: plugin.display_name.clone(),
-                            enabled: true,
-                            bypassed: pi.bypassed,
-                            load_status: InsertLoadStatus::Ready,
-                            runtime_backend: PluginRuntimeBackend::InProcess,
-                            runtime_state: PluginRuntimeState::Ready,
-                            host_pid: None,
-                            parameters: Vec::new(),
-                        },
+                            };
+                            let bridge = sphere_plugin_host::plugin_host_client::plugin_host_bridge_enabled()
+                                && plugin_format == InsertPluginFormat::Vst3;
+                            let path_missing = plugin
+                                .plugin_path
+                                .as_ref()
+                                .is_none_or(|path| !path.exists());
+                            let (load_status, runtime_state, runtime_backend) = if path_missing {
+                                (
+                                    InsertLoadStatus::Missing(
+                                        "Plugin file not found".to_string(),
+                                    ),
+                                    PluginRuntimeState::Missing(
+                                        "Plugin file not found".to_string(),
+                                    ),
+                                    if bridge {
+                                        PluginRuntimeBackend::ExternalBridge
+                                    } else {
+                                        PluginRuntimeBackend::InProcess
+                                    },
+                                )
+                            } else {
+                                (
+                                    InsertLoadStatus::Loading,
+                                    PluginRuntimeState::NotLoaded,
+                                    if bridge {
+                                        PluginRuntimeBackend::ExternalBridge
+                                    } else {
+                                        PluginRuntimeBackend::InProcess
+                                    },
+                                )
+                            };
+                            InsertSlotState {
+                                id: pi.id.clone(),
+                                plugin_id: Some(plugin.plugin_uid.clone()),
+                                plugin_path: plugin.plugin_path.clone(),
+                                plugin_format: Some(plugin_format),
+                                display_name: plugin.display_name.clone(),
+                                enabled: true,
+                                bypassed: pi.bypassed,
+                                load_status,
+                                runtime_backend,
+                                runtime_state,
+                                host_pid: None,
+                                parameters: Vec::new(),
+                                pending_open_editor: false,
+                            }
+                        }
                         None => InsertSlotState::empty(pi.id.clone()),
                     }
                 })

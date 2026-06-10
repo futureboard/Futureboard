@@ -12,7 +12,11 @@ use gpui::{AsyncApp, Context, Entity, WeakEntity};
 use super::timeline::Timeline;
 use super::timeline_state::AudioImportState;
 use super::waveform_cache::{self, WaveformFileMeta, WaveformPreview, CHUNK_PEAKS, PEAK_FINE_SPP};
+use super::waveform_peak_file::{
+    read_peak_file, write_peak_file, waveform_peak_relative_path_for_asset, PeakFileError,
+};
 use crate::layout::StudioLayout;
+use crate::project::io::relative_path_in_project;
 
 /// Bump when peak format or LOD ladder changes to invalidate disk cache.
 pub const PEAK_DECODER_VERSION: u32 = waveform_cache::WAVEFORM_ALGORITHM_VERSION;
@@ -26,75 +30,59 @@ fn import_debug() -> bool {
     *IMPORT_DEBUG.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_IMPORT_DEBUG").is_some())
 }
 
-fn peaks_cache_dir() -> PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("futureboard")
-        .join("Peaks")
+fn project_peak_path(project_root: &Path, asset_id: &str) -> PathBuf {
+    let relative = waveform_peak_relative_path_for_asset(asset_id);
+    project_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
-pub fn stable_cache_key(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let path_s = path.to_string_lossy();
-    let mut hasher = crc32fast::Hasher::new();
-    use std::hash::Hasher;
-    hasher.write(path_s.as_bytes());
-    hasher.write(&meta.len().to_le_bytes());
-    hasher.write(&modified.to_le_bytes());
-    hasher.write(&TARGET_PEAK_SAMPLE_RATE.to_le_bytes());
-    hasher.write(&waveform_cache::WAVEFORM_ALGORITHM_VERSION.to_le_bytes());
-    Some(format!("{:08x}", hasher.finalize()))
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PeaksDiskCache {
-    decoder_version: u32,
-    preview: WaveformPreview,
-}
-
-fn disk_cache_path(cache_key: &str) -> PathBuf {
-    peaks_cache_dir().join(format!("{cache_key}.peaks.json"))
-}
-
-fn try_load_disk_cache(cache_key: &str) -> Option<Arc<WaveformPreview>> {
-    let path = disk_cache_path(cache_key);
-    let bytes = std::fs::read(&path).ok()?;
-    let envelope: PeaksDiskCache = serde_json::from_slice(&bytes).ok()?;
-    if envelope.decoder_version != PEAK_DECODER_VERSION {
-        return None;
-    }
-    if import_debug() {
-        eprintln!(
-            "[audio-import] disk cache HIT key={cache_key} path={}",
-            path.display()
-        );
-    }
-    Some(Arc::new(envelope.preview))
-}
-
-fn save_disk_cache(cache_key: &str, preview: &WaveformPreview) {
-    let dir = peaks_cache_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let path = disk_cache_path(cache_key);
-    let envelope = PeaksDiskCache {
-        decoder_version: PEAK_DECODER_VERSION,
-        preview: preview.clone(),
-    };
-    if let Ok(json) = serde_json::to_vec(&envelope) {
-        let _ = std::fs::write(&path, json);
-        if import_debug() {
+fn try_load_project_peak_cache(
+    project_root: &Path,
+    asset_id: &str,
+) -> Option<Arc<WaveformPreview>> {
+    let path = project_peak_path(project_root, asset_id);
+    match read_peak_file(&path, Some(asset_id)) {
+        Ok(preview) => {
+            let peak_count: usize = preview.lods.iter().map(|l| l.peaks.len()).sum();
             eprintln!(
-                "[audio-import] disk cache WRITE key={cache_key} path={}",
+                "[WaveformCache] disk hit path={} asset_id={asset_id} peaks={peak_count}",
                 path.display()
             );
+            Some(Arc::new(preview))
+        }
+        Err(PeakFileError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("[WaveformCache] disk miss asset_id={asset_id}");
+            None
+        }
+        Err(err) => {
+            eprintln!(
+                "[WaveformCache] corrupt peak file; regenerating path={} error={err}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn save_project_peak_cache(
+    project_root: &Path,
+    asset_id: &str,
+    preview: &WaveformPreview,
+) -> Option<PathBuf> {
+    let path = project_peak_path(project_root, asset_id);
+    match write_peak_file(&path, asset_id, preview) {
+        Ok(bytes) => {
+            eprintln!(
+                "[WaveformCache] written path={} bytes={bytes}",
+                path.display()
+            );
+            Some(path)
+        }
+        Err(err) => {
+            eprintln!(
+                "[WaveformCache] write failed asset_id={asset_id} path={} error={err}",
+                path.display()
+            );
+            None
         }
     }
 }
@@ -201,46 +189,50 @@ pub fn throttled_timeline_notify(timeline: &WeakEntity<Timeline>, cx: &mut Async
     });
 }
 
-fn run_peak_job(path: &Path, path_key: &str) -> Result<Arc<WaveformPreview>, String> {
+fn run_peak_job(
+    path: &Path,
+    asset_id: &str,
+    project_root: Option<&Path>,
+) -> Result<Arc<WaveformPreview>, String> {
     let started = Instant::now();
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    if import_debug() {
-        eprintln!(
-            "[audio-import] peak job start path={} size={} bytes",
-            path.display(),
-            file_size
-        );
-    }
+    eprintln!(
+        "[WaveformCache] generate started asset_id={asset_id} path={} size={file_size}",
+        path.display()
+    );
 
-    if let Some(key) = stable_cache_key(path) {
-        if let Some(preview) = try_load_disk_cache(&key) {
-            waveform_cache::ingest_preview_as_chunks(path_key, Arc::clone(&preview));
+    if let Some(root) = project_root {
+        if let Some(preview) = try_load_project_peak_cache(root, asset_id) {
+            eprintln!("[WaveformCache] memory hit asset_id={asset_id} (disk preload)");
+            waveform_cache::ingest_preview_as_chunks(asset_id, Arc::clone(&preview));
             return Ok(preview);
         }
     }
 
     waveform_cache::set_import_state(
-        path_key,
+        asset_id,
         AudioImportState::GeneratingPeaks { progress: 0.0 },
-    );
-    eprintln!(
-        "[audio-import] peak cache scanning path={} size={file_size} bytes",
-        path.display()
     );
 
     let peaks = DAUx::generate_audio_peaks(path).map_err(|e| e.to_string())?;
     let preview: WaveformPreview = peaks.into();
     let preview = Arc::new(preview);
 
-    if let Some(key) = stable_cache_key(path) {
-        save_disk_cache(&key, preview.as_ref());
+    if let Some(root) = project_root {
+        let peak_relative = waveform_peak_relative_path_for_asset(asset_id);
+        eprintln!(
+            "[AudioImport] project cache path={}",
+            project_peak_path(root, asset_id).display()
+        );
+        save_project_peak_cache(root, asset_id, preview.as_ref());
+        eprintln!("[AudioImport] project asset path={}", path.display());
+        let _ = peak_relative;
     }
 
     if import_debug() {
         let total_peaks: usize = preview.lods.iter().map(|l| l.peaks.len()).sum();
         eprintln!(
-            "[audio-import] peak cache completed path={} scan_ms={} total_peaks={}",
-            path.display(),
+            "[audio-import] peak cache completed asset_id={asset_id} scan_ms={} total_peaks={}",
             started.elapsed().as_millis(),
             total_peaks
         );
@@ -318,43 +310,60 @@ async fn maybe_copy_into_project(
     project_root: Option<PathBuf>,
     timeline: &WeakEntity<Timeline>,
     cx: &mut AsyncApp,
-) -> PathBuf {
+) -> (PathBuf, String) {
     if eager_copy_disabled() {
-        return path;
+        return (path, asset_key.to_string());
     }
     let Some(root) = project_root else {
-        return path; // Untitled project → copy happens at save time instead.
+        return (path, asset_key.to_string());
     };
 
     let src = path.clone();
+    let root_for_job = root.clone();
     let copied = cx
         .background_executor()
-        .spawn(async move { crate::project::import_audio_file_to_project(&src, &root) })
+        .spawn(async move { crate::project::import_audio_file_to_project(&src, &root_for_job) })
         .await;
 
     match copied {
-        Ok(dest) if dest != path => {
+        Ok(dest) => {
             let dest_str = dest.to_string_lossy().to_string();
-            let asset = asset_key.to_string();
+            let relative_asset_id = relative_path_in_project(&dest, &root)
+                .unwrap_or_else(|| asset_key.to_string());
+            let old_key = asset_key.to_string();
+            let new_key = relative_asset_id.clone();
             let _ = timeline.update(cx, |timeline, cx| {
-                if timeline.state.retarget_audio_source(&asset, &dest_str) {
+                let mut changed = false;
+                if dest_str != path.to_string_lossy() {
+                    changed |= timeline.state.retarget_audio_source(&old_key, &dest_str);
+                }
+                if new_key != old_key {
+                    changed |= timeline.state.retarget_audio_asset_id(&old_key, &new_key);
+                    waveform_cache::migrate_cache_key(&old_key, &new_key);
+                }
+                if changed {
                     timeline.mark_media_changed(cx);
                     timeline.mark_project_changed(cx);
                     cx.notify();
                 }
             });
-            eprintln!(
-                "[AudioImport] eager copy retargeted asset_id={asset_key} dest={}",
-                dest.display()
-            );
-            dest
+            if dest != path {
+                eprintln!(
+                    "[AudioImport] eager copy retargeted asset_id={new_key} dest={}",
+                    dest.display()
+                );
+                eprintln!(
+                    "[AudioImport] project asset path={}",
+                    dest.display()
+                );
+            }
+            (dest, new_key)
         }
-        Ok(_) => path, // already inside the project folder
         Err(error) => {
             eprintln!(
                 "[AudioImport] eager copy failed asset_id={asset_key} error={error}; using original source"
             );
-            path
+            (path, asset_key.to_string())
         }
     }
 }
@@ -371,10 +380,12 @@ pub async fn run_import_pipeline(
     layout: Option<WeakEntity<StudioLayout>>,
     cx: &mut AsyncApp,
 ) {
-    let key = asset_key;
+    let mut key = asset_key;
     // Phase D: copy the dropped file into the project folder before importing,
-    // and decode the copy. Keyed by `key` (the asset id), unchanged by the copy.
-    let path = maybe_copy_into_project(&key, path, project_root, &timeline, cx).await;
+    // and decode the copy. Retarget asset id to project-relative path when copied.
+    let (path, copied_key) =
+        maybe_copy_into_project(&key, path, project_root.clone(), &timeline, cx).await;
+    key = copied_key;
     if !waveform_cache::try_begin_import(&key) {
         // Already imported, or an import is still in flight for this source path.
         //
@@ -473,9 +484,16 @@ pub async fn run_import_pipeline(
     let decode_path = path_for_job.clone();
     let path_key = key.clone();
     let path_key_for_job = path_key.clone();
+    let project_root_for_job = project_root.clone();
     let result = cx
         .background_executor()
-        .spawn(async move { run_peak_job(&decode_path, &path_key_for_job) })
+        .spawn(async move {
+            run_peak_job(
+                &decode_path,
+                &path_key_for_job,
+                project_root_for_job.as_deref(),
+            )
+        })
         .await;
 
     match result {
@@ -504,6 +522,127 @@ pub async fn run_import_pipeline(
             throttled_timeline_notify(&timeline_peaks, cx, true);
         }
     }
+}
+
+/// After a project load, hydrate waveform caches from `Cache/Waveforms/` and
+/// schedule background regeneration for missing peak files.
+pub fn schedule_project_waveform_restore(
+    project: &crate::project::FutureboardProject,
+    project_root: PathBuf,
+    timeline: Entity<Timeline>,
+    layout: Entity<StudioLayout>,
+    cx: &mut Context<StudioLayout>,
+) {
+    use std::collections::HashSet;
+
+    use crate::project::ClipSource;
+
+    let mut seen = HashSet::new();
+    let mut jobs: Vec<(String, PathBuf)> = Vec::new();
+    let mut entries: Vec<(String, Option<PathBuf>)> = Vec::new();
+
+    for asset in &project.assets {
+        let audio_path = asset.relative_path.as_ref().map(|rel| {
+            project_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+        });
+        entries.push((asset.id.clone(), audio_path));
+    }
+
+    for track in &project.tracks {
+        for clip in &track.clips {
+            let ClipSource::Audio {
+                asset_id,
+                source_path,
+            } = &clip.source
+            else {
+                continue;
+            };
+            if entries.iter().any(|(id, _)| id == asset_id) {
+                continue;
+            }
+            entries.push((asset_id.clone(), source_path.clone()));
+        }
+    }
+
+    for (asset_id, audio_path) in entries {
+        if !seen.insert(asset_id.clone()) {
+            continue;
+        }
+        if let Some(path) = audio_path.as_ref().filter(|p| p.exists()) {
+            eprintln!(
+                "[ProjectLoad] audio asset resolved path={}",
+                path.display()
+            );
+        }
+        let peak_rel = project
+            .assets
+            .iter()
+            .find(|a| a.id == asset_id)
+            .and_then(|a| a.waveform_peak_relative_path.clone())
+            .unwrap_or_else(|| waveform_peak_relative_path_for_asset(&asset_id));
+        let peak_path = project_root.join(peak_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        eprintln!(
+            "[ProjectLoad] peak cache resolved path={}",
+            peak_path.display()
+        );
+
+        match read_peak_file(&peak_path, Some(&asset_id)) {
+            Ok(preview) => {
+                let peak_count: usize = preview.lods.iter().map(|l| l.peaks.len()).sum();
+                eprintln!(
+                    "[WaveformCache] loaded path={} peaks={peak_count}",
+                    peak_path.display()
+                );
+                let preview = Arc::new(preview);
+                waveform_cache::ingest_preview_as_chunks(&asset_id, preview);
+                waveform_cache::set_import_state(&asset_id, AudioImportState::Ready);
+                let asset_id_for_timeline = asset_id.clone();
+                let _ = timeline.update(cx, |timeline, cx| {
+                    timeline
+                        .state
+                        .set_audio_import_for_asset(&asset_id_for_timeline, AudioImportState::Ready);
+                    cx.notify();
+                });
+            }
+            Err(PeakFileError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("[WaveformCache] disk miss asset_id={asset_id}");
+                if let Some(path) = audio_path.filter(|p| p.exists()) {
+                    jobs.push((asset_id, path));
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "[WaveformCache] corrupt peak file; regenerating path={} error={err}",
+                    peak_path.display()
+                );
+                if let Some(path) = audio_path.filter(|p| p.exists()) {
+                    jobs.push((asset_id, path));
+                }
+            }
+        }
+    }
+
+    if jobs.is_empty() {
+        return;
+    }
+
+    let timeline_weak = timeline.downgrade();
+    let layout_weak = layout.downgrade();
+    let root = project_root;
+    cx.spawn(async move |_layout, cx| {
+        for (asset_id, path) in jobs {
+            run_import_pipeline(
+                asset_id,
+                path,
+                Some(root.clone()),
+                timeline_weak.clone(),
+                Some(layout_weak.clone()),
+                cx,
+            )
+            .await;
+        }
+    })
+    .detach();
 }
 
 /// Timeline drop import entry point.

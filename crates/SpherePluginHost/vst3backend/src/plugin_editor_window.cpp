@@ -129,6 +129,47 @@ bool vst3_editor_debug() {
   return enabled;
 }
 
+UINT embed_hwnd_dpi(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd)) return 96;
+  const UINT dpi = GetDpiForWindow(hwnd);
+  return dpi > 0 ? dpi : 96;
+}
+
+void embed_ensure_thread_dpi_awareness() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    using SetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    using GetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)();
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    auto* set_ctx = user32
+                        ? reinterpret_cast<SetThreadDpiAwarenessContextFn>(
+                              GetProcAddress(user32, "SetThreadDpiAwarenessContext"))
+                        : nullptr;
+    auto* get_ctx = user32
+                        ? reinterpret_cast<GetThreadDpiAwarenessContextFn>(
+                              GetProcAddress(user32, "GetThreadDpiAwarenessContext"))
+                        : nullptr;
+    if (set_ctx) {
+      set_ctx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    } else {
+      SetProcessDPIAware();
+    }
+    if (get_ctx) {
+      std::fprintf(stderr,
+                   "[PluginEditor] dpi_awareness_context=0x%p tid=%lu\n",
+                   static_cast<void*>(get_ctx()),
+                   GetCurrentThreadId());
+    }
+  });
+}
+
+bool embed_adjust_outer_rect_for_hwnd(HWND hwnd, RECT* rect, DWORD style, DWORD ex_style) {
+  if (!hwnd || !rect) return false;
+  const UINT dpi = embed_hwnd_dpi(hwnd);
+  if (AdjustWindowRectExForDpi(rect, style, FALSE, ex_style, dpi)) return true;
+  return AdjustWindowRectEx(rect, style, FALSE, ex_style) != 0;
+}
+
 inline bool vst3_view_rect_equal(const Steinberg::ViewRect& a, const Steinberg::ViewRect& b) {
   return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
 }
@@ -197,10 +238,17 @@ class PluginEditorFrame final : public Steinberg::IPlugFrame {
       SetWindowPos(host_hwnd_, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
       if (shell_hwnd_ && IsWindow(shell_hwnd_)) {
         RECT wr{0, 0, w, h};
-        AdjustWindowRectEx(&wr,
-                           static_cast<DWORD>(GetWindowLongPtrW(shell_hwnd_, GWL_STYLE)),
-                           FALSE,
-                           static_cast<DWORD>(GetWindowLongPtrW(shell_hwnd_, GWL_EXSTYLE)));
+        const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(shell_hwnd_, GWL_STYLE));
+        const DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(shell_hwnd_, GWL_EXSTYLE));
+        if (!embed_adjust_outer_rect_for_hwnd(shell_hwnd_, &wr, style, ex_style)) {
+          AdjustWindowRectEx(&wr, style, FALSE, ex_style);
+        }
+        const UINT dpi = embed_hwnd_dpi(shell_hwnd_);
+        std::fprintf(stderr,
+                     "[PluginEditor] resizeView requested size=%dx%d dpi=%u\n",
+                     w,
+                     h,
+                     dpi);
         SetWindowPos(shell_hwnd_,
                      nullptr,
                      0,
@@ -719,6 +767,30 @@ std::atomic<unsigned long long> g_next_prepare_handle{1};
 bool embed_debug() {
   static const bool enabled = std::getenv("FUTUREBOARD_PLUGIN_VIEW_DEBUG") != nullptr;
   return enabled;
+}
+
+// Plugin editor safe mode (FUTUREBOARD_PLUGIN_EDITOR_SAFE=1): no re-entrant
+// message pumping inside attach handlers and no experimental focus walks.
+bool embed_safe_mode() {
+  static const bool enabled = std::getenv("FUTUREBOARD_PLUGIN_EDITOR_SAFE") != nullptr;
+  return enabled;
+}
+
+// Nearest real Win32 dialog (class #32770) in the parent chain of `hwnd`,
+// including `hwnd` itself. IsDialogMessage must only ever run against real
+// dialogs: feeding it an arbitrary window swallows Tab/arrow/Enter/Escape
+// keystrokes (and can consume mouse messages) destined for plugin controls.
+HWND embed_dialog_ancestor(HWND hwnd) {
+  HWND cur = hwnd;
+  int depth = 0;
+  wchar_t cls[16];
+  while (cur && depth++ < 32) {
+    if (GetClassNameW(cur, cls, 16) > 0 && wcscmp(cls, L"#32770") == 0) {
+      return cur;
+    }
+    cur = GetAncestor(cur, GA_PARENT);
+  }
+  return nullptr;
 }
 
 const char* embed_vst3_result_name(Steinberg::tresult result) {
@@ -1277,12 +1349,26 @@ void embed_force_show_child(EmbedSession* session, int x, int y, int w, int h) {
   }
 }
 
+// Bounded drain of pending messages for the embed child + descendants. Two
+// hard rules (spec items 3/6):
+//  - never loop unbounded — a message-storming plugin window must not wedge
+//    the host UI thread here;
+//  - IsDialogMessage only runs when the message target is (inside) a real
+//    #32770 dialog. The embed child itself is NOT a dialog; the old code
+//    passed it as the dialog and silently ate plugin messages.
+constexpr int kEmbedMaxPumpPerCall = 256;
+
 int embed_pump_child_messages(HWND child) {
   int pumped = 0;
   MSG msg{};
   auto pump_queue = [&](HWND filter) {
-    while (PeekMessageW(&msg, filter, 0, 0, PM_REMOVE)) {
+    while (pumped < kEmbedMaxPumpPerCall && PeekMessageW(&msg, filter, 0, 0, PM_REMOVE)) {
       TranslateMessage(&msg);
+      HWND dialog = embed_dialog_ancestor(msg.hwnd);
+      if (dialog && IsDialogMessageW(dialog, &msg)) {
+        pumped++;
+        continue;
+      }
       DispatchMessageW(&msg);
       pumped++;
     }
@@ -1293,12 +1379,17 @@ int embed_pump_child_messages(HWND child) {
       [](HWND hwnd, LPARAM lparam) -> BOOL {
         MSG m{};
         auto* count = reinterpret_cast<int*>(lparam);
-        while (PeekMessageW(&m, hwnd, 0, 0, PM_REMOVE)) {
+        while (*count < kEmbedMaxPumpPerCall && PeekMessageW(&m, hwnd, 0, 0, PM_REMOVE)) {
           TranslateMessage(&m);
+          HWND dialog = embed_dialog_ancestor(m.hwnd);
+          if (dialog && IsDialogMessageW(dialog, &m)) {
+            (*count)++;
+            continue;
+          }
           DispatchMessageW(&m);
           (*count)++;
         }
-        return TRUE;
+        return *count < kEmbedMaxPumpPerCall ? TRUE : FALSE;
       },
       reinterpret_cast<LPARAM>(&pumped));
   return pumped;
@@ -1321,9 +1412,13 @@ void embed_refresh_session(EmbedSession* session, bool audit_log) {
     return;
   }
   embed_resize_view(session, false);
-  const int pumped = embed_pump_child_messages(session->child);
-  if (audit_log) {
-    std::fprintf(stderr, "[vst3-editor-audit] refresh pump drained=%d messages\n", pumped);
+  // Safe mode: the host loop's own pump drains the thread queue; no nested
+  // per-refresh pumping.
+  if (!embed_safe_mode()) {
+    const int pumped = embed_pump_child_messages(session->child);
+    if (audit_log) {
+      std::fprintf(stderr, "[vst3-editor-audit] refresh pump drained=%d messages\n", pumped);
+    }
   }
 }
 
@@ -1482,25 +1577,48 @@ unsigned long long embed_complete_attach(
     bool have_preferred) {
   if (!attachment || !attachment->view) return 0;
 
+  embed_ensure_thread_dpi_awareness();
   embed_ensure_parent_clip_children(parent);
   embed_audit_log_threads(parent, nullptr);
 
   const EmbedHostKind host_kind = embed_resolve_host_kind();
-  const int region_w = width > 1 ? width : 1;
-  const int region_h = height > 1 ? height : 1;
+  const int content_w =
+      (preferred_w > 0) ? preferred_w : (width > 1 ? width : 1);
+  const int content_h =
+      (preferred_h > 0) ? preferred_h : (height > 1 ? height : 1);
+  const UINT dpi = embed_hwnd_dpi(parent);
+  std::fprintf(stderr,
+               "[PluginEditor] dpi=%u scale=%.3f\n",
+               dpi,
+               static_cast<double>(dpi) / 96.0);
+  std::fprintf(stderr,
+               "[PluginEditor] view_get_size=%dx%d client_size=%dx%d\n",
+               content_w,
+               content_h,
+               content_w,
+               content_h);
 
-  HWND child = embed_create_host_window(parent, host_kind, x, y, region_w, region_h);
+  HWND child = embed_create_host_window(parent, host_kind, x, y, content_w, content_h);
   if (!child) {
     std::fprintf(stderr, "[SpherePluginHost] embed_attach: create host window failed\n");
     return 0;
   }
 
   embed_audit_log_threads(parent, child);
+  std::fprintf(stderr,
+               "[PluginEditor] created child hwnd=0x%p client=%dx%d\n",
+               static_cast<void*>(child),
+               content_w,
+               content_h);
 
   vst3_install_plug_frame(*attachment, child, parent);
+  std::fprintf(stderr, "[PluginEditor] setFrame ok\n");
 
   const auto attach_result =
       attachment->view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
+  std::fprintf(stderr,
+               "[PluginEditor] attached result=0x%x\n",
+               static_cast<unsigned>(attach_result));
   std::fprintf(
       stderr,
       "[vst3-editor-audit] attached result=%s(%d)\n",
@@ -1519,21 +1637,62 @@ unsigned long long embed_complete_attach(
   session->parent = parent;
   session->host_x = x;
   session->host_y = y;
-  session->host_w = region_w;
-  session->host_h = region_h;
+  session->host_w = content_w;
+  session->host_h = content_h;
   session->preferred_w = preferred_w;
   session->preferred_h = preferred_h;
   session->window_id = attachment->plugin_path;
   session->vst3 = std::move(attachment);
 
-  embed_force_show_child(session.get(), x, y, region_w, region_h);
+  embed_force_show_child(session.get(), x, y, content_w, content_h);
   embed_resize_view(session.get(), true);
-  const int pumped = embed_pump_child_messages(child);
-  std::fprintf(stderr, "[vst3-editor-audit] post-attach pump drained=%d messages\n", pumped);
+  std::fprintf(stderr, "[PluginEditor] visible=true\n");
+  const LONG_PTR top_style = GetWindowLongPtrW(parent, GWL_STYLE);
+  const LONG_PTR child_style = GetWindowLongPtrW(child, GWL_STYLE);
+  std::fprintf(stderr,
+               "[PluginEditor] window styles top=0x%08lx child=0x%08lx\n",
+               static_cast<unsigned long>(top_style),
+               static_cast<unsigned long>(child_style));
+  RECT child_rect{};
+  GetWindowRect(child, &child_rect);
+  std::fprintf(stderr,
+               "[PluginEditor] child rect=(%ld,%ld,%ld,%ld)\n",
+               child_rect.left,
+               child_rect.top,
+               child_rect.right,
+               child_rect.bottom);
+  if (embed_safe_mode()) {
+    // Safe mode (spec item 1): no deep-child focus walk and no re-entrant
+    // message pump inside the attach handler. The host loop pumps within
+    // milliseconds; focus follows the user's first click.
+    std::fprintf(stderr, "[PluginEditorSafe] attach: focus walk + post-attach pump skipped\n");
+  } else {
+    HWND focus_target = child;
+    HWND walk = GetWindow(child, GW_CHILD);
+    while (walk && IsWindow(walk)) {
+      focus_target = walk;
+      walk = GetWindow(walk, GW_CHILD);
+    }
+    if (focus_target && IsWindow(focus_target)) {
+      SetFocus(focus_target);
+      std::fprintf(stderr,
+                   "[PluginEditor] focus set child=0x%p\n",
+                   static_cast<void*>(focus_target));
+    }
+    const int pumped = embed_pump_child_messages(child);
+    std::fprintf(stderr, "[vst3-editor-audit] post-attach pump drained=%d messages\n", pumped);
+    std::fprintf(stderr, "[PluginEditor] modal/dialog message pump active\n");
+  }
+  // Focus/capture summary on open (spec item 5): capture should be null or
+  // plugin-owned here.
+  std::fprintf(stderr,
+               "[PluginEditorInput] attach focus=0x%p capture=0x%p\n",
+               static_cast<void*>(GetFocus()),
+               static_cast<void*>(GetCapture()));
 
   const bool gpu_detected = embed_detect_gpu_children(child);
   if (gpu_detected) {
-    embed_post_attach_refresh(child, region_w, region_h);
+    embed_post_attach_refresh(child, content_w, content_h);
   }
 
   Steinberg::ViewRect after{};
@@ -1588,6 +1747,7 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
   // IPlugView call. CEF/WebView plug-ins rely on this; benign for SDK-only
   // editors (idempotent / no-op when already initialized).
   embed_ensure_com_initialized();
+  embed_ensure_thread_dpi_awareness();
 
   HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
   const std::string path = plugin_path ? plugin_path : "";
@@ -1839,6 +1999,7 @@ extern "C" unsigned long long sphere_plugin_editor_embed_prepare(
     int* out_height) {
 #ifdef _WIN32
   embed_ensure_com_initialized();
+  embed_ensure_thread_dpi_awareness();
   const std::string path = plugin_path ? plugin_path : "";
   const std::string cid = class_id ? class_id : "";
   const std::string window_id = std::string("embed:") + path;

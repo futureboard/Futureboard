@@ -18,10 +18,10 @@ pub use sphere_graphic_engine::TextAlign;
 pub fn shell_font_theme() -> PluginShellFontTheme {
     PluginShellFontTheme {
         family_primary: crate::theme::FONT_FAMILY,
-        family_fallback: crate::theme::THAI_FONT_FAMILY,
-        title_size: 13.0,
-        body_size: 13.0,
-        weight_title: 400,
+        family_fallback: crate::theme::SYSTEM_UI_FONT_FAMILY,
+        title_size: crate::theme::typography::PLUGIN_TITLE,
+        body_size: crate::theme::typography::UI_SM,
+        weight_title: 500,
         weight_body: 400,
     }
 }
@@ -69,6 +69,12 @@ mod imp {
 
     fn log_diagnostics(renderer: &DWriteTextRenderer) {
         INIT_LOG.call_once(|| {
+            let theme = shell_font_theme();
+            eprintln!("[Fonts] default_ui_font={}", theme.family_primary);
+            eprintln!(
+                "[Fonts] fallback_ui_font={}",
+                theme.family_fallback
+            );
             let d = renderer.diagnostics();
             eprintln!("[plugin-shell-font] source=shared_embedded");
             eprintln!("[plugin-shell-font] primary={}", d.primary_family);
@@ -103,9 +109,37 @@ mod imp {
         align: TextAlign,
         dpi_scale: f32,
     ) -> bool {
+        draw_text_with_line_height(
+            hdc, rect, text, family, weight, em_px, bg, fg, align, dpi_scale, em_px * 1.3,
+        )
+    }
+
+    pub fn draw_text_with_line_height(
+        hdc: HDC,
+        rect: RECT,
+        text: &str,
+        family: &str,
+        weight: u32,
+        em_px: f32,
+        bg: COLORREF,
+        fg: COLORREF,
+        align: TextAlign,
+        dpi_scale: f32,
+        line_height_px: f32,
+    ) -> bool {
         with_renderer(|renderer| match renderer {
-            Some(renderer) => renderer.draw_text(
-                hdc, rect, text, family, weight, em_px, bg, fg, align, dpi_scale,
+            Some(renderer) => renderer.draw_text_with_line_height(
+                hdc,
+                rect,
+                text,
+                family,
+                weight,
+                em_px,
+                bg,
+                fg,
+                align,
+                dpi_scale,
+                line_height_px,
             ),
             None => false,
         })
@@ -134,4 +168,4 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::draw_text;
+pub use imp::{draw_text, draw_text_with_line_height};

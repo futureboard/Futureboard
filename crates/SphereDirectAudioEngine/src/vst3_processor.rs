@@ -152,6 +152,7 @@ extern "C" {
         height: i32,
     );
     fn sphere_daux_vst3_embed_refresh(processor: *mut SphereDauxVst3Processor);
+    fn sphere_daux_vst3_embed_attach_hwnd(processor: *mut SphereDauxVst3Processor) -> u64;
     fn sphere_daux_vst3_embed_detach(processor: *mut SphereDauxVst3Processor);
     fn sphere_daux_vst3_embed_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_embed_has_visible_ui(processor: *mut SphereDauxVst3Processor) -> i32;
@@ -563,6 +564,17 @@ impl Vst3RuntimeProcessor {
             return;
         }
         unsafe { sphere_daux_vst3_embed_refresh(self.inner.raw) };
+    }
+
+    /// Real Win32 HWND of the embed content child (`IPlugView::attached`
+    /// target), or 0 when not attached. Unlike the opaque handle returned by
+    /// `embed_editor`, this is a valid window handle usable for message
+    /// pumping / focus.
+    pub fn embed_attach_hwnd(&self) -> u64 {
+        if self.inner.raw.is_null() {
+            return 0;
+        }
+        unsafe { sphere_daux_vst3_embed_attach_hwnd(self.inner.raw) }
     }
 
     /// Detach the embedded view and destroy the host window. The processor

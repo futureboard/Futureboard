@@ -296,6 +296,7 @@ impl FutureboardPaths {
 ///   Assets/Audio/
 ///   Assets/MIDI/
 ///   Assets/Samples/
+///   Cache/Waveforms/
 ///   Cache/Waveform/
 ///   Cache/Peaks/
 ///   Cache/Processed/
@@ -310,6 +311,7 @@ pub struct ProjectFolderLayout {
     pub media_audio: PathBuf,
     pub media_midi: PathBuf,
     pub media_samples: PathBuf,
+    pub cache_waveforms: PathBuf,
     pub cache_waveform: PathBuf,
     pub cache_peaks: PathBuf,
     pub cache_processed: PathBuf,
@@ -332,6 +334,7 @@ impl ProjectFolderLayout {
             media_audio: media.join("Audio"),
             media_midi: media.join("MIDI"),
             media_samples: media.join("Samples"),
+            cache_waveforms: cache.join("Waveforms"),
             cache_waveform: cache.join("Waveform"),
             cache_peaks: cache.join("Peaks"),
             cache_processed: cache.join("Processed"),
@@ -349,6 +352,7 @@ impl ProjectFolderLayout {
             &self.media_audio,
             &self.media_midi,
             &self.media_samples,
+            &self.cache_waveforms,
             &self.cache_waveform,
             &self.cache_peaks,
             &self.cache_processed,

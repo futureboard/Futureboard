@@ -27,6 +27,47 @@ pub fn shell_layout_trace_enabled() -> bool {
     forensic_trace_enabled() || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
 }
 
+/// Plugin editor safe mode (`FUTUREBOARD_PLUGIN_EDITOR_SAFE=1`): disables
+/// experimental focus hacks and verbose per-message logging in the native
+/// editor shell. Mirrors the same flag in the plugin host process.
+pub fn plugin_editor_safe_mode() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_EDITOR_SAFE").is_some())
+}
+
+/// Coarse log rate limiter: allows at most `max_per_sec` events per second.
+/// Used to keep per-message diagnostics (hit-test, mouse-move traces) bounded.
+pub struct LogRateLimiter {
+    window_start_ms: std::sync::atomic::AtomicU64,
+    count: std::sync::atomic::AtomicU32,
+    max_per_sec: u32,
+}
+
+impl LogRateLimiter {
+    pub const fn new(max_per_sec: u32) -> Self {
+        Self {
+            window_start_ms: std::sync::atomic::AtomicU64::new(0),
+            count: std::sync::atomic::AtomicU32::new(0),
+            max_per_sec,
+        }
+    }
+
+    pub fn allow(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let start = self.window_start_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(start) >= 1000 {
+            self.window_start_ms.store(now, Ordering::Relaxed);
+            self.count.store(1, Ordering::Relaxed);
+            return true;
+        }
+        self.count.fetch_add(1, Ordering::Relaxed) < self.max_per_sec
+    }
+}
+
 pub fn preview_perf_trace_enabled() -> bool {
     forensic_trace_enabled() || std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some()
 }
@@ -102,6 +143,7 @@ pub fn log_plugin_main_registry(state: &TimelineState) {
         for slot in &track.inserts {
             let backend = slot.runtime_backend.label().to_string();
             let state_tag = match &slot.runtime_state {
+                PluginRuntimeState::NotLoaded => "not_loaded",
                 PluginRuntimeState::Loading => "loading",
                 PluginRuntimeState::Loaded => "loaded",
                 PluginRuntimeState::Active => "active",
@@ -110,6 +152,7 @@ pub fn log_plugin_main_registry(state: &TimelineState) {
                 PluginRuntimeState::EditorOpen => "editor_open",
                 PluginRuntimeState::EditorClosed => "editor_closed",
                 PluginRuntimeState::Bypassed => "bypassed",
+                PluginRuntimeState::Missing(_) => "missing",
                 PluginRuntimeState::Failed(_) => "failed",
                 PluginRuntimeState::Crashed => "crashed",
                 PluginRuntimeState::Unloaded => "unloaded",

@@ -5,15 +5,15 @@ use gpui::{
 
 use crate::assets;
 use crate::platform_chrome::{PlatformChromePolicy, TITLEBAR_HEIGHT_PX};
-use crate::theme::Colors;
+use crate::theme::{self, Colors};
 
 pub const TITLEBAR_HEIGHT: f32 = TITLEBAR_HEIGHT_PX;
 pub const STATUSBAR_HEIGHT: f32 = 22.0;
 pub const CHROME_ICON_BUTTON_SIZE: f32 = 26.0;
 pub const WINDOW_CONTROL_WIDTH: f32 = 34.0;
 pub const CHROME_PAD_X: f32 = 6.0;
-pub const CHROME_TEXT_SIZE: f32 = 10.5;
-pub const CHROME_TITLE_SIZE: f32 = 11.5;
+pub const CHROME_TEXT_SIZE: f32 = crate::theme::typography::UI_SM;
+pub const CHROME_TITLE_SIZE: f32 = crate::theme::typography::UI_SM;
 
 pub fn section_separator() -> impl gpui::IntoElement {
     div()
@@ -128,6 +128,7 @@ pub fn external_window_titlebar_with_icon(
     title_row = title_row.child(
         div()
             .text_size(px(CHROME_TITLE_SIZE))
+            .font(theme::ui_font())
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(Colors::text_primary())
             .child(title_text),
@@ -222,7 +223,8 @@ pub fn external_window_titlebar_compact(
                 .items_center()
                 .h_full()
                 .flex_shrink_0()
-                .text_size(px(11.0))
+                .text_size(px(CHROME_TITLE_SIZE))
+                .font(theme::ui_font())
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(Colors::text_primary())
                 .child(title_text),
@@ -284,7 +286,8 @@ pub fn status_item(text: impl Into<String>, strong: bool) -> impl gpui::IntoElem
         .items_center()
         .px(px(6.0))
         .rounded_sm()
-        .text_size(px(10.0))
+        .text_size(px(crate::theme::typography::UI_XS))
+        .font(theme::ui_font())
         .font_weight(if strong {
             gpui::FontWeight::MEDIUM
         } else {

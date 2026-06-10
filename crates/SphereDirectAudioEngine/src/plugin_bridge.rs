@@ -17,7 +17,11 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
 
     /// Read the host's most-recently produced block (deinterleaved) into
     /// `out_l` / `out_r` (each at least `frames` long). Returns the number of
-    /// frames actually read (0 when nothing is available). Wait-free.
+    /// frames actually read. Each produced block is handed out **at most
+    /// once**: 0 means the host has not produced a new block since the last
+    /// read (stalled on an editor open/close, plugin load, or not started) —
+    /// the caller must bypass or output silence for this block and must never
+    /// reuse previous output. Wait-free.
     fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize;
 
     /// Push one MIDI event for the host to apply to the next block (Stage 4 clip

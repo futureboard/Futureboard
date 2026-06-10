@@ -15,6 +15,7 @@ impl Render for StudioLayout {
         self.frame_diag.tick(reason);
         crate::perf::tick_root_frame(reason_static);
         self.cached_studio_window_bounds = Some(window.bounds());
+        self.flush_deferred_insert_editor_opens(window, cx);
 
         // Keep the OS window title in sync with the project lifecycle state
         // (Part G/H), e.g. "Untitled Project — Unsaved" / "My Song — Saved".

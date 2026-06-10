@@ -2,6 +2,23 @@ extern crate napi_build;
 
 fn main() {
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join("vst3backend/plugin_host.rc").display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join("../../apps/shared/app.manifest").display()
+        );
+        embed_resource::compile(
+            manifest_dir.join("vst3backend/plugin_host.rc"),
+            embed_resource::NONE,
+        )
+        .manifest_required()
+        .unwrap();
+    }
     let sdk_root = manifest_dir.join("../../external/vst3sdk");
     let clap_root = manifest_dir.join("../../external/clap");
     let clap_helpers_root = manifest_dir.join("../../external/clap-helpers");

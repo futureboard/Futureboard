@@ -282,6 +282,10 @@ fn prepare_portable_assets(
                     relative_string,
                     None,
                     fingerprint,
+                    None,
+                    None,
+                    None,
+                    None,
                 )?);
                 continue;
             }
@@ -352,6 +356,10 @@ fn prepare_portable_assets(
                 relative_string,
                 Some(source_abs),
                 dest_fingerprint,
+                None,
+                None,
+                None,
+                None,
             )?);
         }
     }
@@ -439,27 +447,37 @@ fn asset_record(
     relative_path: String,
     original_path: Option<PathBuf>,
     fingerprint: Option<AudioFingerprint>,
+    duration_samples: Option<u64>,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+    duration_secs: Option<f64>,
 ) -> Result<ProjectAsset, ProjectError> {
     Ok(ProjectAsset {
-        id,
+        id: id.clone(),
         original_filename: copied_path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "audio".to_string()),
         relative_path: Some(relative_path),
         absolute_path: original_path,
-        duration_secs: None,
-        sample_rate: None,
-        channels: None,
+        duration_secs,
+        sample_rate,
+        channels,
         source_fingerprint: fingerprint.map(|fp| fp.to_token()),
+        waveform_peak_relative_path: Some(
+            crate::components::timeline::waveform_peak_file::waveform_peak_relative_path_for_asset(
+                &id,
+            ),
+        ),
+        duration_samples,
     })
 }
 
 /// Content identity for asset dedup: byte length + CRC32 of the file contents.
 /// Two files with the same fingerprint are treated as the same audio asset, so
 /// re-importing identical bytes reuses the existing project copy rather than
-/// writing a duplicate. (Distinct from `audio_import::stable_cache_key`, which
-/// keys the *waveform* cache on path + size + mtime.)
+/// writing a duplicate. Waveform peaks are cached separately under
+/// `Cache/Waveforms/` keyed by stable `asset_id` (see `waveform_peak_file`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct AudioFingerprint {
     len: u64,
@@ -538,11 +556,21 @@ fn same_source(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn path_to_project_string(path: &Path) -> String {
+pub fn path_to_project_string(path: &Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Returns a project-relative path string when `path` lives under `project_root`.
+pub fn relative_path_in_project(path: &Path, project_root: &Path) -> Option<String> {
+    path_relative_to_project(path, project_root).map(|rel| path_to_project_string(&rel))
+}
+
+/// Resolve a project-relative audio or cache path against the project folder.
+pub fn resolve_project_relative_path(project_root: &Path, relative: &str) -> PathBuf {
+    project_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
 #[cfg(test)]
@@ -550,8 +578,8 @@ mod tests {
     use super::*;
     use crate::project::{
         format::{encode_project, ProjectError, PROJECT_HEADER_SIZE},
-        ClipSource, FutureboardProject, ProjectClip, ProjectSession, ProjectTrack, ProjectTrackType,
-        TrackRouting,
+        ClipSource, FutureboardProject, ProjectAsset, ProjectClip, ProjectSession, ProjectTrack,
+        ProjectTrackType, TrackRouting,
     };
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -948,6 +976,210 @@ mod tests {
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(ext);
         let _ = fs::remove_dir_all(ext2);
+    }
+
+    fn sample_peak_preview() -> crate::components::timeline::waveform_cache::WaveformPreview {
+        use crate::components::timeline::waveform_cache::{WaveformLod, WaveformPeak};
+        crate::components::timeline::waveform_cache::WaveformPreview {
+            sample_rate: 48_000,
+            channels: 2,
+            duration_seconds: 1.0,
+            total_frames: 48_000,
+            lods: vec![WaveformLod {
+                samples_per_peak: 256,
+                peaks: vec![
+                    WaveformPeak { min: -0.5, max: 0.5 },
+                    WaveformPeak { min: -0.2, max: 0.8 },
+                ],
+            }],
+        }
+    }
+
+    /// Test A: import writes project cache layout and asset metadata.
+    #[test]
+    fn import_writes_project_audio_and_peak_cache_paths() {
+        use crate::components::timeline::waveform_peak_file::{
+            read_peak_file, write_peak_file, waveform_peak_relative_path_for_asset,
+        };
+        use crate::paths::ProjectFolderLayout;
+
+        let root = temp_dir("peak-a");
+        let ext = temp_dir("peak-a-ext");
+        fs::create_dir_all(&ext).unwrap();
+        let source = ext.join("loop.wav");
+        fs::write(&source, b"fake wav bytes for cache test").unwrap();
+
+        let dest = import_audio_file_to_project(&source, &root).unwrap();
+        assert!(dest.exists());
+        assert_eq!(
+            relative_path_in_project(&dest, &root).as_deref(),
+            Some("Assets/Audio/loop.wav")
+        );
+
+        let asset_id = "Assets/Audio/loop.wav";
+        let peak_rel = waveform_peak_relative_path_for_asset(asset_id);
+        let peak_path = resolve_project_relative_path(&root, &peak_rel);
+        write_peak_file(&peak_path, asset_id, &sample_peak_preview()).unwrap();
+        assert!(peak_path.exists());
+
+        let mut project = FutureboardProject::new("PeakA");
+        project
+            .tracks
+            .push(audio_track("t1", vec![audio_clip("c1", &dest)]));
+        let project_file = root.join("PeakA.fbproj");
+        save_project(&mut project, &project_file).unwrap();
+
+        let loaded = load_project(&project_file).unwrap();
+        assert_eq!(loaded.assets.len(), 1);
+        assert_eq!(
+            loaded.assets[0].relative_path.as_deref(),
+            Some("Assets/Audio/loop.wav")
+        );
+        assert_eq!(
+            loaded.assets[0].waveform_peak_relative_path.as_deref(),
+            Some(peak_rel.as_str())
+        );
+        let layout = ProjectFolderLayout::from_root(root.clone());
+        assert!(layout.media_audio.exists());
+        assert!(layout.cache_waveforms.exists());
+        read_peak_file(&peak_path, Some(asset_id)).unwrap();
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(ext);
+    }
+
+    /// Test B: reopen loads peak cache from disk without memory cache.
+    #[test]
+    fn reopen_loads_peak_cache_from_disk() {
+        use crate::components::timeline::waveform_peak_file::{
+            read_peak_file, write_peak_file, waveform_peak_relative_path_for_asset,
+        };
+
+        let root = temp_dir("peak-b");
+        let asset_id = "Assets/Audio/loop.wav";
+        let audio_path = root.join("Assets/Audio/loop.wav");
+        fs::create_dir_all(audio_path.parent().unwrap()).unwrap();
+        fs::write(&audio_path, b"audio").unwrap();
+
+        let peak_rel = waveform_peak_relative_path_for_asset(asset_id);
+        let peak_path = resolve_project_relative_path(&root, &peak_rel);
+        write_peak_file(&peak_path, asset_id, &sample_peak_preview()).unwrap();
+
+        let mut project = FutureboardProject::new("PeakB");
+        project.assets.push(ProjectAsset {
+            id: asset_id.to_string(),
+            original_filename: "loop.wav".to_string(),
+            relative_path: Some(asset_id.to_string()),
+            absolute_path: None,
+            duration_secs: Some(1.0),
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            source_fingerprint: None,
+            waveform_peak_relative_path: Some(peak_rel.clone()),
+            duration_samples: Some(48_000),
+        });
+        project
+            .tracks
+            .push(audio_track("t1", vec![audio_clip("c1", &audio_path)]));
+        let project_file = root.join("PeakB.fbproj");
+        save_project(&mut project, &project_file).unwrap();
+
+        let loaded = load_project(&project_file).unwrap();
+        let peak_path = resolve_project_relative_path(
+            &root,
+            loaded.assets[0]
+                .waveform_peak_relative_path
+                .as_ref()
+                .unwrap(),
+        );
+        let preview = read_peak_file(&peak_path, Some(asset_id)).unwrap();
+        assert_eq!(preview.lods[0].peaks.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Test C: repeated import reuses one project-local audio file.
+    #[test]
+    fn repeated_import_reuses_project_audio_copy() {
+        use crate::components::timeline::waveform_peak_file::waveform_peak_relative_path_for_asset;
+
+        let root = temp_dir("peak-c");
+        let ext = temp_dir("peak-c-ext");
+        fs::create_dir_all(&ext).unwrap();
+        let source_a = ext.join("loop.wav");
+        let source_b = ext.join("again.wav");
+        fs::write(&source_a, b"same bytes").unwrap();
+        fs::write(&source_b, b"same bytes").unwrap();
+
+        let dest_a = import_audio_file_to_project(&source_a, &root).unwrap();
+        let dest_b = import_audio_file_to_project(&source_b, &root).unwrap();
+        assert_eq!(dest_a, dest_b);
+        assert_eq!(audio_files_in(&root), vec!["loop.wav".to_string()]);
+
+        let asset_id = "Assets/Audio/loop.wav";
+        let peak_rel = waveform_peak_relative_path_for_asset(asset_id);
+        assert_eq!(peak_rel, "Cache/Waveforms/Assets__Audio__loop.wav.peaks");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(ext);
+    }
+
+    /// Test D: missing peak file is a disk miss (regeneration path).
+    #[test]
+    fn missing_peak_file_reports_disk_miss() {
+        use crate::components::timeline::waveform_peak_file::{
+            read_peak_file, PeakFileError,
+        };
+
+        let root = temp_dir("peak-d");
+        let asset_id = "Assets/Audio/loop.wav";
+        let peak_path = resolve_project_relative_path(
+            &root,
+            &crate::components::timeline::waveform_peak_file::waveform_peak_relative_path_for_asset(
+                asset_id,
+            ),
+        );
+        let err = read_peak_file(&peak_path, Some(asset_id)).unwrap_err();
+        assert!(matches!(
+            err,
+            PeakFileError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Test E: project-local audio survives loss of original external source.
+    #[test]
+    fn project_local_audio_used_when_external_source_missing() {
+        let root = temp_dir("peak-e");
+        let ext = temp_dir("peak-e-ext");
+        fs::create_dir_all(&ext).unwrap();
+        let source = ext.join("loop.wav");
+        fs::write(&source, b"portable audio").unwrap();
+
+        let dest = import_audio_file_to_project(&source, &root).unwrap();
+        fs::remove_file(&source).unwrap();
+        assert!(!source.exists());
+        assert!(dest.exists());
+
+        let mut project = FutureboardProject::new("PeakE");
+        project
+            .tracks
+            .push(audio_track("t1", vec![audio_clip("c1", &dest)]));
+        let project_file = root.join("PeakE.fbproj");
+        save_project(&mut project, &project_file).unwrap();
+
+        let loaded = load_project(&project_file).unwrap();
+        let ClipSource::Audio {
+            source_path: Some(resolved),
+            ..
+        } = &loaded.tracks[0].clips[0].source
+        else {
+            panic!("expected audio clip source");
+        };
+        assert!(resolved.exists());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(ext);
     }
 
     #[test]

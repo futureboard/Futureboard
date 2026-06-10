@@ -227,6 +227,14 @@ pub struct SharedState {
     pub recording_preview_channels: AtomicU32,
     pub recording_preview_peaks_per_sec: AtomicU32,
 
+    // ── Callback watchdog (audio-hang spec §12; audio → control) ──────────
+    /// Duration of the most recent output callback, microseconds.
+    pub last_callback_us: AtomicU32,
+    /// Worst output-callback duration seen since stream open, microseconds.
+    pub max_callback_us: AtomicU32,
+    /// Blocks that exceeded the 2 ms debug threshold.
+    pub slow_callback_count: AtomicU64,
+
     // DAUx diagnostics (incremented by audio thread, read by control thread)
     pub glitch_count: AtomicU64,
     pub mmcss_active: AtomicBool,
@@ -290,6 +298,9 @@ impl Default for SharedState {
             recording_preview_sample_rate: AtomicU32::new(0),
             recording_preview_channels: AtomicU32::new(0),
             recording_preview_peaks_per_sec: AtomicU32::new(0),
+            last_callback_us: AtomicU32::new(0),
+            max_callback_us: AtomicU32::new(0),
+            slow_callback_count: AtomicU64::new(0),
             glitch_count: AtomicU64::new(0),
             mmcss_active: AtomicBool::new(false),
             device_lost: AtomicBool::new(false),
@@ -490,6 +501,16 @@ impl EngineInner {
 
     pub fn set_pdc_enabled(&self, enabled: bool) {
         self.shared.pdc_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Current transport play flag (set/cleared only by Start/StopTransport).
+    pub fn transport_playing(&self) -> bool {
+        self.shared.playing.load(Ordering::Relaxed)
+    }
+
+    /// Current lifecycle gate of the realtime callback.
+    pub fn engine_state(&self) -> AudioEngineState {
+        AudioEngineState::from_u8(self.shared.engine_state.load(Ordering::Relaxed))
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -1319,10 +1340,15 @@ impl EngineInner {
     // ── Project snapshot ───────────────────────────────────────────────────
 
     pub fn load_project(&self, snapshot: EngineProjectSnapshot) -> Result<(), SphereAudioError> {
-        self.shared
-            .engine_state
-            .store(AudioEngineState::LoadingProject as u8, Ordering::Relaxed);
-        eprintln!("[AudioEngine] state -> LoadingProject");
+        let old_state = AudioEngineState::from_u8(
+            self.shared
+                .engine_state
+                .swap(AudioEngineState::LoadingProject as u8, Ordering::Relaxed),
+        );
+        eprintln!(
+            "[AudioEngineState] old={old_state:?} new=LoadingProject source=load_project playing={}",
+            self.shared.playing.load(Ordering::Relaxed)
+        );
         let output_sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
 
         // Log how many clips have paths before building runtime.
@@ -1401,6 +1427,14 @@ impl EngineInner {
                             }
                         }
                     }
+                    // Failed build must not leave the engine wedged in
+                    // LoadingProject (permanent silence) — restore.
+                    self.shared
+                        .engine_state
+                        .store(old_state as u8, Ordering::Relaxed);
+                    eprintln!(
+                        "[AudioEngineState] old=LoadingProject new={old_state:?} source=load_project_failed"
+                    );
                     return Err(e.into());
                 }
             }
@@ -1460,8 +1494,24 @@ impl EngineInner {
                     "[SphereAudio] ⚠ WARNING: no audio stream open — runtime stored, \
                      will apply on next openDevice/openDaux"
                 );
+                // No callback will run the graph-swap transition; leave a
+                // consistent Paused state instead of LoadingProject.
+                self.shared
+                    .engine_state
+                    .store(AudioEngineState::Paused as u8, Ordering::Relaxed);
+                eprintln!(
+                    "[AudioEngineState] old=LoadingProject new=Paused source=load_project_no_stream"
+                );
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                self.shared
+                    .engine_state
+                    .store(old_state as u8, Ordering::Relaxed);
+                eprintln!(
+                    "[AudioEngineState] old=LoadingProject new={old_state:?} source=load_project_send_failed"
+                );
+                return Err(e);
+            }
         }
 
         let _ = self.set_tempo_map(snapshot.bpm, snapshot.tempo_points.clone());
@@ -2798,6 +2848,10 @@ fn mix_bridged_sink_into_track(
     let mut scratch_l = [0.0f32; MAX];
     let mut scratch_r = [0.0f32; MAX];
     let got = sink.read_output(&mut scratch_l[..n], &mut scratch_r[..n], n);
+    // Always drive the handshake — even when this block was missed (got == 0)
+    // — so a stalled host resumes producing once it recovers instead of the
+    // request/done sequence wedging forever.
+    sink.request_block(frames as u32);
     if got == 0 {
         return;
     }
@@ -2815,7 +2869,6 @@ fn mix_bridged_sink_into_track(
             track.id, peak_l, peak_r
         );
     }
-    sink.request_block(frames as u32);
 }
 
 fn process_track_block(
@@ -2929,12 +2982,19 @@ fn accumulate_sends(
     }
 }
 
+/// `transport_active` — false when this block is rendered while the transport
+/// is stopped (MIDI preview, post-panic bridge flush, open plugin editor). In
+/// that mode the track/insert graph still runs (so bridged VSTi previews are
+/// heard and the host handshake stays alive) but timeline clip material is
+/// skipped — otherwise the frozen playhead would stutter-loop the same audio
+/// clip slice every callback.
 pub fn render_project_block_interleaved(
     runtime: &mut RuntimeProject,
     base_sample: u64,
     master_volume: f32,
     output: &mut [f32],
     channels: usize,
+    transport_active: bool,
 ) -> u64 {
     if channels < 2 {
         return 0;
@@ -2972,6 +3032,9 @@ pub fn render_project_block_interleaved(
     let master_index = runtime.audio_graph.master_index;
 
     for clip_index in 0..runtime.clips.len() {
+        if !transport_active {
+            break; // stopped-transport preview block — no timeline material
+        }
         let clip = &runtime.clips[clip_index];
         if clip.muted {
             continue;
@@ -3277,6 +3340,47 @@ fn apply_external_bridge_insert_block(
         &mut insert.scratch_r[..frames],
         frames,
     );
+
+    // Missed-deadline accounting: `read_output` returns 0 when the host has
+    // not produced a fresh block (its service thread is stalled behind an
+    // editor open/close or a plugin load). The block below then bypasses the
+    // insert (effect keeps the dry signal, instrument contributes silence) —
+    // stale output is never replayed. A few misses are normal on startup and
+    // when resuming from pause, so only log once a stall is established.
+    const BRIDGE_MISS_LOG_THRESHOLD: u32 = 8;
+    if got == 0 {
+        insert.bridge_missed_blocks = insert.bridge_missed_blocks.saturating_add(1);
+        if insert.bridge_missed_blocks == BRIDGE_MISS_LOG_THRESHOLD
+            || insert.bridge_missed_blocks % 1024 == 0
+        {
+            if is_effect {
+                eprintln!(
+                    "[AudioEngine] plugin missed deadline; bypassing to dry signal instance={} missed_blocks={}",
+                    insert.id, insert.bridge_missed_blocks
+                );
+            } else {
+                eprintln!(
+                    "[VSTi] missed bridge block; output silence instance={} missed_blocks={}",
+                    insert.id, insert.bridge_missed_blocks
+                );
+            }
+        }
+    } else {
+        if insert.bridge_missed_blocks >= BRIDGE_MISS_LOG_THRESHOLD {
+            if is_effect {
+                eprintln!(
+                    "[AudioEngine] plugin host recovered instance={} missed_blocks={}",
+                    insert.id, insert.bridge_missed_blocks
+                );
+            } else {
+                eprintln!(
+                    "[VSTi] recovered after missed blocks={} instance={}",
+                    insert.bridge_missed_blocks, insert.id
+                );
+            }
+        }
+        insert.bridge_missed_blocks = 0;
+    }
 
     let mut out_peak_l = 0.0f32;
     let mut out_peak_r = 0.0f32;
@@ -3665,6 +3769,9 @@ where
                             // Preserve the plugin-bridge sinks across reloads (Stage 3b).
                             runtime.plugin_bridge_sinks = old.plugin_bridge_sinks.clone();
                             runtime.bridge_editor_active = old.bridge_editor_active.clone();
+                            // The panic pushed into the preserved sinks above
+                            // still needs flushing through the new graph.
+                            runtime.bridge_panic_flush_samples = old.bridge_panic_flush_samples;
                             let pos = shared.position_samples.load(Ordering::Relaxed);
                             metronome.set_tempo_map(
                                 runtime.tempo_map.clone(),
@@ -3916,15 +4023,27 @@ where
                 let has_preview = runtime.has_active_midi_preview();
                 if playing_local {
                     metronome.preview_tail_samples = 0;
+                    // Playing blocks drive the bridge anyway — flush is implicit.
+                    runtime.bridge_panic_flush_samples = 0;
                 } else if has_preview || pending_midi {
                     // Keep release-tail processing queued past the note-off so a
                     // stopped-transport preview doesn't cut the instrument dead.
                     metronome.preview_tail_samples =
                         (runtime.sample_rate as u64).saturating_mul(2);
                 }
+                // Post-panic flush: keep the bridge handshake alive after a
+                // stop/seek/mute panic so the host drains the panic CCs instead
+                // of leaving VSTi voices stuck until the next play.
+                let panic_flush = runtime.bridge_panic_flush_samples > 0;
+                if !playing_local && panic_flush {
+                    runtime.bridge_panic_flush_samples = runtime
+                        .bridge_panic_flush_samples
+                        .saturating_sub(frames_in_block);
+                }
                 let bridge_editor_wakeup = runtime.has_bridge_editor_active();
                 let preview_render_active = has_preview
                     || pending_midi
+                    || panic_flush
                     || metronome.preview_tail_samples > 0
                     || bridge_editor_wakeup;
                 if preview_render_active
@@ -3983,6 +4102,7 @@ where
                         master_vol,
                         scratch,
                         ch,
+                        playing_local,
                     );
                     if !render_path_logged {
                         render_path_logged = true;

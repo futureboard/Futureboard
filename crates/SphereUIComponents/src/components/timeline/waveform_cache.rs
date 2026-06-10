@@ -174,6 +174,25 @@ fn file_cache() -> &'static Mutex<HashMap<String, FileEntry>> {
     FILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Move an in-memory cache entry from `old_key` to `new_key` (e.g. after
+/// retargeting an asset id to a project-relative path).
+pub fn migrate_cache_key(old_key: &str, new_key: &str) {
+    if old_key == new_key {
+        return;
+    }
+    if let Ok(mut cache) = file_cache().lock() {
+        if let Some(entry) = cache.remove(old_key) {
+            eprintln!("[WaveformCache] migrate asset_id {old_key} -> {new_key}");
+            if let Some(existing) = cache.get(new_key) {
+                if existing.preview.is_some() || existing.chunks_ready > 0 {
+                    return;
+                }
+            }
+            cache.insert(new_key.to_string(), entry);
+        }
+    }
+}
+
 pub fn get_preview_arc(path: &str) -> Option<Arc<WaveformPreview>> {
     file_cache()
         .lock()

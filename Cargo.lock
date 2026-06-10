@@ -5814,6 +5814,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "dirs 5.0.1",
+ "embed-resource",
  "napi",
  "napi-build",
  "napi-derive",

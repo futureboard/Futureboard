@@ -480,7 +480,7 @@ fn insert_chip(
         InsertLoadStatus::Ready if !bypassed => (Colors::accent_muted(), Colors::text_primary()),
         InsertLoadStatus::Ready => (Colors::surface_input(), Colors::text_muted()),
         InsertLoadStatus::Loading => (Colors::surface_input(), Colors::text_muted()),
-        InsertLoadStatus::Failed(_) => (
+        InsertLoadStatus::Missing(_) | InsertLoadStatus::Failed(_) => (
             Colors::with_alpha(Colors::status_error(), 0.16),
             Colors::status_error(),
         ),

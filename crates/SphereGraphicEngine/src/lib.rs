@@ -32,6 +32,8 @@ pub mod software;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlign {
     Left,
+    /// Left-aligned, vertically centered (titlebars).
+    LeftMiddle,
     Center,
 }
 

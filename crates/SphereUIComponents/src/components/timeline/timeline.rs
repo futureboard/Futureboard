@@ -1073,6 +1073,11 @@ impl Timeline {
             _ => (0.0, 1.0e9_f32),
         };
 
+        if self.project_root.is_none() {
+            eprintln!("[AudioImport] blocked: save project before importing audio");
+            return false;
+        }
+
         self.state
             .import_audio_at(path_key.clone(), clip_name, drop_x, drop_y);
         self.mark_project_changed(cx);

@@ -79,7 +79,7 @@ impl ChromeTheme {
             glyph_active: Color::rgb(245, 246, 248),
             button_hover: Color::rgb(45, 47, 53),
             close_hover: Color::rgb(196, 43, 43),
-            titlebar_h: 34,
+            titlebar_h: 32,
             border_px: 1,
             button_w: 46,
             resize_grab: 6,

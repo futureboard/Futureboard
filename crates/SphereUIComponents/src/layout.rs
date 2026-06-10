@@ -360,6 +360,8 @@ pub struct StudioLayout {
     /// Keyed by `(track_id, plugin_instance_id)`.
     bridge_editors: std::collections::HashMap<(String, String), plugin_ops::BridgeEditorSession>,
     plugin_bridge_runtime: Option<plugin_bridge_runtime::SharedPluginBridgeRuntime>,
+    /// Editor opens requested while the insert runtime was still loading.
+    deferred_insert_editor_opens: Vec<(String, usize, String)>,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
     /// Detached mixer window for multi-monitor layouts.
@@ -744,6 +746,7 @@ impl StudioLayout {
             open_plugin_editors: std::collections::HashMap::new(),
             bridge_editors: std::collections::HashMap::new(),
             plugin_bridge_runtime: None,
+            deferred_insert_editor_opens: Vec::new(),
             settings_window: None,
             mixer_window: None,
             pending_mixer_external_open: None,
@@ -1589,6 +1592,13 @@ impl StudioLayout {
         _path_key: String,
     ) {
         let project_root = owner.read(cx).project_session.folder_path.clone();
+        if project_root.is_none() {
+            eprintln!("[AudioImport] blocked: save project before importing audio");
+            let _ = owner.update(cx, |this, cx| {
+                this.show_import_requires_save_dialog(cx);
+            });
+            return;
+        }
         components::timeline::audio_import::spawn_timeline_import_from_layout(
             path,
             project_root,
@@ -1596,5 +1606,29 @@ impl StudioLayout {
             owner,
             cx,
         );
+    }
+
+    pub(super) fn show_import_requires_save_dialog(&mut self, cx: &mut Context<Self>) {
+        use crate::components::{
+            open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
+        };
+        let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
+            self.cached_studio_window_bounds,
+            self.studio_window_bounds(cx),
+            cx,
+        );
+        let options = MessageBoxOptions {
+            kind: MessageBoxKind::Warning,
+            title: "Save Project".to_string(),
+            message: "Save the project before importing audio so Futureboard can copy files and cache waveforms.".to_string(),
+            detail: None,
+            buttons: vec!["OK".to_string()],
+            default_id: 0,
+            cancel_id: None,
+        };
+        let on_response: std::sync::Arc<
+            dyn Fn(MessageBoxResult, &mut gpui::Window, &mut gpui::App) + Send + Sync,
+        > = std::sync::Arc::new(|_, _, _| {});
+        let _ = open_message_box_window(owner_bounds, options, on_response, cx);
     }
 }

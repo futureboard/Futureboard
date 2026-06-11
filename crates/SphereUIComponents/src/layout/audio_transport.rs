@@ -25,17 +25,20 @@ impl StudioLayout {
             }
         };
         let bridge_instance = self.resolve_track_instrument_plugin(&track_id, cx);
-        let sink_ready = self
-            .plugin_bridge_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.lock().ok())
-            .map(|bridge| {
-                bridge
-                    .loaded_instance_ids()
-                    .into_iter()
-                    .any(|id| bridge.audio_sink_for(&id).is_some())
-            })
-            .unwrap_or(false);
+        // Per-note hot path: never block the GPUI thread on the bridge runtime
+        // mutex. A background save / plugin-state capture (`request_plugin_states`,
+        // ~1.5s) or a plugin load can hold it, and pressing notes or muting while
+        // it was held used to freeze the UI. Probe with `try_lock`; if it is busy
+        // but this track has a bridged instrument, route through the lock-free
+        // engine command bus anyway (the correct path once a bridge plugin exists).
+        let sink_ready = match self.plugin_bridge_runtime.as_ref().map(|rt| rt.try_lock()) {
+            Some(Ok(bridge)) => bridge
+                .loaded_instance_ids()
+                .into_iter()
+                .any(|id| bridge.audio_sink_for(&id).is_some()),
+            Some(Err(_)) => bridge_instance.is_some(),
+            None => false,
+        };
 
         if sink_ready {
             // Shared-memory bridge is live — always route through the main DAW
@@ -100,7 +103,10 @@ impl StudioLayout {
 
         if let Some(instance_id) = bridge_instance {
             if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
-                if let Ok(mut bridge) = runtime.lock() {
+                // try_lock, not lock: this IPC fallback runs on the GPUI thread
+                // and must not stall it if a background bridge op holds the mutex.
+                // On contention we fall through to the engine MIDI-preview path.
+                if let Ok(mut bridge) = runtime.try_lock() {
                     let result = match command {
                         components::piano_roll::UiMidiPreviewCommand::NoteOn {
                             channel,

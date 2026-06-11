@@ -372,7 +372,9 @@ pub struct ProjectMixer {
 impl Default for ProjectMixer {
     fn default() -> Self {
         Self {
-            master_volume_norm: 0.818,
+            master_volume_norm: crate::components::timeline::timeline_state::volume::db_to_norm(
+                0.0,
+            ),
         }
     }
 }

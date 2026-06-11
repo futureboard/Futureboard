@@ -285,11 +285,9 @@ fn empty_slot() -> impl IntoElement {
         .mx(px(4.0))
         .py(px(2.0))
         .rounded_sm()
-        .border(px(1.0))
-        .border_dashed()
-        .border_color(Colors::slot_border())
         .text_size(px(8.0))
-        .text_color(Colors::slot_empty_text())
+        .text_color(Colors::text_faint())
+        .opacity(0.62)
         .child("empty")
 }
 
@@ -615,18 +613,31 @@ fn add_insert_button(
         .flex()
         .items_center()
         .justify_center()
+        .gap(px(3.0))
         .mx(px(2.0))
         .px(px(4.0))
         .h(px(18.0))
         .rounded_sm()
         .border(px(1.0))
         .border_dashed()
-        .border_color(Colors::slot_border())
-        .text_size(px(10.0))
-        .text_color(Colors::slot_empty_text())
+        .border_color(Colors::with_alpha(Colors::slot_border(), 0.68))
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(Colors::text_faint())
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(Colors::surface_control_hover()))
-        .child("+ Add Insert")
+        .hover(|s| {
+            s.bg(Colors::surface_control_hover())
+                .border_color(Colors::slot_border())
+                .text_color(Colors::text_muted())
+        })
+        .child(
+            svg()
+                .path(assets::ICON_PLUS_PATH)
+                .w(px(8.0))
+                .h(px(8.0))
+                .text_color(Colors::text_faint()),
+        )
+        .child("Insert")
         .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
             eprintln!(
                 "[mixer] empty insert slot + clicked track={track_id_owned} slot={next_slot}"
@@ -736,18 +747,30 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
         .flex()
         .items_center()
         .justify_center()
+        .gap(px(3.0))
         .mx(px(2.0))
         .px(px(4.0))
         .h(px(18.0))
         .rounded_sm()
         .border(px(1.0))
         .border_dashed()
-        .border_color(Colors::slot_border())
-        .text_size(px(10.0))
-        .text_color(Colors::slot_empty_text())
+        .border_color(Colors::with_alpha(Colors::slot_border(), 0.68))
+        .text_size(px(9.0))
+        .text_color(Colors::text_faint())
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(Colors::surface_control_hover()))
-        .child("+")
+        .hover(|s| {
+            s.bg(Colors::surface_control_hover())
+                .border_color(Colors::slot_border())
+                .text_color(Colors::text_muted())
+        })
+        .child(
+            svg()
+                .path(assets::ICON_PLUS_PATH)
+                .w(px(8.0))
+                .h(px(8.0))
+                .text_color(Colors::text_faint()),
+        )
+        .child("Send")
         .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
             on_add(&track_id_owned, w, cx);
         })
@@ -854,6 +877,8 @@ fn fader_area(
 ) -> impl IntoElement {
     let display_vol = track.display_volume();
     let db_str = volume::format_db(display_vol);
+    let has_volume_automation = track.has_active_volume_automation();
+    let automation_reading = has_volume_automation && track.volume_automation_read;
     let track_id = track.id.clone();
     let vol_cb = callbacks.on_volume_change.clone();
     let on_vol_change = move |new_norm: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
@@ -871,7 +896,46 @@ fn fader_area(
         .pt(px(5.0))
         .pb(px(6.0))
         .gap(px(5.0))
-        .child(db_value_pill(db_str, is_selected))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(3.0))
+                .child(db_value_pill(db_str, is_selected || automation_reading))
+                .when(has_volume_automation, |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(14.0))
+                            .min_w(px(16.0))
+                            .px(px(3.0))
+                            .rounded_sm()
+                            .bg(if automation_reading {
+                                Colors::accent_muted()
+                            } else {
+                                Colors::slot_bg()
+                            })
+                            .border(px(1.0))
+                            .border_color(if automation_reading {
+                                Colors::with_alpha(track.color, 0.58)
+                            } else {
+                                Colors::slot_border()
+                            })
+                            .text_size(px(8.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(if automation_reading {
+                                Colors::text_primary()
+                            } else {
+                                Colors::text_faint()
+                            })
+                            .child("A"),
+                    )
+                }),
+        )
         .child(
             div()
                 .flex()
@@ -1187,6 +1251,31 @@ fn master_strip(
 /// prevent pop-in during horizontal mixer scrolling.
 const MIXER_OVERSCAN: usize = 1;
 
+fn mixer_empty_bay(spare_w: f32) -> impl IntoElement {
+    let stripe_count = (spare_w / STRIP_WIDTH).ceil().clamp(0.0, 64.0) as usize;
+    let stripes: Vec<gpui::AnyElement> = (0..stripe_count)
+        .map(|i| {
+            div()
+                .absolute()
+                .left(px(i as f32 * STRIP_WIDTH))
+                .top_0()
+                .bottom_0()
+                .w(px(1.0))
+                .bg(Colors::strip_border_subtle())
+                .into_any_element()
+        })
+        .collect();
+
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(0.0))
+        .w(px(spare_w.max(0.0)))
+        .bg(Colors::mixer_bg())
+        .children(stripes)
+}
+
 pub fn mixer_panel(
     tracks: &[TrackState],
     master: &MasterBusState,
@@ -1213,6 +1302,7 @@ pub fn mixer_panel(
     let total_content_w = track_count as f32 * STRIP_WIDTH;
     let max_scroll_x = (total_content_w - viewport_width).max(0.0);
     let scroll_x = scroll_x.clamp(0.0, max_scroll_x.max(0.0));
+    let spare_channel_w = (viewport_width - total_content_w).max(0.0);
 
     let first_visible = (scroll_x / STRIP_WIDTH).floor() as usize;
     let visible_start = first_visible.saturating_sub(MIXER_OVERSCAN);
@@ -1276,6 +1366,9 @@ pub fn mixer_panel(
                         .relative()
                         .overflow_hidden()
                         .on_scroll_wheel(on_scroll_wheel)
+                        .when(spare_channel_w > 0.0, |d| {
+                            d.child(mixer_empty_bay(spare_channel_w))
+                        })
                         .child(
                             div()
                                 .absolute()

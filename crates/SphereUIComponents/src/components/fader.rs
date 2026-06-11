@@ -16,6 +16,7 @@ use gpui::{
     ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
 
+use crate::components::timeline::timeline_state::volume;
 use crate::theme::Colors;
 
 /// Minimum recommended rail travel height. The fader will still render at
@@ -39,21 +40,28 @@ impl Render for FaderDrag {
 }
 
 /// dB tick marks. Used by [`db_scale_column`] and the fader rail so the scale
-/// tape lines up with the fader's `0…-60 dB → norm 1…0` mapping.
-pub const SCALE_MARKS: [(f32, &str); 7] = [
+/// tape lines up with the shared `volume::db_to_norm` mapping.
+pub const SCALE_MARKS: [(f32, &str); 8] = [
+    (volume::MAX_DB, "+6"),
     (0.0, "0"),
     (-6.0, "6"),
     (-12.0, "12"),
-    (-18.0, "18"),
     (-24.0, "24"),
     (-36.0, "36"),
-    (-54.0, "∞"),
+    (-48.0, "48"),
+    (volume::MIN_DB, "∞"),
 ];
 
 /// Fraction down from the top of the rail for a dB mark (0.0 = top, 1.0 = bot).
 fn db_to_top_fraction(db: f32) -> f32 {
-    let t = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-    1.0 - t
+    1.0 - volume::db_to_norm(db)
+}
+
+fn pointer_y_to_norm(pointer_y: f32, bounds_y: f32, bounds_h: f32) -> f32 {
+    let rail_top = FADER_THUMB_HEIGHT / 2.0;
+    let rail_h = (bounds_h - FADER_THUMB_HEIGHT).max(1.0);
+    let rail_y = (pointer_y - bounds_y - rail_top).clamp(0.0, rail_h);
+    1.0 - rail_y / rail_h
 }
 
 /// dB scale column — uses `h_full` so it stretches with the strip's flex_1
@@ -70,7 +78,7 @@ pub fn db_scale_column() -> gpui::Div {
                 .right(px(0.0))
                 .mt(-px(4.0))
                 .text_size(px(7.5))
-                .text_color(if db == 0.0 {
+                .text_color(if db == 0.0 || db == volume::MAX_DB {
                     Colors::text_primary()
                 } else {
                     Colors::fader_scale_text()
@@ -115,7 +123,11 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
     // Tick marks (absolute, layered) at fractional positions on the rail.
     for &(db, _) in SCALE_MARKS.iter() {
         let pct = db_to_top_fraction(db);
-        let w = if db == 0.0 { 14.0_f32 } else { 9.0_f32 };
+        let w = if db == 0.0 || db == volume::MAX_DB {
+            14.0_f32
+        } else {
+            9.0_f32
+        };
         let left = RAIL_CENTER_X - w / 2.0;
         col = col.child(
             div()
@@ -124,7 +136,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 .left(px(left))
                 .h(px(1.0))
                 .w(px(w))
-                .bg(if db == 0.0 {
+                .bg(if db == 0.0 || db == volume::MAX_DB {
                     Colors::fader_tick()
                 } else {
                     Colors::with_alpha(Colors::fader_tick(), 0.3) // Approved: minor tick marks alpha
@@ -245,9 +257,31 @@ pub fn fader(
             let bounds = event.bounds;
             let y: f32 = event.event.position.y.into();
             let oy: f32 = bounds.origin.y.into();
-            let oh: f32 = f32::from(bounds.size.height).max(1.0);
-            // Top of rail → 1.0, bottom → 0.0
-            let new_value = (1.0 - (y - oy) / oh).clamp(0.0, 1.0);
+            let oh: f32 = f32::from(bounds.size.height).max(FADER_THUMB_HEIGHT + 1.0);
+            let new_value = pointer_y_to_norm(y, oy, oh);
             on_change(&new_value, window, cx);
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_ticks_follow_shared_volume_mapping() {
+        assert!((db_to_top_fraction(volume::MAX_DB) - 0.0).abs() < 1.0e-6);
+        assert!((db_to_top_fraction(volume::MIN_DB) - 1.0).abs() < 1.0e-6);
+        assert!((db_to_top_fraction(0.0) - (1.0 - volume::db_to_norm(0.0))).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn pointer_mapping_uses_rail_travel_not_outer_hitbox() {
+        let h = 210.0;
+        let top = FADER_THUMB_HEIGHT / 2.0;
+        let bottom = h - FADER_THUMB_HEIGHT / 2.0;
+
+        assert!((pointer_y_to_norm(top, 0.0, h) - 1.0).abs() < 1.0e-6);
+        assert!((pointer_y_to_norm(bottom, 0.0, h) - 0.0).abs() < 1.0e-6);
+        assert!((pointer_y_to_norm(h / 2.0, 0.0, h) - 0.5).abs() < 1.0e-6);
+    }
 }

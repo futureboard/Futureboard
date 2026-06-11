@@ -312,19 +312,26 @@ impl BridgeAudioShared {
         }
     }
 
-    /// Render one block for a single insert instance (serial FX chain path).
+    /// Render one block for a single insert instance (serial FX chain path)
+    /// into caller-provided output buffers. Allocation-free: the producer
+    /// thread reuses stack buffers every block instead of allocating two `Vec`s
+    /// per callback, which used to cause latency spikes on the producer and
+    /// occasional missed blocks (audible as VSTi stutter / dropped notes).
     pub fn render_single_voice(
         &self,
         instance_id: &str,
         frames: usize,
         in_l: &[f32],
         in_r: &[f32],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
         transport: DAUx::vst3_processor::RuntimeTransportContext,
-    ) -> (Vec<f32>, Vec<f32>) {
-        let mut out_l = vec![0.0f32; frames];
-        let mut out_r = vec![0.0f32; frames];
+    ) {
+        let n = frames.min(out_l.len()).min(out_r.len());
+        out_l[..n].fill(0.0);
+        out_r[..n].fill(0.0);
         if !self.dsp_ready() {
-            return (out_l, out_r);
+            return;
         }
         let voices = self.snapshot();
         if let Some(voice) = voices.iter().find(|v| v.instance_id == instance_id) {
@@ -333,12 +340,11 @@ impl BridgeAudioShared {
                 &voice.midi,
                 in_l,
                 in_r,
-                &mut out_l,
-                &mut out_r,
+                &mut out_l[..n],
+                &mut out_r[..n],
                 transport,
             );
         }
-        (out_l, out_r)
     }
 
     /// Render one block of all loaded voices without touching the engine mutex.

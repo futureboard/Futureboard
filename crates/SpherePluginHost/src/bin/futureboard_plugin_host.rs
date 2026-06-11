@@ -317,18 +317,25 @@ fn service_audio_bridge(
         playing: bt.playing,
         recording: bt.recording,
     };
-    let (mix_l, mix_r) = dsp.render_single_voice(
+    // Preallocated stack output buffers — the producer renders allocation-free
+    // every block (no per-block Vec churn that could spike latency and drop a
+    // block → VSTi stutter).
+    let mut mix_l = [0.0f32; MAX_BLOCK_FRAMES];
+    let mut mix_r = [0.0f32; MAX_BLOCK_FRAMES];
+    dsp.render_single_voice(
         plugin_instance_id,
         frames,
         &in_l[..frames],
         &in_r[..frames],
+        &mut mix_l[..frames],
+        &mut mix_r[..frames],
         transport,
     );
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     for i in 0..frames {
-        let l = mix_l.get(i).copied().unwrap_or(0.0);
-        let r = mix_r.get(i).copied().unwrap_or(0.0);
+        let l = mix_l[i];
+        let r = mix_r[i];
         if let Some(slot) = interleaved.get_mut(i * 2) {
             *slot = l;
         }
@@ -371,7 +378,13 @@ fn service_audio_bridge(
 }
 
 /// All mapped shared-audio regions, keyed by insert `plugin_instance_id`.
-type SharedAudioRegions = Arc<Mutex<HashMap<String, Arc<SharedAudioRegion>>>>;
+/// All mapped shared-audio regions, keyed by insert `plugin_instance_id`.
+///
+/// Inner `Arc<HashMap>` (copy-on-write): the producer thread clones the outer
+/// `Arc` once per wake (a refcount bump) instead of deep-cloning the whole map
+/// (with its `String` keys) every block. The map only changes on
+/// attach/unload, which rebuild it via `Arc::make_mut`.
+type SharedAudioRegions = Arc<Mutex<Arc<HashMap<String, Arc<SharedAudioRegion>>>>>;
 
 /// Raise this thread to pro-audio scheduling before it produces blocks.
 ///
@@ -433,9 +446,9 @@ fn run_audio_producer(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let snapshot = regions.lock().map(|map| map.clone()).unwrap_or_default();
-        for (instance_id, region) in snapshot {
-            service_audio_bridge(region.as_ref(), &dsp, &instance_id);
+        let snapshot = regions.lock().map(|map| Arc::clone(&map)).unwrap_or_default();
+        for (instance_id, region) in snapshot.iter() {
+            service_audio_bridge(region.as_ref(), &dsp, instance_id);
         }
         // Acknowledge the latest voice-snapshot publish now that any snapshot
         // borrowed for this block has been dropped (lets unload hand the final
@@ -497,7 +510,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
     // Stage 2/3: the mapped shared-memory audio bridge (engine-created), shared
     // with the dedicated audio producer thread. The `Arc` keeps the view mapped
     // for the host's lifetime.
-    let region_slots: SharedAudioRegions = Arc::new(Mutex::new(HashMap::new()));
+    let region_slots: SharedAudioRegions = Arc::new(Mutex::new(Arc::new(HashMap::new())));
     {
         let slots = region_slots.clone();
         let dsp = preview.lock().bridge_shared();
@@ -1140,7 +1153,7 @@ fn dispatch(
             preview.lock().unload_instance(&plugin_instance_id);
             loaded.remove(&plugin_instance_id);
             if let Ok(mut slots) = region_slots.lock() {
-                slots.remove(&plugin_instance_id);
+                Arc::make_mut(&mut slots).remove(&plugin_instance_id);
             }
             let instance_count = preview.lock().loaded_instance_ids().len();
             eprintln!(
@@ -1210,7 +1223,7 @@ fn dispatch(
                             } else {
                                 plugin_instance_id.clone()
                             };
-                            slots.insert(key, Arc::new(region));
+                            Arc::make_mut(&mut slots).insert(key, Arc::new(region));
                         }
                         preview.lock().set_dsp_ready(true);
                         log_host_audio_mode();

@@ -3067,7 +3067,10 @@ pub fn render_project_block_interleaved(
     // Clips → inserts → fader, sum the post-fader signal into the master
     // output, then feed sends into routing-track receive buffers. Routing
     // tracks (bus/return/group) are deferred to Pass 2 so their inputs are complete.
-    let pass1_indices = runtime.audio_graph.pass1_source_indices.clone();
+    // Take the precomputed pass order out by move (zero alloc) rather than
+    // cloning the Vec every audio block; the loop body never reads it back, and
+    // it is restored below. `audio_graph` is otherwise untouched here.
+    let pass1_indices = std::mem::take(&mut runtime.audio_graph.pass1_source_indices);
     for &track_index in &pass1_indices {
         if effective_track_muted(&runtime.tracks[track_index], block_beat)
             || (runtime.has_solo && !runtime.tracks[track_index].solo)
@@ -3130,13 +3133,14 @@ pub fn render_project_block_interleaved(
         }
         process_track_block(runtime, track_index, frames, output, channels, block_beat, transport);
     }
+    runtime.audio_graph.pass1_source_indices = pass1_indices;
 
     // ── Pass 2: routing tracks (bus / return / group) ───────────────────
     // Input = the accumulated send receive buffer. Process inserts → fader and
     // sum to the master output. Solo is ignored for routing tracks so soloing
     // a *source* track still lets its send reach the return. Order comes from
     // the precomputed topological sort in `RuntimeAudioGraph`.
-    let pass2_indices = runtime.audio_graph.pass2_routing_indices.clone();
+    let pass2_indices = std::mem::take(&mut runtime.audio_graph.pass2_routing_indices);
     for &track_index in &pass2_indices {
         if effective_track_muted(&runtime.tracks[track_index], block_beat) {
             continue;
@@ -3148,6 +3152,7 @@ pub fn render_project_block_interleaved(
         }
         process_track_block(runtime, track_index, frames, output, channels, block_beat, transport);
     }
+    runtime.audio_graph.pass2_routing_indices = pass2_indices;
 
     // ── Master bus: apply master track inserts on the summed output ──
     if let Some(m_idx) = master_index {

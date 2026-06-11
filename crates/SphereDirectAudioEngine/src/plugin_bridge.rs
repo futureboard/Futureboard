@@ -42,6 +42,14 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
     /// size and bumps the request sequence). Wait-free.
     fn request_block(&self, frames: u32);
 
+    /// The bridged plugin's reported processing latency in samples, as published
+    /// by the host (0 if unknown / not yet reported). Does NOT include the
+    /// one-block bridge handshake latency — callers add that separately. Default
+    /// 0 for sinks without a host (test stubs).
+    fn reported_latency_samples(&self) -> u32 {
+        0
+    }
+
     /// Publish the transport ProcessContext (tempo, time signature, project
     /// position, playing/recording) for the next block, so the host fills the
     /// bridged plugin's VST3 `ProcessContext` with real transport instead of a

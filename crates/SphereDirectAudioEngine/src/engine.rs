@@ -2285,6 +2285,14 @@ impl EngineInner {
                     if vst3.is_ready() {
                         samples += vst3.get_latency_samples().max(0) as i64;
                     }
+                } else if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
+                    // Bridged plugin: the host-reported plugin latency plus the
+                    // one-block bridge handshake (the engine reads each block one
+                    // late). Reporting only — PDC compensation of this is a
+                    // dedicated follow-up (needs a graph rebuild on report).
+                    if let Some(sink) = runtime.plugin_bridge_sinks.get(&insert.id) {
+                        samples += sink.reported_latency_samples() as i64 + buffer_frames as i64;
+                    }
                 }
             }
             let plugin_samples = if samples > 0 {

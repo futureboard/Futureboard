@@ -121,6 +121,13 @@ impl PluginBridgeSink for SharedRegionSink {
         }
     }
 
+    fn reported_latency_samples(&self) -> u32 {
+        self.region
+            .bridge()
+            .latency_samples
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn set_transport(&self, ctx: &DAUx::vst3_processor::RuntimeTransportContext) {
         self.region
             .bridge()

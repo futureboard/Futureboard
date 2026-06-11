@@ -346,6 +346,17 @@ fn service_audio_bridge(
     }
     bridge.store_meters(peak_l, peak_r);
     bridge.set_dsp_output_ready(dsp_ready);
+    // Publish the plugin's reported latency so the engine can surface it (and,
+    // later, compensate it). Refreshed periodically — latency rarely changes,
+    // so this avoids an FFI getter + voice lookup on every block.
+    static LATENCY_REPORT_BLOCKS: AtomicU64 = AtomicU64::new(0);
+    if LATENCY_REPORT_BLOCKS.fetch_add(1, Ordering::Relaxed) % 64 == 0 {
+        if let Some(latency) = dsp.voice_latency_samples(plugin_instance_id) {
+            bridge
+                .latency_samples
+                .store(latency as u32, Ordering::Relaxed);
+        }
+    }
     // Throttled: at most one audible-output trace per ~256 blocks so the
     // producer thread never floods stderr while sound is playing.
     static VST3_PROCESS_LOG_BLOCKS: AtomicU64 = AtomicU64::new(0);

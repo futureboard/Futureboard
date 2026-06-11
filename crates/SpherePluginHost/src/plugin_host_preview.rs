@@ -289,6 +289,16 @@ impl BridgeAudioShared {
         }
     }
 
+    /// The reported processing latency (samples) of the voice owning
+    /// `instance_id`, or `None` if it is not loaded. Used by the host to publish
+    /// `latency_samples` into the shared region for the engine's PDC/reporting.
+    pub fn voice_latency_samples(&self, instance_id: &str) -> Option<i32> {
+        self.snapshot()
+            .iter()
+            .find(|v| v.instance_id == instance_id)
+            .map(|v| v.processor.get_latency_samples().max(0))
+    }
+
     /// Apply one engine-pushed parameter change (normalized VST3 ParamID value)
     /// to the voice owning `instance_id`. The C++ processor queues it for the
     /// next `process()` call; routed to the matching voice only.

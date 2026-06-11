@@ -2409,6 +2409,21 @@ These are warning signs:
 "Recorded audio by writing file inside callback"
 ```
 
+Visual / slop warning signs (see Section 7a / 7b):
+
+```txt
+"Added a purple-to-blue gradient header"
+"Gave the panel a glassmorphism / frosted look"
+"Used an emoji for the button/status icon"
+"Pulled in FontAwesome / an icon font"
+"Pasted a random downloaded SVG inline"
+"Used a PNG icon for the toolbar"
+"Made it pop with a glow / neon accent"
+"Big rounded hero cards with lots of whitespace"
+"Hardcoded the icon color instead of currentColor"
+"Looks like a generic AI app / SaaS dashboard"
+```
+
 Stop and reduce scope.
 
 ---

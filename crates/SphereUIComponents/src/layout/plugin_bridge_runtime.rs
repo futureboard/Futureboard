@@ -35,6 +35,13 @@ pub(crate) struct PluginBridgeRuntime {
     /// carries its own `request_seq` / `done_seq` so serial FX chains on one
     /// track do not clobber each other's handshake.
     shared_audio: HashMap<String, Arc<sphere_plugin_host::audio_bridge::SharedAudioRegion>>,
+    /// Producer wake event shared with the host process: the audio-callback
+    /// sink signals it after every `request_seq` bump so the host renders on
+    /// demand instead of polling on a timer tick. One event per engine/host
+    /// pid pair (all insert regions share it — the producer sweeps every
+    /// region per wake). `None` when creation failed; the host then falls
+    /// back to its poll loop.
+    kick: Option<Arc<sphere_plugin_host::audio_bridge::BridgeKickEvent>>,
 }
 
 pub(crate) type SharedPluginBridgeRuntime = Arc<Mutex<PluginBridgeRuntime>>;
@@ -83,6 +90,26 @@ impl PluginBridgeRuntime {
         // The host emits Ready on startup; retain it for any caller that wants
         // to poll, but do not block insert on a second handshake.
         let _ = client.ping();
+        // Producer wake event for this engine/host pair (the host derives the
+        // same name from `--parent-pid` + its own pid). CreateEventW opens the
+        // existing event if the host won the race, so order does not matter.
+        let kick_name = sphere_plugin_host::audio_bridge::bridge_kick_event_name(
+            std::process::id(),
+            client.pid(),
+        );
+        let kick = match sphere_plugin_host::audio_bridge::BridgeKickEvent::create_named(&kick_name)
+        {
+            Ok(event) => {
+                eprintln!("[plugin-bridge] kick event ready name={kick_name}");
+                Some(Arc::new(event))
+            }
+            Err(error) => {
+                eprintln!(
+                    "[plugin-bridge] kick event create failed name={kick_name} error={error}; host will poll"
+                );
+                None
+            }
+        };
         let runtime = Arc::new(Mutex::new(Self {
             client,
             host_pid,
@@ -90,6 +117,7 @@ impl PluginBridgeRuntime {
             queued_events: VecDeque::new(),
             audio_bridge_config: None,
             shared_audio: HashMap::new(),
+            kick,
         }));
         *slot = Some(runtime.clone());
         Ok(runtime)
@@ -107,6 +135,7 @@ impl PluginBridgeRuntime {
         let region = self.shared_audio.get(instance_id)?;
         Some(sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::into_shared(
             region.clone(),
+            self.kick.clone(),
         ))
     }
 
@@ -364,6 +393,116 @@ impl PluginBridgeRuntime {
         let _ = self.client.unload_plugin(plugin_instance_id.clone());
         self.loaded.remove(&plugin_instance_id);
         self.shared_audio.remove(&plugin_instance_id);
+    }
+
+    /// Capture current VST3 states from the host for `instance_ids`
+    /// (request/response over IPC with a bounded wait — call on save, not per
+    /// frame). Unrelated events arriving while waiting are queued for the
+    /// normal `drain_events` pump. Returns packed state bytes per instance
+    /// (`Vst3PluginState::to_packed_bytes`); instances with no state or that
+    /// timed out are simply absent.
+    pub fn request_plugin_states(
+        &mut self,
+        instance_ids: &[String],
+        timeout: std::time::Duration,
+    ) -> HashMap<String, Vec<u8>> {
+        use base64::Engine as _;
+        let mut results = HashMap::new();
+        let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for instance_id in instance_ids {
+            if !self.loaded.contains_key(instance_id) {
+                continue;
+            }
+            match self.client.get_plugin_state(instance_id.clone()) {
+                Ok(()) => {
+                    pending.insert(instance_id.clone());
+                }
+                Err(error) => eprintln!(
+                    "[plugin-bridge] GetPluginState send failed instance={instance_id}: {error}"
+                ),
+            }
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        while !pending.is_empty() && std::time::Instant::now() < deadline {
+            let Some(event) = self.client.try_recv_event() else {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                continue;
+            };
+            match event {
+                ClientEvent::Host(HostEvent::PluginState {
+                    plugin_instance_id,
+                    ok,
+                    component_b64,
+                    controller_b64,
+                }) => {
+                    pending.remove(&plugin_instance_id);
+                    if !ok {
+                        eprintln!(
+                            "[plugin-bridge] GetPluginState failed instance={plugin_instance_id}"
+                        );
+                        continue;
+                    }
+                    let decode = |b64: &str| {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .unwrap_or_default()
+                    };
+                    let state = DAUx::Vst3PluginState {
+                        component: decode(&component_b64),
+                        controller: decode(&controller_b64),
+                    };
+                    eprintln!(
+                        "[plugin-bridge] plugin state captured instance={plugin_instance_id} component_bytes={} controller_bytes={}",
+                        state.component.len(),
+                        state.controller.len()
+                    );
+                    if !state.is_empty() {
+                        results.insert(plugin_instance_id, state.to_packed_bytes());
+                    }
+                }
+                ClientEvent::Disconnected => {
+                    self.queued_events.push_back(ClientEvent::Disconnected);
+                    break;
+                }
+                other => self.queued_events.push_back(other),
+            }
+        }
+        if !pending.is_empty() {
+            eprintln!(
+                "[plugin-bridge] GetPluginState timed out pending={} timeout_ms={}",
+                pending.len(),
+                timeout.as_millis()
+            );
+        }
+        results
+    }
+
+    /// Restore a packed VST3 state (from the project file) onto a loaded
+    /// instance. Sent after `LoadPlugin`/`PrepareProcessing`; the host applies
+    /// it serialized against block production and replies `PluginStateSet`.
+    pub fn send_plugin_state(
+        &mut self,
+        instance_id: &str,
+        packed: &[u8],
+    ) -> Result<(), PluginHostClientError> {
+        use base64::Engine as _;
+        let Some(state) = DAUx::Vst3PluginState::from_packed_bytes(packed) else {
+            eprintln!(
+                "[plugin-bridge] SetPluginState skipped instance={instance_id}: unrecognized packed state ({} bytes)",
+                packed.len()
+            );
+            return Ok(());
+        };
+        eprintln!(
+            "[plugin-bridge] sending SetPluginState instance={instance_id} component_bytes={} controller_bytes={}",
+            state.component.len(),
+            state.controller.len()
+        );
+        self.client.set_plugin_state(
+            instance_id,
+            base64::engine::general_purpose::STANDARD.encode(&state.component),
+            base64::engine::general_purpose::STANDARD.encode(&state.controller),
+        )
     }
 
     pub fn poll(&mut self) {

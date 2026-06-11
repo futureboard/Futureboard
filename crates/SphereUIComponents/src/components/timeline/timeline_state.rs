@@ -1634,6 +1634,12 @@ pub struct InsertSlotState {
     pub parameters: Vec<PluginParameterState>,
     /// When true, open the plugin editor once runtime reaches Active/Loaded.
     pub pending_open_editor: bool,
+    /// Packed VST3 state (`Vst3PluginState::to_packed_bytes`) for project
+    /// persistence. Loaded from the project file on open (then pushed to the
+    /// plugin host after `LoadPlugin`), refreshed from the host on save.
+    /// `Arc` because plugin states can be megabytes and slots are cloned
+    /// freely. `None` = no captured state (fresh insert / stateless plugin).
+    pub vst3_state: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 impl InsertSlotState {
@@ -1652,6 +1658,7 @@ impl InsertSlotState {
             host_pid: None,
             parameters: Vec::new(),
             pending_open_editor: false,
+            vst3_state: None,
         }
     }
 

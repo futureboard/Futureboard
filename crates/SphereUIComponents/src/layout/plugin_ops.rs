@@ -1479,6 +1479,46 @@ impl StudioLayout {
             .collect()
     }
 
+    /// Pull current VST3 states from the plugin host into the timeline slots
+    /// (`InsertSlotState::vst3_state`) so the next project snapshot persists
+    /// them. Bounded request/response — call on save, not per frame. Slots the
+    /// host did not answer for keep their previously captured state.
+    pub(super) fn refresh_bridge_plugin_states(&mut self, cx: &mut Context<Self>) {
+        let slots = self.bridge_vst3_insert_slots(cx);
+        if slots.is_empty() {
+            return;
+        }
+        let Some(runtime) = self.plugin_bridge_runtime.as_ref() else {
+            return;
+        };
+        let instance_ids: Vec<String> = slots.iter().map(|(_, id)| id.clone()).collect();
+        let states = match runtime.lock() {
+            Ok(mut runtime) => runtime
+                .request_plugin_states(&instance_ids, std::time::Duration::from_millis(1500)),
+            Err(_) => {
+                eprintln!("[plugin-bridge] state refresh skipped: runtime lock poisoned");
+                return;
+            }
+        };
+        if states.is_empty() {
+            return;
+        }
+        eprintln!(
+            "[plugin-bridge] refreshed plugin states for save captured={} of {}",
+            states.len(),
+            instance_ids.len()
+        );
+        self.timeline.update(cx, |timeline, _cx| {
+            for track in &mut timeline.state.tracks {
+                for slot in &mut track.inserts {
+                    if let Some(packed) = states.get(&slot.id) {
+                        slot.vst3_state = Some(std::sync::Arc::new(packed.clone()));
+                    }
+                }
+            }
+        });
+    }
+
     /// Install one realtime bridge sink per insert instance (independent
     /// request_seq/done_seq for serial FX chains). Idempotent.
     pub(super) fn sync_plugin_bridge_sinks_to_engine(
@@ -1709,6 +1749,16 @@ impl StudioLayout {
                             "[PluginRestore] runtime instance created instance_id={slot_id} path={}",
                             path.display()
                         );
+                        // Restore the persisted plugin state. Commands are
+                        // processed in order on the host, so this applies
+                        // after the LoadPlugin above completes.
+                        if let Some(state) = slot.vst3_state.as_ref() {
+                            if let Err(error) = runtime.send_plugin_state(slot_id, state) {
+                                eprintln!(
+                                    "[PluginRestore] SetPluginState send failed instance={slot_id}: {error}"
+                                );
+                            }
+                        }
                         runtime.audio_sink_for(slot_id)
                     }
                     Err(_) => {

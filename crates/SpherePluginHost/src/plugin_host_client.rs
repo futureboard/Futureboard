@@ -525,6 +525,32 @@ impl PluginHostClient {
         })
     }
 
+    /// Ask the host for the instance's current VST3 state. The host replies
+    /// [`crate::ipc::HostEvent::PluginState`] (poll via [`Self::try_recv_event`]).
+    pub fn get_plugin_state(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::GetPluginState {
+            plugin_instance_id: plugin_instance_id.into(),
+        })
+    }
+
+    /// Restore a previously captured VST3 state (base64 blobs from a project
+    /// file). The host replies [`crate::ipc::HostEvent::PluginStateSet`].
+    pub fn set_plugin_state(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        component_b64: String,
+        controller_b64: String,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::SetPluginState {
+            plugin_instance_id: plugin_instance_id.into(),
+            component_b64,
+            controller_b64,
+        })
+    }
+
     pub fn close_editor(
         &mut self,
         plugin_instance_id: impl Into<String>,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use DAUx::vst3_processor::{Vst3MidiEvent, Vst3RuntimeProcessor};
+use DAUx::vst3_processor::{Vst3MidiEvent, Vst3PluginState, Vst3RuntimeProcessor};
 
 use crate::audio_bridge::SharedMidiEvent;
 
@@ -270,11 +270,18 @@ impl BridgeAudioShared {
             .collect()
     }
 
-    /// Apply one engine-pushed MIDI event to every loaded voice (single VSTi is
-    /// the common case until per-instance routing exists in the ring).
-    pub fn apply_shared_midi(&self, ev: SharedMidiEvent) {
+    /// Apply one engine-pushed MIDI event to the voice owning `instance_id`.
+    ///
+    /// Each insert has its own shared region (and MIDI ring), so events are
+    /// routed only to the matching voice — never broadcast. With two VSTi
+    /// loaded, notes pushed to one instance must not sound on the other.
+    /// Events for an instance that is not loaded (yet, or anymore) are dropped.
+    pub fn apply_shared_midi(&self, instance_id: &str, ev: SharedMidiEvent) {
         for voice in self.snapshot().iter() {
-            voice.midi.lock().apply_shared(&ev, &voice.instance_id);
+            if voice.instance_id == instance_id {
+                voice.midi.lock().apply_shared(&ev, &voice.instance_id);
+                return;
+            }
         }
     }
 
@@ -431,6 +438,37 @@ impl PluginHostPreviewEngine {
 
     pub fn loaded_instance_ids(&self) -> Vec<String> {
         self.instances.keys().cloned().collect()
+    }
+
+    /// Capture the instance's VST3 state for project persistence. Runs
+    /// `getState` without the voice mutex — VST3 allows state capture while
+    /// processing (it is how every host saves projects during playback).
+    pub fn get_instance_state(&self, plugin_instance_id: &str) -> Option<Vst3PluginState> {
+        self.instances
+            .get(plugin_instance_id)
+            .and_then(|instance| instance.processor.get_state())
+    }
+
+    /// Restore a previously captured VST3 state. Holds the voice MIDI mutex
+    /// across `setState` so it is serialized against the audio producer's
+    /// `process()` (the same mutex `render_voice` holds per block) — the
+    /// engine bypasses the missed block via the freshness guard, which is the
+    /// correct trade for a glitch-free state swap.
+    pub fn set_instance_state(&self, plugin_instance_id: &str, state: &Vst3PluginState) -> bool {
+        let Some(instance) = self.instances.get(plugin_instance_id) else {
+            eprintln!(
+                "[plugin-host-state] set_state instance={plugin_instance_id} loaded=false"
+            );
+            return false;
+        };
+        let _voice_guard = instance.midi.lock();
+        let ok = instance.processor.set_state(state);
+        eprintln!(
+            "[plugin-host-state] set_state instance={plugin_instance_id} component_bytes={} controller_bytes={} ok={ok}",
+            state.component.len(),
+            state.controller.len()
+        );
+        ok
     }
 
     pub fn log_unified_runtime(track_id: &str, insert_id: &str, plugin_instance_id: &str) {

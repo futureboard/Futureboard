@@ -152,6 +152,21 @@ pub enum HostCommand {
         #[serde(default)]
         plugin_instance_id: String,
     },
+    /// Capture the plugin's current state (VST3 `IComponent::getState` +
+    /// `IEditController::getState`) for project persistence. The host replies
+    /// [`HostEvent::PluginState`] with base64 blobs.
+    GetPluginState {
+        plugin_instance_id: String,
+    },
+    /// Restore a previously captured plugin state. Sent after
+    /// `LoadPlugin`/`PrepareProcessing` on project open. Blobs are base64 of
+    /// the raw VST3 streams; either may be empty. The host replies
+    /// [`HostEvent::PluginStateSet`].
+    SetPluginState {
+        plugin_instance_id: String,
+        component_b64: String,
+        controller_b64: String,
+    },
     /// Graceful host shutdown: detach everything and exit 0.
     Shutdown,
 }
@@ -266,6 +281,21 @@ pub enum HostEvent {
         sample_rate: u32,
         max_block_size: u32,
         output_channels: u32,
+    },
+    /// Reply to [`HostCommand::GetPluginState`]. `ok` is false when the
+    /// instance is not loaded or state capture failed; blobs are base64 of the
+    /// raw VST3 component/controller streams (either may be empty — a plugin
+    /// with no state is valid).
+    PluginState {
+        plugin_instance_id: String,
+        ok: bool,
+        component_b64: String,
+        controller_b64: String,
+    },
+    /// Reply to [`HostCommand::SetPluginState`].
+    PluginStateSet {
+        plugin_instance_id: String,
+        ok: bool,
     },
 }
 

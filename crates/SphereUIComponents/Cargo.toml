@@ -37,6 +37,7 @@ dirs.workspace = true
 # Menu manifest is shared with Electron/Web via a generated JSON file.
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 pollster = { workspace = true, optional = true }
 raw-window-handle = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }

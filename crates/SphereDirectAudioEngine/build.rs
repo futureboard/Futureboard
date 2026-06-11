@@ -37,6 +37,7 @@ fn main() {
         .file(sdk_root.join("pluginterfaces/base/funknown.cpp"))
         .file(sdk_root.join("pluginterfaces/base/ustring.cpp"))
         .file(sdk_root.join("public.sdk/source/common/commonstringconvert.cpp"))
+        .file(sdk_root.join("public.sdk/source/common/memorystream.cpp"))
         .file(sdk_root.join("public.sdk/source/vst/utility/stringconvert.cpp"))
         .file(sdk_root.join("public.sdk/source/vst/vstinitiids.cpp"))
         .file(sdk_root.join("public.sdk/source/vst/hosting/hostclasses.cpp"))

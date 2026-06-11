@@ -28,7 +28,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sphere_plugin_host::audio_bridge::{SharedAudioRegion, AUDIO_BUF_LEN, MAX_BLOCK_FRAMES};
+use sphere_plugin_host::audio_bridge::{
+    bridge_kick_event_name, BridgeKickEvent, SharedAudioRegion, AUDIO_BUF_LEN, MAX_BLOCK_FRAMES,
+};
 use sphere_plugin_host::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
 use sphere_plugin_host::native_editor::{self, EmbedRegion};
 use sphere_plugin_host::plugin_host_preview::{
@@ -249,10 +251,9 @@ fn shutdown_host(
 /// with `done_seq`. Wait-free handshake — the host never blocks the engine; the
 /// engine reads whatever the host last produced (one-block latency).
 ///
-/// NB Stage 3 cadence: this currently runs on the host's ~120 Hz idle loop, so a
-/// fast engine block rate will outrun it. Moving production onto a dedicated
-/// host audio thread (and removing the `render_block` Vec allocs) is the next
-/// refinement; until the engine drives `request_seq` (Stage 3b) this is a no-op.
+/// Runs on the dedicated audio producer thread (`run_audio_producer`), woken
+/// by the engine's kick event per requested block. Removing the
+/// `render_single_voice` Vec allocs is a remaining refinement.
 fn service_audio_bridge(
     region: &SharedAudioRegion,
     dsp: &BridgeAudioShared,
@@ -269,10 +270,12 @@ fn service_audio_bridge(
     // engine lock across editor attach / plugin load for seconds without
     // starving block production (the old `lock_misses` dropouts).
     let frames = (bridge.block_frames.load(Ordering::Relaxed) as usize).min(MAX_BLOCK_FRAMES);
-    // Drain engine-pushed MIDI (Stage 3b fills the ring; empty until then).
+    // Drain engine-pushed MIDI. Each region's ring belongs to exactly one
+    // insert instance, so events are routed to that voice only — never
+    // broadcast to every loaded plugin.
     let mut midi_count = 0u32;
     while let Some(ev) = bridge.midi.try_pop() {
-        dsp.apply_shared_midi(ev);
+        dsp.apply_shared_midi(plugin_instance_id, ev);
         midi_count += 1;
     }
     if midi_count > 0 {
@@ -330,19 +333,62 @@ fn service_audio_bridge(
 /// All mapped shared-audio regions, keyed by insert `plugin_instance_id`.
 type SharedAudioRegions = Arc<Mutex<HashMap<String, Arc<SharedAudioRegion>>>>;
 
-/// Dedicated host audio producer thread (Stage 3 cadence fix). Once the region
-/// is mapped it services blocks on a tight cadence instead of the ~120 Hz idle
-/// loop, so it can keep up with the engine's block rate. Servicing is a cheap
-/// no-op until the engine drives `request_seq`. VST3 `process()` runs only here
-/// (the editor stays on the STA main thread); the per-voice MIDI mutex inside
+/// Raise this thread to pro-audio scheduling before it produces blocks.
+///
+/// Two fixes for the "plugin missed deadline; bypassing to dry" dropouts:
+/// `timeBeginPeriod(1)` raises the **process** timer resolution so the
+/// timeout fallback in the kick-event wait ticks at ~1 ms instead of the
+/// 15.6 ms default a background process can be left with (per-process since
+/// Win10 2004), and MMCSS "Pro Audio" puts the producer in the same scheduling
+/// class as the engine's WASAPI callback thread so it is not preempted by
+/// ordinary UI work while rendering a block. Both follow the proven pattern in
+/// `SphereDirectAudioEngine::backend::wasapi_exclusive`.
+#[cfg(windows)]
+fn boost_audio_producer_thread() {
+    #[link(name = "winmm")]
+    extern "system" {
+        fn timeBeginPeriod(u_period: u32) -> u32;
+    }
+    #[link(name = "avrt")]
+    extern "system" {
+        fn AvSetMmThreadCharacteristicsW(task_name: *const u16, task_index: *mut u32) -> isize;
+    }
+    unsafe {
+        let timer_res = timeBeginPeriod(1); // 0 == TIMERR_NOERROR
+        let task: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+        let mut task_index = 0u32;
+        let mmcss = AvSetMmThreadCharacteristicsW(task.as_ptr(), &mut task_index);
+        eprintln!(
+            "[plugin-host-audio] producer boost mmcss_pro_audio={} timer_period_1ms={}",
+            mmcss != 0,
+            timer_res == 0
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn boost_audio_producer_thread() {}
+
+/// Dedicated host audio producer thread. VST3 `process()` runs only here (the
+/// editor stays on the STA main thread); the per-voice MIDI mutex inside
 /// `BridgeAudioShared` serializes it against IPC MIDI so there is never a
 /// concurrent `process()` — without coupling block production to the engine
 /// mutex held across plugin load / editor attach.
+///
+/// Cadence: event-driven. The engine signals `kick` after every `request_seq`
+/// bump (see `SharedRegionSink::request_block`), so the producer wakes within
+/// scheduler latency of each block request instead of polling on a Windows
+/// timer tick it cannot trust. The 1 ms wait timeout is a safety net only —
+/// it keeps shutdown responsive and sweeps any request whose signal raced the
+/// wait. Without a kick event (no `--parent-pid`, or creation failed) it falls
+/// back to the legacy 250 µs sleep poll.
 fn run_audio_producer(
     regions: SharedAudioRegions,
     dsp: Arc<BridgeAudioShared>,
     shutdown: Arc<AtomicBool>,
+    kick: Option<BridgeKickEvent>,
 ) {
+    boost_audio_producer_thread();
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -355,9 +401,16 @@ fn run_audio_producer(
         // borrowed for this block has been dropped (lets unload hand the final
         // processor release back to the IPC thread).
         dsp.mark_snapshot_observed();
-        // ~4 kHz poll: responsive to the engine's block requests without a full
-        // busy-spin. No-op cost is one atomic load when no block is pending.
-        std::thread::sleep(Duration::from_micros(250));
+        match &kick {
+            // Wakes immediately on the engine's request signal. A request
+            // bumped after the region scan above leaves the auto-reset event
+            // signaled, so this wait returns without blocking — no lost
+            // wakeups.
+            Some(kick) => {
+                let _ = kick.wait(1);
+            }
+            None => std::thread::sleep(Duration::from_micros(250)),
+        }
     }
 }
 
@@ -409,9 +462,28 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         let slots = region_slots.clone();
         let dsp = preview.lock().bridge_shared();
         let shutdown = shutdown.clone();
+        // Producer wake event, shared with the engine-side sink. Keyed by the
+        // engine/host pid pair — both sides derive the same name without any
+        // protocol change (the engine knows our pid from spawn, we know its
+        // pid from `--parent-pid`).
+        let kick = parse_parent_pid().and_then(|parent_pid| {
+            let name = bridge_kick_event_name(parent_pid, std::process::id());
+            match BridgeKickEvent::create_named(&name) {
+                Ok(event) => {
+                    eprintln!("[plugin-host-audio] kick event ready name={name}");
+                    Some(event)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[plugin-host-audio] kick event create failed name={name} error={error}; falling back to 250us poll"
+                    );
+                    None
+                }
+            }
+        });
         std::thread::Builder::new()
             .name("plugin-host-audio".into())
-            .spawn(move || run_audio_producer(slots, dsp, shutdown))
+            .spawn(move || run_audio_producer(slots, dsp, shutdown, kick))
             .expect("spawn plugin-host audio producer");
     }
 
@@ -1176,6 +1248,64 @@ fn dispatch(
                 },
             );
             let _ = input_channels;
+        }
+        HostCommand::GetPluginState { plugin_instance_id } => {
+            use base64::Engine as _;
+            let state = preview.lock().get_instance_state(&plugin_instance_id);
+            let ok = state.is_some();
+            let state = state.unwrap_or_default();
+            eprintln!(
+                "[plugin-host-state] get_state instance={plugin_instance_id} ok={ok} component_bytes={} controller_bytes={}",
+                state.component.len(),
+                state.controller.len()
+            );
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginState {
+                    plugin_instance_id,
+                    ok,
+                    component_b64: base64::engine::general_purpose::STANDARD
+                        .encode(&state.component),
+                    controller_b64: base64::engine::general_purpose::STANDARD
+                        .encode(&state.controller),
+                },
+            );
+        }
+        HostCommand::SetPluginState {
+            plugin_instance_id,
+            component_b64,
+            controller_b64,
+        } => {
+            use base64::Engine as _;
+            let decode = |label: &str, b64: &str| -> Vec<u8> {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "[plugin-host-state] set_state instance={plugin_instance_id} {label} base64 invalid: {error}"
+                        );
+                        Vec::new()
+                    })
+            };
+            let state = DAUx::vst3_processor::Vst3PluginState {
+                component: decode("component", &component_b64),
+                controller: decode("controller", &controller_b64),
+            };
+            let ok = if state.is_empty() {
+                eprintln!(
+                    "[plugin-host-state] set_state instance={plugin_instance_id} empty state — skipped"
+                );
+                false
+            } else {
+                preview.lock().set_instance_state(&plugin_instance_id, &state)
+            };
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginStateSet {
+                    plugin_instance_id,
+                    ok,
+                },
+            );
         }
         HostCommand::Shutdown => {
             // Handled in run_ipc_loop before dispatch; unreachable here.

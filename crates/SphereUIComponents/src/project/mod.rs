@@ -630,19 +630,35 @@ impl From<&TimelineState> for FutureboardProject {
                         .enumerate()
                         .map(|(idx, slot)| {
                             use crate::components::timeline::timeline_state::InsertPluginFormat;
-                            let plugin = slot.plugin_id.as_ref().map(|pid| ProjectPluginInstance {
-                                instance_id: slot.id.clone(),
-                                format: match slot.plugin_format {
+                            let plugin = slot.plugin_id.as_ref().map(|pid| {
+                                let format = match slot.plugin_format {
                                     Some(InsertPluginFormat::Vst3) => PluginFormat::Vst3,
                                     Some(InsertPluginFormat::Clap) => PluginFormat::Clap,
                                     Some(InsertPluginFormat::Au) => PluginFormat::Au,
                                     Some(InsertPluginFormat::Lv2) => PluginFormat::Lv2,
                                     _ => PluginFormat::Unknown,
-                                },
-                                plugin_path: slot.plugin_path.clone(),
-                                plugin_uid: pid.clone(),
-                                display_name: slot.display_name.clone(),
-                                state: PluginStateBlob::default(),
+                                };
+                                ProjectPluginInstance {
+                                    instance_id: slot.id.clone(),
+                                    format,
+                                    plugin_path: slot.plugin_path.clone(),
+                                    plugin_uid: pid.clone(),
+                                    display_name: slot.display_name.clone(),
+                                    // Packed VST3 state captured from the plugin
+                                    // host on save (see refresh_bridge_plugin_states).
+                                    state: PluginStateBlob {
+                                        plugin_id: pid.clone(),
+                                        format: Some(format),
+                                        state_bytes: slot
+                                            .vst3_state
+                                            .as_ref()
+                                            .map(|state| state.as_ref().clone())
+                                            .unwrap_or_default(),
+                                        vendor: None,
+                                        name: Some(slot.display_name.clone()),
+                                        version: None,
+                                    },
+                                }
                             });
                             ProjectInsert {
                                 id: slot.id.clone(),
@@ -912,6 +928,9 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                 host_pid: None,
                                 parameters: Vec::new(),
                                 pending_open_editor: false,
+                                vst3_state: (!plugin.state.state_bytes.is_empty()).then(|| {
+                                    std::sync::Arc::new(plugin.state.state_bytes.clone())
+                                }),
                             }
                         }
                         None => InsertSlotState::empty(pi.id.clone()),

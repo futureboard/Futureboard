@@ -178,6 +178,125 @@ extern "C" {
         out_height: *mut i32,
     ) -> i32;
     fn sphere_daux_vst3_editor_resizable(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_get_state(
+        processor: *mut SphereDauxVst3Processor,
+        out_component: *mut *mut u8,
+        out_component_len: *mut i32,
+        out_controller: *mut *mut u8,
+        out_controller_len: *mut i32,
+    ) -> i32;
+    fn sphere_daux_vst3_set_state(
+        processor: *mut SphereDauxVst3Processor,
+        component_data: *const u8,
+        component_len: i32,
+        controller_data: *const u8,
+        controller_len: i32,
+    ) -> i32;
+    fn sphere_daux_vst3_state_free(data: *mut u8);
+}
+
+/// Captured VST3 plugin state: the raw component (processor) stream plus the
+/// controller stream for split component/controller plugins. Either may be
+/// empty — a plugin with no state is valid.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Vst3PluginState {
+    pub component: Vec<u8>,
+    pub controller: Vec<u8>,
+}
+
+impl Vst3PluginState {
+    /// Magic + version prefix of the packed single-blob form.
+    const PACKED_MAGIC: &'static [u8; 4] = b"FBV3";
+    const PACKED_VERSION: u32 = 1;
+
+    pub fn is_empty(&self) -> bool {
+        self.component.is_empty() && self.controller.is_empty()
+    }
+
+    /// Pack both streams into one blob for project persistence:
+    /// `"FBV3" | version:u32 | component_len:u32 | component | controller_len:u32 | controller`
+    /// (all integers little-endian).
+    pub fn to_packed_bytes(&self) -> Vec<u8> {
+        let mut out =
+            Vec::with_capacity(4 + 4 + 4 + self.component.len() + 4 + self.controller.len());
+        out.extend_from_slice(Self::PACKED_MAGIC);
+        out.extend_from_slice(&Self::PACKED_VERSION.to_le_bytes());
+        out.extend_from_slice(&(self.component.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.component);
+        out.extend_from_slice(&(self.controller.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.controller);
+        out
+    }
+
+    /// Inverse of [`Self::to_packed_bytes`]. `None` on bad magic/version or a
+    /// truncated blob — callers should treat that as "no saved state".
+    pub fn from_packed_bytes(bytes: &[u8]) -> Option<Self> {
+        let rest = bytes.strip_prefix(Self::PACKED_MAGIC.as_slice())?;
+        let (version, rest) = take_u32_le(rest)?;
+        if version != Self::PACKED_VERSION {
+            return None;
+        }
+        let (component_len, rest) = take_u32_le(rest)?;
+        let component_len = component_len as usize;
+        if rest.len() < component_len {
+            return None;
+        }
+        let (component, rest) = rest.split_at(component_len);
+        let (controller_len, rest) = take_u32_le(rest)?;
+        let controller_len = controller_len as usize;
+        if rest.len() < controller_len {
+            return None;
+        }
+        Some(Self {
+            component: component.to_vec(),
+            controller: rest[..controller_len].to_vec(),
+        })
+    }
+}
+
+fn take_u32_le(bytes: &[u8]) -> Option<(u32, &[u8])> {
+    let (head, rest) = bytes.split_at_checked(4)?;
+    Some((u32::from_le_bytes(head.try_into().ok()?), rest))
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::Vst3PluginState;
+
+    #[test]
+    fn packed_state_round_trips() {
+        let state = Vst3PluginState {
+            component: vec![1, 2, 3, 4, 5],
+            controller: vec![9, 8],
+        };
+        let packed = state.to_packed_bytes();
+        assert_eq!(Vst3PluginState::from_packed_bytes(&packed), Some(state));
+    }
+
+    #[test]
+    fn packed_state_round_trips_empty_streams() {
+        let state = Vst3PluginState {
+            component: vec![7; 1024],
+            controller: Vec::new(),
+        };
+        let packed = state.to_packed_bytes();
+        assert_eq!(Vst3PluginState::from_packed_bytes(&packed), Some(state));
+    }
+
+    #[test]
+    fn packed_state_rejects_garbage_and_truncation() {
+        assert_eq!(Vst3PluginState::from_packed_bytes(b"not a state"), None);
+        assert_eq!(Vst3PluginState::from_packed_bytes(b""), None);
+        let packed = Vst3PluginState {
+            component: vec![1, 2, 3],
+            controller: vec![4],
+        }
+        .to_packed_bytes();
+        assert_eq!(
+            Vst3PluginState::from_packed_bytes(&packed[..packed.len() - 1]),
+            None
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -478,6 +597,73 @@ impl Vst3RuntimeProcessor {
             return 0;
         }
         unsafe { sphere_daux_vst3_get_latency_samples(self.inner.raw) }
+    }
+
+    /// Capture the plugin's current state for project persistence.
+    ///
+    /// Returns `None` only on hard failure (destroyed processor / allocation
+    /// failure); a plugin without state yields `Some` with empty blobs. Call
+    /// from a control thread — `getState` may take milliseconds.
+    pub fn get_state(&self) -> Option<Vst3PluginState> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        let mut component_ptr: *mut u8 = std::ptr::null_mut();
+        let mut component_len: i32 = 0;
+        let mut controller_ptr: *mut u8 = std::ptr::null_mut();
+        let mut controller_len: i32 = 0;
+        let ok = unsafe {
+            sphere_daux_vst3_get_state(
+                self.inner.raw,
+                &mut component_ptr,
+                &mut component_len,
+                &mut controller_ptr,
+                &mut controller_len,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        // Copy out of the C++ malloc buffers, then release them.
+        let copy = |ptr: *mut u8, len: i32| -> Vec<u8> {
+            if ptr.is_null() || len <= 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(ptr, len as usize).to_vec() }
+            }
+        };
+        let state = Vst3PluginState {
+            component: copy(component_ptr, component_len),
+            controller: copy(controller_ptr, controller_len),
+        };
+        unsafe {
+            sphere_daux_vst3_state_free(component_ptr);
+            sphere_daux_vst3_state_free(controller_ptr);
+        }
+        Some(state)
+    }
+
+    /// Restore a previously captured state. Returns `true` when the component
+    /// state was applied. Call from a control thread — the host side must
+    /// serialize this against `process()` (the bridge host holds the voice
+    /// mutex while applying).
+    pub fn set_state(&self, state: &Vst3PluginState) -> bool {
+        if self.inner.raw.is_null() || state.is_empty() {
+            return false;
+        }
+        let (comp_ptr, comp_len) = if state.component.is_empty() {
+            (std::ptr::null(), 0)
+        } else {
+            (state.component.as_ptr(), state.component.len() as i32)
+        };
+        let (ctrl_ptr, ctrl_len) = if state.controller.is_empty() {
+            (std::ptr::null(), 0)
+        } else {
+            (state.controller.as_ptr(), state.controller.len() as i32)
+        };
+        unsafe {
+            sphere_daux_vst3_set_state(self.inner.raw, comp_ptr, comp_len, ctrl_ptr, ctrl_len) != 0
+        }
     }
 
     pub fn open_editor(

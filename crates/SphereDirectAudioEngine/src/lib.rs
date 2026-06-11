@@ -76,7 +76,9 @@ pub use crate::native::{
 };
 pub use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint, TempoSegment};
 pub use crate::transport::RuntimeTransportSnapshot;
-pub use crate::vst3_processor::{Vst3MidiEvent, Vst3MidiEventKind, Vst3RuntimeProcessor};
+pub use crate::vst3_processor::{
+    Vst3MidiEvent, Vst3MidiEventKind, Vst3PluginState, Vst3RuntimeProcessor,
+};
 
 #[cfg(feature = "napi")]
 use napi_derive::napi;

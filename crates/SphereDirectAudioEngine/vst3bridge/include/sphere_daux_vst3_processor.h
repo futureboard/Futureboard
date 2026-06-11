@@ -170,4 +170,24 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_is_valid(
 SPHERE_DAUX_VST3_API int sphere_daux_vst3_get_latency_samples(
     SphereDauxVst3Processor* processor);
 
+/// Capture the plugin's current state (IComponent::getState +
+/// IEditController::getState for split plugins). Returns 1 on success —
+/// zero-length blobs are valid. Buffers are malloc-owned by the caller; free
+/// them with sphere_daux_vst3_state_free.
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_get_state(
+    SphereDauxVst3Processor* processor,
+    unsigned char** out_component, int* out_component_len,
+    unsigned char** out_controller, int* out_controller_len);
+
+/// Restore a previously captured state (component setState →
+/// controller setComponentState → controller setState). Returns 1 when the
+/// component state was applied.
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_set_state(
+    SphereDauxVst3Processor* processor,
+    const unsigned char* component_data, int component_len,
+    const unsigned char* controller_data, int controller_len);
+
+/// Release a buffer returned by sphere_daux_vst3_get_state.
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_state_free(unsigned char* data);
+
 }

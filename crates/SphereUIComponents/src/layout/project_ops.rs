@@ -604,6 +604,7 @@ impl StudioLayout {
             .unwrap_or_else(|| self.default_projects_dir(cx));
         let name = self.project_session.name.clone();
         let entity = cx.entity().clone();
+        self.refresh_bridge_plugin_states(cx);
         let tl_state = self.timeline.read(cx).state.clone();
         let sample_rate = self.current_audio_sample_rate();
         cx.spawn(async move |_this, cx| {
@@ -638,6 +639,7 @@ impl StudioLayout {
     /// Persist the project to `path`. Returns `true` on success so callers
     /// (notably the unsaved-changes guard) can decide whether to continue.
     pub(super) fn do_save_project(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> bool {
+        self.refresh_bridge_plugin_states(cx);
         let mut project = self.project_snapshot(cx);
         match save_project(&mut project, path) {
             Ok(()) => {
@@ -661,6 +663,7 @@ impl StudioLayout {
         after_save: Option<SaveThenAction>,
         cx: &mut Context<Self>,
     ) {
+        self.refresh_bridge_plugin_states(cx);
         let mut project = self.project_snapshot(cx);
         self.project_switcher.current_project.subtitle = "Saving...".to_string();
         cx.notify();

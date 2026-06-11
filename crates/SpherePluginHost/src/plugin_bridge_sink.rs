@@ -11,11 +11,15 @@ use std::sync::Arc;
 
 use DAUx::plugin_bridge::{PluginBridgeSink, SharedPluginBridgeSink};
 
-use crate::audio_bridge::{SharedAudioRegion, SharedMidiEvent, MAX_BLOCK_FRAMES};
+use crate::audio_bridge::{BridgeKickEvent, SharedAudioRegion, SharedMidiEvent, MAX_BLOCK_FRAMES};
 
 /// Wraps the engine-side shared audio region as a realtime [`PluginBridgeSink`].
 pub struct SharedRegionSink {
     region: Arc<SharedAudioRegion>,
+    /// Signaled after every `request_seq` bump so the host's audio producer
+    /// wakes immediately instead of polling on a timer tick. `None` falls back
+    /// to the host's timeout-paced poll (tests / event creation failure).
+    kick: Option<Arc<BridgeKickEvent>>,
     /// `done_seq` of the last block this sink actually returned from
     /// [`PluginBridgeSink::read_output`]. Freshness guard: when the host has
     /// not produced a new block since the last read (its service thread is
@@ -35,15 +39,23 @@ impl std::fmt::Debug for SharedRegionSink {
 
 impl SharedRegionSink {
     pub fn new(region: Arc<SharedAudioRegion>) -> Self {
+        Self::with_kick(region, None)
+    }
+
+    pub fn with_kick(region: Arc<SharedAudioRegion>, kick: Option<Arc<BridgeKickEvent>>) -> Self {
         Self {
             region,
+            kick,
             last_read_seq: AtomicU64::new(0),
         }
     }
 
     /// Wrap as the trait object the engine holds.
-    pub fn into_shared(region: Arc<SharedAudioRegion>) -> SharedPluginBridgeSink {
-        Arc::new(Self::new(region))
+    pub fn into_shared(
+        region: Arc<SharedAudioRegion>,
+        kick: Option<Arc<BridgeKickEvent>>,
+    ) -> SharedPluginBridgeSink {
+        Arc::new(Self::with_kick(region, kick))
     }
 }
 
@@ -99,6 +111,14 @@ impl PluginBridgeSink for SharedRegionSink {
             .block_frames
             .store(frames.min(MAX_BLOCK_FRAMES as u32), Ordering::Relaxed);
         bridge.request_seq.fetch_add(1, Ordering::Release);
+        // Wake the host producer for this request. `SetEvent` never blocks —
+        // it is the same class of kernel signal the OS itself uses to drive
+        // the WASAPI period callback — so the audio thread stays wait-free.
+        // Ordering: signaled strictly after the `request_seq` Release bump so
+        // a woken producer always observes the new request.
+        if let Some(kick) = &self.kick {
+            kick.set();
+        }
     }
 }
 

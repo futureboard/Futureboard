@@ -437,6 +437,104 @@ impl Drop for SharedAudioRegion {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cross-process producer wake event.
+// ---------------------------------------------------------------------------
+
+/// Name of the named auto-reset event the engine signals after every
+/// `request_seq` bump so the host's audio producer wakes immediately instead of
+/// sleeping on a Windows timer tick (whose resolution — 1 ms to 15.6 ms,
+/// per-process since Win10 2004 — the host cannot rely on at audio block
+/// cadence). Scoped to one engine/host **process pair** so a second host
+/// process (e.g. a legacy editor-window spawn) can never steal wakeups.
+pub fn bridge_kick_event_name(engine_pid: u32, host_pid: u32) -> String {
+    format!("Local\\FutureboardAudioBridgeKick-{engine_pid}__{host_pid}")
+}
+
+/// Named cross-process auto-reset event for the block handshake.
+///
+/// Both sides call [`BridgeKickEvent::create_named`] (`CreateEventW` creates
+/// the event or opens the existing one, so engine and host may initialize in
+/// either order). The engine-side sink calls [`BridgeKickEvent::set`] from the
+/// audio callback — a non-blocking kernel signal, the same class of syscall as
+/// the WASAPI period event — and the host producer blocks in
+/// [`BridgeKickEvent::wait`] until a block is requested.
+#[cfg(windows)]
+pub struct BridgeKickEvent {
+    handle: windows::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: an event HANDLE is a kernel object reference; Set/Wait are
+// thread-safe by definition.
+#[cfg(windows)]
+unsafe impl Send for BridgeKickEvent {}
+#[cfg(windows)]
+unsafe impl Sync for BridgeKickEvent {}
+
+#[cfg(windows)]
+impl BridgeKickEvent {
+    /// Create (or open, if the peer created it first) the named auto-reset
+    /// event. Initially unsignaled.
+    pub fn create_named(name: &str) -> std::io::Result<Self> {
+        use windows::core::HSTRING;
+        use windows::Win32::System::Threading::CreateEventW;
+        let wide = HSTRING::from(name);
+        let handle =
+            unsafe { CreateEventW(None, false, false, &wide) }.map_err(std::io::Error::other)?;
+        Ok(Self { handle })
+    }
+
+    /// Signal the producer. Wait-free from the caller's perspective — `SetEvent`
+    /// never blocks, so this is safe on the engine's audio callback.
+    pub fn set(&self) {
+        unsafe {
+            let _ = windows::Win32::System::Threading::SetEvent(self.handle);
+        }
+    }
+
+    /// Block until signaled or `timeout_ms` elapses. Returns `true` when the
+    /// event was signaled (auto-reset consumes the signal).
+    pub fn wait(&self, timeout_ms: u32) -> bool {
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
+        use windows::Win32::System::Threading::WaitForSingleObject;
+        unsafe { WaitForSingleObject(self.handle, timeout_ms) == WAIT_OBJECT_0 }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for BridgeKickEvent {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Non-Windows stub: the named shared region itself is Windows-only, so the
+/// kick degrades to a timeout-paced poll (`wait` sleeps, `set` is a no-op).
+#[cfg(not(windows))]
+pub struct BridgeKickEvent;
+
+#[cfg(not(windows))]
+impl BridgeKickEvent {
+    pub fn create_named(_name: &str) -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub fn set(&self) {}
+
+    pub fn wait(&self, timeout_ms: u32) -> bool {
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
+        false
+    }
+}
+
+impl std::fmt::Debug for BridgeKickEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BridgeKickEvent").finish()
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use windows::core::HSTRING;
@@ -576,5 +674,22 @@ mod tests {
         let bridge = region.bridge();
         bridge.store_meters(0.5, 0.25);
         assert_eq!(bridge.meters(), (0.5, 0.25));
+    }
+
+    /// The producer-wake event pairs a creator and an opener on the same name:
+    /// `set` on one handle wakes a `wait` on the other, and the auto-reset
+    /// consumes each signal exactly once.
+    #[cfg(windows)]
+    #[test]
+    fn kick_event_wakes_waiter_and_auto_resets() {
+        // Unique per test process; 0xFFFF_FFFF is never a real host pid.
+        let name = bridge_kick_event_name(std::process::id(), 0xFFFF_FFFF);
+        let engine_side = BridgeKickEvent::create_named(&name).expect("create kick event");
+        let host_side = BridgeKickEvent::create_named(&name).expect("open kick event");
+
+        assert!(!host_side.wait(0), "must start unsignaled");
+        engine_side.set();
+        assert!(host_side.wait(100), "set must wake the waiter");
+        assert!(!host_side.wait(0), "auto-reset must consume the signal");
     }
 }

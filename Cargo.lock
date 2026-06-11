@@ -5810,6 +5810,7 @@ dependencies = [
 name = "sphere-plugin-host"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "cc",
  "cpal",
  "crossbeam-channel",
@@ -5830,6 +5831,7 @@ dependencies = [
 name = "sphere_ui_components"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "crc32fast",
  "dirs 5.0.1",
  "gpui",

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <memory>
@@ -36,6 +37,7 @@
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/utility/uid.h"
@@ -4154,4 +4156,137 @@ extern "C" int sphere_daux_vst3_get_latency_samples(SphereDauxVst3Processor* pro
   if (!processor || !processor->processor) return 0;
   const auto latency = processor->processor->getLatencySamples();
   return static_cast<int>(latency);
+}
+
+// ── Plugin state persistence ─────────────────────────────────────────────────
+//
+// Raw VST3 state streams, exactly as the plugin writes them:
+//   component  — IComponent::getState (the processor state; this is the blob
+//                IEditController::setComponentState receives on restore)
+//   controller — IEditController::getState (GUI-side state; only meaningful
+//                for split component/controller plugins)
+// Buffers returned by get_state are malloc-owned by the caller and must be
+// released with sphere_daux_vst3_state_free.
+
+namespace {
+
+// Copy a captured MemoryStream into a malloc buffer. An empty stream is a
+// valid (zero-length) state, not an error.
+bool daux_copy_stream(const Steinberg::MemoryStream& stream,
+                      unsigned char** out_data,
+                      int* out_len) {
+  const auto size = stream.getSize();
+  if (size <= 0) {
+    *out_data = nullptr;
+    *out_len = 0;
+    return true;
+  }
+  auto* buf = static_cast<unsigned char*>(std::malloc(static_cast<size_t>(size)));
+  if (!buf) return false;
+  std::memcpy(buf, stream.getData(), static_cast<size_t>(size));
+  *out_data = buf;
+  *out_len = static_cast<int>(size);
+  return true;
+}
+
+}  // namespace
+
+// Capture the plugin's current state. Returns 1 on success (zero-length blobs
+// are valid — some plugins have no state), 0 on failure. A plugin returning
+// kNotImplemented from getState is treated as "no state", not failure.
+extern "C" int sphere_daux_vst3_get_state(
+    SphereDauxVst3Processor* processor,
+    unsigned char** out_component, int* out_component_len,
+    unsigned char** out_controller, int* out_controller_len) {
+  if (out_component) *out_component = nullptr;
+  if (out_component_len) *out_component_len = 0;
+  if (out_controller) *out_controller = nullptr;
+  if (out_controller_len) *out_controller_len = 0;
+  if (!processor || !processor->component || !out_component || !out_component_len ||
+      !out_controller || !out_controller_len) {
+    return 0;
+  }
+
+  Steinberg::MemoryStream component_stream;
+  const auto comp_res = processor->component->getState(&component_stream);
+  if (comp_res != Steinberg::kResultOk) {
+    component_stream.setSize(0);
+  }
+
+  Steinberg::MemoryStream controller_stream;
+  // For single-component plugins the controller IS the component — its state
+  // already lives in the component stream; querying it again would duplicate.
+  if (processor->controller && !processor->controller_is_component) {
+    const auto ctrl_res = processor->controller->getState(&controller_stream);
+    if (ctrl_res != Steinberg::kResultOk) {
+      controller_stream.setSize(0);
+    }
+  }
+
+  if (!daux_copy_stream(component_stream, out_component, out_component_len)) return 0;
+  if (!daux_copy_stream(controller_stream, out_controller, out_controller_len)) {
+    std::free(*out_component);
+    *out_component = nullptr;
+    *out_component_len = 0;
+    return 0;
+  }
+  std::fprintf(stderr,
+               "[SphereVST3] get_state ok component_bytes=%d controller_bytes=%d comp_result=0x%x\n",
+               *out_component_len, *out_controller_len,
+               static_cast<unsigned>(comp_res));
+  return 1;
+}
+
+// Restore a previously captured state. Restore order follows the VST3
+// workflow: IComponent::setState, then IEditController::setComponentState
+// (same component blob, fresh cursor), then IEditController::setState with
+// the controller blob. Returns 1 when the component state was applied.
+extern "C" int sphere_daux_vst3_set_state(
+    SphereDauxVst3Processor* processor,
+    const unsigned char* component_data, int component_len,
+    const unsigned char* controller_data, int controller_len) {
+  if (!processor || !processor->component) return 0;
+
+  int ok = 1;
+  if (component_data && component_len > 0) {
+    // Non-owning stream over the caller's buffer; cursor starts at 0.
+    Steinberg::MemoryStream comp_stream(
+        const_cast<unsigned char*>(component_data), component_len);
+    const auto res = processor->component->setState(&comp_stream);
+    if (res != Steinberg::kResultOk) {
+      std::fprintf(stderr,
+                   "[SphereVST3] set_state component setState result=0x%x bytes=%d\n",
+                   static_cast<unsigned>(res), component_len);
+      ok = (res == Steinberg::kNotImplemented) ? 1 : 0;
+    }
+    if (processor->controller && !processor->controller_is_component) {
+      Steinberg::MemoryStream sync_stream(
+          const_cast<unsigned char*>(component_data), component_len);
+      const auto sync_res = processor->controller->setComponentState(&sync_stream);
+      if (sync_res != Steinberg::kResultOk) {
+        std::fprintf(stderr,
+                     "[SphereVST3] set_state controller setComponentState result=0x%x\n",
+                     static_cast<unsigned>(sync_res));
+      }
+    }
+  }
+  if (controller_data && controller_len > 0 && processor->controller &&
+      !processor->controller_is_component) {
+    Steinberg::MemoryStream ctrl_stream(
+        const_cast<unsigned char*>(controller_data), controller_len);
+    const auto res = processor->controller->setState(&ctrl_stream);
+    if (res != Steinberg::kResultOk) {
+      std::fprintf(stderr,
+                   "[SphereVST3] set_state controller setState result=0x%x bytes=%d\n",
+                   static_cast<unsigned>(res), controller_len);
+    }
+  }
+  std::fprintf(stderr,
+               "[SphereVST3] set_state applied component_bytes=%d controller_bytes=%d ok=%d\n",
+               component_len, controller_len, ok);
+  return ok;
+}
+
+extern "C" void sphere_daux_vst3_state_free(unsigned char* data) {
+  std::free(data);
 }

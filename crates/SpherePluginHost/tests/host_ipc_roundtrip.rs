@@ -65,6 +65,64 @@ fn ready_then_attach_failed_for_invalid_hwnd() {
     // Drop force-kills if the host has not already exited.
 }
 
+/// State commands round-trip the wire against a real host without a plugin:
+/// an unloaded instance deterministically yields `PluginState { ok: false }`
+/// and `PluginStateSet { ok: false }`, proving the new frames parse on both
+/// sides.
+#[test]
+fn plugin_state_commands_answer_for_unloaded_instance() {
+    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHost-x64");
+
+    client
+        .get_plugin_state("track1:insert1")
+        .expect("send get_plugin_state");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_state = false;
+    while Instant::now() < deadline {
+        match client.try_recv_event() {
+            Some(ClientEvent::Host(HostEvent::PluginState {
+                plugin_instance_id,
+                ok,
+                component_b64,
+                controller_b64,
+            })) => {
+                assert_eq!(plugin_instance_id, "track1:insert1");
+                assert!(!ok, "unloaded instance must report ok=false");
+                assert!(component_b64.is_empty());
+                assert!(controller_b64.is_empty());
+                saw_state = true;
+                break;
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert!(saw_state, "host did not answer GetPluginState");
+
+    client
+        .set_plugin_state("track1:insert1", "AAEC".into(), String::new())
+        .expect("send set_plugin_state");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_set = false;
+    while Instant::now() < deadline {
+        match client.try_recv_event() {
+            Some(ClientEvent::Host(HostEvent::PluginStateSet {
+                plugin_instance_id,
+                ok,
+            })) => {
+                assert_eq!(plugin_instance_id, "track1:insert1");
+                assert!(!ok, "unloaded instance must report ok=false");
+                saw_set = true;
+                break;
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert!(saw_set, "host did not answer SetPluginState");
+    client.shutdown().ok();
+}
+
 #[test]
 fn ping_is_answered_with_pong() {
     let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHost-x64");

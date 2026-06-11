@@ -25,6 +25,7 @@ napi        = { workspace = true, optional = true }
 napi-derive = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 dirs.workspace = true
 rusqlite.workspace = true
 crossbeam-channel.workspace = true

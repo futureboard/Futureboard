@@ -125,6 +125,9 @@ impl StudioLayout {
                     eprintln!(
                         "[PluginRestore] reused runtime instance={plugin_instance_id} name={name}"
                     );
+                    if let Ok(mut bridge) = runtime.lock() {
+                        bridge.mark_plugin_loaded(&plugin_instance_id);
+                    }
                     changed |= self.on_bridge_plugin_host_ready(
                         &plugin_instance_id,
                         &name,
@@ -141,6 +144,9 @@ impl StudioLayout {
                     eprintln!(
                         "[PluginRestore] loaded insert instance={plugin_instance_id} name={name}"
                     );
+                    if let Ok(mut bridge) = runtime.lock() {
+                        bridge.mark_plugin_loaded(&plugin_instance_id);
+                    }
                     changed |= self.on_bridge_plugin_host_ready(
                         &plugin_instance_id,
                         &name,
@@ -154,6 +160,12 @@ impl StudioLayout {
                     error,
                 }) => {
                     eprintln!("[plugin-bridge] event PluginLoadFailed instance={plugin_instance_id} error={error}");
+                    if let Ok(mut bridge) = runtime.lock() {
+                        bridge.mark_plugin_load_failed(&plugin_instance_id);
+                    }
+                    if let Some(engine) = self.audio_engine.as_ref() {
+                        let _ = engine.set_plugin_bridge_sink(plugin_instance_id.clone(), None);
+                    }
                     let user_error = if error.contains("CPU") || error.contains("runtime") {
                         error.clone()
                     } else {

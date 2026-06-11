@@ -16,10 +16,10 @@ use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteBitmapRenderTarget, IDWritePixelSnapping_Impl, IDWriteRenderingParams,
     IDWriteTextFormat1, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_LINE_SPACING_METHOD_UNIFORM,
-    DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_METRICS,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateSolidBrush, DeleteObject, FillRect, HDC, SRCCOPY,
@@ -30,6 +30,7 @@ use super::dwrite_font_manager::{
     resolve_family_in_collection, DWriteFontManager, FontDiagnostics,
 };
 use super::FontConfig;
+use crate::assets::SharedAssetRegistry;
 use crate::TextAlign;
 
 /// A DirectWrite text renderer over an owned [`DWriteFontManager`].
@@ -44,6 +45,17 @@ impl DWriteTextRenderer {
         Some(Self {
             manager: DWriteFontManager::new(font_blobs, &config)?,
         })
+    }
+
+    /// Build a renderer from Futureboard's shared embedded UI font blobs.
+    pub fn new_with_shared_ui_fonts(config: FontConfig) -> Option<Self> {
+        let blobs = SharedAssetRegistry::ui_font_blobs();
+        Self::new(&blobs, config)
+    }
+
+    /// Build a renderer using the default embedded UI font policy.
+    pub fn new_embedded_ui(default_weight: u32) -> Option<Self> {
+        Self::new_with_shared_ui_fonts(FontConfig::embedded_ui(default_weight))
     }
 
     /// Build a renderer over an already-constructed font manager.
@@ -107,19 +119,20 @@ impl DWriteTextRenderer {
             return false;
         }
 
-        let scaled_em = em_px * dpi_scale.max(1.0);
-        let scaled_line = line_height_px * dpi_scale.max(1.0);
+        let dpi_scale = normalized_dpi_scale(dpi_scale);
+        let layout_w = w as f32 / dpi_scale;
+        let layout_h = h as f32 / dpi_scale;
         let layout = unsafe {
             create_text_layout(
                 &self.manager,
                 text,
                 family,
                 weight,
-                scaled_em,
-                w as f32,
-                h as f32,
+                em_px,
+                layout_w,
+                layout_h,
                 align,
-                scaled_line,
+                line_height_px,
             )
         };
         let Some(layout) = layout else {
@@ -131,7 +144,28 @@ impl DWriteTextRenderer {
             return false;
         }
 
-        unsafe { draw_layout(&self.manager, hdc, rect, w, h, &layout, bg, fg, align, dpi_scale) }
+        unsafe {
+            draw_layout(
+                &self.manager,
+                hdc,
+                rect,
+                w,
+                h,
+                &layout,
+                bg,
+                fg,
+                align,
+                dpi_scale,
+            )
+        }
+    }
+}
+
+fn normalized_dpi_scale(dpi_scale: f32) -> f32 {
+    if dpi_scale.is_finite() && dpi_scale > 0.0 {
+        dpi_scale
+    } else {
+        1.0
     }
 }
 
@@ -318,11 +352,7 @@ unsafe fn create_text_layout(
     let _ = format.SetTextAlignment(text_align);
     let _ = format.SetParagraphAlignment(para_align);
     let line_height = line_height_px.max(em_px);
-    let _ = format.SetLineSpacing(
-        DWRITE_LINE_SPACING_METHOD_UNIFORM,
-        line_height,
-        em_px,
-    );
+    let _ = format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line_height, em_px);
 
     let wide: Vec<u16> = text.encode_utf16().collect();
     manager
@@ -344,12 +374,14 @@ unsafe fn draw_layout(
     align: TextAlign,
     dpi_scale: f32,
 ) -> bool {
+    let dpi_scale = normalized_dpi_scale(dpi_scale);
     let Ok(brt) = manager
         .gdi
         .CreateBitmapRenderTarget(None, w as u32, h as u32)
     else {
         return false;
     };
+    let _ = brt.SetPixelsPerDip(dpi_scale);
     let mem = brt.GetMemoryDC();
     let brush = CreateSolidBrush(bg);
     let full = RECT {
@@ -371,16 +403,17 @@ unsafe fn draw_layout(
     };
     // Paragraph CENTER alignment already vertically centers within the layout
     // box — do not add a second offset or glyphs render outside the bitmap.
+    let layout_h = h as f32 / dpi_scale;
     let origin_y = match align {
         TextAlign::LeftMiddle | TextAlign::Center => 0.0,
-        TextAlign::Left => ((h as f32 - metrics.height) / 2.0).max(0.0),
+        TextAlign::Left => ((layout_h - metrics.height) / 2.0).max(0.0),
     };
 
     let ctx = DrawContext {
         brt,
         params: manager.rendering_params.clone(),
         fg,
-        pixels_per_dip: dpi_scale.max(1.0),
+        pixels_per_dip: dpi_scale,
     };
     let renderer: IDWriteTextRenderer = GlyphRunRenderer.into();
     if layout

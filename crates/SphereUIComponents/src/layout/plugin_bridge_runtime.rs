@@ -20,6 +20,7 @@ pub(crate) struct BridgePluginDescriptor {
 pub(crate) struct BridgeLoadedPlugin {
     pub descriptor: BridgePluginDescriptor,
     pub host_pid: Option<u32>,
+    confirmed: bool,
 }
 
 pub(crate) struct PluginBridgeRuntime {
@@ -140,18 +141,39 @@ impl PluginBridgeRuntime {
     }
 
     pub fn loaded_descriptor(&self, instance: &str) -> Option<BridgeLoadedPlugin> {
-        self.loaded.get(instance).cloned()
+        self.loaded
+            .get(instance)
+            .filter(|loaded| loaded.confirmed)
+            .cloned()
     }
 
     pub fn loaded_instance_ids(&self) -> Vec<String> {
-        self.loaded.keys().cloned().collect()
+        self.loaded
+            .iter()
+            .filter(|(_, loaded)| loaded.confirmed)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     pub fn loaded_for_track(&self, track_id: &str) -> Option<BridgeLoadedPlugin> {
         self.loaded
             .values()
-            .find(|loaded| loaded.descriptor.track_id == track_id)
+            .find(|loaded| loaded.confirmed && loaded.descriptor.track_id == track_id)
             .cloned()
+    }
+
+    pub fn mark_plugin_loaded(&mut self, instance: &str) -> bool {
+        let Some(loaded) = self.loaded.get_mut(instance) else {
+            eprintln!("[plugin-bridge] confirmed load for unknown instance={instance}");
+            return false;
+        };
+        loaded.confirmed = true;
+        true
+    }
+
+    pub fn mark_plugin_load_failed(&mut self, instance: &str) {
+        self.loaded.remove(instance);
+        self.shared_audio.remove(instance);
     }
 
     /// Stage 1: push the engine-owned sample rate / block size to the host so it
@@ -240,32 +262,40 @@ impl PluginBridgeRuntime {
             instance, descriptor.plugin_path
         );
         self.establish_shared_audio_for_instance(&instance, sample_rate, max_block_size);
+        let plugin_path = descriptor.plugin_path.clone();
+        let class_id = descriptor.class_id.clone();
+        self.client.load_plugin(
+            instance.clone(),
+            plugin_path,
+            class_id,
+            sample_rate,
+            max_block_size,
+        )?;
         self.loaded.insert(
             instance.clone(),
             BridgeLoadedPlugin {
                 descriptor: descriptor.clone(),
                 host_pid: self.host_pid,
+                confirmed: false,
             },
         );
-        self.client.load_plugin(
-            instance.clone(),
-            descriptor.plugin_path,
-            descriptor.class_id,
-            sample_rate,
-            max_block_size,
-        )?;
         let input_channels = 2u32;
         let output_channels = 2u32;
         eprintln!(
             "[plugin-bridge] sending PrepareProcessing instance={instance} sr={sample_rate} block={max_block_size}"
         );
-        self.client.prepare_processing(
+        let prepare = self.client.prepare_processing(
             instance,
             sample_rate,
             max_block_size,
             input_channels,
             output_channels,
-        )
+        );
+        if prepare.is_err() {
+            self.loaded.remove(&descriptor.insert_id);
+            self.shared_audio.remove(&descriptor.insert_id);
+        }
+        prepare
     }
 
     pub fn open_editor_with_parent(

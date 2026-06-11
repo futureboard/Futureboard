@@ -17,6 +17,7 @@
 
 // IPlugView is needed on all platforms for the editor bridge functions.
 #include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -49,6 +50,7 @@
 // symbol here. The IPlugFrame_iid constant is provided by iplugview.h.
 namespace Steinberg {
 DEF_CLASS_IID(IPlugFrame)
+DEF_CLASS_IID(IPlugViewContentScaleSupport)
 }  // namespace Steinberg
 
 namespace {
@@ -564,6 +566,8 @@ struct SphereDauxVst3Processor {
   Steinberg::Vst::AudioBusBuffers output_bus{};
   Steinberg::Vst::ProcessContext  process_context{};
   Steinberg::Vst::ProcessData     process_data{};
+  int audio_input_bus_count{0};
+  int audio_output_bus_count{0};
   bool processing{false};
 
   // Diagnostics
@@ -676,10 +680,10 @@ struct SphereDauxVst3Processor {
     process_data.processMode        = Steinberg::Vst::kRealtime;
     process_data.symbolicSampleSize = Steinberg::Vst::kSample32;
     process_data.numSamples         = 1;
-    process_data.numInputs          = 1;
-    process_data.numOutputs         = 1;
-    process_data.inputs             = &input_bus;
-    process_data.outputs            = &output_bus;
+    process_data.numInputs          = 0;
+    process_data.numOutputs         = 0;
+    process_data.inputs             = nullptr;
+    process_data.outputs            = nullptr;
     process_data.inputParameterChanges  = nullptr;
     process_data.outputParameterChanges = nullptr;
 
@@ -700,6 +704,8 @@ struct SphereDauxVst3Processor {
         component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kInput);
     const auto output_bus_count =
         component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput);
+    audio_input_bus_count = static_cast<int>(input_bus_count);
+    audio_output_bus_count = static_cast<int>(output_bus_count);
     std::fprintf(stderr, "[SphereVST3] busCount input=%d output=%d\n",
                  (int)input_bus_count, (int)output_bus_count);
 
@@ -718,8 +724,15 @@ struct SphereDauxVst3Processor {
 
     // Set stereo bus arrangements before bus activation. Some VST3 processors
     // reject processing if the arrangement is changed after activation.
-    const auto arrangement_res =
-        processor->setBusArrangements(&input_arrangement, 1, &output_arrangement, 1);
+    Steinberg::Vst::SpeakerArrangement* input_arrangements =
+        audio_input_bus_count > 0 ? &input_arrangement : nullptr;
+    Steinberg::Vst::SpeakerArrangement* output_arrangements =
+        audio_output_bus_count > 0 ? &output_arrangement : nullptr;
+    const auto arrangement_res = processor->setBusArrangements(
+        input_arrangements,
+        audio_input_bus_count > 0 ? 1 : 0,
+        output_arrangements,
+        audio_output_bus_count > 0 ? 1 : 0);
     if (arrangement_res != Steinberg::kResultOk) {
       std::ostringstream err;
       err << g_last_error
@@ -734,17 +747,28 @@ struct SphereDauxVst3Processor {
     }
 
     // Activate stereo buses
-    const auto in_res  = component->activateBus(
-        Steinberg::Vst::kAudio, Steinberg::Vst::kInput,  0, true);
-    const auto out_res = component->activateBus(
-        Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, 0, true);
-    if (in_res  != Steinberg::kResultOk)
-      std::fprintf(stderr, "[DAUx VST3] activate input bus FAILED (result=%d)\n",  (int)in_res);
+    Steinberg::tresult in_res = Steinberg::kResultOk;
+    if (audio_input_bus_count > 0) {
+      in_res = component->activateBus(
+          Steinberg::Vst::kAudio, Steinberg::Vst::kInput, 0, true);
+      if (in_res != Steinberg::kResultOk)
+        std::fprintf(stderr, "[DAUx VST3] activate input bus FAILED (result=%d)\n", (int)in_res);
+    } else {
+      std::fprintf(stderr, "[SphereVST3] activate input bus skipped reason=no_audio_inputs\n");
+    }
+    const auto out_res = audio_output_bus_count > 0
+        ? component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, 0, true)
+        : Steinberg::kResultFalse;
     if (out_res != Steinberg::kResultOk)
       std::fprintf(stderr, "[DAUx VST3] activate output bus FAILED (result=%d)\n", (int)out_res);
 
     std::fprintf(stderr, "[SphereVST3] activateBus inputResult=%d outputResult=%d stereo in/out\n",
                  (int)in_res, (int)out_res);
+
+    process_data.numInputs = audio_input_bus_count > 0 ? 1 : 0;
+    process_data.inputs = audio_input_bus_count > 0 ? &input_bus : nullptr;
+    process_data.numOutputs = audio_output_bus_count > 0 ? 1 : 0;
+    process_data.outputs = audio_output_bus_count > 0 ? &output_bus : nullptr;
 
     // setupProcessing
     Steinberg::Vst::ProcessSetup ps{};
@@ -1086,6 +1110,40 @@ bool daux_resize_child_client(HWND child, int content_w, int content_h) {
                content_h,
                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
   return daux_verify_child_client_rect(child, content_w, content_h, "resize_child");
+}
+
+bool daux_editor_set_content_scale(SphereDauxVst3Processor* processor,
+                                   HWND dpi_ref,
+                                   const char* reason) {
+  if (!processor || !processor->editor_view) return false;
+  const UINT dpi = daux_hwnd_dpi(dpi_ref);
+  const float scale = static_cast<float>(dpi) / 96.0f;
+  Steinberg::IPlugViewContentScaleSupport* scale_support = nullptr;
+  const auto query_result = processor->editor_view->queryInterface(
+      Steinberg::IPlugViewContentScaleSupport::iid,
+      reinterpret_cast<void**>(&scale_support));
+  if ((query_result != Steinberg::kResultTrue && query_result != Steinberg::kResultOk) ||
+      !scale_support) {
+    if (daux_vst3_editor_debug()) {
+      std::fprintf(stderr,
+                   "[vst3-editor] content_scale unsupported dpi=%u scale=%.3f reason=%s\n",
+                   dpi,
+                   scale,
+                   reason ? reason : "unknown");
+    }
+    return false;
+  }
+  const auto scale_result = scale_support->setContentScaleFactor(scale);
+  scale_support->release();
+  if (daux_vst3_editor_debug()) {
+    std::fprintf(stderr,
+                 "[vst3-editor] content_scale result=0x%x dpi=%u scale=%.3f reason=%s\n",
+                 static_cast<unsigned>(scale_result),
+                 dpi,
+                 scale,
+                 reason ? reason : "unknown");
+  }
+  return scale_result == Steinberg::kResultTrue || scale_result == Steinberg::kResultOk;
 }
 
 // IPlugFrame for VST3 editor hosting. Mirrors the SDK editorhost sample:
@@ -2354,6 +2412,7 @@ LRESULT CALLBACK daux_detached_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
       daux_log_editor_dpi(hwnd, "WM_DPICHANGED");
       if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd) &&
           processor->editor_attached) {
+        daux_editor_set_content_scale(processor, hwnd, "WM_DPICHANGED");
         RECT rc{};
         GetClientRect(processor->editor_attach_hwnd, &rc);
         const int content_w = static_cast<int>(rc.right - rc.left);
@@ -2994,8 +3053,12 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
   processor->output_bus.numChannels = 2;
   processor->output_bus.channelBuffers32 = output_channels;
   processor->process_data.numSamples = frames;
-  processor->process_data.inputs = &processor->input_bus;
-  processor->process_data.outputs = &processor->output_bus;
+  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.inputs =
+      processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
+  processor->process_data.numOutputs = processor->audio_output_bus_count > 0 ? 1 : 0;
+  processor->process_data.outputs =
+      processor->audio_output_bus_count > 0 ? &processor->output_bus : nullptr;
 
   const auto result = processor->processor->process(processor->process_data);
 
@@ -3036,9 +3099,15 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
   }
 
   processor->process_data.numSamples = 1;
+  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.numOutputs = processor->audio_output_bus_count > 0 ? 1 : 0;
   processor->process_data.inputEvents = nullptr;
   processor->input_bus.channelBuffers32 = processor->input_channels;
   processor->output_bus.channelBuffers32 = processor->output_channels;
+  processor->process_data.inputs =
+      processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
+  processor->process_data.outputs =
+      processor->audio_output_bus_count > 0 ? &processor->output_bus : nullptr;
 
   if (result != Steinberg::kResultOk) return 0;
   processor->process_count += 1;
@@ -3589,6 +3658,8 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     return 0;
   }
 
+  daux_editor_set_content_scale(processor, parent, "before_getSize");
+
   Steinberg::ViewRect preferred{};
   const auto get_size_result = processor->editor_view->getSize(&preferred);
   int preferred_w = 0;
@@ -3771,6 +3842,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   // size for fixed-size editors.
   daux_editor_view_resizable(processor);
 
+  daux_editor_set_content_scale(processor, content, "after_attach");
   daux_embed_apply_content_size(processor, editor_w, editor_h, "attached");
   {
     Steinberg::ViewRect after_attach_size{};
@@ -3945,6 +4017,11 @@ extern "C" void sphere_daux_vst3_embed_set_bounds(
   processor->embed_content_h = content_h;
   processor->embed_geometry_valid = false;
   if (daux_embed_sync_geometry(processor, x, y, content_w, content_h, daux_embed_debug())) {
+    daux_editor_set_content_scale(processor,
+                                  processor->editor_parent_hwnd
+                                      ? processor->editor_parent_hwnd
+                                      : processor->editor_attach_hwnd,
+                                  "set_bounds");
     resize_editor_view(processor);
     std::fprintf(stderr,
                  "[plugin-host] host_hwnd resize %dx%d\n",
@@ -3991,6 +4068,11 @@ extern "C" void sphere_daux_vst3_embed_refresh(SphereDauxVst3Processor* processo
                                processor->embed_host_x, processor->embed_host_y,
                                processor->embed_host_w, processor->embed_host_h,
                                false)) {
+    daux_editor_set_content_scale(processor,
+                                  processor->editor_parent_hwnd
+                                      ? processor->editor_parent_hwnd
+                                      : processor->editor_attach_hwnd,
+                                  "refresh");
     resize_editor_view(processor);
   }
 #else

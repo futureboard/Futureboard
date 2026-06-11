@@ -14,6 +14,12 @@ const INTER_VARIABLE: &[u8] = include_bytes!("../../../../packages/shared/fonts/
 const GOOGLE_SANS_VARIABLE: &[u8] =
     include_bytes!("../../../../packages/shared/fonts/GoogleSans-VariableFont.ttf");
 
+/// DirectWrite family name for [`INTER_VARIABLE`].
+pub const INTER_FAMILY: &str = "Inter Variable Text";
+
+/// DirectWrite family name for [`GOOGLE_SANS_VARIABLE`].
+pub const GOOGLE_SANS_FAMILY: &str = "Google Sans";
+
 /// Accessor for the shared embedded assets.
 ///
 /// A zero-sized handle: the assets are `'static` and embedded in the binary, so
@@ -29,6 +35,16 @@ impl SharedAssetRegistry {
     /// Fallback font bytes (Google Sans Variable) for Thai / extended Unicode.
     pub fn google_sans() -> &'static [u8] {
         GOOGLE_SANS_VARIABLE
+    }
+
+    /// Primary embedded UI font family name.
+    pub fn inter_family() -> &'static str {
+        INTER_FAMILY
+    }
+
+    /// Embedded fallback UI font family name.
+    pub fn google_sans_family() -> &'static str {
+        GOOGLE_SANS_FAMILY
     }
 
     /// All UI font blobs in priority order (primary first, fallback second).

@@ -18,6 +18,8 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::System::SystemServices::LOCALE_NAME_MAX_LENGTH;
 
+use crate::assets::SharedAssetRegistry;
+
 /// Family / weight policy for the font manager. Generic — no app or plugin
 /// knowledge.
 #[derive(Debug, Clone)]
@@ -28,6 +30,18 @@ pub struct FontConfig {
     pub fallback_family: String,
     /// Default weight used when resolving the primary family.
     pub default_weight: u32,
+}
+
+impl FontConfig {
+    /// Futureboard's embedded UI font policy: Inter primary + Google Sans
+    /// fallback, matching the shared GPUI-facing font assets.
+    pub fn embedded_ui(default_weight: u32) -> Self {
+        Self {
+            primary_family: SharedAssetRegistry::inter_family().to_string(),
+            fallback_family: SharedAssetRegistry::google_sans_family().to_string(),
+            default_weight,
+        }
+    }
 }
 
 /// Read-only facts about what the manager loaded, for caller-side diagnostics.
@@ -109,7 +123,10 @@ unsafe fn load_embedded_fonts(
                 eprintln!("[Fonts] loaded embedded font bytes={}", bytes.len());
             }
             Err(err) => {
-                eprintln!("[Fonts] failed embedded font bytes={} error={err}", bytes.len());
+                eprintln!(
+                    "[Fonts] failed embedded font bytes={} error={err}",
+                    bytes.len()
+                );
             }
         }
     }

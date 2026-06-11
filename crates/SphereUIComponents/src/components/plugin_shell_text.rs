@@ -18,7 +18,7 @@ pub use sphere_graphic_engine::TextAlign;
 pub fn shell_font_theme() -> PluginShellFontTheme {
     PluginShellFontTheme {
         family_primary: crate::theme::FONT_FAMILY,
-        family_fallback: crate::theme::SYSTEM_UI_FONT_FAMILY,
+        family_fallback: crate::theme::THAI_FONT_FAMILY,
         title_size: crate::theme::typography::PLUGIN_TITLE,
         body_size: crate::theme::typography::UI_SM,
         weight_title: 500,
@@ -32,7 +32,7 @@ mod imp {
     use std::sync::Once;
 
     use super::shell_font_theme;
-    use sphere_graphic_engine::{DWriteTextRenderer, FontConfig, SharedAssetRegistry, TextAlign};
+    use sphere_graphic_engine::{DWriteTextRenderer, FontConfig, TextAlign};
     use windows::Win32::Foundation::{COLORREF, RECT};
     use windows::Win32::Graphics::Gdi::HDC;
 
@@ -56,8 +56,7 @@ mod imp {
                     fallback_family: theme.family_fallback.to_string(),
                     default_weight: theme.weight_title,
                 };
-                let blobs = SharedAssetRegistry::ui_font_blobs();
-                let renderer = DWriteTextRenderer::new(&blobs, config);
+                let renderer = DWriteTextRenderer::new_with_shared_ui_fonts(config);
                 if let Some(renderer) = renderer.as_ref() {
                     log_diagnostics(renderer);
                 }
@@ -71,10 +70,7 @@ mod imp {
         INIT_LOG.call_once(|| {
             let theme = shell_font_theme();
             eprintln!("[Fonts] default_ui_font={}", theme.family_primary);
-            eprintln!(
-                "[Fonts] fallback_ui_font={}",
-                theme.family_fallback
-            );
+            eprintln!("[Fonts] fallback_ui_font={}", theme.family_fallback);
             let d = renderer.diagnostics();
             eprintln!("[plugin-shell-font] source=shared_embedded");
             eprintln!("[plugin-shell-font] primary={}", d.primary_family);
@@ -110,7 +106,17 @@ mod imp {
         dpi_scale: f32,
     ) -> bool {
         draw_text_with_line_height(
-            hdc, rect, text, family, weight, em_px, bg, fg, align, dpi_scale, em_px * 1.3,
+            hdc,
+            rect,
+            text,
+            family,
+            weight,
+            em_px,
+            bg,
+            fg,
+            align,
+            dpi_scale,
+            em_px * 1.3,
         )
     }
 

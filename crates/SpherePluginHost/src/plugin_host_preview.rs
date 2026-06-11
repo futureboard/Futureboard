@@ -289,6 +289,19 @@ impl BridgeAudioShared {
         }
     }
 
+    /// Apply one engine-pushed parameter change (normalized VST3 ParamID value)
+    /// to the voice owning `instance_id`. The C++ processor queues it for the
+    /// next `process()` call; routed to the matching voice only.
+    pub fn apply_shared_param(&self, instance_id: &str, param_id: u32, value: f32) {
+        for voice in self.snapshot().iter() {
+            if voice.instance_id == instance_id {
+                let mut processor = voice.processor.clone();
+                processor.set_param(param_id, value as f64);
+                return;
+            }
+        }
+    }
+
     /// Render one block for a single insert instance (serial FX chain path).
     pub fn render_single_voice(
         &self,

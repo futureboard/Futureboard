@@ -95,6 +95,22 @@ impl PluginBridgeSink for SharedRegionSink {
         }
     }
 
+    fn push_param(&self, param_id: u32, value: f32, sample_offset: u32) {
+        let ok = self
+            .region
+            .bridge()
+            .params
+            .try_push(crate::audio_bridge::SharedParamEvent {
+                sample_offset,
+                param_id,
+                value,
+                _pad: 0,
+            });
+        if !ok {
+            eprintln!("[plugin-param] ring_full dropped param_id={param_id} value={value:.4}");
+        }
+    }
+
     fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
         // SAFETY: the engine owns `audio_in` for this block (before `request_seq`).
         unsafe {
@@ -207,5 +223,18 @@ mod tests {
         assert_eq!(ev.data1, 60);
         assert_eq!(ev.data2, 100);
         assert_eq!(ev.sample_offset, 7);
+    }
+
+    #[test]
+    fn sink_push_param_lands_in_ring() {
+        let region = Arc::new(SharedAudioRegion::new_in_process());
+        region.bridge().init_header(48_000, 256, 2);
+        let sink = SharedRegionSink::new(region.clone());
+
+        sink.push_param(12_345, 0.75, 3);
+        let ev = region.bridge().params.try_pop().expect("param queued");
+        assert_eq!(ev.param_id, 12_345);
+        assert_eq!(ev.value, 0.75);
+        assert_eq!(ev.sample_offset, 3);
     }
 }

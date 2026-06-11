@@ -1697,6 +1697,22 @@ impl RuntimeProject {
             return;
         }
 
+        // Bridged plugin (runs in the host process): forward the numeric VST3
+        // ParamID + normalized value to the host through the shared param ring,
+        // and persist it in the params map for snapshot/recall. Previously this
+        // fell through to the built-in branch and was silently dropped.
+        if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
+            if let Ok(vst3_param_id) = param_id.parse::<u32>() {
+                insert
+                    .params
+                    .insert(param_id.to_string(), Value::from(value as f64));
+                if let Some(sink) = self.plugin_bridge_sinks.get(insert_id) {
+                    sink.push_param(vst3_param_id, value.clamp(0.0, 1.0), 0);
+                }
+            }
+            return;
+        }
+
         // For native VST3 inserts: forward numeric param IDs to the C++ processor.
         // The web UI sends VST3 ParamIDs as decimal strings ("12345"), and values
         // are normalized (0..1) as required by IParameterChanges.

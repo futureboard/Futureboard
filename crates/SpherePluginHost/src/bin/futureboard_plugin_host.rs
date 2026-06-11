@@ -283,6 +283,18 @@ fn service_audio_bridge(
             "[plugin-host-midi-consume] seq={req} instance={plugin_instance_id} events={midi_count}"
         );
     }
+    // Drain engine-pushed parameter automation into this voice (queued for the
+    // process() below). Per-instance ring, like MIDI — never broadcast.
+    let mut param_count = 0u32;
+    while let Some(ev) = bridge.params.try_pop() {
+        dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value);
+        param_count += 1;
+    }
+    if param_count > 0 {
+        eprintln!(
+            "[plugin-host-param-consume] seq={req} instance={plugin_instance_id} params={param_count}"
+        );
+    }
     let mut in_l = [0.0f32; MAX_BLOCK_FRAMES];
     let mut in_r = [0.0f32; MAX_BLOCK_FRAMES];
     // SAFETY: the engine owns `audio_in` until it bumps `request_seq`.

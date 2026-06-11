@@ -28,6 +28,12 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
     /// playback / automation). Wait-free ring push; dropped if the ring is full.
     fn push_midi(&self, status: u8, data1: u8, data2: u8, sample_offset: u32);
 
+    /// Push one parameter change (normalized `0.0..=1.0` VST3 ParamID `value`)
+    /// for the host to apply to the next block. Wait-free ring push; dropped if
+    /// the ring is full. Default no-op for sinks that do not carry a param ring
+    /// (test stubs); the shared-region sink forwards it to the host plugin.
+    fn push_param(&self, _param_id: u32, _value: f32, _sample_offset: u32) {}
+
     /// Write the track's pre-plugin stereo input for effect inserts (engine →
     /// host `audio_in`). Wait-free raw buffer copy.
     fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize);

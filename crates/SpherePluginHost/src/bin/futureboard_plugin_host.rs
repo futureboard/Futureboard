@@ -293,8 +293,25 @@ fn service_audio_bridge(
     }
     let mut interleaved = [0.0f32; AUDIO_BUF_LEN];
     let len = (frames * 2).min(AUDIO_BUF_LEN);
-    let (mix_l, mix_r) =
-        dsp.render_single_voice(plugin_instance_id, frames, &in_l[..frames], &in_r[..frames]);
+    // Real transport ProcessContext published by the engine for this block.
+    let bt = bridge.load_transport();
+    let transport = DAUx::RuntimeTransportContext {
+        tempo_bpm: bt.tempo_bpm,
+        time_sig_num: bt.time_sig_num,
+        time_sig_den: bt.time_sig_den,
+        project_time_samples: bt.project_time_samples,
+        ppq_position: bt.ppq_position,
+        bar_position_ppq: bt.bar_position_ppq,
+        playing: bt.playing,
+        recording: bt.recording,
+    };
+    let (mix_l, mix_r) = dsp.render_single_voice(
+        plugin_instance_id,
+        frames,
+        &in_l[..frames],
+        &in_r[..frames],
+        transport,
+    );
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     for i in 0..frames {

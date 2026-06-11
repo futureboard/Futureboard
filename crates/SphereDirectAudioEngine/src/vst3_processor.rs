@@ -72,6 +72,59 @@ impl Vst3MidiEvent {
     }
 }
 
+/// Transport snapshot handed to a plugin's VST3 `ProcessContext` for one block.
+///
+/// Built on the audio thread (in-process) or the bridge producer thread (host)
+/// from the engine's real tempo map, time signature, and transport position —
+/// it is the truth that replaces the old hardcoded 120 BPM / 4-4 / always
+/// playing stub. `Copy` so it threads cheaply through the per-block call chain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeTransportContext {
+    /// Quarter-notes per minute at this block's position.
+    pub tempo_bpm: f64,
+    pub time_sig_num: u32,
+    pub time_sig_den: u32,
+    /// Absolute project sample position of the block start.
+    pub project_time_samples: i64,
+    /// Project position in quarter notes (VST3 `projectTimeMusic`).
+    pub ppq_position: f64,
+    /// Quarter-note position of the current bar start (VST3 `barPositionMusic`).
+    pub bar_position_ppq: f64,
+    pub playing: bool,
+    pub recording: bool,
+}
+
+impl Default for RuntimeTransportContext {
+    fn default() -> Self {
+        Self {
+            tempo_bpm: 120.0,
+            time_sig_num: 4,
+            time_sig_den: 4,
+            project_time_samples: 0,
+            ppq_position: 0.0,
+            bar_position_ppq: 0.0,
+            playing: false,
+            recording: false,
+        }
+    }
+}
+
+impl RuntimeTransportContext {
+    /// Quarter-note position of the bar containing `ppq`, given the time
+    /// signature. Bar length in quarter notes is `num * 4 / den` (e.g. 4/4 = 4,
+    /// 6/8 = 3, 3/4 = 3). Falls back to `ppq` when the signature is degenerate.
+    pub fn bar_start_ppq(ppq: f64, time_sig_num: u32, time_sig_den: u32) -> f64 {
+        if time_sig_num == 0 || time_sig_den == 0 {
+            return ppq;
+        }
+        let bar_len_qn = time_sig_num as f64 * 4.0 / time_sig_den as f64;
+        if bar_len_qn <= 0.0 {
+            return ppq;
+        }
+        (ppq / bar_len_qn).floor() * bar_len_qn
+    }
+}
+
 #[repr(C)]
 struct SphereDauxVst3Processor {
     _private: [u8; 0],
@@ -135,6 +188,17 @@ extern "C" {
     fn sphere_daux_vst3_focus_editor(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_get_latency_samples(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_set_process_context(
+        processor: *mut SphereDauxVst3Processor,
+        tempo: c_double,
+        time_sig_num: i32,
+        time_sig_den: i32,
+        project_time_samples: i64,
+        ppq: c_double,
+        bar_ppq: c_double,
+        playing: i32,
+        recording: i32,
+    );
     // GPUI-embedded editor (Windows): attaches the existing instance's view.
     fn sphere_daux_vst3_embed_editor(
         processor: *mut SphereDauxVst3Processor,
@@ -597,6 +661,32 @@ impl Vst3RuntimeProcessor {
             return 0;
         }
         unsafe { sphere_daux_vst3_get_latency_samples(self.inner.raw) }
+    }
+
+    /// Push the current transport state into the plugin's VST3 `ProcessContext`
+    /// for the next `process()` call (tempo, time signature, project position,
+    /// playing/recording). Call once per block on the thread that drives
+    /// `process()`. Replaces the old hardcoded 120 BPM / always-playing stub so
+    /// tempo-synced plugins (delays, LFOs, arps) and transport-aware plugins
+    /// track the real timeline. No-op once the processor is destroyed.
+    #[inline]
+    pub fn set_process_context(&self, ctx: &RuntimeTransportContext) {
+        if self.inner.raw.is_null() {
+            return;
+        }
+        unsafe {
+            sphere_daux_vst3_set_process_context(
+                self.inner.raw,
+                ctx.tempo_bpm,
+                ctx.time_sig_num as i32,
+                ctx.time_sig_den as i32,
+                ctx.project_time_samples,
+                ctx.ppq_position,
+                ctx.bar_position_ppq,
+                i32::from(ctx.playing),
+                i32::from(ctx.recording),
+            );
+        }
     }
 
     /// Capture the plugin's current state for project persistence.

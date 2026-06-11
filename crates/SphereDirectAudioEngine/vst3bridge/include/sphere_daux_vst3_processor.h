@@ -170,6 +170,20 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_is_valid(
 SPHERE_DAUX_VST3_API int sphere_daux_vst3_get_latency_samples(
     SphereDauxVst3Processor* processor);
 
+/// Update the transport ProcessContext (tempo / time signature / project
+/// position / playing+recording) delivered to the plugin on the next
+/// process() call. Call once per block from the thread that drives process().
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_set_process_context(
+    SphereDauxVst3Processor* processor,
+    double                   tempo,
+    int                      time_sig_num,
+    int                      time_sig_den,
+    long long                project_time_samples,
+    double                   ppq,
+    double                   bar_ppq,
+    int                      playing,
+    int                      recording);
+
 /// Capture the plugin's current state (IComponent::getState +
 /// IEditController::getState for split plugins). Returns 1 on success —
 /// zero-length blobs are valid. Buffers are malloc-owned by the caller; free

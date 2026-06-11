@@ -683,14 +683,17 @@ struct SphereDauxVst3Processor {
     process_data.inputParameterChanges  = nullptr;
     process_data.outputParameterChanges = nullptr;
 
+    // Initial transport defaults. The host (engine in-process, or the bridge
+    // producer) overwrites tempo/time-sig/position/playing per block via
+    // sphere_daux_vst3_set_process_context before every process() call — these
+    // are only the values seen if a plugin processes before the first update.
     process_context.sampleRate         = sr;
     process_context.tempo              = 120.0;
     process_context.timeSigNumerator   = 4;
     process_context.timeSigDenominator = 4;
     process_context.state =
         Steinberg::Vst::ProcessContext::kTempoValid   |
-        Steinberg::Vst::ProcessContext::kTimeSigValid |
-        Steinberg::Vst::ProcessContext::kPlaying;
+        Steinberg::Vst::ProcessContext::kTimeSigValid;
     process_data.processContext = &process_context;
 
     const auto input_bus_count =
@@ -3058,6 +3061,46 @@ extern "C" void sphere_daux_vst3_set_param(
   processor->enqueue_param(
       static_cast<Steinberg::Vst::ParamID>(param_id),
       static_cast<Steinberg::Vst::ParamValue>(value));
+}
+
+/// Update the transport ProcessContext delivered to the plugin on the next
+/// process() call. Replaces the old hardcoded 120 BPM / 4-4 / always-playing
+/// stub with real engine transport. Called once per block on the same thread
+/// that drives process() (audio callback in-process, producer thread in the
+/// bridge host), so it never races process().
+///
+/// `tempo`/`time_sig_*` fall back to sane defaults if non-positive; valid flags
+/// are set only for the fields actually provided. `playing`/`recording` are
+/// 0/1. `ppq` is the project quarter-note position; `bar_ppq` the quarter-note
+/// position of the current bar start.
+extern "C" void sphere_daux_vst3_set_process_context(
+    SphereDauxVst3Processor* processor,
+    double                   tempo,
+    int                      time_sig_num,
+    int                      time_sig_den,
+    long long                project_time_samples,
+    double                   ppq,
+    double                   bar_ppq,
+    int                      playing,
+    int                      recording) {
+  if (!processor) return;
+  auto& ctx = processor->process_context;
+  ctx.tempo              = tempo > 0.0 ? tempo : 120.0;
+  ctx.timeSigNumerator   = time_sig_num > 0 ? time_sig_num : 4;
+  ctx.timeSigDenominator = time_sig_den > 0 ? time_sig_den : 4;
+  ctx.projectTimeSamples = static_cast<Steinberg::Vst::TSamples>(project_time_samples);
+  ctx.continousTimeSamples = static_cast<Steinberg::Vst::TSamples>(project_time_samples);
+  ctx.projectTimeMusic   = static_cast<Steinberg::Vst::TQuarterNotes>(ppq);
+  ctx.barPositionMusic   = static_cast<Steinberg::Vst::TQuarterNotes>(bar_ppq);
+  Steinberg::uint32 state =
+      Steinberg::Vst::ProcessContext::kTempoValid            |
+      Steinberg::Vst::ProcessContext::kTimeSigValid          |
+      Steinberg::Vst::ProcessContext::kProjectTimeMusicValid |
+      Steinberg::Vst::ProcessContext::kBarPositionValid      |
+      Steinberg::Vst::ProcessContext::kContTimeValid;
+  if (playing)   state |= Steinberg::Vst::ProcessContext::kPlaying;
+  if (recording) state |= Steinberg::Vst::ProcessContext::kRecording;
+  ctx.state = state;
 }
 
 extern "C" unsigned long long sphere_daux_vst3_open_editor(

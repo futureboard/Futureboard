@@ -737,6 +737,8 @@ fn fill_output_f32_inner(
             data,
             channels,
             transport_playing,
+            shared.time_sig_num.load(Ordering::Relaxed),
+            shared.time_sig_den.load(Ordering::Relaxed),
         );
         if !local.render_path_logged {
             local.render_path_logged = true;

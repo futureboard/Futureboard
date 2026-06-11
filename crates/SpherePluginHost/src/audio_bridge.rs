@@ -32,7 +32,13 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// Bridge), little-endian.
 pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// Layout version — bump on any change to [`SharedAudioBridge`] field order/size.
-pub const BRIDGE_LAYOUT_VERSION: u32 = 1;
+/// v2 added the transport / ProcessContext block (tempo, time signature,
+/// project position, playing/recording).
+pub const BRIDGE_LAYOUT_VERSION: u32 = 2;
+
+/// `transport_flags` bits.
+pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
+pub const TRANSPORT_FLAG_RECORDING: u32 = 1 << 1;
 
 /// Maximum block size (frames) the region can carry. The engine's actual block
 /// must be `<=` this; the region is sized for the worst case so it never
@@ -268,6 +274,22 @@ pub struct SharedAudioBridge {
     pub xrun_count: AtomicU32,
     pub _pad1: AtomicU32,
 
+    // --- Transport / ProcessContext (engine → host, atomics) ---
+    // Published by the engine each block alongside `request_seq`; read by the
+    // host producer to fill the plugin's VST3 ProcessContext before process().
+    /// Tempo in quarter-notes/min, `f64` bits.
+    pub transport_tempo_bits: AtomicU64,
+    /// Project position in quarter notes (`projectTimeMusic`), `f64` bits.
+    pub transport_ppq_bits: AtomicU64,
+    /// Current bar-start position in quarter notes (`barPositionMusic`), `f64` bits.
+    pub transport_bar_ppq_bits: AtomicU64,
+    /// Absolute project sample position of the block start (`i64` as bits).
+    pub transport_project_samples: AtomicU64,
+    /// `(num << 16) | den` time signature.
+    pub transport_time_sig: AtomicU32,
+    /// [`TRANSPORT_FLAG_PLAYING`] / [`TRANSPORT_FLAG_RECORDING`].
+    pub transport_flags: AtomicU32,
+
     // --- Lock-free rings (engine → host) ---
     pub midi: SpscRing<SharedMidiEvent, MIDI_RING_CAP>,
     pub params: SpscRing<SharedParamEvent, PARAM_RING_CAP>,
@@ -295,6 +317,16 @@ impl SharedAudioBridge {
             .store(BRIDGE_LAYOUT_VERSION, Ordering::Relaxed);
         self.dsp_output_state
             .store(DSP_OUTPUT_PENDING, Ordering::Relaxed);
+        // Sane transport defaults until the engine publishes the first block, so
+        // a host reading early sees 120 BPM / 4-4 / stopped rather than zeros.
+        self.transport_tempo_bits
+            .store(120.0f64.to_bits(), Ordering::Relaxed);
+        self.transport_ppq_bits.store(0, Ordering::Relaxed);
+        self.transport_bar_ppq_bits.store(0, Ordering::Relaxed);
+        self.transport_project_samples.store(0, Ordering::Relaxed);
+        self.transport_time_sig
+            .store((4 << 16) | 4, Ordering::Relaxed);
+        self.transport_flags.store(0, Ordering::Relaxed);
         // Publish magic last (Release) so an opener that sees the magic also sees
         // a fully-stamped header.
         self.magic.store(BRIDGE_MAGIC, Ordering::Release);
@@ -334,6 +366,63 @@ impl SharedAudioBridge {
             f32::from_bits(self.meter_peak_r.load(Ordering::Relaxed)),
         )
     }
+
+    /// Publish the transport ProcessContext for the next block (engine side).
+    /// Wait-free: plain atomic stores, safe on the audio callback.
+    pub fn store_transport(&self, t: &BridgeTransport) {
+        self.transport_tempo_bits
+            .store(t.tempo_bpm.to_bits(), Ordering::Relaxed);
+        self.transport_ppq_bits
+            .store(t.ppq_position.to_bits(), Ordering::Relaxed);
+        self.transport_bar_ppq_bits
+            .store(t.bar_position_ppq.to_bits(), Ordering::Relaxed);
+        self.transport_project_samples
+            .store(t.project_time_samples as u64, Ordering::Relaxed);
+        self.transport_time_sig.store(
+            ((t.time_sig_num & 0xFFFF) << 16) | (t.time_sig_den & 0xFFFF),
+            Ordering::Relaxed,
+        );
+        let mut flags = 0u32;
+        if t.playing {
+            flags |= TRANSPORT_FLAG_PLAYING;
+        }
+        if t.recording {
+            flags |= TRANSPORT_FLAG_RECORDING;
+        }
+        self.transport_flags.store(flags, Ordering::Relaxed);
+    }
+
+    /// Read the transport ProcessContext for this block (host side).
+    pub fn load_transport(&self) -> BridgeTransport {
+        let time_sig = self.transport_time_sig.load(Ordering::Relaxed);
+        let flags = self.transport_flags.load(Ordering::Relaxed);
+        BridgeTransport {
+            tempo_bpm: f64::from_bits(self.transport_tempo_bits.load(Ordering::Relaxed)),
+            time_sig_num: time_sig >> 16,
+            time_sig_den: time_sig & 0xFFFF,
+            project_time_samples: self.transport_project_samples.load(Ordering::Relaxed) as i64,
+            ppq_position: f64::from_bits(self.transport_ppq_bits.load(Ordering::Relaxed)),
+            bar_position_ppq: f64::from_bits(self.transport_bar_ppq_bits.load(Ordering::Relaxed)),
+            playing: flags & TRANSPORT_FLAG_PLAYING != 0,
+            recording: flags & TRANSPORT_FLAG_RECORDING != 0,
+        }
+    }
+}
+
+/// Transport snapshot exchanged through the shared region (engine → host).
+/// Mirrors `DAUx::RuntimeTransportContext` but lives here so the bridge crate
+/// has no dependency direction problem; the host maps it onto the plugin's VST3
+/// ProcessContext.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BridgeTransport {
+    pub tempo_bpm: f64,
+    pub time_sig_num: u32,
+    pub time_sig_den: u32,
+    pub project_time_samples: i64,
+    pub ppq_position: f64,
+    pub bar_position_ppq: f64,
+    pub playing: bool,
+    pub recording: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +763,31 @@ mod tests {
         let bridge = region.bridge();
         bridge.store_meters(0.5, 0.25);
         assert_eq!(bridge.meters(), (0.5, 0.25));
+    }
+
+    #[test]
+    fn transport_defaults_then_round_trips() {
+        let region = SharedAudioRegion::new_in_process();
+        let bridge = region.bridge();
+        bridge.init_header(48_000, 256, 2);
+        // Sane defaults before the first publish.
+        let def = bridge.load_transport();
+        assert_eq!(def.tempo_bpm, 120.0);
+        assert_eq!((def.time_sig_num, def.time_sig_den), (4, 4));
+        assert!(!def.playing && !def.recording);
+
+        let pushed = BridgeTransport {
+            tempo_bpm: 140.5,
+            time_sig_num: 3,
+            time_sig_den: 8,
+            project_time_samples: 96_000,
+            ppq_position: 12.25,
+            bar_position_ppq: 12.0,
+            playing: true,
+            recording: false,
+        };
+        bridge.store_transport(&pushed);
+        assert_eq!(bridge.load_transport(), pushed);
     }
 
     /// The producer-wake event pairs a creator and an opener on the same name:

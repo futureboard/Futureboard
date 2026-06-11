@@ -105,6 +105,21 @@ impl PluginBridgeSink for SharedRegionSink {
         }
     }
 
+    fn set_transport(&self, ctx: &DAUx::vst3_processor::RuntimeTransportContext) {
+        self.region
+            .bridge()
+            .store_transport(&crate::audio_bridge::BridgeTransport {
+                tempo_bpm: ctx.tempo_bpm,
+                time_sig_num: ctx.time_sig_num,
+                time_sig_den: ctx.time_sig_den,
+                project_time_samples: ctx.project_time_samples,
+                ppq_position: ctx.ppq_position,
+                bar_position_ppq: ctx.bar_position_ppq,
+                playing: ctx.playing,
+                recording: ctx.recording,
+            });
+    }
+
     fn request_block(&self, frames: u32) {
         let bridge = self.region.bridge();
         bridge

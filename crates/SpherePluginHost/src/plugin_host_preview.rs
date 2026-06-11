@@ -178,10 +178,14 @@ fn render_voice(
     in_r: &[f32],
     out_l: &mut [f32],
     out_r: &mut [f32],
+    transport: DAUx::vst3_processor::RuntimeTransportContext,
 ) {
     let mut state = midi.lock();
     let events = std::mem::take(&mut state.pending_events);
     let mut processor = processor.clone();
+    // Real transport ProcessContext immediately before process() — same thread,
+    // no race. The clone shares the same C++ processor via Arc.
+    processor.set_process_context(&transport);
     let _ = processor.process_stereo_block_with_midi(in_l, in_r, out_l, out_r, &events);
     if events.is_empty() && state.active_notes.is_empty() {
         state.tail_blocks = state.tail_blocks.saturating_sub(1);
@@ -292,6 +296,7 @@ impl BridgeAudioShared {
         frames: usize,
         in_l: &[f32],
         in_r: &[f32],
+        transport: DAUx::vst3_processor::RuntimeTransportContext,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut out_l = vec![0.0f32; frames];
         let mut out_r = vec![0.0f32; frames];
@@ -307,6 +312,7 @@ impl BridgeAudioShared {
                 in_r,
                 &mut out_l,
                 &mut out_r,
+                transport,
             );
         }
         (out_l, out_r)
@@ -327,8 +333,19 @@ impl BridgeAudioShared {
         }
         let mut out_l = vec![0.0f32; frames];
         let mut out_r = vec![0.0f32; frames];
+        // Legacy debug mixer path (CPAL preview): no engine transport available,
+        // so use defaults. The shared-bridge path supplies real transport.
+        let transport = DAUx::vst3_processor::RuntimeTransportContext::default();
         for voice in voices.iter() {
-            render_voice(&voice.processor, &voice.midi, in_l, in_r, &mut out_l, &mut out_r);
+            render_voice(
+                &voice.processor,
+                &voice.midi,
+                in_l,
+                in_r,
+                &mut out_l,
+                &mut out_r,
+                transport,
+            );
             for i in 0..frames {
                 mix_l[i] += out_l[i];
                 mix_r[i] += out_r[i];
@@ -804,6 +821,8 @@ impl PluginHostPreviewEngine {
         }
         let mut out_l = vec![0.0f32; frames];
         let mut out_r = vec![0.0f32; frames];
+        // Legacy in-engine debug mixer: no shared-bridge transport here.
+        let transport = DAUx::vst3_processor::RuntimeTransportContext::default();
         for instance in self.instances.values() {
             render_voice(
                 &instance.processor,
@@ -812,6 +831,7 @@ impl PluginHostPreviewEngine {
                 in_r,
                 &mut out_l,
                 &mut out_r,
+                transport,
             );
             for i in 0..frames {
                 mix_l[i] += out_l[i];

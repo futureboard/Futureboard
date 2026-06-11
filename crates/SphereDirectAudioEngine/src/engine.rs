@@ -39,6 +39,7 @@ use crate::recording::{self, RecordingSession};
 use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
 use crate::tempo_map::{TempoMap, TempoPoint};
 use crate::transport::{self, RuntimeTransportSnapshot};
+use crate::vst3_processor::RuntimeTransportContext;
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
@@ -2837,6 +2838,7 @@ fn route_main_output(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_track_block(
     runtime: &mut RuntimeProject,
     track_index: usize,
@@ -2844,11 +2846,13 @@ fn process_track_block(
     output: &mut [f32],
     channels: usize,
     beat: f64,
+    transport: RuntimeTransportContext,
 ) {
     apply_track_chain_block(
         &mut runtime.tracks[track_index],
         frames,
         &runtime.plugin_bridge_sinks,
+        transport,
     );
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
@@ -2938,6 +2942,7 @@ fn accumulate_sends(
 /// heard and the host handshake stays alive) but timeline clip material is
 /// skipped — otherwise the frozen playhead would stutter-loop the same audio
 /// clip slice every callback.
+#[allow(clippy::too_many_arguments)]
 pub fn render_project_block_interleaved(
     runtime: &mut RuntimeProject,
     base_sample: u64,
@@ -2945,6 +2950,8 @@ pub fn render_project_block_interleaved(
     output: &mut [f32],
     channels: usize,
     transport_active: bool,
+    time_sig_num: u32,
+    time_sig_den: u32,
 ) -> u64 {
     if channels < 2 {
         return 0;
@@ -2954,6 +2961,24 @@ pub fn render_project_block_interleaved(
         return 0;
     }
     let block_beat = sample_to_beat(runtime, base_sample);
+    // Real transport ProcessContext for every plugin processed this block —
+    // tempo from the map at this position, time signature from the engine,
+    // project position from the playhead, playing = transport state. Replaces
+    // the old hardcoded 120 BPM / always-playing stub.
+    let transport = RuntimeTransportContext {
+        tempo_bpm: runtime.tempo_map.bpm_at_beat(block_beat),
+        time_sig_num,
+        time_sig_den,
+        project_time_samples: base_sample as i64,
+        ppq_position: block_beat,
+        bar_position_ppq: RuntimeTransportContext::bar_start_ppq(
+            block_beat,
+            time_sig_num,
+            time_sig_den,
+        ),
+        playing: transport_active,
+        recording: false,
+    };
     for frame in output.chunks_mut(channels) {
         frame[0] = 0.0;
         frame[1] = 0.0;
@@ -3095,7 +3120,7 @@ pub fn render_project_block_interleaved(
                 first_clip
             );
         }
-        process_track_block(runtime, track_index, frames, output, channels, block_beat);
+        process_track_block(runtime, track_index, frames, output, channels, block_beat, transport);
     }
 
     // ── Pass 2: routing tracks (bus / return / group) ───────────────────
@@ -3113,7 +3138,7 @@ pub fn render_project_block_interleaved(
             track.block_l[..frames].copy_from_slice(&track.recv_l[..frames]);
             track.block_r[..frames].copy_from_slice(&track.recv_r[..frames]);
         }
-        process_track_block(runtime, track_index, frames, output, channels, block_beat);
+        process_track_block(runtime, track_index, frames, output, channels, block_beat, transport);
     }
 
     // ── Master bus: apply master track inserts on the summed output ──
@@ -3128,7 +3153,12 @@ pub fn render_project_block_interleaved(
                 master.block_l[i] = frame[0];
                 master.block_r[i] = frame[1];
             }
-            apply_track_chain_block(master, frames, &std::collections::HashMap::new());
+            apply_track_chain_block(
+                master,
+                frames,
+                &std::collections::HashMap::new(),
+                transport,
+            );
             // Write back, accumulate master meter, apply preview mode.
             for i in 0..frames {
                 let (l, r) =
@@ -3196,6 +3226,7 @@ pub fn apply_track_chain_block(
         String,
         std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>,
     >,
+    transport: RuntimeTransportContext,
 ) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
         track.callback_insert_log_done = true;
@@ -3223,6 +3254,7 @@ pub fn apply_track_chain_block(
                 midi,
                 bridge_sink,
                 ix,
+                transport,
             );
         } else {
             apply_insert_block(
@@ -3230,6 +3262,7 @@ pub fn apply_track_chain_block(
                 &mut track.block_r[..frames],
                 insert,
                 midi,
+                transport,
             );
         }
     }
@@ -3246,6 +3279,7 @@ fn push_vst3_midi_to_sink(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_external_bridge_insert_block(
     block_l: &mut [f32],
     block_r: &mut [f32],
@@ -3253,6 +3287,7 @@ fn apply_external_bridge_insert_block(
     midi_events: Option<&[crate::vst3_processor::Vst3MidiEvent]>,
     bridge_sink: Option<&dyn crate::plugin_bridge::PluginBridgeSink>,
     slot_index: usize,
+    transport: RuntimeTransportContext,
 ) {
     let frames = block_l.len().min(block_r.len());
     if frames == 0 || !insert.enabled {
@@ -3406,6 +3441,11 @@ fn apply_external_bridge_insert_block(
         );
     }
 
+    // Publish the real transport ProcessContext for this block before kicking
+    // the host, so the bridged plugin sees true tempo/position/playing instead
+    // of the old hardcoded stub. Wait-free atomic stores.
+    sink.set_transport(&transport);
+
     // Drive the host DSP handshake: MIDI was already pushed to the shared ring.
     if plugin_restore_debug_enabled() && insert.bridge_missed_blocks == 0 {
         eprintln!(
@@ -3505,6 +3545,7 @@ pub fn apply_insert_block(
     block_r: &mut [f32],
     insert: &mut RuntimeInsert,
     midi_events: Option<&[crate::vst3_processor::Vst3MidiEvent]>,
+    transport: RuntimeTransportContext,
 ) {
     if block_l.is_empty() || block_r.is_empty() {
         return;
@@ -3584,6 +3625,10 @@ pub fn apply_insert_block(
     }
     insert.scratch_l[..frames].fill(0.0);
     insert.scratch_r[..frames].fill(0.0);
+
+    // Real transport ProcessContext for this block, immediately before the
+    // plugin processes it (same thread, no race with process()).
+    vst3.set_process_context(&transport);
 
     let handle = vst3.handle_value();
     let process_ok = if let Some(events) = midi_events.filter(|e| !e.is_empty()) {
@@ -4101,6 +4146,8 @@ where
                         scratch,
                         ch,
                         playing_local,
+                        shared.time_sig_num.load(Ordering::Relaxed),
+                        shared.time_sig_den.load(Ordering::Relaxed),
                     );
                     if !render_path_logged {
                         render_path_logged = true;
@@ -4405,7 +4452,7 @@ mod bridge_insert_tests {
             std::sync::Arc<dyn PluginBridgeSink>,
         > = std::collections::HashMap::new();
         sinks.insert("insert-1".to_string(), std::sync::Arc::new(sink));
-        apply_track_chain_block(&mut track, 4, &sinks);
+        apply_track_chain_block(&mut track, 4, &sinks, RuntimeTransportContext::default());
         assert!((track.block_l[0] - 0.25).abs() < 1e-6);
         assert!((track.block_r[0] - 0.25).abs() < 1e-6);
     }
@@ -4413,7 +4460,12 @@ mod bridge_insert_tests {
     #[test]
     fn external_bridge_effect_stays_dry_without_sink() {
         let mut track = bridge_effect_track(1.0);
-        apply_track_chain_block(&mut track, 4, &std::collections::HashMap::new());
+        apply_track_chain_block(
+            &mut track,
+            4,
+            &std::collections::HashMap::new(),
+            RuntimeTransportContext::default(),
+        );
         assert!((track.block_l[0] - 1.0).abs() < 1e-6);
         assert!((track.block_r[0] - 1.0).abs() < 1e-6);
     }
@@ -4527,7 +4579,7 @@ mod bridge_insert_tests {
         let mut sinks = std::collections::HashMap::new();
         sinks.insert("insert-a".to_string(), sink_a as Arc<dyn PluginBridgeSink>);
         sinks.insert("insert-b".to_string(), sink_b as Arc<dyn PluginBridgeSink>);
-        apply_track_chain_block(&mut track, 4, &sinks);
+        apply_track_chain_block(&mut track, 4, &sinks, RuntimeTransportContext::default());
         assert!(
             (track.block_l[0] - 6.0).abs() < 1e-4,
             "serial chain expected 1*2*3=6 got {}",
@@ -4644,7 +4696,7 @@ mod bridge_insert_tests {
         sinks.insert("insert-a".to_string(), sink_a as Arc<dyn PluginBridgeSink>);
         sinks.insert("insert-b".to_string(), sink_b as Arc<dyn PluginBridgeSink>);
         sinks.insert("insert-c".to_string(), sink_c as Arc<dyn PluginBridgeSink>);
-        apply_track_chain_block(&mut track, 4, &sinks);
+        apply_track_chain_block(&mut track, 4, &sinks, RuntimeTransportContext::default());
         assert!(
             (track.block_l[0] - 10.0).abs() < 1e-4,
             "A x2, B missed, C x5 expected 1*2*5=10 got {}",

@@ -35,6 +35,14 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
     /// Publish the request for the host to process `frames` next (sets the block
     /// size and bumps the request sequence). Wait-free.
     fn request_block(&self, frames: u32);
+
+    /// Publish the transport ProcessContext (tempo, time signature, project
+    /// position, playing/recording) for the next block, so the host fills the
+    /// bridged plugin's VST3 `ProcessContext` with real transport instead of a
+    /// hardcoded stub. Called once per block right before [`Self::request_block`].
+    /// Wait-free (plain atomic stores). Default no-op for sinks that do not
+    /// carry transport (e.g. test stubs).
+    fn set_transport(&self, _ctx: &crate::vst3_processor::RuntimeTransportContext) {}
 }
 
 /// Shared handle to a realtime plugin-bridge sink.

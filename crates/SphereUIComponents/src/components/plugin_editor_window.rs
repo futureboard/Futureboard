@@ -1091,9 +1091,7 @@ impl PluginEditorWindow {
             ClientEvent::Host(HostEvent::EditorUnresponsive { gap_ms, .. }) => {
                 // Freeze-watchdog notification; the host usually recovers, so
                 // log only — the close path stays available in this process.
-                eprintln!(
-                    "[plugin-view][host] EditorUnresponsive editor_id={id} gap_ms={gap_ms}"
-                );
+                eprintln!("[plugin-view][host] EditorUnresponsive editor_id={id} gap_ms={gap_ms}");
             }
             ClientEvent::Host(HostEvent::EditorContentResize {
                 plugin_instance_id,

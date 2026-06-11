@@ -1,13 +1,11 @@
 use gpui::{App, Bounds, Context, Window};
 
-use crate::components::timeline::timeline_state::{
-    PluginRuntimeBackend, PluginRuntimeState,
-};
 use crate::components::native_editor_shell::{shell_defaults, NativeEditorShell};
 use crate::components::plugin_manager::open_plugin_manager_window;
 use crate::components::plugin_picker::{
     ensure_default_highlight, PickerFilter, PluginInsertKind, PluginPickerState, STUB_PLUGIN_ID,
 };
+use crate::components::timeline::timeline_state::{PluginRuntimeBackend, PluginRuntimeState};
 use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
 
 use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
@@ -345,7 +343,10 @@ impl StudioLayout {
                         })
                         .map(|track| track.id.clone())
                         .collect();
-                    let host_pid = runtime.as_ref().and_then(|rt| rt.lock().ok()).and_then(|r| r.host_pid());
+                    let host_pid = runtime
+                        .as_ref()
+                        .and_then(|rt| rt.lock().ok())
+                        .and_then(|r| r.host_pid());
                     track_ids.into_iter().any(|track_id| {
                         timeline.state.set_insert_runtime(
                             &track_id,
@@ -395,9 +396,7 @@ impl StudioLayout {
                 log_bridge_gpu_diagnostics(session, plugin_instance_id, &plugin_path);
                 log_bridge_paint_stats(session);
             }
-            ClientEvent::Host(HostEvent::EditorContentResize {
-                width, height, ..
-            }) => {
+            ClientEvent::Host(HostEvent::EditorContentResize { width, height, .. }) => {
                 eprintln!(
                     "[plugin-bridge] event EditorContentResize instance={plugin_instance_id} width={width} height={height}"
                 );
@@ -484,7 +483,10 @@ impl StudioLayout {
             }
             ClientEvent::Host(HostEvent::EditorClosed { .. }) => {
                 eprintln!("[plugin-view][host] EditorClosed instance={plugin_instance_id}");
-                let host_pid = runtime.as_ref().and_then(|rt| rt.lock().ok()).and_then(|r| r.host_pid());
+                let host_pid = runtime
+                    .as_ref()
+                    .and_then(|rt| rt.lock().ok())
+                    .and_then(|r| r.host_pid());
                 self.timeline.update(cx, |timeline, _cx| {
                     let track_ids: Vec<String> = timeline
                         .state
@@ -621,7 +623,11 @@ impl StudioLayout {
                 if let Some(engine) = self.audio_engine.as_ref() {
                     let _ = engine.set_bridge_editor_active(track_id.to_string(), true);
                 }
-                self.log_editor_engine_state("open complete engine_state_after=", track_id, instance_id);
+                self.log_editor_engine_state(
+                    "open complete engine_state_after=",
+                    track_id,
+                    instance_id,
+                );
                 cx.notify();
             }
             Err(e) => {
@@ -816,7 +822,9 @@ impl StudioLayout {
         eprintln!(
             "[PluginEditor] open requested track={track_id} slot={insert_index} instance={resolved_plugin_instance_id}"
         );
-        eprintln!("[PluginEditor] insert runtime_state={runtime_state:?} load_status={load_status:?}");
+        eprintln!(
+            "[PluginEditor] insert runtime_state={runtime_state:?} load_status={load_status:?}"
+        );
 
         if !insert_found {
             eprintln!("[PluginEditor] no runtime instance; cannot open (insert id mismatch)");
@@ -992,6 +1000,196 @@ impl StudioLayout {
             if let Ok(mut runtime) = runtime.lock() {
                 runtime.unload_plugin(insert_id.to_string());
             }
+        }
+    }
+
+    /// Fully tear down ONE live plugin instance everywhere outside the project
+    /// model — editor window, external bridge-host instance, and the engine's
+    /// realtime bridge-audio sink — so no registry keeps the old
+    /// `PluginInstanceId` alive. Call this BEFORE dropping the slot from the
+    /// model. Idempotent: safe for an instance that is already gone.
+    ///
+    /// The in-process VST3 graph node is released separately: dropping the slot
+    /// and re-syncing makes the engine reconcile drop its processor clone
+    /// (`sphere_daux_vst3_destroy`). Fresh slot ids (see
+    /// `TimelineState::next_insert_slot_id`) guarantee the reconcile can never
+    /// reuse the dropped instance for the next add.
+    pub(super) fn teardown_insert_instance(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        cx: &mut Context<Self>,
+        reason: &'static str,
+    ) {
+        use crate::components::timeline::timeline_state::TrackType;
+        eprintln!("[PluginUnload] start track={track_id} instance={insert_id} reason={reason}");
+
+        // Only the instrument (inserts[0] on an Instrument/MIDI track) carries
+        // MIDI — panic the track so a held/stuck note can't sustain past the
+        // unload. Cheap no-op for an effect insert.
+        let is_instrument = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(track_id)
+            .map(|track| {
+                track.instrument_plugin_instance_id.as_deref() == Some(insert_id)
+                    || (matches!(track.track_type, TrackType::Instrument | TrackType::Midi)
+                        && track
+                            .inserts
+                            .first()
+                            .map(|slot| slot.id == insert_id)
+                            .unwrap_or(false))
+            })
+            .unwrap_or(false);
+
+        // 1. Editor window (native main-owned bridge shell + legacy GPUI) —
+        //    disconnects the editor from the instance and releases its clone.
+        self.close_insert_editor(track_id, insert_id, cx);
+        eprintln!("[PluginUnload] editor_closed track={track_id} instance={insert_id}");
+
+        // 2. External bridge host: real UnloadPlugin (host closes the editor,
+        //    suspends + deactivates the VST3 component, releases component /
+        //    controller, drops HWND / param / MIDI maps) and drops the bridge
+        //    runtime's shared-audio region for this instance.
+        self.unload_bridge_plugin(insert_id);
+        eprintln!("[PluginUnload] host_unload_sent track={track_id} instance={insert_id}");
+
+        // 3. Engine realtime sink: keyed by instance id and PRESERVED across
+        //    LoadProject, so the snapshot reconcile alone never drops it. Remove
+        //    it explicitly or the removed plugin keeps mixing into the master.
+        if let Some(engine) = self.audio_engine.as_ref() {
+            match engine.set_plugin_bridge_sink(insert_id.to_string(), None) {
+                Ok(()) => eprintln!(
+                    "[PluginUnload] engine_sink_removed track={track_id} instance={insert_id}"
+                ),
+                Err(error) => eprintln!(
+                    "[PluginUnload] engine_sink_remove_failed instance={insert_id} err={error}"
+                ),
+            }
+            if is_instrument {
+                match engine.midi_preview_all_notes_off(track_id.to_string()) {
+                    Ok(()) => eprintln!(
+                        "[PluginUnload] midi_disconnected track={track_id} instance={insert_id}"
+                    ),
+                    Err(error) => eprintln!(
+                        "[PluginUnload] midi_panic_failed track={track_id} instance={insert_id} err={error}"
+                    ),
+                }
+            }
+        }
+
+        eprintln!("[PluginUnload] complete track={track_id} instance={insert_id}");
+    }
+
+    /// RemoveInstrumentPlugin / remove-insert flow: tear the live instance down
+    /// everywhere, drop the slot from the project model, then push the new
+    /// snapshot so the engine reconcile destroys the in-process VST3 clone. The
+    /// next add always receives a fresh `PluginInstanceId`, so nothing is reused.
+    pub(super) fn remove_insert_fully(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        cx: &mut Context<Self>,
+        reason: &'static str,
+    ) {
+        self.teardown_insert_instance(track_id, insert_id, cx, reason);
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.state.remove_insert(track_id, insert_id);
+            cx.notify();
+        });
+        self.mark_dirty();
+        self.engine_project_dirty = true;
+        // Push the snapshot now instead of waiting for the idle poll: the engine
+        // reconcile drops the old processor clone and the sink removal applies
+        // immediately, so the removed VSTi can never sound again.
+        self.schedule_audio_project_sync(cx, true, reason);
+        self.assert_instance_fully_removed(track_id, insert_id, cx);
+        cx.notify();
+    }
+
+    /// Post-removal invariant check (logged; debug-asserted). Proves the
+    /// `PluginInstanceId` is gone from every registry the main app owns. The
+    /// in-process engine graph node + MIDI router live on the audio thread and
+    /// are verified by the engine reconcile log, not from here.
+    pub(super) fn assert_instance_fully_removed(
+        &self,
+        track_id: &str,
+        insert_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (slot_present, instrument_ptr) = {
+            let state = &self.timeline.read(cx).state;
+            let track = state.find_track(track_id);
+            let slot_present = track
+                .map(|t| t.inserts.iter().any(|s| s.id == insert_id))
+                .unwrap_or(false);
+            let instrument_ptr = track
+                .map(|t| t.instrument_plugin_instance_id.as_deref() == Some(insert_id))
+                .unwrap_or(false);
+            (slot_present, instrument_ptr)
+        };
+        let editor_open = self
+            .open_plugin_editors
+            .keys()
+            .chain(self.bridge_editors.keys())
+            .any(|(_, id)| id == insert_id);
+        let bridge_loaded = self
+            .plugin_bridge_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.lock().ok().map(|r| r.is_loaded(insert_id)))
+            .unwrap_or(false);
+        eprintln!(
+            "[PluginUnload] invariants track={track_id} instance={insert_id} \
+             slot_present={slot_present} instrument_ptr={instrument_ptr} \
+             editor_open={editor_open} bridge_loaded={bridge_loaded}"
+        );
+        debug_assert!(!slot_present, "insert slot still present after removal");
+        debug_assert!(!instrument_ptr, "instrument pointer still set after removal");
+        debug_assert!(!editor_open, "editor still open after removal");
+        debug_assert!(!bridge_loaded, "bridge instance still loaded after removal");
+    }
+
+    /// CloseProject flow: tear down EVERY live plugin instance before the
+    /// project model is replaced (load / close). The engine preserves its
+    /// bridge-sink map across `LoadProject`, so without this every old
+    /// instance's sink + bridge-host process + editor leaks into the next
+    /// project.
+    pub(super) fn teardown_all_plugin_instances(
+        &mut self,
+        cx: &mut Context<Self>,
+        reason: &'static str,
+    ) {
+        let pairs: Vec<(String, String)> = {
+            let state = &self.timeline.read(cx).state;
+            let mut pairs: Vec<(String, String)> = state
+                .tracks
+                .iter()
+                .flat_map(|track| {
+                    track
+                        .inserts
+                        .iter()
+                        .map(move |slot| (track.id.clone(), slot.id.clone()))
+                })
+                .collect();
+            // Defensive: also catch any editor whose model slot already vanished.
+            for key in self
+                .open_plugin_editors
+                .keys()
+                .chain(self.bridge_editors.keys())
+            {
+                if !pairs.contains(key) {
+                    pairs.push(key.clone());
+                }
+            }
+            pairs
+        };
+        eprintln!(
+            "[ProjectClose] teardown_all instances={} reason={reason}",
+            pairs.len()
+        );
+        for (track_id, insert_id) in pairs {
+            self.teardown_insert_instance(&track_id, &insert_id, cx, reason);
         }
     }
 
@@ -1279,23 +1477,42 @@ impl StudioLayout {
                 )
             });
 
-        let new_slot_id = self.timeline.update(cx, |timeline, _cx| {
-            timeline
-                .state
-                .ensure_insert_slot_at(&track_id, target_slot_index)
-        });
+        // Replace flow: if the target slot already holds a loaded plugin, this
+        // is a replace-on-top. Fully tear the OLD instance down (editor + bridge
+        // host + engine sink) and give the slot a FRESH id, so the engine
+        // reconcile can never reuse the previous instance and the same plugin
+        // file loads as an independent instance. A fresh/empty slot just gets a
+        // new slot id as before.
+        let existing_slot_id = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(&track_id)
+            .and_then(|track| track.inserts.get(target_slot_index))
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.id.clone());
+        let new_slot_id = if let Some(old_slot_id) = existing_slot_id {
+            self.teardown_insert_instance(&track_id, &old_slot_id, cx, "replace_instrument_plugin");
+            self.timeline.update(cx, |timeline, _cx| {
+                timeline
+                    .state
+                    .replace_insert_with_fresh_slot(&track_id, &old_slot_id)
+            })
+        } else {
+            self.timeline.update(cx, |timeline, _cx| {
+                timeline
+                    .state
+                    .ensure_insert_slot_at(&track_id, target_slot_index)
+            })
+        };
         let mut opened_slot = None;
         if let Some(slot_id) = new_slot_id {
-            // Replacing the plugin in a slot that already has an editor open: the
-            // editor holds a clone of the OLD instance's processor. Close it
-            // before rebinding so the old C++ instance is released and we don't
-            // orphan a window pointing at a disconnected processor. No-op when
-            // the slot is freshly created (no editor open yet).
+            // Defensive: a fresh slot never has an editor open, and the replace
+            // path already closed the old one — but closing the (new) slot id is
+            // a cheap no-op that keeps every add paired with a close.
             self.close_insert_editor(&track_id, &slot_id, cx);
             let log_display_name = display_name.clone();
-            eprintln!(
-                "[PluginAdd] track={track_id} slot={slot_id} plugin={log_display_name}"
-            );
+            eprintln!("[PluginAdd] track={track_id} slot={slot_id} plugin={log_display_name}");
             eprintln!("[PluginAdd] runtime_instance_id={slot_id}");
             let bridge_class_id = plugin_id_out.clone();
             self.timeline.update(cx, |timeline, _cx| {
@@ -1505,8 +1722,9 @@ impl StudioLayout {
         };
         let instance_ids: Vec<String> = slots.iter().map(|(_, id)| id.clone()).collect();
         let states = match runtime.lock() {
-            Ok(mut runtime) => runtime
-                .request_plugin_states(&instance_ids, std::time::Duration::from_millis(1500)),
+            Ok(mut runtime) => {
+                runtime.request_plugin_states(&instance_ids, std::time::Duration::from_millis(1500))
+            }
             Err(_) => {
                 eprintln!("[plugin-bridge] state refresh skipped: runtime lock poisoned");
                 return;
@@ -1740,11 +1958,9 @@ impl StudioLayout {
                 });
                 let bridge_sink = match runtime.lock() {
                     Ok(mut runtime) => {
-                        if let Err(error) = runtime.send_load_plugin(
-                            descriptor,
-                            sample_rate,
-                            max_block_size,
-                        ) {
+                        if let Err(error) =
+                            runtime.send_load_plugin(descriptor, sample_rate, max_block_size)
+                        {
                             eprintln!("[PluginRestore] failed reason={error}");
                             let _ = self.timeline.update(cx, |timeline, _cx| {
                                 timeline.state.set_insert_runtime(
@@ -1834,7 +2050,9 @@ impl StudioLayout {
     /// plugin instances for persisted inserts (bridge path).
     pub(super) fn restore_plugin_inserts_after_project_load(&mut self, cx: &mut Context<Self>) {
         if !super::plugin_bridge_runtime::bridge_enabled() {
-            eprintln!("[PluginRestore] in-process path — engine sync will instantiate native inserts");
+            eprintln!(
+                "[PluginRestore] in-process path — engine sync will instantiate native inserts"
+            );
             return;
         }
 

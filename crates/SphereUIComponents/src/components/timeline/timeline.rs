@@ -6,10 +6,9 @@ use crate::components::timeline::tempo_track::tempo_track_lane;
 use crate::components::timeline::time_signature_track::time_signature_track_lane;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipResizeDrag, SnapDivision, TempoPointDrag, TimeSignaturePointDrag,
-    TimelineRangeSelection,
-    TimelineState, TimelineTool, TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT,
-    TEMPO_LANE_PAD, TRACK_HEIGHT,
+    ClipDragItem, ClipResizeDrag, ClipState, ClipType, SnapDivision, TempoPointDrag,
+    TimeSignaturePointDrag, TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem,
+    TrackType, HEADER_WIDTH, RULER_HEIGHT, TEMPO_LANE_PAD, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -72,6 +71,16 @@ fn is_supported_audio_ext(path: &std::path::Path) -> bool {
     )
 }
 
+fn is_supported_midi_ext(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("mid") | Some("midi")
+    )
+}
+
 use std::collections::HashSet;
 
 pub struct Timeline {
@@ -93,6 +102,7 @@ pub struct Timeline {
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
+    clip_clone_drag_id: Option<String>,
     /// Pen-tool click-drag MIDI clip preview, live until mouse-up creates the clip.
     pen_clip_draw: Option<ClipDrawPreview>,
     /// Pointer-tool empty-lane marquee. Rule: Pointer + empty lane drag starts
@@ -220,6 +230,7 @@ impl Timeline {
         self.log_input_state("reset-before");
         self.clip_drag_origin = None;
         self.clip_drag_target_track_index = None;
+        self.clip_clone_drag_id = None;
         self.pen_clip_draw = None;
         self.range_select_drag = None;
         self.state.arrangement_range = None;
@@ -257,6 +268,7 @@ impl Timeline {
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
+            clip_clone_drag_id: None,
             pen_clip_draw: None,
             range_select_drag: None,
             erase_clip_drag: None,
@@ -290,6 +302,7 @@ impl Timeline {
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
+            clip_clone_drag_id: None,
             pen_clip_draw: None,
             range_select_drag: None,
             erase_clip_drag: None,
@@ -682,11 +695,10 @@ impl Timeline {
                 self.state.select_time_signature_point(&id);
             } else {
                 let pt = self.state.time_signature_map.time_signature_at_beat(beat);
-                if let Some(id) = self.state.add_time_signature_point(
-                    beat,
-                    pt.numerator,
-                    pt.denominator,
-                ) {
+                if let Some(id) =
+                    self.state
+                        .add_time_signature_point(beat, pt.numerator, pt.denominator)
+                {
                     self.state.select_time_signature_point(&id);
                     self.ts_drag = Some(TimeSignaturePointDrag {
                         point_id: id,
@@ -746,15 +758,11 @@ impl Timeline {
 
     fn add_time_signature_marker_at_playhead_from_header(&mut self, cx: &mut Context<Self>) {
         let beat = self.state.transport.playhead_beats as f64;
-        let pt = self
+        let pt = self.state.time_signature_map.time_signature_at_beat(beat);
+        if let Some(id) = self
             .state
-            .time_signature_map
-            .time_signature_at_beat(beat);
-        if let Some(id) = self.state.add_time_signature_point(
-            beat,
-            pt.numerator,
-            pt.denominator,
-        ) {
+            .add_time_signature_point(beat, pt.numerator, pt.denominator)
+        {
             self.state.select_time_signature_point(&id);
             self.mark_time_signature_map_changed(cx);
             cx.notify();
@@ -1008,6 +1016,28 @@ impl Timeline {
         window: &Window,
     ) {
         let origin = *self.clip_drag_origin.get_or_insert(position);
+        let (target_index, snapped) = self.resolve_clip_drag_target(drag, origin, position);
+        self.clip_drag_target_track_index = Some(target_index);
+
+        let current_track_id = self
+            .state
+            .find_clip(&drag.clip_id)
+            .map(|(track, _)| track.id.clone())
+            .unwrap_or_else(|| drag.source_track_id.clone());
+        self.state
+            .move_clip_to_track(&drag.clip_id, &current_track_id, snapped);
+
+        let (max_x, max_y) = self.max_scroll_offsets(window);
+        self.state.viewport.scroll_x = self.state.viewport.scroll_x.clamp(0.0, max_x);
+        self.state.viewport.scroll_y = self.state.viewport.scroll_y.clamp(0.0, max_y);
+    }
+
+    fn resolve_clip_drag_target(
+        &self,
+        drag: &ClipDragItem,
+        origin: gpui::Point<gpui::Pixels>,
+        position: gpui::Point<gpui::Pixels>,
+    ) -> (usize, f32) {
         let dx: f32 = (position.x - origin.x).into();
         let dy: f32 = (position.y - origin.y).into();
         let ppb = self.state.viewport.pixels_per_second * self.state.seconds_per_beat();
@@ -1023,19 +1053,39 @@ impl Timeline {
         let slot = (dy / TRACK_HEIGHT).round() as isize;
         let max_index = self.state.tracks.len().saturating_sub(1) as isize;
         let target_index = (source_index as isize + slot).clamp(0, max_index) as usize;
-        self.clip_drag_target_track_index = Some(target_index);
+        (target_index, snapped)
+    }
 
-        let current_track_id = self
-            .state
-            .find_clip(&drag.clip_id)
-            .map(|(track, _)| track.id.clone())
-            .unwrap_or_else(|| drag.source_track_id.clone());
-        self.state
-            .move_clip_to_track(&drag.clip_id, &current_track_id, snapped);
+    fn build_clip_clone_at(
+        &self,
+        source_clip_id: &str,
+        target_track_id: &str,
+        start_beat: f32,
+    ) -> Option<(String, ClipState)> {
+        let (_, source) = self.state.find_clip(source_clip_id)?;
+        let clip = self.state.clone_clip_for_insert(
+            source,
+            self.state.next_clip_id(),
+            format!("{} Copy", source.name),
+            start_beat,
+        );
+        Some((target_track_id.to_string(), clip))
+    }
 
-        let (max_x, max_y) = self.max_scroll_offsets(window);
-        self.state.viewport.scroll_x = self.state.viewport.scroll_x.clamp(0.0, max_x);
-        self.state.viewport.scroll_y = self.state.viewport.scroll_y.clamp(0.0, max_y);
+    fn create_clip_clone_at(
+        &mut self,
+        source_clip_id: &str,
+        target_track_id: &str,
+        start_beat: f32,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let Some((track_id, clip)) =
+            self.build_clip_clone_at(source_clip_id, target_track_id, start_beat)
+        else {
+            return false;
+        };
+        self.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+        true
     }
 
     fn track_area_y_from_window(&self, position: gpui::Point<gpui::Pixels>) -> f32 {
@@ -1061,17 +1111,7 @@ impl Timeline {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "Imported Audio".to_string());
 
-        let (drop_x, drop_y) = match self.last_drag_position {
-            Some(p) if !force_new_track => {
-                let x: f32 = p.x.into();
-                let y: f32 = p.y.into();
-                let lane_x = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
-                let lane_y =
-                    (y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()).max(0.0);
-                (lane_x, lane_y)
-            }
-            _ => (0.0, 1.0e9_f32),
-        };
+        let (drop_x, drop_y) = self.drop_position_or_new_track(force_new_track);
 
         if self.project_root.is_none() {
             eprintln!("[AudioImport] blocked: save project before importing audio");
@@ -1090,6 +1130,81 @@ impl Timeline {
             cx,
         );
         true
+    }
+
+    fn import_midi_path_at_last_drag(
+        &mut self,
+        path: &std::path::Path,
+        force_new_track: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !is_supported_midi_ext(path) {
+            return false;
+        }
+
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!(
+                    "[MidiImport] read failed path={} err={error}",
+                    path.display()
+                );
+                return false;
+            }
+        };
+        let imported = match super::midi_import::parse_smf_notes(&bytes) {
+            Ok(imported) => imported,
+            Err(error) => {
+                eprintln!(
+                    "[MidiImport] parse failed path={} err={error}",
+                    path.display()
+                );
+                return false;
+            }
+        };
+        let clip_name = path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Imported MIDI".to_string());
+        let (drop_x, drop_y) = self.drop_position_or_new_track(force_new_track);
+        let Some((track_id, clip)) = self
+            .state
+            .import_midi_at(clip_name, imported, drop_x, drop_y)
+        else {
+            return false;
+        };
+        if crate::components::timeline::timeline_state::midi_debug_enabled() {
+            eprintln!(
+                "[MidiImport] imported path={} track={} clip={} notes={}",
+                path.display(),
+                track_id,
+                clip.id,
+                match &clip.clip_type {
+                    crate::components::timeline::timeline_state::ClipType::Midi {
+                        notes, ..
+                    } => notes.len(),
+                    _ => 0,
+                }
+            );
+        }
+        self.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+        true
+    }
+
+    fn drop_position_or_new_track(&self, force_new_track: bool) -> (f32, f32) {
+        match self.last_drag_position {
+            Some(p) if !force_new_track => {
+                let x: f32 = p.x.into();
+                let y: f32 = p.y.into();
+                let lane_x = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+                let lane_y =
+                    (y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()).max(0.0);
+                (lane_x, lane_y)
+            }
+            _ => (0.0, 1.0e9_f32),
+        }
     }
 }
 
@@ -1135,15 +1250,32 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_select_clip =
-            cx.listener(|this, (clip_id, additive): &(String, bool), _window, cx| {
+        let on_select_clip = cx.listener(
+            |this, (clip_id, additive, clone_drag): &(String, bool, bool), _window, cx| {
+                if this.state.active_tool == TimelineTool::Pen {
+                    let is_audio = this
+                        .state
+                        .find_clip(clip_id)
+                        .map(|(_, clip)| matches!(clip.clip_type, ClipType::Audio { .. }))
+                        .unwrap_or(false);
+                    if is_audio {
+                        if let Some((track_id, clip)) =
+                            this.state.build_clip_duplicate_after(clip_id)
+                        {
+                            this.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+                        }
+                        return;
+                    }
+                }
+                this.clip_clone_drag_id = clone_drag.then(|| clip_id.clone());
                 if *additive {
                     this.state.select_clip_additive(clip_id);
                 } else {
                     this.state.select_clip(clip_id);
                 }
                 cx.notify();
-            });
+            },
+        );
 
         let on_toggle_mute = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_mute(track_id);
@@ -1232,8 +1364,26 @@ impl Render for Timeline {
                 .map(|t| t.track_type);
             match track_type {
                 Some(TrackType::Audio) => {
-                    // Audio clips require a real file import — pen draw does not
-                    // create placeholder clips.
+                    if this.state.active_tool == TimelineTool::Pen {
+                        let source_id = this
+                            .state
+                            .selection
+                            .selected_clip_ids
+                            .iter()
+                            .find(|id| {
+                                this.state
+                                    .find_clip(id)
+                                    .map(|(_, clip)| {
+                                        matches!(clip.clip_type, ClipType::Audio { .. })
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .cloned();
+                        if let Some(source_id) = source_id {
+                            let start = this.snap_beat(*beat);
+                            this.create_clip_clone_at(&source_id, track_id, start, cx);
+                        }
+                    }
                 }
                 Some(TrackType::Midi | TrackType::Instrument) => {
                     if this.state.active_tool == TimelineTool::Pen {
@@ -1547,7 +1697,7 @@ impl Render for Timeline {
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_select_track);
         let on_select_clip: std::sync::Arc<
-            dyn Fn(&(String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+            dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_select_clip);
         let on_toggle_mute: std::sync::Arc<
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
@@ -1782,16 +1932,13 @@ impl Render for Timeline {
             std::sync::Arc::new(
                 move |pos: &(f32, f32), window: &mut gpui::Window, cx: &mut gpui::App| {
                     cb(
-                        &(
-                            TimelineContextTarget::TimeSignatureLaneHeader,
-                            pos.0,
-                            pos.1,
-                        ),
+                        &(TimelineContextTarget::TimeSignatureLaneHeader, pos.0, pos.1),
                         window,
                         cx,
                     );
                 },
-            ) as crate::components::timeline::time_signature_track::GlobalLaneMenuCallback
+            )
+                as crate::components::timeline::time_signature_track::GlobalLaneMenuCallback
         });
 
         let on_ts_hide = cx.listener(|this, _: &(), _window, cx| {
@@ -1802,8 +1949,7 @@ impl Render for Timeline {
             std::sync::Arc::new(on_ts_hide);
 
         let on_ts_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
-            this.state.time_signature_track_collapsed =
-                !this.state.time_signature_track_collapsed;
+            this.state.time_signature_track_collapsed = !this.state.time_signature_track_collapsed;
             cx.notify();
         });
         let on_ts_toggle_collapsed: crate::components::timeline::time_signature_track::GlobalLaneVoidCallback =
@@ -1861,7 +2007,8 @@ impl Render for Timeline {
             let mut force_new_track = false;
             for path in paths.paths().iter() {
                 let imported =
-                    this.import_audio_path_at_last_drag(path, force_new_track, _window, cx);
+                    this.import_midi_path_at_last_drag(path, force_new_track, _window, cx)
+                        || this.import_audio_path_at_last_drag(path, force_new_track, _window, cx);
                 any_imported |= imported;
                 force_new_track |= imported;
             }
@@ -1878,7 +2025,9 @@ impl Render for Timeline {
         );
 
         let on_browser_file_dropped = cx.listener(|this, item: &BrowserDragItem, window, cx| {
-            if this.import_audio_path_at_last_drag(&item.path, false, window, cx) {
+            if this.import_midi_path_at_last_drag(&item.path, false, window, cx)
+                || this.import_audio_path_at_last_drag(&item.path, false, window, cx)
+            {
                 this.last_drag_position = None;
                 cx.notify();
             }
@@ -1888,7 +2037,14 @@ impl Render for Timeline {
             |this, event: &gpui::DragMoveEvent<ClipDragItem>, window, cx| {
                 let drag = event.drag(cx).clone();
                 this.last_drag_position = Some(event.event.position);
-                this.move_dragged_clip_to_position(&drag, event.event.position, window);
+                if this.clip_clone_drag_id.as_deref() == Some(drag.clip_id.as_str()) {
+                    let origin = *this.clip_drag_origin.get_or_insert(event.event.position);
+                    let (target_index, _) =
+                        this.resolve_clip_drag_target(&drag, origin, event.event.position);
+                    this.clip_drag_target_track_index = Some(target_index);
+                } else {
+                    this.move_dragged_clip_to_position(&drag, event.event.position, window);
+                }
                 cx.notify();
             },
         );
@@ -1899,17 +2055,27 @@ impl Render for Timeline {
                 .and_then(|index| this.state.tracks.get(index))
                 .map(|track| track.id.clone())
             {
-                let current_start = this
-                    .state
-                    .find_clip(&drag.clip_id)
-                    .map(|(_, clip)| clip.start_beat)
-                    .unwrap_or(drag.start_beat);
-                this.state
-                    .move_clip_to_track(&drag.clip_id, &target_track_id, current_start);
-                this.mark_project_changed(cx);
+                if this.clip_clone_drag_id.as_deref() == Some(drag.clip_id.as_str()) {
+                    let origin = this
+                        .clip_drag_origin
+                        .unwrap_or_else(|| this.last_drag_position.unwrap_or_default());
+                    let position = this.last_drag_position.unwrap_or(origin);
+                    let (_, start_beat) = this.resolve_clip_drag_target(drag, origin, position);
+                    this.create_clip_clone_at(&drag.clip_id, &target_track_id, start_beat, cx);
+                } else {
+                    let current_start = this
+                        .state
+                        .find_clip(&drag.clip_id)
+                        .map(|(_, clip)| clip.start_beat)
+                        .unwrap_or(drag.start_beat);
+                    this.state
+                        .move_clip_to_track(&drag.clip_id, &target_track_id, current_start);
+                    this.mark_project_changed(cx);
+                }
             }
             this.clip_drag_origin = None;
             this.clip_drag_target_track_index = None;
+            this.clip_clone_drag_id = None;
             this.last_drag_position = None;
             cx.notify();
         });

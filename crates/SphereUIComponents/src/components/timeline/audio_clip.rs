@@ -50,7 +50,7 @@ pub fn audio_clip(
     track_color: gpui::Rgba,
     state: &TimelineState,
     on_select_clip: std::sync::Arc<
-        dyn Fn(&(String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+        dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
     on_context_menu: Option<
@@ -121,7 +121,11 @@ pub fn audio_clip(
             move |event: &gpui::MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 let additive = event.modifiers.control || event.modifiers.platform;
-                on_select(&(clip_id.clone(), additive), window, cx);
+                on_select(
+                    &(clip_id.clone(), additive, event.modifiers.alt),
+                    window,
+                    cx,
+                );
                 if event.click_count >= 2 {
                     if let Some(open) = open_editor.as_ref() {
                         open(window, cx);

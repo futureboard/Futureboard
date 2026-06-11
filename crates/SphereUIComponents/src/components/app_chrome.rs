@@ -551,65 +551,63 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                     ]
                 } else {
                     let on_ts_edit = on_ts_edit_start.clone();
-                    vec![
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(2.0))
-                            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                                if event.click_count >= 2 {
-                                    on_ts_edit(&(), window, cx);
-                                }
-                            })
-                            .child(
-                                div()
-                                    .w(px(18.0))
-                                    .h(px(19.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .bg(Colors::surface_input())
-                                    .text_color(Colors::text_primary())
-                                    .text_size(px(11.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(
-                                        state
-                                            .time_signature_label
-                                            .split_once('/')
-                                            .map(|(num, _)| num.to_string())
-                                            .unwrap_or_else(|| "4".to_string()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_color(Colors::text_muted())
-                                    .text_size(px(10.0))
-                                    .child("/"),
-                            )
-                            .child(
-                                div()
-                                    .w(px(18.0))
-                                    .h(px(19.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .bg(Colors::surface_input())
-                                    .text_color(Colors::text_primary())
-                                    .text_size(px(11.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(
-                                        state
-                                            .time_signature_label
-                                            .split_once('/')
-                                            .map(|(_, den)| den.to_string())
-                                            .unwrap_or_else(|| "4".to_string()),
-                                    ),
-                            )
-                            .into_any_element(),
-                    ]
+                    vec![div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.0))
+                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                            if event.click_count >= 2 {
+                                on_ts_edit(&(), window, cx);
+                            }
+                        })
+                        .child(
+                            div()
+                                .w(px(18.0))
+                                .h(px(19.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .bg(Colors::surface_input())
+                                .text_color(Colors::text_primary())
+                                .text_size(px(11.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(
+                                    state
+                                        .time_signature_label
+                                        .split_once('/')
+                                        .map(|(num, _)| num.to_string())
+                                        .unwrap_or_else(|| "4".to_string()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_color(Colors::text_muted())
+                                .text_size(px(10.0))
+                                .child("/"),
+                        )
+                        .child(
+                            div()
+                                .w(px(18.0))
+                                .h(px(19.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .bg(Colors::surface_input())
+                                .text_color(Colors::text_primary())
+                                .text_size(px(11.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(
+                                    state
+                                        .time_signature_label
+                                        .split_once('/')
+                                        .map(|(_, den)| den.to_string())
+                                        .unwrap_or_else(|| "4".to_string()),
+                                ),
+                        )
+                        .into_any_element()]
                 }),
         )
 }

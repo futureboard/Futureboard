@@ -32,10 +32,7 @@ pub fn init_host_logging() -> Option<PathBuf> {
     }
 
     let log_path = log_dir.join(format!("{pid}.log"));
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path);
+    let file = OpenOptions::new().create(true).append(true).open(&log_path);
 
     match file {
         Ok(mut f) => {
@@ -45,7 +42,10 @@ pub fn init_host_logging() -> Option<PathBuf> {
             Some(log_path)
         }
         Err(e) => {
-            eprintln!("[PluginHost] log_open_failed path={} err={e}", log_path.display());
+            eprintln!(
+                "[PluginHost] log_open_failed path={} err={e}",
+                log_path.display()
+            );
             None
         }
     }

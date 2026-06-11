@@ -20,7 +20,7 @@ pub fn track_list(
     header_callbacks: TrackHeaderCallbacks,
     on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     on_select_clip: std::sync::Arc<
-        dyn Fn(&(String, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+        dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
     on_add_clip: std::sync::Arc<
         dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,

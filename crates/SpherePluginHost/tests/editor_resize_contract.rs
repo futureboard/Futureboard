@@ -167,7 +167,10 @@ fn resize_contract_with_real_plugin() {
         .open_editor(instance, &plugin_path, &class_id, parent, 600, 400, 96)
         .expect("send OpenEditorWithParentHwnd");
     let attached = wait_for(&client, Duration::from_secs(30), |ev| {
-        matches!(ev, HostEvent::EditorAttached { .. } | HostEvent::EditorAttachFailed { .. })
+        matches!(
+            ev,
+            HostEvent::EditorAttached { .. } | HostEvent::EditorAttachFailed { .. }
+        )
     })
     .expect("no EditorAttached/EditorAttachFailed");
     let (resizable, preferred, host_hwnd) = match attached {

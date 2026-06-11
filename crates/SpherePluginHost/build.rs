@@ -10,7 +10,9 @@ fn main() {
         );
         println!(
             "cargo:rerun-if-changed={}",
-            manifest_dir.join("../../apps/shared/app.manifest").display()
+            manifest_dir
+                .join("../../apps/shared/app.manifest")
+                .display()
         );
         embed_resource::compile(
             manifest_dir.join("vst3backend/plugin_host.rc"),

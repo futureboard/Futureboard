@@ -123,7 +123,10 @@ pub fn scan_audio() -> u64 {
     let inputs: Vec<AudioDeviceEntry> = raw_in.into_iter().map(to_entry).collect();
     let outputs: Vec<AudioDeviceEntry> = raw_out.into_iter().map(to_entry).collect();
     let default_input = inputs.iter().find(|d| d.is_default).map(|d| d.name.clone());
-    let default_output = outputs.iter().find(|d| d.is_default).map(|d| d.name.clone());
+    let default_output = outputs
+        .iter()
+        .find(|d| d.is_default)
+        .map(|d| d.name.clone());
     let (in_n, out_n) = (inputs.len(), outputs.len());
     let revision = {
         let mut s = state().write().unwrap();

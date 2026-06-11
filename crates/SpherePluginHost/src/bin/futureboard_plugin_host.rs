@@ -17,10 +17,7 @@
 //! are written to **stdout**, human logs go to **stderr** behind
 //! `FUTUREBOARD_PLUGIN_VIEW_DEBUG`. See [`sphere_plugin_host::ipc`].
 
-#![cfg_attr(
-    all(windows, not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
 use std::io::{self, BufReader};
@@ -446,7 +443,10 @@ fn run_audio_producer(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let snapshot = regions.lock().map(|map| Arc::clone(&map)).unwrap_or_default();
+        let snapshot = regions
+            .lock()
+            .map(|map| Arc::clone(&map))
+            .unwrap_or_default();
         for (instance_id, region) in snapshot.iter() {
             service_audio_bridge(region.as_ref(), &dsp, instance_id);
         }
@@ -554,8 +554,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
     // open, the plugin UI freezes (cross-process parenting attaches input
     // queues, so a wedged host thread blocks clicks on plugin dialogs too).
     let mut last_pump_done = Instant::now();
-    let mut window_tree: std::collections::HashMap<u64, String> =
-        std::collections::HashMap::new();
+    let mut window_tree: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
     // Spin watchdog state: consecutive wakes that claimed input but dispatched
     // nothing (the signature of a 100% CPU pump spin).
     let mut spin_iterations: u32 = 0;
@@ -648,7 +647,13 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                 // Clone processor handles under a short bounded lock, then
                 // apply the (possibly slow) onSize work with the lock RELEASED
                 // so the audio producer never waits on editor UI work.
-                type ResizeJob = (String, u32, u32, u32, DAUx::vst3_processor::Vst3RuntimeProcessor);
+                type ResizeJob = (
+                    String,
+                    u32,
+                    u32,
+                    u32,
+                    DAUx::vst3_processor::Vst3RuntimeProcessor,
+                );
                 let jobs: Option<(Vec<ResizeJob>, Vec<String>)> = preview
                     .try_lock_for(Duration::from_millis(2))
                     .map(|engine| {
@@ -692,16 +697,18 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         //    short bounded try-locks and skip the tick when the lock is busy.
         timed_section!("editor_refresh", {
             let refresh_targets: Option<Vec<(String, DAUx::vst3_processor::Vst3RuntimeProcessor)>> =
-                preview.try_lock_for(Duration::from_millis(2)).map(|engine| {
-                    registry
-                        .keys()
-                        .filter_map(|id| {
-                            engine
-                                .clone_processor_for(id)
-                                .map(|processor| (id.clone(), processor))
-                        })
-                        .collect()
-                });
+                preview
+                    .try_lock_for(Duration::from_millis(2))
+                    .map(|engine| {
+                        registry
+                            .keys()
+                            .filter_map(|id| {
+                                engine
+                                    .clone_processor_for(id)
+                                    .map(|processor| (id.clone(), processor))
+                            })
+                            .collect()
+                    });
             if let Some(refresh_targets) = refresh_targets {
                 for (instance_id, processor) in refresh_targets {
                     processor.embed_refresh();
@@ -810,7 +817,10 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
             platform::log_window_tree_changes(&roots, &mut window_tree);
         }
         if tick.is_multiple_of(60) {
-            eprintln!("[PluginUIThread] loop alive editor_count={}", registry.len());
+            eprintln!(
+                "[PluginUIThread] loop alive editor_count={}",
+                registry.len()
+            );
             eprintln!("[plugin-host-ui-thread] message_loop_running=true");
             eprintln!("[plugin-host-ui-thread] editor_count={}", registry.len());
             eprintln!("[plugin-host-ui-thread] idle_tick={tick}");
@@ -979,7 +989,9 @@ fn dispatch(
                     "Plugin failed to load. It may require a newer CPU instruction set \
                      or a missing runtime dependency. path={plugin_path_loaded}"
                 );
-                eprintln!("[PluginHost] instance load failed id={plugin_instance_id} error={error}");
+                eprintln!(
+                    "[PluginHost] instance load failed id={plugin_instance_id} error={error}"
+                );
                 let _ = ipc::write_frame(
                     out,
                     &HostEvent::PluginLoadFailed {
@@ -1350,7 +1362,9 @@ fn dispatch(
                 );
                 false
             } else {
-                preview.lock().set_instance_state(&plugin_instance_id, &state)
+                preview
+                    .lock()
+                    .set_instance_state(&plugin_instance_id, &state)
             };
             let _ = ipc::write_frame(
                 out,
@@ -1430,7 +1444,11 @@ fn attach_unified_editor(
     }
     registry.insert(
         plugin_instance_id.to_string(),
-        if attach_hwnd != 0 { attach_hwnd } else { handle },
+        if attach_hwnd != 0 {
+            attach_hwnd
+        } else {
+            handle
+        },
     );
     preview.lock().set_continuous_mode(true);
     if platform::editor_safe_mode() {
@@ -1577,31 +1595,31 @@ fn run_selftest() -> i32 {
 
 #[cfg(windows)]
 mod platform {
+    use windows::core::BOOL;
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::Foundation::{LPARAM, RECT, WAIT_OBJECT_0, WPARAM};
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-    use windows::Win32::UI::HiDpi::{
-        GetDpiForSystem, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-    };
     use windows::Win32::System::Threading::{
         GetCurrentThreadId, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::HiDpi::{
+        GetDpiForSystem, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetCapture, GetFocus, IsWindowEnabled, ReleaseCapture, SetFocus,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
-        EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW, GetParent, GetWindow,
-        GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsChild, IsDialogMessageW,
-        IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
-        TranslateMessage, WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT, GWL_EXSTYLE,
-        GWL_STYLE, GWLP_HWNDPARENT, GW_CHILD, GW_OWNER, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE,
-        QS_ALLINPUT, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-        WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WS_CHILD, WS_CLIPCHILDREN,
-        WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumChildWindows,
+        EnumThreadWindows, GetAncestor, GetClassNameW, GetParent, GetWindow, GetWindowLongPtrW,
+        GetWindowRect, GetWindowThreadProcessId, IsChild, IsDialogMessageW, IsWindow,
+        IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
+        TranslateMessage, WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT,
+        GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_OWNER, MSG, MWMO_INPUTAVAILABLE,
+        PM_REMOVE, QS_ALLINPUT, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WS_CHILD,
+        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
-    use windows::core::BOOL;
-    use windows::Win32::Foundation::{LPARAM, RECT, WAIT_OBJECT_0, WPARAM};
 
     /// End-to-end plugin debug switch (`FUTUREBOARD_PLUGIN_DEBUG=1`), shared
     /// with the narrower view-debug flag.
@@ -1737,7 +1755,11 @@ mod platform {
     pub fn system_dpi() -> u32 {
         unsafe {
             let dpi = GetDpiForSystem();
-            if dpi == 0 { 96 } else { dpi }
+            if dpi == 0 {
+                96
+            } else {
+                dpi
+            }
         }
     }
 
@@ -1782,8 +1804,7 @@ mod platform {
             let owner = HWND(GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT) as *mut core::ffi::c_void);
             eprintln!(
                 "[PluginEditor] window styles {label} hwnd=0x{:x} owner=0x{:x} style=0x{style:08x}",
-                hwnd.0 as u64,
-                owner.0 as u64
+                hwnd.0 as u64, owner.0 as u64
             );
         }
     }
@@ -1807,16 +1828,10 @@ mod platform {
             }
             if target != host {
                 let _ = SetFocus(Some(target));
-                eprintln!(
-                    "[PluginEditor] focus set child=0x{:x}",
-                    target.0 as u64
-                );
+                eprintln!("[PluginEditor] focus set child=0x{:x}", target.0 as u64);
             } else {
                 let _ = SetFocus(Some(host));
-                eprintln!(
-                    "[PluginEditor] focus set child=0x{:x}",
-                    host.0 as u64
-                );
+                eprintln!("[PluginEditor] focus set child=0x{:x}", host.0 as u64);
             }
             {
                 use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus};
@@ -1907,15 +1922,13 @@ mod platform {
             let focus = GetFocus();
             eprintln!(
                 "[PluginEditorInput] editor_open focus=0x{:x} capture=0x{:x}",
-                focus.0 as u64,
-                capture.0 as u64
+                focus.0 as u64, capture.0 as u64
             );
             if capture.0.is_null() {
                 return;
             }
             let host = hwnd_from(host_hwnd);
-            let related = host_hwnd != 0
-                && (capture == host || IsChild(host, capture).as_bool());
+            let related = host_hwnd != 0 && (capture == host || IsChild(host, capture).as_bool());
             if !related {
                 let _ = ReleaseCapture();
                 eprintln!(
@@ -1945,7 +1958,11 @@ mod platform {
         // separately in `log_throttled_noise`).
         let interesting = matches!(
             msg.message,
-            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+            WM_LBUTTONDOWN
+                | WM_LBUTTONUP
+                | WM_RBUTTONDOWN
+                | WM_RBUTTONUP
+                | WM_MBUTTONDOWN
                 | WM_KEYDOWN
         );
         if !interesting {
@@ -2082,9 +2099,7 @@ mod platform {
                     dialog_candidate = dialog.0 as u64;
                     static DIALOG_RATE: LogRate = LogRate::new(1);
                     if DIALOG_RATE.allow() {
-                        eprintln!(
-                            "[PluginUIThread] dialog candidate hwnd=0x{dialog_candidate:x}"
-                        );
+                        eprintln!("[PluginUIThread] dialog candidate hwnd=0x{dialog_candidate:x}");
                     }
                     dialog_handled = IsDialogMessageW(dialog, &mut msg).as_bool();
                     if dialog_handled && debug && !safe {
@@ -2214,9 +2229,7 @@ mod platform {
             let capture = GetCapture();
             eprintln!(
                 "[PluginEditorSnapshot] end windows={} focus=0x{:x} capture=0x{:x}",
-                ctx.count,
-                focus.0 as u64,
-                capture.0 as u64
+                ctx.count, focus.0 as u64, capture.0 as u64
             );
         }
     }

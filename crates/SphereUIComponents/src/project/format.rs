@@ -31,14 +31,19 @@ pub enum ProjectError {
     InvalidMagic,
     UnsupportedVersion(u32),
     /// File is shorter than the header or declared payload.
-    IncompleteFile { reason: String },
+    IncompleteFile {
+        reason: String,
+    },
     UnexpectedEof {
         needed: usize,
         remaining: usize,
         field: &'static str,
     },
     Corrupted(String),
-    ChecksumMismatch { expected: u32, got: u32 },
+    ChecksumMismatch {
+        expected: u32,
+        got: u32,
+    },
 }
 
 impl ProjectError {
@@ -240,7 +245,11 @@ impl<'a> FbReader<'a> {
         len.saturating_sub(pos)
     }
 
-    fn read_exact_field(&mut self, buf: &mut [u8], field: &'static str) -> Result<(), ProjectError> {
+    fn read_exact_field(
+        &mut self,
+        buf: &mut [u8],
+        field: &'static str,
+    ) -> Result<(), ProjectError> {
         let needed = buf.len();
         let remaining = self.remaining();
         if remaining < needed {
@@ -250,11 +259,13 @@ impl<'a> FbReader<'a> {
                 field,
             });
         }
-        self.cur.read_exact(buf).map_err(|_| ProjectError::UnexpectedEof {
-            needed,
-            remaining,
-            field,
-        })
+        self.cur
+            .read_exact(buf)
+            .map_err(|_| ProjectError::UnexpectedEof {
+                needed,
+                remaining,
+                field,
+            })
     }
 
     fn read_u8(&mut self) -> Result<u8, ProjectError> {

@@ -2968,6 +2968,7 @@ pub fn render_project_block_interleaved(
     if frames == 0 {
         return 0;
     }
+    runtime.refresh_runtime_latency_graph(frames as u32);
     let block_beat = sample_to_beat(runtime, base_sample);
     // Real transport ProcessContext for every plugin processed this block —
     // tempo from the map at this position, time signature from the engine,
@@ -4375,6 +4376,7 @@ mod bridge_insert_tests {
     struct WetEffectSink {
         done_seq: AtomicU64,
         requests: AtomicU64,
+        latency_samples: u32,
     }
 
     impl PluginBridgeSink for WetEffectSink {
@@ -4400,6 +4402,10 @@ mod bridge_insert_tests {
         fn request_block(&self, _: u32) {
             self.requests.fetch_add(1, Ordering::Relaxed);
             self.done_seq.store(1, Ordering::Release);
+        }
+
+        fn reported_latency_samples(&self) -> u32 {
+            self.latency_samples
         }
     }
 
@@ -4459,6 +4465,7 @@ mod bridge_insert_tests {
         let sink = WetEffectSink {
             done_seq: AtomicU64::new(1),
             requests: AtomicU64::new(0),
+            latency_samples: 0,
         };
         let mut sinks: std::collections::HashMap<
             String,
@@ -4468,6 +4475,39 @@ mod bridge_insert_tests {
         apply_track_chain_block(&mut track, 4, &sinks, RuntimeTransportContext::default());
         assert!((track.block_l[0] - 0.25).abs() < 1e-6);
         assert!((track.block_r[0] - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bridge_latency_refresh_updates_pdc_delays() {
+        let frames = 16usize;
+        let mut fast = bridge_effect_track(1.0);
+        fast.id = "fast".to_string();
+        fast.inserts.clear();
+        let mut slow = bridge_effect_track(1.0);
+        slow.id = "slow".to_string();
+        slow.inserts[0].id = "slow-insert".to_string();
+        let tracks = vec![fast, slow];
+        let audio_graph = crate::audio_graph::plan_runtime_audio_graph(&tracks).unwrap();
+        let mut p = RuntimeProject {
+            tracks,
+            audio_graph,
+            pdc_enabled: true,
+            ..Default::default()
+        };
+        let sink = WetEffectSink {
+            done_seq: AtomicU64::new(1),
+            requests: AtomicU64::new(0),
+            latency_samples: 16,
+        };
+        p.plugin_bridge_sinks
+            .insert("slow-insert".to_string(), Arc::new(sink));
+
+        assert!(p.refresh_runtime_latency_graph(frames as u32));
+        assert_eq!(p.latency_graph.track_plugin_latency[0], 0);
+        assert_eq!(p.latency_graph.track_plugin_latency[1], 32);
+        assert_eq!(p.latency_graph.track_pdc_delay[0], 32);
+        assert_eq!(p.latency_graph.track_pdc_delay[1], 0);
+        assert!(!p.refresh_runtime_latency_graph(frames as u32));
     }
 
     #[test]

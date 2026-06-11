@@ -32,6 +32,9 @@ pub enum EditCommand {
         track_id: String,
         clip: ClipState,
     },
+    BatchCreateClips {
+        clips: Vec<(String, ClipState)>,
+    },
     DeleteClip {
         snapshot: ClipSnapshot,
     },
@@ -88,6 +91,7 @@ impl EditCommand {
     pub fn label(&self) -> &'static str {
         match self {
             EditCommand::CreateClip { .. } => "Create Clip",
+            EditCommand::BatchCreateClips { .. } => "Create Clips",
             EditCommand::DeleteClip { .. } => "Delete Clip",
             EditCommand::BatchDeleteClips { .. } => "Delete Clips",
             EditCommand::CreateMidiNote { .. } => "Create MIDI Note",
@@ -113,6 +117,21 @@ impl EditCommand {
                     track.clips.push(clip.clone());
                     state.selection.selected_track_id = Some(track_id.clone());
                     state.selection.selected_clip_ids = vec![clip.id.clone()];
+                }
+            }
+            EditCommand::BatchCreateClips { clips } => {
+                let mut selected = Vec::new();
+                let mut selected_track = None;
+                for (track_id, clip) in clips {
+                    if let Some(track) = state.tracks.iter_mut().find(|t| t.id == *track_id) {
+                        track.clips.push(clip.clone());
+                        selected_track = Some(track_id.clone());
+                        selected.push(clip.id.clone());
+                    }
+                }
+                if !selected.is_empty() {
+                    state.selection.selected_track_id = selected_track;
+                    state.selection.selected_clip_ids = selected;
                 }
             }
             EditCommand::DeleteClip { snapshot } => {
@@ -188,6 +207,11 @@ impl EditCommand {
         match self {
             EditCommand::CreateClip { clip, .. } => {
                 state.delete_clip(&clip.id);
+            }
+            EditCommand::BatchCreateClips { clips } => {
+                for (_, clip) in clips {
+                    state.delete_clip(&clip.id);
+                }
             }
             EditCommand::DeleteClip { snapshot } => {
                 restore_clip_snapshot(state, snapshot);

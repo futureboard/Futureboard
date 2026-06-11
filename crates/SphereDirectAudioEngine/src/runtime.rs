@@ -463,6 +463,8 @@ pub struct RuntimeProject {
     pub audio_graph: RuntimeAudioGraph,
     /// Latency propagation and PDC delays (Phase V/W).
     pub latency_graph: RuntimeLatencyGraph,
+    /// Effective playback PDC flag used when this runtime graph was built.
+    pub pdc_enabled: bool,
     /// Stage 3b: realtime sinks for external plugin-host DSP output, keyed by
     /// insert `id` (one region + handshake per insert). Set via
     /// [`crate::command::EngineCommand::SetPluginBridgeSink`]
@@ -485,6 +487,91 @@ pub struct RuntimeProject {
 }
 
 impl RuntimeProject {
+    #[inline]
+    fn track_insert_latency_samples(&self, track: &RuntimeTrack, bridge_block_frames: u32) -> u32 {
+        if track.inserts.is_empty() {
+            return track.plugin_latency_samples;
+        }
+        let mut samples = 0u32;
+        for insert in &track.inserts {
+            if !insert.enabled {
+                continue;
+            }
+            if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
+                if let Some(sink) = self.plugin_bridge_sinks.get(&insert.id) {
+                    samples = samples
+                        .saturating_add(bridge_block_frames)
+                        .saturating_add(sink.reported_latency_samples());
+                }
+                continue;
+            }
+            if let Some(vst3) = insert.vst3.as_ref().filter(|vst3| vst3.is_ready()) {
+                samples = samples.saturating_add(vst3.get_latency_samples().max(0) as u32);
+            }
+        }
+        samples
+    }
+
+    fn ensure_pdc_delay_capacity(&mut self) {
+        let pdc_buffer_frames = self.latency_graph.max_path_latency_samples.max(1) as usize
+            + DEFAULT_AUDIO_BLOCK_CAPACITY;
+        for track in &mut self.tracks {
+            track.pdc_delay_l.resize(pdc_buffer_frames, 0.0);
+            track.pdc_delay_r.resize(pdc_buffer_frames, 0.0);
+            track.pdc_write_pos = 0;
+        }
+    }
+
+    /// Refresh PDC planning when runtime-only bridge latency changes. The
+    /// steady-state path scans existing tracks/inserts without allocation; graph
+    /// rebuild + delay-line resize only happens when an observed latency differs
+    /// from the active plan.
+    pub fn refresh_runtime_latency_graph(&mut self, bridge_block_frames: u32) -> bool {
+        let changed = self.tracks.iter().enumerate().any(|(idx, track)| {
+            let observed = self.track_insert_latency_samples(track, bridge_block_frames);
+            self.latency_graph
+                .track_plugin_latency
+                .get(idx)
+                .copied()
+                .unwrap_or(0)
+                != observed
+        });
+        if !changed {
+            return false;
+        }
+
+        let observed: Vec<u32> = self
+            .tracks
+            .iter()
+            .map(|track| self.track_insert_latency_samples(track, bridge_block_frames))
+            .collect();
+        for (track, samples) in self.tracks.iter_mut().zip(observed) {
+            track.plugin_latency_samples = samples;
+        }
+        self.latency_graph =
+            plan_runtime_latency_graph(&self.tracks, &self.audio_graph, self.pdc_enabled);
+        self.ensure_pdc_delay_capacity();
+
+        if std::env::var_os("FUTUREBOARD_PDC_DEBUG").is_some()
+            || std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some()
+        {
+            eprintln!(
+                "[pdc] refreshed max_path={} pdc_enabled={}",
+                self.latency_graph.max_path_latency_samples, self.pdc_enabled
+            );
+            for (idx, track) in self.tracks.iter().enumerate() {
+                eprintln!(
+                    "[pdc] track={} plugin={} output={} delay={}",
+                    track.id,
+                    self.latency_graph.track_plugin_latency[idx],
+                    self.latency_graph.track_output_latency[idx],
+                    self.latency_graph.track_pdc_delay[idx],
+                );
+            }
+        }
+        true
+    }
+
     /// Build a RuntimeProject from a snapshot.
     ///
     /// `existing_vst3` — if provided, VST3 processors from a previous runtime
@@ -946,6 +1033,7 @@ impl RuntimeProject {
             midi_tracks,
             audio_graph,
             latency_graph,
+            pdc_enabled: pdc_active,
             // Installed by the control thread after build; never carried in a
             // freshly built project (preserved across reloads in drain_commands).
             plugin_bridge_sinks: std::collections::HashMap::new(),

@@ -955,12 +955,7 @@ impl TimeSignaturePoint {
         }
     }
 
-    pub fn with_id(
-        id: impl Into<String>,
-        beat: f64,
-        numerator: u16,
-        denominator: u16,
-    ) -> Self {
+    pub fn with_id(id: impl Into<String>, beat: f64, numerator: u16, denominator: u16) -> Self {
         let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
         let denominator = normalize_time_signature_denominator(denominator);
         Self {
@@ -1115,10 +1110,7 @@ impl TimeSignatureMap {
 
         for (i, pt) in points.iter().enumerate() {
             let seg_start = pt.beat;
-            let seg_end = points
-                .get(i + 1)
-                .map(|p| p.beat)
-                .unwrap_or(f64::INFINITY);
+            let seg_end = points.get(i + 1).map(|p| p.beat).unwrap_or(f64::INFINITY);
             if beat + TS_BEAT_EPSILON < seg_start {
                 continue;
             }
@@ -1163,10 +1155,7 @@ impl TimeSignatureMap {
 
         for (i, pt) in points.iter().enumerate() {
             let seg_start = pt.beat;
-            let seg_end = points
-                .get(i + 1)
-                .map(|p| p.beat)
-                .unwrap_or(f64::INFINITY);
+            let seg_end = points.get(i + 1).map(|p| p.beat).unwrap_or(f64::INFINITY);
             let bpb = beats_per_bar_from_sig(pt.numerator, pt.denominator);
             let denom_unit = denominator_unit_quarter_beats(pt.denominator);
             let bars_in_seg = if seg_end.is_finite() {
@@ -1221,7 +1210,11 @@ impl TimeSignatureMap {
     }
 
     /// Enumerate bar spans intersecting a visible beat range for background paint.
-    pub fn visible_bar_rects(&self, visible_start: f64, visible_end: f64) -> Vec<BarBackgroundRect> {
+    pub fn visible_bar_rects(
+        &self,
+        visible_start: f64,
+        visible_end: f64,
+    ) -> Vec<BarBackgroundRect> {
         const MAX_BARS: i64 = 4096;
         let visible_start = visible_start.max(0.0);
         let visible_end = visible_end.max(visible_start);
@@ -1267,12 +1260,7 @@ impl TimeSignatureMap {
         self.bump_revision();
     }
 
-    pub fn update_point_by_id(
-        &mut self,
-        id: &str,
-        numerator: u16,
-        denominator: u16,
-    ) -> bool {
+    pub fn update_point_by_id(&mut self, id: &str, numerator: u16, denominator: u16) -> bool {
         let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
         let denominator = normalize_time_signature_denominator(denominator);
         if let Some(point) = self.points.iter_mut().find(|p| p.id == id) {
@@ -1324,8 +1312,11 @@ impl TimeSignatureMap {
     }
 
     fn sort(&mut self) {
-        self.points
-            .sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+        self.points.sort_by(|a, b| {
+            a.beat
+                .partial_cmp(&b.beat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     fn sorted_points(&self) -> Vec<TimeSignaturePoint> {
@@ -1334,7 +1325,11 @@ impl TimeSignatureMap {
         } else {
             self.points.clone()
         };
-        points.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+        points.sort_by(|a, b| {
+            a.beat
+                .partial_cmp(&b.beat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         points
     }
 
@@ -2195,6 +2190,151 @@ pub struct GridLine {
     pub show_label: bool,
 }
 
+/// Inputs for [`resolve_timeline_grid_lod`]. A snapshot of the current timeline
+/// zoom and musical context — enough to choose how dense the bar/beat/sub grid
+/// should be. Kept as a plain value type so the resolver stays a pure function
+/// that is trivial to unit test and reuse from the ruler, the GPUI grid, and the
+/// WGPU snapshot path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimelineGridLodParams {
+    /// Pixels per quarter-note beat at the current zoom (zoom already baked in,
+    /// equals `pixels_per_second * seconds_per_beat`).
+    pub pixels_per_beat: f32,
+    /// Project tempo. Not used by the level math today, but carried so a future
+    /// tempo-map-aware resolver can vary density across the viewport.
+    pub bpm: f32,
+    /// Active time-signature numerator (musical beats per bar).
+    pub numerator: u16,
+    /// Active time-signature denominator (note value of one beat).
+    pub denominator: u16,
+    /// Visible content width in px. Carried for future viewport-aware tuning.
+    pub viewport_width: f32,
+    /// Horizontal scroll offset in px. Carried for future viewport-aware tuning.
+    pub scroll_x: f32,
+}
+
+/// Resolved grid level-of-detail for one timeline render. Pure data; the
+/// renderers turn this into actual lines/labels. All steps are expressed in
+/// musical units so the same struct works for any tempo / time signature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimelineGridLod {
+    /// Draw a bar line only every Nth bar (1 = every bar). Thins bar lines when
+    /// zoomed out so they never collapse into a solid stripe.
+    pub major_bar_step: u32,
+    /// Whether any bar lines are drawn. Always true today; kept for symmetry and
+    /// a possible future "beats-only" / "grid off" mode.
+    pub show_bar_lines: bool,
+    /// Whether per-beat lines are drawn inside each bar.
+    pub show_beat_lines: bool,
+    /// Whether sub-beat (1/8, 1/16) lines are drawn.
+    pub show_subdivision_lines: bool,
+    /// Draw a beat line every Nth musical beat (1 = every beat).
+    pub beat_step: u32,
+    /// Number of subdivision lines per musical beat (2 = 1/8, 4 = 1/16).
+    pub subdivision_per_beat: u32,
+    /// Place a ruler bar label every Nth bar. Always a multiple of
+    /// `major_bar_step` so labels land on a drawn bar line, and spaced at least
+    /// `min_label_px` apart.
+    pub label_bar_step: u32,
+    /// Whether per-beat ("bar.beat") labels may be drawn (only when zoomed in
+    /// far enough that every beat has room for its own label).
+    pub show_beat_labels: bool,
+    /// Minimum spacing between any two ruler labels, in px. Labels closer than
+    /// this are suppressed so text never overlaps.
+    pub min_label_px: f32,
+}
+
+/// Pure resolver: choose an adaptive musical grid level-of-detail from the
+/// current zoom and time signature.
+///
+/// The point is that callers *iterate only the visible musical positions at the
+/// chosen level* instead of emitting a line per beat and culling later. As the
+/// user zooms out, bar lines thin (every 2 / 4 / 8 / … bars), beat lines drop
+/// out, and labels collapse to clean major bars (1.1, 9.1, 17.1, …). As the user
+/// zooms in, beats and then 1/8 / 1/16 subdivisions appear.
+///
+/// This assumes a single (constant) time signature for the decision; it takes
+/// the meter at the visible start. The structure leaves room to resolve per
+/// tempo-map / per time-signature segment later without changing callers.
+pub fn resolve_timeline_grid_lod(p: &TimelineGridLodParams) -> TimelineGridLod {
+    // Bar-line thinning thresholds, in px per bar.
+    const BAR_EVERY_1_PX: f32 = 96.0; // >= -> every bar
+    const BAR_EVERY_2_PX: f32 = 48.0; // >= -> every 2 bars
+    const BAR_EVERY_4_PX: f32 = 24.0; // >= -> every 4 bars
+    // Never let drawn bar lines pack tighter than this at extreme zoom-out.
+    const BAR_MIN_PX: f32 = 24.0;
+    // px per musical beat required before beat / subdivision lines appear.
+    const BEAT_LINE_MIN_PX: f32 = 18.0;
+    const SUBDIV_8_MIN_PX: f32 = 48.0; // 1/8 lines
+    const SUBDIV_16_MIN_PX: f32 = 96.0; // 1/16 lines
+    // px per musical beat required before per-beat ("bar.beat") labels appear.
+    const BEAT_LABEL_MIN_PX: f32 = 48.0;
+    // Minimum spacing between any two ruler labels.
+    const MIN_LABEL_PX: f32 = 48.0;
+
+    let ppb = p.pixels_per_beat.max(0.0001);
+    // Quarter-note beats per bar, and one musical beat in quarter-note beats.
+    let bar_beats = beats_per_bar_from_sig(p.numerator, p.denominator).max(0.0001) as f32;
+    let beat_unit = denominator_unit_quarter_beats(p.denominator).max(0.0001) as f32;
+
+    let px_per_bar = (ppb * bar_beats).max(0.0001);
+    let px_per_beat = (ppb * beat_unit).max(0.0001);
+
+    let show_beat_lines = px_per_beat >= BEAT_LINE_MIN_PX;
+
+    // Bar thinning. When beats are visible there is always room for every bar, so
+    // force step 1 — otherwise beat lines would cross a "missing" bar line.
+    let major_bar_step = if show_beat_lines || px_per_bar >= BAR_EVERY_1_PX {
+        1
+    } else if px_per_bar >= BAR_EVERY_2_PX {
+        2
+    } else if px_per_bar >= BAR_EVERY_4_PX {
+        4
+    } else {
+        // Extreme zoom-out: keep doubling from 8 until bar lines are far enough
+        // apart to read as bars instead of a stripe.
+        let mut step = 8u32;
+        while (step as f32) * px_per_bar < BAR_MIN_PX && step < (1 << 20) {
+            step *= 2;
+        }
+        step
+    };
+
+    // Subdivisions only matter once beats themselves are visible.
+    let subdivision_per_beat = if !show_beat_lines {
+        1
+    } else if px_per_beat >= SUBDIV_16_MIN_PX {
+        4
+    } else if px_per_beat >= SUBDIV_8_MIN_PX {
+        2
+    } else {
+        1
+    };
+    let show_subdivision_lines = subdivision_per_beat > 1;
+
+    // Label thinning: start at the major-bar step, then keep doubling until the
+    // labelled bars sit at least MIN_LABEL_PX apart so text never collides.
+    let mut label_bar_step = major_bar_step.max(1);
+    while (label_bar_step as f32) * px_per_bar < MIN_LABEL_PX && label_bar_step < (1 << 20) {
+        label_bar_step *= 2;
+    }
+
+    // bar.beat labels only when each beat has its own comfortable room.
+    let show_beat_labels = show_beat_lines && px_per_beat >= BEAT_LABEL_MIN_PX;
+
+    TimelineGridLod {
+        major_bar_step,
+        show_bar_lines: true,
+        show_beat_lines,
+        show_subdivision_lines,
+        beat_step: 1,
+        subdivision_per_beat,
+        label_bar_step,
+        show_beat_labels,
+        min_label_px: MIN_LABEL_PX,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MasterBusState {
     pub volume: f32,
@@ -2700,9 +2840,7 @@ impl TimelineState {
     }
 
     pub fn sync_legacy_time_signature_fields(&mut self) {
-        let pt = self
-            .time_signature_map
-            .time_signature_at_beat(0.0);
+        let pt = self.time_signature_map.time_signature_at_beat(0.0);
         self.time_signature_num = pt.numerator as u32;
         self.time_signature_den = pt.denominator as u32;
     }
@@ -2799,11 +2937,8 @@ impl TimelineState {
         let pt = self
             .time_signature_map
             .time_signature_at_beat(playhead_beat);
-        self.time_signature_map.reset_to_single_point(
-            0.0,
-            pt.numerator,
-            pt.denominator,
-        );
+        self.time_signature_map
+            .reset_to_single_point(0.0, pt.numerator, pt.denominator);
         self.sync_legacy_time_signature_fields();
         self.selected_time_signature_point_id = None;
     }
@@ -3180,15 +3315,11 @@ impl TimelineState {
 
     pub fn get_arrangement_grid_lines(&self, viewport_width: f32) -> Vec<GridLine> {
         let power = crate::perf::power_mode();
-        const MIN_LINE_SPACING_PX_BASE: f32 = 8.0;
-        // Force sub lines further apart on low-end so we draw fewer of them.
-        let min_line_spacing_px = if matches!(power, crate::perf::PowerMode::LowEnd) {
-            16.0
-        } else {
-            MIN_LINE_SPACING_PX_BASE
-        };
-        const MIN_LABEL_SPACING_PX: f32 = 46.0;
         const MAX_GRID_LINES_BASE: usize = 1200;
+        // Merge any grid line that would land within this many px of one already
+        // placed. Honors the "never draw lines closer than 3px" rule and collapses
+        // coincident bar/beat/sub positions onto the first (strongest) level.
+        const MIN_GRID_LINE_SPACING_PX: i32 = 3;
         let max_grid_lines = (MAX_GRID_LINES_BASE as f32 * power.grid_line_budget_scale()) as usize;
 
         let ppb = self.pixels_per_beat().max(0.0001);
@@ -3198,10 +3329,26 @@ impl TimelineState {
         let end_beat = end_beat.max(start_beat);
         let max_bpb = self.beats_per_bar_at_beat(end_beat as f64).max(1.0) as f32;
 
+        // One adaptive level-of-detail per frame, resolved from the meter at the
+        // left edge of the visible range. This decides how many bar lines to thin
+        // away, whether beats / subdivisions appear, and how far apart ruler
+        // labels must sit. See [`resolve_timeline_grid_lod`].
+        let start_sig = self
+            .time_signature_map
+            .time_signature_at_beat(start_beat as f64);
+        let lod = resolve_timeline_grid_lod(&TimelineGridLodParams {
+            pixels_per_beat: ppb,
+            bpm: self.bpm,
+            numerator: start_sig.numerator,
+            denominator: start_sig.denominator,
+            viewport_width,
+            scroll_x: self.viewport.scroll_x,
+        });
+
         let mut lines: Vec<GridLine> = Vec::new();
         let mut occupied_x: Vec<i32> = Vec::new();
 
-        let mut add_line = |beat: f32, level: GridLineLevel| {
+        let mut add_line = |beat: f32, level: GridLineLevel, label_candidate: bool| {
             if beat < start_beat - max_bpb || beat > end_beat + max_bpb {
                 return;
             }
@@ -3213,7 +3360,7 @@ impl TimelineState {
             }
             if occupied_x
                 .iter()
-                .any(|existing| (x_key - *existing).abs() < 1)
+                .any(|existing| (x_key - *existing).abs() < MIN_GRID_LINE_SPACING_PX)
             {
                 return;
             }
@@ -3222,16 +3369,22 @@ impl TimelineState {
                 x,
                 beat: rb,
                 level,
-                show_label: false,
+                show_label: label_candidate,
             });
         };
 
-        // Bar + denominator-beat lines follow time-signature segments.
+        // Bar + per-beat lines follow time-signature segments. Only the visible
+        // musical positions at the chosen LOD are iterated: when zoomed out we
+        // step over whole groups of bars instead of emitting every beat and
+        // culling later.
         let ts_points = if self.time_signature_map.points.is_empty() {
             vec![TimeSignaturePoint::with_id("implicit-4-4", 0.0, 4, 4)]
         } else {
             self.time_signature_map.points.clone()
         };
+        let bar_step = lod.major_bar_step.max(1) as f32;
+        let label_step = lod.label_bar_step.max(1) as i64;
+        let beat_step = lod.beat_step.max(1);
         for (i, pt) in ts_points.iter().enumerate() {
             let seg_start = pt.beat as f32;
             let seg_end = ts_points
@@ -3244,8 +3397,11 @@ impl TimelineState {
                 continue;
             }
             let rel_start = start_beat.max(seg_start);
-            let first_bar = ((rel_start - seg_start) / bpb).floor() - 1.0;
             let rel_end = end_beat.min(seg_end);
+            // First visible bar (segment-relative), snapped down onto a major-bar
+            // boundary so thinned bar lines stay aligned to bar 1 of the segment.
+            let first_bar_raw = ((rel_start - seg_start) / bpb).floor() - 1.0;
+            let first_bar = ((first_bar_raw / bar_step).floor() * bar_step).max(-bar_step);
             let last_bar = ((rel_end - seg_start) / bpb).ceil() + 1.0;
             let mut bar = first_bar;
             while bar <= last_bar {
@@ -3253,29 +3409,31 @@ impl TimelineState {
                 if bar_start >= seg_start - TS_BEAT_EPSILON as f32
                     && bar_start < seg_end - TS_BEAT_EPSILON as f32
                 {
-                    add_line(bar_start, GridLineLevel::Bar);
-                    for beat_idx in 1..pt.numerator {
-                        let tick = bar_start + beat_idx as f32 * denom_unit;
-                        if tick < seg_end - TS_BEAT_EPSILON as f32 {
-                            add_line(tick, GridLineLevel::Beat);
+                    let bar_idx = bar.round() as i64;
+                    let is_label_bar = bar_idx.rem_euclid(label_step) == 0;
+                    add_line(bar_start, GridLineLevel::Bar, is_label_bar);
+                    if lod.show_beat_lines {
+                        let mut beat_idx = beat_step;
+                        while beat_idx < pt.numerator as u32 {
+                            let tick = bar_start + beat_idx as f32 * denom_unit;
+                            if tick < seg_end - TS_BEAT_EPSILON as f32 {
+                                add_line(tick, GridLineLevel::Beat, lod.show_beat_labels);
+                            }
+                            beat_idx += beat_step;
                         }
                     }
                 }
-                bar += 1.0;
+                bar += bar_step;
             }
         }
 
-        let sub_step = if !power.allow_sub_grid_lines() {
-            None
-        } else if ppb >= 96.0 {
-            Some(0.25_f32)
-        } else if ppb >= 48.0 {
-            Some(0.5_f32)
-        } else {
-            None
-        };
-
-        if let Some(step) = sub_step.filter(|step| step * ppb >= min_line_spacing_px) {
+        // Sub-beat (1/8, 1/16) lines. Only generated once the per-beat spacing is
+        // wide enough (resolved into `subdivision_per_beat`), and never on a
+        // denominator-beat position where a beat line already sits.
+        let show_subdivisions = lod.show_subdivision_lines && power.allow_sub_grid_lines();
+        if show_subdivisions {
+            let beat_unit = denominator_unit_quarter_beats(start_sig.denominator) as f32;
+            let step = (beat_unit / lod.subdivision_per_beat.max(1) as f32).max(1.0e-4);
             let first_sub = (start_beat / step).floor() - 1.0;
             let last_sub = (end_beat / step).ceil() + 1.0;
             let mut slot = first_sub;
@@ -3293,7 +3451,7 @@ impl TimelineState {
                     false
                 };
                 if !on_denom_grid {
-                    add_line(beat, GridLineLevel::Sub);
+                    add_line(beat, GridLineLevel::Sub, false);
                 }
                 slot += 1.0;
             }
@@ -3305,23 +3463,19 @@ impl TimelineState {
             lines.truncate(max_grid_lines);
         }
 
+        // Enforce minimum label spacing. Candidates were chosen at clean musical
+        // steps above; this only suppresses the rare too-close pair (e.g. either
+        // side of a time-signature change) so ruler text never overlaps.
         let mut last_label_x = f32::NEG_INFINITY;
         let mut ruler_labels = 0u64;
         for line in &mut lines {
-            let denom_unit = denominator_unit_quarter_beats(
-                self.time_signature_map
-                    .time_signature_at_beat(line.beat as f64)
-                    .denominator,
-            ) as f32;
-            let can_label_level = match line.level {
-                GridLineLevel::Bar => true,
-                GridLineLevel::Beat => denom_unit * ppb >= 24.0,
-                GridLineLevel::Sub => false,
-            };
-            if can_label_level && line.x - last_label_x >= MIN_LABEL_SPACING_PX {
-                line.show_label = true;
-                last_label_x = line.x;
-                ruler_labels += 1;
+            if line.show_label {
+                if line.x - last_label_x >= lod.min_label_px {
+                    last_label_x = line.x;
+                    ruler_labels += 1;
+                } else {
+                    line.show_label = false;
+                }
             }
         }
 
@@ -3717,6 +3871,38 @@ impl TimelineState {
             clip_type: ClipType::Midi {
                 notes: Vec::new(),
                 controller_lanes: Vec::new(),
+            },
+            muted: false,
+            audio_import: AudioImportState::default(),
+        })
+    }
+
+    pub fn build_imported_midi_clip(
+        &mut self,
+        track_id: &str,
+        name: String,
+        start_beat: f32,
+        imported: crate::components::timeline::midi_import::ImportedMidiClip,
+    ) -> Option<ClipState> {
+        if !self.tracks.iter().any(|t| t.id == track_id) {
+            return None;
+        }
+        let len = snap_up_beats(
+            imported.duration_beats.max(MIN_MIDI_CLIP_BEATS),
+            self.midi_snap_step_beats().max(MIN_NOTE_BEATS),
+        )
+        .max(MIN_MIDI_CLIP_BEATS);
+        Some(ClipState {
+            id: self.next_clip_id(),
+            name,
+            start_beat: start_beat.max(0.0),
+            duration_beats: len,
+            source_duration_seconds: None,
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Midi {
+                notes: imported.notes,
+                controller_lanes: imported.controller_lanes,
             },
             muted: false,
             audio_import: AudioImportState::default(),
@@ -4475,13 +4661,21 @@ impl TimelineState {
     }
 
     fn next_insert_slot_id(track: &TrackState) -> String {
-        let mut suffix = track.inserts.len() + 1;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_INSERT_SLOT_SEQ: AtomicU64 = AtomicU64::new(1);
+        // Session-monotonic so a removed slot's id is NEVER regenerated. The
+        // audio engine reconciles live VST3 instances by insert id (plugin
+        // path/class_id are only an extra reuse guard), so handing a fresh slot
+        // the id of a just-removed one resurrects the old instance — the exact
+        // "old VSTi is still there" bug. The counter is process-global; we still
+        // verify against the track's current ids so a fresh id can never collide
+        // with one loaded from a saved project (whose suffixes are arbitrary).
         loop {
-            let candidate = format!("insert-{}-{}", track.id, suffix);
+            let seq = NEXT_INSERT_SLOT_SEQ.fetch_add(1, Ordering::Relaxed);
+            let candidate = format!("insert-{}-{}", track.id, seq);
             if track.inserts.iter().all(|slot| slot.id != candidate) {
                 return candidate;
             }
-            suffix += 1;
         }
     }
 
@@ -4583,13 +4777,72 @@ impl TimelineState {
         let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
             return;
         };
+        let was_present = track.inserts.iter().any(|i| i.id == insert_id);
         track.inserts.retain(|i| i.id != insert_id);
+        // Drop automation lanes bound to the removed instance's parameters — they
+        // would otherwise reference a destroyed PluginInstanceId, and a re-add
+        // gets a fresh id so they can never re-bind. (Automation bindings don't
+        // keep the plugin alive, but stale lanes are dead weight + confusing.)
+        track.automation_lanes.retain(|lane| {
+            !matches!(&lane.target, AutomationTarget::PluginParameter { insert_id: id, .. } if id == insert_id)
+        });
+        // If the removed slot was this track's canonical MIDI/instrument
+        // destination, drop the dangling pointer. The instrument insert is
+        // always `inserts[0]` on an Instrument/MIDI track, so re-point it at the
+        // new first non-empty slot, or clear it when none remains. Without this
+        // the track keeps routing MIDI to a destroyed PluginInstanceId.
+        if track.instrument_plugin_instance_id.as_deref() == Some(insert_id) {
+            track.instrument_plugin_instance_id = track
+                .inserts
+                .first()
+                .filter(|slot| !slot.is_empty())
+                .map(|slot| slot.id.clone());
+        }
+        if was_present {
+            eprintln!(
+                "[PluginUnload] model remove_insert track={} slot={} instrument_instance={:?}",
+                track_id, insert_id, track.instrument_plugin_instance_id
+            );
+        }
         if plugin_debug_enabled() {
             eprintln!(
                 "[plugin] remove_insert track={} slot={}",
                 track_id, insert_id
             );
         }
+    }
+
+    /// Replace the insert slot identified by `old_insert_id` with a brand-new
+    /// empty slot at the SAME index, returning the fresh slot id. The replace
+    /// flow uses this so a replaced plugin never inherits the previous instance
+    /// id — the engine reconciles live VST3 instances by insert id, so reusing
+    /// the id would resurrect the old instance (and reloading the same plugin
+    /// file must produce an independent instance). Returns `None` if the slot is
+    /// not found. The caller is responsible for tearing the OLD instance down
+    /// (editor / bridge host / engine sink) before calling this.
+    pub fn replace_insert_with_fresh_slot(
+        &mut self,
+        track_id: &str,
+        old_insert_id: &str,
+    ) -> Option<String> {
+        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
+        let idx = track.inserts.iter().position(|s| s.id == old_insert_id)?;
+        let fresh_id = Self::next_insert_slot_id(track);
+        track.inserts[idx] = InsertSlotState::empty(&fresh_id);
+        // Drop automation lanes bound to the OLD instance so no old state leaks
+        // into the fresh instance (which gets a brand-new id below).
+        track.automation_lanes.retain(|lane| {
+            !matches!(&lane.target, AutomationTarget::PluginParameter { insert_id: id, .. } if id == old_insert_id)
+        });
+        // Drop the dangling instrument pointer; `set_insert_plugin` re-points it
+        // at the fresh id when the new plugin binds.
+        if track.instrument_plugin_instance_id.as_deref() == Some(old_insert_id) {
+            track.instrument_plugin_instance_id = None;
+        }
+        eprintln!(
+            "[PluginAdd] replace_insert_with_fresh_slot track={track_id} old={old_insert_id} new={fresh_id}"
+        );
+        Some(fresh_id)
     }
 
     /// Move an insert slot one position earlier (`up = true`) or later within
@@ -5324,30 +5577,100 @@ impl TimelineState {
     }
 
     pub fn duplicate_clip(&mut self, clip_id: &str) {
-        let next_id = self.next_clip_id();
+        let Some((track_id, duplicate)) = self.build_clip_duplicate_after(clip_id) else {
+            return;
+        };
+        let duplicate_id = duplicate.id.clone();
+        if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {
+            if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+                track.clips.insert(index + 1, duplicate);
+            } else {
+                track.clips.push(duplicate);
+            }
+            self.selection.selected_track_id = Some(track.id.clone());
+            self.selection.selected_clip_ids = vec![duplicate_id];
+        }
+    }
+
+    pub fn build_clip_duplicate_after(&self, clip_id: &str) -> Option<(String, ClipState)> {
         let snap_step = if self.snap_to_grid && self.grid_division != SnapDivision::Off {
             Some((self.grid_division.step_beats(self.beats_per_bar())).max(0.0))
         } else {
             None
         };
-        for track in &mut self.tracks {
-            if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
-                let mut duplicate = track.clips[index].clone();
-                duplicate.id = next_id;
-                duplicate.name = format!("{} Copy", duplicate.name);
-                let raw_start = duplicate.start_beat + duplicate.duration_beats;
-                duplicate.start_beat = snap_step
+        for track in &self.tracks {
+            if let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) {
+                let raw_start = clip.start_beat + clip.duration_beats;
+                let start_beat = snap_step
                     .filter(|step| *step > 0.0)
                     .map(|step| (raw_start / step).round() * step)
                     .unwrap_or(raw_start)
                     .max(0.0);
-                let duplicate_id = duplicate.id.clone();
-                track.clips.insert(index + 1, duplicate);
-                self.selection.selected_track_id = Some(track.id.clone());
-                self.selection.selected_clip_ids = vec![duplicate_id];
-                return;
+                let duplicate = self.clone_clip_for_insert(
+                    clip,
+                    self.next_clip_id(),
+                    format!("{} Copy", clip.name),
+                    start_beat,
+                );
+                return Some((track.id.clone(), duplicate));
             }
         }
+        None
+    }
+
+    pub fn clone_clip_for_insert(
+        &self,
+        clip: &ClipState,
+        id: String,
+        name: String,
+        start_beat: f32,
+    ) -> ClipState {
+        let mut cloned = clip.clone();
+        cloned.id = id;
+        cloned.name = name;
+        cloned.start_beat = start_beat.max(0.0);
+        cloned.clip_type = match &clip.clip_type {
+            ClipType::Audio {
+                file_id,
+                source_path,
+            } => ClipType::Audio {
+                file_id: file_id.clone(),
+                source_path: source_path.clone(),
+            },
+            ClipType::Midi {
+                notes,
+                controller_lanes,
+            } => ClipType::Midi {
+                notes: notes
+                    .iter()
+                    .map(|note| {
+                        let mut cloned = MidiNoteState::new(
+                            note.pitch,
+                            note.start,
+                            note.duration,
+                            note.velocity,
+                        );
+                        cloned.muted = note.muted;
+                        cloned
+                    })
+                    .collect(),
+                controller_lanes: controller_lanes
+                    .iter()
+                    .map(|lane| MidiControllerLane {
+                        kind: lane.kind,
+                        points: lane
+                            .points
+                            .iter()
+                            .map(|point| MidiControllerPoint::new(point.beat, point.value))
+                            .collect(),
+                        visible: lane.visible,
+                        height: lane.height,
+                        collapsed: lane.collapsed,
+                    })
+                    .collect(),
+            },
+        };
+        cloned
     }
 
     /// Multiplicative zoom around a content-space x anchor. Updates
@@ -5613,6 +5936,29 @@ impl TimelineState {
         let start_beat = self.snap_beats(raw_beats).max(0.0);
 
         self.insert_audio_clip(track_id, source_path, clip_name, start_beat)
+    }
+
+    pub fn import_midi_at(
+        &mut self,
+        clip_name: String,
+        imported: crate::components::timeline::midi_import::ImportedMidiClip,
+        drop_x: f32,
+        drop_y: f32,
+    ) -> Option<(String, ClipState)> {
+        let track_id = match self.track_index_at_y(drop_y) {
+            Some(idx)
+                if matches!(
+                    self.tracks[idx].track_type,
+                    TrackType::Midi | TrackType::Instrument
+                ) =>
+            {
+                self.tracks[idx].id.clone()
+            }
+            _ => self.create_midi_track(),
+        };
+        let start_beat = self.snap_beats(self.x_to_beats(drop_x.max(0.0))).max(0.0);
+        self.build_imported_midi_clip(&track_id, clip_name, start_beat, imported)
+            .map(|clip| (track_id, clip))
     }
 
     pub fn import_audio_to_selected_or_new_track(
@@ -5939,6 +6285,309 @@ impl TimelineState {
 }
 
 #[cfg(test)]
+mod instrument_lifecycle_tests {
+    use super::*;
+
+    fn instrument_track(state: &mut TimelineState) -> String {
+        state.tracks.clear();
+        state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Inst".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        })
+    }
+
+    fn load_vsti(
+        state: &mut TimelineState,
+        track_id: &str,
+        slot_index: usize,
+        class_id: &str,
+        path: &str,
+    ) -> String {
+        let slot = state
+            .ensure_insert_slot_at(track_id, slot_index)
+            .expect("slot");
+        state.set_insert_plugin(
+            track_id,
+            &slot,
+            class_id.to_string(),
+            Some(std::path::PathBuf::from(path)),
+            InsertPluginFormat::Vst3,
+            class_id.to_string(),
+        );
+        slot
+    }
+
+    /// Test 1 (model half): removing a VSTi clears the slot and the canonical
+    /// instrument instance pointer.
+    #[test]
+    fn remove_vsti_clears_slot_and_instrument_pointer() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+
+        let track = state.find_track(&track_id).unwrap();
+        assert_eq!(
+            track.instrument_plugin_instance_id.as_deref(),
+            Some(slot.as_str())
+        );
+
+        state.remove_insert(&track_id, &slot);
+        let track = state.find_track(&track_id).unwrap();
+        assert!(track.inserts.is_empty(), "slot must be gone");
+        assert!(
+            track.instrument_plugin_instance_id.is_none(),
+            "instrument pointer must be cleared"
+        );
+    }
+
+    /// Test 2: add VSTi A, remove it, add VSTi B → B gets a brand-new instance
+    /// id (the old one is never reused, so the engine cannot resurrect A).
+    #[test]
+    fn re_add_after_remove_gets_fresh_instance_id() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_a = load_vsti(&mut state, &track_id, 0, "synth-a", "C:/p/a.vst3");
+        state.remove_insert(&track_id, &slot_a);
+        let slot_b = load_vsti(&mut state, &track_id, 0, "synth-b", "C:/p/b.vst3");
+        assert_ne!(slot_a, slot_b, "re-added VSTi must get a fresh instance id");
+        assert_eq!(
+            state
+                .find_track(&track_id)
+                .unwrap()
+                .instrument_plugin_instance_id
+                .as_deref(),
+            Some(slot_b.as_str())
+        );
+    }
+
+    /// Test 3: load the SAME plugin file, remove, load it again → two distinct
+    /// instance ids (same file is loadable as independent instances).
+    #[test]
+    fn same_plugin_file_reloaded_gets_distinct_instance_ids() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_1 = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        state.remove_insert(&track_id, &slot_1);
+        let slot_2 = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        assert_ne!(
+            slot_1, slot_2,
+            "same plugin file must reload as a new independent instance"
+        );
+    }
+
+    /// Replace flow: replacing a VSTi in place yields a fresh id at the same
+    /// index and clears the stale instrument pointer.
+    #[test]
+    fn replace_with_fresh_slot_swaps_id_in_place() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_a = load_vsti(&mut state, &track_id, 0, "synth-a", "C:/p/a.vst3");
+        let slot_b = state
+            .replace_insert_with_fresh_slot(&track_id, &slot_a)
+            .expect("fresh slot");
+        assert_ne!(slot_a, slot_b);
+        let track = state.find_track(&track_id).unwrap();
+        assert_eq!(track.inserts.len(), 1, "still one slot at the same index");
+        assert_eq!(track.inserts[0].id, slot_b);
+        assert!(track.inserts[0].is_empty(), "fresh slot starts empty");
+        assert!(
+            track.instrument_plugin_instance_id.is_none(),
+            "stale instrument pointer cleared until the new plugin binds"
+        );
+    }
+
+    /// Removing a VSTi must also drop automation lanes bound to that instance,
+    /// and leave lanes targeting other inserts / built-ins untouched.
+    #[test]
+    fn remove_vsti_prunes_its_automation_bindings() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        {
+            let track = state.tracks.iter_mut().find(|t| t.id == track_id).unwrap();
+            track.automation_lanes.push(AutomationLaneState::new(
+                "auto-cutoff",
+                AutomationTarget::PluginParameter {
+                    insert_id: slot.clone(),
+                    parameter_id: "1".to_string(),
+                    parameter_name: "Cutoff".to_string(),
+                },
+            ));
+            track
+                .automation_lanes
+                .push(AutomationLaneState::new("auto-vol", AutomationTarget::TrackVolume));
+        }
+
+        state.remove_insert(&track_id, &slot);
+
+        let track = state.find_track(&track_id).unwrap();
+        assert!(
+            !track.automation_lanes.iter().any(|l| matches!(
+                &l.target,
+                AutomationTarget::PluginParameter { insert_id, .. } if *insert_id == slot
+            )),
+            "plugin-param automation lane must be pruned with its instance"
+        );
+        assert!(
+            track
+                .automation_lanes
+                .iter()
+                .any(|l| matches!(l.target, AutomationTarget::TrackVolume)),
+            "unrelated track automation must survive"
+        );
+    }
+
+    /// Removing an effect insert must NOT disturb the instrument pointer.
+    #[test]
+    fn removing_effect_keeps_instrument_pointer() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_instr = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        let slot_fx = load_vsti(&mut state, &track_id, 1, "fx", "C:/p/fx.vst3");
+        state.remove_insert(&track_id, &slot_fx);
+        let track = state.find_track(&track_id).unwrap();
+        assert_eq!(
+            track.instrument_plugin_instance_id.as_deref(),
+            Some(slot_instr.as_str()),
+            "removing an effect must not clear the instrument pointer"
+        );
+        assert_eq!(track.inserts.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod grid_lod_tests {
+    use super::*;
+
+    fn params(ppb: f32, num: u16, den: u16) -> TimelineGridLodParams {
+        TimelineGridLodParams {
+            pixels_per_beat: ppb,
+            bpm: 120.0,
+            numerator: num,
+            denominator: den,
+            viewport_width: 1200.0,
+            scroll_x: 0.0,
+        }
+    }
+
+    /// pixels_per_second that yields the requested pixels-per-beat at 120 BPM.
+    fn pps_for_ppb(ppb: f32) -> f32 {
+        // ppb = pps * seconds_per_beat = pps * (60/120) = pps * 0.5
+        ppb / 0.5
+    }
+
+    fn zoomed_state(ppb: f32) -> TimelineState {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state.viewport.pixels_per_second = pps_for_ppb(ppb);
+        state.sync_pixels_per_beat();
+        state.update_viewport_size(1200.0, 500.0);
+        state
+    }
+
+    #[test]
+    fn zoomed_in_shows_beats_and_subdivisions() {
+        let lod = resolve_timeline_grid_lod(&params(120.0, 4, 4));
+        assert_eq!(lod.major_bar_step, 1);
+        assert!(lod.show_beat_lines);
+        assert!(lod.show_subdivision_lines);
+        assert_eq!(lod.subdivision_per_beat, 4); // 1/16
+        assert_eq!(lod.label_bar_step, 1);
+        assert!(lod.show_beat_labels);
+    }
+
+    #[test]
+    fn medium_zoom_shows_bars_and_beats_without_subdivisions() {
+        // 24 px/beat -> px_per_bar 96: beats visible, no subdivisions, no beat labels.
+        let lod = resolve_timeline_grid_lod(&params(24.0, 4, 4));
+        assert_eq!(lod.major_bar_step, 1);
+        assert!(lod.show_beat_lines);
+        assert!(!lod.show_subdivision_lines);
+        assert!(!lod.show_beat_labels);
+    }
+
+    #[test]
+    fn zoomed_out_hides_beats_and_thins_bars() {
+        // 8 px/beat -> px_per_bar 32 -> every 4 bars, no beats/subs.
+        let lod = resolve_timeline_grid_lod(&params(8.0, 4, 4));
+        assert!(!lod.show_beat_lines);
+        assert!(!lod.show_subdivision_lines);
+        assert_eq!(lod.major_bar_step, 4);
+        // Labels land on drawn bar lines and stay a multiple of the bar step.
+        assert!(lod.label_bar_step >= lod.major_bar_step);
+        assert_eq!(lod.label_bar_step % lod.major_bar_step, 0);
+    }
+
+    #[test]
+    fn extreme_zoom_out_keeps_bar_lines_readable() {
+        // 1 px/beat -> px_per_bar 4: bar lines must not pack tighter than ~24px.
+        let lod = resolve_timeline_grid_lod(&params(1.0, 4, 4));
+        assert!(!lod.show_beat_lines);
+        let px_per_bar = 1.0 * beats_per_bar_from_sig(4, 4) as f32; // 4 px
+        assert!(lod.major_bar_step as f32 * px_per_bar >= 24.0);
+        // Labels must be at least the minimum spacing apart too.
+        assert!(lod.label_bar_step as f32 * px_per_bar >= lod.min_label_px);
+    }
+
+    #[test]
+    fn grid_lines_zoomed_out_emit_only_spaced_bar_lines() {
+        let state = zoomed_state(8.0);
+        let lines = state.get_arrangement_grid_lines(1200.0);
+        assert!(!lines.is_empty());
+        // No beat or subdivision lines when zoomed out.
+        assert!(lines
+            .iter()
+            .all(|l| matches!(l.level, GridLineLevel::Bar)));
+        // Every drawn line is at least the minimum spacing from its neighbor.
+        let mut xs: Vec<f32> = lines.iter().map(|l| l.x).collect();
+        xs.sort_by(|a, b| a.total_cmp(b));
+        for w in xs.windows(2) {
+            assert!(w[1] - w[0] >= 3.0, "lines too close: {} vs {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn grid_lines_zoomed_in_emit_beats_and_subs() {
+        let state = zoomed_state(120.0);
+        let lines = state.get_arrangement_grid_lines(1200.0);
+        assert!(lines.iter().any(|l| matches!(l.level, GridLineLevel::Beat)));
+        assert!(lines.iter().any(|l| matches!(l.level, GridLineLevel::Sub)));
+    }
+
+    #[test]
+    fn ruler_labels_never_pack_closer_than_min_spacing() {
+        for ppb in [1.0_f32, 4.0, 8.0, 16.0, 24.0, 48.0, 120.0, 300.0] {
+            let state = zoomed_state(ppb);
+            let lines = state.get_arrangement_grid_lines(1200.0);
+            let mut label_xs: Vec<f32> = lines
+                .iter()
+                .filter(|l| l.show_label)
+                .map(|l| l.x)
+                .collect();
+            label_xs.sort_by(|a, b| a.total_cmp(b));
+            for w in label_xs.windows(2) {
+                assert!(
+                    w[1] - w[0] >= 48.0 - 0.5,
+                    "labels too close at ppb={ppb}: {} vs {}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tempo_map_tests {
     use super::*;
 
@@ -6058,7 +6707,10 @@ mod audio_asset_key_tests {
         // Placeholder / live-preview clip (no source) → no key.
         assert_eq!(audio_clip("asset-1", None).audio_asset_key(), None);
         // Empty asset id → no key.
-        assert_eq!(audio_clip("", Some("C:/a/loop.wav")).audio_asset_key(), None);
+        assert_eq!(
+            audio_clip("", Some("C:/a/loop.wav")).audio_asset_key(),
+            None
+        );
     }
 
     #[test]
@@ -6067,8 +6719,12 @@ mod audio_asset_key_tests {
         // binding must not break when its `source_path` is later rewritten
         // (e.g. copying the source into the project folder).
         let mut state = TimelineState::default();
-        let clip_id =
-            state.import_audio_at("C:/ext/loop.wav".to_string(), "loop".to_string(), 0.0, 1.0e9);
+        let clip_id = state.import_audio_at(
+            "C:/ext/loop.wav".to_string(),
+            "loop".to_string(),
+            0.0,
+            1.0e9,
+        );
 
         let asset_key = state
             .find_clip(&clip_id)
@@ -6098,7 +6754,9 @@ mod audio_asset_key_tests {
         // …and asset-keyed state updates still reach the clip.
         state.set_audio_import_for_asset(&asset_key, AudioImportState::Ready);
         assert_eq!(
-            state.find_clip(&clip_id).map(|(_, clip)| &clip.audio_import),
+            state
+                .find_clip(&clip_id)
+                .map(|(_, clip)| &clip.audio_import),
             Some(&AudioImportState::Ready)
         );
     }

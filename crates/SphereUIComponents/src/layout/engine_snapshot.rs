@@ -102,6 +102,14 @@ fn log_track_insert_chain(track_id: &str, inserts: &[EngineInsertSnapshot]) {
     );
 }
 
+fn bridge_insert_role(track: &TrackState, slot_index: usize) -> &'static str {
+    if matches!(track.track_type, TrackType::Instrument | TrackType::Midi) && slot_index == 0 {
+        "instrument"
+    } else {
+        "effect"
+    }
+}
+
 fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
     use crate::components::timeline::timeline_state::InsertPluginFormat;
 
@@ -109,7 +117,8 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
         return track
             .inserts
             .iter()
-            .filter_map(|slot| {
+            .enumerate()
+            .filter_map(|(slot_index, slot)| {
                 let plugin_id = slot.plugin_id.as_deref()?;
                 if plugin_id == STUB_PLUGIN_ID {
                     return None;
@@ -123,12 +132,7 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
                     .map(|p| p.to_string_lossy().into_owned())
                     .filter(|p| !p.trim().is_empty())?;
 
-                use crate::components::timeline::timeline_state::TrackType;
-                let role = if matches!(track.track_type, TrackType::Instrument | TrackType::Midi) {
-                    "instrument"
-                } else {
-                    "effect"
-                };
+                let role = bridge_insert_role(track, slot_index);
 
                 let mut params: std::collections::HashMap<String, serde_json::Value> =
                     std::collections::HashMap::new();
@@ -638,12 +642,8 @@ mod tests {
             armed: false,
             input_monitor: timeline_state::InputMonitorMode::Off,
         });
-        let slot_a = state
-            .ensure_insert_slot_at(&track_id, 0)
-            .expect("slot A");
-        let slot_b = state
-            .ensure_insert_slot_at(&track_id, 1)
-            .expect("slot B");
+        let slot_a = state.ensure_insert_slot_at(&track_id, 0).expect("slot A");
+        let slot_b = state.ensure_insert_slot_at(&track_id, 1).expect("slot B");
         state.set_insert_plugin(
             &track_id,
             &slot_a,
@@ -667,9 +667,61 @@ mod tests {
             .iter()
             .find(|t| t.id == track_id)
             .expect("audio track in snapshot");
-        assert_eq!(track.inserts.len(), 2, "both inserts must survive graph build");
+        assert_eq!(
+            track.inserts.len(),
+            2,
+            "both inserts must survive graph build"
+        );
         assert_eq!(track.inserts[0].id, slot_a);
         assert_eq!(track.inserts[1].id, slot_b);
+    }
+
+    #[test]
+    fn instrument_track_marks_only_first_bridge_insert_as_instrument() {
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Instrument".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let slot_instrument = state
+            .ensure_insert_slot_at(&track_id, 0)
+            .expect("vsti slot");
+        let slot_effect = state.ensure_insert_slot_at(&track_id, 1).expect("fx slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot_instrument,
+            "synth-class".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/synth.vst3")),
+            InsertPluginFormat::Vst3,
+            "Synth".to_string(),
+        );
+        state.set_insert_plugin(
+            &track_id,
+            &slot_effect,
+            "fx-class".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/fx.vst3")),
+            InsertPluginFormat::Vst3,
+            "FX".to_string(),
+        );
+
+        let track = state
+            .find_track(&track_id)
+            .expect("instrument track in state");
+        assert_eq!(bridge_insert_role(track, 0), "instrument");
+        assert_eq!(bridge_insert_role(track, 1), "effect");
     }
 
     #[test]

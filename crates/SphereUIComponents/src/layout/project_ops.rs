@@ -150,12 +150,7 @@ impl StudioLayout {
         });
     }
 
-    fn show_project_lifecycle_error(
-        &mut self,
-        title: &str,
-        message: &str,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_project_lifecycle_error(&mut self, title: &str, message: &str, cx: &mut Context<Self>) {
         self.show_project_open_failed_dialog(
             title,
             message,
@@ -215,32 +210,33 @@ impl StudioLayout {
 
         let owner = cx.entity().clone();
         let failed_path_for_dialog = failed_path.clone();
-        let on_response: Arc<dyn Fn(MessageBoxResult, &mut gpui::Window, &mut gpui::App) + Send + Sync> =
-            Arc::new(move |result, _window, cx| {
-                let _ = owner.update(cx, |this, cx| {
-                    this.pending_failed_open_path = None;
-                    let Some(path) = failed_path_for_dialog.clone() else {
-                        return;
-                    };
-                    if backup_index == Some(result.response) {
-                        this.load_project_from_path_with_options(
-                            project_backup_path(&path),
-                            ProjectOpenOptions::default(),
-                            cx,
-                        );
-                        return;
-                    }
-                    if remove_recent_index == Some(result.response) {
-                        this.recent_projects.remove(&path);
-                        this.sync_recent_to_switcher();
-                        cx.notify();
-                        return;
-                    }
-                    if locate_index == Some(result.response) {
-                        this.cmd_open_project(cx);
-                    }
-                });
+        let on_response: Arc<
+            dyn Fn(MessageBoxResult, &mut gpui::Window, &mut gpui::App) + Send + Sync,
+        > = Arc::new(move |result, _window, cx| {
+            let _ = owner.update(cx, |this, cx| {
+                this.pending_failed_open_path = None;
+                let Some(path) = failed_path_for_dialog.clone() else {
+                    return;
+                };
+                if backup_index == Some(result.response) {
+                    this.load_project_from_path_with_options(
+                        project_backup_path(&path),
+                        ProjectOpenOptions::default(),
+                        cx,
+                    );
+                    return;
+                }
+                if remove_recent_index == Some(result.response) {
+                    this.recent_projects.remove(&path);
+                    this.sync_recent_to_switcher();
+                    cx.notify();
+                    return;
+                }
+                if locate_index == Some(result.response) {
+                    this.cmd_open_project(cx);
+                }
             });
+        });
         let _ = open_message_box_window(owner_bounds, dialog, on_response, cx);
     }
 
@@ -299,7 +295,8 @@ impl StudioLayout {
     /// blank arrangement that is marked dirty/unsaved.
     pub fn new_empty_project(&mut self, cx: &mut Context<Self>) {
         self.reset_project(cx);
-        self.project_session.bind_untitled("Untitled Project", false);
+        self.project_session
+            .bind_untitled("Untitled Project", false);
         self.sync_project_session_to_workspace(cx);
         self.mark_engine_media_dirty();
         self.schedule_audio_project_sync(cx, true, "new_empty_project");
@@ -416,7 +413,10 @@ impl StudioLayout {
             self.mark_engine_media_dirty();
             self.schedule_audio_project_sync(cx, true, "project_created");
         } else {
-            project_lifecycle_log!("save failed after create — session remains bound to {}", path.display());
+            project_lifecycle_log!(
+                "save failed after create — session remains bound to {}",
+                path.display()
+            );
         }
     }
 
@@ -860,6 +860,12 @@ impl StudioLayout {
             Ok(project) => {
                 project_lifecycle_log!("loaded project file: {}", path.display());
                 let project_for_restore = project.clone();
+                // CloseProject flow: fully unload every plugin instance from the
+                // OUTGOING project before its model is replaced. The engine keeps
+                // its bridge-sink map across LoadProject, so without this each old
+                // instance's sink + bridge-host process + editor leaks into the
+                // freshly loaded project.
+                self.teardown_all_plugin_instances(cx, "project_load_replace");
                 let _ = self.timeline.update(cx, |timeline, cx| {
                     timeline.reset_input_state();
                     apply_to_timeline(&project, &mut timeline.state);
@@ -932,9 +938,7 @@ impl StudioLayout {
         if let Some(path) = path {
             self.load_project_from_path_with_options(
                 path,
-                ProjectOpenOptions {
-                    from_recent: true,
-                },
+                ProjectOpenOptions { from_recent: true },
                 cx,
             );
         }

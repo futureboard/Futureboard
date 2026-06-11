@@ -117,7 +117,24 @@ impl MidiEditorWindow {
         format!("{notes} notes · {sel} selected · grid {grid}")
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn should_route_to_piano_roll(event: &KeyDownEvent) -> bool {
+        let key = event.keystroke.key.as_str();
+        let mods = event.keystroke.modifiers;
+        let command = mods.control || mods.platform;
+        if command && !mods.alt && !mods.function {
+            return matches!(
+                key,
+                "a" | "A" | "c" | "C" | "x" | "X" | "v" | "V" | "d" | "D"
+            );
+        }
+        !mods.control
+            && !mods.platform
+            && !mods.alt
+            && !mods.function
+            && matches!(key, "delete" | "backspace")
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.is_held {
             return;
         }
@@ -137,6 +154,12 @@ impl MidiEditorWindow {
                 }
                 _ => {}
             }
+        }
+        if Self::should_route_to_piano_roll(event) {
+            cx.stop_propagation();
+            let _ = self
+                .piano_roll
+                .update(cx, |roll, cx| roll.handle_key_event(event, window, cx));
         }
     }
 }

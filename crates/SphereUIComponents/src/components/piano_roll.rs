@@ -21,11 +21,12 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    canvas, div, px, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
+    canvas, div, px, svg, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
     Render, ScrollWheelEvent, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
+use crate::assets;
 use crate::components::edit::{normalize_range, EditCommand};
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::{
@@ -38,6 +39,18 @@ use crate::theme::Colors;
 const ROW_H: f32 = 14.0; // px per semitone
 const PITCH_CNT: i32 = 128;
 const TOTAL_H: f32 = PITCH_CNT as f32 * ROW_H;
+
+/// Reversed-pitch row mapping shared by the note grid and the left piano-key
+/// lane: higher pitches sit at the top, lower at the bottom, offset by the
+/// vertical scroll, clamped to the valid MIDI range. This is the single source
+/// of truth for "which row is which pitch" — the keys and the grid both go
+/// through it (via [`PianoRoll::y_to_pitch`]) so they can never drift apart.
+/// Out-of-lane detection is layered on top in [`PianoRoll::key_lane_pitch_at`].
+fn local_y_to_pitch(local_y: f32, scroll_y: f32) -> u8 {
+    let row = ((local_y + scroll_y) / ROW_H).floor() as i32;
+    (PITCH_CNT - 1 - row).clamp(0, PITCH_CNT - 1) as u8
+}
+
 /// Piano-roll chrome theme (spec Part 7).
 struct PianoRollTheme {
     key_lane_width: f32,
@@ -288,6 +301,7 @@ enum PianoDrag {
         dx_beats: f32,
         dpitch: i32,
         grab_pitch: u8,
+        clone_on_commit: bool,
     },
     /// Resize a single note from its right edge (also used to drag-extend a
     /// freshly drawn note). `new_dur` is the live length.
@@ -302,7 +316,6 @@ enum PianoDrag {
     /// affected note's `(id, orig_velocity)` so the live delta is reproducible
     /// and undo can restore exact values.
     Velocity {
-        start_y: f32,
         prev: Vec<(u64, u8)>,
     },
     /// Rectangular marquee selection on the note grid (local grid px).
@@ -407,8 +420,19 @@ pub struct PianoRoll {
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
     active_preview_note: Option<(String, u8, u8)>,
-    /// Pitch held in the left key lane (for drag-across-key preview).
+    /// Pitch currently sounding from the left key lane (the audition note); also
+    /// drives the pressed-key highlight. `None` while no key is being auditioned
+    /// (including mid-drag when the cursor has left the lane).
     key_lane_pressed_pitch: Option<u8>,
+    /// `true` between a key mouse-down and the matching mouse-up — i.e. the user
+    /// is scrubbing the piano-key lane. Kept separate from
+    /// [`Self::key_lane_pressed_pitch`] so a drag that wanders off the lane (note
+    /// off, no sounding pitch) still resumes auditioning when it returns.
+    piano_key_drag_active: bool,
+    /// Bounds of the left key-lane keys area, captured at paint so a window-space
+    /// cursor can be hit-tested + mapped to a pitch with the same math the grid
+    /// uses. `None` until the first frame lays the lane out.
+    key_lane_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     focus: FocusHandle,
     focus_lost_subscription: Option<Subscription>,
 }
@@ -448,6 +472,8 @@ impl PianoRoll {
             last_editing_clip: None,
             active_preview_note: None,
             key_lane_pressed_pitch: None,
+            piano_key_drag_active: false,
+            key_lane_bounds: Rc::new(Cell::new(None)),
             focus: cx.focus_handle(),
             focus_lost_subscription: None,
         }
@@ -531,6 +557,15 @@ impl PianoRoll {
     /// `on_key_down`) instead of the timeline clip commands.
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
+    }
+
+    pub fn handle_key_event(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_key(event, window, cx);
     }
 
     pub fn grid_label(&self) -> &'static str {
@@ -794,6 +829,11 @@ impl PianoRoll {
             .map(|(track_id, _, _)| track_id.clone())
             .or_else(|| self.preview_target(cx).map(|(track_id, _)| track_id));
         self.active_preview_note = None;
+        // Any all-notes-off (escape, focus loss, clip change, editor close,
+        // destructive edit) must also end a piano-key scrub so the pressed key
+        // clears and a stale drag can't keep re-triggering.
+        self.key_lane_pressed_pitch = None;
+        self.piano_key_drag_active = false;
         let Some(track_id) = target else {
             return;
         };
@@ -814,6 +854,7 @@ impl PianoRoll {
             .or_else(|| self.preview_target(cx).map(|(track_id, _)| track_id));
         self.active_preview_note = None;
         self.key_lane_pressed_pitch = None;
+        self.piano_key_drag_active = false;
         let Some(track_id) = target else {
             return;
         };
@@ -858,8 +899,7 @@ impl PianoRoll {
         beat * self.ppb - self.scroll_x
     }
     fn y_to_pitch(&self, local_y: f32) -> u8 {
-        let row = ((local_y + self.scroll_y) / ROW_H).floor() as i32;
-        (PITCH_CNT - 1 - row).clamp(0, PITCH_CNT - 1) as u8
+        local_y_to_pitch(local_y, self.scroll_y)
     }
     fn pitch_to_y(&self, pitch: u8) -> f32 {
         (PITCH_CNT - 1 - pitch as i32) as f32 * ROW_H - self.scroll_y
@@ -1016,6 +1056,12 @@ impl PianoRoll {
     }
 
     fn cancel_active_gesture(&mut self, cx: &mut Context<Self>) {
+        if self.piano_key_drag_active || self.key_lane_pressed_pitch.is_some() {
+            eprintln!(
+                "[PianoKeyPreview] cancel active={:?}",
+                self.key_lane_pressed_pitch
+            );
+        }
         self.preview_all_notes_off("cancel", cx);
         if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
             self.cancel_marquee_select(cx);
@@ -1038,6 +1084,25 @@ impl PianoRoll {
         let x: f32 = window_pos.x.into();
         let y: f32 = window_pos.y.into();
         Some((x - ox, y - oy))
+    }
+
+    /// Pitch under a window-space point **iff** it is inside the left piano-key
+    /// lane, else `None` (the cursor has left the lane → the scrub note must
+    /// stop). Uses the exact same [`Self::y_to_pitch`] mapping as the note grid,
+    /// so the keys and the grid rows can never drift apart — there is no
+    /// second copy of the pitch math.
+    fn key_lane_pitch_at(&self, window_pos: gpui::Point<Pixels>) -> Option<u8> {
+        let bounds = self.key_lane_bounds.get()?;
+        let ox: f32 = bounds.origin.x.into();
+        let oy: f32 = bounds.origin.y.into();
+        let w: f32 = bounds.size.width.into();
+        let h: f32 = bounds.size.height.into();
+        let local_x = f32::from(window_pos.x) - ox;
+        let local_y = f32::from(window_pos.y) - oy;
+        if local_x < 0.0 || local_x > w || local_y < 0.0 || local_y > h {
+            return None;
+        }
+        Some(self.y_to_pitch(local_y))
     }
 
     fn grid_view_size(&self) -> (f32, f32) {
@@ -1402,6 +1467,7 @@ impl PianoRoll {
         }
         let shift = event.modifiers.shift;
         let ctrl = event.modifiers.control || event.modifiers.platform;
+        let clone_on_commit = event.modifiers.alt;
         if shift || ctrl {
             // Toggle this note in/out of the selection — no drag.
             if self.selection.contains(&id) {
@@ -1435,6 +1501,7 @@ impl PianoRoll {
             dx_beats: 0.0,
             dpitch: 0,
             grab_pitch,
+            clone_on_commit,
         };
         // Audition the grabbed pitch immediately; on_move switches it as the
         // drag changes pitch, on_up / cancel stops it.
@@ -1506,11 +1573,84 @@ impl PianoRoll {
             self.selection = HashSet::from([id]);
             vec![(id, orig_vel)]
         };
-        self.drag = PianoDrag::Velocity {
-            start_y: event.position.y.into(),
-            prev,
-        };
+        let value = self.velocity_from_window_y(event.position);
+        self.apply_velocity_value(&prev, value, cx);
+        self.drag = PianoDrag::Velocity { prev };
         cx.notify();
+    }
+
+    fn velocity_from_window_y(&self, position: gpui::Point<Pixels>) -> u8 {
+        let local_y = self.cc_local(position).map(|(_, y)| y).unwrap_or_else(|| {
+            self.cc_bounds
+                .get()
+                .map(|bounds| {
+                    let origin_y: f32 = bounds.origin.y.into();
+                    let y: f32 = position.y.into();
+                    y - origin_y
+                })
+                .unwrap_or(LANE_H * 0.5)
+        });
+        let (_, lane_h) = self.cc_view_size();
+        let usable_h = (lane_h - 8.0).max(1.0);
+        let norm = (1.0 - ((local_y - 2.0) / usable_h)).clamp(0.0, 1.0);
+        (1.0 + norm * 126.0).round().clamp(1.0, 127.0) as u8
+    }
+
+    fn apply_velocity_value(&mut self, prev: &[(u64, u8)], value: u8, cx: &mut Context<Self>) {
+        if prev.is_empty() {
+            return;
+        }
+        self.drag_value_status = Some(if prev.len() == 1 {
+            format!("Velocity: {value}")
+        } else {
+            format!("Velocity: {value} · {} notes", prev.len())
+        });
+        if let Some(clip_id) = self.editing_clip_id(cx) {
+            self.with_timeline_silent(cx, |tl, _| {
+                for (id, _) in prev {
+                    tl.state.set_midi_note_velocity(&clip_id, *id, value);
+                }
+            });
+        }
+    }
+
+    fn velocity_note_at_x(&self, cx: &Context<Self>, clip_id: &str, lx: f32) -> Option<(u64, u8)> {
+        let tl = self.timeline.read(cx);
+        let notes = tl.state.midi_clip_notes(clip_id)?;
+        notes
+            .iter()
+            .filter_map(|note| {
+                let d = self.display_note(note);
+                let x = self.beat_to_x(d.start);
+                let distance = if lx < x {
+                    x - lx
+                } else if lx > x + 8.0 {
+                    lx - (x + 8.0)
+                } else {
+                    0.0
+                };
+                (distance <= 14.0).then_some((distance, d.id, d.velocity))
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, id, velocity)| (id, velocity))
+    }
+
+    fn begin_velocity_lane_click(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let Some((lx, _)) = self.cc_local(event.position) else {
+            return;
+        };
+        let Some((id, velocity)) = self.velocity_note_at_x(cx, &clip_id, lx) else {
+            return;
+        };
+        self.begin_velocity_drag(id, velocity, event, window, cx);
     }
 
     fn snapshot_selection(&self, cx: &Context<Self>, clip_id: &str) -> Vec<(u64, f32, u8)> {
@@ -1528,6 +1668,39 @@ impl PianoRoll {
     }
 
     fn on_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // Piano-key lane drag-scrub: audition whichever key is under the cursor.
+        // Driven from this root-level move handler (not a per-key one) so fast
+        // vertical drags keep tracking even as the cursor crosses key edges. It
+        // is mutually exclusive with grid drags — it only starts from a key
+        // mouse-down — so handle it first and return.
+        if self.piano_key_drag_active {
+            match self.key_lane_pitch_at(event.position) {
+                Some(pitch) => {
+                    // Debounce: only (re)trigger when the pitch actually changes.
+                    if self.key_lane_pressed_pitch != Some(pitch) {
+                        eprintln!(
+                            "[PianoKeyPreview] move old={:?} new={}",
+                            self.key_lane_pressed_pitch, pitch
+                        );
+                        // `begin_preview_note` sends note-off for the previous
+                        // pitch before note-on for the new one (no stuck notes).
+                        self.begin_preview_note(pitch, 100, "piano_key_drag", cx);
+                        self.key_lane_pressed_pitch = Some(pitch);
+                        cx.notify();
+                    }
+                }
+                None => {
+                    // Cursor left the lane: stop the current note but keep the
+                    // drag active so returning to the lane resumes auditioning.
+                    if self.key_lane_pressed_pitch.take().is_some() {
+                        eprintln!("[PianoKeyPreview] off note=outside_lane");
+                        self.end_preview_note("piano_key_drag_out", cx);
+                        cx.notify();
+                    }
+                }
+            }
+            return;
+        }
         // Track the grid beat under the pointer so paste-at-mouse has an anchor.
         // Cheap field write, no repaint.
         if let Some((lx, ly)) = self.grid_local(event.position) {
@@ -1674,27 +1847,10 @@ impl PianoRoll {
                 *new_dur = d;
                 cx.notify();
             }
-            PianoDrag::Velocity { start_y, prev } => {
-                let cur_y: f32 = event.position.y.into();
-                let delta = (*start_y - cur_y).round() as i32;
-                let updates: Vec<(u64, u8)> = prev
-                    .iter()
-                    .map(|(id, orig)| (*id, (*orig as i32 + delta).clamp(1, 127) as u8))
-                    .collect();
-                if let Some((_, value)) = updates.first() {
-                    self.drag_value_status = Some(if updates.len() == 1 {
-                        format!("Velocity: {value}")
-                    } else {
-                        format!("Velocity: {value} · {} notes", updates.len())
-                    });
-                }
-                if let Some(clip_id) = self.editing_clip_id(cx) {
-                    self.with_timeline_silent(cx, |tl, _| {
-                        for (id, new_vel) in &updates {
-                            tl.state.set_midi_note_velocity(&clip_id, *id, *new_vel);
-                        }
-                    });
-                }
+            PianoDrag::Velocity { prev } => {
+                let prev = prev.clone();
+                let value = self.velocity_from_window_y(event.position);
+                self.apply_velocity_value(&prev, value, cx);
             }
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
@@ -1765,6 +1921,20 @@ impl PianoRoll {
 
     fn on_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.end_preview_note("mouse_up", cx);
+        // End a piano-key scrub. Fires here for release anywhere — including
+        // outside the lane/window — because this is wired to both `on_mouse_up`
+        // and `on_mouse_up_out` on the root. A key-lane drag never edits clip
+        // notes, so just clear its state (the note-off was sent above).
+        if self.piano_key_drag_active || self.key_lane_pressed_pitch.is_some() {
+            eprintln!(
+                "[PianoKeyPreview] off note={:?} reason=mouse_up",
+                self.key_lane_pressed_pitch
+            );
+            self.piano_key_drag_active = false;
+            self.key_lane_pressed_pitch = None;
+            cx.notify();
+            return;
+        }
         if matches!(
             self.drag,
             PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. }
@@ -1797,6 +1967,7 @@ impl PianoRoll {
                 prev,
                 dx_beats,
                 dpitch,
+                clone_on_commit,
                 ..
             } => {
                 if dx_beats.abs() < 0.0001 && dpitch == 0 {
@@ -1817,6 +1988,37 @@ impl PianoRoll {
                     .zip(prev.iter())
                     .any(|((_, ns, np), (_, os, op))| (ns - os).abs() > 1e-4 || np != op);
                 if !changed {
+                    return;
+                }
+                if clone_on_commit {
+                    let source_notes: std::collections::HashMap<u64, MidiNoteState> = self
+                        .timeline
+                        .read(cx)
+                        .state
+                        .midi_clip_notes(&clip_id)
+                        .map(|notes| notes.iter().map(|n| (n.id, n.clone())).collect())
+                        .unwrap_or_default();
+                    let notes: Vec<MidiNoteState> = updates
+                        .iter()
+                        .filter_map(|(id, start, pitch)| {
+                            let source = source_notes.get(id)?;
+                            let mut note = MidiNoteState::new(
+                                *pitch,
+                                *start,
+                                source.duration,
+                                source.velocity,
+                            );
+                            note.muted = source.muted;
+                            Some(note)
+                        })
+                        .collect();
+                    if notes.is_empty() {
+                        return;
+                    }
+                    let new_ids: Vec<u64> = notes.iter().map(|note| note.id).collect();
+                    self.run_edit_command(EditCommand::CreateMidiNotes { clip_id, notes }, cx);
+                    self.selection = new_ids.into_iter().collect();
+                    cx.notify();
                     return;
                 }
                 let ids: Vec<u64> = updates.iter().map(|(id, _, _)| *id).collect();
@@ -1871,11 +2073,11 @@ impl PianoRoll {
         match key {
             "up" if !ctrl && !self.selection.is_empty() => {
                 cx.stop_propagation();
-                self.transpose_selection(if shift { 12 } else { 1 }, cx);
+                self.transpose_selection(1, cx);
             }
             "down" if !ctrl && !self.selection.is_empty() => {
                 cx.stop_propagation();
-                self.transpose_selection(if shift { -12 } else { -1 }, cx);
+                self.transpose_selection(-1, cx);
             }
             "delete" | "backspace" if !self.selection.is_empty() => {
                 cx.stop_propagation();
@@ -2823,7 +3025,7 @@ impl PianoRoll {
                 .absolute()
                 .top(px(26.0))
                 .left_0()
-                .w(px(150.0))
+                .w(px(176.0))
                 .flex()
                 .flex_col()
                 .p(px(3.0))
@@ -2832,7 +3034,8 @@ impl PianoRoll {
                 .bg(Colors::surface_card())
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
-                .shadow_lg();
+                .shadow_lg()
+                .occlude();
             for (i, kind) in LANE_CYCLE.iter().enumerate() {
                 let kind = *kind;
                 let selected = kind == current;
@@ -2951,14 +3154,17 @@ impl PianoRoll {
             .flex_row()
             .items_center()
             .gap(px(2.0))
+            .occlude()
             .child(
                 div()
                     .id("pr-lane-select")
                     .flex()
                     .items_center()
                     .h(px(22.0))
-                    .px(px(7.0))
-                    .gap(px(4.0))
+                    .min_w(px(122.0))
+                    .pl(px(7.0))
+                    .pr(px(5.0))
+                    .gap(px(6.0))
                     .rounded(px(4.0))
                     .text_size(px(10.0))
                     .text_color(if open {
@@ -2996,12 +3202,18 @@ impl PianoRoll {
                             this.cycle_lane(if dy < 0.0 { 1 } else { -1 }, cx);
                         }
                     }))
-                    .child(label)
+                    .child(div().flex_1().truncate().child(label))
                     .child(
-                        div()
-                            .text_size(px(8.0))
-                            .text_color(Colors::text_faint())
-                            .child("▾"),
+                        svg()
+                            .path(assets::ICON_CHEVRON_DOWN_PATH)
+                            .w(px(10.0))
+                            .h(px(10.0))
+                            .flex_shrink_0()
+                            .text_color(if open {
+                                Colors::text_secondary()
+                            } else {
+                                Colors::text_faint()
+                            }),
                     ),
             )
             // Collapse / expand the whole lane.
@@ -3269,11 +3481,13 @@ impl PianoRoll {
         // room (>= 14 px), otherwise fall back to C-only labels so the lane
         // stays readable.
         let show_all_labels = ROW_H >= 14.0;
+        let pressed_pitch = self.key_lane_pressed_pitch;
         let keys: Vec<_> = (first_pitch..=last_pitch)
             .map(|p| {
                 let y = self.pitch_to_y(p as u8);
                 let black = is_black(p);
                 let is_c = p.rem_euclid(12) == 0;
+                let pressed = pressed_pitch == Some(p as u8);
                 let label_color = if is_c {
                     Colors::text_primary()
                 } else if black {
@@ -3288,7 +3502,11 @@ impl PianoRoll {
                     .left_0()
                     .w_full()
                     .h(px(ROW_H))
-                    .bg(if black {
+                    // Pressed/auditioned key reads with the accent fill (both black
+                    // and white keys); otherwise the usual black/white surface.
+                    .bg(if pressed {
+                        Colors::accent_primary()
+                    } else if black {
                         Colors::surface_base()
                     } else {
                         Colors::surface_raised()
@@ -3300,31 +3518,18 @@ impl PianoRoll {
                     .justify_end()
                     .pr(px(5.0))
                     .cursor(gpui::CursorStyle::PointingHand)
+                    // Mouse-down starts a key-lane scrub. The matching note-off /
+                    // state reset happens centrally in `on_up` (wired to both
+                    // mouse-up and mouse-up-out on the root), and drag tracking
+                    // happens in `on_move` — so no per-key up/move handlers here.
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| {
-                            if let Some((track_id, channel)) = this.preview_target(cx) {
-                                eprintln!(
-                                    "[midi-preview-ui] note_on source=piano_key pitch={} velocity=100 instance_track={} channel={}",
-                                    p, track_id, channel
-                                );
-                            }
+                            eprintln!("[PianoKeyPreview] down note={p}");
+                            this.piano_key_drag_active = true;
                             this.key_lane_pressed_pitch = Some(p as u8);
                             this.begin_preview_note(p as u8, 100, "piano_key_down", cx);
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.key_lane_pressed_pitch = None;
-                            this.end_preview_note("piano_key_up", cx);
-                        }),
-                    )
-                    .on_mouse_up_out(
-                        MouseButton::Left,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.key_lane_pressed_pitch = None;
-                            this.end_preview_note("piano_key_up_out", cx);
+                            cx.notify();
                         }),
                     )
                     .when(show_label, |this| {
@@ -3396,6 +3601,13 @@ impl PianoRoll {
         } else if self.lane_shows_velocity {
             let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
             let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
+            let velocity_bounds = self.cc_bounds.clone();
+            let velocity_bounds_canvas = canvas(
+                move |bounds, _w, _cx| velocity_bounds.set(Some(bounds)),
+                |_bounds, _scene, _w, _cx| {},
+            )
+            .absolute()
+            .inset_0();
             let velocity_empty =
                 (note_count_for_clip(cx, &self.timeline, clip_id) == 0).then(|| {
                     div()
@@ -3425,6 +3637,13 @@ impl PianoRoll {
                     .border_t(px(1.0))
                     .border_color(Colors::panel_border())
                     .bg(Colors::surface_panel_alt())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                            this.begin_velocity_lane_click(ev, window, cx);
+                        }),
+                    )
+                    .child(velocity_bounds_canvas)
                     .children(vel_grid)
                     .children(vel_bars)
                     .children(velocity_empty)
@@ -3448,6 +3667,20 @@ impl PianoRoll {
         let grid_canvas = canvas(
             move |bounds, _w, _cx| {
                 grid_bounds.set(Some(bounds));
+            },
+            |_b, _r, _w, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+
+        // Capture the key-lane viewport bounds so a window-space cursor can be
+        // hit-tested + mapped to a pitch during drag-scrub (see `on_move`). Sits
+        // behind the keys and carries no handlers, so it never intercepts the
+        // per-key mouse-down.
+        let key_lane_bounds = self.key_lane_bounds.clone();
+        let key_lane_canvas = canvas(
+            move |bounds, _w, _cx| {
+                key_lane_bounds.set(Some(bounds));
             },
             |_b, _r, _w, _cx| {},
         )
@@ -3486,19 +3719,11 @@ impl PianoRoll {
                             .bg(Colors::surface_panel())
                             .border_r(px(1.0))
                             .border_color(Colors::panel_border())
-                            .on_mouse_move(cx.listener(
-                                |this, event: &MouseMoveEvent, _window, cx| {
-                                    if this.key_lane_pressed_pitch.is_none() {
-                                        return;
-                                    }
-                                    let local_y: f32 = event.position.y.into();
-                                    let pitch = this.y_to_pitch(local_y);
-                                    if this.key_lane_pressed_pitch != Some(pitch) {
-                                        this.key_lane_pressed_pitch = Some(pitch);
-                                        this.begin_preview_note(pitch, 100, "piano_key_drag", cx);
-                                    }
-                                },
-                            ))
+                            // Drag-scrub (move/up) is handled by the root-level
+                            // `on_move`/`on_up` using `key_lane_bounds` captured
+                            // here — never read raw window coords as if they were
+                            // lane-local (the old bug).
+                            .child(key_lane_canvas)
                             .children(keys),
                     )
                     // Single unified controller-lane header (name + range).
@@ -5141,5 +5366,56 @@ impl PianoRoll {
             velocity,
             controller_points,
         }
+    }
+}
+
+#[cfg(test)]
+mod piano_key_pitch_tests {
+    use super::*;
+
+    const MAX_PITCH: u8 = (PITCH_CNT - 1) as u8;
+
+    /// Top of the lane is the highest pitch (reversed pitch order).
+    #[test]
+    fn top_row_is_highest_pitch() {
+        assert_eq!(local_y_to_pitch(0.0, 0.0), MAX_PITCH);
+    }
+
+    /// Each row down drops exactly one semitone.
+    #[test]
+    fn moving_down_one_row_lowers_pitch_by_one() {
+        assert_eq!(local_y_to_pitch(ROW_H, 0.0), MAX_PITCH - 1);
+        assert_eq!(local_y_to_pitch(ROW_H * 2.0, 0.0), MAX_PITCH - 2);
+    }
+
+    /// Scrolling shifts which pitch is at the lane top, consistently (spec test
+    /// 7: scroll + drag keeps the mapping correct).
+    #[test]
+    fn scroll_offsets_mapping_by_whole_rows() {
+        let scroll = ROW_H * 3.0;
+        assert_eq!(local_y_to_pitch(0.0, scroll), MAX_PITCH - 3);
+        // ...and a click one row further down with the same scroll is one lower.
+        assert_eq!(local_y_to_pitch(ROW_H, scroll), MAX_PITCH - 4);
+    }
+
+    /// The key lane mapping is the exact inverse of `pitch_to_y` (the layout
+    /// used to position the keys) for the middle of each key's row — so the key
+    /// under the cursor always matches the pitch that gets auditioned.
+    #[test]
+    fn round_trips_with_key_layout() {
+        let scroll = ROW_H * 2.5;
+        for pitch in [0u8, 24, 60, 100, MAX_PITCH] {
+            // `pitch_to_y`: (PITCH_CNT - 1 - pitch) * ROW_H - scroll.
+            let row_top = (PITCH_CNT - 1 - pitch as i32) as f32 * ROW_H - scroll;
+            let row_mid = row_top + ROW_H * 0.5;
+            assert_eq!(local_y_to_pitch(row_mid, scroll), pitch, "pitch {pitch}");
+        }
+    }
+
+    /// Out-of-range rows clamp to the MIDI bounds (never panic / wrap).
+    #[test]
+    fn clamps_beyond_the_range() {
+        assert_eq!(local_y_to_pitch(1.0e6, 0.0), 0);
+        assert_eq!(local_y_to_pitch(-1.0e6, 0.0), MAX_PITCH);
     }
 }

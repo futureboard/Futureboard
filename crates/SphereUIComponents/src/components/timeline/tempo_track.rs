@@ -1,4 +1,6 @@
-use crate::components::timeline::global_lane_header::{global_lane_header, GlobalLaneHeaderActions};
+use crate::components::timeline::global_lane_header::{
+    global_lane_header, GlobalLaneHeaderActions,
+};
 use crate::components::timeline::timeline_state::{
     bpm_to_y, TempoMap, TimelineState, TEMPO_LANE_PAD,
 };
@@ -112,7 +114,10 @@ pub fn tempo_track_lane(
         let (fill_color, ring) = if selected {
             (Colors::text_primary(), Colors::accent_primary())
         } else {
-            (Colors::accent_primary(), Colors::with_alpha(Colors::text_primary(), 0.65))
+            (
+                Colors::accent_primary(),
+                Colors::with_alpha(Colors::text_primary(), 0.65),
+            )
         };
 
         markers.push(
@@ -144,11 +149,9 @@ pub fn tempo_track_lane(
             let label_text = format!("{label} BPM");
             // Single-line pill width: estimate from glyph count, never below the
             // minimum so it can't shrink to the handle width.
-            let pill_w =
-                (label_text.chars().count() as f32 * 5.5 + 14.0).max(TEMPO_LABEL_MIN_W);
+            let pill_w = (label_text.chars().count() as f32 * 5.5 + 14.0).max(TEMPO_LABEL_MIN_W);
             // Center the pill over the handle, then clamp it inside the lane.
-            let pill_x =
-                (x - pill_w / 2.0).clamp(2.0, (lane_w - pill_w - 2.0).max(2.0));
+            let pill_x = (x - pill_w / 2.0).clamp(2.0, (lane_w - pill_w - 2.0).max(2.0));
             // Prefer above the dot; drop below if there is no room, then clamp so
             // it stays fully inside the lane content (no top/bottom clipping).
             let mut pill_y = y - size_px / 2.0 - TEMPO_LABEL_H - 4.0;
@@ -198,7 +201,9 @@ pub fn tempo_track_lane(
                     cx.stop_propagation();
                     let wx: f32 = event.position.x.into();
                     let wy: f32 = event.position.y.into();
-                    let lane_x = wx - crate::components::sidebar::SIDEBAR_WIDTH - crate::components::timeline::timeline_state::HEADER_WIDTH;
+                    let lane_x = wx
+                        - crate::components::sidebar::SIDEBAR_WIDTH
+                        - crate::components::timeline::timeline_state::HEADER_WIDTH;
                     let beat = state_left.x_to_beat(lane_x).max(0.0);
                     let snapped = state_left.snap_beats(beat as f32) as f64;
                     let local_y = wy - content_top - TEMPO_LANE_PAD;
@@ -228,7 +233,9 @@ pub fn tempo_track_lane(
                     let wy: f32 = event.position.y.into();
                     let sx: f32 = event.position.x.into();
                     let sy: f32 = event.position.y.into();
-                    let lane_x = wx - crate::components::sidebar::SIDEBAR_WIDTH - crate::components::timeline::timeline_state::HEADER_WIDTH;
+                    let lane_x = wx
+                        - crate::components::sidebar::SIDEBAR_WIDTH
+                        - crate::components::timeline::timeline_state::HEADER_WIDTH;
                     let beat = state_right.x_to_beat(lane_x).max(0.0);
                     let local_y = wy - content_top - TEMPO_LANE_PAD;
                     let bpm = crate::components::timeline::timeline_state::y_to_bpm(

@@ -875,7 +875,10 @@ impl Render for StudioLayout {
         // is capturing the keyboard. This is intentionally stricter than
         // `window.focused().is_none()`: it also recovers from orphaned focus,
         // while never stealing focus from a field the user is actively typing in.
-        if !self.focus_handle.is_focused(window) && !self.keyboard_text_capture_live(window) {
+        if !self.focus_handle.is_focused(window)
+            && !midi_editor.read(cx).is_focused(window)
+            && !self.keyboard_text_capture_live(window)
+        {
             self.focus_handle.focus(window, cx);
         }
         let focus_holder = self.focus_handle.clone();

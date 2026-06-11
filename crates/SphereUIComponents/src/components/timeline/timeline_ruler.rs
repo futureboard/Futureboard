@@ -290,10 +290,8 @@ pub fn timeline_ruler(
                     if x < -24.0 || x > ruler_grid_width + 24.0 {
                         return None;
                     }
-                    let label = TimeSignatureMap::format_marker_label(
-                        point.numerator,
-                        point.denominator,
-                    );
+                    let label =
+                        TimeSignatureMap::format_marker_label(point.numerator, point.denominator);
                     Some(
                         div()
                             .absolute()

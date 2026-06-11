@@ -152,11 +152,7 @@ pub const ICON_PLUGIN_VST3_PATH: &str = "icons/plugins/vst3.svg";
 fn log_startup_dpi() {
     use windows::Win32::UI::HiDpi::GetDpiForSystem;
     let dpi = unsafe { GetDpiForSystem() };
-    let scale = if dpi == 0 {
-        1.0
-    } else {
-        dpi as f32 / 96.0
-    };
+    let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
     eprintln!("[UI] dpi_scale={scale:.3}");
 }
 

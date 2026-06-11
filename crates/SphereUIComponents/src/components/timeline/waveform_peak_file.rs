@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use super::waveform_cache::{WaveformLod, WaveformPeak, WaveformPreview, WAVEFORM_ALGORITHM_VERSION};
+use super::waveform_cache::{
+    WaveformLod, WaveformPeak, WaveformPreview, WAVEFORM_ALGORITHM_VERSION,
+};
 
 pub const PEAK_FILE_MAGIC: &[u8; 8] = b"FBPEAKS1";
 pub const PEAK_FILE_VERSION: u32 = 1;
@@ -27,7 +29,10 @@ impl std::fmt::Display for PeakFileError {
             Self::BadMagic => write!(f, "invalid peak file magic"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported peak file version {v}"),
             Self::AlgorithmMismatch { expected, found } => {
-                write!(f, "peak algorithm mismatch expected={expected} found={found}")
+                write!(
+                    f,
+                    "peak algorithm mismatch expected={expected} found={found}"
+                )
             }
             Self::AssetMismatch { expected, found } => {
                 write!(f, "peak asset mismatch expected={expected} found={found}")
@@ -132,7 +137,9 @@ fn read_peak_bytes(
     let asset_len = u32::from_le_bytes(take(4, "asset_id_len")?.try_into().unwrap()) as usize;
     let asset_raw = take(asset_len, "asset_id")?;
     let asset_id = std::str::from_utf8(asset_raw)
-        .map_err(|_| PeakFileError::Truncated { field: "asset_id_utf8" })?
+        .map_err(|_| PeakFileError::Truncated {
+            field: "asset_id_utf8",
+        })?
         .to_string();
     if let Some(expected) = expected_asset_id {
         if asset_id != expected {
@@ -153,8 +160,7 @@ fn read_peak_bytes(
     for _ in 0..lod_count {
         let samples_per_peak =
             u32::from_le_bytes(take(4, "samples_per_peak")?.try_into().unwrap()) as usize;
-        let peak_count =
-            u32::from_le_bytes(take(4, "peak_count")?.try_into().unwrap()) as usize;
+        let peak_count = u32::from_le_bytes(take(4, "peak_count")?.try_into().unwrap()) as usize;
         let mut peaks = Vec::with_capacity(peak_count);
         for _ in 0..peak_count {
             let min = f32::from_le_bytes(take(4, "peak_min")?.try_into().unwrap());
@@ -186,11 +192,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "fb_peak_{label}_{}_{}",
-            std::process::id(),
-            nanos
-        ))
+        std::env::temp_dir().join(format!("fb_peak_{label}_{}_{}", std::process::id(), nanos))
     }
 
     fn sample_preview() -> WaveformPreview {
@@ -202,8 +204,14 @@ mod tests {
             lods: vec![WaveformLod {
                 samples_per_peak: 256,
                 peaks: vec![
-                    WaveformPeak { min: -0.5, max: 0.5 },
-                    WaveformPeak { min: -0.25, max: 0.75 },
+                    WaveformPeak {
+                        min: -0.5,
+                        max: 0.5,
+                    },
+                    WaveformPeak {
+                        min: -0.25,
+                        max: 0.75,
+                    },
                 ],
             }],
         }

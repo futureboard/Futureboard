@@ -827,12 +827,14 @@ impl StudioLayout {
                 .time_signature_map
                 .points
                 .iter()
-                .map(|p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
-                    beat: p.beat,
-                    numerator: p.numerator,
-                    denominator: p.denominator,
-                    grouping: p.effective_grouping(),
-                })
+                .map(
+                    |p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                        beat: p.beat,
+                        numerator: p.numerator,
+                        denominator: p.denominator,
+                        grouping: p.effective_grouping(),
+                    },
+                )
                 .collect::<Vec<_>>();
             (
                 timeline.state.transport.playhead_beats,
@@ -1551,12 +1553,14 @@ impl StudioLayout {
                 .time_signature_map
                 .points
                 .iter()
-                .map(|p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
-                    beat: p.beat,
-                    numerator: p.numerator,
-                    denominator: p.denominator,
-                    grouping: p.effective_grouping(),
-                })
+                .map(
+                    |p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                        beat: p.beat,
+                        numerator: p.numerator,
+                        denominator: p.denominator,
+                        grouping: p.effective_grouping(),
+                    },
+                )
                 .collect::<Vec<_>>()
         };
         if let Some(engine) = self.audio_engine.as_ref() {
@@ -1596,7 +1600,10 @@ impl StudioLayout {
     pub(super) fn add_time_signature_marker_at_playhead(&mut self, cx: &mut Context<Self>) {
         let changed = self.timeline.update(cx, |timeline, cx| {
             let beat = timeline.state.transport.playhead_beats as f64;
-            let pt = timeline.state.time_signature_map.time_signature_at_beat(beat);
+            let pt = timeline
+                .state
+                .time_signature_map
+                .time_signature_at_beat(beat);
             timeline
                 .state
                 .add_time_signature_point(beat, pt.numerator, pt.denominator);
@@ -1613,7 +1620,10 @@ impl StudioLayout {
     pub(super) fn add_time_signature_point_at_beat(&mut self, beat: f64, cx: &mut Context<Self>) {
         let beat = beat.max(0.0);
         let changed = self.timeline.update(cx, |timeline, cx| {
-            let pt = timeline.state.time_signature_map.time_signature_at_beat(beat);
+            let pt = timeline
+                .state
+                .time_signature_map
+                .time_signature_at_beat(beat);
             timeline
                 .state
                 .add_time_signature_point(beat, pt.numerator, pt.denominator);
@@ -1711,9 +1721,10 @@ impl StudioLayout {
     pub(super) fn begin_ts_edit(&mut self, point_id: Option<String>, cx: &mut Context<Self>) {
         let (num, den) = {
             let state = &self.timeline.read(cx).state;
-            if let Some(id) = point_id.as_deref().or(
-                state.selected_time_signature_point_id.as_deref(),
-            ) {
+            if let Some(id) = point_id
+                .as_deref()
+                .or(state.selected_time_signature_point_id.as_deref())
+            {
                 if let Some(pt) = state.time_signature_map.points.iter().find(|p| p.id == id) {
                     (pt.numerator, pt.denominator)
                 } else {
@@ -1754,7 +1765,9 @@ impl StudioLayout {
         };
         let den = den
             .map(crate::components::timeline::timeline_state::normalize_time_signature_denominator)
-            .filter(|d| crate::components::timeline::timeline_state::TS_ALLOWED_DENOMINATORS.contains(d));
+            .filter(|d| {
+                crate::components::timeline::timeline_state::TS_ALLOWED_DENOMINATORS.contains(d)
+            });
         let Some(den) = den else {
             cx.notify();
             return;
@@ -1763,14 +1776,10 @@ impl StudioLayout {
         let point_id = self.ts_edit_point_id.clone();
         let changed = self.timeline.update(cx, |timeline, cx| {
             let changed = if let Some(id) = point_id {
-                timeline
-                    .state
-                    .update_time_signature_point(&id, num, den)
+                timeline.state.update_time_signature_point(&id, num, den)
             } else {
                 let beat = timeline.state.transport.playhead_beats as f64;
-                timeline
-                    .state
-                    .add_time_signature_point(beat, num, den);
+                timeline.state.add_time_signature_point(beat, num, den);
                 true
             };
             if changed {

@@ -11,10 +11,11 @@ use crate::scan::cache::{
     should_auto_scan_au,
 };
 use crate::scan::isolation::{
-    plugin_info_from_descriptor, run_isolated_format_scan, IsolatedScanRequest,
+    plugin_info_from_descriptor, run_isolated_bundle_scan, run_isolated_format_scan,
+    IsolatedScanRequest,
 };
 use crate::scan::types::PluginScanFormat;
-use crate::scanner::{discover_plugin_bundles, scan_plugin_bundle};
+use crate::scanner::discover_plugin_bundles;
 use crate::types::PluginInfo;
 
 /// Plug-in container format (aligned with Electron `AudioPluginRegistryEntry.format`).
@@ -753,7 +754,7 @@ impl PluginRegistry {
                     path: bundle.clone(),
                 });
 
-                match scan_plugin_bundle(bundle) {
+                match run_isolated_bundle_scan(bundle) {
                     Ok(infos) => {
                         for info in infos {
                             let mut plugin = registry_plugin_from_scan(&info, scanned_at);

@@ -461,7 +461,9 @@ impl PluginHostPreviewEngine {
     }
 
     pub fn set_continuous_mode(&mut self, enabled: bool) {
-        self.bridge.continuous_mode.store(enabled, Ordering::Release);
+        self.bridge
+            .continuous_mode
+            .store(enabled, Ordering::Release);
     }
 
     pub fn continuous_mode(&self) -> bool {
@@ -502,9 +504,7 @@ impl PluginHostPreviewEngine {
     /// correct trade for a glitch-free state swap.
     pub fn set_instance_state(&self, plugin_instance_id: &str, state: &Vst3PluginState) -> bool {
         let Some(instance) = self.instances.get(plugin_instance_id) else {
-            eprintln!(
-                "[plugin-host-state] set_state instance={plugin_instance_id} loaded=false"
-            );
+            eprintln!("[plugin-host-state] set_state instance={plugin_instance_id} loaded=false");
             return false;
         };
         let _voice_guard = instance.midi.lock();
@@ -645,7 +645,8 @@ impl PluginHostPreviewEngine {
             // release (VST3 terminate) happens on this thread, not mid-block on
             // the audio producer.
             self.publish_bridge_snapshot();
-            self.bridge.wait_snapshot_observed(Duration::from_millis(10));
+            self.bridge
+                .wait_snapshot_observed(Duration::from_millis(10));
         }
         drop(retired);
         eprintln!("[plugin-host-registry] instances={}", self.instances.len());
@@ -673,7 +674,9 @@ impl PluginHostPreviewEngine {
         eprintln!("[plugin-editor] open instance={plugin_instance_id} uses_runtime_instance=true");
         eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
         eprintln!("[plugin-editor] no_duplicate_component_created=true");
-        instance.processor.embed_set_instance_label(plugin_instance_id);
+        instance
+            .processor
+            .embed_set_instance_label(plugin_instance_id);
         instance
             .processor
             .embed_editor(parent_hwnd, 0, 0, width, height)
@@ -774,7 +777,10 @@ impl PluginHostPreviewEngine {
             );
             return;
         };
-        instance.midi.lock().preview_note_on(channel, pitch, velocity);
+        instance
+            .midi
+            .lock()
+            .preview_note_on(channel, pitch, velocity);
         eprintln!("[plugin-host-midi] queued note_on to VSTi");
     }
 
@@ -824,7 +830,9 @@ impl PluginHostPreviewEngine {
     }
 
     pub fn has_active_preview(&self) -> bool {
-        self.instances.values().any(|i| i.midi.lock().has_activity())
+        self.instances
+            .values()
+            .any(|i| i.midi.lock().has_activity())
     }
 
     pub fn has_loaded_instances(&self) -> bool {

@@ -33,40 +33,82 @@ pub enum ScannerBinaryLocation {
 }
 
 pub fn locate_scanner_binary() -> Result<PathBuf, PluginScanError> {
-    if let Ok(path) = std::env::var("FUTUREBOARD_PLUGIN_SCANNER") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(PluginScanError::ScannerBinaryMissing(
-            path.display().to_string(),
-        ));
-    }
-
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(dir) = current_exe.parent() {
             let candidate = scanner_binary_name(dir);
             if candidate.is_file() {
                 return Ok(candidate);
             }
+            return Err(PluginScanError::ScannerBinaryMissing(
+                candidate.display().to_string(),
+            ));
         }
     }
 
-    let compile_time = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/futureboard_plugin_scanner");
-    if compile_time.is_file() {
-        return Ok(compile_time);
-    }
-
-    let release = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/release/futureboard_plugin_scanner");
-    if release.is_file() {
-        return Ok(release);
-    }
-
     Err(PluginScanError::ScannerBinaryMissing(
-        "futureboard_plugin_scanner".into(),
+        "{appdir}/futureboard_plugin_scanner.exe".into(),
     ))
+}
+
+pub fn run_isolated_bundle_scan(bundle: &Path) -> Result<Vec<PluginInfo>, String> {
+    let format = bundle_scan_format(bundle)
+        .ok_or_else(|| format!("Unsupported plug-in bundle: {}", bundle.display()))?;
+    let scanner = locate_scanner_binary().map_err(|error| error.message())?;
+    let output = Command::new(&scanner)
+        .arg("--format")
+        .arg(format.cli_arg())
+        .arg("--json")
+        .arg("--path")
+        .arg(bundle)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| PluginScanError::ScannerLaunchFailed(error.to_string()).message())?;
+
+    if !output.status.success() {
+        let exit_code = output.status.code();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        return Err(match (exit_code, detail.is_empty()) {
+            (Some(code), true) => {
+                format!("{} scanner process crashed (exit {code})", format.cli_arg())
+            }
+            (Some(code), false) => {
+                format!(
+                    "{} scanner process failed (exit {code}): {detail}",
+                    format.cli_arg()
+                )
+            }
+            (None, true) => format!("{} scanner process crashed", format.cli_arg()),
+            (None, false) => format!("{} scanner process crashed: {detail}", format.cli_arg()),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: ScanResultPayload = serde_json::from_str(&stdout)
+        .map_err(|error| PluginScanError::ScannerOutputInvalid(error.to_string()).message())?;
+    if payload.process_crashed {
+        return Err(payload
+            .error
+            .unwrap_or_else(|| format!("{} scanner process crashed", format.cli_arg())));
+    }
+    if let Some(error) = payload.error {
+        return Err(error);
+    }
+    Ok(payload
+        .plugins
+        .iter()
+        .map(plugin_info_from_descriptor)
+        .collect())
+}
+
+fn bundle_scan_format(bundle: &Path) -> Option<PluginScanFormat> {
+    let ext = bundle.extension()?.to_str()?;
+    match ext.to_ascii_lowercase().as_str() {
+        "vst3" => Some(PluginScanFormat::Vst3),
+        "clap" => Some(PluginScanFormat::Clap),
+        _ => None,
+    }
 }
 
 fn scanner_binary_name(dir: &Path) -> PathBuf {

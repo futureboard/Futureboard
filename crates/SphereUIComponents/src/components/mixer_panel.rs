@@ -652,11 +652,17 @@ fn inserts_section(
     _index: usize,
     callbacks: &MixerCallbacks,
 ) -> impl IntoElement {
+    let effect_start = if track.track_type == TrackType::Instrument {
+        1
+    } else {
+        0
+    };
     let used = track.inserts.len();
     let at_max = used >= MAX_INSERT_SLOTS;
 
     let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
-    for (insert_index, slot) in track.inserts.iter().enumerate() {
+    for (offset, slot) in track.effect_inserts().iter().enumerate() {
+        let insert_index = effect_start + offset;
         chips = chips.child(insert_chip(&track.id, insert_index, slot, callbacks));
     }
     // Requirement: always render one trailing empty slot after the last insert,

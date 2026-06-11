@@ -414,14 +414,18 @@ impl Render for MessageBoxWindow {
                 }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
-            .child(external_window_titlebar_compact(title, "message-box-close", {
-                let target = target.clone();
-                move |window, cx| {
-                    let _ = target.update(cx, |this, cx| {
-                        this.finish(this.cancel_response_index(), window, cx);
-                    });
-                }
-            }))
+            .child(external_window_titlebar_compact(
+                title,
+                "message-box-close",
+                {
+                    let target = target.clone();
+                    move |window, cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            this.finish(this.cancel_response_index(), window, cx);
+                        });
+                    }
+                },
+            ))
             .child(message_box_body(
                 &self.options,
                 Arc::new({

@@ -308,15 +308,10 @@ impl StudioLayout {
                 let track_id = track_id.clone();
                 let insert_id = insert_id.clone();
                 StudioLayout::defer_update(&this, cx, move |this, cx| {
-                    // Close any open editor window for this slot before dropping
-                    // the descriptor — every open pairs with a close.
-                    this.close_insert_editor(&track_id, &insert_id, cx);
-                    this.unload_bridge_plugin(&insert_id);
-                    this.timeline.update(cx, |timeline, _cx| {
-                        timeline.state.remove_insert(&track_id, &insert_id);
-                    });
-                    this.mark_dirty();
-                    this.engine_project_dirty = true;
+                    // Full RemoveInstrumentPlugin lifecycle: close editor, unload
+                    // the bridge-host instance, remove the engine sink, drop the
+                    // slot, re-sync the engine, and assert the instance is gone.
+                    this.remove_insert_fully(&track_id, &insert_id, cx, "mixer_remove_insert");
                     cx.notify();
                 });
             })

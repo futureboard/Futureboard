@@ -7,9 +7,9 @@ pub mod template;
 pub use format::{decode_project, encode_project, ProjectError, PROJECT_MAGIC, PROJECT_VERSION};
 pub use io::{
     create_project_folder, default_projects_dir, import_audio_file_to_project, load_project,
-    project_backup_path,
-    project_temp_path, sanitize_project_name, save_project, validate_project_file,
-    verify_project_file, LEGACY_PROJECT_FILE_EXT, PROJECT_FILE_EXT, SUPPORTED_PROJECT_FILE_EXTS,
+    project_backup_path, project_temp_path, sanitize_project_name, save_project,
+    validate_project_file, verify_project_file, LEGACY_PROJECT_FILE_EXT, PROJECT_FILE_EXT,
+    SUPPORTED_PROJECT_FILE_EXTS,
 };
 pub use recent::{RecentProject, RecentProjectsStore};
 pub use session::ProjectSession;
@@ -738,10 +738,8 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
             crate::components::timeline::timeline_state::TimeSignatureMap::with_default_4_4();
         tl.time_signature_map.points[0].numerator =
             project.settings.time_sig_num.clamp(1, 64) as u16;
-        tl.time_signature_map.points[0].denominator = project
-            .settings
-            .time_sig_den
-            .clamp(1, 32) as u16;
+        tl.time_signature_map.points[0].denominator =
+            project.settings.time_sig_den.clamp(1, 32) as u16;
     } else {
         tl.time_signature_map =
             crate::components::timeline::timeline_state::TimeSignatureMap::with_points(

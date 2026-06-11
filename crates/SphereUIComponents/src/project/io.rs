@@ -228,7 +228,10 @@ fn prepare_portable_assets(
         .iter()
         .filter_map(|a| {
             let rel = a.relative_path.clone()?;
-            let fp = a.source_fingerprint.as_deref().and_then(AudioFingerprint::parse)?;
+            let fp = a
+                .source_fingerprint
+                .as_deref()
+                .and_then(AudioFingerprint::parse)?;
             Some((rel, fp))
         })
         .collect();
@@ -272,7 +275,9 @@ fn prepare_portable_assets(
                     .copied()
                     .or_else(|| audio_fingerprint(&source_abs));
                 if let Some(fp) = fingerprint {
-                    content_index.entry(fp).or_insert_with(|| relative_string.clone());
+                    content_index
+                        .entry(fp)
+                        .or_insert_with(|| relative_string.clone());
                 }
                 *source_path = PathBuf::from(&relative_string);
                 *asset_id = relative_string.clone();
@@ -821,7 +826,10 @@ mod tests {
         let mut project = FutureboardProject::new("Dedup");
         project.tracks.push(audio_track(
             "track-1",
-            vec![audio_clip("clip-a", &source_a), audio_clip("clip-b", &source_b)],
+            vec![
+                audio_clip("clip-a", &source_a),
+                audio_clip("clip-b", &source_b),
+            ],
         ));
 
         let project_file = root.join("Dedup.fbproj");
@@ -869,7 +877,10 @@ mod tests {
         let mut project = FutureboardProject::new("Collision");
         project.tracks.push(audio_track(
             "track-1",
-            vec![audio_clip("clip-a", &source_a), audio_clip("clip-b", &source_b)],
+            vec![
+                audio_clip("clip-a", &source_a),
+                audio_clip("clip-b", &source_b),
+            ],
         ));
 
         let project_file = root.join("Collision.fbproj");
@@ -907,7 +918,10 @@ mod tests {
         let source2 = ext2.join("again.wav");
         fs::write(&source2, b"eager copy bytes").unwrap();
         let dest2 = import_audio_file_to_project(&source2, &root).unwrap();
-        assert_eq!(dest2, expected, "identical content must reuse the existing copy");
+        assert_eq!(
+            dest2, expected,
+            "identical content must reuse the existing copy"
+        );
         assert_eq!(audio_files_in(&root), vec!["loop.wav".to_string()]);
 
         // A file already inside the project folder is returned unchanged.
@@ -988,8 +1002,14 @@ mod tests {
             lods: vec![WaveformLod {
                 samples_per_peak: 256,
                 peaks: vec![
-                    WaveformPeak { min: -0.5, max: 0.5 },
-                    WaveformPeak { min: -0.2, max: 0.8 },
+                    WaveformPeak {
+                        min: -0.5,
+                        max: 0.5,
+                    },
+                    WaveformPeak {
+                        min: -0.2,
+                        max: 0.8,
+                    },
                 ],
             }],
         }
@@ -999,7 +1019,7 @@ mod tests {
     #[test]
     fn import_writes_project_audio_and_peak_cache_paths() {
         use crate::components::timeline::waveform_peak_file::{
-            read_peak_file, write_peak_file, waveform_peak_relative_path_for_asset,
+            read_peak_file, waveform_peak_relative_path_for_asset, write_peak_file,
         };
         use crate::paths::ProjectFolderLayout;
 
@@ -1052,7 +1072,7 @@ mod tests {
     #[test]
     fn reopen_loads_peak_cache_from_disk() {
         use crate::components::timeline::waveform_peak_file::{
-            read_peak_file, write_peak_file, waveform_peak_relative_path_for_asset,
+            read_peak_file, waveform_peak_relative_path_for_asset, write_peak_file,
         };
 
         let root = temp_dir("peak-b");
@@ -1127,9 +1147,7 @@ mod tests {
     /// Test D: missing peak file is a disk miss (regeneration path).
     #[test]
     fn missing_peak_file_reports_disk_miss() {
-        use crate::components::timeline::waveform_peak_file::{
-            read_peak_file, PeakFileError,
-        };
+        use crate::components::timeline::waveform_peak_file::{read_peak_file, PeakFileError};
 
         let root = temp_dir("peak-d");
         let asset_id = "Assets/Audio/loop.wav";
@@ -1185,7 +1203,10 @@ mod tests {
     #[test]
     fn user_message_maps_invalid_magic() {
         let err = ProjectError::InvalidMagic;
-        assert_eq!(err.user_message(), "This file is not a Futureboard project.");
+        assert_eq!(
+            err.user_message(),
+            "This file is not a Futureboard project."
+        );
     }
 
     #[test]

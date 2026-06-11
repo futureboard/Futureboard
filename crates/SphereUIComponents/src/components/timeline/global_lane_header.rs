@@ -66,7 +66,10 @@ fn lane_icon_button(
         .justify_center()
         .rounded_sm()
         .border(px(1.0))
-        .border_color(Colors::with_alpha(Colors::accent_primary(), if accent { 0.35 } else { 0.0 }))
+        .border_color(Colors::with_alpha(
+            Colors::accent_primary(),
+            if accent { 0.35 } else { 0.0 },
+        ))
         .bg(Colors::with_alpha(Colors::surface_raised(), 0.35))
         .cursor(CursorStyle::PointingHand)
         .hover(|s| {

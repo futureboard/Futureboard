@@ -13,7 +13,7 @@ use super::timeline::Timeline;
 use super::timeline_state::AudioImportState;
 use super::waveform_cache::{self, WaveformFileMeta, WaveformPreview, CHUNK_PEAKS, PEAK_FINE_SPP};
 use super::waveform_peak_file::{
-    read_peak_file, write_peak_file, waveform_peak_relative_path_for_asset, PeakFileError,
+    read_peak_file, waveform_peak_relative_path_for_asset, write_peak_file, PeakFileError,
 };
 use crate::layout::StudioLayout;
 use crate::project::io::relative_path_in_project;
@@ -328,8 +328,8 @@ async fn maybe_copy_into_project(
     match copied {
         Ok(dest) => {
             let dest_str = dest.to_string_lossy().to_string();
-            let relative_asset_id = relative_path_in_project(&dest, &root)
-                .unwrap_or_else(|| asset_key.to_string());
+            let relative_asset_id =
+                relative_path_in_project(&dest, &root).unwrap_or_else(|| asset_key.to_string());
             let old_key = asset_key.to_string();
             let new_key = relative_asset_id.clone();
             let _ = timeline.update(cx, |timeline, cx| {
@@ -352,10 +352,7 @@ async fn maybe_copy_into_project(
                     "[AudioImport] eager copy retargeted asset_id={new_key} dest={}",
                     dest.display()
                 );
-                eprintln!(
-                    "[AudioImport] project asset path={}",
-                    dest.display()
-                );
+                eprintln!("[AudioImport] project asset path={}", dest.display());
             }
             (dest, new_key)
         }
@@ -542,9 +539,10 @@ pub fn schedule_project_waveform_restore(
     let mut entries: Vec<(String, Option<PathBuf>)> = Vec::new();
 
     for asset in &project.assets {
-        let audio_path = asset.relative_path.as_ref().map(|rel| {
-            project_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
-        });
+        let audio_path = asset
+            .relative_path
+            .as_ref()
+            .map(|rel| project_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)));
         entries.push((asset.id.clone(), audio_path));
     }
 
@@ -569,10 +567,7 @@ pub fn schedule_project_waveform_restore(
             continue;
         }
         if let Some(path) = audio_path.as_ref().filter(|p| p.exists()) {
-            eprintln!(
-                "[ProjectLoad] audio asset resolved path={}",
-                path.display()
-            );
+            eprintln!("[ProjectLoad] audio asset resolved path={}", path.display());
         }
         let peak_rel = project
             .assets
@@ -598,9 +593,10 @@ pub fn schedule_project_waveform_restore(
                 waveform_cache::set_import_state(&asset_id, AudioImportState::Ready);
                 let asset_id_for_timeline = asset_id.clone();
                 let _ = timeline.update(cx, |timeline, cx| {
-                    timeline
-                        .state
-                        .set_audio_import_for_asset(&asset_id_for_timeline, AudioImportState::Ready);
+                    timeline.state.set_audio_import_for_asset(
+                        &asset_id_for_timeline,
+                        AudioImportState::Ready,
+                    );
                     cx.notify();
                 });
             }
@@ -665,7 +661,15 @@ pub fn spawn_timeline_import(
     let timeline_weak = _timeline.downgrade();
     let layout_weak = layout.map(|e| e.downgrade());
     cx.spawn(async move |_timeline, cx| {
-        run_import_pipeline(asset_key, path, project_root, timeline_weak, layout_weak, cx).await;
+        run_import_pipeline(
+            asset_key,
+            path,
+            project_root,
+            timeline_weak,
+            layout_weak,
+            cx,
+        )
+        .await;
     })
     .detach();
 }
@@ -690,8 +694,15 @@ pub fn spawn_timeline_import_from_layout(
     let timeline_weak = timeline.downgrade();
     let layout_weak = layout.downgrade();
     cx.spawn(async move |_layout, cx| {
-        run_import_pipeline(asset_key, path, project_root, timeline_weak, Some(layout_weak), cx)
-            .await;
+        run_import_pipeline(
+            asset_key,
+            path,
+            project_root,
+            timeline_weak,
+            Some(layout_weak),
+            cx,
+        )
+        .await;
     })
     .detach();
 }

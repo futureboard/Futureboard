@@ -76,11 +76,10 @@ mod imp {
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
         FillRect, GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx,
-        SelectObject, SetBkMode, SetTextColor, UpdateWindow, BLACK_BRUSH, DEFAULT_CHARSET,
-        CLIP_DEFAULT_PRECIS, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-        FF_DONTCARE, FONT_QUALITY,
-        FW_MEDIUM, HBRUSH, HDC, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, OUT_TT_PRECIS,
-        PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+        SelectObject, SetBkMode, SetTextColor, UpdateWindow, BLACK_BRUSH, CLIP_DEFAULT_PRECIS,
+        DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+        FF_DONTCARE, FONT_QUALITY, FW_MEDIUM, HBRUSH, HDC, MONITOR_DEFAULTTONEAREST,
+        MONITOR_DEFAULTTOPRIMARY, OUT_TT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
     };
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, ScreenToClient, MONITORINFO};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -93,11 +92,11 @@ mod imp {
         ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
         GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW,
         IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU,
-        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
-        HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG, PM_REMOVE,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, TranslateMessage, WINDOW_EX_STYLE,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWLP_USERDATA, GWL_EXSTYLE,
+        GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
+        HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG,
+        PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE,
         WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_GETMINMAXINFO,
         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE,
         WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT, WM_PAINT, WM_SIZE, WNDCLASSW,
@@ -224,8 +223,8 @@ mod imp {
         use windows::Win32::Graphics::Gdi::ClientToScreen;
         use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus, IsWindowEnabled};
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetAncestor, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
-            WindowFromPoint, GA_ROOT,
+            GetAncestor, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, WindowFromPoint,
+            GA_ROOT,
         };
         fn class_of(hwnd: HWND) -> String {
             if hwnd.0.is_null() {
@@ -357,7 +356,12 @@ mod imp {
     }
 
     /// Desired shell **client** size from plugin content + chrome (spec Part 2).
-    fn shell_client_size(content_w: i32, content_h: i32, titlebar_h: i32, border: i32) -> (i32, i32) {
+    fn shell_client_size(
+        content_w: i32,
+        content_h: i32,
+        titlebar_h: i32,
+        border: i32,
+    ) -> (i32, i32) {
         (
             content_w.max(1),
             (content_h.max(1) + titlebar_h + border).max(1),
@@ -506,9 +510,7 @@ mod imp {
         inner
             .last_layout_x
             .store(layout.content_x, Ordering::Relaxed);
-        inner
-            .last_layout_y
-            .store(content_y, Ordering::Relaxed);
+        inner.last_layout_y.store(content_y, Ordering::Relaxed);
         inner
             .last_layout_w
             .store(layout.content_w, Ordering::Relaxed);
@@ -976,10 +978,7 @@ mod imp {
             let em = t.title_em;
             static TITLE_LOG: Once = Once::new();
             TITLE_LOG.call_once(|| {
-                eprintln!(
-                    "[PluginEditor] title_font_family={}",
-                    t.font.family_primary
-                );
+                eprintln!("[PluginEditor] title_font_family={}", t.font.family_primary);
                 eprintln!("[PluginEditor] title_font_size={em}");
                 eprintln!("[PluginEditor] title_text={title}");
             });
@@ -1788,11 +1787,7 @@ mod imp {
                 eprintln!("[plugin-editor-window] native_content_region_reserved=true");
                 log_content_rect(top);
                 let dpi = GetDpiForWindow(top);
-                let dpi_scale = if dpi == 0 {
-                    1.0
-                } else {
-                    dpi as f32 / 96.0
-                };
+                let dpi_scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
                 eprintln!("[UI] dpi_scale={dpi_scale:.3}");
                 eprintln!("[UI] default_font={}", crate::theme::FONT_FAMILY);
                 eprintln!(
@@ -2023,7 +2018,11 @@ mod imp {
         pub fn shell_dpi(&self) -> u32 {
             let top = hwnd_from(self.top_hwnd);
             let dpi = unsafe { GetDpiForWindow(top) };
-            if dpi == 0 { 96 } else { dpi }
+            if dpi == 0 {
+                96
+            } else {
+                dpi
+            }
         }
 
         /// Resize the window so the content area equals `content_w x content_h`
@@ -2094,8 +2093,7 @@ mod imp {
                         0,
                         0,
                         0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
-                            | SWP_FRAMECHANGED,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     );
                 }
             }

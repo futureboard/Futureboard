@@ -72,7 +72,10 @@ mod tests {
     fn bridge_region_names_are_unique_per_insert_instance() {
         let a = bridge_region_name("insert-track1-1");
         let b = bridge_region_name("insert-track1-2");
-        assert_ne!(a, b, "each insert instance must get its own shared region name");
+        assert_ne!(
+            a, b,
+            "each insert instance must get its own shared region name"
+        );
         assert!(a.contains("insert-track1-1"));
         assert!(b.contains("insert-track1-2"));
     }
@@ -134,10 +137,12 @@ impl PluginBridgeRuntime {
         instance_id: &str,
     ) -> Option<DAUx::plugin_bridge::SharedPluginBridgeSink> {
         let region = self.shared_audio.get(instance_id)?;
-        Some(sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::into_shared(
-            region.clone(),
-            self.kick.clone(),
-        ))
+        Some(
+            sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::into_shared(
+                region.clone(),
+                self.kick.clone(),
+            ),
+        )
     }
 
     pub fn loaded_descriptor(&self, instance: &str) -> Option<BridgeLoadedPlugin> {
@@ -423,6 +428,12 @@ impl PluginBridgeRuntime {
         let _ = self.client.unload_plugin(plugin_instance_id.clone());
         self.loaded.remove(&plugin_instance_id);
         self.shared_audio.remove(&plugin_instance_id);
+    }
+
+    /// True while this instance id is still tracked as a loaded bridge plugin.
+    /// Used by the removal invariant check to prove the instance is gone.
+    pub fn is_loaded(&self, plugin_instance_id: &str) -> bool {
+        self.loaded.contains_key(plugin_instance_id)
     }
 
     /// Capture current VST3 states from the host for `instance_ids`

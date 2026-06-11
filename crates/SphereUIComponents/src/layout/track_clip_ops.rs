@@ -95,19 +95,14 @@ impl StudioLayout {
             }
         }
 
-        // 2. Close every open editor owned by the track. Dropping each
-        //    PluginEditorWindow detaches its native view and releases its
-        //    processor clone; the engine drops the matching clone on the next
-        //    project sync, after which the C++ instance is destroyed.
-        for insert_id in &insert_ids {
-            eprintln!(
-                "[PluginUnload] track_id={track_id} insert_id={insert_id} action=close_editor reason=track_delete"
-            );
-            self.close_insert_editor(track_id, insert_id, cx);
-        }
-
+        // 2. Tear down every insert on the track (editor window + external
+        //    bridge-host instance + engine bridge sink). `teardown_insert_instance`
+        //    closes the editor, so the `insert_ids` set above is only used for the
+        //    diagnostic count. The in-process VST3 graph nodes are released by the
+        //    engine reconcile once `delete_track` removes the track and the next
+        //    project sync runs, after which the C++ instances are destroyed.
         for plugin_id in &plugin_ids {
-            self.unload_bridge_plugin(plugin_id);
+            self.teardown_insert_instance(track_id, plugin_id, cx, "track_delete");
             eprintln!("[GraphUpdate] remove_plugin_node={plugin_id}");
             eprintln!("[PluginUnload] plugin={plugin_id} released=pending_runtime_reconcile");
         }
@@ -282,9 +277,12 @@ impl StudioLayout {
                 } else {
                     continue;
                 };
-                let mut clip = snapshot.clip.clone();
-                clip.id = timeline.state.next_clip_id();
-                clip.start_beat = (clip.start_beat + offset).max(0.0);
+                let clip = timeline.state.clone_clip_for_insert(
+                    &snapshot.clip,
+                    timeline.state.next_clip_id(),
+                    snapshot.clip.name.clone(),
+                    (snapshot.clip.start_beat + offset).max(0.0),
+                );
                 pasted_ids.push(clip.id.clone());
                 timeline.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
             }
@@ -343,13 +341,23 @@ impl StudioLayout {
     }
 
     pub(super) fn duplicate_selected_clip(&mut self, cx: &mut Context<Self>) {
-        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
-            if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
-                timeline.state.duplicate_clip(&id);
-                cx.notify();
+            let selected = timeline.state.selection.selected_clip_ids.clone();
+            if selected.is_empty() {
+                return;
             }
+            let mut clips = Vec::new();
+            for id in selected {
+                if let Some((track_id, clip)) = timeline.state.build_clip_duplicate_after(&id) {
+                    clips.push((track_id, clip));
+                }
+            }
+            if clips.is_empty() {
+                return;
+            }
+            timeline.run_edit_command(EditCommand::BatchCreateClips { clips }, cx);
         });
+        self.mark_dirty();
     }
 
     pub(super) fn toggle_selected_track_mute(&mut self, cx: &mut Context<Self>) {

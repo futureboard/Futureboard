@@ -1187,13 +1187,7 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
 
     if let Some(slot) = slot {
         section = section.child(insert_action_row(
-            &track.id,
-            slot,
-            0,
-            callbacks,
-            false,
-            track.inserts.len() > 1,
-            true,
+            &track.id, slot, 0, callbacks, false, false, true,
         ));
     } else {
         let track_id = track.id.clone();
@@ -1459,7 +1453,7 @@ fn track_inspector(
                 .gap(px(2.0))
                 .child(fb_section_header("CONTENTS"))
                 .child(kv_row("Clips", track.clips.len().to_string()))
-                .child(kv_row("Inserts", track.inserts.len().to_string()))
+                .child(kv_row("Inserts", track.effect_inserts().len().to_string()))
                 .child(kv_row("Sends", track.sends.len().to_string()))
                 .child(kv_row(
                     "Automation Lanes",

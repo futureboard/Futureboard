@@ -854,7 +854,10 @@ impl StudioLayout {
                             "noop",
                         ),
                         ContextMenuEntry::Separator,
-                        ContextMenuEntry::item("Add Time Signature Marker Here", "ts:add-point-here"),
+                        ContextMenuEntry::item(
+                            "Add Time Signature Marker Here",
+                            "ts:add-point-here",
+                        ),
                         ContextMenuEntry::item("Edit Time Signature…", "ts:edit"),
                         ContextMenuEntry::Separator,
                         ContextMenuEntry::item("Show Time Signature Track", "ts:open-track"),
@@ -869,10 +872,7 @@ impl StudioLayout {
                 let mut entries = vec![
                     ContextMenuEntry::disabled_item(format!("Tempo: {bpm:.1} BPM"), "noop"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item(
-                        "Add Tempo Point at Playhead",
-                        "tempo:add-marker",
-                    ),
+                    ContextMenuEntry::item("Add Tempo Point at Playhead", "tempo:add-marker"),
                     ContextMenuEntry::item("Edit Current BPM…", "tempo:edit-bpm"),
                 ];
                 if has_automation {

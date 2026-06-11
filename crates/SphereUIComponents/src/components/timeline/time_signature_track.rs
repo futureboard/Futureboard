@@ -1,10 +1,10 @@
-use crate::components::timeline::global_lane_header::{global_lane_header, GlobalLaneHeaderActions};
+use crate::components::timeline::global_lane_header::{
+    global_lane_header, GlobalLaneHeaderActions,
+};
 use crate::components::timeline::timeline_state::TimelineState;
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
-use gpui::{
-    div, px, InteractiveElement, IntoElement, ParentElement, Styled,
-};
+use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
 
 pub type TimeSignatureTrackDownCallback = std::sync::Arc<
     dyn Fn(&(f64, Option<String>, bool, u32), &mut gpui::Window, &mut gpui::App) + 'static,
@@ -140,8 +140,7 @@ pub fn time_signature_track_lane(
                             - crate::components::timeline::timeline_state::HEADER_WIDTH;
                         let beat = state_ctx.x_to_beat(lane_x).max(0.0);
                         let ppb = state_ctx.viewport.pixels_per_beat.max(1.0) as f64;
-                        let point_id =
-                            state_ctx.time_signature_point_at(beat, 12.0 / ppb);
+                        let point_id = state_ctx.time_signature_point_at(beat, 12.0 / ppb);
                         ctx_cb(&(beat, point_id, sx, sy), window, cx);
                     },
                 )

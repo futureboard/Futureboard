@@ -319,6 +319,11 @@ Futureboard UI style:
 - clear focus states
 - dense but readable
 
+The visual source of truth is the existing polished DAW dialog/panel style
+(`AddTrackDialog` / `DialogWindow` and the shared Settings components). Every
+new surface must look like it already shipped inside this app. When in doubt,
+copy the nearest existing polished surface — do not invent a new look.
+
 Use global theme tokens.
 
 Do not invent hardcoded colors.
@@ -374,6 +379,379 @@ All reusable controls should come from shared components where possible:
 - `ComboBox`
 - `ContextMenu`
 - `MessageBox`
+
+---
+
+# 7a. No Slop GUI — Hard Visual Discipline
+
+Futureboard is a **professional desktop DAW**, not an AI-generated landing
+page, not a SaaS dashboard, not a crypto app. "Slop GUI" is any default,
+generic, AI-looking treatment that screams *template*. It is banned on sight.
+
+## Banned outright (no slop)
+
+- **Gradient slop.** No purple→blue/teal hero gradients, no gradient buttons,
+  no gradient backgrounds, no gradient borders, no gradient text. Surfaces are
+  flat theme tokens. The only acceptable gradient is a *functional* one a DAW
+  actually needs — a meter scale, a fade curve, a waveform shade, an EQ/spectrum
+  fill — and only when the feature genuinely requires it, built from theme
+  tokens, never decorative.
+- **Glassmorphism / frosted-glass / heavy blur** as a style. (A subtle popover
+  backdrop is fine; "glass cards" are not.)
+- **Glow, neon, drop-shadow soup.** One subtle floating-window shadow is the
+  budget. No glowing accents, no colored shadows, no shadow on every element.
+- **Bubbly oversized radius.** Compact DAW radius only. No pill-shaped giant
+  buttons, no 16px+ rounded "cards."
+- **Emoji as UI.** Never use emoji as icons, status markers, or button glyphs.
+- **Generic SaaS layout.** No big hero headers, no centered marketing cards, no
+  huge whitespace, no "feature card grid," no onboarding-wizard fluff.
+- **Decorative anything.** No gratuitous accent bars, no rainbow category dots
+  beyond the real color system, no animated sparkles/gradients.
+
+## Required instead
+
+- Flat, dark, dense, token-driven surfaces.
+- Tight spacing tuned for desktop mouse/keyboard precision.
+- Borders and elevation done with `border.subtle` / `surface.raised`, not
+  shadow and glow.
+- Color used for **meaning** (status, accent, transport, meter), not decoration.
+- Native compact controls that match the Settings/dialog language.
+
+If a design looks like it could be a generic AI app screenshot, it is wrong.
+Make it look like a tool a mixing engineer uses for eight hours a day.
+
+
+---
+
+# 7c. Layout Discipline — No Flexbox Guessing, No Crooked Panels
+
+Futureboard layouts must be engineered, not guessed. A DAW screen is a dense
+instrument panel: one wrong flex value can break hit-testing, scroll geometry,
+plugin editor embedding, timeline alignment, or mixer sizing.
+
+## Prime layout rule
+
+Before changing layout, identify the owning rectangle and the child rectangles:
+
+```txt
+window
+  -> app chrome
+  -> main content rect
+    -> left browser
+    -> arrangement/timeline rect
+    -> inspector rect
+    -> bottom panel rect
+    -> status bar rect
+```
+
+Do not add layout wrappers until you know which rect they own.
+
+Every major panel must have a clear contract:
+
+```txt
+owner
+width / height source
+min / max size
+scroll owner
+clip owner
+overflow behavior
+z-index/layer behavior
+DPI coordinate space
+```
+
+If a patch changes layout without naming the owner rect and scroll/clip owner,
+it is probably wrong.
+
+## Banned layout behavior
+
+- Random `flex: 1` on nested containers without a documented parent height.
+- `height: 100%` chains where any parent has no explicit/min height.
+- Mixing absolute positioning with flex children without a measured anchor rect.
+- Hardcoded viewport constants when real chrome sizes exist.
+- Magic offsets like `left: 220px`, `bottom: 48px`, `width: calc(100vw - 300px)`
+  unless they are named constants derived from the layout model.
+- Adding spacer divs to "make it look right".
+- Letting child content decide the size of DAW panels that should be controlled
+  by the shell.
+- Using CSS grid/flex auto-placement for timeline, mixer, piano roll, ruler, or
+  plugin editor host areas where exact alignment is required.
+- Hiding layout bugs with `overflow: hidden` on the wrong parent.
+- Fixing clipping by increasing padding until it "looks okay".
+- Ignoring scrollbars, bottom panel height, inspector width, or collapsed browser
+  state in geometry calculations.
+
+## Required layout behavior
+
+- One shell computes the main chrome metrics.
+- Timeline/ruler/grid/clip geometry must use the same measured content rect.
+- Left headers and scrollable content must be separate rects with explicit
+  clipping.
+- Bottom panel height must be part of timeline viewport math.
+- Inspector/browser collapse state must be part of timeline viewport math.
+- Every scrollable area has exactly one scroll owner.
+- Every clipped drawing area has exactly one clip owner.
+- Every floating overlay has a measured anchor and window-clamped bounds.
+- Every resizable panel has min/max constraints.
+- Every panel must behave correctly when:
+  - window is maximized
+  - window is very small
+  - bottom panel is open/closed/resized
+  - browser is hidden
+  - inspector is visible
+  - DPI scale changes
+  - scrollbar appears/disappears
+
+## Flexbox rules for Web/Tailwind surfaces
+
+Flexbox is allowed for simple rows/columns, not for critical DAW geometry.
+
+Good flexbox uses:
+
+```txt
+toolbar rows
+button groups
+settings rows
+simple dialog content
+menu items
+small control clusters
+```
+
+Bad flexbox uses:
+
+```txt
+timeline ruler alignment
+clip positioning
+playhead alignment
+piano roll note grid
+mixer strip sizing
+plugin editor viewport
+waveform canvas sizing
+scroll-synced lane/header layout
+```
+
+When using flexbox:
+
+- Parent must have a known size.
+- Children that shrink must set `min-width: 0` / `min-height: 0` where needed.
+- Scroll children inside flex parents must explicitly use `min-height: 0`.
+- Do not combine `gap` with pixel-perfect timeline coordinates.
+- Do not rely on flex wrapping in DAW chrome unless explicitly requested.
+- Do not use `justify-center` to hide incorrect width calculations.
+- Do not use huge `p-*`, `m-*`, or `rounded-*` classes copied from SaaS UI.
+
+Tailwind-specific bans in DAW UI:
+
+```txt
+p-6 p-8 p-10
+text-xl text-2xl text-3xl
+rounded-2xl rounded-3xl
+shadow-xl shadow-2xl
+backdrop-blur
+bg-gradient-to-*
+from-* via-* to-*
+space-y-8 gap-8 gap-10
+container mx-auto
+max-w-7xl for app chrome
+```
+
+Use compact, intentional sizing instead.
+
+## GPUI layout rules
+
+- Prefer measured `Bounds`/rects from the shell over repeated local constants.
+- Do not derive timeline body size from stale hardcoded sidebar widths.
+- Do not let a child view mutate parent layout while the parent is rendering.
+- Avoid deeply nested `relative()` containers unless each one owns a distinct
+  coordinate space.
+- If a child uses `absolute()`, its coordinate space must be documented by the
+  parent.
+- For scrollable DAW content, compute visible range from the scroll offset and
+  content rect, not from full window bounds.
+- For ruler/automation/tempo/time-signature lanes, labels must be nowrap,
+  clamped inside the lane, and clipped by the lane content rect.
+
+## Canvas/WGPU layout rules
+
+Canvas/WGPU renderers must never guess dimensions from CSS alone.
+
+Required:
+
+```txt
+logical width
+logical height
+device pixel ratio
+scroll_x / scroll_y
+zoom / px_per_beat or px_per_second
+content origin
+clip rect
+```
+
+Rules:
+
+- Resize GPU/canvas surfaces only when measured size changes.
+- Convert logical↔physical pixels explicitly.
+- Keep ruler, grid, clips, playhead, automation, and MIDI notes on the same
+  coordinate conversion path.
+- Never draw outside the content clip rect unless the layer is intentionally
+  global, like a floating overlay.
+- Debug overlays must be env-gated.
+
+## Plugin editor layout rules
+
+Plugin editor hosting is not normal UI layout.
+
+- The GPUI shell owns the outer plugin window/surface.
+- The native child HWND/NSView owns the plugin editor client area.
+- The plugin editor client rect must be measured, not guessed.
+- Host chrome/header height must be subtracted before attaching/resizing the
+  plugin view.
+- VST3 `onSize()`/resize requests must update the host/client rect coherently.
+- Do not put plugin child windows inside flexbox-like auto layout assumptions.
+- Do not stretch plugin editors unless the plugin explicitly supports resize.
+- Clamp plugin editor size to sane min/max bounds and monitor work area.
+
+## Layout validation checklist
+
+After any layout change, validate at least the relevant subset:
+
+```txt
+1. fresh launch default size
+2. maximize window
+3. resize narrower/wider
+4. open/close browser
+5. open/close inspector
+6. resize bottom panel
+7. scroll timeline horizontally and vertically
+8. zoom timeline in/out
+9. open popover/menu near every window edge
+10. open plugin editor and resize if supported
+11. test at 100%, 125%, 150% DPI where possible
+12. verify no header bleed, no clipped labels, no phantom blank bands
+```
+
+If a patch affects timeline geometry, enable or add a debug flag like:
+
+```txt
+FUTUREBOARD_UI_DEBUG_CLIPS=1
+FUTUREBOARD_TIMELINE_VIEWPORT_DEBUG=1
+FUTUREBOARD_LAYOUT_DEBUG=1
+```
+
+Do not claim a layout fix is complete without checking the states it affects.
+
+---
+
+# 7d. No Slop Component Construction
+
+A component is slop if it looks acceptable in isolation but breaks when placed
+inside the real DAW shell.
+
+## Required component contract
+
+Every new reusable UI component must define:
+
+```txt
+size behavior: fixed / hug content / fill parent
+min size
+max size if any
+keyboard focus behavior
+mouse capture behavior
+scroll behavior if any
+empty state
+loading state
+error/disabled state
+DPI behavior if custom drawing
+```
+
+Components must not secretly own app-level state or shell geometry.
+
+## Banned component patterns
+
+- Component-local mock data that looks real.
+- Local persistent state that duplicates project state.
+- Controls that visually work but do not call real callbacks.
+- Buttons with no disabled/loading/error behavior.
+- Menus/popovers that are not anchored to measured bounds.
+- Dialogs that are not centered/clamped.
+- Text labels that wrap in DAW chrome unless explicitly designed to wrap.
+- Icons with hardcoded colors/sizes outside the shared icon system.
+- One-off scroll containers inside another scroll container without a clear
+  reason.
+- Components that only look correct at one window size.
+
+## Density contract
+
+Default DAW chrome should be compact:
+
+```txt
+body/control text: 11–13px
+secondary metadata: 10–12px
+toolbar height: compact and consistent
+buttons: desktop-sized, not web-landing-page-sized
+rows: dense but readable
+padding: intentional and small
+```
+
+Oversized font, padding, radius, and whitespace count as regressions unless the
+user explicitly asks for a presentation/marketing surface.
+
+## Visual QA before finishing UI tasks
+
+Before reporting done, inspect the result against this checklist:
+
+```txt
+Does it match the nearest existing polished Futureboard surface?
+Does it use theme tokens only?
+Does it avoid gradient/glow/glass/card slop?
+Does it keep compact DAW density?
+Does it align with neighboring controls?
+Does it survive resize/collapse/scroll/DPI?
+Does it avoid wrapping/clipping text accidentally?
+Does it have real callbacks or an explicitly disabled unfinished state?
+```
+
+If the answer is no, fix the component before claiming completion.
+
+---
+
+# 7b. Icon Rules
+
+Icons are **SVG only**, from exactly three sources:
+
+1. **Lucide** (`lucide` — primary set, preferred default)
+2. **Tabler Icons** (when Lucide lacks a glyph)
+3. **Custom in-house SVG** (hand-authored, committed to the repo asset/icon
+   layer) for DAW-specific glyphs Lucide/Tabler do not cover (transport,
+   meters, routing, MIDI, automation, plugin slots, etc.)
+
+Hard rules:
+
+- **No emoji** as icons, anywhere in product UI.
+- **No icon fonts** (FontAwesome, Material Icons font, Ionicons, etc.).
+- **No raster icons** (PNG/JPG/GIF) for UI chrome. SVG only.
+- **No random one-off downloaded SVGs** pasted inline. Route every glyph through
+  the shared icon component / asset layer.
+- **Do not mix sets visually.** Prefer Lucide everywhere; reach for Tabler only
+  when needed, matched to the same size and stroke weight so they read as one set.
+
+Style contract:
+
+- Icons inherit color from theme tokens via `currentColor` — never hardcode an
+  icon fill/stroke color.
+- Consistent size grid (e.g. 14/16/18/20px) and a single stroke width per scale.
+- Monochrome by default; multi-color icons are not allowed for standard chrome.
+- Render through the shared `IconButton` / icon component, not ad-hoc `<svg>` /
+  `img` tags scattered in feature code.
+
+Custom DAW icons:
+
+- Author as clean single-path/stroke SVG on the same grid and stroke width as
+  Lucide so they sit beside it seamlessly.
+- Store in the shared asset/icon layer with a stable name; reference by name.
+- No embedded gradients, filters, or raster data inside custom SVGs.
+
+When a task needs a new glyph: check Lucide first, then Tabler, then author a
+custom SVG that matches the set. Never fall back to emoji or an icon font.
 
 ---
 
@@ -702,6 +1080,98 @@ realtime callback -> plugin scanner
 
 ---
 
+# 13a. Audio Hot Path Enforcement — No Exceptions
+
+Any task touching `SphereDirectAudioEngine`, DAUx, plugin processing, recording,
+MIDI playback, bridge processing, or stream callbacks must first classify every
+changed function as one of:
+
+```txt
+Realtime hot path
+Audio control path
+Plugin host producer path
+UI/control path
+Build/test path
+```
+
+If a function can run from an audio callback, plugin process callback, bridge
+producer cycle, or block renderer, treat it as realtime until proven otherwise.
+
+## Mandatory realtime preflight
+
+Before implementing an audio/plugin patch, inspect for existing behavior in the
+exact files being changed:
+
+```bash
+rg "println!|eprintln!|dbg!|panic!|unwrap\(|expect\(" crates/SphereDirectAudioEngine crates/SpherePluginHost
+rg "serde_json|HashMap|BTreeMap|Vec::new|collect::<Vec|\.clone\(\)" crates/SphereDirectAudioEngine crates/SpherePluginHost
+rg "sleep\(|thread::sleep|Duration::from_micros|Duration::from_millis" crates/SphereDirectAudioEngine crates/SpherePluginHost
+```
+
+These greps are not proof by themselves, but they show danger zones. Do not
+blindly delete everything. Understand whether the match is in tests/control code
+or a hot path.
+
+## Hard ban in realtime hot paths
+
+Never add these to realtime code:
+
+```txt
+println!, eprintln!, dbg!
+format!, serde_json, JSON parsing
+filesystem/network/process calls
+thread sleep / wait on UI thread
+unbounded channel send/recv
+Mutex/RwLock that can block
+Vec/String allocation in steady state
+HashMap lookup by String in steady state
+panic/unwrap/expect
+plugin scan/load/unload
+project save/load
+UI update / cx.notify / GPUI entity update
+Node/Electron calls
+```
+
+## Required alternatives
+
+Use:
+
+```txt
+preallocated buffers
+fixed-size arrays or bounded rings
+immutable runtime snapshots
+compact numeric handles instead of String IDs
+resolved enums instead of JSON/HashMap roles
+atomic counters for diagnostics
+bounded diagnostics ring drained by non-realtime thread
+control-thread logging gated by debug flags
+```
+
+If a requested feature seems to require allocation/logging in the callback,
+split it:
+
+```txt
+UI/control thread prepares immutable snapshot
+audio callback reads snapshot without allocation
+non-realtime drain thread prints diagnostics later
+```
+
+## Realtime patch report requirement
+
+For audio/plugin patches, the final report must include:
+
+```txt
+Realtime safety:
+- hot path functions touched
+- allocations/logging/locks added: none, or explain why not hot path
+- diagnostics mechanism used
+```
+
+Never claim "realtime safe" unless this check was actually done.
+
+
+---
+
 # 14. Audio Engine Rules
 
 The UI controls audio but must not become the audio path.
@@ -829,6 +1299,113 @@ Do not force JUCE into the project unless explicitly requested.
 
 ---
 
+# 16a. Bridged Plugin Host Rules — No Fake Wiring
+
+Bridged plugins are not allowed to have "looks connected" code paths that silently
+do nothing. If a bridge structure exists, either wire it end-to-end or clearly
+mark it unsupported in diagnostics/status.
+
+The bridge must be treated as a cross-process realtime system:
+
+```txt
+Audio engine realtime callback
+  -> shared memory request/audio/MIDI/param rings
+  -> wake producer without polling
+  -> plugin host producer
+  -> plugin process call
+  -> shared memory response
+  -> engine freshness guard
+```
+
+## Producer wake rule
+
+Do not use sleep polling as the primary bridge producer mechanism.
+
+Bad:
+
+```rust
+loop {
+    service_audio_bridge();
+    std::thread::sleep(Duration::from_micros(250));
+}
+```
+
+Required on Windows:
+
+```txt
+engine publishes request_seq
+engine signals named event / SetEvent
+host producer WaitForSingleObject
+bounded timeout only for shutdown/watchdog
+freshness guard remains in engine
+```
+
+Temporary hardening is acceptable but not a replacement for event-driven wake:
+
+```txt
+timeBeginPeriod(1)
+MMCSS "Pro Audio" for producer thread
+suitable thread priority
+clean shutdown with AvRevertMmThreadCharacteristics/timeEndPeriod
+```
+
+If the event is not signaled, shutdown must not deadlock.
+
+## Per-instance routing rule
+
+Never broadcast MIDI or parameter events from one bridged insert to every loaded
+plugin voice.
+
+Every bridge region/ring/event must be routed by stable instance identity:
+
+```txt
+bridge region -> instance_id -> exact loaded voice/processor
+```
+
+Required tests or diagnostics:
+
+```txt
+MIDI event for instance A does not reach instance B
+Param event for instance A does not reach instance B
+Shutdown does not deadlock with no events
+```
+
+## Freshness guard rule
+
+The freshness guard is correct. Do not remove it to hide timing bugs.
+
+If stale audio appears:
+
+```txt
+fix producer scheduling/wake
+fix bridge deadline
+fix host processing time
+do not bypass the guard permanently
+```
+
+Stale plugin output is worse than silence/dry fallback because it can feed old
+audio into a new timeline position.
+
+## Bridge diagnostics rule
+
+Bridge diagnostics must not print from the audio callback.
+
+Use:
+
+```txt
+bridge_missed_count
+bridge_recovered_count
+midi_ring_full_count
+param_ring_full_count
+diagnostics_ring_dropped_count
+last_instance_id / last_seq / last_error on control side
+```
+
+Print only from a non-realtime thread and only behind debug flags.
+
+
+---
+
 # 17. PluginHost.node Rules
 
 `PluginHost.node` is a control bridge, not the realtime audio path.
@@ -922,6 +1499,136 @@ Linux:
 
 - support depends on X11/Wayland/plugin format details
 - scaffold safely if not implemented
+
+---
+
+# 18a. VST3 Correctness Rules — State, Context, Params, PDC
+
+A VST3 plugin that opens its editor is not automatically "working." A DAW host is
+not usable until state, timing, parameters, MIDI routing, and latency are wired
+correctly.
+
+## Plugin state is P0
+
+Every live insert must be able to save and restore plugin state.
+
+Required model:
+
+```txt
+Project insert
+  -> plugin identity
+  -> plugin format/class id
+  -> component state blob
+  -> controller state blob
+  -> payload version
+```
+
+Required VST3 behavior:
+
+```txt
+IComponent::getState / setState
+IEditController::getState / setState when available
+opaque binary blobs
+restore after instantiate, before playback/editor open
+structured error if restore fails
+```
+
+Rules:
+
+- Do not interpret plugin state bytes in Rust.
+- Do not silently discard failed state restore.
+- Do not fetch or restore state on the realtime callback.
+- If project format is text-only, base64 is acceptable as a temporary layer.
+- Missing state is okay; failed state must be surfaced.
+
+## ProcessContext must be real
+
+Never hardcode VST3 `ProcessContext` as production behavior.
+
+Bad permanent values:
+
+```txt
+tempo = 120.0 forever
+time signature = 4/4 forever
+state = playing forever
+projectTimeSamples never advances
+```
+
+Required per-block context where available:
+
+```txt
+sample_rate
+block_frames
+playing/stopped
+recording if known
+project_time_samples
+continuous sample position
+tempo at current timeline position
+time signature at current timeline position
+PPQ position if available
+bar start PPQ if available
+loop/cycle state if supported
+```
+
+Set VST3 context flags only for fields that are actually valid.
+
+The engine already owns musical timing. The bridge/in-process processor must
+receive that timing; do not duplicate fake host state inside the C++ bridge.
+
+## Parameter automation must be end-to-end
+
+A parameter event is not implemented until it reaches the target plugin instance.
+
+Required chain:
+
+```txt
+automation lane / parameter command
+  -> engine runtime event
+  -> target insert identity
+  -> in-process VST3 parameter queue
+  or shared bridge param ring
+  -> host producer pop
+  -> exact plugin instance
+  -> VST3 inputParameterChanges or documented fallback
+```
+
+Rules:
+
+- Do not write only to a local HashMap for bridged plugins.
+- Do not silently ignore unsupported bridged automation.
+- Do not broadcast parameters to all loaded plugins.
+- Include sample/block offset when available.
+- Ring-full behavior must be non-blocking and reported via counters/diagnostics.
+
+## PDC must include bridged plugins
+
+Latency compensation must count:
+
+```txt
+in-process plugin reported latency
+bridge handoff latency
+bridged plugin reported latency
+bus/return/send topology rules
+```
+
+Minimum bridged latency is at least one processing block if the architecture
+requires a one-block handoff.
+
+If plugin-reported latency is unavailable:
+
+```txt
+bridge_latency_samples = block_frames
+```
+
+If available:
+
+```txt
+bridge_latency_samples = block_frames + plugin_reported_latency_samples
+```
+
+Add tests for no-plugin, in-process plugin, bridge-minimum, and bridge+reported
+latency cases where possible.
+
 
 ---
 
@@ -1461,6 +2168,47 @@ Do not log every audio block unless throttled or ring-buffered.
 
 ---
 
+# 34a. Audio/Plugin Debug Flags and Counters
+
+Audio/plugin debug output must be opt-in, throttled, and non-realtime.
+
+Recommended additional flags:
+
+```txt
+FUTUREBOARD_AUDIO_WATCHDOG_DEBUG=1
+FUTUREBOARD_REALTIME_DIAGNOSTICS_DEBUG=1
+FUTUREBOARD_BRIDGE_WAKE_DEBUG=1
+FUTUREBOARD_BRIDGE_INSTANCE_DEBUG=1
+FUTUREBOARD_VST3_CONTEXT_DEBUG=1
+FUTUREBOARD_VST3_STATE_DEBUG=1
+FUTUREBOARD_PARAM_BRIDGE_DEBUG=1
+FUTUREBOARD_PDC_DEBUG=1
+```
+
+Required pattern:
+
+```txt
+audio callback:
+  atomic counter / bounded diagnostics ring push
+control thread:
+  drains diagnostics
+  checks debug env
+  prints throttled summary
+```
+
+Never print one line per audio block by default.
+
+Useful summary format:
+
+```txt
+[bridge] missed=12 recovered=11 midi_full=0 param_full=0 dropped_diag=0 last_seq=42
+[vst3-context] instance=... playing=true tempo=128.0 sig=4/4 sample=123456
+[pdc] track=... bridge=256 plugin=128 total=384
+```
+
+
+---
+
 # 35. Reporting Format
 
 After implementation, report:
@@ -1497,6 +2245,84 @@ If task is too large:
 - say what remains
 
 Never claim success if validation failed or was not run.
+
+---
+
+# 35a. Audio/Plugin Validation Checklist
+
+For any patch touching audio engine, bridge, VST3, MIDI playback, recording, or
+plugin host, run the smallest relevant commands and report failures honestly.
+
+Minimum command candidates:
+
+```bash
+cargo check -p sphere-direct-audio-engine
+cargo test -p sphere-direct-audio-engine
+cargo check -p sphere_plugin_host
+cargo test -p sphere_plugin_host
+cargo check --manifest-path apps/native/Cargo.toml
+```
+
+If C++ bridge changed, also run the relevant CMake/Cargo build path used by the
+repo. If the command does not exist, say so and run the closest available check.
+
+## Required targeted validation by feature
+
+Producer wake / bridge timing:
+
+```txt
+producer wakes without sleep polling
+bounded timeout exits on shutdown
+freshness guard still trips on stale data
+no deadlock if event is never signaled
+```
+
+Plugin state:
+
+```txt
+state payload serializes/deserializes
+component/controller blobs roundtrip
+project reload restores stored state
+restore failure surfaces insert warning/error
+```
+
+ProcessContext:
+
+```txt
+stopped transport reports stopped
+playing transport advances projectTimeSamples
+tempo map changes reach VST3 context
+time signature map changes reach VST3 context
+```
+
+Parameter bridge:
+
+```txt
+instance A param does not reach instance B
+ring full does not block realtime thread
+unsupported automation is surfaced
+```
+
+PDC:
+
+```txt
+no plugin = 0
+bridge plugin = at least block_frames
+bridge plugin + reported latency = block_frames + reported latency
+```
+
+Realtime cleanup:
+
+```txt
+no new realtime println/eprintln/dbg
+no new steady-state Vec/String allocation in touched hot path
+diagnostics drain works off the audio thread
+watchdog before/after noted if available
+```
+
+Do not claim "fixed dropout" solely because code compiles. Use diagnostics,
+counters, or a reproducible manual test.
+
 
 ---
 

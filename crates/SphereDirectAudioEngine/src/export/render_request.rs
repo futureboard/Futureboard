@@ -98,3 +98,11 @@ pub fn arrangement_bounds_samples(
     let end_sample = tempo_map.samples_at_beat(end_beat, sr);
     (0, end_sample)
 }
+
+/// Convert a project beat position to an absolute sample position at
+/// `sample_rate`, honoring the snapshot's tempo map (not just a static BPM).
+pub fn beats_to_samples(snapshot: &EngineProjectSnapshot, beat: f64, sample_rate: u32) -> u64 {
+    let sr = sample_rate.max(1) as f64;
+    let tempo_map = build_project_tempo_map(snapshot);
+    tempo_map.samples_at_beat(beat.max(0.0), sr)
+}

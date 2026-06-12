@@ -271,6 +271,18 @@ pub trait AudioEncoder: Send {
     fn finalize(&mut self) -> Result<AudioEncodeSummary, EncodeError>;
 }
 
+/// Whether MP3 encoding is compiled into this build (the `mp3` feature). The UI
+/// uses this to show MP3 as available or disabled with a clear explanation —
+/// never to silently fall back.
+pub fn mp3_available() -> bool {
+    cfg!(feature = "mp3-lame")
+}
+
+/// Whether FLAC encoding is compiled into this build (the `flac` feature).
+pub fn flac_available() -> bool {
+    cfg!(feature = "flac")
+}
+
 /// Construct an encoder for `path` from a spec + options.
 ///
 /// Returns [`EncodeError::CodecUnavailable`] (not a panic, not a fake success)

@@ -5935,6 +5935,7 @@ dependencies = [
  "serde_json",
  "sphere-audio-editor",
  "sphere-direct-audio-engine",
+ "sphere-encoder",
  "sphere-graphic-engine",
  "sphere-plugin-host",
  "wgpu",

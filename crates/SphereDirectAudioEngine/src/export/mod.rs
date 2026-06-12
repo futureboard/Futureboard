@@ -26,7 +26,8 @@ pub use exporter::{
 pub use offline_renderer::{render_offline, OfflineRenderSummary};
 pub use render_progress::{ExportCancelToken, ExportProgress, ExportStage};
 pub use render_request::{
-    arrangement_bounds_samples, ExportNormalizeMode, ExportTailMode, OfflineRenderRequest,
+    arrangement_bounds_samples, beats_to_samples, ExportNormalizeMode, ExportTailMode,
+    OfflineRenderRequest,
 };
 
 /// Errors surfaced by the offline export pipeline. Never panics across the

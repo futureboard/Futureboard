@@ -101,6 +101,7 @@ export const APP_MENUS: AppMenuGroup[] = [
       {
         id: "file.export_arrangement",
         label: "Export Arrangement...",
+        accelerator: "Ctrl+E",
         icon: "download",
         action: "file:export-arrangement",
       },

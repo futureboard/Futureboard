@@ -140,7 +140,7 @@
           "kind": "normal",
           "label": "Export Arrangement...",
           "icon": "download",
-          "shortcut": null,
+          "shortcut": "Ctrl+E",
           "command": "file:export-arrangement",
           "role": null,
           "enabled": true,

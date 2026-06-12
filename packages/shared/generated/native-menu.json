@@ -130,6 +130,27 @@
           "children": []
         },
         {
+          "id": "file.sep.export",
+          "kind": "separator",
+          "enabled": true,
+          "visible": true
+        },
+        {
+          "id": "file.export_arrangement",
+          "kind": "normal",
+          "label": "Export Arrangement...",
+          "icon": "download",
+          "shortcut": "Ctrl+E",
+          "command": "file:export-arrangement",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Render the arrangement to WAV, FLAC, or MP3",
+          "children": []
+        },
+        {
           "id": "file.sep.close",
           "kind": "separator",
           "enabled": true,

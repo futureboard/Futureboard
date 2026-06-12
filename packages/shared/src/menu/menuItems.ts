@@ -96,6 +96,17 @@ export const APP_MENUS: AppMenuGroup[] = [
       },
       {
         type: "separator",
+        id: "file.sep.export",
+      },
+      {
+        id: "file.export_arrangement",
+        label: "Export Arrangement...",
+        accelerator: "Ctrl+E",
+        icon: "download",
+        action: "file:export-arrangement",
+      },
+      {
+        type: "separator",
         id: "file.sep.close",
       },
       {

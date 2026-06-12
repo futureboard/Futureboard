@@ -42,6 +42,7 @@ mod audio_transport;
 mod browser_ops;
 mod close_ops;
 mod engine_snapshot;
+mod export_ops;
 mod frame_diagnostics;
 mod helpers;
 mod input_ops;
@@ -342,6 +343,7 @@ pub struct StudioLayout {
     plugin_picker_window: Option<WindowHandle<plugin_picker_window::InsertPickerWindow>>,
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
+    export_arrangement_window: Option<WindowHandle<crate::export::ExportArrangementWindow>>,
     /// Cached plugin registry scan result. `None` until the first
     /// `+ Add Insert` click triggers a sync scan (or the Plugin Manager
     /// dialog populates it). Phase 2a uses the first insert-capable
@@ -754,6 +756,7 @@ impl StudioLayout {
             plugin_picker_window: None,
             add_track_window: None,
             plugin_manager_window: None,
+            export_arrangement_window: None,
             available_plugins: None,
             plugin_cache_present: false,
             plugin_catalog_status: PluginCatalogStatus::Loading,
@@ -1365,6 +1368,9 @@ impl StudioLayout {
                 self.open_add_track_external_window(AddTrackKind::Master, owner_bounds, cx)
             }
             "plugins:manager" => self.open_plugin_manager_external_window(owner_bounds, cx),
+            "file:export-arrangement" => {
+                self.open_export_arrangement_external_window(owner_bounds, cx)
+            }
             "track:delete" => self.delete_selected_track(cx),
             "track:mute" => self.toggle_selected_track_mute(cx),
             "track:solo" => self.toggle_selected_track_solo(cx),
@@ -1406,6 +1412,7 @@ impl StudioLayout {
             | "tools:select-pen"
             | "tools:select-cut"
             | "tools:select-glue"
+            | "tools:select-mute"
             | "tools:select-time"
             | "tools:select-automation" => {
                 use components::timeline::timeline_state::TimelineTool;
@@ -1413,6 +1420,7 @@ impl StudioLayout {
                     "tools:select-pen" => TimelineTool::Pen,
                     "tools:select-cut" => TimelineTool::Cut,
                     "tools:select-glue" => TimelineTool::Glue,
+                    "tools:select-mute" => TimelineTool::Mute,
                     "tools:select-time" => TimelineTool::Time,
                     "tools:select-automation" => TimelineTool::Automation,
                     _ => TimelineTool::Pointer,
@@ -1662,23 +1670,15 @@ impl StudioLayout {
     /// only when nothing focusable consumes them; if/when text inputs
     /// land in the studio surface, gate this on `event.bubble_phase`.
     /// Resolve a key event to a command id under the active shortcut profile.
-    /// Profiles are data-driven (`packages/keymaps/*.json`); `Ctrl+E` keeps a
-    /// special case for opening the MIDI editor since that command has no menu
-    /// accelerator in the bundled map.
+    /// Profiles are data-driven (`packages/keymaps/*.json`). `Ctrl+Shift+P` keeps
+    /// a special case for the command palette since that command is not always
+    /// present in a user-supplied map.
     fn shortcut_command_id(&self, event: &KeyDownEvent) -> Option<String> {
         if let Some(command) = self.active_keymap.command_for_event(event) {
             return Some(command.to_string());
         }
-        // Fallback: Ctrl/Cmd+E opens the MIDI editor (not in the menu manifest).
         let mods = event.keystroke.modifiers;
         let key = event.keystroke.key.as_str();
-        if (mods.control || mods.platform)
-            && !mods.alt
-            && !mods.function
-            && matches!(key, "e" | "E")
-        {
-            return Some("midi:open-editor".to_string());
-        }
         if (mods.control || mods.platform)
             && mods.shift
             && !mods.alt

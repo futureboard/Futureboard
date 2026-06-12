@@ -1,0 +1,1084 @@
+//! External "Export Arrangement" window.
+//!
+//! Compact, native-feeling Futureboard dialog (no web-style controls). It owns a
+//! plain [`EngineProjectSnapshot`] + [`ExportProjectDefaults`] captured when the
+//! window opens, edits an [`ExportSettings`], and — on Export — spawns a
+//! background thread that runs the engine's `export_arrangement`. Progress flows
+//! back through a shared `Mutex` polled by a GPUI timer loop; the worker thread
+//! never touches GPUI and the UI never blocks. No entity is leased during the
+//! render/encode work.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use gpui::{
+    div, px, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    WindowHandle,
+};
+
+use sphere_encoder::AudioFileFormat;
+use DAUx::types::EngineProjectSnapshot;
+use DAUx::{
+    export_arrangement, ArrangementExportSummary, ExportCancelToken, ExportProgress, ExportStage,
+};
+
+use crate::components::form::select::{select, SelectOption};
+use crate::components::progress_dialog::{progress_bar, ProgressBarValue};
+use crate::components::title_bar::{external_window_titlebar_compact, TITLEBAR_HEIGHT};
+use crate::theme::{self, Colors};
+
+use super::export_settings::{
+    ExportChannelMode, ExportNormalizeChoice, ExportProjectDefaults, ExportRangeChoice,
+    ExportSampleRateChoice, ExportSettings, ExportTailChoice,
+};
+
+pub const EXPORT_WINDOW_WIDTH: f32 = 540.0;
+const EXPORT_WINDOW_HEIGHT: f32 = 588.0;
+const BODY_PAD: f32 = 14.0;
+const ROW_GAP: f32 = 9.0;
+const LABEL_W: f32 = 96.0;
+const CONTROL_H: f32 = 28.0;
+const BUTTON_H: f32 = 28.0;
+
+/// Lifecycle of the export job, surfaced in the window body.
+pub enum ExportJobState {
+    Editing,
+    Running(ExportProgress),
+    Complete(ArrangementExportSummary),
+    Failed(String),
+    Cancelled,
+}
+
+#[derive(Default)]
+struct ExportShared {
+    progress: Option<ExportProgress>,
+    done: Option<Result<ArrangementExportSummary, String>>,
+}
+
+struct ExportJob {
+    shared: Arc<Mutex<ExportShared>>,
+    cancel: ExportCancelToken,
+}
+
+/// Which dropdown is currently open (only one at a time).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectField {
+    Format,
+    FormatOption,
+    Range,
+    SampleRate,
+    Channels,
+    Normalize,
+    Tail,
+}
+
+pub struct ExportArrangementWindow {
+    project_name: String,
+    snapshot: EngineProjectSnapshot,
+    defaults: ExportProjectDefaults,
+    settings: ExportSettings,
+    state: ExportJobState,
+    open_select: Option<SelectField>,
+    job: Option<ExportJob>,
+    focus_handle: FocusHandle,
+}
+
+impl ExportArrangementWindow {
+    pub fn new(
+        project_name: String,
+        snapshot: EngineProjectSnapshot,
+        defaults: ExportProjectDefaults,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut settings = ExportSettings::default();
+        // Default output: <project>.wav in the temp dir as a safe fallback; the
+        // opener can override with a project Exports folder.
+        let file = ExportSettings::default_file_name(&project_name, settings.format);
+        settings.output_path = Some(std::env::temp_dir().join(file));
+        Self {
+            project_name,
+            snapshot,
+            defaults,
+            settings,
+            state: ExportJobState::Editing,
+            open_select: None,
+            job: None,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// Override the default output path (e.g. project Exports folder).
+    pub fn set_default_output(&mut self, path: PathBuf) {
+        self.settings.output_path = Some(path);
+    }
+
+    fn subtitle(&self) -> String {
+        let range = match self.settings.range {
+            ExportRangeChoice::EntireArrangement => "Entire arrangement",
+            ExportRangeChoice::TimeSelection { .. } => "Time selection",
+            ExportRangeChoice::LoopRange { .. } => "Loop range",
+            ExportRangeChoice::Custom { .. } => "Custom range",
+        };
+        if self.project_name.trim().is_empty() {
+            range.to_string()
+        } else {
+            format!("{} — {range}", self.project_name)
+        }
+    }
+
+    fn close(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        // Closing always cancels a running job so no orphaned worker keeps
+        // writing after the window is gone.
+        if let Some(job) = &self.job {
+            job.cancel.cancel();
+        }
+        window.remove_window();
+    }
+
+    fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                if self.open_select.is_some() {
+                    self.open_select = None;
+                    cx.notify();
+                } else if matches!(self.state, ExportJobState::Running(_)) {
+                    self.request_cancel(cx);
+                } else {
+                    self.close(window, cx);
+                }
+            }
+            "enter" if matches!(self.state, ExportJobState::Editing) => {
+                self.start_export(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn request_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = &self.job {
+            job.cancel.cancel();
+        }
+        cx.notify();
+    }
+
+    fn browse_output(&mut self, cx: &mut Context<Self>) {
+        let entity = cx.entity().clone();
+        let format = self.settings.format;
+        let start = self
+            .settings
+            .output_path
+            .clone()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(std::env::temp_dir);
+        let file = ExportSettings::default_file_name(&self.project_name, format);
+        cx.spawn(async move |_this, cx| {
+            let result = rfd::AsyncFileDialog::new()
+                .set_title("Export Arrangement")
+                .set_directory(&start)
+                .set_file_name(&file)
+                .add_filter(format.as_str().to_uppercase(), &[format.extension()])
+                .save_file()
+                .await;
+            if let Some(handle) = result {
+                let path = handle.path().to_path_buf();
+                let _ = entity.update(cx, |this, cx| {
+                    this.settings.output_path = Some(path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn start_export(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let request = match self.settings.to_request(&self.snapshot, &self.defaults) {
+            Ok(request) => request,
+            Err(err) => {
+                self.state = ExportJobState::Failed(err.user_message());
+                cx.notify();
+                return;
+            }
+        };
+
+        let shared = Arc::new(Mutex::new(ExportShared::default()));
+        let cancel = ExportCancelToken::new();
+        self.job = Some(ExportJob {
+            shared: shared.clone(),
+            cancel: cancel.clone(),
+        });
+        self.state = ExportJobState::Running(ExportProgress::stage_only(
+            ExportStage::Preparing,
+            request.render.content_frames(),
+        ));
+
+        // Worker thread: plain data only, never touches GPUI.
+        let snapshot = self.snapshot.clone();
+        let worker_shared = shared.clone();
+        let worker_cancel = cancel.clone();
+        std::thread::Builder::new()
+            .name("fb-arrangement-export".to_string())
+            .spawn(move || {
+                let progress_shared = worker_shared.clone();
+                let result = export_arrangement(&snapshot, &request, &worker_cancel, |p| {
+                    if let Ok(mut guard) = progress_shared.lock() {
+                        guard.progress = Some(p);
+                    }
+                });
+                if let Ok(mut guard) = worker_shared.lock() {
+                    guard.done = Some(result.map_err(|e| e.to_string()));
+                }
+            })
+            .ok();
+
+        // Poll loop: copy shared progress into UI state until terminal.
+        cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            loop {
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_millis(50)).await;
+                let keep_going = this
+                    .update(cx, |this, cx| this.poll_job(cx))
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    /// Apply the latest shared progress/result. Returns `false` once terminal.
+    fn poll_job(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(job) = &self.job else {
+            return false;
+        };
+        let (progress, done) = {
+            let Ok(mut guard) = job.shared.lock() else {
+                return true;
+            };
+            (guard.progress.take(), guard.done.take())
+        };
+        if let Some(done) = done {
+            self.state = match done {
+                Ok(summary) => ExportJobState::Complete(summary),
+                Err(message) if job.cancel.is_cancelled() && message.contains("cancel") => {
+                    ExportJobState::Cancelled
+                }
+                Err(message) => ExportJobState::Failed(message),
+            };
+            self.job = None;
+            cx.notify();
+            return false;
+        }
+        if let Some(progress) = progress {
+            self.state = ExportJobState::Running(progress);
+            cx.notify();
+        }
+        true
+    }
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+
+impl Render for ExportArrangementWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let target = cx.entity().clone();
+        let title = "Export Arrangement".to_string();
+
+        let body = match &self.state {
+            ExportJobState::Editing | ExportJobState::Failed(_) => {
+                self.render_editing(target.clone())
+            }
+            ExportJobState::Running(progress) => {
+                self.render_progress(progress.clone(), target.clone())
+            }
+            ExportJobState::Complete(summary) => {
+                self.render_complete(summary.clone(), target.clone())
+            }
+            ExportJobState::Cancelled => self.render_terminal_message(
+                "Export cancelled.",
+                Colors::text_secondary(),
+                target.clone(),
+            ),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .font(theme::ui_font())
+            .bg(Colors::surface_base())
+            .overflow_hidden()
+            .rounded_md()
+            .border(px(1.0))
+            .border_color(Colors::border_subtle())
+            .shadow(vec![gpui::BoxShadow {
+                color: Colors::surface_overlay().into(),
+                offset: gpui::point(px(0.0), px(6.0)),
+                blur_radius: px(20.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .capture_key_down({
+                let target = target.clone();
+                move |event, window, cx| {
+                    let _ = target.update(cx, |this, cx| this.handle_key(event, window, cx));
+                }
+            })
+            .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
+            .child(external_window_titlebar_compact(
+                title,
+                "export-window-close",
+                {
+                    let target = target.clone();
+                    move |window, cx| {
+                        let _ = target.update(cx, |this, cx| this.close(window, cx));
+                    }
+                },
+            ))
+            .child(
+                div()
+                    .px(px(BODY_PAD))
+                    .pt(px(6.0))
+                    .text_size(px(11.0))
+                    .text_color(Colors::text_muted())
+                    .truncate()
+                    .child(self.subtitle()),
+            )
+            .child(body)
+    }
+}
+
+impl ExportArrangementWindow {
+    fn render_editing(&self, target: gpui::Entity<Self>) -> gpui::AnyElement {
+        let invalid = self.settings.validate(&self.defaults).err();
+
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .px(px(BODY_PAD))
+            .py(px(BODY_PAD))
+            .gap(px(ROW_GAP))
+            .child(self.output_row(target.clone()))
+            .child(self.format_row(target.clone()))
+            .child(self.format_option_row(target.clone()))
+            .child(self.range_row(target.clone()))
+            .child(self.sample_rate_row(target.clone()))
+            .child(self.channels_row(target.clone()))
+            .child(self.normalize_row(target.clone()))
+            .child(self.tail_row(target.clone()))
+            .child(div().flex_1());
+
+        if let ExportJobState::Failed(message) = &self.state {
+            col = col.child(error_banner(message.clone()));
+        } else if let Some(err) = &invalid {
+            col = col.child(hint_banner(err.user_message()));
+        }
+
+        col = col.child(self.footer(invalid.is_none(), target));
+        col.into_any_element()
+    }
+
+    fn labeled<E: IntoElement>(&self, label: &str, control: E) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(SharedString::from(format!("export-row-{label}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .w(px(LABEL_W))
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(Colors::text_secondary())
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(control.into_any_element()),
+            )
+    }
+
+    fn output_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let path_label = self
+            .settings
+            .normalized_output_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "No file selected".to_string());
+        let control = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h(px(CONTROL_H))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .border(px(1.0))
+                    .border_color(Colors::border_subtle())
+                    .bg(Colors::surface_input())
+                    .text_size(px(11.0))
+                    .text_color(Colors::text_primary())
+                    .truncate()
+                    .child(path_label),
+            )
+            .child(secondary_button("export-browse", "Browse…", {
+                let target = target.clone();
+                move |_window, cx| {
+                    let _ = target.update(cx, |this, cx| this.browse_output(cx));
+                }
+            }));
+        self.labeled("Output", control)
+    }
+
+    fn dropdown(
+        &self,
+        field: SelectField,
+        id: &'static str,
+        selected: String,
+        options: Vec<SelectOption>,
+        target: gpui::Entity<Self>,
+    ) -> impl IntoElement {
+        let open = self.open_select == Some(field);
+        let toggle_target = target.clone();
+        let change_target = target.clone();
+        select(
+            id,
+            Some(selected.as_str()),
+            selected.clone(),
+            options,
+            open,
+            false,
+            Arc::new(move |_, _window, cx| {
+                let _ = toggle_target.update(cx, |this, cx| {
+                    this.open_select = if this.open_select == Some(field) {
+                        None
+                    } else {
+                        Some(field)
+                    };
+                    cx.notify();
+                });
+            }),
+            Arc::new(move |value, _window, cx| {
+                let value = value.clone();
+                let _ = change_target.update(cx, |this, cx| {
+                    this.apply_select(field, &value);
+                    this.open_select = None;
+                    cx.notify();
+                });
+            }),
+        )
+    }
+
+    fn format_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let options = vec![
+            SelectOption::new("wav", "WAV"),
+            SelectOption::new("flac", "FLAC"),
+            SelectOption::new("mp3", "MP3").disabled(!self.defaults.mp3_available),
+        ];
+        let control = self.dropdown(
+            SelectField::Format,
+            "export-format",
+            self.settings.format.as_str().to_string(),
+            options,
+            target,
+        );
+        self.labeled("Format", control)
+    }
+
+    fn format_option_row(&self, target: gpui::Entity<Self>) -> gpui::Stateful<gpui::Div> {
+        let (label, selected, options) = match self.settings.format {
+            AudioFileFormat::Wav => (
+                "Bit depth",
+                match self.settings.wav_sample_format {
+                    sphere_encoder::AudioSampleFormat::F32 => "f32",
+                    sphere_encoder::AudioSampleFormat::I24 => "i24",
+                    _ => "i16",
+                }
+                .to_string(),
+                vec![
+                    SelectOption::new("f32", "Float 32"),
+                    SelectOption::new("i24", "PCM 24"),
+                    SelectOption::new("i16", "PCM 16"),
+                ],
+            ),
+            AudioFileFormat::Flac => (
+                "Bit depth",
+                format!("{}", self.settings.flac_bit_depth),
+                vec![
+                    SelectOption::new("16", "16-bit"),
+                    SelectOption::new("24", "24-bit"),
+                ],
+            ),
+            AudioFileFormat::Mp3 => (
+                "Bitrate",
+                format!("{}", self.settings.mp3_bitrate_kbps),
+                vec![
+                    SelectOption::new("128", "128 kbps"),
+                    SelectOption::new("192", "192 kbps"),
+                    SelectOption::new("256", "256 kbps"),
+                    SelectOption::new("320", "320 kbps"),
+                ],
+            ),
+            AudioFileFormat::Rauf => ("Bit depth", "f32".to_string(), vec![]),
+        };
+        let control = self.dropdown(
+            SelectField::FormatOption,
+            "export-format-option",
+            selected,
+            options,
+            target,
+        );
+        self.labeled(label, control)
+    }
+
+    fn range_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let has_sel = self.defaults.time_selection.is_some();
+        let has_loop = self.defaults.loop_range.is_some();
+        let selected = match self.settings.range {
+            ExportRangeChoice::EntireArrangement => "entire",
+            ExportRangeChoice::TimeSelection { .. } => "selection",
+            ExportRangeChoice::LoopRange { .. } => "loop",
+            ExportRangeChoice::Custom { .. } => "custom",
+        };
+        let options = vec![
+            SelectOption::new("entire", "Entire arrangement"),
+            SelectOption::new("selection", "Time selection").disabled(!has_sel),
+            SelectOption::new("loop", "Loop range").disabled(!has_loop),
+            SelectOption::new("custom", "Custom range"),
+        ];
+        let control = self.dropdown(
+            SelectField::Range,
+            "export-range",
+            selected.to_string(),
+            options,
+            target,
+        );
+        self.labeled("Range", control)
+    }
+
+    fn sample_rate_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let selected = match self.settings.sample_rate {
+            ExportSampleRateChoice::Project => "project",
+            ExportSampleRateChoice::Hz44100 => "44100",
+            ExportSampleRateChoice::Hz48000 => "48000",
+            ExportSampleRateChoice::Hz88200 => "88200",
+            ExportSampleRateChoice::Hz96000 => "96000",
+        };
+        let options = vec![
+            SelectOption::new("project", "Project"),
+            SelectOption::new("44100", "44100 Hz"),
+            SelectOption::new("48000", "48000 Hz"),
+            SelectOption::new("88200", "88200 Hz"),
+            SelectOption::new("96000", "96000 Hz"),
+        ];
+        let control = self.dropdown(
+            SelectField::SampleRate,
+            "export-rate",
+            selected.to_string(),
+            options,
+            target,
+        );
+        self.labeled("Sample rate", control)
+    }
+
+    fn channels_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let selected = match self.settings.channels {
+            ExportChannelMode::Stereo => "stereo",
+            ExportChannelMode::Mono => "mono",
+        };
+        let options = vec![
+            SelectOption::new("stereo", "Stereo"),
+            SelectOption::new("mono", "Mono"),
+        ];
+        let control = self.dropdown(
+            SelectField::Channels,
+            "export-channels",
+            selected.to_string(),
+            options,
+            target,
+        );
+        self.labeled("Channels", control)
+    }
+
+    fn normalize_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let selected = match self.settings.normalize {
+            ExportNormalizeChoice::Off => "off",
+            ExportNormalizeChoice::PeakDb(_) => "peak",
+        };
+        let options = vec![
+            SelectOption::new("off", "Off"),
+            SelectOption::new("peak", "Peak −1.0 dB"),
+        ];
+        let control = self.dropdown(
+            SelectField::Normalize,
+            "export-normalize",
+            selected.to_string(),
+            options,
+            target,
+        );
+        self.labeled("Normalize", control)
+    }
+
+    fn tail_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let selected = match self.settings.tail {
+            ExportTailChoice::None => "none",
+            ExportTailChoice::FixedSeconds(_) => "fixed",
+            ExportTailChoice::UntilSilence { .. } => "silence",
+        };
+        let options = vec![
+            SelectOption::new("none", "None"),
+            SelectOption::new("fixed", "Fixed 2 s"),
+            SelectOption::new("silence", "Until silence"),
+        ];
+        let control = self.dropdown(
+            SelectField::Tail,
+            "export-tail",
+            selected.to_string(),
+            options,
+            target,
+        );
+        self.labeled("Tail", control)
+    }
+
+    fn apply_select(&mut self, field: SelectField, value: &str) {
+        match field {
+            SelectField::Format => {
+                self.settings.format = match value {
+                    "flac" => AudioFileFormat::Flac,
+                    "mp3" => AudioFileFormat::Mp3,
+                    _ => AudioFileFormat::Wav,
+                };
+                if let Some(path) = self.settings.normalized_output_path() {
+                    self.settings.output_path = Some(path);
+                }
+            }
+            SelectField::FormatOption => match self.settings.format {
+                AudioFileFormat::Wav => {
+                    self.settings.wav_sample_format = match value {
+                        "f32" => sphere_encoder::AudioSampleFormat::F32,
+                        "i16" => sphere_encoder::AudioSampleFormat::I16,
+                        _ => sphere_encoder::AudioSampleFormat::I24,
+                    };
+                }
+                AudioFileFormat::Flac => {
+                    self.settings.flac_bit_depth = if value == "16" { 16 } else { 24 };
+                }
+                AudioFileFormat::Mp3 => {
+                    self.settings.mp3_bitrate_kbps = value.parse().unwrap_or(256);
+                }
+                AudioFileFormat::Rauf => {}
+            },
+            SelectField::Range => {
+                self.settings.range = match value {
+                    "selection" => self
+                        .defaults
+                        .time_selection
+                        .map(|(s, e)| ExportRangeChoice::TimeSelection {
+                            start_beat: s,
+                            end_beat: e,
+                        })
+                        .unwrap_or(ExportRangeChoice::EntireArrangement),
+                    "loop" => self
+                        .defaults
+                        .loop_range
+                        .map(|(s, e)| ExportRangeChoice::LoopRange {
+                            start_beat: s,
+                            end_beat: e,
+                        })
+                        .unwrap_or(ExportRangeChoice::EntireArrangement),
+                    "custom" => ExportRangeChoice::Custom {
+                        start_beat: 0.0,
+                        end_beat: self.defaults.content_end_beat.max(1.0),
+                    },
+                    _ => ExportRangeChoice::EntireArrangement,
+                };
+            }
+            SelectField::SampleRate => {
+                self.settings.sample_rate = match value {
+                    "44100" => ExportSampleRateChoice::Hz44100,
+                    "48000" => ExportSampleRateChoice::Hz48000,
+                    "88200" => ExportSampleRateChoice::Hz88200,
+                    "96000" => ExportSampleRateChoice::Hz96000,
+                    _ => ExportSampleRateChoice::Project,
+                };
+            }
+            SelectField::Channels => {
+                self.settings.channels = if value == "mono" {
+                    ExportChannelMode::Mono
+                } else {
+                    ExportChannelMode::Stereo
+                };
+            }
+            SelectField::Normalize => {
+                self.settings.normalize = if value == "peak" {
+                    ExportNormalizeChoice::PeakDb(-1.0)
+                } else {
+                    ExportNormalizeChoice::Off
+                };
+            }
+            SelectField::Tail => {
+                self.settings.tail = match value {
+                    "fixed" => ExportTailChoice::FixedSeconds(2.0),
+                    "silence" => ExportTailChoice::UntilSilence {
+                        max_seconds: 10.0,
+                        threshold_db: -60.0,
+                    },
+                    _ => ExportTailChoice::None,
+                };
+            }
+        }
+    }
+
+    fn footer(&self, can_export: bool, target: gpui::Entity<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap(px(8.0))
+            .pt(px(8.0))
+            .border_t(px(1.0))
+            .border_color(Colors::border_subtle())
+            .child(secondary_button("export-cancel", "Cancel", {
+                let target = target.clone();
+                move |window, cx| {
+                    let _ = target.update(cx, |this, cx| this.close(window, cx));
+                }
+            }))
+            .child(primary_button("export-start", "Export", can_export, {
+                let target = target.clone();
+                move |_window, cx| {
+                    let _ = target.update(cx, |this, cx| this.start_export(cx));
+                }
+            }))
+    }
+
+    fn render_progress(
+        &self,
+        progress: ExportProgress,
+        target: gpui::Entity<Self>,
+    ) -> gpui::AnyElement {
+        let percent = format!("{:.0}%", progress.percent);
+        let detail = format!(
+            "{} of {} frames",
+            progress.rendered_frames, progress.total_frames
+        );
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .px(px(BODY_PAD))
+            .py(px(BODY_PAD))
+            .gap(px(10.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::text_primary())
+                            .child(progress.stage.as_str().to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::accent_primary())
+                            .child(percent),
+                    ),
+            )
+            .child(progress_bar(ProgressBarValue::value(
+                progress.percent / 100.0,
+            )))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_muted())
+                    .child(detail),
+            )
+            .child(self.output_path_caption())
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .child(secondary_button("export-cancel-run", "Cancel", {
+                        let target = target.clone();
+                        move |_window, cx| {
+                            let _ = target.update(cx, |this, cx| this.request_cancel(cx));
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_complete(
+        &self,
+        summary: ArrangementExportSummary,
+        target: gpui::Entity<Self>,
+    ) -> gpui::AnyElement {
+        let info = format!(
+            "{:.2} s • {} ch • {} Hz",
+            summary.duration_seconds, summary.channels, summary.sample_rate
+        );
+        let path = summary.output_path.clone();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .px(px(BODY_PAD))
+            .py(px(BODY_PAD))
+            .gap(px(10.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(Colors::accent_primary())
+                    .child("Export complete"),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(Colors::text_primary())
+                    .truncate()
+                    .child(summary.output_path.display().to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_muted())
+                    .child(info),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(secondary_button("export-reveal", "Open Folder", {
+                        move |_window, _cx| {
+                            if let Some(dir) = path.parent() {
+                                let _ = open_in_file_manager(dir);
+                            }
+                        }
+                    }))
+                    .child(primary_button("export-close", "Close", true, {
+                        let target = target.clone();
+                        move |window, cx| {
+                            let _ = target.update(cx, |this, cx| this.close(window, cx));
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_terminal_message(
+        &self,
+        message: &str,
+        color: gpui::Rgba,
+        target: gpui::Entity<Self>,
+    ) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .px(px(BODY_PAD))
+            .py(px(BODY_PAD))
+            .gap(px(10.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(color)
+                    .child(message.to_string()),
+            )
+            .child(div().flex_1())
+            .child(div().flex().flex_row().justify_end().child(primary_button(
+                "export-close-term",
+                "Close",
+                true,
+                {
+                    let target = target.clone();
+                    move |window, cx| {
+                        let _ = target.update(cx, |this, cx| this.close(window, cx));
+                    }
+                },
+            )))
+            .into_any_element()
+    }
+
+    fn output_path_caption(&self) -> impl IntoElement {
+        let path = self
+            .settings
+            .normalized_output_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        div()
+            .text_size(px(10.0))
+            .text_color(Colors::text_faint())
+            .truncate()
+            .child(path)
+    }
+}
+
+// ── Small shared button helpers (compact, theme-token only) ──────────────────
+
+fn secondary_button(
+    id: &'static str,
+    label: &str,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(BUTTON_H))
+        .px(px(12.0))
+        .rounded(px(5.0))
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .text_size(px(12.0))
+        .text_color(Colors::text_secondary())
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .child(label.to_string())
+}
+
+fn primary_button(
+    id: &'static str,
+    label: &str,
+    enabled: bool,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let mut button = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(BUTTON_H))
+        .px(px(14.0))
+        .min_w(px(86.0))
+        .rounded(px(5.0))
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(label.to_string());
+    if enabled {
+        button = button
+            .bg(Colors::accent_primary())
+            .text_color(gpui::white())
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(|s| s.opacity(0.9))
+            .on_click(move |_, window, cx| on_click(window, cx));
+    } else {
+        button = button
+            .bg(Colors::surface_input())
+            .text_color(Colors::text_faint())
+            .cursor(gpui::CursorStyle::OperationNotAllowed);
+    }
+    button
+}
+
+fn error_banner(message: String) -> impl IntoElement {
+    banner(message, Colors::status_error())
+}
+
+fn hint_banner(message: String) -> impl IntoElement {
+    banner(message, Colors::text_muted())
+}
+
+fn banner(message: String, color: gpui::Rgba) -> impl IntoElement {
+    div()
+        .px(px(10.0))
+        .py(px(6.0))
+        .rounded(px(5.0))
+        .bg(Colors::surface_panel_alt())
+        .text_size(px(10.0))
+        .text_color(color)
+        .child(message)
+}
+
+fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer").arg(dir).spawn()?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = dir;
+    }
+    Ok(())
+}
+
+// ── Opener ───────────────────────────────────────────────────────────────────
+
+/// Open the external Export Arrangement window centered over `owner_bounds`.
+#[cfg(target_os = "windows")]
+pub fn open_export_arrangement_window(
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
+    project_name: String,
+    snapshot: EngineProjectSnapshot,
+    defaults: ExportProjectDefaults,
+    default_output: Option<PathBuf>,
+    cx: &mut App,
+) -> Result<WindowHandle<ExportArrangementWindow>, String> {
+    use crate::window_position::{apply_owner_display, centered_window_bounds};
+    use gpui::{size, WindowBackgroundAppearance, WindowBounds, WindowKind};
+
+    let height = TITLEBAR_HEIGHT + EXPORT_WINDOW_HEIGHT;
+    let window_bounds =
+        centered_window_bounds(owner_bounds, size(px(EXPORT_WINDOW_WIDTH), px(height)), cx);
+
+    let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
+    window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
+    window_options.kind = WindowKind::Floating;
+    window_options.is_resizable = false;
+    window_options.is_minimizable = false;
+    window_options.window_background = WindowBackgroundAppearance::Transparent;
+    apply_owner_display(&mut window_options, owner_bounds, cx);
+
+    cx.open_window(window_options, move |_window, cx| {
+        cx.new(|cx| {
+            let mut win = ExportArrangementWindow::new(project_name, snapshot, defaults, cx);
+            if let Some(path) = default_output {
+                win.set_default_output(path);
+            }
+            win
+        })
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn open_export_arrangement_window(
+    _owner_bounds: Option<Bounds<gpui::Pixels>>,
+    _project_name: String,
+    _snapshot: EngineProjectSnapshot,
+    _defaults: ExportProjectDefaults,
+    _default_output: Option<PathBuf>,
+    _cx: &mut App,
+) -> Result<WindowHandle<ExportArrangementWindow>, String> {
+    Err("native export window is only available on Windows".to_string())
+}

@@ -154,7 +154,28 @@ impl RaufWriter {
             ));
         }
         let channels = self.header.channels as usize;
-        if channels == 0 || samples.len() % channels != 0 {
+        if channels == 0 || !samples.len().is_multiple_of(channels) {
+            return Err(RaufError::InvalidHeader(format!(
+                "sample count {} is not divisible by channels {}",
+                samples.len(),
+                channels
+            )));
+        }
+        for sample in samples {
+            self.file.write_all(&sample.to_le_bytes())?;
+        }
+        self.header.frames_written += (samples.len() / channels) as u64;
+        Ok(())
+    }
+
+    pub fn write_f32le_interleaved(&mut self, samples: &[f32]) -> Result<()> {
+        if self.header.sample_format != RaufSampleFormat::F32 {
+            return Err(RaufError::UnsupportedFormat(
+                "writer was not configured for f32le".to_string(),
+            ));
+        }
+        let channels = self.header.channels as usize;
+        if channels == 0 || !samples.len().is_multiple_of(channels) {
             return Err(RaufError::InvalidHeader(format!(
                 "sample count {} is not divisible by channels {}",
                 samples.len(),
@@ -215,6 +236,123 @@ impl RaufReader {
     pub fn recover_frames_from_size(&self) -> Result<u64> {
         let size = std::fs::metadata(&self.path)?.len();
         recover_frames_from_size(&self.header, size)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RAUF as a generic AudioEncoder target (internal/debug export format).
+// ---------------------------------------------------------------------------
+
+use crate::format::{
+    AudioEncodeSpec, AudioEncodeSummary, AudioEncoder, AudioFileFormat, AudioSampleFormat,
+    EncodeError, check_interleaved_len, f32_to_i32, i32_to_f32,
+};
+
+impl From<RaufError> for EncodeError {
+    fn from(value: RaufError) -> Self {
+        match value {
+            RaufError::Io(error) => EncodeError::Io(error),
+            other => EncodeError::FinalizeFailed(other.to_string()),
+        }
+    }
+}
+
+/// Wraps [`RaufWriter`] behind the generic [`AudioEncoder`] trait. F32 specs map
+/// to RAUF F32; integer specs are stored as full-scale RAUF S32.
+pub struct RaufEncoder {
+    writer: Option<RaufWriter>,
+    spec: AudioEncodeSpec,
+}
+
+impl RaufEncoder {
+    pub fn create(
+        path: impl AsRef<Path>,
+        spec: AudioEncodeSpec,
+    ) -> std::result::Result<Self, EncodeError> {
+        spec.validate()?;
+        let sample_format = if spec.sample_format.is_float() {
+            RaufSampleFormat::F32
+        } else {
+            RaufSampleFormat::S32
+        };
+        let writer = RaufWriter::create(
+            path,
+            RaufConfig {
+                sample_rate: spec.sample_rate,
+                channels: spec.channels,
+                sample_format,
+                interleaved: true,
+                project_start_sample: 0,
+                take_id: [0u8; 16],
+            },
+        )?;
+        Ok(Self {
+            writer: Some(writer),
+            spec,
+        })
+    }
+
+    fn writer_mut(&mut self) -> std::result::Result<&mut RaufWriter, EncodeError> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| EncodeError::InvalidInput("write after finalize".to_string()))
+    }
+}
+
+impl AudioEncoder for RaufEncoder {
+    fn format(&self) -> AudioFileFormat {
+        AudioFileFormat::Rauf
+    }
+
+    fn spec(&self) -> AudioEncodeSpec {
+        self.spec.clone()
+    }
+
+    fn write_interleaved_f32(&mut self, frames: &[f32]) -> std::result::Result<(), EncodeError> {
+        check_interleaved_len(frames.len(), self.spec.channels)?;
+        let float = self.spec.sample_format.is_float();
+        let writer = self.writer_mut()?;
+        if float {
+            writer.write_f32le_interleaved(frames)?;
+        } else {
+            let ints: Vec<i32> = frames.iter().map(|&x| f32_to_i32(x)).collect();
+            writer.write_s32le_interleaved(&ints)?;
+        }
+        Ok(())
+    }
+
+    fn write_interleaved_i32(&mut self, frames: &[i32]) -> std::result::Result<(), EncodeError> {
+        check_interleaved_len(frames.len(), self.spec.channels)?;
+        let float = self.spec.sample_format.is_float();
+        let writer = self.writer_mut()?;
+        if float {
+            let floats: Vec<f32> = frames.iter().map(|&x| i32_to_f32(x)).collect();
+            writer.write_f32le_interleaved(&floats)?;
+        } else {
+            writer.write_s32le_interleaved(frames)?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> std::result::Result<AudioEncodeSummary, EncodeError> {
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| EncodeError::FinalizeFailed("encoder already finalized".to_string()))?;
+        let report = writer.finalize()?;
+        let sample_format = if self.spec.sample_format.is_float() {
+            AudioSampleFormat::F32
+        } else {
+            AudioSampleFormat::I32
+        };
+        Ok(AudioEncodeSummary {
+            format: AudioFileFormat::Rauf,
+            sample_rate: report.header.sample_rate,
+            channels: report.header.channels,
+            sample_format,
+            frames_written: report.frames_written,
+            bytes_written: report.data_bytes,
+        })
     }
 }
 

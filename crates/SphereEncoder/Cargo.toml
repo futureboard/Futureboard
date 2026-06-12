@@ -8,3 +8,16 @@ name = "sphere_encoder"
 path = "src/lib.rs"
 
 [dependencies]
+flacenc = { version = "0.5.1", default-features = false, features = ["par"], optional = true }
+mp3lame-encoder = { version = "0.2.4", features = ["std"], optional = true }
+tracing.workspace = true
+
+# FLAC is on by default (pure-Rust `flacenc`, no native deps). MP3 is OFF by
+# default because `mp3lame-sys` compiles libmp3lame from source via autotools,
+# which is not guaranteed available in every build environment. No FFmpeg/libav
+# is involved in either path.
+[features]
+default = ["flac"]
+flac = ["dep:flacenc"]
+mp3 = ["mp3-lame"]
+mp3-lame = ["dep:mp3lame-encoder"]

@@ -1032,17 +1032,78 @@ impl Timeline {
         let (target_index, snapped) = self.resolve_clip_drag_target(drag, origin, position);
         self.clip_drag_target_track_index = Some(target_index);
 
-        let current_track_id = self
+        let Some((current_drag_track_id, current_drag_start)) = self
             .state
             .find_clip(&drag.clip_id)
-            .map(|(track, _)| track.id.clone())
-            .unwrap_or_else(|| drag.source_track_id.clone());
-        self.state
-            .move_clip_to_track(&drag.clip_id, &current_track_id, snapped);
+            .map(|(track, clip)| (track.id.clone(), clip.start_beat))
+        else {
+            return;
+        };
+        let beat_delta = snapped - current_drag_start;
+        let drag_ids = self.clip_drag_selection_ids(&drag.clip_id);
+
+        for clip_id in &drag_ids {
+            let Some((track_id, start_beat)) = self
+                .state
+                .find_clip(clip_id)
+                .map(|(track, clip)| (track.id.clone(), clip.start_beat))
+            else {
+                continue;
+            };
+            let next_start = if clip_id == &drag.clip_id {
+                snapped
+            } else {
+                (start_beat + beat_delta).max(0.0)
+            };
+            self.state.move_clip_to_track(clip_id, &track_id, next_start);
+        }
+        self.restore_clip_drag_selection(&drag.clip_id, drag_ids, Some(current_drag_track_id));
 
         let (max_x, max_y) = self.max_scroll_offsets(window);
         self.state.viewport.scroll_x = self.state.viewport.scroll_x.clamp(0.0, max_x);
         self.state.viewport.scroll_y = self.state.viewport.scroll_y.clamp(0.0, max_y);
+    }
+
+    fn clip_drag_selection_ids(&self, dragged_clip_id: &str) -> Vec<String> {
+        let selected = &self.state.selection.selected_clip_ids;
+        if selected.iter().any(|id| id == dragged_clip_id) {
+            selected
+                .iter()
+                .filter(|id| self.state.find_clip(id).is_some())
+                .cloned()
+                .collect()
+        } else {
+            vec![dragged_clip_id.to_string()]
+        }
+    }
+
+    fn restore_clip_drag_selection(
+        &mut self,
+        dragged_clip_id: &str,
+        clip_ids: Vec<String>,
+        fallback_track_id: Option<String>,
+    ) {
+        let existing = clip_ids
+            .into_iter()
+            .filter(|id| self.state.find_clip(id).is_some())
+            .collect::<Vec<_>>();
+        if existing.is_empty() {
+            return;
+        }
+
+        let selected_track_id = self
+            .state
+            .find_clip(dragged_clip_id)
+            .map(|(track, _)| track.id.clone())
+            .or(fallback_track_id)
+            .or_else(|| {
+                existing
+                    .first()
+                    .and_then(|id| self.state.find_clip(id))
+                    .map(|(track, _)| track.id.clone())
+            });
+        self.state.selection.selected_track_id = selected_track_id;
+        self.state.selection.selected_clip_ids = existing;
     }
 
     fn resolve_clip_drag_target(
@@ -1283,6 +1344,15 @@ impl Render for Timeline {
                 this.clip_clone_drag_id = clone_drag.then(|| clip_id.clone());
                 if *additive {
                     this.state.select_clip_additive(clip_id);
+                } else if this.state.selection.selected_clip_ids.len() > 1
+                    && this
+                        .state
+                        .selection
+                        .selected_clip_ids
+                        .iter()
+                        .any(|id| id == clip_id)
+                {
+                    this.state.arrangement_range = None;
                 } else {
                     this.state.select_clip(clip_id);
                 }
@@ -2067,13 +2137,45 @@ impl Render for Timeline {
                     let (_, start_beat) = this.resolve_clip_drag_target(drag, origin, position);
                     this.create_clip_clone_at(&drag.clip_id, &target_track_id, start_beat, cx);
                 } else {
-                    let current_start = this
+                    let drag_ids = this.clip_drag_selection_ids(&drag.clip_id);
+                    let resolved_target_index = target_index.unwrap_or_else(|| {
+                        this.state
+                            .tracks
+                            .iter()
+                            .position(|track| track.id == target_track_id)
+                            .unwrap_or(0)
+                    });
+                    let source_index = this
                         .state
-                        .find_clip(&drag.clip_id)
-                        .map(|(_, clip)| clip.start_beat)
-                        .unwrap_or(drag.start_beat);
-                    this.state
-                        .move_clip_to_track(&drag.clip_id, &target_track_id, current_start);
+                        .tracks
+                        .iter()
+                        .position(|track| track.id == drag.source_track_id)
+                        .unwrap_or(resolved_target_index);
+                    let track_delta = resolved_target_index as isize - source_index as isize;
+                    let max_index = this.state.tracks.len().saturating_sub(1) as isize;
+
+                    for clip_id in &drag_ids {
+                        let Some((track_index, current_start)) =
+                            this.state.tracks.iter().enumerate().find_map(|(index, track)| {
+                                track
+                                    .clips
+                                    .iter()
+                                    .find(|clip| clip.id == *clip_id)
+                                    .map(|clip| (index, clip.start_beat))
+                            })
+                        else {
+                            continue;
+                        };
+                        let target_track_id = this
+                            .state
+                            .tracks
+                            .get((track_index as isize + track_delta).clamp(0, max_index) as usize)
+                            .map(|track| track.id.clone())
+                            .unwrap_or_else(|| target_track_id.clone());
+                        this.state
+                            .move_clip_to_track(clip_id, &target_track_id, current_start);
+                    }
+                    this.restore_clip_drag_selection(&drag.clip_id, drag_ids, Some(target_track_id));
                     this.mark_project_changed(cx);
                 }
             }
@@ -2337,6 +2439,16 @@ impl Render for Timeline {
                 Some(on_automation_cycle.clone()),
                 self.automation_marquee.as_ref(),
             )))
+            .children(timeline_marker_region_overlay(state).map(|overlay| {
+                div()
+                    .absolute()
+                    .left(px(HEADER_WIDTH))
+                    .right_0()
+                    .top(px(content_top))
+                    .bottom_0()
+                    .overflow_hidden()
+                    .child(overlay)
+            }))
             // 3. Playhead Overlay (frontmost timeline pass)
             // Render after ruler + content so grid/ruler/content never cover it.
             // Split into:
@@ -2903,6 +3015,71 @@ fn arrangement_range_overlay(state: &TimelineState) -> Option<gpui::AnyElement> 
             .bg(Colors::with_alpha(Colors::accent_primary(), 0.14))
             .border(px(1.0))
             .border_color(Colors::with_alpha(Colors::accent_primary(), 0.7))
+            .into_any_element(),
+    )
+}
+
+fn timeline_marker_region_overlay(state: &TimelineState) -> Option<gpui::AnyElement> {
+    if state.markers.is_empty() && state.regions.is_empty() {
+        return None;
+    }
+
+    let (visible_start, visible_end) = state.visible_beat_range(state.viewport.viewport_width);
+    let body_height = state.viewport.track_area_height.max(state.viewport.viewport_height);
+    let mut children: Vec<gpui::AnyElement> = Vec::new();
+
+    for region in &state.regions {
+        let (start, end) = region.normalized_range();
+        if end < visible_start as f64 || start > visible_end as f64 {
+            continue;
+        }
+        let x = state.beats_to_x(start as f32);
+        let width = (state.beats_to_x(end as f32) - x).max(1.0);
+        let color =
+            crate::color::parse_hex_color(&region.color_hex).unwrap_or_else(|_| Colors::accent_success());
+        children.push(
+            div()
+                .absolute()
+                .left(px(x))
+                .top_0()
+                .h(px(body_height))
+                .w(px(width))
+                .bg(Colors::with_alpha(color, 0.08))
+                .border_l(px(1.0))
+                .border_r(px(1.0))
+                .border_color(Colors::with_alpha(color, 0.35))
+                .into_any_element(),
+        );
+    }
+
+    for marker in &state.markers {
+        if marker.beat < visible_start as f64 || marker.beat > visible_end as f64 {
+            continue;
+        }
+        let x = state.beats_to_x(marker.beat as f32);
+        let color =
+            crate::color::parse_hex_color(&marker.color_hex).unwrap_or_else(|_| Colors::accent_primary());
+        children.push(
+            div()
+                .absolute()
+                .left(px(x))
+                .top_0()
+                .h(px(body_height))
+                .w(px(1.0))
+                .bg(Colors::with_alpha(color, 0.48))
+                .into_any_element(),
+        );
+    }
+
+    if children.is_empty() {
+        return None;
+    }
+
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .children(children)
             .into_any_element(),
     )
 }

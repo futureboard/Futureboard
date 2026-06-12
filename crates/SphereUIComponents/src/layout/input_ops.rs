@@ -951,6 +951,9 @@ impl StudioLayout {
                 let mut entries = vec![
                     ContextMenuEntry::disabled_item(format!("Tempo at {label}"), "noop"),
                     ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Add Marker Here", "ruler:add-marker"),
+                    ContextMenuEntry::item("Create Region Here", "ruler:add-region"),
+                    ContextMenuEntry::Separator,
                 ];
                 if !has_automation {
                     entries.push(ContextMenuEntry::item(

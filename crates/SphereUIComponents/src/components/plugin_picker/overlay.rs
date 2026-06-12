@@ -228,6 +228,169 @@ pub fn plugin_picker_overlay(
         )
 }
 
+pub fn plugin_picker_panel(
+    state: &PluginPickerState,
+    index: Option<&PluginSearchIndex>,
+    prefs: &PluginPickerPrefs,
+    catalog_status: CatalogStatus,
+    search_input: &TextInputState,
+    search_focused: bool,
+    search_callbacks: TextInputCallbacks,
+    callbacks: PluginPickerCallbacks,
+    au_scan_error: Option<&str>,
+) -> impl IntoElement {
+    let on_pick_add = callbacks.on_pick.clone();
+    let on_pick_stub = callbacks.on_pick.clone();
+    let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
+    let stub_enabled = debug || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_STUB").is_some();
+
+    let empty_index = PluginSearchIndex::from_plugins(Vec::new());
+    let index_ref = index.unwrap_or(&empty_index);
+    let filter_result =
+        compute_filter_result(index_ref, &state.query, &state.filters, prefs, debug);
+    let visible_count = filter_result.indices.len();
+    let total = index_ref.len();
+
+    let visible_plugins: Arc<Vec<RegistryPlugin>> = Arc::new(
+        filter_result
+            .indices
+            .iter()
+            .filter_map(|&i| index_ref.plugin_at(i).cloned())
+            .collect(),
+    );
+
+    let highlighted = state.highlighted_index.min(visible_count.saturating_sub(1));
+    let selected_plugin = visible_plugins.get(highlighted);
+    let validation = selected_plugin
+        .map(|plugin| validate_insert(plugin, &state.insert_target))
+        .unwrap_or(InsertValidation::NotInsertable);
+    let can_add = validation == InsertValidation::Ok;
+
+    let list_body = build_list_body(
+        catalog_status.clone(),
+        visible_count,
+        total,
+        state,
+        &filter_result,
+        &visible_plugins,
+        highlighted,
+        &callbacks,
+        prefs,
+        au_scan_error,
+    );
+
+    let sidebar = plugin_filter_sidebar(
+        &state.filters.sidebar,
+        &filter_result.counts,
+        &filter_result.vendors,
+        &filter_result.categories,
+        debug,
+        cfg!(target_os = "macos") || filter_result.counts.au > 0,
+        callbacks.on_select_filter.clone(),
+    );
+
+    let list_section = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(plugin_table_header())
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_hidden()
+                .child(list_body),
+        );
+
+    let footer_label = footer_label_for(
+        selected_plugin,
+        &validation,
+        visible_count,
+        total,
+        &catalog_status,
+        state,
+    );
+
+    let footer = build_footer(
+        footer_label,
+        can_add,
+        stub_enabled,
+        state
+            .selected_id
+            .clone()
+            .or_else(|| selected_plugin.map(|p| p.id.clone())),
+        on_pick_add,
+        on_pick_stub,
+    );
+
+    div()
+        .flex()
+        .flex_col()
+        .size_full()
+        .overflow_hidden()
+        .bg(Colors::surface_window())
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(6.0))
+                .border_b(px(1.0))
+                .border_color(Colors::divider())
+                .text_size(px(10.0))
+                .text_color(Colors::text_faint())
+                .child(state.insert_target.label()),
+        )
+        .when_some(au_scan_error, |panel, message| {
+            panel.child(
+                div()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .border_b(px(1.0))
+                    .border_color(Colors::divider())
+                    .bg(Colors::surface_input())
+                    .text_size(px(10.0))
+                    .text_color(Colors::status_warning())
+                    .child(format!(
+                        "AudioUnit scan failed. VST3/CLAP results are still available. {message}"
+                    )),
+            )
+        })
+        .child(
+            div()
+                .border_b(px(1.0))
+                .border_color(Colors::divider())
+                .px(px(10.0))
+                .py(px(7.0))
+                .child(text_field_with_callbacks(
+                    search_input,
+                    search_focused,
+                    search_callbacks,
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .child(div().flex_shrink_0().child(sidebar))
+                .child(list_section)
+                .when(state.show_details, |panel| {
+                    panel.when_some(selected_plugin, |panel, plugin| {
+                        panel.child(
+                            div()
+                                .flex_shrink_0()
+                                .child(plugin_details_panel(plugin, &state.insert_target)),
+                        )
+                    })
+                }),
+        )
+        .child(footer)
+}
+
 fn build_header(close_button: VoidCb) -> impl IntoElement {
     div()
         .flex()

@@ -48,6 +48,7 @@ mod inspector_ops;
 mod mixer_ops;
 pub(crate) mod plugin_bridge_runtime;
 mod plugin_ops;
+mod plugin_picker_window;
 mod project_ops;
 mod recording_ops;
 mod studio_render;
@@ -334,6 +335,7 @@ pub struct StudioLayout {
     plugin_picker_prefs: PluginPickerPrefs,
     plugin_search_index: Option<PluginSearchIndex>,
     plugin_picker_au_error: Option<String>,
+    plugin_picker_window: Option<WindowHandle<plugin_picker_window::InsertPickerWindow>>,
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
     /// Cached plugin registry scan result. `None` until the first
@@ -738,6 +740,7 @@ impl StudioLayout {
             plugin_picker_prefs: PluginPickerPrefs::load(),
             plugin_search_index: None,
             plugin_picker_au_error: load_au_cache_state().last_error,
+            plugin_picker_window: None,
             add_track_window: None,
             plugin_manager_window: None,
             available_plugins: None,
@@ -1023,6 +1026,28 @@ impl StudioLayout {
             "ruler:add-tempo-marker" => {
                 if let Some(beat) = self.ruler_context_beat() {
                     self.add_tempo_point_at_beat(beat, false, cx);
+                }
+            }
+            "ruler:add-marker" => {
+                if let Some(beat) = self.ruler_context_beat() {
+                    let _ = self.timeline.update(cx, |timeline, cx| {
+                        timeline.state.add_marker_at_beat(beat);
+                        timeline.mark_project_changed(cx);
+                        cx.notify();
+                    });
+                    self.mark_dirty();
+                    cx.notify();
+                }
+            }
+            "ruler:add-region" => {
+                if let Some(beat) = self.ruler_context_beat() {
+                    let _ = self.timeline.update(cx, |timeline, cx| {
+                        timeline.state.add_region_at_beat(beat);
+                        timeline.mark_project_changed(cx);
+                        cx.notify();
+                    });
+                    self.mark_dirty();
+                    cx.notify();
                 }
             }
 

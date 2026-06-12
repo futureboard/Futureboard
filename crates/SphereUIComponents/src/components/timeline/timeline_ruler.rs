@@ -233,6 +233,79 @@ pub fn timeline_ruler(
                 } else {
                     None
                 })
+                .children(state.regions.iter().filter_map(|region| {
+                    let (start, end) = region.normalized_range();
+                    let x = state.beats_to_x(start as f32);
+                    let rx = state.beats_to_x(end as f32);
+                    let width = (rx - x).max(1.0);
+                    if x > ruler_grid_width + 24.0 || x + width < -24.0 {
+                        return None;
+                    }
+                    let color = crate::color::parse_hex_color(&region.color_hex)
+                        .unwrap_or_else(|_| Colors::accent_success());
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top(px(1.0))
+                            .h(px(13.0))
+                            .w(px(width))
+                            .rounded(px(3.0))
+                            .bg(Colors::with_alpha(color, 0.20))
+                            .border(px(1.0))
+                            .border_color(Colors::with_alpha(color, 0.55))
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .px(px(4.0))
+                                    .text_size(px(8.5))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(color)
+                                    .truncate()
+                                    .child(region.name.clone()),
+                            ),
+                    )
+                }))
+                .children(state.markers.iter().filter_map(|marker| {
+                    let x = state.beats_to_x(marker.beat as f32);
+                    if x < -24.0 || x > ruler_grid_width + 24.0 {
+                        return None;
+                    }
+                    let color = crate::color::parse_hex_color(&marker.color_hex)
+                        .unwrap_or_else(|_| Colors::accent_primary());
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top(px(0.0))
+                            .bottom_0()
+                            .w(px(1.0))
+                            .bg(Colors::with_alpha(color, 0.70))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(-4.0))
+                                    .top(px(2.0))
+                                    .w(px(9.0))
+                                    .h(px(9.0))
+                                    .rounded(px(2.0))
+                                    .bg(color),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(5.0))
+                                    .top(px(1.0))
+                                    .min_w(px(38.0))
+                                    .max_w(px(110.0))
+                                    .text_size(px(8.5))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(color)
+                                    .truncate()
+                                    .child(marker.name.clone()),
+                            ),
+                    )
+                }))
                 // Ticks: every visible grid line, drawn as a 1 px vertical mark
                 // anchored to the bottom of the ruler. Bar lines reach the top;
                 // beat and sub lines are shorter.

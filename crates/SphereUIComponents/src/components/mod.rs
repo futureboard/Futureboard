@@ -33,6 +33,7 @@ pub mod plugin_format_badge;
 pub mod plugin_manager;
 pub mod plugin_picker;
 pub mod plugin_shell_text;
+pub mod progress_dialog;
 pub mod project_switcher;
 pub mod settings_components;
 pub mod settings_dialog;
@@ -87,6 +88,12 @@ pub use piano_roll::PianoRoll;
 pub use plugin_manager::{
     open_plugin_manager_window, FilterCounts, PluginManagerDialogState, PluginManagerWindow,
     SidebarFilter, SortDir, SortKey,
+};
+pub use progress_dialog::{
+    open_copying_file_dialog_window, open_loading_session_dialog_window,
+    open_progress_dialog_window, progress_bar, CopyingFileDialogOptions,
+    LoadingSessionDialogOptions, ProgressBarValue, ProgressDialogCancelCb, ProgressDialogOptions,
+    ProgressDialogWindow, PROGRESS_DIALOG_WIDTH,
 };
 pub use settings_components::{
     settings_box_list, settings_box_list_group, settings_combo_trigger, settings_control_slot,

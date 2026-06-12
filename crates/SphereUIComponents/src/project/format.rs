@@ -2,9 +2,9 @@ use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
     InputMonitorMode, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNote,
     PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer,
-    ProjectPluginInstance, ProjectSend, ProjectTempoPoint, ProjectTrack, ProjectTrackAudioFormat,
-    ProjectTrackInputRouting, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
-    ProjectTrackType, TrackRouting,
+    ProjectPluginInstance, ProjectSend, ProjectTempoPoint, ProjectTimelineMarker,
+    ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting,
+    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
 };
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
@@ -20,7 +20,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v8 adds stable ids on tempo points for independent marker editing.
 /// v11 adds a content fingerprint per project asset for cross-session import
 /// dedup. Pre-v11 files have no asset fingerprint and load with `None`.
-pub const PROJECT_VERSION: u32 = 12;
+/// v13 adds timeline markers and regions.
+pub const PROJECT_VERSION: u32 = 13;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -708,6 +709,23 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         }
     }
 
+    // Timeline arrangement markers and regions (v13+).
+    w.write_u32(project.settings.timeline_markers.len() as u32);
+    for marker in &project.settings.timeline_markers {
+        w.write_str(&marker.id);
+        w.write_f64(marker.beat);
+        w.write_str(&marker.name);
+        w.write_str(&marker.color_hex);
+    }
+    w.write_u32(project.settings.timeline_regions.len() as u32);
+    for region in &project.settings.timeline_regions {
+        w.write_str(&region.id);
+        w.write_f64(region.start_beat);
+        w.write_f64(region.end_beat);
+        w.write_str(&region.name);
+        w.write_str(&region.color_hex);
+    }
+
     w.into_bytes()
 }
 
@@ -1244,6 +1262,33 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         Vec::new()
     };
 
+    let (timeline_markers, timeline_regions) = if version >= 13 {
+        let marker_count = r.read_u32()? as usize;
+        let mut markers = Vec::with_capacity(marker_count);
+        for _ in 0..marker_count {
+            markers.push(ProjectTimelineMarker {
+                id: r.read_str()?,
+                beat: r.read_f64()?,
+                name: r.read_str()?,
+                color_hex: r.read_str()?,
+            });
+        }
+        let region_count = r.read_u32()? as usize;
+        let mut regions = Vec::with_capacity(region_count);
+        for _ in 0..region_count {
+            regions.push(ProjectTimelineRegion {
+                id: r.read_str()?,
+                start_beat: r.read_f64()?,
+                end_beat: r.read_f64()?,
+                name: r.read_str()?,
+                color_hex: r.read_str()?,
+            });
+        }
+        (markers, regions)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     Ok(FutureboardProject {
         id,
         name,
@@ -1253,6 +1298,8 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             bpm,
             tempo_points,
             time_signature_points,
+            timeline_markers,
+            timeline_regions,
             time_sig_num,
             time_sig_den,
             sample_rate,

@@ -1325,6 +1325,7 @@ impl StudioLayout {
                         }
                     }
                 }
+                this.notify_insert_picker_window(cx);
                 cx.notify();
             });
         })
@@ -1411,6 +1412,7 @@ impl StudioLayout {
                 started.elapsed().as_millis()
             );
         }
+        self.open_insert_picker_external_window(Some(window.bounds()), cx);
         cx.notify();
     }
 

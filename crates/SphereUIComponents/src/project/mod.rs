@@ -428,6 +428,23 @@ pub struct ProjectTimeSignaturePoint {
     pub grouping: Vec<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectTimelineMarker {
+    pub id: String,
+    pub beat: f64,
+    pub name: String,
+    pub color_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectTimelineRegion {
+    pub id: String,
+    pub start_beat: f64,
+    pub end_beat: f64,
+    pub name: String,
+    pub color_hex: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectSettings {
     pub bpm: f64,
@@ -435,6 +452,8 @@ pub struct ProjectSettings {
     pub tempo_points: Vec<ProjectTempoPoint>,
     /// Global time signature markers. Empty on disk = migrate from legacy pair.
     pub time_signature_points: Vec<ProjectTimeSignaturePoint>,
+    pub timeline_markers: Vec<ProjectTimelineMarker>,
+    pub timeline_regions: Vec<ProjectTimelineRegion>,
     pub time_sig_num: u32,
     pub time_sig_den: u32,
     pub sample_rate: u32,
@@ -447,6 +466,8 @@ impl Default for ProjectSettings {
             bpm: 120.0,
             tempo_points: Vec::new(),
             time_signature_points: Vec::new(),
+            timeline_markers: Vec::new(),
+            timeline_regions: Vec::new(),
             time_sig_num: 4,
             time_sig_den: 4,
             sample_rate: 48000,
@@ -503,7 +524,7 @@ pub fn hex_to_rgba(hex: &str) -> gpui::Rgba {
 // ── From TimelineState ────────────────────────────────────────────────────────
 
 use crate::components::timeline::timeline_state::{
-    ClipType, TimelineState, TrackType as TlTrackType,
+    ClipType, TimelineMarkerState, TimelineRegionState, TimelineState, TrackType as TlTrackType,
 };
 
 impl From<&TimelineState> for FutureboardProject {
@@ -700,6 +721,27 @@ impl From<&TimelineState> for FutureboardProject {
                 grouping: p.effective_grouping(),
             })
             .collect();
+        project.settings.timeline_markers = tl
+            .markers
+            .iter()
+            .map(|marker| ProjectTimelineMarker {
+                id: marker.id.clone(),
+                beat: marker.beat,
+                name: marker.name.clone(),
+                color_hex: marker.color_hex.clone(),
+            })
+            .collect();
+        project.settings.timeline_regions = tl
+            .regions
+            .iter()
+            .map(|region| ProjectTimelineRegion {
+                id: region.id.clone(),
+                start_beat: region.start_beat,
+                end_beat: region.end_beat,
+                name: region.name.clone(),
+                color_hex: region.color_hex.clone(),
+            })
+            .collect();
         project.settings.time_sig_num = tl.time_signature_num;
         project.settings.time_sig_den = tl.time_signature_den;
         project.tracks = tracks;
@@ -733,6 +775,40 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
             .collect(),
     );
     tl.tempo_map.ensure_point_ids();
+    tl.markers = project
+        .settings
+        .timeline_markers
+        .iter()
+        .map(|marker| {
+            TimelineMarkerState::with_id(
+                marker.id.clone(),
+                marker.beat,
+                marker.name.clone(),
+                marker.color_hex.clone(),
+            )
+        })
+        .collect();
+    tl.markers
+        .sort_by(|a, b| a.beat.total_cmp(&b.beat).then_with(|| a.id.cmp(&b.id)));
+    tl.regions = project
+        .settings
+        .timeline_regions
+        .iter()
+        .map(|region| {
+            TimelineRegionState::with_id(
+                region.id.clone(),
+                region.start_beat,
+                region.end_beat,
+                region.name.clone(),
+                region.color_hex.clone(),
+            )
+        })
+        .collect();
+    tl.regions.sort_by(|a, b| {
+        a.start_beat
+            .total_cmp(&b.start_beat)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     if project.settings.time_signature_points.is_empty() {
         tl.time_signature_map =
             crate::components::timeline::timeline_state::TimeSignatureMap::with_default_4_4();

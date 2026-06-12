@@ -7,6 +7,9 @@ pub const INTER_VARIABLE: &[u8] =
 pub const GOOGLE_SANS_VARIABLE: &[u8] =
     include_bytes!("../../../packages/shared/fonts/GoogleSans-VariableFont.ttf");
 
+pub const FONT_INTER_VARIABLE_PATH: &str = "fonts/InterVariable.ttf";
+pub const FONT_GOOGLE_SANS_VARIABLE_PATH: &str = "fonts/GoogleSans-VariableFont.ttf";
+
 pub struct SvgIcon {
     pub name: &'static str,
     pub svg: &'static str,

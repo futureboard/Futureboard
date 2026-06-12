@@ -859,6 +859,115 @@ fn next_time_signature_point_id() -> TimeSignaturePointId {
     format!("ts-{ts:x}-{seq:x}")
 }
 
+fn next_timeline_marker_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("marker-{ts:x}-{seq:x}")
+}
+
+fn next_timeline_region_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("region-{ts:x}-{seq:x}")
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineMarkerState {
+    pub id: String,
+    pub beat: f64,
+    pub name: String,
+    pub color_hex: String,
+}
+
+impl TimelineMarkerState {
+    pub fn new(beat: f64, name: impl Into<String>, color_hex: impl Into<String>) -> Self {
+        Self::with_id("", beat, name, color_hex)
+    }
+
+    pub fn with_id(
+        id: impl Into<String>,
+        beat: f64,
+        name: impl Into<String>,
+        color_hex: impl Into<String>,
+    ) -> Self {
+        let mut id = id.into();
+        if id.is_empty() {
+            id = next_timeline_marker_id();
+        }
+        Self {
+            id,
+            beat: beat.max(0.0),
+            name: name.into(),
+            color_hex: color_hex.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineRegionState {
+    pub id: String,
+    pub start_beat: f64,
+    pub end_beat: f64,
+    pub name: String,
+    pub color_hex: String,
+}
+
+impl TimelineRegionState {
+    pub fn new(
+        start_beat: f64,
+        end_beat: f64,
+        name: impl Into<String>,
+        color_hex: impl Into<String>,
+    ) -> Self {
+        Self::with_id("", start_beat, end_beat, name, color_hex)
+    }
+
+    pub fn with_id(
+        id: impl Into<String>,
+        start_beat: f64,
+        end_beat: f64,
+        name: impl Into<String>,
+        color_hex: impl Into<String>,
+    ) -> Self {
+        let mut id = id.into();
+        if id.is_empty() {
+            id = next_timeline_region_id();
+        }
+        let (start, end) = if start_beat <= end_beat {
+            (start_beat.max(0.0), end_beat.max(0.0))
+        } else {
+            (end_beat.max(0.0), start_beat.max(0.0))
+        };
+        Self {
+            id,
+            start_beat: start,
+            end_beat: end.max(start + 1.0e-3),
+            name: name.into(),
+            color_hex: color_hex.into(),
+        }
+    }
+
+    pub fn normalized_range(&self) -> (f64, f64) {
+        if self.start_beat <= self.end_beat {
+            (self.start_beat, self.end_beat)
+        } else {
+            (self.end_beat, self.start_beat)
+        }
+    }
+}
+
 /// Normalize a denominator to one of the allowed note values.
 pub fn normalize_time_signature_denominator(denominator: u16) -> u16 {
     TS_ALLOWED_DENOMINATORS
@@ -2356,6 +2465,10 @@ pub struct TimelineState {
     pub tempo_map: TempoMap,
     /// Global time signature markers (authoritative for bar/beat layout).
     pub time_signature_map: TimeSignatureMap,
+    /// Timeline markers shown on the arrangement ruler.
+    pub markers: Vec<TimelineMarkerState>,
+    /// Named timeline regions spanning a beat range.
+    pub regions: Vec<TimelineRegionState>,
     /// Legacy single signature — kept in sync with the marker at beat 0 for
     /// templates and engine fallbacks.
     pub time_signature_num: u32,
@@ -2400,6 +2513,8 @@ impl Default for TimelineState {
             bpm: 120.0,
             tempo_map: TempoMap::new(),
             time_signature_map: TimeSignatureMap::with_default_4_4(),
+            markers: Vec::new(),
+            regions: Vec::new(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -2627,6 +2742,8 @@ impl TimelineState {
             bpm: 120.0,
             tempo_map: TempoMap::new(),
             time_signature_map: TimeSignatureMap::with_default_4_4(),
+            markers: Vec::new(),
+            regions: Vec::new(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -2837,6 +2954,43 @@ impl TimelineState {
                 .points
                 .first()
                 .is_some_and(|p| p.beat > TS_BEAT_EPSILON)
+    }
+
+    pub fn add_marker_at_beat(&mut self, beat: f64) -> String {
+        let label = format!("Marker {}", self.markers.len() + 1);
+        let marker = TimelineMarkerState::new(beat, label, "#7C5CFF");
+        let id = marker.id.clone();
+        self.markers.push(marker);
+        self.markers
+            .sort_by(|a, b| a.beat.total_cmp(&b.beat).then_with(|| a.id.cmp(&b.id)));
+        id
+    }
+
+    pub fn add_region_at_beat(&mut self, beat: f64) -> String {
+        let start = beat.max(0.0);
+        let length = self.beats_per_bar_at_beat(start).max(1.0);
+        let label = format!("Region {}", self.regions.len() + 1);
+        let region = TimelineRegionState::new(start, start + length, label, "#42C7A3");
+        let id = region.id.clone();
+        self.regions.push(region);
+        self.regions.sort_by(|a, b| {
+            a.start_beat
+                .total_cmp(&b.start_beat)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        id
+    }
+
+    pub fn delete_marker(&mut self, id: &str) -> bool {
+        let before = self.markers.len();
+        self.markers.retain(|marker| marker.id != id);
+        before != self.markers.len()
+    }
+
+    pub fn delete_region(&mut self, id: &str) -> bool {
+        let before = self.regions.len();
+        self.regions.retain(|region| region.id != id);
+        before != self.regions.len()
     }
 
     pub fn sync_legacy_time_signature_fields(&mut self) {

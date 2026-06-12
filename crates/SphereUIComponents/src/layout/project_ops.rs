@@ -666,6 +666,14 @@ impl StudioLayout {
         self.refresh_bridge_plugin_states(cx);
         let mut project = self.project_snapshot(cx);
         self.project_switcher.current_project.subtitle = "Saving...".to_string();
+        self.start_background_task(
+            "project-save",
+            crate::components::BackgroundTaskKind::ProjectSave,
+            "Save project",
+            Some(path.to_string_lossy().to_string()),
+            None,
+            false,
+        );
         cx.notify();
         cx.spawn(async move |this, cx| {
             let path_for_job = path.clone();
@@ -676,12 +684,20 @@ impl StudioLayout {
             let _ = this.update(cx, move |this, cx| match result {
                 Ok(project) => {
                     this.finish_project_save(project, path, cx);
+                    this.complete_background_task(
+                        "project-save",
+                        Some("Project saved".to_string()),
+                    );
                     project_lifecycle_log!("save complete");
                     if let Some(after_save) = after_save {
                         this.apply_save_then(after_save, cx);
                     }
                 }
-                Err(e) => this.handle_project_save_error(e.to_string(), cx),
+                Err(e) => {
+                    let error = e.to_string();
+                    this.fail_background_task("project-save", error.clone());
+                    this.handle_project_save_error(error, cx);
+                }
             });
         })
         .detach();

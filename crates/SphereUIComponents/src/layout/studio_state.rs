@@ -25,6 +25,7 @@ pub enum OpenPopover {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TextMenuTarget {
+    CommandPalette,
     ProjectSwitcherSearch,
     BrowserSearch,
     PluginPickerSearch,

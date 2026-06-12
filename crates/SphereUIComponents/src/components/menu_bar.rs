@@ -22,6 +22,26 @@ pub const MENU_PICKER_ID: &str = "__menu_picker__";
 
 const PICKER_PANEL_WIDTH: f32 = 168.0;
 const PICKER_ROW_HEIGHT: f32 = menu_style::ROW_HEIGHT;
+const MENU_BAR_PAD_X: f32 = 2.0;
+const MENU_LABEL_PAD_X: f32 = 7.0;
+const MENU_LABEL_GAP: f32 = 1.0;
+const MENU_LABEL_CHAR_W: f32 = 6.2;
+const COMPACT_MENU_BUTTON_SIZE: f32 = 16.0;
+
+pub fn menu_bar_chrome_width(viewport_width: f32) -> f32 {
+    if PlatformChromePolicy::menubar_compact(viewport_width) {
+        MENU_BAR_PAD_X * 2.0 + COMPACT_MENU_BUTTON_SIZE
+    } else {
+        let manifest = MenuManifest::load();
+        let labels_width = manifest
+            .menus
+            .iter()
+            .map(|menu| menu_label_width(&menu.label))
+            .sum::<f32>();
+        let gaps = manifest.menus.len().saturating_sub(1) as f32 * MENU_LABEL_GAP;
+        MENU_BAR_PAD_X * 2.0 + labels_width + gaps
+    }
+}
 
 pub fn menu_bar(
     open_menu_id: Option<&str>,
@@ -38,18 +58,24 @@ pub fn menu_bar(
 fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
     let manifest = MenuManifest::load();
     let open_id_owned = open_menu_id.map(|s| s.to_string());
+    let chrome_left: f32 = PlatformChromePolicy::current()
+        .traffic_light_left_padding()
+        .into();
+    let mut next_label_left = chrome_left + MENU_BAR_PAD_X;
 
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(1.0))
+        .gap(px(MENU_LABEL_GAP))
         .h(px(TITLEBAR_HEIGHT))
-        .px(px(4.0))
+        .px(px(MENU_BAR_PAD_X))
         .children(manifest.menus.iter().enumerate().map(|(i, menu)| {
             let is_open = open_id_owned.as_deref() == Some(menu.id.as_str());
             let menu_id = menu.id.clone();
             let hover_menu_id = menu.id.clone();
+            let anchor_x = next_label_left;
+            next_label_left += menu_label_width(&menu.label) + MENU_LABEL_GAP;
             let cb = on_open_menu.clone();
             let hover_cb = on_open_menu.clone();
             let can_hover_switch = open_id_owned.is_some() && !is_open;
@@ -61,13 +87,11 @@ fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl I
                 can_hover_switch,
                 move |hovered, window, cx| {
                     if *hovered {
-                        let x: f32 = window.mouse_position().x.into();
-                        hover_cb(&(hover_menu_id.clone(), x), window, cx);
+                        hover_cb(&(hover_menu_id.clone(), anchor_x), window, cx);
                     }
                 },
-                move |event, window, cx| {
-                    let click_x: f32 = event.position.x.into();
-                    cb(&(menu_id.clone(), click_x), window, cx);
+                move |_event, window, cx| {
+                    cb(&(menu_id.clone(), anchor_x), window, cx);
                 },
             )
         }))
@@ -76,18 +100,22 @@ fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl I
 fn menu_bar_compact(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
     let is_open = open_menu_id == Some(MENU_PICKER_ID);
     let cb = on_open_menu.clone();
+    let chrome_left: f32 = PlatformChromePolicy::current()
+        .traffic_light_left_padding()
+        .into();
+    let anchor_x = chrome_left + MENU_BAR_PAD_X;
 
     div()
         .flex()
         .flex_row()
         .items_center()
         .h(px(TITLEBAR_HEIGHT))
-        .px(px(4.0))
+        .px(px(MENU_BAR_PAD_X))
         .child(
             div()
                 .id("top-menu-hamburger")
-                .w(px(28.0))
-                .h(px(28.0))
+                .w(px(COMPACT_MENU_BUTTON_SIZE))
+                .h(px(COMPACT_MENU_BUTTON_SIZE))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -99,9 +127,8 @@ fn menu_bar_compact(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> imp
                 })
                 .hover(|s| s.bg(Colors::surface_control_hover()))
                 .cursor(gpui::CursorStyle::PointingHand)
-                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-                    let click_x: f32 = event.position.x.into();
-                    cb(&(MENU_PICKER_ID.to_string(), click_x), window, cx);
+                .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+                    cb(&(MENU_PICKER_ID.to_string(), anchor_x), window, cx);
                 })
                 .occlude()
                 .child(
@@ -192,14 +219,17 @@ pub fn menu_picker_dropdown(
                         .text_color(Colors::text_primary())
                         .hover(|s| s.bg(Colors::surface_control_hover()))
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-                            let click_x: f32 = event.position.x.into();
-                            cb(&(menu_id.clone(), click_x), window, cx);
+                        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+                            cb(&(menu_id.clone(), panel_left), window, cx);
                         })
                         .occlude()
                         .child(label)
                 })),
         )
+}
+
+fn menu_label_width(label: &str) -> f32 {
+    MENU_LABEL_PAD_X * 2.0 + label.chars().count() as f32 * MENU_LABEL_CHAR_W
 }
 
 pub fn menu_label_button(
@@ -213,7 +243,7 @@ pub fn menu_label_button(
     div()
         .id(id)
         .h(px(24.0))
-        .px(px(7.0))
+        .px(px(MENU_LABEL_PAD_X))
         .flex()
         .items_center()
         .rounded_md()

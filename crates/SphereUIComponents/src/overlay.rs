@@ -104,10 +104,10 @@ pub fn titlebar_label_anchor(click_x: f32) -> OverlayAnchor {
 }
 
 /// Anchor for the project title button in the title bar.
-pub fn project_title_anchor(click_x: f32) -> OverlayAnchor {
+pub fn project_title_anchor(left_x: f32) -> OverlayAnchor {
     OverlayAnchor {
         bounds: bounds(
-            point(px(click_x - 8.0), px(0.0)),
+            point(px(left_x), px(0.0)),
             size(px(288.0), px(TITLEBAR_HEIGHT)),
         ),
     }

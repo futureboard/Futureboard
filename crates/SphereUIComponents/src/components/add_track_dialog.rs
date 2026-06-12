@@ -18,8 +18,8 @@ use crate::components::form::{
     select_dismiss_backdrop, select_with_placement, SelectMenuPlacement, SelectOption,
 };
 use crate::components::text_input::{
-    bind_mouse_selection, bind_mouse_selection_with_offset, text_field_with_callbacks_and_ime,
-    TextInputAction, TextInputCallbacks, TextInputState,
+    bind_mouse_selection, text_field_with_callbacks, text_field_with_callbacks_and_ime,
+    TextInputAction, TextInputCallbacks, TextInputMouseEvent, TextInputMousePhase, TextInputState,
 };
 use crate::components::timeline::timeline_state::TrackType;
 use crate::components::title_bar::external_window_titlebar_with_icon;
@@ -33,6 +33,7 @@ const FORM_LABEL_WIDTH: f32 = 86.0;
 const FORM_GAP: f32 = 10.0;
 const BODY_PAD_X: f32 = 14.0;
 const NAME_INPUT_X_OFFSET: f32 = BODY_PAD_X + FORM_LABEL_WIDTH + FORM_GAP;
+const COUNT_INPUT_X_OFFSET: f32 = NAME_INPUT_X_OFFSET + 34.0;
 
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type KindCb = Arc<dyn Fn(&AddTrackKind, &mut Window, &mut App) + 'static>;
@@ -497,6 +498,9 @@ fn check_row(
 
 fn count_stepper(
     state: &AddTrackDialogState,
+    count_input: &TextInputState,
+    count_focused: bool,
+    count_callbacks: TextInputCallbacks,
     callbacks: &AddTrackDialogCallbacks,
 ) -> impl IntoElement {
     let down = callbacks.on_count_delta.clone();
@@ -511,28 +515,23 @@ fn count_stepper(
             "-",
             move |_, w, cx| down(&-1, w, cx),
         ))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .min_w(px(48.0))
-                .h(px(28.0))
-                .px(px(10.0))
-                .rounded_md()
-                .border(px(1.0))
-                .border_color(Colors::border_subtle())
-                .bg(Colors::surface_input())
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_primary())
-                .child(state.count.to_string()),
-        )
+        .child(div().w(px(54.0)).child(text_field_with_callbacks(
+            count_input,
+            count_focused,
+            count_callbacks,
+        )))
         .child(fb_stepper_button(
             "add-track-count-plus",
             "+",
             move |_, w, cx| up(&1, w, cx),
         ))
+        .child(
+            div()
+                .min_w(px(44.0))
+                .text_size(px(10.0))
+                .text_color(Colors::text_faint())
+                .child(if state.count == 1 { "track" } else { "tracks" }),
+        )
 }
 
 fn type_tabs(
@@ -545,8 +544,8 @@ fn type_tabs(
         .flex()
         .flex_row()
         .gap(px(4.0))
-        .px(px(12.0))
-        .py(px(8.0));
+        .px(px(BODY_PAD_X))
+        .py(px(6.0));
     for (i, kind) in tabs.iter().enumerate() {
         let active = state.selected_kind == *kind;
         let supported = kind_supported(*kind, state);
@@ -559,9 +558,9 @@ fn type_tabs(
             .items_center()
             .justify_center()
             .gap(px(6.0))
-            .h(px(30.0))
-            .min_w(px(86.0))
-            .px(px(10.0))
+            .h(px(27.0))
+            .min_w(px(84.0))
+            .px(px(9.0))
             .rounded_md()
             .border(px(1.0))
             .border_color(if active {
@@ -575,15 +574,24 @@ fn type_tabs(
                 Colors::surface_input()
             })
             .opacity(if supported { 1.0 } else { 0.42 })
-            .child(icon(
-                kind.icon(),
-                13.0,
-                if active {
-                    Colors::accent_primary()
-                } else {
-                    Colors::text_muted()
-                },
-            ))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(15.0))
+                    .h(px(15.0))
+                    .child(icon(
+                        kind.icon(),
+                        12.5,
+                        if active {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_muted()
+                        },
+                    )),
+            )
             .child(
                 div()
                     .text_size(px(10.5))
@@ -702,9 +710,9 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(px(12.0))
+        .gap(px(10.0))
         .px(px(BODY_PAD_X))
-        .py(px(10.0))
+        .py(px(7.0))
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .bg(Colors::surface_panel_alt())
@@ -720,15 +728,15 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .w(px(26.0))
-                        .h(px(26.0))
+                        .w(px(28.0))
+                        .h(px(28.0))
                         .rounded_md()
                         .border(px(1.0))
                         .border_color(Colors::border_subtle())
                         .bg(Colors::surface_input())
                         .child(icon(
                             state.selected_kind.icon(),
-                            14.0,
+                            16.0,
                             Colors::accent_primary(),
                         )),
                 )
@@ -759,7 +767,7 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
             div()
                 .flex_shrink_0()
                 .px(px(8.0))
-                .h(px(22.0))
+                .h(px(20.0))
                 .flex()
                 .items_center()
                 .rounded_md()
@@ -783,7 +791,7 @@ fn form_panel(child: impl IntoElement) -> impl IntoElement {
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel_alt())
-        .p(px(10.0))
+        .p(px(9.0))
         .child(child)
 }
 
@@ -1130,6 +1138,9 @@ pub fn add_track_dialog_body(
     track_name_focused: bool,
     track_name_callbacks: TextInputCallbacks,
     track_name_ime_target: Entity<AddTrackWindow>,
+    count_input: &TextInputState,
+    count_focused: bool,
+    count_callbacks: TextInputCallbacks,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
     color_ui: AddTrackColorUi,
@@ -1187,7 +1198,13 @@ pub fn add_track_dialog_body(
                         ))
                         .child(fb_form_row(
                             i18n.tr("add-track.field.count"),
-                            count_stepper(state, &callbacks),
+                            count_stepper(
+                                state,
+                                count_input,
+                                count_focused,
+                                count_callbacks,
+                                &callbacks,
+                            ),
                         ))
                         .child(color_row(state, &callbacks, color_ui, i18n)),
                 ))
@@ -1255,6 +1272,8 @@ pub struct AddTrackWindow {
     pub state: AddTrackDialogState,
     language: String,
     track_name_input: TextInputState,
+    count_input: TextInputState,
+    count_editing: bool,
     color_picker: ColorPickerState,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: Vec<RegistryPlugin>,
@@ -1274,6 +1293,8 @@ impl AddTrackWindow {
         let mut track_name_input = TextInputState::new("add-track-window-name", cx.focus_handle());
         track_name_input.set_value(initial_state.track_name.clone());
         track_name_input.select_all();
+        let mut count_input = TextInputState::new("add-track-window-count", cx.focus_handle());
+        count_input.set_value(initial_state.count.to_string());
         let color_picker = ColorPickerState::new(
             "add-track-hex",
             cx.focus_handle(),
@@ -1285,6 +1306,8 @@ impl AddTrackWindow {
             state: initial_state,
             language: language.into(),
             track_name_input,
+            count_input,
+            count_editing: false,
             color_picker,
             open_select: None,
             instrument_plugins,
@@ -1318,6 +1341,8 @@ impl AddTrackWindow {
         ));
         self.track_name_input.set_value(dialog.track_name.clone());
         self.track_name_input.select_all();
+        self.count_input.set_value(dialog.count.to_string());
+        self.count_editing = false;
         self.open_select = None;
         self.color_picker
             .reset(color_picker_value_for(&dialog), dialog.selected_color());
@@ -1344,7 +1369,36 @@ impl AddTrackWindow {
         }
     }
 
+    fn set_count(&mut self, count: u32) {
+        self.state.count = count.clamp(1, MAX_TRACK_COUNT);
+        self.count_input.set_value(self.state.count.to_string());
+    }
+
+    fn begin_count_edit(&mut self) {
+        self.count_input.set_value(self.state.count.to_string());
+        self.count_input.select_all();
+        self.count_editing = true;
+    }
+
+    fn commit_count_edit(&mut self) {
+        let parsed = self.count_input.value.trim().parse::<u32>().ok();
+        if let Some(count) = parsed {
+            self.set_count(count);
+        } else {
+            self.count_input.set_value(self.state.count.to_string());
+        }
+        self.count_editing = false;
+    }
+
+    fn cancel_count_edit(&mut self) {
+        self.count_input.set_value(self.state.count.to_string());
+        self.count_editing = false;
+    }
+
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.count_editing {
+            self.commit_count_edit();
+        }
         if !self.state.is_valid() {
             return;
         }
@@ -1393,6 +1447,17 @@ impl AddTrackWindow {
                     cx.notify();
                 }
             }
+            return;
+        }
+
+        if self.count_editing {
+            let action = self.count_input.handle_key_with_clipboard(event, Some(cx));
+            match action {
+                TextInputAction::Submit => self.commit_count_edit(),
+                TextInputAction::Cancel => self.cancel_count_edit(),
+                TextInputAction::Consumed | TextInputAction::Pass => {}
+            }
+            cx.notify();
             return;
         }
 
@@ -1519,7 +1584,8 @@ impl Render for AddTrackWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let i18n = I18n::new(&self.language);
         let target = cx.entity().clone();
-        let search_focused = self.track_name_input.is_focused(window);
+        let search_focused = self.track_name_input.is_focused(window) && !self.count_editing;
+        let count_focused = self.count_editing;
         // Snapshot the open select for this frame. The dismiss backdrop (below)
         // sits above the form and resets `open_select` first on a click, so the
         // trigger must decide open-vs-close against the frame it was drawn for —
@@ -1559,8 +1625,9 @@ impl Render for AddTrackWindow {
                     let delta = *delta;
                     let _ = target.update(cx, |this, cx| {
                         let current = this.state.count as i32;
-                        this.state.count =
-                            (current + delta).clamp(1, MAX_TRACK_COUNT as i32) as u32;
+                        let next = (current + delta).clamp(1, MAX_TRACK_COUNT as i32) as u32;
+                        this.set_count(next);
+                        this.count_editing = false;
                         cx.notify();
                     });
                 }
@@ -1836,6 +1903,50 @@ impl Render for AddTrackWindow {
             }),
             callbacks: picker_callbacks,
         };
+        let name_callbacks = TextInputCallbacks {
+            on_context_menu: None,
+            on_mouse: Some(Arc::new({
+                let target = target.clone();
+                move |event: &TextInputMouseEvent, _w, cx| {
+                    let x = event.x - NAME_INPUT_X_OFFSET;
+                    let phase = event.phase;
+                    let _ = target.update(cx, |this, cx| {
+                        this.count_editing = false;
+                        match phase {
+                            TextInputMousePhase::Down => {
+                                this.track_name_input.handle_mouse_down(x, false)
+                            }
+                            TextInputMousePhase::Drag => this.track_name_input.handle_mouse_drag(x),
+                            TextInputMousePhase::Up => this.track_name_input.handle_mouse_up(),
+                        }
+                        cx.notify();
+                    });
+                }
+            })),
+        };
+        let count_callbacks = TextInputCallbacks {
+            on_context_menu: None,
+            on_mouse: Some(Arc::new({
+                let target = target.clone();
+                move |event: &TextInputMouseEvent, _w, cx| {
+                    let x = event.x - COUNT_INPUT_X_OFFSET;
+                    let phase = event.phase;
+                    let _ = target.update(cx, |this, cx| {
+                        if !this.count_editing {
+                            this.begin_count_edit();
+                        }
+                        match phase {
+                            TextInputMousePhase::Down => {
+                                this.count_input.handle_mouse_down(x, false)
+                            }
+                            TextInputMousePhase::Drag => this.count_input.handle_mouse_drag(x),
+                            TextInputMousePhase::Up => this.count_input.handle_mouse_up(),
+                        }
+                        cx.notify();
+                    });
+                }
+            })),
+        };
 
         div()
             .flex()
@@ -1861,12 +1972,11 @@ impl Render for AddTrackWindow {
                 &self.state,
                 &self.track_name_input,
                 search_focused,
-                bind_mouse_selection_with_offset(
-                    cx.entity().clone(),
-                    |this| &mut this.track_name_input,
-                    NAME_INPUT_X_OFFSET,
-                ),
+                name_callbacks,
                 cx.entity().clone(),
+                &self.count_input,
+                count_focused,
+                count_callbacks,
                 self.open_select,
                 &self.instrument_plugins,
                 color_ui,

@@ -89,17 +89,17 @@ pub mod text {
 pub mod menu {
     pub const PANEL_MIN_WIDTH: f32 = 210.0;
     pub const PANEL_MAX_WIDTH: f32 = 340.0;
-    pub const PANEL_PAD: f32 = 4.0;
-    pub const ROW_HEIGHT: f32 = 25.0;
-    pub const ROW_PAD_X: f32 = 10.0;
+    pub const PANEL_PAD: f32 = 3.0;
+    pub const ROW_HEIGHT: f32 = 20.0;
+    pub const ROW_PAD_X: f32 = 8.0;
     pub const CHECK_SLOT_W: f32 = 18.0;
     pub const ICON_SIZE: f32 = 11.0;
     pub const CHEVRON_SIZE: f32 = 11.0;
-    pub const LABEL_TEXT_SIZE: f32 = crate::theme::typography::UI_SM;
+    pub const LABEL_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
     pub const META_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
     pub const HEADER_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
     pub const HEADER_HEIGHT: f32 = 21.0;
-    pub const SEPARATOR_MARGIN_Y: f32 = 3.0;
+    pub const SEPARATOR_MARGIN_Y: f32 = 2.0;
     pub const ITEM_GAP: f32 = 1.0;
 }
 

@@ -36,9 +36,9 @@ use crate::theme::{menu as menu_style, Colors};
 
 pub const TOP_CHROME_HEIGHT: f32 = TITLEBAR_HEIGHT;
 
-const MENU_PANEL_EDGE_GAP: f32 = 4.0;
-const MENU_SUBMENU_GAP: f32 = 4.0;
-const MENU_MIN_VISIBLE_HEIGHT: f32 = 80.0;
+const MENU_PANEL_EDGE_GAP: f32 = 0.0;
+const MENU_SUBMENU_GAP: f32 = 0.0;
+const MENU_MIN_VISIBLE_HEIGHT: f32 = 20.0;
 const SEPARATOR_HEIGHT: f32 = menu_style::SEPARATOR_MARGIN_Y * 2.0 + 1.0;
 
 pub type CommandCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
@@ -298,9 +298,7 @@ fn panel_view(
         .top(px(top))
         .left(px(left))
         .w(px(width))
-        .max_h(px(560.0))
         .id(("menu-dropdown-panel", (depth + 1) * 1000 + left as usize))
-        .overflow_y_scroll()
         .flex()
         .flex_col()
         .gap(px(1.0))

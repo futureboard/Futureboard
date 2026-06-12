@@ -280,7 +280,6 @@ impl StudioLayout {
         results: Vec<DAUx::types::JsRecordingResult>,
     ) {
         let bpm = self.timeline.read(cx).state.bpm;
-        let owner = cx.entity().clone();
         let timeline = self.timeline.clone();
         let (generate_waveforms, recording_offset_ms) = {
             let settings = self.settings.read(cx);
@@ -349,13 +348,7 @@ impl StudioLayout {
         self.schedule_audio_project_sync(cx, true, "recording_commit");
 
         for (path, path_key) in import_paths {
-            Self::spawn_timeline_audio_import_jobs(
-                cx,
-                owner.clone(),
-                timeline.clone(),
-                path,
-                path_key,
-            );
+            self.spawn_timeline_audio_import_jobs(cx, timeline.clone(), path, path_key);
         }
     }
 

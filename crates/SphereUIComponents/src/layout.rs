@@ -29,6 +29,7 @@ use crate::components::text_input::{
 use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{ClipType, TempoCurve};
 use crate::components::MixerWindow;
+use crate::components::{BackgroundTaskStore, CommandPaletteState};
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
 use crate::overlay::{project_title_anchor, titlebar_label_anchor};
 use crate::paths::FutureboardPaths;
@@ -313,6 +314,9 @@ pub struct StudioLayout {
     /// and so the handle survives across renders.
     browser_scroll: UniformListScrollHandle,
     menu_bar: MenuBarUiState,
+    command_palette: CommandPaletteState,
+    command_palette_input: TextInputState,
+    background_tasks: BackgroundTaskStore,
     project_switcher: ProjectSwitcherState,
     project_switcher_search_input: TextInputState,
     browser_search_input: TextInputState,
@@ -713,6 +717,13 @@ impl StudioLayout {
             file_browser: FileBrowserState::default(),
             browser_scroll: UniformListScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
+            command_palette: CommandPaletteState::default(),
+            command_palette_input: TextInputState::new(
+                "command-palette-search-input",
+                cx.focus_handle(),
+            )
+            .with_placeholder("Run command..."),
+            background_tasks: BackgroundTaskStore::default(),
             project_switcher: ProjectSwitcherState::default(),
             project_switcher_search_input: TextInputState::new(
                 "project-switcher-search-input",
@@ -927,6 +938,60 @@ impl StudioLayout {
 }
 
 impl StudioLayout {
+    pub(super) fn start_background_task(
+        &mut self,
+        id: impl Into<String>,
+        kind: components::BackgroundTaskKind,
+        title: impl Into<String>,
+        detail: Option<String>,
+        progress: Option<components::BackgroundTaskProgress>,
+        cancellable: bool,
+    ) {
+        self.background_tasks.add_or_update(
+            id,
+            components::BackgroundTaskUpdate {
+                kind,
+                title: title.into(),
+                detail,
+                status: components::BackgroundTaskStatus::Running,
+                progress,
+                error: None,
+                cancellable,
+                parent_id: None,
+            },
+        );
+    }
+
+    pub(super) fn queue_background_task(
+        &mut self,
+        id: impl Into<String>,
+        kind: components::BackgroundTaskKind,
+        title: impl Into<String>,
+        detail: Option<String>,
+    ) {
+        self.background_tasks.add_or_update(
+            id,
+            components::BackgroundTaskUpdate {
+                kind,
+                title: title.into(),
+                detail,
+                status: components::BackgroundTaskStatus::Queued,
+                progress: None,
+                error: None,
+                cancellable: false,
+                parent_id: None,
+            },
+        );
+    }
+
+    pub(super) fn complete_background_task(&mut self, id: &str, detail: Option<String>) {
+        self.background_tasks.complete(id, detail);
+    }
+
+    pub(super) fn fail_background_task(&mut self, id: &str, error: impl Into<String>) {
+        self.background_tasks.fail(id, error);
+    }
+
     /// Single entry point for menu items, keyboard shortcuts, and chrome
     /// buttons. `command_id` matches the Electron/shared menu manifest
     /// IDs (e.g. `transport:play-pause`). Unknown IDs are logged once
@@ -962,6 +1027,15 @@ impl StudioLayout {
         }
         match command_id {
             "noop" => {}
+
+            "tools:command-palette" => {
+                self.command_palette.open();
+                self.command_palette_input.set_value("");
+                self.open_popover = None;
+                self.project_switcher.is_open = false;
+                self.plugin_picker.is_open = false;
+                cx.notify();
+            }
 
             "tempo:add-marker" => {
                 self.add_tempo_marker_at_playhead(cx);
@@ -1123,11 +1197,9 @@ impl StudioLayout {
                             this.schedule_audio_project_sync(cx, false, "browser_import");
                         });
                         let path_key = path_for_decode.to_string_lossy().to_string();
-                        let owner = layout.clone();
-                        let _ = layout.update(cx, move |_layout, cx| {
-                            Self::spawn_timeline_audio_import_jobs(
+                        let _ = layout.update(cx, move |this, cx| {
+                            this.spawn_timeline_audio_import_jobs(
                                 cx,
-                                owner,
                                 timeline_for_decode,
                                 path_for_decode,
                                 path_key,
@@ -1158,12 +1230,12 @@ impl StudioLayout {
                 };
                 if let Some(path) = path {
                     self.file_browser.mark_loading(path.clone());
-                    Self::spawn_directory_load(cx, path);
+                    self.spawn_directory_load(cx, path);
                 } else {
                     let pending = self.file_browser.expanded_paths.clone();
                     for p in pending {
                         self.file_browser.mark_loading(p.clone());
-                        Self::spawn_directory_load(cx, p);
+                        self.spawn_directory_load(cx, p);
                     }
                 }
             }
@@ -1195,7 +1267,7 @@ impl StudioLayout {
                         let pending = self.file_browser.paths_needing_load();
                         for p in pending {
                             self.file_browser.mark_loading(p.clone());
-                            Self::spawn_directory_load(cx, p);
+                            self.spawn_directory_load(cx, p);
                         }
                     }
                 }
@@ -1607,24 +1679,40 @@ impl StudioLayout {
         {
             return Some("midi:open-editor".to_string());
         }
+        if (mods.control || mods.platform)
+            && mods.shift
+            && !mods.alt
+            && !mods.function
+            && matches!(key, "p" | "P")
+        {
+            return Some("tools:command-palette".to_string());
+        }
         None
     }
 
     fn spawn_timeline_audio_import_jobs(
+        &mut self,
         cx: &mut Context<Self>,
-        owner: Entity<Self>,
         timeline: Entity<components::timeline::Timeline>,
         path: PathBuf,
         _path_key: String,
     ) {
-        let project_root = owner.read(cx).project_session.folder_path.clone();
+        // Read `folder_path` from the already-leased `self` rather than
+        // `owner.read(cx)`. Every caller invokes this from inside the
+        // StudioLayout entity lease (a `this.update(cx, …)` closure or a
+        // `&mut self` method such as `commit_recording_results`), so reading or
+        // updating the entity again would double-lease panic
+        // ("cannot read StudioLayout while it is already being updated").
+        let project_root = self.project_session.folder_path.clone();
         if project_root.is_none() {
             eprintln!("[AudioImport] blocked: save project before importing audio");
-            let _ = owner.update(cx, |this, cx| {
-                this.show_import_requires_save_dialog(cx);
-            });
+            self.show_import_requires_save_dialog(cx);
             return;
         }
+        // `cx.entity()` only clones the handle (no lease); the downstream
+        // `spawn_timeline_import_from_layout` merely downgrades it and does all
+        // real work in `cx.spawn`, so handing it the entity here is safe.
+        let owner = cx.entity().clone();
         components::timeline::audio_import::spawn_timeline_import_from_layout(
             path,
             project_root,

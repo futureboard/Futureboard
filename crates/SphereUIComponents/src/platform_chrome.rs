@@ -16,7 +16,7 @@ pub const MACOS_TRAFFIC_LIGHT_PADDING_PX: f32 = 72.0;
 pub const EXTERNAL_DIALOG_TITLE_PADDING_PX: f32 = 12.0;
 
 /// Below this width the in-window menubar collapses to a hamburger control.
-pub const MENUBAR_COMPACT_BREAKPOINT_PX: f32 = 800.0;
+pub const MENUBAR_COMPACT_BREAKPOINT_PX: f32 = 1400.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformChromeKind {

@@ -1,4 +1,5 @@
 use gpui::{Context, KeyDownEvent, Window};
+use std::path::PathBuf;
 
 use crate::components::context_menu::ContextMenuEntry;
 use crate::components::plugin_picker::{
@@ -9,16 +10,77 @@ use crate::components::text_input::{TextInputAction, TextInputState};
 use crate::components::timeline::timeline_state::ClipType;
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
+use super::project_ops::ProjectOpenOptions;
 use super::{ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
 impl StudioLayout {
-    pub(super) fn project_switcher_visible_count(&self) -> usize {
-        1 + self
-            .project_switcher
+    pub(super) fn command_palette_visible_count(&self) -> usize {
+        crate::components::command_palette_entries(&self.command_palette.query).len()
+    }
+
+    pub(super) fn handle_command_palette_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.command_palette.is_open {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.command_palette.close();
+                self.text_context_menu = None;
+                self.focus_handle.focus(window, cx);
+                true
+            }
+            "arrow_down" | "arrowdown" | "down" => {
+                let max = self.command_palette_visible_count().saturating_sub(1);
+                self.command_palette.selected_index =
+                    (self.command_palette.selected_index + 1).min(max);
+                true
+            }
+            "arrow_up" | "arrowup" | "up" => {
+                self.command_palette.selected_index =
+                    self.command_palette.selected_index.saturating_sub(1);
+                true
+            }
+            "enter" | "numpad_enter" => {
+                if let Some(entry) =
+                    crate::components::command_palette_entries(&self.command_palette.query)
+                        .get(self.command_palette.selected_index)
+                        .cloned()
+                {
+                    self.command_palette.close();
+                    self.focus_handle.focus(window, cx);
+                    self.dispatch_command_id_from_bounds(&entry.command, Some(window.bounds()), cx);
+                }
+                true
+            }
+            _ => {
+                let focused = self.command_palette_input.is_focused(window);
+                if focused || is_text_input_key(event) {
+                    let action = self
+                        .command_palette_input
+                        .handle_key_with_clipboard(event, Some(cx));
+                    self.sync_text_input_target(TextMenuTarget::CommandPalette);
+                    return !matches!(action, TextInputAction::Pass);
+                }
+                false
+            }
+        }
+    }
+
+    pub(super) fn project_switcher_visible_recent_paths(&self) -> Vec<PathBuf> {
+        let query = self.project_switcher.query.trim().to_lowercase();
+        self.project_switcher
             .recent_projects
             .iter()
             .filter(|project| !project.is_current)
             .filter(|project| {
-                let query = self.project_switcher.query.trim().to_lowercase();
                 if query.is_empty() {
                     return true;
                 }
@@ -29,7 +91,12 @@ impl StudioLayout {
                     .unwrap_or_default();
                 project.name.to_lowercase().contains(&query) || path.contains(&query)
             })
-            .count()
+            .filter_map(|project| project.path.clone())
+            .collect()
+    }
+
+    pub(super) fn project_switcher_visible_count(&self) -> usize {
+        1 + self.project_switcher_visible_recent_paths().len()
     }
 
     pub(super) fn handle_project_switcher_key(
@@ -57,20 +124,30 @@ impl StudioLayout {
                 self.text_context_menu = None;
                 true
             }
-            "arrow_down" | "down" => {
+            "arrow_down" | "arrowdown" | "down" => {
                 let max = self.project_switcher_visible_count().saturating_sub(1);
                 self.project_switcher.selected_index =
                     (self.project_switcher.selected_index + 1).min(max);
                 true
             }
-            "arrow_up" | "up" => {
+            "arrow_up" | "arrowup" | "up" => {
                 self.project_switcher.selected_index =
                     self.project_switcher.selected_index.saturating_sub(1);
                 true
             }
             "enter" | "numpad_enter" => {
                 if self.project_switcher.selected_index > 0 {
-                    self.dispatch_command_id("project:open-recent", cx);
+                    if let Some(path) = self
+                        .project_switcher_visible_recent_paths()
+                        .get(self.project_switcher.selected_index - 1)
+                        .cloned()
+                    {
+                        self.load_project_from_path_with_options(
+                            path,
+                            ProjectOpenOptions { from_recent: true },
+                            cx,
+                        );
+                    }
                     self.project_switcher.is_open = false;
                 }
                 true
@@ -189,7 +266,7 @@ impl StudioLayout {
                 let pending = self.file_browser.paths_needing_load();
                 for p in pending {
                     self.file_browser.mark_loading(p.clone());
-                    Self::spawn_directory_load(cx, p);
+                    self.spawn_directory_load(cx, p);
                 }
                 cx.notify();
                 true
@@ -199,7 +276,7 @@ impl StudioLayout {
                 let pending = self.file_browser.paths_needing_load();
                 for p in pending {
                     self.file_browser.mark_loading(p.clone());
-                    Self::spawn_directory_load(cx, p);
+                    self.spawn_directory_load(cx, p);
                 }
                 cx.notify();
                 true
@@ -213,7 +290,7 @@ impl StudioLayout {
                             let pending = self.file_browser.paths_needing_load();
                             for p in pending {
                                 self.file_browser.mark_loading(p.clone());
-                                Self::spawn_directory_load(cx, p);
+                                self.spawn_directory_load(cx, p);
                             }
                         }
                     } else {
@@ -245,11 +322,9 @@ impl StudioLayout {
                                 this.schedule_audio_project_sync(cx, false, "browser_import");
                             });
                             let path_key = path_for_decode.to_string_lossy().to_string();
-                            let owner = layout.clone();
-                            let _ = layout.update(cx, move |_layout, cx| {
-                                Self::spawn_timeline_audio_import_jobs(
+                            let _ = layout.update(cx, move |this, cx| {
+                                this.spawn_timeline_audio_import_jobs(
                                     cx,
-                                    owner,
                                     timeline_for_decode,
                                     path_for_decode,
                                     path_key,
@@ -439,6 +514,7 @@ impl StudioLayout {
 
     pub(super) fn text_input_mut(&mut self, target: TextMenuTarget) -> &mut TextInputState {
         match target {
+            TextMenuTarget::CommandPalette => &mut self.command_palette_input,
             TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &mut self.plugin_picker_search_input,
@@ -449,6 +525,7 @@ impl StudioLayout {
 
     pub(super) fn text_input(&self, target: TextMenuTarget) -> &TextInputState {
         match target {
+            TextMenuTarget::CommandPalette => &self.command_palette_input,
             TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &self.plugin_picker_search_input,
@@ -459,6 +536,10 @@ impl StudioLayout {
 
     pub(super) fn sync_text_input_target(&mut self, target: TextMenuTarget) {
         match target {
+            TextMenuTarget::CommandPalette => {
+                self.command_palette.query = self.command_palette_input.value.clone();
+                self.command_palette.selected_index = 0;
+            }
             TextMenuTarget::ProjectSwitcherSearch => {
                 self.project_switcher.query = self.project_switcher_search_input.value.clone();
                 self.project_switcher.selected_index = 0;
@@ -492,7 +573,8 @@ impl StudioLayout {
     }
 
     pub(super) fn text_input_has_focus(&self, window: &Window) -> bool {
-        self.project_switcher_search_input.is_focused(window)
+        self.command_palette_input.is_focused(window)
+            || self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
             || self.plugin_picker_search_input.is_focused(window)
             || self.inspector_name_input.is_focused(window)
@@ -604,7 +686,9 @@ impl StudioLayout {
     /// though its element is no longer rendered. That orphaned focus is exactly
     /// what silently killed every keyboard shortcut — see `reclaim` in render.
     pub(super) fn keyboard_text_capture_live(&self, window: &Window) -> bool {
-        (self.project_switcher.is_open && self.project_switcher_search_input.is_focused(window))
+        (self.command_palette.is_open && self.command_palette_input.is_focused(window))
+            || (self.project_switcher.is_open
+                && self.project_switcher_search_input.is_focused(window))
             || (self.plugin_picker.is_open && self.plugin_picker_search_input.is_focused(window))
             || self.browser_search_input.is_focused(window)
             || self.inspector_name_input.is_focused(window)

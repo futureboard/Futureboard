@@ -1055,7 +1055,8 @@ impl Timeline {
             } else {
                 (start_beat + beat_delta).max(0.0)
             };
-            self.state.move_clip_to_track(clip_id, &track_id, next_start);
+            self.state
+                .move_clip_to_track(clip_id, &track_id, next_start);
         }
         self.restore_clip_drag_selection(&drag.clip_id, drag_ids, Some(current_drag_track_id));
 
@@ -2155,8 +2156,12 @@ impl Render for Timeline {
                     let max_index = this.state.tracks.len().saturating_sub(1) as isize;
 
                     for clip_id in &drag_ids {
-                        let Some((track_index, current_start)) =
-                            this.state.tracks.iter().enumerate().find_map(|(index, track)| {
+                        let Some((track_index, current_start)) = this
+                            .state
+                            .tracks
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, track)| {
                                 track
                                     .clips
                                     .iter()
@@ -2175,7 +2180,11 @@ impl Render for Timeline {
                         this.state
                             .move_clip_to_track(clip_id, &target_track_id, current_start);
                     }
-                    this.restore_clip_drag_selection(&drag.clip_id, drag_ids, Some(target_track_id));
+                    this.restore_clip_drag_selection(
+                        &drag.clip_id,
+                        drag_ids,
+                        Some(target_track_id),
+                    );
                     this.mark_project_changed(cx);
                 }
             }
@@ -3025,7 +3034,10 @@ fn timeline_marker_region_overlay(state: &TimelineState) -> Option<gpui::AnyElem
     }
 
     let (visible_start, visible_end) = state.visible_beat_range(state.viewport.viewport_width);
-    let body_height = state.viewport.track_area_height.max(state.viewport.viewport_height);
+    let body_height = state
+        .viewport
+        .track_area_height
+        .max(state.viewport.viewport_height);
     let mut children: Vec<gpui::AnyElement> = Vec::new();
 
     for region in &state.regions {
@@ -3035,8 +3047,8 @@ fn timeline_marker_region_overlay(state: &TimelineState) -> Option<gpui::AnyElem
         }
         let x = state.beats_to_x(start as f32);
         let width = (state.beats_to_x(end as f32) - x).max(1.0);
-        let color =
-            crate::color::parse_hex_color(&region.color_hex).unwrap_or_else(|_| Colors::accent_success());
+        let color = crate::color::parse_hex_color(&region.color_hex)
+            .unwrap_or_else(|_| Colors::accent_success());
         children.push(
             div()
                 .absolute()
@@ -3057,8 +3069,8 @@ fn timeline_marker_region_overlay(state: &TimelineState) -> Option<gpui::AnyElem
             continue;
         }
         let x = state.beats_to_x(marker.beat as f32);
-        let color =
-            crate::color::parse_hex_color(&marker.color_hex).unwrap_or_else(|_| Colors::accent_primary());
+        let color = crate::color::parse_hex_color(&marker.color_hex)
+            .unwrap_or_else(|_| Colors::accent_primary());
         children.push(
             div()
                 .absolute()

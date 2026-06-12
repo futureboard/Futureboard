@@ -527,6 +527,12 @@ impl StudioLayout {
 
         if self.audio_sync_in_flight {
             self.audio_sync_pending = true;
+            self.queue_background_task(
+                "native-sync-pending",
+                crate::components::BackgroundTaskKind::NativeSync,
+                "Sync native engine",
+                Some("Queued behind current engine sync".to_string()),
+            );
             return;
         }
 
@@ -577,6 +583,14 @@ impl StudioLayout {
         }
 
         self.audio_sync_in_flight = true;
+        self.start_background_task(
+            "native-sync",
+            crate::components::BackgroundTaskKind::NativeSync,
+            "Sync native engine",
+            Some(reason.to_string()),
+            None,
+            false,
+        );
         let owner = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
             let join = std::thread::Builder::new()
@@ -616,10 +630,16 @@ impl StudioLayout {
                 self.engine_project_dirty = false;
                 self.engine_media_dirty = false;
                 self.audio_last_error = None;
+                self.complete_background_task(
+                    "native-sync",
+                    Some("Engine graph ready".to_string()),
+                );
+                self.complete_background_task("native-sync-pending", None);
             }
             Err(error) => {
                 self.audio_last_error = Some(error.to_string());
                 eprintln!("[audio] load_project failed: {error}");
+                self.fail_background_task("native-sync", error.to_string());
                 // Clear dirty so a failed decode does not retry every poll tick.
                 self.engine_project_dirty = false;
                 self.engine_media_dirty = false;

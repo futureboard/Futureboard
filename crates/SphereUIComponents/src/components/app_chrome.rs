@@ -243,7 +243,7 @@ fn menu_area(
     menu_bar::menu_bar(open_menu_id, on_open_menu, viewport_width)
 }
 
-fn project_title(state: ProjectChromeState) -> impl IntoElement {
+fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
     let on_open = state.on_open_project_menu.clone();
     let status = if state.is_dirty { "Unsaved" } else { "Saved" };
     div()
@@ -256,9 +256,8 @@ fn project_title(state: ProjectChromeState) -> impl IntoElement {
         .rounded_md()
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
-        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-            let x: f32 = event.position.x.into();
-            on_open(&x, window, cx);
+        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+            on_open(&anchor_x, window, cx);
         })
         .occlude()
         .child(
@@ -771,6 +770,13 @@ pub fn app_chrome(
 ) -> impl IntoElement {
     let policy = PlatformChromePolicy::current();
     let viewport_width: f32 = window.bounds().size.width.into();
+    let chrome_left: f32 = policy.traffic_light_left_padding().into();
+    let menu_width = if policy.show_in_window_menubar {
+        menu_bar::menu_bar_chrome_width(viewport_width) + 7.0
+    } else {
+        0.0
+    };
+    let project_anchor_x = chrome_left + menu_width;
 
     let mut chrome = div()
         .flex()
@@ -805,7 +811,7 @@ pub fn app_chrome(
     }
 
     chrome = chrome
-        .child(project_title(project))
+        .child(project_title(project, project_anchor_x))
         .child(draggable_spacer())
         .child(transport_controls(transport))
         .child(section_separator())

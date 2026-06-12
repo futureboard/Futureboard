@@ -542,7 +542,7 @@ pub fn start_recording(
 
     // Ensure directory structure exists.
     let project_root = Path::new(&config.project_root);
-    let recordings_dir = project_root.join("recordings");
+    let recordings_dir = project_root.join("Recordings");
 
     std::fs::create_dir_all(&recordings_dir).map_err(|e| {
         SphereAudioError::NativeError(format!("Cannot create recordings folder: {e}"))

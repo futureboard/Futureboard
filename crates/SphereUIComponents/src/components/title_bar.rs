@@ -12,8 +12,8 @@ pub const STATUSBAR_HEIGHT: f32 = 22.0;
 pub const CHROME_ICON_BUTTON_SIZE: f32 = 26.0;
 pub const WINDOW_CONTROL_WIDTH: f32 = 34.0;
 pub const CHROME_PAD_X: f32 = 6.0;
-pub const CHROME_TEXT_SIZE: f32 = crate::theme::typography::UI_SM;
-pub const CHROME_TITLE_SIZE: f32 = crate::theme::typography::UI_SM;
+pub const CHROME_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
+pub const CHROME_TITLE_SIZE: f32 = crate::theme::typography::UI_XS;
 
 pub fn section_separator() -> impl gpui::IntoElement {
     div()

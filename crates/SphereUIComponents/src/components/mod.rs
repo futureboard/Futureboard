@@ -2,10 +2,12 @@ pub mod add_track_dialog;
 mod app_chrome;
 mod audio_editor_adapter;
 mod audio_editor_host;
+pub mod background_tasks;
 mod bottom_panel;
 pub mod box_list_view;
 pub mod color_picker;
 pub mod combo_box;
+pub mod command_palette;
 pub mod context_menu;
 pub mod controls;
 pub mod edit;
@@ -55,6 +57,11 @@ pub use app_chrome::{
     BPM_DRAG_DEADZONE_PX, BPM_MAX, BPM_MIN,
 };
 pub use audio_editor_host::AudioEditorHost;
+pub use background_tasks::{
+    background_task_button, background_task_panel, BackgroundTaskCancelCb, BackgroundTaskKind,
+    BackgroundTaskProgress, BackgroundTaskStatus, BackgroundTaskStore, BackgroundTaskToggleCb,
+    BackgroundTaskUpdate,
+};
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use box_list_view::{
     box_list_empty_state, box_list_group_label, box_list_icon_button, box_list_item,
@@ -66,6 +73,9 @@ pub use color_picker::{
     ColorPickerPlacement, ColorPickerState, ColorPickerValue,
 };
 pub use combo_box::{combo_box_menu, combo_box_trigger, dedupe_preserve_order, ComboBoxOption};
+pub use command_palette::{
+    command_palette_entries, command_palette_overlay, CommandPaletteEntry, CommandPaletteState,
+};
 pub use controls::{
     fb_button, fb_checkbox, fb_color_swatch, fb_field_label, fb_form_row, fb_section_header,
     fb_section_label, fb_segmented_button, fb_stepper_button, FbButtonKind,
@@ -108,5 +118,5 @@ pub use settings_dialog::{
 };
 pub use sidebar::sidebar;
 pub use slider::slider;
-pub use status_bar::status_bar;
+pub use status_bar::{status_bar, status_bar_with_background_tasks};
 pub use text_input::{text_field, TextInputAction, TextInputState};

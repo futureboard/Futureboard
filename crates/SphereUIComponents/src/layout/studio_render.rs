@@ -236,7 +236,7 @@ impl Render for StudioLayout {
                         let pending = this.file_browser.paths_needing_load();
                         for p in pending {
                             this.file_browser.mark_loading(p.clone());
-                            Self::spawn_directory_load(cx, p);
+                            this.spawn_directory_load(cx, p);
                         }
                     }
                     cx.notify();
@@ -301,11 +301,9 @@ impl Render for StudioLayout {
                     this.schedule_audio_project_sync(cx, false, "timeline_audio_import");
                 });
                 let path_key = path_for_decode.to_string_lossy().to_string();
-                let owner = layout.clone();
-                let _ = layout.update(cx, move |_layout, cx| {
-                    Self::spawn_timeline_audio_import_jobs(
+                let _ = layout.update(cx, move |this, cx| {
+                    this.spawn_timeline_audio_import_jobs(
                         cx,
-                        owner,
                         timeline_for_decode,
                         path_for_decode,
                         path_key,
@@ -557,6 +555,7 @@ impl Render for StudioLayout {
                 let _ = this.update(cx, |this, cx| {
                     this.open_popover = None;
                     this.project_switcher.is_open = false;
+                    this.command_palette.close();
                     this.text_context_menu = None;
                     cx.notify();
                 });
@@ -569,14 +568,73 @@ impl Render for StudioLayout {
             std::sync::Arc::new(move |command: &String, w, cx| {
                 let command = command.clone();
                 let _ = this.update(cx, |this, cx| {
-                    this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
+                    if let Some(path) =
+                        command.strip_prefix(components::project_switcher::OPEN_RECENT_PATH_PREFIX)
+                    {
+                        this.load_project_from_path_with_options(
+                            std::path::PathBuf::from(path),
+                            project_ops::ProjectOpenOptions { from_recent: true },
+                            cx,
+                        );
+                    } else {
+                        this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
+                    }
                     this.open_popover = None;
                     this.project_switcher.is_open = false;
+                    this.command_palette.close();
                     cx.notify();
                 });
             })
         };
-        let popover_overlay = if self.project_switcher.is_open {
+        let popover_overlay = if self.command_palette.is_open {
+            let search_mouse_callbacks = crate::components::text_input::bind_mouse_selection(
+                cx.entity().clone(),
+                |layout: &mut StudioLayout| &mut layout.command_palette_input,
+            );
+            let on_palette_close: std::sync::Arc<
+                dyn Fn(&(), &mut Window, &mut gpui::App) + 'static,
+            > = {
+                let this = cx.entity().clone();
+                std::sync::Arc::new(move |_: &(), w, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.command_palette.close();
+                        this.focus_handle.focus(w, cx);
+                        cx.notify();
+                    });
+                })
+            };
+            let on_palette_command: std::sync::Arc<
+                dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+            > = {
+                let this = cx.entity().clone();
+                std::sync::Arc::new(move |command: &String, w, cx| {
+                    let command = command.clone();
+                    let _ = this.update(cx, |this, cx| {
+                        this.command_palette.close();
+                        this.focus_handle.focus(w, cx);
+                        this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
+                        cx.notify();
+                    });
+                })
+            };
+            Some(
+                components::command_palette_overlay(
+                    &self.command_palette,
+                    &self.command_palette_input,
+                    self.command_palette_input.is_focused(window),
+                    search_mouse_callbacks,
+                    viewport_width,
+                    viewport_height,
+                    on_palette_command,
+                    on_palette_close,
+                )
+                .into_any_element(),
+            )
+        } else if self.project_switcher.is_open {
+            let search_mouse_callbacks = crate::components::text_input::bind_mouse_selection(
+                cx.entity().clone(),
+                |layout: &mut StudioLayout| &mut layout.project_switcher_search_input,
+            );
             let search_context_callbacks = TextInputCallbacks {
                 on_context_menu: Some(Arc::new({
                     let this = cx.entity().clone();
@@ -593,7 +651,7 @@ impl Render for StudioLayout {
                         });
                     }
                 })),
-                on_mouse: None,
+                on_mouse: search_mouse_callbacks.on_mouse,
             };
             Some(
                 components::project_switcher::project_switcher_popover(
@@ -860,6 +918,29 @@ impl Render for StudioLayout {
             on_open_project_menu: on_project_open,
         };
         let (status_left, status_right) = self.status_text();
+        let on_toggle_background_tasks: std::sync::Arc<
+            dyn Fn(&(), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_: &(), _w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.background_tasks.toggle_panel();
+                    cx.notify();
+                });
+            })
+        };
+        let on_cancel_background_task: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |task_id: &String, _w, cx| {
+                let task_id = task_id.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.background_tasks.cancel(&task_id);
+                    cx.notify();
+                });
+            })
+        };
         let shortcut_target = cx.entity().clone();
         // Docked MIDI editor — consulted in the key handler so Ctrl+A/C/V/X and
         // Delete route to the piano roll (its own `on_key_down`) when it holds
@@ -884,6 +965,9 @@ impl Render for StudioLayout {
         {
             self.focus_handle.focus(window, cx);
         }
+        if self.command_palette.is_open && !self.command_palette_input.is_focused(window) {
+            self.command_palette_input.focus_handle.focus(window, cx);
+        }
         let focus_holder = self.focus_handle.clone();
 
         div()
@@ -907,7 +991,8 @@ impl Render for StudioLayout {
             .font(theme::ui_font())
             .capture_key_down(move |event, window, cx| {
                 let handled = shortcut_target.update(cx, |this, cx| {
-                    let handled = this.handle_bpm_edit_key(event, window, cx)
+                    let handled = this.handle_command_palette_key(event, window, cx)
+                        || this.handle_bpm_edit_key(event, window, cx)
                         || this.handle_ts_edit_key(event, window, cx)
                         || this.handle_settings_dialog_key(event, window, cx)
                         || this.handle_add_track_dialog_key(event, window, cx)
@@ -953,6 +1038,7 @@ impl Render for StudioLayout {
                         });
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
+                        this.command_palette.close();
                         this.open_popover = None;
                         this.text_context_menu = None;
                         this.project_switcher.is_open = false;
@@ -1089,7 +1175,13 @@ impl Render for StudioLayout {
             })
             .child({
                 let _s = crate::perf::PerfScope::enter("StatusBar");
-                components::status_bar(status_left, status_right)
+                components::status_bar_with_background_tasks(
+                    status_left,
+                    status_right,
+                    &self.background_tasks,
+                    on_toggle_background_tasks,
+                    on_cancel_background_task,
+                )
             })
             // Dropdown overlay — rendered last so it sits above every other
             // panel. The dropdown's own backdrop captures click-outside.

@@ -548,17 +548,22 @@ pub fn schedule_project_waveform_restore(
 
     for track in &project.tracks {
         for clip in &track.clips {
-            let ClipSource::Audio {
-                asset_id,
-                source_path,
-            } = &clip.source
-            else {
-                continue;
+            let (asset_id, source_path) = match &clip.source {
+                ClipSource::Audio {
+                    asset_id,
+                    source_path,
+                } => (asset_id, source_path.clone()),
+                ClipSource::Rauf {
+                    asset_id,
+                    source_path,
+                    ..
+                } => (asset_id, Some(source_path.clone())),
+                _ => continue,
             };
             if entries.iter().any(|(id, _)| id == asset_id) {
                 continue;
             }
-            entries.push((asset_id.clone(), source_path.clone()));
+            entries.push((asset_id.clone(), source_path));
         }
     }
 

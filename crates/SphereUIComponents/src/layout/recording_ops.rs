@@ -37,28 +37,17 @@ impl StudioLayout {
             }
         };
 
-        let save_before_recording = self
-            .settings
-            .read(cx)
-            .current
-            .recording
-            .audio
-            .save_before_recording;
-        if save_before_recording && self.project_session.is_dirty {
-            let Some(project_path) = self.project_session.project_file_path.clone() else {
-                self.fail_recording_start("save the project to a folder before recording", cx);
-                return;
-            };
-            if !self.do_save_project(&project_path, cx) {
-                self.fail_recording_start("could not save the project before recording", cx);
-                return;
-            }
-        }
-
-        let Some(engine) = self.audio_engine.as_ref() else {
+        // Clone the engine handle (cheap, Arc-backed) so the local `engine`
+        // borrow targets `engine_handle` instead of `self`. That lets the
+        // `save_before_recording` auto-save run *after* every record
+        // precondition is validated (see below), rather than before — clicking
+        // Record on a project that cannot start a take (no engine, no armed
+        // audio track, device conflict) must not silently save the project.
+        let Some(engine_handle) = self.audio_engine.clone() else {
             self.fail_recording_start("audio engine unavailable", cx);
             return;
         };
+        let engine = &engine_handle;
 
         let input_devices: Vec<RecordingInputDevice> = engine
             .list_input_devices()
@@ -145,6 +134,30 @@ impl StudioLayout {
             }
             (configs, explicit_device_id, monitor_channels)
         };
+
+        // Every record precondition has now passed (engine present, at least
+        // one armed audio track, input devices/channels resolved). Only now
+        // honour `save_before_recording`: the auto-save must never fire for a
+        // Record click that won't actually start a take, otherwise the project
+        // title flips to "Saved" with no recording. Save remains an explicit
+        // command everywhere else — this is the only record-triggered save.
+        let save_before_recording = self
+            .settings
+            .read(cx)
+            .current
+            .recording
+            .audio
+            .save_before_recording;
+        if save_before_recording && self.project_session.is_dirty {
+            let Some(project_path) = self.project_session.project_file_path.clone() else {
+                self.fail_recording_start("save the project to a folder before recording", cx);
+                return;
+            };
+            if !self.do_save_project(&project_path, cx) {
+                self.fail_recording_start("could not save the project before recording", cx);
+                return;
+            }
+        }
 
         let input_device_id = explicit_device_id.or_else(|| {
             selected_input_device

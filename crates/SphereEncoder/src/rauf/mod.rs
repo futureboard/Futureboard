@@ -1,0 +1,449 @@
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+pub type Result<T> = std::result::Result<T, RaufError>;
+
+pub const RAUF_MAGIC: &[u8; 4] = b"RAUF";
+pub const RAUF_VERSION: u16 = 1;
+pub const RAUF_HEADER_SIZE: u16 = 256;
+pub const RAUF_DATA_OFFSET: u64 = 256;
+
+pub const RAUF_FLAG_FINALIZED: u16 = 1 << 0;
+pub const RAUF_FLAG_HAS_SIDECAR: u16 = 1 << 1;
+pub const RAUF_FLAG_HAS_PEAK: u16 = 1 << 2;
+pub const RAUF_FLAG_RECOVERED: u16 = 1 << 3;
+
+#[derive(Debug)]
+pub enum RaufError {
+    Io(std::io::Error),
+    InvalidMagic,
+    UnsupportedVersion(u16),
+    InvalidHeader(String),
+    UnsupportedFormat(String),
+}
+
+impl std::fmt::Display for RaufError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "{error}"),
+            Self::InvalidMagic => write!(f, "not a RAUF file"),
+            Self::UnsupportedVersion(version) => write!(f, "unsupported RAUF version {version}"),
+            Self::InvalidHeader(message) => write!(f, "invalid RAUF header: {message}"),
+            Self::UnsupportedFormat(message) => write!(f, "unsupported RAUF format: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for RaufError {}
+
+impl From<std::io::Error> for RaufError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum RaufSampleFormat {
+    S32 = 3,
+    F32 = 4,
+}
+
+impl RaufSampleFormat {
+    fn from_u16(value: u16) -> Result<Self> {
+        match value {
+            3 => Ok(Self::S32),
+            4 => Ok(Self::F32),
+            other => Err(RaufError::UnsupportedFormat(format!(
+                "sample_format={other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RaufConfig {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub sample_format: RaufSampleFormat,
+    pub interleaved: bool,
+    pub project_start_sample: u64,
+    pub take_id: [u8; 16],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaufHeader {
+    pub version: u16,
+    pub header_size: u16,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub sample_format: RaufSampleFormat,
+    pub endianness: u16,
+    pub interleaved: bool,
+    pub flags: u16,
+    pub frames_written: u64,
+    pub project_start_sample: u64,
+    pub take_id: [u8; 16],
+    pub data_offset: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RaufReport {
+    pub path: PathBuf,
+    pub header: RaufHeader,
+    pub frames_written: u64,
+    pub data_bytes: u64,
+}
+
+pub struct RaufWriter {
+    path: PathBuf,
+    file: File,
+    header: RaufHeader,
+}
+
+impl RaufWriter {
+    pub fn create(path: impl AsRef<Path>, config: RaufConfig) -> Result<Self> {
+        if config.sample_rate == 0 {
+            return Err(RaufError::InvalidHeader(
+                "sample_rate must be non-zero".to_string(),
+            ));
+        }
+        if config.channels == 0 {
+            return Err(RaufError::InvalidHeader(
+                "channels must be non-zero".to_string(),
+            ));
+        }
+        if !config.interleaved {
+            return Err(RaufError::UnsupportedFormat(
+                "RAUF v1 requires interleaved PCM".to_string(),
+            ));
+        }
+
+        let path = path.as_ref().to_path_buf();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .open(&path)?;
+
+        let header = RaufHeader {
+            version: RAUF_VERSION,
+            header_size: RAUF_HEADER_SIZE,
+            sample_rate: config.sample_rate,
+            channels: config.channels,
+            sample_format: config.sample_format,
+            endianness: 1,
+            interleaved: config.interleaved,
+            flags: 0,
+            frames_written: 0,
+            project_start_sample: config.project_start_sample,
+            take_id: config.take_id,
+            data_offset: RAUF_DATA_OFFSET,
+        };
+        write_header(&mut file, &header)?;
+        file.seek(SeekFrom::Start(header.data_offset))?;
+        Ok(Self { path, file, header })
+    }
+
+    pub fn write_s32le_interleaved(&mut self, samples: &[i32]) -> Result<()> {
+        if self.header.sample_format != RaufSampleFormat::S32 {
+            return Err(RaufError::UnsupportedFormat(
+                "writer was not configured for s32le".to_string(),
+            ));
+        }
+        let channels = self.header.channels as usize;
+        if channels == 0 || samples.len() % channels != 0 {
+            return Err(RaufError::InvalidHeader(format!(
+                "sample count {} is not divisible by channels {}",
+                samples.len(),
+                channels
+            )));
+        }
+        for sample in samples {
+            self.file.write_all(&sample.to_le_bytes())?;
+        }
+        self.header.frames_written += (samples.len() / channels) as u64;
+        Ok(())
+    }
+
+    pub fn frames_written(&self) -> u64 {
+        self.header.frames_written
+    }
+
+    pub fn set_flags(&mut self, flags: u16) {
+        self.header.flags |= flags;
+    }
+
+    pub fn finalize(mut self) -> Result<RaufReport> {
+        self.file.flush()?;
+        self.header.flags |= RAUF_FLAG_FINALIZED;
+        self.file.seek(SeekFrom::Start(0))?;
+        write_header(&mut self.file, &self.header)?;
+        self.file.flush()?;
+        self.file.sync_all()?;
+        let data_bytes = self.header.frames_written
+            * self.header.channels as u64
+            * bytes_per_sample(self.header.sample_format);
+        Ok(RaufReport {
+            path: self.path,
+            header: self.header.clone(),
+            frames_written: self.header.frames_written,
+            data_bytes,
+        })
+    }
+}
+
+pub struct RaufReader {
+    path: PathBuf,
+    header: RaufHeader,
+}
+
+impl RaufReader {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut file = File::open(&path)?;
+        let header = read_header(&mut file)?;
+        Ok(Self { path, header })
+    }
+
+    pub fn header(&self) -> &RaufHeader {
+        &self.header
+    }
+
+    pub fn recover_frames_from_size(&self) -> Result<u64> {
+        let size = std::fs::metadata(&self.path)?.len();
+        recover_frames_from_size(&self.header, size)
+    }
+}
+
+fn recover_frames_from_size(header: &RaufHeader, size: u64) -> Result<u64> {
+    if size < header.data_offset {
+        return Ok(0);
+    }
+    let bytes_per_frame = header.channels as u64 * bytes_per_sample(header.sample_format);
+    if bytes_per_frame == 0 {
+        return Err(RaufError::InvalidHeader(
+            "bytes per frame is zero".to_string(),
+        ));
+    }
+    Ok((size - header.data_offset) / bytes_per_frame)
+}
+
+fn bytes_per_sample(format: RaufSampleFormat) -> u64 {
+    match format {
+        RaufSampleFormat::S32 | RaufSampleFormat::F32 => 4,
+    }
+}
+
+fn write_header(file: &mut File, header: &RaufHeader) -> Result<()> {
+    let mut bytes = [0u8; RAUF_HEADER_SIZE as usize];
+    bytes[0..4].copy_from_slice(RAUF_MAGIC);
+    put_u16(&mut bytes, 4, header.version);
+    put_u16(&mut bytes, 6, header.header_size);
+    put_u32(&mut bytes, 8, header.sample_rate);
+    put_u16(&mut bytes, 12, header.channels);
+    put_u16(&mut bytes, 14, header.sample_format as u16);
+    put_u16(&mut bytes, 16, header.endianness);
+    put_u16(&mut bytes, 18, u16::from(header.interleaved));
+    put_u16(&mut bytes, 20, header.flags);
+    put_u64(&mut bytes, 24, header.frames_written);
+    put_u64(&mut bytes, 32, header.project_start_sample);
+    bytes[40..56].copy_from_slice(&header.take_id);
+    put_u64(&mut bytes, 56, header.data_offset);
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&bytes)?;
+    Ok(())
+}
+
+fn read_header(file: &mut File) -> Result<RaufHeader> {
+    let mut bytes = [0u8; RAUF_HEADER_SIZE as usize];
+    file.read_exact(&mut bytes)?;
+    if &bytes[0..4] != RAUF_MAGIC {
+        return Err(RaufError::InvalidMagic);
+    }
+    let version = get_u16(&bytes, 4);
+    if version != RAUF_VERSION {
+        return Err(RaufError::UnsupportedVersion(version));
+    }
+    let header_size = get_u16(&bytes, 6);
+    if header_size != RAUF_HEADER_SIZE {
+        return Err(RaufError::InvalidHeader(format!(
+            "header_size={header_size}"
+        )));
+    }
+    let sample_rate = get_u32(&bytes, 8);
+    let channels = get_u16(&bytes, 12);
+    let sample_format = RaufSampleFormat::from_u16(get_u16(&bytes, 14))?;
+    let endianness = get_u16(&bytes, 16);
+    let interleaved = get_u16(&bytes, 18) != 0;
+    let flags = get_u16(&bytes, 20);
+    let frames_written = get_u64(&bytes, 24);
+    let project_start_sample = get_u64(&bytes, 32);
+    let mut take_id = [0u8; 16];
+    take_id.copy_from_slice(&bytes[40..56]);
+    let data_offset = get_u64(&bytes, 56);
+
+    if sample_rate == 0 || channels == 0 {
+        return Err(RaufError::InvalidHeader(
+            "sample_rate and channels must be non-zero".to_string(),
+        ));
+    }
+    if endianness != 1 {
+        return Err(RaufError::UnsupportedFormat(
+            "RAUF v1 supports little endian only".to_string(),
+        ));
+    }
+    if !interleaved {
+        return Err(RaufError::UnsupportedFormat(
+            "RAUF v1 supports interleaved PCM only".to_string(),
+        ));
+    }
+    if data_offset < RAUF_HEADER_SIZE as u64 {
+        return Err(RaufError::InvalidHeader(format!(
+            "data_offset={data_offset}"
+        )));
+    }
+
+    Ok(RaufHeader {
+        version,
+        header_size,
+        sample_rate,
+        channels,
+        sample_format,
+        endianness,
+        interleaved,
+        flags,
+        frames_written,
+        project_start_sample,
+        take_id,
+        data_offset,
+    })
+}
+
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn get_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn get_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn get_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(channels: u16) -> RaufConfig {
+        RaufConfig {
+            sample_rate: 48_000,
+            channels,
+            sample_format: RaufSampleFormat::S32,
+            interleaved: true,
+            project_start_sample: 960_000,
+            take_id: [7; 16],
+        }
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "futureboard-{name}-{}-{}.rauf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        path
+    }
+
+    #[test]
+    fn header_write_read_roundtrips() {
+        let path = temp_path("header");
+        let writer = RaufWriter::create(&path, config(1)).unwrap();
+        assert_eq!(writer.frames_written(), 0);
+        drop(writer.finalize().unwrap());
+
+        let reader = RaufReader::open(&path).unwrap();
+        let header = reader.header();
+        assert_eq!(header.version, 1);
+        assert_eq!(header.header_size, 256);
+        assert_eq!(header.sample_rate, 48_000);
+        assert_eq!(header.channels, 1);
+        assert_eq!(header.sample_format, RaufSampleFormat::S32);
+        assert!(header.interleaved);
+        assert_eq!(header.project_start_sample, 960_000);
+        assert_eq!(header.data_offset, 256);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn frames_written_and_finalize_flag_are_correct() {
+        let path = temp_path("frames");
+        let mut writer = RaufWriter::create(&path, config(1)).unwrap();
+        writer.write_s32le_interleaved(&[1, 2, 3, 4]).unwrap();
+        assert_eq!(writer.frames_written(), 4);
+        let report = writer.finalize().unwrap();
+        assert_eq!(report.frames_written, 4);
+
+        let reader = RaufReader::open(&path).unwrap();
+        assert_eq!(reader.header().frames_written, 4);
+        assert_ne!(reader.header().flags & RAUF_FLAG_FINALIZED, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recovery_computes_frames_from_file_size() {
+        let path = temp_path("recover");
+        let mut writer = RaufWriter::create(&path, config(1)).unwrap();
+        writer.write_s32le_interleaved(&[1, 2, 3]).unwrap();
+        drop(writer);
+
+        let reader = RaufReader::open(&path).unwrap();
+        assert_eq!(reader.header().flags & RAUF_FLAG_FINALIZED, 0);
+        assert_eq!(reader.recover_frames_from_size().unwrap(), 3);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_magic_is_rejected() {
+        let path = temp_path("bad-magic");
+        std::fs::write(&path, [0u8; RAUF_HEADER_SIZE as usize]).unwrap();
+        assert!(matches!(
+            RaufReader::open(&path),
+            Err(RaufError::InvalidMagic)
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stereo_interleaved_frame_counting() {
+        let path = temp_path("stereo");
+        let mut writer = RaufWriter::create(&path, config(2)).unwrap();
+        writer.write_s32le_interleaved(&[1, 2, 3, 4, 5, 6]).unwrap();
+        assert_eq!(writer.frames_written(), 3);
+        writer.finalize().unwrap();
+
+        let reader = RaufReader::open(&path).unwrap();
+        assert_eq!(reader.header().frames_written, 3);
+        assert_eq!(reader.recover_frames_from_size().unwrap(), 3);
+        let _ = std::fs::remove_file(path);
+    }
+}

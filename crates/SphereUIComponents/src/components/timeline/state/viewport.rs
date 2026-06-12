@@ -1,0 +1,285 @@
+use super::*;
+
+/// Playback follow / auto-scroll behavior for the timeline viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoScrollMode {
+    /// Never auto-scroll. User controls the viewport entirely.
+    Off,
+    /// When the playhead reaches the right edge, page forward by ~90% of
+    /// the viewport width so the playhead lands near the left side again.
+    /// Cheap, predictable, and friendly to low-end GPUs.
+    Page,
+    /// Keep the playhead at a roughly fixed fraction of the viewport while
+    /// playing. Smoother, but more scroll churn — left as an opt-in.
+    Continuous,
+}
+
+impl Default for AutoScrollMode {
+    fn default() -> Self {
+        AutoScrollMode::Page
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineTool {
+    Pointer,
+    Pen,
+    Cut,
+    Glue,
+    Mute,
+    Time,
+    Automation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineViewport {
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+    pub target_scroll_x: f32,
+    pub target_scroll_y: f32,
+    pub pixels_per_second: f32,
+    pub pixels_per_beat: f32,
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub track_area_height: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackLayout {
+    pub track_ids: Vec<TrackId>,
+    pub track_height: f32,
+    pub scroll_y: f32,
+}
+
+impl TrackLayout {
+    pub fn from_tracks(tracks: &[TrackState], scroll_y: f32) -> Self {
+        Self {
+            track_ids: tracks.iter().map(|track| track.id.clone()).collect(),
+            track_height: TRACK_HEIGHT,
+            scroll_y,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapSettings {
+    pub enabled: bool,
+    pub division: SnapDivision,
+    pub beats_per_bar: f64,
+    pub auto_step_beats: f64,
+}
+
+impl SnapSettings {
+    pub fn from_timeline(state: &TimelineState) -> Self {
+        Self {
+            enabled: state.snap_to_grid,
+            division: state.grid_division,
+            beats_per_bar: state.beats_per_bar() as f64,
+            auto_step_beats: state.get_grid_sub_beats(state.pixels_per_beat()) as f64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapDivision {
+    Auto,
+    Off,
+    Bar1,
+    Div1_1,
+    Div1_2,
+    Div1_4,
+    Div1_8,
+    Div1_16,
+    Div1_32,
+    Div1_64,
+}
+
+impl SnapDivision {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SnapDivision::Auto => "Auto",
+            SnapDivision::Off => "Off",
+            SnapDivision::Bar1 => "1 bar",
+            SnapDivision::Div1_1 => "1/1",
+            SnapDivision::Div1_2 => "1/2",
+            SnapDivision::Div1_4 => "1/4",
+            SnapDivision::Div1_8 => "1/8",
+            SnapDivision::Div1_16 => "1/16",
+            SnapDivision::Div1_32 => "1/32",
+            SnapDivision::Div1_64 => "1/64",
+        }
+    }
+
+    pub fn step_beats(&self, bpb: f32) -> f32 {
+        match self {
+            SnapDivision::Auto => 0.0,
+            SnapDivision::Off => 0.0,
+            SnapDivision::Bar1 => bpb,
+            SnapDivision::Div1_1 => 4.0,
+            SnapDivision::Div1_2 => 2.0,
+            SnapDivision::Div1_4 => 1.0,
+            SnapDivision::Div1_8 => 0.5,
+            SnapDivision::Div1_16 => 0.25,
+            SnapDivision::Div1_32 => 0.125,
+            SnapDivision::Div1_64 => 0.0625,
+        }
+    }
+}
+
+impl TimelineState {
+    pub fn pixels_per_beat(&self) -> f32 {
+        self.viewport.pixels_per_second * self.seconds_per_beat()
+    }
+
+    pub(crate) fn sync_pixels_per_beat(&mut self) {
+        self.viewport.pixels_per_beat = self.pixels_per_beat();
+    }
+
+    pub fn update_viewport_size(&mut self, width: f32, height: f32) {
+        self.viewport.viewport_width = width.max(0.0);
+        self.viewport.viewport_height = height.max(0.0);
+        self.viewport.track_area_height = height.max(0.0);
+        self.sync_pixels_per_beat();
+    }
+
+    pub fn get_visible_beat_range(&self, width: f32) -> (f32, f32) {
+        let start = self.x_to_beats(0.0);
+        let end = self.x_to_beats(width);
+        (start, end)
+    }
+
+    pub fn visible_beat_range(&self, viewport_width: f32) -> (f32, f32) {
+        self.get_visible_beat_range(viewport_width)
+    }
+
+    /// Multiplicative zoom around a content-space x anchor. Updates
+    /// `pixels_per_second` and shifts `scroll_x` so the time under `anchor_x`
+    /// (a screen-space x inside the track lane, already net of header) stays
+    /// fixed under the cursor. Smooth — accepts arbitrary positive `factor`.
+    pub fn zoom_by(&mut self, factor: f32, anchor_x: f32) {
+        let factor = factor.max(0.0001);
+        let old_pps = self.viewport.pixels_per_second.max(0.0001);
+        let new_pps = (old_pps * factor).clamp(4.0, 4000.0);
+        if (new_pps - old_pps).abs() < 0.0001 {
+            return;
+        }
+        // Time under anchor before the change.
+        let anchor_time = (anchor_x + self.viewport.scroll_x) / old_pps;
+        self.viewport.pixels_per_second = new_pps;
+        self.sync_pixels_per_beat();
+        // Re-solve scroll_x so the same anchor_time lands under anchor_x.
+        let new_scroll = (anchor_time * new_pps - anchor_x).max(0.0);
+        self.viewport.scroll_x = new_scroll;
+        self.viewport.target_scroll_x = new_scroll;
+    }
+
+    pub fn scroll_by(&mut self, delta_x: f32, delta_y: f32, max_x: f32, max_y: f32) {
+        self.viewport.target_scroll_x =
+            (self.viewport.target_scroll_x + delta_x).clamp(0.0, max_x.max(0.0));
+        self.viewport.target_scroll_y =
+            (self.viewport.target_scroll_y + delta_y).clamp(0.0, max_y.max(0.0));
+        self.smooth_scroll_towards_target();
+    }
+
+    pub fn set_scroll_immediate(&mut self, x: f32, y: f32, max_x: f32, max_y: f32) {
+        self.viewport.scroll_x = x.clamp(0.0, max_x.max(0.0));
+        self.viewport.scroll_y = y.clamp(0.0, max_y.max(0.0));
+        self.viewport.target_scroll_x = self.viewport.scroll_x;
+        self.viewport.target_scroll_y = self.viewport.scroll_y;
+    }
+
+    pub fn clamp_scroll(&mut self, max_x: f32, max_y: f32) {
+        let max_x = max_x.max(0.0);
+        let max_y = max_y.max(0.0);
+        self.viewport.scroll_x = self.viewport.scroll_x.clamp(0.0, max_x);
+        self.viewport.scroll_y = self.viewport.scroll_y.clamp(0.0, max_y);
+        self.viewport.target_scroll_x = self.viewport.target_scroll_x.clamp(0.0, max_x);
+        self.viewport.target_scroll_y = self.viewport.target_scroll_y.clamp(0.0, max_y);
+    }
+
+    /// Keep the playhead inside the visible viewport while playing.
+    /// Returns true when the viewport scrolled (caller should `cx.notify`).
+    /// Cheap — no allocation, just a couple of float comparisons.
+    pub fn update_auto_scroll_for_playhead(&mut self, playhead_beats: f32) -> bool {
+        if !self.follow_playhead || self.auto_scroll_mode == AutoScrollMode::Off {
+            return false;
+        }
+        let viewport_width = self.viewport.viewport_width;
+        if viewport_width <= 1.0 {
+            return false;
+        }
+        let pps = self.viewport.pixels_per_second.max(0.0001);
+        let playhead_content_x = playhead_beats.max(0.0) * self.seconds_per_beat() * pps;
+        let scroll_x = self.viewport.scroll_x;
+
+        // Trigger thresholds: right 15% / left 5% of the viewport.
+        let right_trigger = scroll_x + viewport_width * 0.85;
+        let left_trigger = scroll_x + viewport_width * 0.05;
+
+        let new_scroll_x = match self.auto_scroll_mode {
+            AutoScrollMode::Off => return false,
+            AutoScrollMode::Page => {
+                if playhead_content_x > right_trigger {
+                    // Page forward so the playhead lands ~10% into the new viewport.
+                    (playhead_content_x - viewport_width * 0.10).max(0.0)
+                } else if playhead_content_x < scroll_x {
+                    // Playhead seeked or wrapped back behind the viewport — recenter.
+                    (playhead_content_x - viewport_width * 0.10).max(0.0)
+                } else {
+                    return false;
+                }
+            }
+            AutoScrollMode::Continuous => {
+                if playhead_content_x > right_trigger || playhead_content_x < left_trigger {
+                    (playhead_content_x - viewport_width * 0.40).max(0.0)
+                } else {
+                    return false;
+                }
+            }
+        };
+
+        if (new_scroll_x - scroll_x).abs() < 0.5 {
+            return false;
+        }
+        if std::env::var_os("FUTUREBOARD_AUTOSCROLL_DEBUG").is_some() {
+            eprintln!(
+                "[autoscroll] playhead_x={:.1} viewport=[{:.1}..{:.1}] scroll_x: {:.1} -> {:.1} mode={:?}",
+                playhead_content_x,
+                scroll_x,
+                scroll_x + viewport_width,
+                scroll_x,
+                new_scroll_x,
+                self.auto_scroll_mode
+            );
+        }
+        self.viewport.scroll_x = new_scroll_x;
+        self.viewport.target_scroll_x = new_scroll_x;
+        true
+    }
+
+    /// Called when the user manually scrolls/drags the viewport — temporarily
+    /// disables follow-playhead so playback won't fight the user. Re-enable
+    /// by toggling the Follow control.
+    pub fn note_user_scrolled(&mut self) {
+        if self.follow_playhead {
+            self.follow_playhead = false;
+        }
+    }
+
+    pub fn set_follow_playhead(&mut self, follow: bool) {
+        self.follow_playhead = follow;
+    }
+
+    pub fn smooth_scroll_towards_target(&mut self) -> bool {
+        let dx = self.viewport.target_scroll_x - self.viewport.scroll_x;
+        let dy = self.viewport.target_scroll_y - self.viewport.scroll_y;
+        if dx.abs() < 0.35 && dy.abs() < 0.35 {
+            self.viewport.scroll_x = self.viewport.target_scroll_x;
+            self.viewport.scroll_y = self.viewport.target_scroll_y;
+            return false;
+        }
+        self.viewport.scroll_x += dx * 0.42;
+        self.viewport.scroll_y += dy * 0.42;
+        true
+    }
+}

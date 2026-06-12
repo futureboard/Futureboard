@@ -1,6 +1,10 @@
 [package]
-name = "SphereFBEncoder"
+name = "sphere-encoder"
 version.workspace = true
 edition.workspace = true
+
+[lib]
+name = "sphere_encoder"
+path = "src/lib.rs"
 
 [dependencies]

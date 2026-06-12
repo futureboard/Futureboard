@@ -1,0 +1,927 @@
+use super::*;
+
+#[cfg(test)]
+mod instrument_lifecycle_tests {
+    use super::*;
+
+    fn instrument_track(state: &mut TimelineState) -> String {
+        state.tracks.clear();
+        state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Inst".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        })
+    }
+
+    fn load_vsti(
+        state: &mut TimelineState,
+        track_id: &str,
+        slot_index: usize,
+        class_id: &str,
+        path: &str,
+    ) -> String {
+        let slot = state
+            .ensure_insert_slot_at(track_id, slot_index)
+            .expect("slot");
+        state.set_insert_plugin(
+            track_id,
+            &slot,
+            class_id.to_string(),
+            Some(std::path::PathBuf::from(path)),
+            InsertPluginFormat::Vst3,
+            class_id.to_string(),
+        );
+        slot
+    }
+
+    /// Test 1 (model half): removing a VSTi clears the slot and the canonical
+    /// instrument instance pointer.
+    #[test]
+    fn remove_vsti_clears_slot_and_instrument_pointer() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+
+        let track = state.find_track(&track_id).unwrap();
+        assert_eq!(
+            track.instrument_plugin_instance_id.as_deref(),
+            Some(slot.as_str())
+        );
+
+        state.remove_insert(&track_id, &slot);
+        let track = state.find_track(&track_id).unwrap();
+        assert!(track.inserts.is_empty(), "slot must be gone");
+        assert!(
+            track.instrument_plugin_instance_id.is_none(),
+            "instrument pointer must be cleared"
+        );
+    }
+
+    /// Test 2: add VSTi A, remove it, add VSTi B → B gets a brand-new instance
+    /// id (the old one is never reused, so the engine cannot resurrect A).
+    #[test]
+    fn re_add_after_remove_gets_fresh_instance_id() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_a = load_vsti(&mut state, &track_id, 0, "synth-a", "C:/p/a.vst3");
+        state.remove_insert(&track_id, &slot_a);
+        let slot_b = load_vsti(&mut state, &track_id, 0, "synth-b", "C:/p/b.vst3");
+        assert_ne!(slot_a, slot_b, "re-added VSTi must get a fresh instance id");
+        assert_eq!(
+            state
+                .find_track(&track_id)
+                .unwrap()
+                .instrument_plugin_instance_id
+                .as_deref(),
+            Some(slot_b.as_str())
+        );
+    }
+
+    /// Test 3: load the SAME plugin file, remove, load it again → two distinct
+    /// instance ids (same file is loadable as independent instances).
+    #[test]
+    fn same_plugin_file_reloaded_gets_distinct_instance_ids() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_1 = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        state.remove_insert(&track_id, &slot_1);
+        let slot_2 = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        assert_ne!(
+            slot_1, slot_2,
+            "same plugin file must reload as a new independent instance"
+        );
+    }
+
+    /// Replace flow: replacing a VSTi in place yields a fresh id at the same
+    /// index and clears the stale instrument pointer.
+    #[test]
+    fn replace_with_fresh_slot_swaps_id_in_place() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_a = load_vsti(&mut state, &track_id, 0, "synth-a", "C:/p/a.vst3");
+        let slot_b = state
+            .replace_insert_with_fresh_slot(&track_id, &slot_a)
+            .expect("fresh slot");
+        assert_ne!(slot_a, slot_b);
+        let track = state.find_track(&track_id).unwrap();
+        assert_eq!(track.inserts.len(), 1, "still one slot at the same index");
+        assert_eq!(track.inserts[0].id, slot_b);
+        assert!(track.inserts[0].is_empty(), "fresh slot starts empty");
+        assert!(
+            track.instrument_plugin_instance_id.is_none(),
+            "stale instrument pointer cleared until the new plugin binds"
+        );
+    }
+
+    /// Removing a VSTi must also drop automation lanes bound to that instance,
+    /// and leave lanes targeting other inserts / built-ins untouched.
+    #[test]
+    fn remove_vsti_prunes_its_automation_bindings() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        {
+            let track = state.tracks.iter_mut().find(|t| t.id == track_id).unwrap();
+            track.automation_lanes.push(AutomationLaneState::new(
+                "auto-cutoff",
+                AutomationTarget::PluginParameter {
+                    insert_id: slot.clone(),
+                    parameter_id: "1".to_string(),
+                    parameter_name: "Cutoff".to_string(),
+                },
+            ));
+            track.automation_lanes.push(AutomationLaneState::new(
+                "auto-vol",
+                AutomationTarget::TrackVolume,
+            ));
+        }
+
+        state.remove_insert(&track_id, &slot);
+
+        let track = state.find_track(&track_id).unwrap();
+        assert!(
+            !track.automation_lanes.iter().any(|l| matches!(
+                &l.target,
+                AutomationTarget::PluginParameter { insert_id, .. } if *insert_id == slot
+            )),
+            "plugin-param automation lane must be pruned with its instance"
+        );
+        assert!(
+            track
+                .automation_lanes
+                .iter()
+                .any(|l| matches!(l.target, AutomationTarget::TrackVolume)),
+            "unrelated track automation must survive"
+        );
+    }
+
+    /// Removing an effect insert must NOT disturb the instrument pointer.
+    #[test]
+    fn removing_effect_keeps_instrument_pointer() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot_instr = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+        let slot_fx = load_vsti(&mut state, &track_id, 1, "fx", "C:/p/fx.vst3");
+        state.remove_insert(&track_id, &slot_fx);
+        let track = state.find_track(&track_id).unwrap();
+        assert_eq!(
+            track.instrument_plugin_instance_id.as_deref(),
+            Some(slot_instr.as_str()),
+            "removing an effect must not clear the instrument pointer"
+        );
+        assert_eq!(track.inserts.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod grid_lod_tests {
+    use super::*;
+
+    fn params(ppb: f32, num: u16, den: u16) -> TimelineGridLodParams {
+        TimelineGridLodParams {
+            pixels_per_beat: ppb,
+            bpm: 120.0,
+            numerator: num,
+            denominator: den,
+            viewport_width: 1200.0,
+            scroll_x: 0.0,
+        }
+    }
+
+    /// pixels_per_second that yields the requested pixels-per-beat at 120 BPM.
+    fn pps_for_ppb(ppb: f32) -> f32 {
+        // ppb = pps * seconds_per_beat = pps * (60/120) = pps * 0.5
+        ppb / 0.5
+    }
+
+    fn zoomed_state(ppb: f32) -> TimelineState {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state.viewport.pixels_per_second = pps_for_ppb(ppb);
+        state.sync_pixels_per_beat();
+        state.update_viewport_size(1200.0, 500.0);
+        state
+    }
+
+    #[test]
+    fn zoomed_in_shows_beats_and_subdivisions() {
+        let lod = resolve_timeline_grid_lod(&params(120.0, 4, 4));
+        assert_eq!(lod.major_bar_step, 1);
+        assert!(lod.show_beat_lines);
+        assert!(lod.show_subdivision_lines);
+        assert_eq!(lod.subdivision_per_beat, 4); // 1/16
+        assert_eq!(lod.label_bar_step, 1);
+        assert!(lod.show_beat_labels);
+    }
+
+    #[test]
+    fn medium_zoom_shows_bars_and_beats_without_subdivisions() {
+        // 24 px/beat -> px_per_bar 96: beats visible, no subdivisions, no beat labels.
+        let lod = resolve_timeline_grid_lod(&params(24.0, 4, 4));
+        assert_eq!(lod.major_bar_step, 1);
+        assert!(lod.show_beat_lines);
+        assert!(!lod.show_subdivision_lines);
+        assert!(!lod.show_beat_labels);
+    }
+
+    #[test]
+    fn zoomed_out_hides_beats_and_thins_bars() {
+        // 8 px/beat -> px_per_bar 32 -> every 4 bars, no beats/subs.
+        let lod = resolve_timeline_grid_lod(&params(8.0, 4, 4));
+        assert!(!lod.show_beat_lines);
+        assert!(!lod.show_subdivision_lines);
+        assert_eq!(lod.major_bar_step, 4);
+        // Labels land on drawn bar lines and stay a multiple of the bar step.
+        assert!(lod.label_bar_step >= lod.major_bar_step);
+        assert_eq!(lod.label_bar_step % lod.major_bar_step, 0);
+    }
+
+    #[test]
+    fn extreme_zoom_out_keeps_bar_lines_readable() {
+        // 1 px/beat -> px_per_bar 4: bar lines must not pack tighter than ~24px.
+        let lod = resolve_timeline_grid_lod(&params(1.0, 4, 4));
+        assert!(!lod.show_beat_lines);
+        let px_per_bar = 1.0 * beats_per_bar_from_sig(4, 4) as f32; // 4 px
+        assert!(lod.major_bar_step as f32 * px_per_bar >= 24.0);
+        // Labels must be at least the minimum spacing apart too.
+        assert!(lod.label_bar_step as f32 * px_per_bar >= lod.min_label_px);
+    }
+
+    #[test]
+    fn grid_lines_zoomed_out_emit_only_spaced_bar_lines() {
+        let state = zoomed_state(8.0);
+        let lines = state.get_arrangement_grid_lines(1200.0);
+        assert!(!lines.is_empty());
+        // No beat or subdivision lines when zoomed out.
+        assert!(lines.iter().all(|l| matches!(l.level, GridLineLevel::Bar)));
+        // Every drawn line is at least the minimum spacing from its neighbor.
+        let mut xs: Vec<f32> = lines.iter().map(|l| l.x).collect();
+        xs.sort_by(|a, b| a.total_cmp(b));
+        for w in xs.windows(2) {
+            assert!(w[1] - w[0] >= 3.0, "lines too close: {} vs {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn grid_lines_zoomed_in_emit_beats_and_subs() {
+        let state = zoomed_state(120.0);
+        let lines = state.get_arrangement_grid_lines(1200.0);
+        assert!(lines.iter().any(|l| matches!(l.level, GridLineLevel::Beat)));
+        assert!(lines.iter().any(|l| matches!(l.level, GridLineLevel::Sub)));
+    }
+
+    #[test]
+    fn ruler_labels_never_pack_closer_than_min_spacing() {
+        for ppb in [1.0_f32, 4.0, 8.0, 16.0, 24.0, 48.0, 120.0, 300.0] {
+            let state = zoomed_state(ppb);
+            let lines = state.get_arrangement_grid_lines(1200.0);
+            let mut label_xs: Vec<f32> =
+                lines.iter().filter(|l| l.show_label).map(|l| l.x).collect();
+            label_xs.sort_by(|a, b| a.total_cmp(b));
+            for w in label_xs.windows(2) {
+                assert!(
+                    w[1] - w[0] >= 48.0 - 0.5,
+                    "labels too close at ppb={ppb}: {} vs {}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tempo_map_tests {
+    use super::*;
+
+    #[test]
+    fn empty_map_uses_base_bpm() {
+        let map = TempoMap::new();
+        assert!(!map.has_automation());
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(100.0, 120.0), 120.0);
+    }
+
+    #[test]
+    fn hold_marker_steps_bpm() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(8.0, 140.0, TempoCurve::Hold);
+        assert!(map.has_automation());
+        // Before the marker we sit on the implicit base point.
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(7.9, 120.0), 120.0);
+        // From the marker onward the held tempo applies.
+        assert_eq!(map.bpm_at_beat(8.0, 120.0), 140.0);
+        assert_eq!(map.bpm_at_beat(99.0, 120.0), 140.0);
+    }
+
+    #[test]
+    fn linear_curve_interpolates_between_markers() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(0.0, 100.0, TempoCurve::Linear);
+        map.add_or_update_point(4.0, 200.0, TempoCurve::Hold);
+        // Halfway between the two markers = midpoint BPM.
+        assert!((map.bpm_at_beat(2.0, 120.0) - 150.0).abs() < 1e-6);
+        // At/after the last marker the held value applies.
+        assert!((map.bpm_at_beat(4.0, 120.0) - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn add_replaces_marker_at_same_beat_and_clear_resets() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(4.0, 130.0, TempoCurve::Hold);
+        map.add_or_update_point(4.0, 150.0, TempoCurve::Linear);
+        assert_eq!(map.points.len(), 1);
+        assert_eq!(map.points[0].bpm, 150.0);
+        assert_eq!(map.points[0].curve, TempoCurve::Linear);
+
+        map.clear();
+        assert!(!map.has_automation());
+    }
+
+    #[test]
+    fn hold_tempo_time_conversions_match_engine() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(4.0, 160.0, TempoCurve::Hold);
+        assert!((map.seconds_at_beat(0.0, 120.0) - 0.0).abs() < 1e-9);
+        assert!((map.seconds_at_beat(4.0, 120.0) - 2.0).abs() < 1e-9);
+        assert!((map.seconds_at_beat(8.0, 120.0) - 3.5).abs() < 1e-9);
+        assert!((map.beat_at_seconds(2.0, 120.0) - 4.0).abs() < 1e-9);
+        assert!((map.beat_at_seconds(3.5, 120.0) - 8.0).abs() < 1e-9);
+        assert_eq!(map.samples_at_beat(4.0, 120.0, 48_000.0), 96_000);
+        assert_eq!(map.samples_at_beat(8.0, 120.0, 48_000.0), 168_000);
+    }
+
+    #[test]
+    fn tempo_marker_bpm_values_are_independent() {
+        let mut map = TempoMap::new();
+        map.add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        map.add_or_update_point(4.0, 132.0, TempoCurve::Hold);
+        map.ensure_point_ids();
+
+        assert_eq!(map.points[0].bpm, 120.0);
+        assert_eq!(map.points[1].bpm, 132.0);
+        assert_eq!(TempoMap::format_marker_label(map.points[0].bpm), "120");
+        assert_eq!(TempoMap::format_marker_label(map.points[1].bpm), "132");
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(3.9, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(4.0, 120.0), 132.0);
+
+        let id_b = map.points[1].id.clone();
+        assert!(map.update_point_bpm_by_id(&id_b, 140.0));
+
+        assert_eq!(map.points[0].bpm, 120.0);
+        assert_eq!(map.points[1].bpm, 140.0);
+        assert_eq!(TempoMap::format_marker_label(map.points[0].bpm), "120");
+        assert_eq!(TempoMap::format_marker_label(map.points[1].bpm), "140");
+        assert_eq!(map.bpm_at_beat(0.0, 120.0), 120.0);
+        assert_eq!(map.bpm_at_beat(4.0, 120.0), 140.0);
+    }
+}
+
+#[cfg(test)]
+mod audio_asset_key_tests {
+    use super::*;
+
+    fn audio_clip(file_id: &str, source: Option<&str>) -> ClipState {
+        ClipState {
+            id: "c1".to_string(),
+            name: "loop".to_string(),
+            start_beat: 0.0,
+            duration_beats: 4.0,
+            source_duration_seconds: None,
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Audio {
+                file_id: file_id.to_string(),
+                source_path: source.map(str::to_string),
+            },
+            muted: false,
+            audio_import: AudioImportState::Pending,
+        }
+    }
+
+    #[test]
+    fn asset_key_is_file_id_and_requires_a_real_source() {
+        assert_eq!(
+            audio_clip("asset-1", Some("C:/a/loop.wav")).audio_asset_key(),
+            Some("asset-1")
+        );
+        // Placeholder / live-preview clip (no source) → no key.
+        assert_eq!(audio_clip("asset-1", None).audio_asset_key(), None);
+        // Empty asset id → no key.
+        assert_eq!(
+            audio_clip("", Some("C:/a/loop.wav")).audio_asset_key(),
+            None
+        );
+    }
+
+    #[test]
+    fn binding_survives_source_path_rewrite() {
+        // The whole point of keying on the asset id: a clip's waveform/import
+        // binding must not break when its `source_path` is later rewritten
+        // (e.g. copying the source into the project folder).
+        let mut state = TimelineState::default();
+        let clip_id = state.import_audio_at(
+            "C:/ext/loop.wav".to_string(),
+            "loop".to_string(),
+            0.0,
+            1.0e9,
+        );
+
+        let asset_key = state
+            .find_clip(&clip_id)
+            .and_then(|(_, clip)| clip.audio_asset_key())
+            .expect("new audio clip has an asset key")
+            .to_string();
+        assert_eq!(asset_key, "C:/ext/loop.wav");
+
+        // Simulate copy-into-project: rewrite source_path, keep file_id stable.
+        for track in &mut state.tracks {
+            for clip in &mut track.clips {
+                if clip.id == clip_id {
+                    if let ClipType::Audio { source_path, .. } = &mut clip.clip_type {
+                        *source_path = Some("C:/proj/Assets/Audio/loop.wav".to_string());
+                    }
+                }
+            }
+        }
+
+        // Asset key is unchanged despite the new path…
+        assert_eq!(
+            state
+                .find_clip(&clip_id)
+                .and_then(|(_, clip)| clip.audio_asset_key()),
+            Some(asset_key.as_str())
+        );
+        // …and asset-keyed state updates still reach the clip.
+        state.set_audio_import_for_asset(&asset_key, AudioImportState::Ready);
+        assert_eq!(
+            state
+                .find_clip(&clip_id)
+                .map(|(_, clip)| &clip.audio_import),
+            Some(&AudioImportState::Ready)
+        );
+    }
+}
+
+#[cfg(test)]
+mod tempo_track_tests {
+    use super::*;
+
+    #[test]
+    fn tempo_lane_header_subtitle_fixed_and_range() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        assert_eq!(state.tempo_lane_header_subtitle(), "Fixed 120 BPM");
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(16.0, 160.0, TempoCurve::Hold);
+        assert_eq!(state.tempo_lane_header_subtitle(), "120–160 BPM");
+    }
+
+    #[test]
+    fn time_signature_lane_header_subtitle_fixed_and_markers() {
+        let mut state = TimelineState::default();
+        assert_eq!(state.time_signature_lane_header_subtitle(), "Fixed 4/4");
+        state.time_signature_map.add_or_update_point(0.0, 4, 4);
+        state.time_signature_map.add_or_update_point(16.0, 6, 8);
+        assert_eq!(
+            state.time_signature_lane_header_subtitle(),
+            "4/4 · 2 markers"
+        );
+    }
+
+    #[test]
+    fn show_tempo_track_enables_global_lane() {
+        let mut state = TimelineState::default();
+        assert!(!state.show_tempo_track);
+        assert!(state.visible_global_lanes().is_empty());
+
+        state.show_tempo_track_lane();
+        assert!(state.show_tempo_track);
+        assert_eq!(state.visible_global_lanes(), vec![GlobalLaneKind::Tempo]);
+    }
+
+    #[test]
+    fn tempo_track_renders_two_point_bpm_values() {
+        let mut state = TimelineState::default();
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(4.0, 160.0, TempoCurve::Hold);
+        state.show_tempo_track_lane();
+
+        let values = state.tempo_track_render_bpm_values();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], 120.0);
+        assert_eq!(values[1], 160.0);
+        assert_eq!(TempoMap::format_marker_label(values[0]), "120");
+        assert_eq!(TempoMap::format_marker_label(values[1]), "160");
+    }
+
+    #[test]
+    fn editing_one_tempo_point_leaves_other_unchanged() {
+        let mut state = TimelineState::default();
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(4.0, 160.0, TempoCurve::Hold);
+        state.tempo_map.ensure_point_ids();
+        let id_b = state.tempo_map.points[1].id.clone();
+        let rev_before = state.tempo_map.revision();
+
+        assert!(state.move_tempo_point(&id_b, 4.0, 170.0));
+        assert_eq!(state.tempo_map.points[0].bpm, 120.0);
+        assert_eq!(state.tempo_map.points[1].bpm, 170.0);
+        assert!(state.tempo_map.revision() > rev_before);
+    }
+
+    #[test]
+    fn fixed_tempo_renders_flat_line_across_viewport() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state
+            .tempo_map
+            .reset_to_single_point(0.0, 120.0, TempoCurve::Hold);
+        state.show_tempo_track_lane();
+        state.update_viewport_size(800.0, 500.0);
+
+        let samples = state.tempo_track_bpm_samples(800.0);
+        assert!(!samples.is_empty());
+        for bpm in samples {
+            assert!((bpm - 120.0).abs() < 1e-6);
+        }
+    }
+}
+
+#[cfg(test)]
+mod time_signature_map_tests {
+    use super::*;
+
+    #[test]
+    fn default_4_4_bar_boundaries() {
+        let map = TimeSignatureMap::with_default_4_4();
+        assert!((map.bar_start_beat(1) - 0.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(2) - 4.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(3) - 8.0).abs() < 1e-9);
+        let bb0 = map.bar_beat_at_beat(0.0);
+        assert_eq!(bb0.bar, 1);
+        assert_eq!(bb0.beat_in_bar, 1);
+        let bb4 = map.bar_beat_at_beat(4.0);
+        assert_eq!(bb4.bar, 2);
+        assert_eq!(bb4.beat_in_bar, 1);
+    }
+
+    #[test]
+    fn change_from_4_4_to_3_4() {
+        let mut map = TimeSignatureMap::with_default_4_4();
+        map.add_or_update_point(16.0, 3, 4);
+        assert_eq!(map.format_position_at_beat(0.0), "1.1");
+        assert_eq!(map.format_position_at_beat(4.0), "2.1");
+        assert_eq!(map.format_position_at_beat(8.0), "3.1");
+        assert_eq!(map.format_position_at_beat(12.0), "4.1");
+        assert_eq!(map.format_position_at_beat(16.0), "5.1");
+        assert_eq!(map.format_position_at_beat(19.0), "6.1");
+        assert_eq!(map.format_position_at_beat(22.0), "7.1");
+    }
+
+    #[test]
+    fn seven_eight_beats_per_bar() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 7, 8);
+        assert!((map.beats_per_bar_at_beat(0.0) - 3.5).abs() < 1e-9);
+        assert!((map.bar_start_beat(1) - 0.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(2) - 3.5).abs() < 1e-9);
+        assert!((map.bar_start_beat(3) - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn marker_bpm_values_are_independent() {
+        let mut map = TimeSignatureMap::with_default_4_4();
+        map.add_or_update_point(16.0, 3, 4);
+        map.ensure_point_ids();
+        assert_eq!(map.points[0].label(), "4/4");
+        assert_eq!(map.points[1].label(), "3/4");
+        let id_b = map.points[1].id.clone();
+        assert!(map.update_point_by_id(&id_b, 7, 8));
+        assert_eq!(map.points[0].label(), "4/4");
+        assert_eq!(map.points[1].label(), "7/8");
+    }
+
+    #[test]
+    fn five_eight_ruler_denominator_ticks() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        assert!((map.bar_start_beat(1) - 0.0).abs() < 1e-9);
+        assert!((map.bar_start_beat(2) - 2.5).abs() < 1e-9);
+        assert_eq!(map.format_position_at_beat(0.0), "1.1");
+        assert_eq!(map.format_position_at_beat(0.5), "1.2");
+        assert_eq!(map.format_position_at_beat(1.0), "1.3");
+        assert_eq!(map.format_position_at_beat(1.5), "1.4");
+        assert_eq!(map.format_position_at_beat(2.0), "1.5");
+        assert_eq!(map.format_position_at_beat(2.5), "2.1");
+    }
+
+    #[test]
+    fn six_eight_ruler_denominator_ticks() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 6, 8);
+        assert!((map.bar_start_beat(2) - 3.0).abs() < 1e-9);
+        assert_eq!(map.format_position_at_beat(2.5), "1.6");
+        assert_eq!(map.format_position_at_beat(3.0), "2.1");
+    }
+
+    #[test]
+    fn default_grouping_for_compound_meters() {
+        let pt = TimeSignaturePoint::new(0.0, 5, 8);
+        assert_eq!(pt.effective_grouping(), vec![2, 3]);
+        let pt6 = TimeSignaturePoint::new(0.0, 6, 8);
+        assert_eq!(pt6.effective_grouping(), vec![3, 3]);
+        let pt7 = TimeSignaturePoint::new(0.0, 7, 8);
+        assert_eq!(pt7.effective_grouping(), vec![2, 2, 3]);
+    }
+
+    #[test]
+    fn marker_boundary_label_meter_change() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        map.add_or_update_point(2.5, 6, 8);
+        assert_eq!(map.format_position_at_beat(2.0), "1.5");
+        assert_eq!(map.format_position_at_beat(2.5), "2.1");
+        assert_eq!(map.format_position_at_beat(3.0), "2.2");
+    }
+
+    #[test]
+    fn visible_bar_background_rects_across_changing_meters() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        map.add_or_update_point(2.5, 6, 8);
+        map.add_or_update_point(5.5, 5, 8);
+        let rects = map.visible_bar_rects(0.0, 8.0);
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[0].bar, 1);
+        assert!((rects[0].start_beat - 0.0).abs() < 1e-9);
+        assert!((rects[0].end_beat - 2.5).abs() < 1e-9);
+        assert_eq!(rects[1].bar, 2);
+        assert!((rects[1].start_beat - 2.5).abs() < 1e-9);
+        assert!((rects[1].end_beat - 5.5).abs() < 1e-9);
+        assert_eq!(rects[2].bar, 3);
+        assert!((rects[2].start_beat - 5.5).abs() < 1e-9);
+        assert!((rects[2].end_beat - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn visible_bar_rects_follow_scroll_window() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 5, 8);
+        map.add_or_update_point(2.5, 6, 8);
+        map.add_or_update_point(5.5, 5, 8);
+        let rects = map.visible_bar_rects(3.0, 6.0);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].bar, 2);
+        assert!((rects[0].start_beat - 2.5).abs() < 1e-9);
+        assert_eq!(rects[1].bar, 3);
+        assert!((rects[1].start_beat - 5.5).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod midi_edit_tests {
+    use super::*;
+    use crate::components::edit::EditCommand;
+
+    /// Build an empty state with one MIDI clip and return `(state, clip_id)`.
+    fn state_with_midi_clip() -> (TimelineState, String) {
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Midi,
+            name: "Test".into(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let clip = state
+            .build_midi_clip(&track_id, 0.0, 4.0)
+            .expect("clip builds");
+        let clip_id = clip.id.clone();
+        EditCommand::CreateClip { track_id, clip }.execute(&mut state);
+        (state, clip_id)
+    }
+
+    fn note(state: &TimelineState, clip_id: &str, id: u64) -> MidiNoteState {
+        state
+            .midi_clip_notes(clip_id)
+            .unwrap()
+            .iter()
+            .find(|n| n.id == id)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn edit_midi_notes_velocity_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+
+        let prev = state.midi_clip_notes(&clip_id).unwrap().clone();
+        state.set_midi_notes_velocity_bulk(&clip_id, &[id], 40);
+        let next = state.midi_clip_notes(&clip_id).unwrap().clone();
+        assert_eq!(note(&state, &clip_id, id).velocity, 40);
+
+        let cmd = EditCommand::EditMidiNotes {
+            clip_id: clip_id.clone(),
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        assert_eq!(note(&state, &clip_id, id).velocity, 100, "undo restores");
+        cmd.execute(&mut state);
+        assert_eq!(note(&state, &clip_id, id).velocity, 40, "redo reapplies");
+    }
+
+    #[test]
+    fn edit_midi_notes_move_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+
+        let prev = state.midi_clip_notes(&clip_id).unwrap().clone();
+        state.move_midi_notes(&clip_id, &[(id, 2.0, 67)]);
+        let next = state.midi_clip_notes(&clip_id).unwrap().clone();
+
+        let cmd = EditCommand::EditMidiNotes {
+            clip_id: clip_id.clone(),
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        let n = note(&state, &clip_id, id);
+        assert_eq!((n.start, n.pitch), (0.0, 60), "undo restores start+pitch");
+        cmd.execute(&mut state);
+        let n = note(&state, &clip_id, id);
+        assert_eq!((n.start, n.pitch), (2.0, 67), "redo reapplies");
+    }
+
+    #[test]
+    fn controller_point_edit_and_undo_roundtrip() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(1);
+        let prev = state.controller_points_snapshot(&clip_id, kind);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.5);
+        state.put_controller_point(&clip_id, kind, 2.0, 0.75);
+        let next = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(next.len(), 2);
+
+        let cmd = EditCommand::SetControllerPoints {
+            clip_id: clip_id.clone(),
+            kind,
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        assert_eq!(
+            state.controller_points_snapshot(&clip_id, kind).len(),
+            0,
+            "undo clears the lane"
+        );
+        cmd.execute(&mut state);
+        assert_eq!(
+            state.controller_points_snapshot(&clip_id, kind).len(),
+            2,
+            "redo restores points"
+        );
+    }
+
+    #[test]
+    fn controller_undo_to_empty_removes_lane_and_redo_restores_pitch_bend() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::PitchBend;
+        let prev = state.controller_points_snapshot(&clip_id, kind);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.0);
+        let next = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(next.len(), 1);
+
+        let cmd = EditCommand::SetControllerPoints {
+            clip_id: clip_id.clone(),
+            kind,
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        assert!(
+            state
+                .midi_clip_controller_lanes(&clip_id)
+                .is_some_and(|lanes| lanes.iter().all(|lane| lane.kind != kind)),
+            "undo to an empty snapshot removes the controller lane"
+        );
+        cmd.execute(&mut state);
+        let restored = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(restored.len(), 1, "redo restores pitch-bend points");
+        assert_eq!(restored[0].value, 0.0);
+    }
+
+    #[test]
+    fn put_controller_point_merges_within_epsilon() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(7);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.2);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.9);
+        let pts = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(pts.len(), 1, "same-beat edit updates in place");
+        assert_eq!(pts[0].value, 0.9);
+    }
+
+    #[test]
+    fn set_controller_point_moves_in_place() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(1);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.5);
+        let id = state.controller_points_snapshot(&clip_id, kind)[0].id;
+        assert!(state.set_controller_point(&clip_id, kind, id, 3.0, 0.25));
+        let snapshot = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].beat, 3.0);
+        assert_eq!(snapshot[0].value, 0.25);
+        assert_eq!(snapshot[0].id, id, "id is preserved across a move");
+    }
+
+    #[test]
+    fn delete_controller_points_near_removes_in_tolerance() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::CC(11);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.5);
+        state.put_controller_point(&clip_id, kind, 3.0, 0.5);
+        let removed = state.delete_controller_points_near(&clip_id, kind, 1.05, 0.25);
+        assert_eq!(removed, 1);
+        assert_eq!(state.controller_points_snapshot(&clip_id, kind).len(), 1);
+    }
+
+    #[test]
+    fn set_midi_notes_muted_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        assert!(!note(&state, &clip_id, id).muted);
+
+        let cmd = EditCommand::SetMidiNotesMuted {
+            clip_id: clip_id.clone(),
+            prev: vec![(id, false)],
+            muted: true,
+        };
+        cmd.execute(&mut state);
+        assert!(note(&state, &clip_id, id).muted, "execute mutes");
+        cmd.undo(&mut state);
+        assert!(!note(&state, &clip_id, id).muted, "undo unmutes");
+    }
+
+    #[test]
+    fn split_midi_note_roundtrips() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 2.0, 100).unwrap();
+        let original = note(&state, &clip_id, id).clone();
+        let left = MidiNoteState::new(60, 0.0, 1.0, 100);
+        let right = MidiNoteState::new(60, 1.0, 1.0, 100);
+        let (left_id, right_id) = (left.id, right.id);
+
+        let cmd = EditCommand::SplitMidiNote {
+            clip_id: clip_id.clone(),
+            original,
+            parts: vec![left, right],
+        };
+        cmd.execute(&mut state);
+        let notes = state.midi_clip_notes(&clip_id).unwrap();
+        assert!(notes.iter().all(|n| n.id != id), "original removed");
+        assert!(notes.iter().any(|n| n.id == left_id), "left part added");
+        assert!(notes.iter().any(|n| n.id == right_id), "right part added");
+
+        cmd.undo(&mut state);
+        let notes = state.midi_clip_notes(&clip_id).unwrap();
+        assert!(notes.iter().any(|n| n.id == id), "undo restores original");
+        assert!(
+            notes.iter().all(|n| n.id != left_id && n.id != right_id),
+            "undo removes both parts"
+        );
+    }
+}

@@ -231,3 +231,58 @@ pub(super) fn reveal_path(path: &std::path::Path) {
         let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
     }
 }
+
+#[cfg(test)]
+mod transport_binding_tests {
+    use super::*;
+
+    /// The transport Record button (top toolbar) and the `R`/`F9` keymap entry
+    /// both dispatch the literal command id `"transport:record"`. It must
+    /// resolve to the transport Record action — never a project/save action.
+    /// Regression guard for the "record button saves the project" bug.
+    #[test]
+    fn record_command_id_resolves_to_transport_record() {
+        assert!(matches!(
+            transport_command_from_id("transport:record"),
+            Some(TransportCommand::Record)
+        ));
+    }
+
+    /// Normalized id forms (web-style `.` namespace separator, surrounding
+    /// whitespace) must resolve identically — the chrome/keymap dispatcher
+    /// normalizes ids before lookup, so a Record click can't be lost to a
+    /// separator mismatch. (`normalize_command_id` maps `.`→`:` and `_`→`-`.)
+    #[test]
+    fn record_command_id_resolves_after_normalization() {
+        for raw in ["transport.record", " transport:record "] {
+            let normalized = normalize_command_id(raw);
+            assert!(
+                matches!(
+                    transport_command_from_id(&normalized),
+                    Some(TransportCommand::Record)
+                ),
+                "id {raw:?} should resolve to TransportCommand::Record"
+            );
+        }
+    }
+
+    /// The Save commands are not transport actions: `transport_command_from_id`
+    /// returns `None`, so the transport dispatcher leaves them to the explicit
+    /// project-save path. If a refactor ever mapped a save id onto a transport
+    /// action (or Record onto Save), clicking Save could toggle recording and
+    /// clicking Record could save — the exact regression class this file guards.
+    #[test]
+    fn save_command_ids_are_not_transport_actions() {
+        for save_id in ["project:save", "project:save-as", "project:save-copy"] {
+            assert!(
+                transport_command_from_id(save_id).is_none(),
+                "save id {save_id:?} must not map to a transport action"
+            );
+            let normalized = normalize_command_id(save_id);
+            assert!(
+                transport_command_from_id(&normalized).is_none(),
+                "normalized save id {normalized:?} must not map to a transport action"
+            );
+        }
+    }
+}

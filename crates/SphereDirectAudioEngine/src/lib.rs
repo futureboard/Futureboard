@@ -37,9 +37,9 @@ pub mod native;
 pub mod plugin_bridge;
 pub mod recording;
 mod runtime;
-pub mod time_signature_map;
 mod streaming_source;
 pub mod tempo_map;
+pub mod time_signature_map;
 pub mod transport;
 pub mod types;
 pub mod vst3_processor;
@@ -95,7 +95,7 @@ use types::{
     EngineProjectSnapshot, JsAudioDeviceInfo, JsAudioFileInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsLatencyInfo, JsMeterSnapshot,
     JsRecordingResult, JsRecordingStatus, JsSphereAudioStatus, JsStartRecordingConfig,
-    JsWavPeakResult,
+    JsWavExportResult, JsWavPeakResult,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -558,9 +558,28 @@ impl SphereDirectAudioEngine {
         })
     }
 
+    /// Convert an internal RAUF recording take to a standard WAV file without FFmpeg.
+    ///
+    /// This is the export/drag-out path for recorded takes. RAUF remains an
+    /// internal project format; external consumers should receive the WAV path.
+    #[napi]
+    pub fn export_rauf_to_wav(
+        &self,
+        rauf_path: String,
+        wav_path: String,
+    ) -> napi::Result<JsWavExportResult> {
+        let report = sphere_encoder::wav::convert_rauf_to_wav(&rauf_path, &wav_path)
+            .map_err(|e| napi::Error::from_reason(format!("RAUF to WAV export failed: {e}")))?;
+        Ok(JsWavExportResult {
+            file_path: wav_path,
+            frames_written: report.frames_written as f64,
+            data_bytes: report.data_bytes as f64,
+        })
+    }
+
     // ── Recording ────────────────────────────────────────────────────────────
 
-    /// Begin recording armed tracks to WAV files in `<projectRoot>/Media/Audio`.
+    /// Begin recording armed tracks to RAUF files in `<projectRoot>/recordings`.
     ///
     /// Opens a separate cpal input stream on the selected input device.
     /// Audio data is routed through a lock-free channel to a disk writer thread —
@@ -574,7 +593,7 @@ impl SphereDirectAudioEngine {
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
-    /// Stop the active recording session, finalize WAV files, and return per-track results.
+    /// Stop the active recording session, finalize RAUF files, and return per-track results.
     ///
     /// Drops the input stream (causing the disk writer to flush and close its
     /// files), then waits up to 60 s for finalization before returning.

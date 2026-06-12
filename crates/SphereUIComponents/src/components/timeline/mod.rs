@@ -7,6 +7,7 @@ pub mod midi_clip;
 pub mod midi_import;
 pub mod playhead;
 pub mod render;
+pub mod state;
 pub mod tempo_track;
 pub mod time_signature_track;
 pub mod timeline;

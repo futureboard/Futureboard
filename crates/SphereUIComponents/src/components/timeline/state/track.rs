@@ -1,0 +1,376 @@
+use super::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackType {
+    Audio,
+    Midi,
+    Instrument,
+    /// Sub-mix bus — other tracks route their output here for grouped
+    /// processing before the master. Phase 3.
+    Bus,
+    /// FX return — receives sends from other tracks (aux/reverb returns).
+    /// Phase 3.
+    Return,
+    Master,
+}
+
+impl TrackType {
+    /// `true` for routing tracks (Bus/Return) that receive audio from other
+    /// tracks rather than hosting clips directly.
+    pub fn is_routing(self) -> bool {
+        matches!(self, TrackType::Bus | TrackType::Return)
+    }
+}
+
+/// Per-track edit/display mode. `Clips` is normal clip editing; `Automation`
+/// switches the lane to automation editing — points/line are drawn inside the
+/// same track lane and clips are dimmed behind. UI-only state: toggling it
+/// never marks the engine or project dirty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackLaneMode {
+    Clips,
+    Automation,
+}
+
+impl Default for TrackLaneMode {
+    fn default() -> Self {
+        TrackLaneMode::Clips
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackState {
+    pub id: String,
+    pub name: String,
+    pub track_type: TrackType,
+    pub color: gpui::Rgba,
+    /// Manual/base normalized fader position in `0.0..=1.0`. `1.0` is the top of
+    /// the fader (≈ +6 dB) and `0.0` is the bottom (≈ -60 dB). See
+    /// `Volume::norm_to_db`. This is the value the user sets directly and the
+    /// value persisted as `volume_norm`; Track Volume automation does NOT write
+    /// here — it drives [`Self::volume_effective`] instead.
+    pub volume: f32,
+    /// Automation-evaluated effective volume at the current playhead. UI-only and
+    /// not persisted — recomputed from the Track Volume automation lane on
+    /// playback ticks, seeks, and point edits (see
+    /// [`TimelineState::recompute_effective_volumes`]). Equals [`Self::volume`]
+    /// whenever automation read is off or there is no active volume automation.
+    pub volume_effective: f32,
+    /// Whether Track Volume automation drives the effective volume / display.
+    /// UI-only, not persisted; defaults to `true` so existing automated projects
+    /// follow their curves on load.
+    pub volume_automation_read: bool,
+    /// Pan position in `-1.0..=1.0`. `-1.0` is hard left, `+1.0` is hard right.
+    pub pan: f32,
+    pub muted: bool,
+    pub solo: bool,
+    pub armed: bool,
+    /// Input monitoring mode (Off / Auto / Input).
+    pub input_monitor: InputMonitorMode,
+    /// Latest peak meter levels in `0.0..=1.0`. Currently a static placeholder
+    /// per track; will be driven by the audio engine when that lands.
+    pub meter_level_l: f32,
+    pub meter_level_r: f32,
+    /// Held peak levels (slow release) driving the peak-hold tick. UI-only.
+    pub meter_peak_hold_l: f32,
+    pub meter_peak_hold_r: f32,
+    /// Latched clip indicator — set when the engine peak reached/exceeded
+    /// 0 dBFS, auto-cleared once the held peak falls back. UI-only.
+    pub meter_clip: bool,
+    pub clips: Vec<ClipState>,
+    pub automation_lanes: Vec<AutomationLaneState>,
+    /// Per-track edit mode (Clip vs Automation). UI-only; not persisted.
+    pub lane_mode: TrackLaneMode,
+    /// Which automation target the lane editor is currently focused on. Drives
+    /// which lane renders/edits while in [`TrackLaneMode::Automation`]. UI-only.
+    pub selected_automation_target: Option<AutomationTarget>,
+    /// Insert (effect) plugin chain — ordered. Audio flows through these
+    /// in order before volume/pan/sends in the runtime. The UI stores
+    /// only descriptor + transient state; the runtime owns the actual
+    /// plugin processor.
+    pub inserts: Vec<InsertSlotState>,
+    /// Canonical MIDI destination for this instrument track — the
+    /// `plugin_instance_id` of the first enabled instrument insert (e.g.
+    /// `insert-track-1-1`). Set when a VSTi is assigned; used for piano
+    /// preview, clip playback, and external-bridge routing.
+    pub instrument_plugin_instance_id: Option<String>,
+    /// Aux sends to Bus/Return tracks (Phase 3). Empty for most tracks.
+    pub sends: Vec<SendSlotState>,
+    /// Persisted routing choices. Device discovery is not wired yet, so device
+    /// variants are preserved but not created by the Inspector.
+    pub routing: TrackRoutingState,
+}
+
+impl TrackState {
+    /// `true` when this track has an enabled Track Volume automation lane that
+    /// actually carries points — i.e. automation can resolve a value.
+    pub fn has_active_volume_automation(&self) -> bool {
+        self.automation_lanes.iter().any(|l| {
+            l.enabled && matches!(l.target, AutomationTarget::TrackVolume) && !l.points.is_empty()
+        })
+    }
+
+    /// The normalized volume the UI fader / readout should display: the
+    /// automation-evaluated effective value when automation read is active and a
+    /// volume lane exists, otherwise the manual/base value. Faders still WRITE
+    /// the base via [`TimelineState::set_track_volume`] — this is display only,
+    /// so an automation-follow repaint can never be mistaken for a user edit.
+    pub fn display_volume(&self) -> f32 {
+        if self.volume_automation_read && self.has_active_volume_automation() {
+            self.volume_effective
+        } else {
+            self.volume
+        }
+    }
+
+    pub fn instrument_insert(&self) -> Option<&InsertSlotState> {
+        if self.track_type == TrackType::Instrument {
+            self.inserts.first()
+        } else {
+            None
+        }
+    }
+
+    pub fn instrument_insert_mut(&mut self) -> Option<&mut InsertSlotState> {
+        if self.track_type == TrackType::Instrument {
+            self.inserts.first_mut()
+        } else {
+            None
+        }
+    }
+
+    pub fn effect_inserts(&self) -> &[InsertSlotState] {
+        if self.track_type == TrackType::Instrument {
+            self.inserts.get(1..).unwrap_or(&[])
+        } else {
+            self.inserts.as_slice()
+        }
+    }
+
+    pub fn effect_inserts_mut(&mut self) -> &mut [InsertSlotState] {
+        if self.track_type == TrackType::Instrument {
+            let start = self.inserts.len().min(1);
+            &mut self.inserts[start..]
+        } else {
+            self.inserts.as_mut_slice()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateTrackOptions {
+    pub track_type: TrackType,
+    pub name: String,
+    pub color: gpui::Rgba,
+    pub volume: f32,
+    pub pan: f32,
+    pub armed: bool,
+    pub input_monitor: InputMonitorMode,
+}
+
+impl TimelineState {
+    // ── Identity helpers ─────────────────────────────────────────────────────
+
+    pub fn next_track_id(&self) -> String {
+        // Find the highest numeric suffix on "track-N" ids, plus one.
+        let mut n = 0u32;
+        for t in &self.tracks {
+            if let Some(rest) = t.id.strip_prefix("track-") {
+                if let Ok(v) = rest.parse::<u32>() {
+                    if v > n {
+                        n = v;
+                    }
+                }
+            }
+        }
+        format!("track-{}", n + 1)
+    }
+
+    pub fn track_index_at_y(&self, y: f32) -> Option<usize> {
+        if y < 0.0 {
+            return None;
+        }
+        let idx = ((y + self.viewport.scroll_y) / TRACK_HEIGHT).floor() as usize;
+        if idx < self.tracks.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    pub fn track_insert_index_at_y(&self, y: f32) -> usize {
+        if self.tracks.is_empty() {
+            return 0;
+        }
+        let content_y = (y + self.viewport.scroll_y).max(0.0);
+        ((content_y / TRACK_HEIGHT).round() as usize).clamp(0, self.tracks.len())
+    }
+
+    pub fn begin_track_drag(&mut self, track_id: &str, origin_index: usize, y: f32) {
+        self.dragging_track_id = Some(track_id.to_string());
+        self.drag_origin_index = Some(origin_index);
+        self.drag_current_y = y;
+        self.drag_target_index = Some(origin_index.min(self.tracks.len()));
+    }
+
+    pub fn update_track_drag(&mut self, y: f32) {
+        self.drag_current_y = y;
+        self.drag_target_index = Some(self.track_insert_index_at_y(y));
+    }
+
+    pub fn clear_track_drag(&mut self) {
+        self.dragging_track_id = None;
+        self.drag_origin_index = None;
+        self.drag_current_y = 0.0;
+        self.drag_target_index = None;
+    }
+
+    pub fn reorder_track(&mut self, track_id: &str, target_index: usize) -> bool {
+        let Some(origin_index) = self.tracks.iter().position(|track| track.id == track_id) else {
+            self.clear_track_drag();
+            return false;
+        };
+        let target_index = target_index.clamp(0, self.tracks.len());
+        let insert_index = if origin_index < target_index {
+            target_index.saturating_sub(1)
+        } else {
+            target_index
+        };
+        if insert_index == origin_index {
+            self.clear_track_drag();
+            return false;
+        }
+
+        let track = self.tracks.remove(origin_index);
+        let insert_index = insert_index.min(self.tracks.len());
+        self.tracks.insert(insert_index, track);
+        if let Some(selected) = self.selection.selected_track_id.as_deref() {
+            if !self.tracks.iter().any(|track| track.id == selected) {
+                self.selection.selected_track_id =
+                    self.tracks.get(insert_index).map(|t| t.id.clone());
+            }
+        }
+        self.clear_track_drag();
+        true
+    }
+
+    /// Create a new audio track with auto-assigned id/color.
+    pub fn create_audio_track(&mut self) -> String {
+        let name = format!("Audio {}", self.tracks.len() + 1);
+        let log_name = name.clone();
+        let id = self.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name,
+            color: self.track_color_for_index(self.tracks.len()),
+            volume: volume::db_to_norm(0.0),
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        eprintln!("[import] created track id={} name={}", id, log_name);
+        id
+    }
+
+    pub fn create_midi_track(&mut self) -> String {
+        let name = format!("MIDI {}", self.tracks.len() + 1);
+        self.create_track(CreateTrackOptions {
+            track_type: TrackType::Midi,
+            name,
+            color: self.track_color_for_index(self.tracks.len()),
+            volume: volume::db_to_norm(0.0),
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        })
+    }
+
+    pub fn track_color_for_index(&self, index: usize) -> gpui::Rgba {
+        crate::theme::Colors::track_color_for_index(index)
+    }
+
+    pub fn create_track(&mut self, options: CreateTrackOptions) -> String {
+        let id = self.next_track_id();
+        let track_type = options.track_type;
+        self.tracks.push(TrackState {
+            id: id.clone(),
+            name: options.name,
+            track_type,
+            color: options.color,
+            volume: options.volume.clamp(0.0, 1.0),
+            volume_effective: options.volume.clamp(0.0, 1.0),
+            volume_automation_read: true,
+            pan: options.pan.clamp(-1.0, 1.0),
+            muted: false,
+            solo: false,
+            armed: options.armed,
+            input_monitor: options.input_monitor,
+            meter_level_l: 0.0,
+            meter_level_r: 0.0,
+            meter_peak_hold_l: 0.0,
+            meter_peak_hold_r: 0.0,
+            meter_clip: false,
+            clips: Vec::new(),
+            automation_lanes: Vec::new(),
+            lane_mode: TrackLaneMode::Clips,
+            selected_automation_target: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            routing: TrackRoutingState::for_track_type(track_type),
+            instrument_plugin_instance_id: None,
+        });
+        id
+    }
+
+    pub fn selected_audio_track_id(&self) -> Option<String> {
+        let selected = self.selection.selected_track_id.as_deref()?;
+        self.tracks
+            .iter()
+            .find(|track| track.id == selected && matches!(track.track_type, TrackType::Audio))
+            .map(|track| track.id.clone())
+    }
+
+    /// Rename a track. Trims surrounding whitespace and ignores an
+    /// all-whitespace name (keeps the previous one). Returns `true` if the
+    /// stored name actually changed, so callers only mark dirty on a real edit.
+    pub fn rename_track(&mut self, track_id: &str, name: &str) -> bool {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            if t.name != trimmed {
+                t.name = trimmed.to_string();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set a track's color. Returns `true` if it changed.
+    pub fn set_track_color(&mut self, track_id: &str, color: gpui::Rgba) -> bool {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            if t.color != color {
+                t.color = color;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn find_track(&self, track_id: &str) -> Option<&TrackState> {
+        self.tracks.iter().find(|t| t.id == track_id)
+    }
+
+    pub fn delete_track(&mut self, track_id: &str) {
+        if let Some(index) = self.tracks.iter().position(|track| track.id == track_id) {
+            self.tracks.remove(index);
+            if self.selection.selected_track_id.as_deref() == Some(track_id) {
+                self.selection.selected_track_id = self
+                    .tracks
+                    .get(index.saturating_sub(1))
+                    .map(|t| t.id.clone());
+            }
+            self.selection.selected_clip_ids.clear();
+        }
+    }
+}

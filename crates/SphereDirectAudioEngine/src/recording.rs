@@ -6,8 +6,8 @@
 //! JS control thread
 //!   └─ start_recording()
 //!        ├─ opens cpal input stream  ──► input callback
-//!        │                                 └─ try_send(block) ──► crossbeam channel
-//!        └─ spawns disk writer thread ──► recv(block) → write WAV temp file
+//!        │                                 └─ try_recv(pool) + try_send(block) ──► bounded channel
+//!        └─ spawns disk writer thread ──► recv(block) → RaufWriter → .rauf
 //!
 //! JS control thread
 //!   └─ stop_recording()
@@ -15,10 +15,10 @@
 //!        └─ recv(results)  →  return to caller
 //! ```
 //!
-//! The audio callback does only two things: load an `AtomicBool` and
-//! call `try_send`.  No allocation, no locking, no file I/O.
+//! The audio callback does not write files, encode containers, or block on disk
+//! I/O. The recording path uses a bounded preallocated block pool and drops on
+//! backpressure instead of allocating or blocking.
 
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -27,6 +27,7 @@ use std::sync::{
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::bounded;
+use sphere_encoder::rauf::{RaufConfig, RaufSampleFormat, RaufWriter, RAUF_FLAG_HAS_SIDECAR};
 
 use crate::error::SphereAudioError;
 use crate::types::{JsRecordingResult, JsStartRecordingConfig};
@@ -39,15 +40,19 @@ static RECORD_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct TrackWriterState {
     track_id: String,
-    file: std::fs::File,
-    data_bytes: u64,
+    track_name: String,
+    writer: RaufWriter,
     /// 0-based indices into the interleaved input block to capture.
     input_channels: Vec<usize>,
-    /// Number of channels written to the output WAV (= input_channels.len()).
+    /// Number of channels written to the output RAUF (= input_channels.len()).
     out_channels: u16,
-    temp_path: PathBuf,
     final_path: PathBuf,
     relative_path: String,
+    sidecar_path: PathBuf,
+    sidecar_relative_path: String,
+    take_id: String,
+    project_start_sample: u64,
+    error: Option<String>,
 }
 
 pub struct RecordingResult {
@@ -58,6 +63,8 @@ pub struct RecordingResult {
     pub duration_seconds: f64,
     pub sample_rate: u32,
     pub channels: u32,
+    pub metadata_path: String,
+    pub sample_format: String,
     pub success: bool,
     pub error: Option<String>,
 }
@@ -81,51 +88,6 @@ pub struct RecordingSession {
 // under a parking_lot::Mutex — never from the audio thread.
 unsafe impl Send for RecordingSession {}
 unsafe impl Sync for RecordingSession {}
-
-// ── WAV writing ───────────────────────────────────────────────────────────────
-
-/// Write a 44-byte WAV header with placeholder sizes (filled in on finalize).
-fn write_wav_placeholder(file: &mut std::fs::File, channels: u16, sample_rate: u32) {
-    let byte_rate = sample_rate * channels as u32 * 4;
-    let block_align = channels * 4;
-    let _ = file.write_all(b"RIFF");
-    let _ = file.write_all(&0u32.to_le_bytes()); // riff size — filled later
-    let _ = file.write_all(b"WAVE");
-    let _ = file.write_all(b"fmt ");
-    let _ = file.write_all(&16u32.to_le_bytes()); // fmt chunk length
-    let _ = file.write_all(&3u16.to_le_bytes()); // IEEE float PCM
-    let _ = file.write_all(&channels.to_le_bytes());
-    let _ = file.write_all(&sample_rate.to_le_bytes());
-    let _ = file.write_all(&byte_rate.to_le_bytes());
-    let _ = file.write_all(&block_align.to_le_bytes());
-    let _ = file.write_all(&32u16.to_le_bytes()); // 32-bit float
-    let _ = file.write_all(b"data");
-    let _ = file.write_all(&0u32.to_le_bytes()); // data size — filled later
-}
-
-/// Seek to the start of the file and patch in the correct RIFF / data sizes.
-fn finalize_wav(file: &mut std::fs::File, data_bytes: u64, channels: u16, sample_rate: u32) {
-    let data_size = data_bytes.min(u32::MAX as u64) as u32;
-    let riff_size = data_size.saturating_add(36); // header after "RIFF\x04"
-    let byte_rate = sample_rate * channels as u32 * 4;
-    let block_align = channels * 4;
-
-    let _ = file.seek(SeekFrom::Start(0));
-    let _ = file.write_all(b"RIFF");
-    let _ = file.write_all(&riff_size.to_le_bytes());
-    let _ = file.write_all(b"WAVE");
-    let _ = file.write_all(b"fmt ");
-    let _ = file.write_all(&16u32.to_le_bytes());
-    let _ = file.write_all(&3u16.to_le_bytes());
-    let _ = file.write_all(&channels.to_le_bytes());
-    let _ = file.write_all(&sample_rate.to_le_bytes());
-    let _ = file.write_all(&byte_rate.to_le_bytes());
-    let _ = file.write_all(&block_align.to_le_bytes());
-    let _ = file.write_all(&32u16.to_le_bytes());
-    let _ = file.write_all(b"data");
-    let _ = file.write_all(&data_size.to_le_bytes());
-    let _ = file.flush();
-}
 
 // ── Filename helpers ──────────────────────────────────────────────────────────
 
@@ -158,7 +120,7 @@ fn unique_recording_path(
     let timestamp = sanitize_filename(timestamp);
     let extension = extension.trim_start_matches('.').trim();
     let extension = if extension.is_empty() {
-        "wav"
+        "rauf"
     } else {
         extension
     };
@@ -172,6 +134,30 @@ fn unique_recording_path(
             return path;
         }
     }
+}
+
+fn make_take_id(session_id: &str, track_index: u64) -> [u8; 16] {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in session_id.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let counter = RECORD_COUNTER
+        .load(Ordering::Relaxed)
+        .wrapping_add(track_index);
+    let mut id = [0u8; 16];
+    id[0..8].copy_from_slice(&hash.to_le_bytes());
+    id[8..16].copy_from_slice(&counter.to_le_bytes());
+    id
+}
+
+fn format_take_id(take_id: [u8; 16]) -> String {
+    let mut out = String::with_capacity(32);
+    for byte in take_id {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 // ── Device lookup ─────────────────────────────────────────────────────────────
@@ -195,43 +181,48 @@ pub fn find_input_device(device_id: Option<&str>) -> Result<cpal::Device, Sphere
         .ok_or_else(|| SphereAudioError::NativeError("No default input device".to_string()))
 }
 
-// ── Disk writer thread ────────────────────────────────────────────────────────
+// ── RAUF / disk writer thread ─────────────────────────────────────────────────
 
 fn disk_writer_thread(
-    audio_rx: crossbeam_channel::Receiver<Vec<f32>>,
+    audio_rx: crossbeam_channel::Receiver<Vec<i32>>,
+    free_tx: crossbeam_channel::Sender<Vec<i32>>,
     mut writers: Vec<TrackWriterState>,
     sample_rate: u32,
     input_ch: usize, // channels per interleaved input frame
     start_beat: f64,
     finalize_tx: std::sync::mpsc::Sender<Vec<RecordingResult>>,
 ) {
-    // Write placeholder WAV headers (will be overwritten on finalize).
-    for w in &mut writers {
-        write_wav_placeholder(&mut w.file, w.out_channels, sample_rate);
-    }
-
     let mut total_frames = 0u64;
 
     // Drain audio blocks until the sender (input stream) disconnects.
-    while let Ok(block) = audio_rx.recv() {
+    while let Ok(mut block) = audio_rx.recv() {
         let frames = block.len().checked_div(input_ch).unwrap_or(0);
         if frames == 0 {
+            block.clear();
+            let _ = free_tx.try_send(block);
             continue;
         }
         for w in &mut writers {
+            let mut selected = Vec::with_capacity(frames * w.input_channels.len());
             for f in 0..frames {
                 for &ch in &w.input_channels {
                     let s = if ch < input_ch {
                         block[f * input_ch + ch]
                     } else {
-                        0.0f32
+                        0
                     };
-                    let _ = w.file.write_all(&s.to_le_bytes());
-                    w.data_bytes += 4;
+                    selected.push(s);
+                }
+            }
+            if w.error.is_none() {
+                if let Err(error) = w.writer.write_s32le_interleaved(&selected) {
+                    w.error = Some(error.to_string());
                 }
             }
         }
         total_frames += frames as u64;
+        block.clear();
+        let _ = free_tx.try_send(block);
     }
 
     let duration_seconds = if sample_rate > 0 {
@@ -243,32 +234,97 @@ fn disk_writer_thread(
     let mut results = Vec::with_capacity(writers.len());
 
     for mut w in writers {
-        finalize_wav(&mut w.file, w.data_bytes, w.out_channels, sample_rate);
-        drop(w.file); // close before rename
-
-        let ok = std::fs::rename(&w.temp_path, &w.final_path).is_ok();
+        w.writer.set_flags(RAUF_FLAG_HAS_SIDECAR);
+        let sidecar = RaufSidecarData {
+            sidecar_path: w.sidecar_path.clone(),
+            relative_path: w.relative_path.clone(),
+            take_id: w.take_id.clone(),
+            track_id: w.track_id.clone(),
+            track_name: w.track_name.clone(),
+            project_start_sample: w.project_start_sample,
+            out_channels: w.out_channels,
+        };
+        let write_error = w.error.take();
+        let finalized = w.writer.finalize();
+        let frames_recorded = finalized
+            .as_ref()
+            .map(|report| report.frames_written)
+            .unwrap_or(0);
+        let sidecar_result =
+            write_rauf_sidecar(&sidecar, sample_rate, frames_recorded, true, false);
+        let ok = write_error.is_none() && finalized.is_ok() && sidecar_result.is_ok();
+        let error = write_error.or_else(|| {
+            finalized
+                .err()
+                .map(|error| error.to_string())
+                .or_else(|| sidecar_result.err().map(|error| error.to_string()))
+        });
         results.push(RecordingResult {
             track_id: w.track_id,
-            file_path: if ok {
-                w.final_path.to_string_lossy().into_owned()
-            } else {
-                w.temp_path.to_string_lossy().into_owned()
-            },
+            file_path: w.final_path.to_string_lossy().into_owned(),
             relative_path: w.relative_path,
             start_beat,
             duration_seconds,
             sample_rate,
             channels: w.out_channels as u32,
+            metadata_path: w.sidecar_relative_path,
+            sample_format: "s32le".to_string(),
             success: ok,
-            error: if ok {
-                None
-            } else {
-                Some("Failed to move recording file to final location".to_string())
-            },
+            error,
         });
     }
 
     let _ = finalize_tx.send(results);
+}
+
+struct RaufSidecarData {
+    sidecar_path: PathBuf,
+    relative_path: String,
+    take_id: String,
+    track_id: String,
+    track_name: String,
+    project_start_sample: u64,
+    out_channels: u16,
+}
+
+fn write_rauf_sidecar(
+    w: &RaufSidecarData,
+    sample_rate: u32,
+    frames_recorded: u64,
+    finalized: bool,
+    recovered: bool,
+) -> std::io::Result<()> {
+    let audio_file = Path::new(&w.relative_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("take.rauf");
+    let peak_file = format!(
+        "{}.peak",
+        Path::new(audio_file)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("take")
+    );
+    let metadata = serde_json::json!({
+        "format": "futureboard.rauf.sidecar",
+        "version": 1,
+        "audio_file": audio_file,
+        "take_id": w.take_id,
+        "track_id": w.track_id,
+        "track_name": w.track_name,
+        "record_mode": "live_input",
+        "project_start_sample": w.project_start_sample,
+        "sample_rate": sample_rate,
+        "channels": w.out_channels,
+        "sample_format": "s32le",
+        "interleaved": true,
+        "frames_recorded": frames_recorded,
+        "finalized": finalized,
+        "recovered": recovered,
+        "peak_file": peak_file,
+    });
+    let text = serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "{}".to_string());
+    std::fs::write(&w.sidecar_path, text)
 }
 
 /// Realtime-safe max into an f32-bits atomic (no allocation, no lock).
@@ -301,13 +357,16 @@ fn atomic_max_bits(target: &AtomicU32, value: f32) {
 ///   3. preview     → min/max/rms bins → `shared.preview_ring` (drained by UI)
 ///   4. meters/diag → raw input peak + lightweight counters
 ///
-/// Realtime-safe: only the record path allocates (`to_vec` once per block, off
-/// the output hot path); the monitor/preview/meter paths are atomics-only.
+/// Realtime-safe: the record path uses a bounded preallocated block pool and
+/// drops when the pool or writer queue is full; the monitor/preview/meter paths
+/// are atomics-only.
 #[allow(clippy::too_many_arguments)]
 fn build_f32_input_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    tx: crossbeam_channel::Sender<Vec<f32>>,
+    tx: crossbeam_channel::Sender<Vec<i32>>,
+    free_rx: crossbeam_channel::Receiver<Vec<i32>>,
+    free_tx: crossbeam_channel::Sender<Vec<i32>>,
     active: Arc<AtomicBool>,
     dropped_blocks: Arc<AtomicU64>,
     shared: Arc<crate::engine::SharedState>,
@@ -412,15 +471,44 @@ fn build_f32_input_stream(
                     .store(f32_store(prev_rec.max(rec_peak)), Ordering::Relaxed);
 
                 // 2. Record path → disk writer worker (only while armed/active).
-                if active.load(Ordering::Relaxed) && tx.try_send(data.to_vec()).is_err() {
-                    dropped_blocks.fetch_add(1, Ordering::Relaxed);
-                    shared.record_ring_overruns.fetch_add(1, Ordering::Relaxed);
+                if active.load(Ordering::Relaxed) {
+                    match free_rx.try_recv() {
+                        Ok(mut block) => {
+                            if block.capacity() < data.len() {
+                                dropped_blocks.fetch_add(1, Ordering::Relaxed);
+                                shared.record_ring_overruns.fetch_add(1, Ordering::Relaxed);
+                                let _ = free_tx.try_send(block);
+                                return;
+                            }
+                            block.clear();
+                            block.extend(data.iter().copied().map(f32_to_s32));
+                            if let Err(error) = tx.try_send(block) {
+                                dropped_blocks.fetch_add(1, Ordering::Relaxed);
+                                shared.record_ring_overruns.fetch_add(1, Ordering::Relaxed);
+                                let _ = free_tx.try_send(error.into_inner());
+                            }
+                        }
+                        Err(_) => {
+                            dropped_blocks.fetch_add(1, Ordering::Relaxed);
+                            shared.record_ring_overruns.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
                 }
             },
             |err| eprintln!("[SphereAudio] Input stream error: {err}"),
             None,
         )
         .map_err(|e| SphereAudioError::NativeError(format!("Cannot open input stream: {e}")))
+}
+
+#[inline]
+fn f32_to_s32(sample: f32) -> i32 {
+    let x = sample.clamp(-1.0, 1.0);
+    if x >= 0.0 {
+        (x * i32::MAX as f32) as i32
+    } else {
+        (x * -(i32::MIN as f32)) as i32
+    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -454,18 +542,16 @@ pub fn start_recording(
 
     // Ensure directory structure exists.
     let project_root = Path::new(&config.project_root);
-    let media_dir = project_root.join("Media").join("Audio");
-    let temp_dir = media_dir.join(".rec").join(&config.session_id);
+    let recordings_dir = project_root.join("recordings");
 
-    std::fs::create_dir_all(&media_dir)
-        .map_err(|e| SphereAudioError::NativeError(format!("Cannot create Media/Audio: {e}")))?;
-    std::fs::create_dir_all(&temp_dir).map_err(|e| {
-        SphereAudioError::NativeError(format!("Cannot create temp recording dir: {e}"))
+    std::fs::create_dir_all(&recordings_dir).map_err(|e| {
+        SphereAudioError::NativeError(format!("Cannot create recordings folder: {e}"))
     })?;
+    let project_start_sample = shared.position_samples.load(Ordering::Relaxed);
 
     // Build per-track writer states.
     let mut track_writers: Vec<TrackWriterState> = Vec::new();
-    for track in &config.tracks {
+    for (track_index, track) in config.tracks.iter().enumerate() {
         let project_name = if config.project_name.trim().is_empty() {
             "Recording"
         } else {
@@ -476,17 +562,18 @@ pub fn start_recording(
         } else {
             config.timestamp.as_str()
         };
-        let final_path = unique_recording_path(&media_dir, project_name, timestamp, "wav");
+        let final_path = unique_recording_path(&recordings_dir, project_name, timestamp, "rauf");
         let filename = final_path
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "recording.wav".to_string());
-        let relative_path = format!("Media/Audio/{filename}");
-        let temp_path = temp_dir.join(format!("{}.tmp.wav", sanitize_filename(&track.track_id)));
-
-        let file = std::fs::File::create(&temp_path).map_err(|e| {
-            SphereAudioError::NativeError(format!("Cannot create recording temp file: {e}"))
-        })?;
+            .unwrap_or_else(|| "recording.rauf".to_string());
+        let relative_path = format!("recordings/{filename}");
+        let sidecar_path = final_path.with_extension("rauf.json");
+        let sidecar_filename = sidecar_path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "recording.rauf.json".to_string());
+        let sidecar_relative_path = format!("recordings/{sidecar_filename}");
 
         let in_chs: Vec<usize> = track.input_channels.iter().map(|&c| c as usize).collect();
         if in_chs.is_empty() {
@@ -503,16 +590,35 @@ pub fn start_recording(
             )));
         }
         let out_channels = in_chs.len().max(1) as u16;
+        let take_id = make_take_id(&config.session_id, track_index as u64);
+        let writer = RaufWriter::create(
+            &final_path,
+            RaufConfig {
+                sample_rate,
+                channels: out_channels,
+                sample_format: RaufSampleFormat::S32,
+                interleaved: true,
+                project_start_sample,
+                take_id,
+            },
+        )
+        .map_err(|e| {
+            SphereAudioError::NativeError(format!("Cannot create RAUF recording file: {e}"))
+        })?;
 
         track_writers.push(TrackWriterState {
             track_id: track.track_id.clone(),
-            file,
-            data_bytes: 0,
+            track_name: track.name.clone(),
+            writer,
             input_channels: in_chs,
             out_channels,
-            temp_path,
             final_path,
             relative_path,
+            sidecar_path,
+            sidecar_relative_path,
+            take_id: format_take_id(take_id),
+            project_start_sample,
+            error: None,
         });
     }
 
@@ -520,14 +626,21 @@ pub fn start_recording(
 
     // Bounded channel: if the disk writer falls behind, `try_send` drops the
     // block rather than blocking the audio callback.
-    let (audio_tx, audio_rx) = bounded::<Vec<f32>>(512);
+    let (audio_tx, audio_rx) = bounded::<Vec<i32>>(512);
+    let (free_tx, free_rx) = bounded::<Vec<i32>>(512);
+    let max_record_block_samples = input_ch.saturating_mul(8192).max(input_ch.max(1));
+    for _ in 0..512 {
+        let _ = free_tx.try_send(Vec::with_capacity(max_record_block_samples));
+    }
 
     // Spawn disk writer — owns `audio_rx` and all file handles.
     let (finalize_tx, finalize_rx) = std::sync::mpsc::channel();
     let start_beat = config.start_beat;
+    let writer_free_tx = free_tx.clone();
     std::thread::spawn(move || {
         disk_writer_thread(
             audio_rx,
+            writer_free_tx,
             track_writers,
             sample_rate,
             input_ch,
@@ -595,6 +708,8 @@ pub fn start_recording(
         &device,
         &stream_config,
         audio_tx,
+        free_rx,
+        free_tx,
         Arc::clone(&recording_active),
         Arc::clone(&dropped_blocks),
         Arc::clone(&shared),
@@ -625,7 +740,7 @@ pub fn start_recording(
     })
 }
 
-/// Stop recording, finalize WAV files, and return per-track results.
+/// Stop recording, finalize RAUF files, and return per-track results.
 pub fn stop_recording(
     session: RecordingSession,
 ) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
@@ -686,6 +801,8 @@ pub fn stop_recording(
             duration_seconds: r.duration_seconds,
             sample_rate: r.sample_rate,
             channels: r.channels,
+            metadata_path: r.metadata_path,
+            sample_format: r.sample_format,
             success: r.success,
             error: r.error,
         })

@@ -1145,7 +1145,10 @@ impl StudioLayout {
              editor_open={editor_open} bridge_loaded={bridge_loaded}"
         );
         debug_assert!(!slot_present, "insert slot still present after removal");
-        debug_assert!(!instrument_ptr, "instrument pointer still set after removal");
+        debug_assert!(
+            !instrument_ptr,
+            "instrument pointer still set after removal"
+        );
         debug_assert!(!editor_open, "editor still open after removal");
         debug_assert!(!bridge_loaded, "bridge instance still loaded after removal");
     }

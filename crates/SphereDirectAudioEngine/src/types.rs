@@ -185,6 +185,14 @@ pub struct JsWavPeakResult {
 
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Default, Clone)]
+pub struct JsWavExportResult {
+    pub file_path: String,
+    pub frames_written: f64,
+    pub data_bytes: f64,
+}
+
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
 pub struct JsAudioFileInfo {
     pub path: String,
     pub sample_rate: u32,
@@ -492,15 +500,19 @@ pub struct JsStartRecordingConfig {
 #[derive(Debug, Default, Clone)]
 pub struct JsRecordingResult {
     pub track_id: String,
-    /// Absolute path to the finalized WAV file.
+    /// Absolute path to the finalized internal recording file.
     pub file_path: String,
-    /// Path relative to project root (e.g., "Media/Audio/Kick Rec 0001.wav").
+    /// Path relative to project root (e.g., "recordings/take_0001.rauf").
     pub relative_path: String,
     /// Transport beat at which recording started.
     pub start_beat: f64,
     pub duration_seconds: f64,
     pub sample_rate: u32,
     pub channels: u32,
+    /// Sidecar metadata path relative to project root.
+    pub metadata_path: String,
+    /// PCM encoding for the internal recording file, currently "s32le".
+    pub sample_format: String,
     pub success: bool,
     pub error: Option<String>,
 }

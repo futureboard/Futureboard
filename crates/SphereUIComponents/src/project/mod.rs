@@ -93,6 +93,16 @@ pub enum ClipSource {
         asset_id: String,
         source_path: Option<PathBuf>,
     },
+    Rauf {
+        asset_id: String,
+        source_path: PathBuf,
+        metadata_path: Option<PathBuf>,
+        sample_format: String,
+        sample_rate: u32,
+        channels: u16,
+        start_frame: u64,
+        length_frames: u64,
+    },
     Midi {
         notes: Vec<MidiNote>,
         controller_lanes: Vec<MidiControllerLane>,
@@ -549,10 +559,36 @@ impl From<&TimelineState> for FutureboardProject {
                             ClipType::Audio {
                                 file_id,
                                 source_path,
-                            } => ClipSource::Audio {
-                                asset_id: file_id.clone(),
-                                source_path: source_path.as_deref().map(PathBuf::from),
-                            },
+                            } => {
+                                let path = source_path.as_deref().map(PathBuf::from);
+                                if path
+                                    .as_ref()
+                                    .and_then(|p| p.extension())
+                                    .and_then(|ext| ext.to_str())
+                                    .is_some_and(|ext| ext.eq_ignore_ascii_case("rauf"))
+                                {
+                                    let metadata_path = path.as_ref().map(|p| {
+                                        let mut value = p.as_os_str().to_os_string();
+                                        value.push(".json");
+                                        PathBuf::from(value)
+                                    });
+                                    ClipSource::Rauf {
+                                        asset_id: file_id.clone(),
+                                        source_path: path.unwrap_or_default(),
+                                        metadata_path,
+                                        sample_format: "s32le".to_string(),
+                                        sample_rate: 48_000,
+                                        channels: 0,
+                                        start_frame: 0,
+                                        length_frames: 0,
+                                    }
+                                } else {
+                                    ClipSource::Audio {
+                                        asset_id: file_id.clone(),
+                                        source_path: path,
+                                    }
+                                }
+                            }
                             ClipType::Midi {
                                 notes,
                                 controller_lanes,
@@ -866,6 +902,14 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                             source_path: source_path
                                 .as_ref()
                                 .map(|p| p.to_string_lossy().into_owned()),
+                        },
+                        ClipSource::Rauf {
+                            asset_id,
+                            source_path,
+                            ..
+                        } => ClipType::Audio {
+                            file_id: asset_id.clone(),
+                            source_path: Some(source_path.to_string_lossy().into_owned()),
                         },
                         ClipSource::Midi {
                             notes,

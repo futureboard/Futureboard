@@ -13,8 +13,8 @@ use crate::components::plugin_picker::{
 use crate::components::text_input::TextInputCallbacks;
 use crate::components::title_bar::external_window_titlebar;
 use crate::theme::{self, Colors};
-use crate::window_position::{apply_owner_display, centered_window_bounds};
 use crate::window_position::resolve_owner_bounds_with_preferred;
+use crate::window_position::{apply_owner_display, centered_window_bounds};
 
 use super::StudioLayout;
 
@@ -137,7 +137,13 @@ impl Render for InsertPickerWindow {
                         if let Some((track_id, insert_index, insert_id)) =
                             layout.apply_picked_insert(&plugin_id, cx)
                         {
-                            layout.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
+                            layout.open_insert_editor(
+                                &track_id,
+                                insert_index,
+                                &insert_id,
+                                window,
+                                cx,
+                            );
                         }
                         layout.plugin_picker_window = None;
                     });
@@ -246,9 +252,9 @@ impl Render for InsertPickerWindow {
             .bg(Colors::surface_window())
             .font(theme::ui_font())
             .track_focus(&self.focus_handle)
-            .capture_key_down(cx.listener(
-                |this, event: &KeyDownEvent, window, cx| this.handle_key(event, window, cx),
-            ))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.handle_key(event, window, cx)
+            }))
             .child(external_window_titlebar(
                 "Add Insert",
                 "insert-picker-close",
@@ -259,22 +265,17 @@ impl Render for InsertPickerWindow {
                     }
                 },
             ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .child(plugin_picker_panel(
-                        &snapshot.picker,
-                        snapshot.index.as_ref(),
-                        &snapshot.prefs,
-                        snapshot.catalog_status,
-                        &snapshot.search_input,
-                        search_focused,
-                        search_callbacks,
-                        picker_callbacks,
-                        snapshot.au_error.as_deref(),
-                    )),
-            )
+            .child(div().flex_1().min_h(px(0.0)).child(plugin_picker_panel(
+                &snapshot.picker,
+                snapshot.index.as_ref(),
+                &snapshot.prefs,
+                snapshot.catalog_status,
+                &snapshot.search_input,
+                search_focused,
+                search_callbacks,
+                picker_callbacks,
+                snapshot.au_error.as_deref(),
+            )))
     }
 }
 
@@ -286,7 +287,10 @@ pub(crate) fn open_insert_picker_window(
 ) -> Result<WindowHandle<InsertPickerWindow>, String> {
     let window_bounds = centered_window_bounds(
         owner_bounds,
-        size(px(INSERT_PICKER_WINDOW_WIDTH), px(INSERT_PICKER_WINDOW_HEIGHT)),
+        size(
+            px(INSERT_PICKER_WINDOW_WIDTH),
+            px(INSERT_PICKER_WINDOW_HEIGHT),
+        ),
         cx,
     );
 

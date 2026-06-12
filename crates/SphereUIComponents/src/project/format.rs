@@ -20,8 +20,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v8 adds stable ids on tempo points for independent marker editing.
 /// v11 adds a content fingerprint per project asset for cross-session import
 /// dedup. Pre-v11 files have no asset fingerprint and load with `None`.
-/// v13 adds timeline markers and regions.
-pub const PROJECT_VERSION: u32 = 13;
+/// v13 adds timeline markers and regions. v14 adds internal RAUF clip sources.
+pub const PROJECT_VERSION: u32 = 14;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -490,6 +490,26 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
             w.write_str(asset_id);
             w.write_opt_path(source_path);
         }
+        ClipSource::Rauf {
+            asset_id,
+            source_path,
+            metadata_path,
+            sample_format,
+            sample_rate,
+            channels,
+            start_frame,
+            length_frames,
+        } => {
+            w.write_u8(3);
+            w.write_str(asset_id);
+            w.write_str(&source_path.to_string_lossy());
+            w.write_opt_path(metadata_path);
+            w.write_str(sample_format);
+            w.write_u32(*sample_rate);
+            w.write_u32(*channels as u32);
+            w.write_u64(*start_frame);
+            w.write_u64(*length_frames);
+        }
         ClipSource::Midi {
             notes,
             controller_lanes,
@@ -909,6 +929,16 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
         1 => ClipSource::Audio {
             asset_id: r.read_str()?,
             source_path: r.read_opt_path()?,
+        },
+        3 if version >= 14 => ClipSource::Rauf {
+            asset_id: r.read_str()?,
+            source_path: PathBuf::from(r.read_str()?),
+            metadata_path: r.read_opt_path()?,
+            sample_format: r.read_str()?,
+            sample_rate: r.read_u32()?,
+            channels: r.read_u32()? as u16,
+            start_frame: r.read_u64()?,
+            length_frames: r.read_u64()?,
         },
         2 => {
             let count = r.read_u32()? as usize;

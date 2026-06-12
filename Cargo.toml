@@ -19,7 +19,6 @@ exclude = [
     # Quarantined experimental/placeholder crates (no implementation yet).
     # See ARCHITECTURE.md → "Experimental crates policy". Promote back into the
     # workspace by removing the corresponding line once a crate has real content.
-    "crates/SphereEncoder",
     "crates/SphereExtensionHost",
     "crates/SphereMediaUtils",
     "crates/SphereNoiseRemover",
@@ -37,6 +36,7 @@ sphere_ui_components = { path = "crates/SphereUIComponents" }
 sphere-direct-audio-engine = { path = "crates/SphereDirectAudioEngine", default-features = false }
 sphere-audio-editor = { path = "crates/SphereAudioEditor" }
 sphere-audio-plugins = { path = "crates/SphereAudioPlugins" }
+sphere-encoder = { path = "crates/SphereEncoder" }
 sphere-plugin-host = { path = "crates/SpherePluginHost", default-features = false }
 sphere-graphic-engine = { path = "crates/SphereGraphicEngine" }
 napi = { version = "2", features = ["napi4"] }

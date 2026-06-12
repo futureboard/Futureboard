@@ -488,6 +488,20 @@ impl AudioEngine {
         self.inner.stop_recording()
     }
 
+    pub fn export_rauf_to_wav(
+        &self,
+        rauf_path: &str,
+        wav_path: &str,
+    ) -> Result<crate::types::JsWavExportResult, SphereAudioError> {
+        let report = sphere_encoder::wav::convert_rauf_to_wav(rauf_path, wav_path)
+            .map_err(|error| SphereAudioError::NativeError(error.to_string()))?;
+        Ok(crate::types::JsWavExportResult {
+            file_path: wav_path.to_string(),
+            frames_written: report.frames_written as f64,
+            data_bytes: report.data_bytes as f64,
+        })
+    }
+
     pub fn recording_status(&self) -> crate::types::JsRecordingStatus {
         self.inner.get_recording_status()
     }

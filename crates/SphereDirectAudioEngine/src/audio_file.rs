@@ -12,6 +12,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::error::SphereAudioError;
+use sphere_encoder::rauf::{RaufReader, RaufSampleFormat};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -34,6 +35,7 @@ pub struct AudioFileBuffer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioFileFormat {
     Wav,
+    Rauf,
     Mp3,
     Flac,
     Ogg,
@@ -45,6 +47,7 @@ impl AudioFileFormat {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Wav => "wav",
+            Self::Rauf => "rauf",
             Self::Mp3 => "mp3",
             Self::Flac => "flac",
             Self::Ogg => "ogg",
@@ -120,6 +123,7 @@ pub fn generate_audio_peaks(path: impl AsRef<Path>) -> Result<AudioPeakFile, Sph
     let info = probe_audio_file(path)?;
     match info.format {
         AudioFileFormat::Wav => generate_wav_peaks_streaming(path, &info),
+        AudioFileFormat::Rauf => generate_peaks_in_memory(path, &info),
         _ => generate_peaks_in_memory(path, &info),
     }
 }
@@ -344,6 +348,7 @@ pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereA
     let format = audio_file_format(path);
     match format {
         AudioFileFormat::Wav => probe_wav_file(path, format),
+        AudioFileFormat::Rauf => probe_rauf_file(path),
         AudioFileFormat::Mp3
         | AudioFileFormat::Flac
         | AudioFileFormat::Ogg
@@ -357,7 +362,7 @@ pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereA
 
 /// Load an audio file from `path` into a decoded `AudioFileBuffer`.
 ///
-/// Supported extensions: `wav`, `wave`, `mp3`, `flac`, `ogg`, `oga`,
+/// Supported extensions: `rauf`, `wav`, `wave`, `mp3`, `flac`, `ogg`, `oga`,
 /// `aiff`, `aif`.
 ///
 /// Returns an error string on failure; the caller logs it and skips the clip.
@@ -372,6 +377,7 @@ pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
     match ext.as_str() {
         // Fast path — hand-written RIFF/WAVE parser (no symphonia overhead).
         "wav" | "wave" => load_wav(p),
+        "rauf" => load_rauf(p),
 
         // Symphonia handles everything else.
         "mp3" | "flac" | "ogg" | "oga" | "aiff" | "aif" => load_via_symphonia(p),
@@ -389,6 +395,7 @@ fn audio_file_format(path: &Path) -> AudioFileFormat {
         .as_str()
     {
         "wav" | "wave" => AudioFileFormat::Wav,
+        "rauf" => AudioFileFormat::Rauf,
         "mp3" => AudioFileFormat::Mp3,
         "flac" => AudioFileFormat::Flac,
         "ogg" | "oga" => AudioFileFormat::Ogg,
@@ -423,6 +430,34 @@ fn probe_wav_file(path: &Path, format: AudioFileFormat) -> Result<AudioFileInfo,
         total_frames,
         duration_seconds: total_frames as f64 / fmt.sample_rate as f64,
         format,
+    })
+}
+
+fn probe_rauf_file(path: &Path) -> Result<AudioFileInfo, SphereAudioError> {
+    let reader = RaufReader::open(path).map_err(|e| {
+        SphereAudioError::NativeError(format!(
+            "RAUF metadata read failed for '{}': {e}",
+            path.display()
+        ))
+    })?;
+    let header = reader.header();
+    let total_frames = if header.flags & sphere_encoder::rauf::RAUF_FLAG_FINALIZED != 0 {
+        header.frames_written
+    } else {
+        reader.recover_frames_from_size().map_err(|e| {
+            SphereAudioError::NativeError(format!(
+                "RAUF recovery read failed for '{}': {e}",
+                path.display()
+            ))
+        })?
+    };
+    Ok(AudioFileInfo {
+        path: path.to_path_buf(),
+        sample_rate: header.sample_rate,
+        channels: header.channels,
+        total_frames,
+        duration_seconds: total_frames as f64 / header.sample_rate as f64,
+        format: AudioFileFormat::Rauf,
     })
 }
 
@@ -808,6 +843,49 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
         sample_rate: fmt.sample_rate,
         channels: fmt.channels,
         frames,
+        samples,
+    })
+}
+
+fn load_rauf(path: &Path) -> Result<AudioFileBuffer, String> {
+    let reader = RaufReader::open(path).map_err(|e| format!("RAUF open failed: {e}"))?;
+    let header = reader.header().clone();
+    if header.sample_format != RaufSampleFormat::S32 {
+        return Err("RAUF playback currently supports s32le only".to_string());
+    }
+    if !header.interleaved {
+        return Err("RAUF playback requires interleaved PCM".to_string());
+    }
+
+    let frames = if header.flags & sphere_encoder::rauf::RAUF_FLAG_FINALIZED != 0 {
+        header.frames_written
+    } else {
+        reader
+            .recover_frames_from_size()
+            .map_err(|e| format!("RAUF recovery failed: {e}"))?
+    };
+    let channels = header.channels as usize;
+    let sample_count = frames as usize * channels;
+    let mut file = File::open(path).map_err(|e| format!("open failed: {e}"))?;
+    file.seek(SeekFrom::Start(header.data_offset))
+        .map_err(|e| format!("seek failed: {e}"))?;
+    let byte_len = sample_count
+        .checked_mul(4)
+        .ok_or_else(|| "RAUF sample byte length overflow".to_string())?;
+    let mut bytes = vec![0u8; byte_len];
+    file.read_exact(&mut bytes)
+        .map_err(|e| format!("read failed: {e}"))?;
+
+    let mut samples = Vec::with_capacity(sample_count);
+    for chunk in bytes.chunks_exact(4) {
+        let sample = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        samples.push((sample as f32 / 2_147_483_648.0).clamp(-1.0, 1.0));
+    }
+
+    Ok(AudioFileBuffer {
+        sample_rate: header.sample_rate,
+        channels,
+        frames: frames as usize,
         samples,
     })
 }

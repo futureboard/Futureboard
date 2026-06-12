@@ -250,6 +250,34 @@ fn prepare_portable_assets(
 
     for track in &mut project.tracks {
         for clip in &mut track.clips {
+            if let ClipSource::Rauf {
+                asset_id,
+                source_path,
+                metadata_path,
+                ..
+            } = &mut clip.source
+            {
+                let source_abs = resolve_source_for_save(source_path, project_root);
+                if !source_abs.exists() {
+                    return Err(ProjectError::Corrupted(format!(
+                        "missing RAUF recording: {}",
+                        source_abs.display()
+                    )));
+                }
+                if let Some(relative) = path_relative_to_project(&source_abs, project_root) {
+                    let relative_string = path_to_project_string(&relative);
+                    *source_path = PathBuf::from(&relative_string);
+                    *asset_id = relative_string.clone();
+                }
+                if let Some(metadata_path) = metadata_path {
+                    let metadata_abs = resolve_source_for_save(metadata_path, project_root);
+                    if let Some(relative) = path_relative_to_project(&metadata_abs, project_root) {
+                        *metadata_path = PathBuf::from(path_to_project_string(&relative));
+                    }
+                }
+                continue;
+            }
+
             let ClipSource::Audio {
                 asset_id,
                 source_path: Some(source_path),
@@ -390,6 +418,24 @@ fn resolve_project_relative_assets(project: &mut FutureboardProject, project_fil
             };
             if source_path.is_relative() {
                 *source_path = project_root.join(&source_path);
+            }
+        }
+        for clip in &mut track.clips {
+            let ClipSource::Rauf {
+                source_path,
+                metadata_path,
+                ..
+            } = &mut clip.source
+            else {
+                continue;
+            };
+            if source_path.is_relative() {
+                *source_path = project_root.join(&source_path);
+            }
+            if let Some(metadata_path) = metadata_path {
+                if metadata_path.is_relative() {
+                    *metadata_path = project_root.join(&metadata_path);
+                }
             }
         }
     }

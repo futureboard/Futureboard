@@ -1,0 +1,56 @@
+//! Timeline arrangement state, split by domain.
+//!
+//! Extracted from the former monolithic `timeline_state.rs`. Public items are
+//! re-exported flat so existing `timeline_state::*` imports keep working through
+//! the shim at `super::timeline_state`.
+
+mod audio;
+mod automation;
+mod clip;
+mod core;
+mod debug;
+mod demo;
+mod drag;
+mod geometry;
+mod global_lanes;
+mod grid;
+mod ids;
+mod marker;
+mod midi;
+mod midi_controller;
+mod mixer;
+mod plugin_chain;
+mod recording;
+mod routing;
+mod selection;
+mod tempo;
+mod time_signature;
+mod track;
+mod viewport;
+
+#[cfg(test)]
+mod tests;
+
+pub use automation::*;
+pub use clip::*;
+pub use core::*;
+pub use debug::*;
+pub use drag::*;
+pub use geometry::*;
+pub use global_lanes::*;
+pub use grid::*;
+pub use ids::*;
+pub use marker::*;
+pub use midi::*;
+pub use midi_controller::*;
+pub use mixer::*;
+pub use plugin_chain::*;
+pub use routing::*;
+pub use selection::*;
+pub use tempo::*;
+pub use time_signature::*;
+pub use track::*;
+pub use viewport::*;
+
+// `audio`, `recording`, and `demo` only contribute `impl TimelineState`
+// methods (no nameable items), so they need no `pub use` re-export.

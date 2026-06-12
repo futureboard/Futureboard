@@ -5794,9 +5794,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sphere-audio-plugins",
+ "sphere-encoder",
  "symphonia",
  "windows 0.61.3",
 ]
+
+[[package]]
+name = "sphere-encoder"
+version = "0.1.0"
 
 [[package]]
 name = "sphere-graphic-engine"

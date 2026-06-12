@@ -61,6 +61,7 @@ serde_json.workspace = true
 
 # Plugin/audio graph integration.
 sphere-audio-plugins.workspace = true
+sphere-encoder.workspace = true
 
 # Memory-map large audio files so huge WAVs do not explode RAM usage.
 memmap2.workspace = true

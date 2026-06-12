@@ -665,8 +665,9 @@ impl Render for StudioLayout {
         // Add Track moved to an external window.
 
         // Phase 2b insert plugin picker overlay.
-        let plugin_picker_overlay_el: Option<gpui::AnyElement> =
-            if self.plugin_picker.is_open && self.plugin_picker_window.is_none() {
+        let plugin_picker_overlay_el: Option<gpui::AnyElement> = if self.plugin_picker.is_open
+            && self.plugin_picker_window.is_none()
+        {
             let search_context_callbacks = TextInputCallbacks {
                 on_context_menu: Some(Arc::new({
                     let this = cx.entity().clone();

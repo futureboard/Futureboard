@@ -42,6 +42,7 @@ mod audio_transport;
 mod browser_ops;
 mod close_ops;
 mod engine_snapshot;
+mod export_ops;
 mod frame_diagnostics;
 mod helpers;
 mod input_ops;
@@ -342,6 +343,7 @@ pub struct StudioLayout {
     plugin_picker_window: Option<WindowHandle<plugin_picker_window::InsertPickerWindow>>,
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
+    export_arrangement_window: Option<WindowHandle<crate::export::ExportArrangementWindow>>,
     /// Cached plugin registry scan result. `None` until the first
     /// `+ Add Insert` click triggers a sync scan (or the Plugin Manager
     /// dialog populates it). Phase 2a uses the first insert-capable
@@ -754,6 +756,7 @@ impl StudioLayout {
             plugin_picker_window: None,
             add_track_window: None,
             plugin_manager_window: None,
+            export_arrangement_window: None,
             available_plugins: None,
             plugin_cache_present: false,
             plugin_catalog_status: PluginCatalogStatus::Loading,
@@ -1365,6 +1368,9 @@ impl StudioLayout {
                 self.open_add_track_external_window(AddTrackKind::Master, owner_bounds, cx)
             }
             "plugins:manager" => self.open_plugin_manager_external_window(owner_bounds, cx),
+            "file:export-arrangement" => {
+                self.open_export_arrangement_external_window(owner_bounds, cx)
+            }
             "track:delete" => self.delete_selected_track(cx),
             "track:mute" => self.toggle_selected_track_mute(cx),
             "track:solo" => self.toggle_selected_track_solo(cx),

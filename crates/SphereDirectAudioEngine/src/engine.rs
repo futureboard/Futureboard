@@ -12,7 +12,7 @@
 //!   - Stream lifecycle (open/close) is guarded by `parking_lot::Mutex`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -39,12 +39,12 @@ use crate::recording::{self, RecordingSession};
 use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
 use crate::tempo_map::{TempoMap, TempoPoint};
 use crate::transport::{self, RuntimeTransportSnapshot};
-use crate::vst3_processor::RuntimeTransportContext;
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
     JsRecordingStatus, JsSphereAudioStatus, JsStartRecordingConfig, JsTrackMeterSnapshot,
 };
+use crate::vst3_processor::RuntimeTransportContext;
 
 // ── Version ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +74,14 @@ fn callback_debug_enabled() -> bool {
 fn plugin_restore_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some())
+}
+
+/// `FUTUREBOARD_PLUGIN_BRIDGE_DEBUG=1` enables the throttled bridge
+/// missed-deadline / recovered traces from the audio callback. Off by default —
+/// stall accounting stays in `RuntimeInsert::bridge_missed_blocks` either way.
+fn bridge_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_BRIDGE_DEBUG").is_some())
 }
 
 // ── Realtime constants shared with render.rs ──────────────────────────────────
@@ -2568,7 +2576,6 @@ pub fn render_project_sample(
             continue;
         }
 
-        let clip_track_id = clip.track_id.clone();
         let clip_offset_seconds = clip.offset_seconds;
         let clip_speed_ratio = clip.speed_ratio;
         let clip_gain = clip.gain;
@@ -2576,7 +2583,8 @@ pub fn render_project_sample(
         let clip_fade_out = clip.fade_out_samples;
         let source = Arc::clone(&clip.source);
 
-        let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip_track_id) else {
+        // Resolved at build time — no id lookup or String clone per sample.
+        let Some(track_index) = clip.track_index.filter(|&ti| ti < runtime.tracks.len()) else {
             continue;
         };
         if Some(track_index) == master_index {
@@ -2602,47 +2610,44 @@ pub fn render_project_sample(
         l *= g;
         r *= g;
 
-        let output_track_id = runtime.tracks[track_index].output_track_id.clone();
-        let sends = runtime.tracks[track_index].sends.clone();
+        // Build-time resolved output index (None for master/missing) — never
+        // clone ids or the sends Vec on the audio thread.
+        let output_track_index = runtime.tracks[track_index]
+            .output_track_index
+            .filter(|&t| t < runtime.tracks.len());
         let (track_l, track_r) =
             apply_track_chain_at_beat(l, r, &mut runtime.tracks[track_index], beat);
         let (track_l, track_r) =
             apply_preview_mode(track_l, track_r, runtime.tracks[track_index].preview_mode);
         runtime.accumulate_track_meter(track_index, track_l, track_r);
 
-        if let Some(target_id) = output_track_id
-            .as_deref()
-            .filter(|id| !is_master_output(id))
-        {
-            if let Some(target_index) = runtime.tracks.iter().position(|t| t.id == target_id) {
-                let (bus_l, bus_r) = apply_track_chain_at_beat(
-                    track_l,
-                    track_r,
-                    &mut runtime.tracks[target_index],
-                    beat,
-                );
-                let (bus_l, bus_r) =
-                    apply_preview_mode(bus_l, bus_r, runtime.tracks[target_index].preview_mode);
-                runtime.accumulate_track_meter(target_index, bus_l, bus_r);
-                out_l += bus_l;
-                out_r += bus_r;
-            } else {
-                out_l += track_l;
-                out_r += track_r;
-            }
+        if let Some(target_index) = output_track_index {
+            let (bus_l, bus_r) = apply_track_chain_at_beat(
+                track_l,
+                track_r,
+                &mut runtime.tracks[target_index],
+                beat,
+            );
+            let (bus_l, bus_r) =
+                apply_preview_mode(bus_l, bus_r, runtime.tracks[target_index].preview_mode);
+            runtime.accumulate_track_meter(target_index, bus_l, bus_r);
+            out_l += bus_l;
+            out_r += bus_r;
         } else {
             out_l += track_l;
             out_r += track_r;
         }
 
-        for send in sends {
-            if !send.enabled || send.level <= 0.0 {
+        let send_count = runtime.tracks[track_index].sends.len();
+        for s in 0..send_count {
+            let (enabled, level, return_track_index) = {
+                let send = &runtime.tracks[track_index].sends[s];
+                (send.enabled, send.level, send.return_track_index)
+            };
+            if !enabled || level <= 0.0 {
                 continue;
             }
-            let Some(return_track_index) = runtime
-                .tracks
-                .iter()
-                .position(|t| t.id == send.return_track_id)
+            let Some(return_track_index) = return_track_index.filter(|&t| t < runtime.tracks.len())
             else {
                 continue;
             };
@@ -2652,8 +2657,8 @@ pub fn render_project_sample(
                 continue;
             }
             let (send_l, send_r) = apply_track_chain_at_beat(
-                track_l * send.level,
-                track_r * send.level,
+                track_l * level,
+                track_r * level,
                 &mut runtime.tracks[return_track_index],
                 beat,
             );
@@ -2817,10 +2822,11 @@ fn route_main_output(
     output: &mut [f32],
     channels: usize,
 ) {
-    let target = match runtime.tracks[src_index].output_track_id.as_deref() {
-        Some(id) if !is_master_output(id) => runtime.tracks.iter().position(|t| t.id == id),
-        _ => None,
-    };
+    // Resolved at build time (None for master/missing) — no id lookup on the
+    // audio thread.
+    let target = runtime.tracks[src_index]
+        .output_track_index
+        .filter(|&t| t < runtime.tracks.len());
 
     if let Some(t) = target {
         let src_routing = is_routing_type(&runtime.tracks[src_index].track_type);
@@ -2856,12 +2862,7 @@ fn process_track_block(
     beat: f64,
     transport: RuntimeTransportContext,
 ) {
-    apply_track_chain_block(
-        &mut runtime.tracks[track_index],
-        frames,
-        &runtime.plugin_bridge_sinks,
-        transport,
-    );
+    apply_track_chain_block(&mut runtime.tracks[track_index], frames, true, transport);
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
     apply_fader(&mut runtime.tracks[track_index], frames, beat);
@@ -2913,21 +2914,18 @@ fn accumulate_sends(
     }
     let src_routing = is_routing_type(&runtime.tracks[src_index].track_type);
     for s in 0..send_count {
-        let (enabled, level) = {
+        let (enabled, level, target_index) = {
             let send = &runtime.tracks[src_index].sends[s];
             if send.pre_fader != pre_fader {
                 continue;
             }
-            (send.enabled, send.level)
+            (send.enabled, send.level, send.return_track_index)
         };
         if !enabled || level == 0.0 {
             continue;
         }
-        let target_index = {
-            let target_id = &runtime.tracks[src_index].sends[s].return_track_id;
-            runtime.tracks.iter().position(|t| &t.id == target_id)
-        };
-        let Some(t) = target_index else {
+        // Resolved at build time — no id lookup on the audio thread.
+        let Some(t) = target_index.filter(|&t| t < runtime.tracks.len()) else {
             continue;
         };
         if t == src_index || !is_routing_type(&runtime.tracks[t].track_type) {
@@ -2960,6 +2958,7 @@ pub fn render_project_block_interleaved(
     transport_active: bool,
     time_sig_num: u32,
     time_sig_den: u32,
+    loop_bounds: Option<crate::transport::LoopBounds>,
 ) -> u64 {
     if channels < 2 {
         return 0;
@@ -3023,7 +3022,9 @@ pub fn render_project_block_interleaved(
         if clip.muted {
             continue;
         }
-        let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip.track_id) else {
+        // Resolved at build time (RuntimeProject::resolve_indices) — no id
+        // lookup on the audio thread.
+        let Some(track_index) = clip.track_index.filter(|&ti| ti < runtime.tracks.len()) else {
             continue;
         };
         if effective_track_muted(&runtime.tracks[track_index], block_beat)
@@ -3032,35 +3033,57 @@ pub fn render_project_block_interleaved(
             continue;
         }
 
+        let source = Arc::clone(&clip.source);
         let clip_start = clip.start_sample;
         let clip_end = clip.start_sample.saturating_add(clip.duration_samples);
-        let block_start = base_sample;
-        let block_end = base_sample.saturating_add(frames as u64);
-        if block_end <= clip_start || block_start >= clip_end {
-            continue;
-        }
-
-        let render_start = clip_start.saturating_sub(block_start) as usize;
-        let render_end = (clip_end.min(block_end) - block_start) as usize;
-        let source = Arc::clone(&clip.source);
-        for frame_idx in render_start..render_end {
-            let project_sample = base_sample + frame_idx as u64;
-            let rel = project_sample - clip_start;
-            let source_pos_seconds = clip.offset_seconds
-                + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip.speed_ratio as f64;
-            let source_pos = source_pos_seconds * source.sample_rate() as f64;
-            let (mut l, mut r) = sample_source_stereo(&source, source_pos);
-            let fade = clip_fade_gain(
-                rel,
-                clip.duration_samples,
-                clip.fade_in_samples,
-                clip.fade_out_samples,
+        let mut segment_sample =
+            crate::transport::normalize_loop_position(base_sample, loop_bounds);
+        let mut callback_offset = 0usize;
+        let mut remaining = frames as u64;
+        while remaining > 0 {
+            let segment_frames = crate::transport::segment_frames_until_loop_wrap(
+                segment_sample,
+                remaining,
+                loop_bounds,
             );
-            let g = clip.gain * fade;
-            l *= g;
-            r *= g;
-            runtime.tracks[track_index].block_l[frame_idx] += l;
-            runtime.tracks[track_index].block_r[frame_idx] += r;
+            let block_start = segment_sample;
+            let block_end = segment_sample.saturating_add(segment_frames);
+            if block_end > clip_start && block_start < clip_end {
+                let render_start = clip_start.saturating_sub(block_start) as usize;
+                let render_end = (clip_end.min(block_end) - block_start) as usize;
+                for frame_in_segment in render_start..render_end {
+                    let frame_idx = callback_offset + frame_in_segment;
+                    let project_sample = segment_sample + frame_in_segment as u64;
+                    let rel = project_sample - clip_start;
+                    let source_pos_seconds = clip.offset_seconds
+                        + (rel as f64 / runtime.sample_rate.max(1) as f64)
+                            * clip.speed_ratio as f64;
+                    let source_pos = source_pos_seconds * source.sample_rate() as f64;
+                    let (mut l, mut r) = sample_source_stereo(&source, source_pos);
+                    let fade = clip_fade_gain(
+                        rel,
+                        clip.duration_samples,
+                        clip.fade_in_samples,
+                        clip.fade_out_samples,
+                    );
+                    let g = clip.gain * fade;
+                    l *= g;
+                    r *= g;
+                    runtime.tracks[track_index].block_l[frame_idx] += l;
+                    runtime.tracks[track_index].block_r[frame_idx] += r;
+                }
+            }
+            callback_offset += segment_frames as usize;
+            remaining -= segment_frames;
+            if remaining == 0 {
+                break;
+            }
+            segment_sample = crate::transport::advance_loop_position(
+                segment_sample,
+                segment_frames,
+                loop_bounds,
+            )
+            .0;
         }
     }
 
@@ -3132,7 +3155,15 @@ pub fn render_project_block_interleaved(
                 first_clip
             );
         }
-        process_track_block(runtime, track_index, frames, output, channels, block_beat, transport);
+        process_track_block(
+            runtime,
+            track_index,
+            frames,
+            output,
+            channels,
+            block_beat,
+            transport,
+        );
     }
     runtime.audio_graph.pass1_source_indices = pass1_indices;
 
@@ -3151,7 +3182,15 @@ pub fn render_project_block_interleaved(
             track.block_l[..frames].copy_from_slice(&track.recv_l[..frames]);
             track.block_r[..frames].copy_from_slice(&track.recv_r[..frames]);
         }
-        process_track_block(runtime, track_index, frames, output, channels, block_beat, transport);
+        process_track_block(
+            runtime,
+            track_index,
+            frames,
+            output,
+            channels,
+            block_beat,
+            transport,
+        );
     }
     runtime.audio_graph.pass2_routing_indices = pass2_indices;
 
@@ -3167,12 +3206,7 @@ pub fn render_project_block_interleaved(
                 master.block_l[i] = frame[0];
                 master.block_r[i] = frame[1];
             }
-            apply_track_chain_block(
-                master,
-                frames,
-                &std::collections::HashMap::new(),
-                transport,
-            );
+            apply_track_chain_block(master, frames, false, transport);
             // Write back, accumulate master meter, apply preview mode.
             for i in 0..frames {
                 let (l, r) =
@@ -3197,6 +3231,56 @@ pub fn render_project_block_interleaved(
     }
 
     frames as u64
+}
+
+/// Schedule one device callback's MIDI events, splitting only the scheduler
+/// range at loop boundaries. The graph/bridge render still runs once for the
+/// full device block; offsets are absolute within that callback.
+///
+/// Returns `Some(loop_start)` when the block ended exactly on a loop boundary
+/// and the caller should reset MIDI after rendering so the next callback starts
+/// from the loop start.
+pub fn schedule_midi_render_block(
+    runtime: &mut RuntimeProject,
+    base_sample: u64,
+    frames: u64,
+    loop_bounds: Option<crate::transport::LoopBounds>,
+) -> Option<u64> {
+    if frames == 0 {
+        return None;
+    }
+    let mut segment_sample = crate::transport::normalize_loop_position(base_sample, loop_bounds);
+    let mut remaining = frames;
+    let mut callback_offset = 0u64;
+    let mut end_reset = None;
+    while remaining > 0 {
+        let segment_frames = crate::transport::segment_frames_until_loop_wrap(
+            segment_sample,
+            remaining,
+            loop_bounds,
+        );
+        runtime.schedule_midi_block_with_offset(
+            segment_sample,
+            segment_frames,
+            callback_offset.min(u32::MAX as u64) as u32,
+        );
+        callback_offset = callback_offset.saturating_add(segment_frames);
+        remaining -= segment_frames;
+        let (next_sample, wrapped) =
+            crate::transport::advance_loop_position(segment_sample, segment_frames, loop_bounds);
+        if wrapped {
+            if remaining > 0 {
+                runtime.reset_midi_playback_with_offset(
+                    next_sample,
+                    callback_offset.min(u32::MAX as u64) as u32,
+                );
+            } else {
+                end_reset = Some(next_sample);
+            }
+        }
+        segment_sample = next_sample;
+    }
+    end_reset
 }
 
 #[inline]
@@ -3233,13 +3317,14 @@ pub fn apply_track_chain_at_beat(
     (l * volume * pan_l, r * volume * pan_r)
 }
 
+/// `bridge_enabled` — false on the master-bus chain, which has never routed
+/// external-bridge inserts (parity with the old empty sink-map call); true for
+/// regular track strips, where each bridge insert uses its build/command-time
+/// cached `bridge_sink` (no per-block `HashMap<String, _>` lookup).
 pub fn apply_track_chain_block(
     track: &mut RuntimeTrack,
     frames: usize,
-    bridge_sinks: &std::collections::HashMap<
-        String,
-        std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>,
-    >,
+    bridge_enabled: bool,
     transport: RuntimeTransportContext,
 ) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
@@ -3259,14 +3344,20 @@ pub fn apply_track_chain_block(
         let midi = instrument_ix
             .filter(|&i| i == ix)
             .map(|_| midi_events.as_slice());
-        if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
-            let bridge_sink = bridge_sinks.get(&insert.id).map(|s| s.as_ref());
+        if insert.kind_tag == crate::runtime::RuntimeInsertKind::ExternalBridge {
+            // Arc clone (refcount bump only) so the sink can be borrowed
+            // alongside the &mut insert.
+            let bridge_sink = if bridge_enabled {
+                insert.bridge_sink.clone()
+            } else {
+                None
+            };
             apply_external_bridge_insert_block(
                 &mut track.block_l[..frames],
                 &mut track.block_r[..frames],
                 insert,
                 midi,
-                bridge_sink,
+                bridge_sink.as_deref(),
                 ix,
                 transport,
             );
@@ -3341,12 +3432,8 @@ fn apply_external_bridge_insert_block(
         push_vst3_midi_to_sink(sink, events, &insert.id);
     }
 
-    let role = insert
-        .params
-        .get("role")
-        .and_then(|v| v.as_str())
-        .unwrap_or("instrument");
-    let is_effect = role.eq_ignore_ascii_case("effect");
+    // `params["role"]` resolved at build time — no params-map read per block.
+    let is_effect = insert.bridge_is_effect;
 
     if is_effect {
         sink.write_input(&block_l[..frames], &block_r[..frames], frames);
@@ -3374,15 +3461,19 @@ fn apply_external_bridge_insert_block(
         if plugin_restore_debug_enabled()
             && (insert.bridge_missed_blocks == 1
                 || insert.bridge_missed_blocks == BRIDGE_MISS_LOG_THRESHOLD
-                || insert.bridge_missed_blocks % 1024 == 0)
+                || insert.bridge_missed_blocks.is_multiple_of(1024))
         {
             eprintln!(
                 "[Bridge] missed/bypass instance_id={} missed_blocks={}",
                 insert.id, insert.bridge_missed_blocks
             );
         }
-        if insert.bridge_missed_blocks == BRIDGE_MISS_LOG_THRESHOLD
-            || insert.bridge_missed_blocks % 1024 == 0
+        // Stall accounting stays in `bridge_missed_blocks`; stderr from the
+        // audio callback only exists under the bridge debug flag (realtime
+        // rules — stdio can block the callback).
+        if bridge_debug_enabled()
+            && (insert.bridge_missed_blocks == BRIDGE_MISS_LOG_THRESHOLD
+                || insert.bridge_missed_blocks.is_multiple_of(1024))
         {
             if is_effect {
                 eprintln!(
@@ -3407,7 +3498,7 @@ fn apply_external_bridge_insert_block(
                 insert.id
             );
         }
-        if insert.bridge_missed_blocks >= BRIDGE_MISS_LOG_THRESHOLD {
+        if bridge_debug_enabled() && insert.bridge_missed_blocks >= BRIDGE_MISS_LOG_THRESHOLD {
             if is_effect {
                 eprintln!(
                     "[AudioEngine] plugin host recovered instance={} missed_blocks={}",
@@ -3487,15 +3578,16 @@ pub fn apply_preview_mode(l: f32, r: f32, mode: RuntimePreviewMode) -> (f32, f32
 
 #[inline]
 pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
-    if insert.kind.eq_ignore_ascii_case("native-plugin") {
-        let format = insert
-            .params
-            .get("format")
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
+    if insert.kind_tag == crate::runtime::RuntimeInsertKind::NativePlugin {
         if !insert.enabled {
             if !insert.callback_process_log_done {
                 insert.callback_process_log_done = true;
+                // params lookup only inside the once-per-insert log branch.
+                let format = insert
+                    .params
+                    .get("format")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 eprintln!(
                     "[SphereAudio callback] insert={} format={} bypass=true beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
                     insert.id,
@@ -3509,16 +3601,20 @@ pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
             return (l, r);
         }
         if let Some(vst3) = insert.vst3.as_mut() {
-            let handle = vst3.handle_value();
             let processed = vst3.process_stereo_sample(l, r);
             let (out_l, out_r) = processed.unwrap_or((l, r));
             if !insert.callback_process_log_done {
                 insert.callback_process_log_done = true;
+                let format = insert
+                    .params
+                    .get("format")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 eprintln!(
                     "[SphereAudio callback] insert={} format={} processorHandle=0x{:x} bypass=false processOk={} beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
                     insert.id,
                     format,
-                    handle,
+                    vst3.handle_value(),
                     processed.is_some(),
                     l.abs(),
                     r.abs(),
@@ -3530,6 +3626,11 @@ pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
         }
         if !insert.callback_process_log_done {
             insert.callback_process_log_done = true;
+            let format = insert
+                .params
+                .get("format")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             eprintln!(
                 "[SphereAudio callback] insert={} format={} processorHandle=0x0 bypass=false processOk=false beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
                 insert.id,
@@ -3564,7 +3665,7 @@ pub fn apply_insert_block(
     if block_l.is_empty() || block_r.is_empty() {
         return;
     }
-    if !insert.kind.eq_ignore_ascii_case("native-plugin") {
+    if insert.kind_tag != crate::runtime::RuntimeInsertKind::NativePlugin {
         for i in 0..block_l.len().min(block_r.len()) {
             let (l, r) = apply_insert(block_l[i], block_r[i], insert);
             block_l[i] = l;
@@ -3573,21 +3674,32 @@ pub fn apply_insert_block(
         return;
     }
 
-    let format = insert
-        .params
-        .get("format")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let before_peak_l = block_l
-        .iter()
-        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-    let before_peak_r = block_r
-        .iter()
-        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    // Diagnostic-only: peak folds feed the once-per-insert process log and the
+    // silent-block counter; skipped entirely once that log has fired so the
+    // steady-state path stays branch + DSP only. The params "format" lookup
+    // happens only inside the log branches.
+    let diag = !insert.callback_process_log_done;
+    let (before_peak_l, before_peak_r) = if diag {
+        (
+            block_l
+                .iter()
+                .fold(0.0f32, |peak, sample| peak.max(sample.abs())),
+            block_r
+                .iter()
+                .fold(0.0f32, |peak, sample| peak.max(sample.abs())),
+        )
+    } else {
+        (0.0, 0.0)
+    };
 
     if !insert.enabled {
         if !insert.callback_process_log_done {
             insert.callback_process_log_done = true;
+            let format = insert
+                .params
+                .get("format")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             eprintln!(
                 "[SphereAudio callback] insert={} format={} bypass=true blockFrames={} beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
                 insert.id,
@@ -3605,6 +3717,11 @@ pub fn apply_insert_block(
     let Some(vst3) = insert.vst3.as_mut() else {
         if !insert.callback_process_log_done {
             insert.callback_process_log_done = true;
+            let format = insert
+                .params
+                .get("format")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             eprintln!(
                 "[SphereAudio callback] insert={} format={} processorHandle=0x0 bypass=false processOk=false blockFrames={} beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
                 insert.id,
@@ -3624,6 +3741,11 @@ pub fn apply_insert_block(
     if !vst3.is_processor_valid() {
         if !insert.callback_process_log_done {
             insert.callback_process_log_done = true;
+            let format = insert
+                .params
+                .get("format")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             eprintln!(
                 "[SphereAudio callback] insert={} format={} processorHandle=0x{:x} INVALID/DESTROYED bypass=true — insert bypassed to prevent use-after-free",
                 insert.id, format, vst3.handle_value()
@@ -3666,16 +3788,21 @@ pub fn apply_insert_block(
         block_r[..frames].copy_from_slice(&insert.scratch_r[..frames]);
     }
 
-    if before_peak_l <= 0.000001 && before_peak_r <= 0.000001 {
+    if diag && before_peak_l <= 0.000001 && before_peak_r <= 0.000001 {
         insert.silent_process_blocks = insert.silent_process_blocks.saturating_add(1);
     }
 
-    if !insert.callback_process_log_done
+    if diag
         && (before_peak_l > 0.000001
             || before_peak_r > 0.000001
             || insert.silent_process_blocks >= 200)
     {
         insert.callback_process_log_done = true;
+        let format = insert
+            .params
+            .get("format")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let after_peak_l = block_l[..frames]
             .iter()
             .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
@@ -3825,6 +3952,9 @@ where
                             runtime.sample_rate = output_sample_rate;
                             // Preserve the plugin-bridge sinks across reloads (Stage 3b).
                             runtime.plugin_bridge_sinks = old.plugin_bridge_sinks.clone();
+                            // Re-cache the per-insert sink handles on the fresh
+                            // graph (the block path reads insert.bridge_sink).
+                            runtime.resolve_bridge_sinks();
                             runtime.bridge_editor_active = old.bridge_editor_active.clone();
                             // The panic pushed into the preserved sinks above
                             // still needs flushing through the new graph.
@@ -3869,6 +3999,7 @@ where
                                 );
                             }
                             playing_local = true;
+                            metronome.stop_tail_samples = 0;
                             shared.playing.store(true, Ordering::Relaxed);
                             // Position MIDI cursors at the start beat and clear
                             // any stale active notes so play-from is clean.
@@ -3879,6 +4010,8 @@ where
                                 eprintln!("[SphereAudio callback] StopTransport");
                             }
                             playing_local = false;
+                            metronome.stop_tail_samples =
+                                crate::backend::render::post_stop_tail_samples(runtime.sample_rate);
                             shared.playing.store(false, Ordering::Relaxed);
                             // Release held notes so nothing is left stuck.
                             runtime.all_notes_off("stop");
@@ -3955,14 +4088,18 @@ where
                                 .master_volume
                                 .store(f32_store(value), Ordering::Relaxed);
                         }
-                        EngineCommand::SetPluginBridgeSink { insert_id, sink } => match sink {
-                            Some(sink) => {
-                                runtime.plugin_bridge_sinks.insert(insert_id, sink);
+                        EngineCommand::SetPluginBridgeSink { insert_id, sink } => {
+                            match sink {
+                                Some(sink) => {
+                                    runtime.plugin_bridge_sinks.insert(insert_id, sink);
+                                }
+                                None => {
+                                    runtime.plugin_bridge_sinks.remove(&insert_id);
+                                }
                             }
-                            None => {
-                                runtime.plugin_bridge_sinks.remove(&insert_id);
-                            }
-                        },
+                            // Re-cache per-insert sink handles for the block path.
+                            runtime.resolve_bridge_sinks();
+                        }
                         EngineCommand::SetBridgeEditorActive { track_id, active } => {
                             runtime.set_bridge_editor_active(&track_id, active);
                         }
@@ -4062,13 +4199,30 @@ where
                 let mut sum_sq_l = 0.0f32;
                 let mut sum_sq_r = 0.0f32;
                 let mut frames = 0u64;
-                let base_sample = shared.position_samples.load(Ordering::Relaxed);
+                let loop_bounds = if playing_local {
+                    transport::active_loop_bounds(&shared)
+                } else {
+                    None
+                };
+                let raw_base_sample = shared.position_samples.load(Ordering::Relaxed);
+                let base_sample = transport::normalize_loop_position(raw_base_sample, loop_bounds);
+                if base_sample != raw_base_sample {
+                    shared.position_samples.store(base_sample, Ordering::Relaxed);
+                    runtime.reset_midi_playback(base_sample);
+                    metronome.reset_metronome_schedule(base_sample, output_sample_rate);
+                }
                 runtime.begin_meter_block();
 
                 // MIDI scheduling — once per block when playing.
+                let mut end_loop_midi_reset = None;
                 if playing_local && ch > 0 {
                     let frames_needed = data.len().checked_div(ch).unwrap_or(0) as u64;
-                    runtime.schedule_midi_block(base_sample, frames_needed);
+                    end_loop_midi_reset = schedule_midi_render_block(
+                        &mut runtime,
+                        base_sample,
+                        frames_needed,
+                        loop_bounds,
+                    );
                 }
 
                 let pending_midi = ch > 0
@@ -4080,6 +4234,7 @@ where
                 let has_preview = runtime.has_active_midi_preview();
                 if playing_local {
                     metronome.preview_tail_samples = 0;
+                    metronome.stop_tail_samples = 0;
                     // Playing blocks drive the bridge anyway — flush is implicit.
                     runtime.bridge_panic_flush_samples = 0;
                 } else if has_preview || pending_midi {
@@ -4102,6 +4257,7 @@ where
                     || pending_midi
                     || panic_flush
                     || metronome.preview_tail_samples > 0
+                    || metronome.stop_tail_samples > 0
                     || bridge_editor_wakeup;
                 if preview_render_active
                     && !playing_local
@@ -4145,6 +4301,10 @@ where
                         }
                     }
                 }
+                if !playing_local && metronome.stop_tail_samples > 0 {
+                    metronome.stop_tail_samples =
+                        metronome.stop_tail_samples.saturating_sub(frames_in_block);
+                }
 
                 if ch >= 2 && (playing_local || preview_render_active) {
                     let frames_needed = data.len() / ch;
@@ -4162,6 +4322,7 @@ where
                         playing_local,
                         shared.time_sig_num.load(Ordering::Relaxed),
                         shared.time_sig_den.load(Ordering::Relaxed),
+                        loop_bounds,
                     );
                     if !render_path_logged {
                         render_path_logged = true;
@@ -4182,13 +4343,39 @@ where
                             frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
                         }
                     }
-                    for (i, frame) in scratch.chunks_mut(ch).enumerate() {
-                        let click =
-                            metronome.metronome_sample(base_sample + i as u64, output_sample_rate);
-                        if click != 0.0 {
-                            frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
-                            frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
+                    let mut segment_sample = base_sample;
+                    let mut callback_offset = 0usize;
+                    let mut remaining = frames;
+                    while remaining > 0 {
+                        let segment_frames = transport::segment_frames_until_loop_wrap(
+                            segment_sample,
+                            remaining,
+                            loop_bounds,
+                        );
+                        for i in 0..segment_frames as usize {
+                            let frame = &mut scratch[(callback_offset + i) * ch
+                                ..(callback_offset + i) * ch + ch];
+                            let click = metronome
+                                .metronome_sample(segment_sample + i as u64, output_sample_rate);
+                            if click != 0.0 {
+                                frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
+                                frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
+                            }
                         }
+                        callback_offset += segment_frames as usize;
+                        remaining -= segment_frames;
+                        if remaining == 0 {
+                            break;
+                        }
+                        let (next_sample, wrapped) = transport::advance_loop_position(
+                            segment_sample,
+                            segment_frames,
+                            loop_bounds,
+                        );
+                        if wrapped {
+                            metronome.reset_metronome_schedule(next_sample, output_sample_rate);
+                        }
+                        segment_sample = next_sample;
                     }
                     // (Legacy NAPI path) Software monitoring is handled by the
                     // DAUx/cpal render kernel via the input ring; the old
@@ -4308,10 +4495,13 @@ where
 
                 // Advance position counter.
                 if playing_local && ch > 0 {
-                    shared.position_samples.fetch_add(frames, Ordering::Relaxed);
-                    transport::apply_loop_wrap(&shared, &mut runtime, output_sample_rate, |start| {
-                        metronome.reset_metronome_schedule(start, output_sample_rate);
-                    });
+                    let (next_position, _) =
+                        transport::advance_loop_position(base_sample, frames, loop_bounds);
+                    shared.position_samples.store(next_position, Ordering::Relaxed);
+                    if let Some(reset_sample) = end_loop_midi_reset {
+                        runtime.reset_midi_playback(reset_sample);
+                        metronome.reset_metronome_schedule(reset_sample, output_sample_rate);
+                    }
                 }
             },
             move |err| {
@@ -4424,11 +4614,15 @@ mod bridge_insert_tests {
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
+            output_track_index: None,
             inserts: vec![RuntimeInsert {
                 id: "insert-1".to_string(),
                 kind: "external-bridge-plugin".to_string(),
+                kind_tag: crate::runtime::RuntimeInsertKind::ExternalBridge,
                 enabled: true,
                 params,
+                bridge_is_effect: true,
+                bridge_sink: None,
                 dsp: InsertDspState::default(),
                 vst3: None,
                 callback_process_log_done: false,
@@ -4467,12 +4661,8 @@ mod bridge_insert_tests {
             requests: AtomicU64::new(0),
             latency_samples: 0,
         };
-        let mut sinks: std::collections::HashMap<
-            String,
-            std::sync::Arc<dyn PluginBridgeSink>,
-        > = std::collections::HashMap::new();
-        sinks.insert("insert-1".to_string(), std::sync::Arc::new(sink));
-        apply_track_chain_block(&mut track, 4, &sinks, RuntimeTransportContext::default());
+        track.inserts[0].bridge_sink = Some(std::sync::Arc::new(sink));
+        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
         assert!((track.block_l[0] - 0.25).abs() < 1e-6);
         assert!((track.block_r[0] - 0.25).abs() < 1e-6);
     }
@@ -4501,6 +4691,9 @@ mod bridge_insert_tests {
         };
         p.plugin_bridge_sinks
             .insert("slow-insert".to_string(), Arc::new(sink));
+        // The block path reads the cached per-insert sink, exactly like the
+        // SetPluginBridgeSink command handler.
+        p.resolve_bridge_sinks();
 
         assert!(p.refresh_runtime_latency_graph(frames as u32));
         assert_eq!(p.latency_graph.track_plugin_latency[0], 0);
@@ -4513,12 +4706,7 @@ mod bridge_insert_tests {
     #[test]
     fn external_bridge_effect_stays_dry_without_sink() {
         let mut track = bridge_effect_track(1.0);
-        apply_track_chain_block(
-            &mut track,
-            4,
-            &std::collections::HashMap::new(),
-            RuntimeTransportContext::default(),
-        );
+        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
         assert!((track.block_l[0] - 1.0).abs() < 1e-6);
         assert!((track.block_r[0] - 1.0).abs() < 1e-6);
     }
@@ -4529,8 +4717,11 @@ mod bridge_insert_tests {
         RuntimeInsert {
             id: id.to_string(),
             kind: "external-bridge-plugin".to_string(),
+            kind_tag: crate::runtime::RuntimeInsertKind::ExternalBridge,
             enabled: true,
             params,
+            bridge_is_effect: true,
+            bridge_sink: None,
             dsp: InsertDspState::default(),
             vst3: None,
             callback_process_log_done: false,
@@ -4593,6 +4784,7 @@ mod bridge_insert_tests {
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
+            output_track_index: None,
             inserts: vec![
                 bridge_effect_track_with_id("insert-a"),
                 bridge_effect_track_with_id("insert-b"),
@@ -4629,10 +4821,9 @@ mod bridge_insert_tests {
             buf_l: std::sync::Mutex::new(vec![0.0; 8]),
             buf_r: std::sync::Mutex::new(vec![0.0; 8]),
         });
-        let mut sinks = std::collections::HashMap::new();
-        sinks.insert("insert-a".to_string(), sink_a as Arc<dyn PluginBridgeSink>);
-        sinks.insert("insert-b".to_string(), sink_b as Arc<dyn PluginBridgeSink>);
-        apply_track_chain_block(&mut track, 4, &sinks, RuntimeTransportContext::default());
+        track.inserts[0].bridge_sink = Some(sink_a as Arc<dyn PluginBridgeSink>);
+        track.inserts[1].bridge_sink = Some(sink_b as Arc<dyn PluginBridgeSink>);
+        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
         assert!(
             (track.block_l[0] - 6.0).abs() < 1e-4,
             "serial chain expected 1*2*3=6 got {}",
@@ -4707,6 +4898,7 @@ mod bridge_insert_tests {
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
+            output_track_index: None,
             inserts: vec![
                 bridge_effect_track_with_id("insert-a"),
                 bridge_effect_track_with_id("insert-b"),
@@ -4745,11 +4937,10 @@ mod bridge_insert_tests {
             buf_l: std::sync::Mutex::new(vec![0.0; 8]),
             buf_r: std::sync::Mutex::new(vec![0.0; 8]),
         });
-        let mut sinks = std::collections::HashMap::new();
-        sinks.insert("insert-a".to_string(), sink_a as Arc<dyn PluginBridgeSink>);
-        sinks.insert("insert-b".to_string(), sink_b as Arc<dyn PluginBridgeSink>);
-        sinks.insert("insert-c".to_string(), sink_c as Arc<dyn PluginBridgeSink>);
-        apply_track_chain_block(&mut track, 4, &sinks, RuntimeTransportContext::default());
+        track.inserts[0].bridge_sink = Some(sink_a as Arc<dyn PluginBridgeSink>);
+        track.inserts[1].bridge_sink = Some(sink_b as Arc<dyn PluginBridgeSink>);
+        track.inserts[2].bridge_sink = Some(sink_c as Arc<dyn PluginBridgeSink>);
+        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
         assert!(
             (track.block_l[0] - 10.0).abs() < 1e-4,
             "A x2, B missed, C x5 expected 1*2*5=10 got {}",
@@ -4761,9 +4952,12 @@ mod bridge_insert_tests {
 #[cfg(test)]
 mod routing_tests {
     use super::*;
+    use crate::audio_file::AudioFileBuffer;
+    use crate::audio_source::ClipAudioSource;
     use crate::runtime::{
         volume_db_to_norm, RuntimeAutomationCurve, RuntimeAutomationLane, RuntimeAutomationPoint,
-        RuntimeAutomationTarget, RuntimePreviewMode, RuntimeProject, RuntimeSend, RuntimeTrack,
+        RuntimeAutomationTarget, RuntimeClip, RuntimePreviewMode, RuntimeProject, RuntimeSend,
+        RuntimeTrack,
     };
     use std::sync::Arc;
 
@@ -4781,6 +4975,7 @@ mod routing_tests {
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
+            output_track_index: None,
             inserts: Vec::new(),
             sends,
             automation_lanes: Vec::new(),
@@ -4808,6 +5003,7 @@ mod routing_tests {
         RuntimeSend {
             id: format!("send-{target}"),
             return_track_id: target.to_string(),
+            return_track_index: None,
             level,
             enabled: true,
             pre_fader: false,
@@ -4830,6 +5026,66 @@ mod routing_tests {
                 curve: RuntimeAutomationCurve::Linear,
             }],
         }
+    }
+
+    #[test]
+    fn block_render_wraps_clip_material_inside_callback() {
+        let frames = 5usize;
+        let channels = 2usize;
+        let mut audio_track = track("audio", "audio", vec![]);
+        audio_track.pan = -1.0;
+        let tracks = vec![audio_track];
+        let audio_graph = crate::audio_graph::plan_runtime_audio_graph(&tracks).unwrap();
+        let mut samples = Vec::new();
+        for i in 0..8 {
+            let v = i as f32 / 10.0;
+            samples.push(v);
+            samples.push(v);
+        }
+        let source = Arc::new(ClipAudioSource::InMemory(Arc::new(AudioFileBuffer {
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 8,
+            samples,
+        })));
+        let mut p = RuntimeProject {
+            sample_rate: 48_000,
+            tracks,
+            clips: vec![RuntimeClip {
+                id: "clip-1".to_string(),
+                track_id: "audio".to_string(),
+                track_index: None,
+                start_sample: 0,
+                duration_samples: 8,
+                offset_seconds: 0.0,
+                gain: 1.0,
+                speed_ratio: 1.0,
+                muted: false,
+                fade_in_samples: 0,
+                fade_out_samples: 0,
+                source,
+            }],
+            audio_graph,
+            ..Default::default()
+        };
+        p.resolve_indices();
+
+        let mut output = vec![0.0f32; frames * channels];
+        let rendered = render_project_block_interleaved(
+            &mut p,
+            3,
+            1.0,
+            &mut output,
+            channels,
+            true,
+            4,
+            4,
+            Some(crate::transport::LoopBounds { start: 2, end: 5 }),
+        );
+
+        assert_eq!(rendered, frames as u64);
+        let left: Vec<f32> = output.chunks(channels).map(|frame| frame[0]).collect();
+        assert_eq!(left, vec![0.3, 0.4, 0.2, 0.3, 0.4]);
     }
 
     #[test]
@@ -4881,6 +5137,7 @@ mod routing_tests {
             ],
             ..Default::default()
         };
+        p.resolve_indices();
         // Source post-fader signal (accumulate_sends reads block_*).
         p.tracks[0].block_l[..frames].fill(1.0);
         p.tracks[0].block_r[..frames].fill(-2.0);
@@ -4907,6 +5164,7 @@ mod routing_tests {
             ],
             ..Default::default()
         };
+        p.resolve_indices();
         p.tracks[0].block_l[..frames].fill(1.0);
 
         // Post-fader phase: the pre-fader send must NOT route.
@@ -4930,6 +5188,7 @@ mod routing_tests {
             ],
             ..Default::default()
         };
+        p.resolve_indices();
         p.tracks[0].block_l[..frames].fill(1.0);
         accumulate_sends(&mut p, 0, frames, false);
         // Target is a normal audio track → not a valid send destination.
@@ -4948,6 +5207,7 @@ mod routing_tests {
             ],
             ..Default::default()
         };
+        p.resolve_indices();
         p.tracks[0].block_l[..frames].fill(1.0);
         p.tracks[1].block_l[..frames].fill(1.0);
 
@@ -4970,6 +5230,7 @@ mod routing_tests {
             tracks: vec![a, track("bus", "bus", vec![])],
             ..Default::default()
         };
+        p.resolve_indices();
         p.tracks[0].block_l[..frames].fill(0.8);
         p.tracks[0].block_r[..frames].fill(-0.4);
 
@@ -5017,6 +5278,7 @@ mod routing_tests {
             tracks: vec![a, track("b", "audio", vec![])],
             ..Default::default()
         };
+        p.resolve_indices();
         p.tracks[0].block_l[..frames].fill(1.0);
         p.tracks[0].block_r[..frames].fill(1.0);
 

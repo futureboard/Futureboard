@@ -21,9 +21,10 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    canvas, div, px, svg, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Render, ScrollWheelEvent, StatefulInteractiveElement, Styled, Subscription, Window,
+    canvas, deferred, div, fill, point, px, size, svg, Bounds, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent, StatefulInteractiveElement,
+    Styled, Subscription, Window,
 };
 
 use crate::assets;
@@ -68,6 +69,9 @@ fn key_lane_width() -> f32 {
 /// Height of the single unified controller lane (velocity / CC / pitch-bend /
 /// pressure). Replaces the old stacked velocity + CC lanes — one lane at a time.
 const LANE_H: f32 = 140.0;
+/// Paint above the piano grid/body so the lane selector is never hidden by the
+/// editor's scroll/clip containers.
+const LANE_MENU_PRIORITY: usize = 100;
 const RULER_H: f32 = 18.0; // bar/beat ruler header height
 const RESIZE_ZONE: f32 = 6.0; // px on the right edge that starts a resize
 /// Pixels of movement before an empty-grid press becomes a marquee drag.
@@ -359,6 +363,8 @@ enum PianoDrag {
         anchor_beat: f32,
         anchor_value: f32,
     },
+    /// Dragging the bar/beat ruler to seek the project playhead.
+    RulerSeek,
 }
 
 pub struct PianoRoll {
@@ -398,6 +404,8 @@ pub struct PianoRoll {
     /// Last clip id we ran [`Self::fit_piano_roll_to_notes`] for.
     fitted_clip_id: Option<String>,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Bounds of the bar/beat ruler header; used to seek from window-space drag.
+    ruler_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The controller kind shown/edited when the unified lane is NOT in velocity
     /// mode. Also remembered while velocity is shown, so switching back restores
     /// the last controller. Switching the lane never touches hidden lane data.
@@ -462,6 +470,7 @@ impl PianoRoll {
             drag_value_status: None,
             fitted_clip_id: None,
             grid_bounds: Rc::new(Cell::new(None)),
+            ruler_bounds: Rc::new(Cell::new(None)),
             active_cc: MidiControllerKind::CC(1),
             lane_shows_velocity: true,
             lane_visible: true,
@@ -528,7 +537,8 @@ impl PianoRoll {
             | PianoDrag::DrawNote { .. }
             | PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
-            | PianoDrag::CcLine { .. } => false,
+            | PianoDrag::CcLine { .. }
+            | PianoDrag::RulerSeek => false,
             PianoDrag::Move { prev, .. } => {
                 prev.retain(|(id, _, _)| valid_note_ids.contains(id));
                 prev.is_empty()
@@ -614,6 +624,10 @@ impl PianoRoll {
                 .drag_value_status
                 .clone()
                 .unwrap_or_else(|| "CC line".to_string()),
+            PianoDrag::RulerSeek => self
+                .drag_value_status
+                .clone()
+                .unwrap_or_else(|| "Seek".to_string()),
             PianoDrag::EraseNotes { erased, .. } => {
                 format!("Erase {} note{}", erased.len(), plural(erased.len()))
             }
@@ -1084,6 +1098,29 @@ impl PianoRoll {
         let x: f32 = window_pos.x.into();
         let y: f32 = window_pos.y.into();
         Some((x - ox, y - oy))
+    }
+
+    fn ruler_local(&self, window_pos: gpui::Point<Pixels>) -> Option<(f32, f32)> {
+        let bounds = self.ruler_bounds.get()?;
+        let ox: f32 = bounds.origin.x.into();
+        let oy: f32 = bounds.origin.y.into();
+        let x: f32 = window_pos.x.into();
+        let y: f32 = window_pos.y.into();
+        Some((x - ox, y - oy))
+    }
+
+    fn seek_ruler_at(&mut self, lx: f32, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let (clip_start, clip_len) = self.clip_meta(cx, &clip_id);
+        let rel_beat = self.x_to_beat(lx).clamp(0.0, clip_len.max(0.0));
+        let project_beat = clip_start + rel_beat;
+        self.timeline
+            .update(cx, |tl, tcx| tl.seek_to_beat(project_beat, tcx));
+        self.hover_beat = Some(rel_beat);
+        self.drag_value_status = Some(format!("Seek {:.2}", project_beat));
+        cx.notify();
     }
 
     /// Pitch under a window-space point **iff** it is inside the left piano-key
@@ -1701,6 +1738,12 @@ impl PianoRoll {
             }
             return;
         }
+        if matches!(self.drag, PianoDrag::RulerSeek) {
+            if let Some((lx, _)) = self.ruler_local(event.position) {
+                self.seek_ruler_at(lx, cx);
+            }
+            return;
+        }
         // Track the grid beat under the pointer so paste-at-mouse has an anchor.
         // Cheap field write, no repaint.
         if let Some((lx, ly)) = self.grid_local(event.position) {
@@ -1855,6 +1898,7 @@ impl PianoRoll {
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
             PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. } => {}
+            PianoDrag::RulerSeek => {}
         }
     }
 
@@ -1942,6 +1986,12 @@ impl PianoRoll {
             self.drag = PianoDrag::None;
             self.drag_value_status = None;
             self.commit_cc_edit(cx);
+            return;
+        }
+        if matches!(self.drag, PianoDrag::RulerSeek) {
+            self.drag = PianoDrag::None;
+            self.drag_value_status = None;
+            cx.notify();
             return;
         }
         if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
@@ -2060,6 +2110,7 @@ impl PianoRoll {
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
             PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. } => {}
+            PianoDrag::RulerSeek => {}
         }
     }
 
@@ -3035,7 +3086,8 @@ impl PianoRoll {
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
                 .shadow_lg()
-                .occlude();
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation());
             for (i, kind) in LANE_CYCLE.iter().enumerate() {
                 let kind = *kind;
                 let selected = kind == current;
@@ -3059,7 +3111,10 @@ impl PianoRoll {
                         })
                         .hover(|s| s.bg(Colors::surface_hover()))
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .on_click(cx.listener(move |this, _ev, _w, cx| this.set_lane(kind, cx)))
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.set_lane(kind, cx);
+                        }))
                         .child(text),
                 );
             }
@@ -3088,6 +3143,7 @@ impl PianoRoll {
                             .hover(|s| s.bg(Colors::surface_hover()))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(cx.listener(|this, _ev, _w, cx| {
+                                cx.stop_propagation();
                                 this.custom_cc = this.custom_cc.saturating_sub(1);
                                 cx.notify();
                             }))
@@ -3117,6 +3173,7 @@ impl PianoRoll {
                             .hover(|s| s.bg(Colors::surface_hover()))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                cx.stop_propagation();
                                 this.set_lane(
                                     ControllerLaneKind::Controller(MidiControllerKind::CC(
                                         this.custom_cc,
@@ -3139,6 +3196,7 @@ impl PianoRoll {
                             .hover(|s| s.bg(Colors::surface_hover()))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(cx.listener(|this, _ev, _w, cx| {
+                                cx.stop_propagation();
                                 this.custom_cc = (this.custom_cc + 1).min(127);
                                 cx.notify();
                             }))
@@ -3186,6 +3244,7 @@ impl PianoRoll {
                     .hover(|s| s.bg(Colors::surface_hover()))
                     .cursor(gpui::CursorStyle::PointingHand)
                     .on_click(cx.listener(|this, _ev, _w, cx| {
+                        cx.stop_propagation();
                         this.lane_menu_open = !this.lane_menu_open;
                         cx.notify();
                     }))
@@ -3223,7 +3282,9 @@ impl PianoRoll {
                 !visible,
                 cx.listener(|this, _ev, _w, cx| this.toggle_lane_visible(cx)),
             ))
-            .children(dropdown)
+            .when_some(dropdown, |root, panel| {
+                root.child(deferred(panel).with_priority(LANE_MENU_PRIORITY))
+            })
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>, clip_id: Option<&str>) -> impl IntoElement {
@@ -3687,6 +3748,16 @@ impl PianoRoll {
         .absolute()
         .inset_0();
 
+        let ruler_bounds = self.ruler_bounds.clone();
+        let ruler_bounds_canvas = canvas(
+            move |bounds, _w, _cx| {
+                ruler_bounds.set(Some(bounds));
+            },
+            |_b, _r, _w, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+
         div()
             .flex_1()
             .min_h_0()
@@ -3746,7 +3817,20 @@ impl PianoRoll {
                             .bg(Colors::surface_panel())
                             .border_b(px(1.0))
                             .border_color(Colors::panel_border())
-                            .children(ruler),
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .child(ruler_bounds_canvas)
+                            .children(ruler)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    window.focus(&this.focus, cx);
+                                    if let Some((lx, _)) = this.ruler_local(ev.position) {
+                                        this.drag = PianoDrag::RulerSeek;
+                                        this.seek_ruler_at(lx, cx);
+                                    }
+                                }),
+                            ),
                     )
                     // Note grid.
                     .child(
@@ -4747,7 +4831,7 @@ impl PianoRoll {
         const R: f32 = 6.0;
         points.iter().find_map(|p| {
             let x = self.beat_to_x(p.beat);
-            let y = (1.0 - p.value) * (cc_h - 6.0) + 3.0;
+            let y = Self::controller_y_for_value(p.value, cc_h);
             ((lx - x).abs() <= R && (ly - y).abs() <= R).then_some(p.id)
         })
     }
@@ -4911,6 +4995,57 @@ impl PianoRoll {
         }
     }
 
+    fn controller_y_for_value(value: f32, lane_h: f32) -> f32 {
+        (1.0 - value.clamp(0.0, 1.0)) * (lane_h - 10.0) + 5.0
+    }
+
+    fn build_cc_line(&self, cx: &Context<Self>, clip_id: &str) -> gpui::AnyElement {
+        let (view_w, cc_h) = self.cc_view_size();
+        let kind = self.active_cc;
+        let points = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_lane_points(clip_id, kind)
+            .cloned()
+            .unwrap_or_default();
+        let default_value = controller_default_value(kind);
+        let baseline_y = Self::controller_y_for_value(default_value, cc_h);
+        let num_cols = view_w.ceil().max(1.0) as usize;
+        let mut samples = Vec::with_capacity(num_cols + 1);
+        for col in 0..=num_cols {
+            let beat = self.x_to_beat(col as f32);
+            let value = evaluate_controller_points(&points, beat, default_value);
+            samples.push(Self::controller_y_for_value(value, cc_h));
+        }
+        let line_color = Colors::accent_primary();
+        let baseline_color = Colors::with_alpha(Colors::text_primary(), 0.10);
+        canvas(
+            |_b, _w, _cx| {},
+            move |bounds: Bounds<Pixels>, (), window, _cx| {
+                let baseline = Bounds::new(
+                    bounds.origin + point(px(0.0), px(baseline_y)),
+                    size(px(view_w), px(1.0)),
+                );
+                window.paint_quad(fill(baseline, baseline_color));
+                for col in 0..num_cols {
+                    let y0 = samples[col];
+                    let y1 = samples[col + 1];
+                    let top = y0.min(y1);
+                    let h = (y0 - y1).abs().max(1.6);
+                    let rect = Bounds::new(
+                        bounds.origin + point(px(col as f32), px(top)),
+                        size(px(1.0), px(h)),
+                    );
+                    window.paint_quad(fill(rect, line_color));
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+
     fn build_cc_points(&self, cx: &Context<Self>, clip_id: &str) -> Vec<gpui::AnyElement> {
         let (view_w, cc_h) = self.cc_view_size();
         let kind = self.active_cc;
@@ -4928,33 +5063,22 @@ impl PianoRoll {
                 if x < -6.0 || x > view_w + 6.0 {
                     return None;
                 }
-                let y = (1.0 - value) * (cc_h - 6.0) + 3.0;
+                let y = Self::controller_y_for_value(value, cc_h);
                 Some(
                     div()
                         .id(("pr-cc-point", id as usize))
                         .absolute()
                         .left(px(x - 5.0))
-                        .top_0()
+                        .top(px(y - 5.0))
                         .w(px(10.0))
-                        .h_full()
-                        .cursor(gpui::CursorStyle::ResizeUpDown)
+                        .h(px(10.0))
+                        .cursor(gpui::CursorStyle::PointingHand)
                         .hover(|s| s.bg(Colors::with_alpha(Colors::accent_primary(), 0.08)))
-                        // Stem from the point down to the lane floor.
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(4.0))
-                                .top(px(y))
-                                .w(px(2.0))
-                                .bottom(px(0.0))
-                                .bg(Colors::with_alpha(accent, 0.45)),
-                        )
-                        // Point dot.
                         .child(
                             div()
                                 .absolute()
                                 .left(px(1.0))
-                                .top(px(y - 4.0))
+                                .top(px(1.0))
                                 .w(px(8.0))
                                 .h(px(8.0))
                                 .rounded(px(4.0))
@@ -4978,6 +5102,7 @@ impl PianoRoll {
         bpb: f32,
     ) -> impl IntoElement {
         let grid = self.build_velocity_grid(start_beat, end_beat, bpb);
+        let line = self.build_cc_line(cx, clip_id);
         let points = self.build_cc_points(cx, clip_id);
         let is_empty = points.is_empty();
         let value_chip_el = matches!(
@@ -5015,6 +5140,7 @@ impl PianoRoll {
             .cursor(gpui::CursorStyle::Crosshair)
             .child(canvas)
             .children(grid)
+            .child(line)
             .children(points)
             .children(empty_state)
             .children(value_chip_el)
@@ -5081,6 +5207,43 @@ fn controller_display_value(kind: MidiControllerKind, value: f32) -> String {
         }
         _ => format!("{}", (value.clamp(0.0, 1.0) * 127.0).round() as i32),
     }
+}
+
+fn controller_default_value(kind: MidiControllerKind) -> f32 {
+    match kind {
+        MidiControllerKind::PitchBend => 0.5,
+        MidiControllerKind::CC(_)
+        | MidiControllerKind::ChannelPressure
+        | MidiControllerKind::PolyPressure => 0.0,
+    }
+}
+
+fn evaluate_controller_points(
+    points: &[MidiControllerPoint],
+    beat: f32,
+    default_value: f32,
+) -> f32 {
+    if points.is_empty() {
+        return default_value.clamp(0.0, 1.0);
+    }
+    let beat = beat.max(0.0);
+    if beat <= points[0].beat {
+        return points[0].value;
+    }
+    let last = points.len() - 1;
+    if beat >= points[last].beat {
+        return points[last].value;
+    }
+    for pair in points.windows(2) {
+        let a = &pair[0];
+        let b = &pair[1];
+        if beat >= a.beat && beat <= b.beat {
+            let span = (b.beat - a.beat).max(1.0e-6);
+            let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
+            return (a.value + (b.value - a.value) * t).clamp(0.0, 1.0);
+        }
+    }
+    default_value.clamp(0.0, 1.0)
 }
 
 fn value_chip(label: &str, left: f32, top: f32) -> impl IntoElement {

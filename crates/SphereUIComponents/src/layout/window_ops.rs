@@ -606,7 +606,9 @@ impl StudioLayout {
         let owner = cx.entity().clone();
         let on_close: Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
             Arc::new(move |_window, cx| {
-                let _ = owner.update(cx, |layout, cx| layout.note_midi_editor_window_closed(cx));
+                StudioLayout::defer_update(&owner, cx, |layout, cx| {
+                    layout.note_midi_editor_window_closed(cx);
+                });
             });
         let dispatch_owner = cx.entity().clone();
         let dispatch_command: Arc<dyn Fn(&'static str, &mut gpui::App) + Send + Sync> =

@@ -4202,6 +4202,12 @@ impl TimelineState {
         kind: MidiControllerKind,
         mut points: Vec<MidiControllerPoint>,
     ) {
+        if points.is_empty() {
+            if let Some(lanes) = self.controller_lanes_mut(clip_id) {
+                lanes.retain(|lane| lane.kind != kind);
+            }
+            return;
+        }
         self.ensure_controller_lane(clip_id, kind);
         Self::sort_lane_points(&mut points);
         if let Some(lanes) = self.controller_lanes_mut(clip_id) {
@@ -7101,6 +7107,34 @@ mod midi_edit_tests {
             2,
             "redo restores points"
         );
+    }
+
+    #[test]
+    fn controller_undo_to_empty_removes_lane_and_redo_restores_pitch_bend() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let kind = MidiControllerKind::PitchBend;
+        let prev = state.controller_points_snapshot(&clip_id, kind);
+        state.put_controller_point(&clip_id, kind, 1.0, 0.0);
+        let next = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(next.len(), 1);
+
+        let cmd = EditCommand::SetControllerPoints {
+            clip_id: clip_id.clone(),
+            kind,
+            prev,
+            next,
+        };
+        cmd.undo(&mut state);
+        assert!(
+            state
+                .midi_clip_controller_lanes(&clip_id)
+                .is_some_and(|lanes| lanes.iter().all(|lane| lane.kind != kind)),
+            "undo to an empty snapshot removes the controller lane"
+        );
+        cmd.execute(&mut state);
+        let restored = state.controller_points_snapshot(&clip_id, kind);
+        assert_eq!(restored.len(), 1, "redo restores pitch-bend points");
+        assert_eq!(restored[0].value, 0.0);
     }
 
     #[test]

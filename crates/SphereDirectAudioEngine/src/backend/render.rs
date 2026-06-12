@@ -42,6 +42,11 @@ fn transport_freeze_debug_enabled() -> bool {
 static POST_PLAY_CALLBACK_LOGS: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
+pub(crate) fn post_stop_tail_samples(sample_rate: u32) -> u64 {
+    (sample_rate as u64).saturating_mul(4)
+}
+
+#[inline]
 fn log_post_play_callback(step: &str) {
     let remaining = POST_PLAY_CALLBACK_LOGS.load(Ordering::Relaxed);
     if remaining == 0 || !transport_freeze_debug_enabled() {
@@ -76,6 +81,10 @@ pub struct LocalAudioState {
     /// dead when transport is stopped. Counts down per block; refreshed while a
     /// preview note is held.
     pub preview_tail_samples: u64,
+    /// Samples of graph processing still owed after transport stop/pause so
+    /// instruments, delays, reverbs, and bridged plugin tails decay naturally
+    /// instead of being hard-cut as soon as the playhead stops.
+    pub stop_tail_samples: u64,
     /// Last logged preview-note count (gates PreviewRenderWake spam).
     pub prev_logged_preview_notes: u32,
     /// Blocks until next PreviewRenderWake log while preview is active.
@@ -109,14 +118,14 @@ impl LocalAudioState {
             prev_input_bus_r: 0.0,
             render_path_logged: false,
             preview_tail_samples: 0,
+            stop_tail_samples: 0,
             prev_logged_preview_notes: u32::MAX,
             preview_wake_log_cooldown: 0,
             metronome_enabled: false,
             metronome_ts_num: 4,
             metronome_ts_den: 4,
-            time_signature_map: crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::static_sig(
-                4, 4,
-            ),
+            time_signature_map:
+                crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::static_sig(4, 4),
             metronome_next_beat: 0.0,
             tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(120.0),
             metronome_click_remaining: 0,
@@ -276,6 +285,9 @@ pub fn drain_commands(
                 // Preserve the plugin-bridge sinks across reloads (Stage 3b) — a
                 // freshly built project never carries them.
                 runtime.plugin_bridge_sinks = old.plugin_bridge_sinks.clone();
+                // Re-cache the per-insert sink handles on the fresh graph (the
+                // block path reads insert.bridge_sink, never the map).
+                runtime.resolve_bridge_sinks();
                 runtime.bridge_editor_active = old.bridge_editor_active.clone();
                 // The panic the all_notes_off above pushed into the (preserved)
                 // sinks still needs flushing through the new graph.
@@ -294,8 +306,9 @@ pub fn drain_commands(
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 runtime.reset_midi_playback(pos);
                 local.set_tempo_map(runtime.tempo_map.clone(), pos, output_sample_rate);
-                let old_state =
-                    crate::engine::AudioEngineState::from_u8(shared.engine_state.load(Ordering::Relaxed));
+                let old_state = crate::engine::AudioEngineState::from_u8(
+                    shared.engine_state.load(Ordering::Relaxed),
+                );
                 let new_state = if was_playing {
                     crate::engine::AudioEngineState::Running
                 } else {
@@ -304,9 +317,11 @@ pub fn drain_commands(
                 shared
                     .engine_state
                     .store(new_state as u8, Ordering::Relaxed);
-                eprintln!(
-                    "[AudioEngineState] old={old_state:?} new={new_state:?} source=graph_swap was_playing={was_playing}"
-                );
+                if callback_debug_enabled() || command_debug_enabled() {
+                    eprintln!(
+                        "[AudioEngineState] old={old_state:?} new={new_state:?} source=graph_swap was_playing={was_playing}"
+                    );
+                }
             }
             EngineCommand::SetTestTone { enabled, frequency } => {
                 local.osc_on = enabled;
@@ -331,14 +346,17 @@ pub fn drain_commands(
                     POST_PLAY_CALLBACK_LOGS.store(5, Ordering::Relaxed);
                 }
                 local.playing_local = true;
+                local.stop_tail_samples = 0;
                 shared.playing.store(true, Ordering::Relaxed);
-                let old_state = crate::engine::AudioEngineState::from_u8(
-                    shared.engine_state.swap(
-                        crate::engine::AudioEngineState::Running as u8,
-                        Ordering::Relaxed,
-                    ),
-                );
-                eprintln!("[AudioEngineState] old={old_state:?} new=Running source=StartTransport");
+                let old_state = crate::engine::AudioEngineState::from_u8(shared.engine_state.swap(
+                    crate::engine::AudioEngineState::Running as u8,
+                    Ordering::Relaxed,
+                ));
+                if callback_debug_enabled() || command_debug_enabled() {
+                    eprintln!(
+                        "[AudioEngineState] old={old_state:?} new=Running source=StartTransport"
+                    );
+                }
                 runtime.reset_midi_playback(pos);
             }
             EngineCommand::StopTransport => {
@@ -347,13 +365,16 @@ pub fn drain_commands(
                 }
                 local.playing_local = false;
                 shared.playing.store(false, Ordering::Relaxed);
-                let old_state = crate::engine::AudioEngineState::from_u8(
-                    shared.engine_state.swap(
-                        crate::engine::AudioEngineState::Paused as u8,
-                        Ordering::Relaxed,
-                    ),
-                );
-                eprintln!("[AudioEngineState] old={old_state:?} new=Paused source=StopTransport");
+                local.stop_tail_samples = post_stop_tail_samples(runtime.sample_rate);
+                let old_state = crate::engine::AudioEngineState::from_u8(shared.engine_state.swap(
+                    crate::engine::AudioEngineState::Paused as u8,
+                    Ordering::Relaxed,
+                ));
+                if callback_debug_enabled() || command_debug_enabled() {
+                    eprintln!(
+                        "[AudioEngineState] old={old_state:?} new=Paused source=StopTransport"
+                    );
+                }
                 runtime.all_notes_off("stop");
             }
             EngineCommand::Seek { position_seconds } => {
@@ -420,14 +441,18 @@ pub fn drain_commands(
                     .master_volume
                     .store(f32_store(value), Ordering::Relaxed);
             }
-            EngineCommand::SetPluginBridgeSink { insert_id, sink } => match sink {
-                Some(sink) => {
-                    runtime.plugin_bridge_sinks.insert(insert_id, sink);
+            EngineCommand::SetPluginBridgeSink { insert_id, sink } => {
+                match sink {
+                    Some(sink) => {
+                        runtime.plugin_bridge_sinks.insert(insert_id, sink);
+                    }
+                    None => {
+                        runtime.plugin_bridge_sinks.remove(&insert_id);
+                    }
                 }
-                None => {
-                    runtime.plugin_bridge_sinks.remove(&insert_id);
-                }
-            },
+                // Re-cache per-insert sink handles for the block path.
+                runtime.resolve_bridge_sinks();
+            }
             EngineCommand::SetBridgeEditorActive { track_id, active } => {
                 runtime.set_bridge_editor_active(&track_id, active);
             }
@@ -559,7 +584,11 @@ pub fn fill_output_f32(
                 let state = crate::engine::AudioEngineState::from_u8(
                     shared.engine_state.load(Ordering::Relaxed),
                 );
-                let severity = if elapsed_us >= 10_000 { "error" } else { "warning" };
+                let severity = if elapsed_us >= 10_000 {
+                    "error"
+                } else {
+                    "warning"
+                };
                 eprintln!(
                     "[AudioCallback] slow block severity={severity} duration_us={elapsed_us} state={} frames={frames}",
                     state.as_str()
@@ -595,6 +624,7 @@ fn fill_output_f32_inner(
                 || runtime.bridge_panic_flush_samples > 0
                 || runtime.has_bridge_editor_active()
                 || local.preview_tail_samples > 0
+                || local.stop_tail_samples > 0
                 || runtime
                     .tracks
                     .iter()
@@ -606,16 +636,24 @@ fn fill_output_f32_inner(
                 *sample = 0.0;
             }
             local.preview_tail_samples = 0;
+            local.stop_tail_samples = 0;
             local.prev_peak_l = 0.0;
             local.prev_peak_r = 0.0;
-            shared.peak_l.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
-            shared.peak_r.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
-            shared.rms_l.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
-            shared.rms_r.store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+            shared
+                .peak_l
+                .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+            shared
+                .peak_r
+                .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+            shared
+                .rms_l
+                .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+            shared
+                .rms_r
+                .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
             runtime.end_meter_block(0);
             let frames = data.len() / channels.max(1);
-            if callback_debug_enabled()
-                && shared.output_cb_count.load(Ordering::Relaxed) % 400 == 1
+            if callback_debug_enabled() && shared.output_cb_count.load(Ordering::Relaxed) % 400 == 1
             {
                 eprintln!(
                     "[AudioEngine] callback silence reason={} frames={frames}",
@@ -639,7 +677,20 @@ fn fill_output_f32_inner(
     }
     let gen_tone = tone_on || local.osc_on;
     let master_vol = f32_load(shared.master_volume.load(Ordering::Relaxed));
-    let base_sample = shared.position_samples.load(Ordering::Relaxed);
+    let loop_bounds = if transport_playing {
+        transport::active_loop_bounds(shared)
+    } else {
+        None
+    };
+    let raw_base_sample = shared.position_samples.load(Ordering::Relaxed);
+    let base_sample = transport::normalize_loop_position(raw_base_sample, loop_bounds);
+    if base_sample != raw_base_sample {
+        shared
+            .position_samples
+            .store(base_sample, Ordering::Relaxed);
+        runtime.reset_midi_playback(base_sample);
+        local.reset_metronome_schedule(base_sample, runtime.sample_rate);
+    }
 
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
@@ -648,10 +699,16 @@ fn fill_output_f32_inner(
     let mut frames = 0u64;
     runtime.begin_meter_block();
 
+    let mut end_loop_midi_reset = None;
     if transport_playing {
         let frames_needed = data.len().checked_div(channels).unwrap_or(0) as u64;
         if frames_needed > 0 {
-            runtime.schedule_midi_block(base_sample, frames_needed);
+            end_loop_midi_reset = crate::engine::schedule_midi_render_block(
+                runtime,
+                base_sample,
+                frames_needed,
+                loop_bounds,
+            );
         }
     }
 
@@ -665,6 +722,7 @@ fn fill_output_f32_inner(
     if transport_playing {
         // Transport drives processing while playing; don't carry a stale tail.
         local.preview_tail_samples = 0;
+        local.stop_tail_samples = 0;
         // Playing blocks request/drain the bridge anyway — flush is implicit.
         runtime.bridge_panic_flush_samples = 0;
     } else if has_preview || pending_midi {
@@ -688,7 +746,8 @@ fn fill_output_f32_inner(
         || pending_midi
         || panic_flush
         || bridge_editor_wakeup
-        || local.preview_tail_samples > 0;
+        || local.preview_tail_samples > 0
+        || local.stop_tail_samples > 0;
     if preview_render_active
         && !transport_playing
         && (has_preview || pending_midi || local.preview_tail_samples > 0)
@@ -701,13 +760,15 @@ fn fill_output_f32_inner(
         let active_u32 = active_notes as u32;
         let changed = active_u32 != local.prev_logged_preview_notes;
         if changed {
-            eprintln!(
-                "[PreviewRenderWake] active_preview_notes changed {} -> {} tail_samples={}",
-                local.prev_logged_preview_notes, active_u32, local.preview_tail_samples
-            );
+            if callback_debug_enabled() {
+                eprintln!(
+                    "[PreviewRenderWake] active_preview_notes changed {} -> {} tail_samples={}",
+                    local.prev_logged_preview_notes, active_u32, local.preview_tail_samples
+                );
+            }
             local.prev_logged_preview_notes = active_u32;
             local.preview_wake_log_cooldown = 0;
-        } else if active_notes > 0 {
+        } else if active_notes > 0 && callback_debug_enabled() {
             local.preview_wake_log_cooldown = local.preview_wake_log_cooldown.saturating_add(1);
             let sr = runtime.sample_rate.max(1);
             let log_interval_blocks = (sr / frames_in_block.max(1) as u32).max(1);
@@ -728,6 +789,9 @@ fn fill_output_f32_inner(
             }
         }
     }
+    if !transport_playing && local.stop_tail_samples > 0 {
+        local.stop_tail_samples = local.stop_tail_samples.saturating_sub(frames_in_block);
+    }
 
     if channels >= 2 && (transport_playing || preview_render_active) {
         frames = render_project_block_interleaved(
@@ -739,6 +803,7 @@ fn fill_output_f32_inner(
             transport_playing,
             shared.time_sig_num.load(Ordering::Relaxed),
             shared.time_sig_den.load(Ordering::Relaxed),
+            loop_bounds,
         );
         if !local.render_path_logged {
             local.render_path_logged = true;
@@ -759,12 +824,32 @@ fn fill_output_f32_inner(
                 frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
             }
         }
-        for (i, frame) in data.chunks_mut(channels).enumerate() {
-            let click = local.metronome_sample(base_sample + i as u64, runtime.sample_rate);
-            if click != 0.0 {
-                frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
-                frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
+        let mut segment_sample = base_sample;
+        let mut callback_offset = 0usize;
+        let mut remaining = frames;
+        while remaining > 0 {
+            let segment_frames =
+                transport::segment_frames_until_loop_wrap(segment_sample, remaining, loop_bounds);
+            for i in 0..segment_frames as usize {
+                let frame = &mut data
+                    [(callback_offset + i) * channels..(callback_offset + i) * channels + channels];
+                let click = local.metronome_sample(segment_sample + i as u64, runtime.sample_rate);
+                if click != 0.0 {
+                    frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
+                    frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
+                }
             }
+            callback_offset += segment_frames as usize;
+            remaining -= segment_frames;
+            if remaining == 0 {
+                break;
+            }
+            let (next_sample, wrapped) =
+                transport::advance_loop_position(segment_sample, segment_frames, loop_bounds);
+            if wrapped {
+                local.reset_metronome_schedule(next_sample, runtime.sample_rate);
+            }
+            segment_sample = next_sample;
         }
         // Live monitoring is mixed below via the input ring (single, clean
         // path) — the old per-block sample-and-hold monitor was removed because
@@ -904,11 +989,14 @@ fn fill_output_f32_inner(
 
     // Advance transport position.
     if transport_playing && channels > 0 {
-        shared.position_samples.fetch_add(frames, Ordering::Relaxed);
-        let sample_rate = runtime.sample_rate;
-        transport::apply_loop_wrap(shared, runtime, sample_rate, |start| {
-            local.reset_metronome_schedule(start, sample_rate);
-        });
+        let (next_position, _) = transport::advance_loop_position(base_sample, frames, loop_bounds);
+        shared
+            .position_samples
+            .store(next_position, Ordering::Relaxed);
+        if let Some(reset_sample) = end_loop_midi_reset {
+            runtime.reset_midi_playback(reset_sample);
+            local.reset_metronome_schedule(reset_sample, runtime.sample_rate);
+        }
     }
 
     // Consumed for this block — clear AFTER render so drain_commands preview

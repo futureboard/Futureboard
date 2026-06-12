@@ -53,6 +53,11 @@ pub struct RuntimeTrack {
     pub input_source: RuntimeTrackInputSource,
     pub preview_mode: RuntimePreviewMode,
     pub output_track_id: Option<String>,
+    /// [`Self::output_track_id`] resolved at build time
+    /// ([`RuntimeProject::resolve_indices`]): `Some(index)` only when the id
+    /// names an existing non-master track. The render path must never do a
+    /// per-block id lookup.
+    pub output_track_index: Option<usize>,
     pub inserts: Vec<RuntimeInsert>,
     pub sends: Vec<RuntimeSend>,
     pub automation_lanes: Vec<RuntimeAutomationLane>,
@@ -341,12 +346,48 @@ impl RuntimeTrackMeter {
     }
 }
 
+/// `RuntimeInsert::kind` resolved to a compact tag at build time so the render
+/// path never does per-block string compares (realtime rules).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeInsertKind {
+    /// In-process VST3 (`kind == "native-plugin"`).
+    NativePlugin,
+    /// Out-of-process bridged plugin (`kind == "external-bridge-plugin"`).
+    ExternalBridge,
+    /// Built-in DSP insert (everything else).
+    BuiltIn,
+}
+
+impl RuntimeInsertKind {
+    pub fn from_kind(kind: &str) -> Self {
+        if kind.eq_ignore_ascii_case("native-plugin") {
+            Self::NativePlugin
+        } else if kind.eq_ignore_ascii_case("external-bridge-plugin") {
+            Self::ExternalBridge
+        } else {
+            Self::BuiltIn
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeInsert {
     pub id: String,
     pub kind: String,
+    /// [`Self::kind`] resolved at build time — the audio callback branches on
+    /// this tag, never on the string.
+    pub kind_tag: RuntimeInsertKind,
     pub enabled: bool,
     pub params: HashMap<String, Value>,
+    /// For [`RuntimeInsertKind::ExternalBridge`]: `params["role"] == "effect"`,
+    /// resolved at build time so the block path never reads the params map.
+    pub bridge_is_effect: bool,
+    /// For [`RuntimeInsertKind::ExternalBridge`]: the installed realtime sink.
+    /// Cached from [`RuntimeProject::plugin_bridge_sinks`] by
+    /// [`RuntimeProject::resolve_bridge_sinks`] (LoadProject /
+    /// SetPluginBridgeSink) so the block path never does a `HashMap<String, _>`
+    /// lookup.
+    pub bridge_sink: Option<crate::plugin_bridge::SharedPluginBridgeSink>,
     pub dsp: InsertDspState,
     pub vst3: Option<Vst3RuntimeProcessor>,
     pub callback_process_log_done: bool,
@@ -367,6 +408,10 @@ const DEFAULT_AUDIO_BLOCK_CAPACITY: usize = 8192;
 pub struct RuntimeSend {
     pub id: String,
     pub return_track_id: String,
+    /// [`Self::return_track_id`] resolved to a track index at build time
+    /// ([`RuntimeProject::resolve_indices`]) — `None` when the target track
+    /// does not exist. The render path must never do a per-block id lookup.
+    pub return_track_index: Option<usize>,
     pub level: f32,
     pub enabled: bool,
     /// Pre-fader tap (Phase 3). See [`EngineSendSnapshot::pre_fader`].
@@ -377,6 +422,9 @@ pub struct RuntimeSend {
 pub struct RuntimeClip {
     pub id: String,
     pub track_id: String,
+    /// [`Self::track_id`] resolved to a track index at build time
+    /// ([`RuntimeProject::resolve_indices`]); `None` when the track is missing.
+    pub track_index: Option<usize>,
     pub start_sample: u64,
     pub duration_samples: u64,
     pub offset_seconds: f64,
@@ -439,6 +487,9 @@ pub struct RuntimeMidiClip {
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeMidiTrack {
     pub track_id: String,
+    /// [`Self::track_id`] resolved to a track index at build time
+    /// ([`RuntimeProject::resolve_indices`]); `None` when the track is missing.
+    pub track_index: Option<usize>,
     pub events: Vec<RuntimeMidiEvent>,
     pub cursor: usize,
     /// Currently-sounding (channel, pitch) pairs since the last NoteOn.
@@ -487,6 +538,60 @@ pub struct RuntimeProject {
 }
 
 impl RuntimeProject {
+    /// Resolve every cross-entity id reference (clip→track, send→track,
+    /// track→output, MIDI track→track) to an index. Called once at build time
+    /// on the worker thread; track order is fixed for the life of a runtime
+    /// snapshot, so the audio callback only ever reads the precomputed indices.
+    pub fn resolve_indices(&mut self) {
+        for i in 0..self.clips.len() {
+            let ix = {
+                let id = &self.clips[i].track_id;
+                self.tracks.iter().position(|t| &t.id == id)
+            };
+            self.clips[i].track_index = ix;
+        }
+        for i in 0..self.midi_tracks.len() {
+            let ix = {
+                let id = &self.midi_tracks[i].track_id;
+                self.tracks.iter().position(|t| &t.id == id)
+            };
+            self.midi_tracks[i].track_index = ix;
+        }
+        for i in 0..self.tracks.len() {
+            let out_ix = self.tracks[i]
+                .output_track_id
+                .as_deref()
+                .filter(|id| !crate::engine::is_master_output(id))
+                .and_then(|id| self.tracks.iter().position(|t| t.id == id));
+            self.tracks[i].output_track_index = out_ix;
+            for s in 0..self.tracks[i].sends.len() {
+                let target_ix = {
+                    let id = &self.tracks[i].sends[s].return_track_id;
+                    self.tracks.iter().position(|t| &t.id == id)
+                };
+                self.tracks[i].sends[s].return_track_index = target_ix;
+            }
+        }
+        self.resolve_bridge_sinks();
+    }
+
+    /// Cache each external-bridge insert's realtime sink from
+    /// [`Self::plugin_bridge_sinks`] onto the insert itself, so the block path
+    /// reads `insert.bridge_sink` instead of doing a `HashMap<String, _>`
+    /// lookup. Re-run whenever the sink map changes (LoadProject preserves the
+    /// map across graph swaps; SetPluginBridgeSink installs/removes entries).
+    /// Arc clones only — no allocation.
+    pub fn resolve_bridge_sinks(&mut self) {
+        let sinks = &self.plugin_bridge_sinks;
+        for track in &mut self.tracks {
+            for insert in &mut track.inserts {
+                if insert.kind_tag == RuntimeInsertKind::ExternalBridge {
+                    insert.bridge_sink = sinks.get(&insert.id).cloned();
+                }
+            }
+        }
+    }
+
     #[inline]
     fn track_insert_latency_samples(&self, track: &RuntimeTrack, bridge_block_frames: u32) -> u32 {
         if track.inserts.is_empty() {
@@ -497,8 +602,8 @@ impl RuntimeProject {
             if !insert.enabled {
                 continue;
             }
-            if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
-                if let Some(sink) = self.plugin_bridge_sinks.get(&insert.id) {
+            if insert.kind_tag == RuntimeInsertKind::ExternalBridge {
+                if let Some(sink) = insert.bridge_sink.as_ref() {
                     samples = samples
                         .saturating_add(bridge_block_frames)
                         .saturating_add(sink.reported_latency_samples());
@@ -752,7 +857,15 @@ impl RuntimeProject {
                 inserts.push(RuntimeInsert {
                     id: insert.id.clone(),
                     kind: insert.kind.clone(),
+                    kind_tag: RuntimeInsertKind::from_kind(&insert.kind),
                     enabled: insert.enabled,
+                    bridge_is_effect: insert
+                        .params
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .map(|role| role.eq_ignore_ascii_case("effect"))
+                        .unwrap_or(false),
+                    bridge_sink: None,
                     params: insert.params.clone(),
                     dsp: InsertDspState::new(
                         canonical_plugin_id(&insert.kind),
@@ -782,6 +895,7 @@ impl RuntimeProject {
                 input_source: RuntimeTrackInputSource::from_channels(&t.input_source.channels),
                 preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
+                output_track_index: None, // resolved below in resolve_indices
                 inserts,
                 sends: t
                     .sends
@@ -789,6 +903,7 @@ impl RuntimeProject {
                     .map(|send| RuntimeSend {
                         id: send.id.clone(),
                         return_track_id: send.return_track_id.clone(),
+                        return_track_index: None, // resolved below in resolve_indices
                         level: send.level.clamp(0.0, 2.0),
                         enabled: send.enabled,
                         pre_fader: send.pre_fader,
@@ -1023,7 +1138,7 @@ impl RuntimeProject {
             }
         }
 
-        Ok(Self {
+        let mut project = Self {
             sample_rate: output_sample_rate,
             tracks,
             clips,
@@ -1039,14 +1154,25 @@ impl RuntimeProject {
             plugin_bridge_sinks: std::collections::HashMap::new(),
             bridge_editor_active: std::collections::HashSet::new(),
             bridge_panic_flush_samples: 0,
-        })
+        };
+        // Resolve cross-entity indices once, on this worker thread, so the
+        // audio callback never does an id lookup per block.
+        project.resolve_indices();
+        Ok(project)
     }
 
     /// Reposition every MIDI track's cursor to the first event at/after
     /// `position_sample` and clear active notes (emitting note-offs so the
     /// destination never gets a stuck note). Called on seek / play-from.
     pub fn reset_midi_playback(&mut self, position_sample: u64) {
-        self.all_notes_off("seek/play");
+        self.reset_midi_playback_with_offset(position_sample, 0);
+    }
+
+    /// Like [`Self::reset_midi_playback`], but note-off panic events are placed
+    /// at `sample_offset` within the current callback block. Used when the
+    /// render kernel wraps a loop in the middle of a device block.
+    pub fn reset_midi_playback_with_offset(&mut self, position_sample: u64, sample_offset: u32) {
+        self.all_notes_off_with_offset("seek/play", sample_offset);
         for mt in &mut self.midi_tracks {
             // Binary search: first event with sample >= position.
             mt.cursor = mt.events.partition_point(|ev| ev.sample < position_sample);
@@ -1098,13 +1224,17 @@ impl RuntimeProject {
     /// Emit note-off for all active notes on every MIDI track and clear the
     /// active set. Called on stop/seek to prevent stuck notes.
     pub fn all_notes_off(&mut self, reason: &str) {
+        self.all_notes_off_with_offset(reason, 0);
+    }
+
+    fn all_notes_off_with_offset(&mut self, reason: &str, sample_offset: u32) {
         let debug = midi_engine_debug_enabled();
-        if reason.contains("seek") {
+        if debug && reason.contains("seek") {
             for mt in &self.midi_tracks {
                 if mt.active.is_empty() {
                     continue;
                 }
-                if let Some(ti) = self.tracks.iter().position(|t| t.id == mt.track_id) {
+                if let Some(ti) = mt.track_index {
                     if let Some(ix) = self.tracks[ti].midi_instrument_insert_ix {
                         if let Some(instance) = self.tracks[ti].inserts.get(ix) {
                             eprintln!(
@@ -1117,25 +1247,24 @@ impl RuntimeProject {
                 }
             }
         }
-        let flush: Vec<(String, Vec<(u8, u8)>)> = self
-            .midi_tracks
-            .iter()
-            .map(|mt| (mt.track_id.clone(), mt.active.clone()))
-            .collect();
-        for (track_id, active) in flush {
+        // Runs on the audio thread (stop/seek/mute/solo/graph swap): take each
+        // active list out by swap (no clone, capacity preserved) and hand the
+        // note-offs to the track's instrument route.
+        for mt_ix in 0..self.midi_tracks.len() {
+            let mut active = std::mem::take(&mut self.midi_tracks[mt_ix].active);
             if debug {
                 eprintln!(
                     "[MidiPanic] track={} reason={} active_notes_cleared={}",
-                    track_id,
+                    self.midi_tracks[mt_ix].track_id,
                     reason,
                     active.len()
                 );
             }
-            push_all_notes_off_for_track(self, &track_id, &active);
-        }
-        for mt in &mut self.midi_tracks {
-            mt.active.clear();
-            mt.preview_active.clear();
+            let track_index = self.midi_tracks[mt_ix].track_index;
+            push_all_notes_off_for_track(self, track_index, &active, sample_offset);
+            active.clear();
+            self.midi_tracks[mt_ix].active = active;
+            self.midi_tracks[mt_ix].preview_active.clear();
         }
     }
 
@@ -1144,6 +1273,15 @@ impl RuntimeProject {
     /// allocation on the steady-state path (event lists are preallocated; the
     /// active-note Vec is reserved at build time).
     pub fn schedule_midi_block(&mut self, base_sample: u64, frames: u64) {
+        self.schedule_midi_block_with_offset(base_sample, frames, 0);
+    }
+
+    pub fn schedule_midi_block_with_offset(
+        &mut self,
+        base_sample: u64,
+        frames: u64,
+        callback_offset: u32,
+    ) {
         if self.midi_tracks.is_empty() || frames == 0 {
             return;
         }
@@ -1153,64 +1291,63 @@ impl RuntimeProject {
         let trace = crate::forensic_trace::engine_midi_trace_enabled();
         let vst3_debug = vst3_midi_debug_enabled();
         let sr = self.sample_rate.max(1) as f64;
-        let bpm = self
-            .tempo_map
-            .bpm_at_beat(self.tempo_map.beat_at_samples(base_sample, sr));
         let heartbeat = trace && crate::forensic_trace::scheduler_heartbeat_due();
         for mt in &mut self.midi_tracks {
             let mut scheduled = 0u32;
-            let mut _notes_on = 0u32;
-            let mut _notes_off = 0u32;
-            let instrument_instance =
-                self.tracks
-                    .iter()
-                    .find(|t| t.id == mt.track_id)
-                    .and_then(|t| {
-                        t.midi_instrument_insert_ix
-                            .and_then(|ix| t.inserts.get(ix).map(|i| i.id.clone()))
-                    });
-            let bridged = instrument_instance
-                .as_ref()
-                .is_some_and(|id| self.plugin_bridge_sinks.contains_key(id));
-            let overlapping: Vec<_> = self
-                .midi_clips
-                .iter()
-                .filter(|c| {
-                    c.track_id == mt.track_id
-                        && block_end > self.tempo_map.samples_at_beat(c.start_beat, sr)
-                        && base_sample < self.tempo_map.samples_at_beat(c.end_beat, sr)
-                })
-                .collect();
-            let _clips_active = overlapping.len();
-            let block_has_note = overlapping.iter().any(|c| {
-                c.events.iter().any(|ev| {
-                    ev.sample >= base_sample
-                        && ev.sample < block_end
-                        && matches!(ev.kind, RuntimeMidiEventKind::NoteOn)
-                })
+            // Instrument route from build-time indices + the cached bridge
+            // sink — no id lookups, String clones, or Vec collects per block.
+            let track_ix = mt.track_index.filter(|&ti| ti < self.tracks.len());
+            let instrument_ix = track_ix.and_then(|ti| self.tracks[ti].midi_instrument_insert_ix);
+            let bridge_sink = track_ix.zip(instrument_ix).and_then(|(ti, ix)| {
+                self.tracks[ti]
+                    .inserts
+                    .get(ix)
+                    .and_then(|insert| insert.bridge_sink.clone())
             });
-            if trace && (block_has_note || heartbeat) {
-                eprintln!(
-                    "[midi-scheduler] playing=true bpm={bpm:.1} sr={} block_start={base_sample} block_end={block_end}",
-                    self.sample_rate
-                );
-            }
-            if trace && !overlapping.is_empty() && (block_has_note || heartbeat) {
-                for clip in &overlapping {
+            if trace {
+                // Trace-only diagnostics. The clip-overlap scan (and its Vec)
+                // is allowed here because the flag is off in production.
+                let bpm = self
+                    .tempo_map
+                    .bpm_at_beat(self.tempo_map.beat_at_samples(base_sample, sr));
+                let overlapping: Vec<_> = self
+                    .midi_clips
+                    .iter()
+                    .filter(|c| {
+                        c.track_id == mt.track_id
+                            && block_end > self.tempo_map.samples_at_beat(c.start_beat, sr)
+                            && base_sample < self.tempo_map.samples_at_beat(c.end_beat, sr)
+                    })
+                    .collect();
+                let block_has_note = overlapping.iter().any(|c| {
+                    c.events.iter().any(|ev| {
+                        ev.sample >= base_sample
+                            && ev.sample < block_end
+                            && matches!(ev.kind, RuntimeMidiEventKind::NoteOn)
+                    })
+                });
+                if block_has_note || heartbeat {
                     eprintln!(
-                        "[midi-scheduler] track={} clip={} overlaps=true",
-                        mt.track_id, clip.id
+                        "[midi-scheduler] playing=true bpm={bpm:.1} sr={} block_start={base_sample} block_end={block_end}",
+                        self.sample_rate
                     );
+                    for clip in &overlapping {
+                        eprintln!(
+                            "[midi-scheduler] track={} clip={} overlaps=true",
+                            mt.track_id, clip.id
+                        );
+                    }
                 }
-            }
-            if trace && bridged {
-                if let Some(ref instance_id) = instrument_instance {
-                    eprintln!(
-                        "[instrument-route] track={} instrument_instance={}",
-                        mt.track_id, instance_id
-                    );
-                    eprintln!("[instrument-route] plugin_instance_id={instance_id}");
-                    eprintln!("[instrument-route] route_ok=true");
+                if bridge_sink.is_some() {
+                    if let Some((ti, ix)) = track_ix.zip(instrument_ix) {
+                        let instance_id = &self.tracks[ti].inserts[ix].id;
+                        eprintln!(
+                            "[instrument-route] track={} instrument_instance={}",
+                            mt.track_id, instance_id
+                        );
+                        eprintln!("[instrument-route] plugin_instance_id={instance_id}");
+                        eprintln!("[instrument-route] route_ok=true");
+                    }
                 }
             }
             while mt.cursor < mt.events.len() && mt.events[mt.cursor].sample < block_end {
@@ -1220,10 +1357,10 @@ impl RuntimeProject {
                     apply_active(&mut mt.active, &ev);
                     continue;
                 }
-                let offset = (ev.sample - base_sample) as u32;
+                let offset = callback_offset.saturating_add((ev.sample - base_sample) as u32);
                 apply_active(&mut mt.active, &ev);
-                if let Some(ti) = self.tracks.iter().position(|t| t.id == mt.track_id) {
-                    if self.tracks[ti].midi_instrument_insert_ix.is_some() {
+                if let Some(ti) = track_ix {
+                    if let Some(ix) = instrument_ix {
                         let vel = ev.velocity as f32 / 127.0;
                         let midi_ev = match ev.kind {
                             RuntimeMidiEventKind::NoteOn => {
@@ -1239,41 +1376,27 @@ impl RuntimeProject {
                                 ev.cc_value,
                             ),
                         };
-                        if bridged {
-                            if let Some(ref instance_id) = instrument_instance {
-                                if let Some(sink) =
-                                    self.plugin_bridge_sinks.get(instance_id.as_str())
-                                {
-                                    push_vst3_midi_event_to_sink(
-                                        sink.as_ref(),
-                                        &midi_ev,
-                                        instance_id,
-                                        verbose,
-                                    );
-                                }
+                        if let Some(sink) = bridge_sink.as_deref() {
+                            push_vst3_midi_event_to_sink(
+                                sink,
+                                &midi_ev,
+                                &self.tracks[ti].inserts[ix].id,
+                                verbose,
+                            );
+                            if trace {
+                                let abs = ev.sample;
+                                let instance_id = &self.tracks[ti].inserts[ix].id;
                                 match ev.kind {
-                                    RuntimeMidiEventKind::NoteOn => {
-                                        _notes_on += 1;
-                                        if trace {
-                                            let abs = base_sample + u64::from(offset);
-                                            eprintln!(
-                                                "[midi-scheduler] note_on pitch={} offset={offset} \
-                                                 absolute_sample={abs} instance={instance_id}",
-                                                ev.pitch
-                                            );
-                                        }
-                                    }
-                                    RuntimeMidiEventKind::NoteOff => {
-                                        _notes_off += 1;
-                                        if trace {
-                                            let abs = base_sample + u64::from(offset);
-                                            eprintln!(
-                                                "[midi-scheduler] note_off pitch={} offset={offset} \
-                                                 absolute_sample={abs} instance={instance_id}",
-                                                ev.pitch
-                                            );
-                                        }
-                                    }
+                                    RuntimeMidiEventKind::NoteOn => eprintln!(
+                                        "[midi-scheduler] note_on pitch={} offset={offset} \
+                                         absolute_sample={abs} instance={instance_id}",
+                                        ev.pitch
+                                    ),
+                                    RuntimeMidiEventKind::NoteOff => eprintln!(
+                                        "[midi-scheduler] note_off pitch={} offset={offset} \
+                                         absolute_sample={abs} instance={instance_id}",
+                                        ev.pitch
+                                    ),
                                     _ => {}
                                 }
                             }
@@ -1316,16 +1439,14 @@ impl RuntimeProject {
                     scheduled,
                     mt.active.len()
                 );
-            }
-            if debug && scheduled > 0 {
                 eprintln!(
                     "[DAUx MIDI] block events={} track={}",
                     scheduled, mt.track_id
                 );
             }
             if vst3_debug {
-                if let Some(ti) = self.tracks.iter().position(|t| t.id == mt.track_id) {
-                    if let Some(ix) = self.tracks[ti].midi_instrument_insert_ix {
+                if let Some(ti) = track_ix {
+                    if let Some(ix) = instrument_ix {
                         eprintln!(
                             "[VST3 MIDI] instrument insert track={} insert_ix={} block_events={}",
                             mt.track_id,
@@ -1397,19 +1518,15 @@ impl RuntimeProject {
     ) {
         let channel = channel.min(15);
         let pitch = pitch.min(127);
-        eprintln!(
-            "[EngineMidiPreview] received note_off track={} instance={} ch={} pitch={}",
-            track_id, plugin_instance_id, channel, pitch
-        );
+        if crate::forensic_trace::engine_midi_verbose_enabled() {
+            eprintln!(
+                "[EngineMidiPreview] received note_off track={} instance={} ch={} pitch={}",
+                track_id, plugin_instance_id, channel, pitch
+            );
+        }
         let bridged = self.plugin_bridge_sinks.contains_key(plugin_instance_id);
         if bridged {
-            self.push_bridge_preview_midi(
-                plugin_instance_id,
-                0x80 | channel,
-                pitch,
-                0,
-                "note_off",
-            );
+            self.push_bridge_preview_midi(plugin_instance_id, 0x80 | channel, pitch, 0, "note_off");
             self.set_preview_active(track_id, channel, pitch, false);
             return;
         }
@@ -1425,19 +1542,24 @@ impl RuntimeProject {
     }
 
     pub fn bridge_preview_all_notes_off(&mut self, track_id: &str, plugin_instance_id: &str) {
-        let active = self
+        let (active, track_index) = self
             .midi_tracks
             .iter()
             .find(|mt| mt.track_id == track_id)
-            .map(|mt| mt.preview_active.clone())
+            .map(|mt| (mt.preview_active.clone(), mt.track_index))
             .unwrap_or_default();
-        eprintln!(
-            "[EngineMidiPreview] received all_notes_off track={} instance={} active_notes={}",
-            track_id,
-            plugin_instance_id,
-            active.len()
-        );
-        push_all_notes_off_for_track(self, track_id, &active);
+        // Command path (not per-block): fall back to an id lookup so the panic
+        // CCs still reach a track that never had a MIDI schedule entry.
+        let track_index = track_index.or_else(|| self.tracks.iter().position(|t| t.id == track_id));
+        if crate::forensic_trace::engine_midi_verbose_enabled() {
+            eprintln!(
+                "[EngineMidiPreview] received all_notes_off track={} instance={} active_notes={}",
+                track_id,
+                plugin_instance_id,
+                active.len()
+            );
+        }
+        push_all_notes_off_for_track(self, track_index, &active, 0);
         if self.plugin_bridge_sinks.contains_key(plugin_instance_id) {
             if let Some(sink) = self.plugin_bridge_sinks.get(plugin_instance_id) {
                 for &(channel, pitch) in &active {
@@ -1515,56 +1637,67 @@ impl RuntimeProject {
         channel: u8,
         pitch: u8,
     ) -> bool {
+        // Runs on the audio thread per preview event — route diagnostics (with
+        // their String formatting) only exist under the verbose trace flag.
+        let verbose = crate::forensic_trace::engine_midi_verbose_enabled();
         let Some(ti) = self.tracks.iter().position(|t| t.id == track_id) else {
-            eprintln!(
-                "[InstrumentRoute] track={} no instrument plugin found reason=missing_track",
-                track_id
-            );
+            if verbose {
+                eprintln!(
+                    "[InstrumentRoute] track={} no instrument plugin found reason=missing_track",
+                    track_id
+                );
+            }
             return false;
         };
         let track = &self.tracks[ti];
-        let plugins = track
-            .inserts
-            .iter()
-            .map(|insert| {
-                format!(
-                    "{}:{}:{}",
-                    insert.id,
-                    insert.kind,
-                    if insert.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        eprintln!(
-            "[InstrumentRoute] track={} kind={} plugins={}",
-            track.id, track.track_type, plugins
-        );
-        let Some(insert_ix) = track.midi_instrument_insert_ix else {
+        if verbose {
+            let plugins = track
+                .inserts
+                .iter()
+                .map(|insert| {
+                    format!(
+                        "{}:{}:{}",
+                        insert.id,
+                        insert.kind,
+                        if insert.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             eprintln!(
-                "[InstrumentRoute] track={} selected_instrument_plugin=none no instrument plugin found",
-                track_id
+                "[InstrumentRoute] track={} kind={} plugins={}",
+                track.id, track.track_type, plugins
             );
+        }
+        let Some(insert_ix) = track.midi_instrument_insert_ix else {
+            if verbose {
+                eprintln!(
+                    "[InstrumentRoute] track={} selected_instrument_plugin=none no instrument plugin found",
+                    track_id
+                );
+            }
             return false;
         };
-        let plugin_id = self.tracks[ti].inserts[insert_ix].id.clone();
-        eprintln!(
-            "[InstrumentRoute] track={} selected_instrument_plugin={}",
-            track_id, plugin_id
-        );
-        eprintln!(
-            "[PluginMidiIn] plugin={} {} ch={} pitch={} offset=0",
-            plugin_id, event_type, channel, pitch
-        );
+        if verbose {
+            let plugin_id = &self.tracks[ti].inserts[insert_ix].id;
+            eprintln!(
+                "[InstrumentRoute] track={} selected_instrument_plugin={}",
+                track_id, plugin_id
+            );
+            eprintln!(
+                "[PluginMidiIn] plugin={} {} ch={} pitch={} offset=0",
+                plugin_id, event_type, channel, pitch
+            );
+            eprintln!(
+                "[EngineMidiPreview] target plugin={} event queued",
+                plugin_id
+            );
+        }
         self.tracks[ti].midi_block_events.push(event);
-        eprintln!(
-            "[EngineMidiPreview] target plugin={} event queued",
-            plugin_id
-        );
         true
     }
 
@@ -1574,8 +1707,10 @@ impl RuntimeProject {
             .iter_mut()
             .find(|mt| mt.track_id == track_id)
         else {
+            let track_index = self.tracks.iter().position(|t| t.id == track_id);
             self.midi_tracks.push(RuntimeMidiTrack {
                 track_id: track_id.to_string(),
+                track_index,
                 events: Vec::new(),
                 cursor: 0,
                 active: Vec::with_capacity(128),
@@ -1789,12 +1924,12 @@ impl RuntimeProject {
         // ParamID + normalized value to the host through the shared param ring,
         // and persist it in the params map for snapshot/recall. Previously this
         // fell through to the built-in branch and was silently dropped.
-        if insert.kind.eq_ignore_ascii_case("external-bridge-plugin") {
+        if insert.kind_tag == RuntimeInsertKind::ExternalBridge {
             if let Ok(vst3_param_id) = param_id.parse::<u32>() {
                 insert
                     .params
                     .insert(param_id.to_string(), Value::from(value as f64));
-                if let Some(sink) = self.plugin_bridge_sinks.get(insert_id) {
+                if let Some(sink) = insert.bridge_sink.as_ref() {
                     sink.push_param(vst3_param_id, value.clamp(0.0, 1.0), 0);
                 }
             }
@@ -1941,54 +2076,81 @@ fn insert_accepts_midi_events(insert: &RuntimeInsert, track_type: &str) -> bool 
         .unwrap_or(false)
 }
 
-fn push_all_notes_off_for_track(project: &mut RuntimeProject, track_id: &str, active: &[(u8, u8)]) {
-    let Some(ti) = project.tracks.iter().position(|t| t.id == track_id) else {
+fn push_all_notes_off_for_track(
+    project: &mut RuntimeProject,
+    track_index: Option<usize>,
+    active: &[(u8, u8)],
+    sample_offset: u32,
+) {
+    let Some(ti) = track_index.filter(|&ti| ti < project.tracks.len()) else {
         return;
     };
-    if project.tracks[ti].midi_instrument_insert_ix.is_none() {
+    let Some(ix) = project.tracks[ti].midi_instrument_insert_ix else {
         return;
-    }
-    let instance_id = project.tracks[ti]
-        .midi_instrument_insert_ix
-        .and_then(|ix| project.tracks[ti].inserts.get(ix).map(|i| i.id.clone()));
-    if let Some(ref instance) = instance_id {
-        if let Some(sink) = project.plugin_bridge_sinks.get(instance) {
+    };
+    let sink = project.tracks[ti]
+        .inserts
+        .get(ix)
+        .and_then(|insert| insert.bridge_sink.clone());
+    if let Some(sink) = sink {
+        if midi_engine_debug_enabled() {
             eprintln!(
-                "[midi-playback] transport_stop panic instance={instance} old_notes={}",
+                "[midi-playback] transport_stop panic instance={} old_notes={}",
+                project.tracks[ti].inserts[ix].id,
                 active.len()
             );
-            for &(channel, pitch) in active {
-                sink.push_midi(0x80 | (channel & 0x0F), pitch, 0, 0);
-            }
-            for ch in 0u8..16 {
-                sink.push_midi(0xB0 | (ch & 0x0F), 64, 0, 0);
-                sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, 0);
-                sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, 0);
-            }
-            // The host only drains the ring while blocks are requested — keep the
-            // handshake alive past this panic so it is actually delivered.
-            project.arm_bridge_panic_flush();
-            return;
         }
+        for &(channel, pitch) in active {
+            sink.push_midi(0x80 | (channel & 0x0F), pitch, 0, sample_offset);
+        }
+        for ch in 0u8..16 {
+            sink.push_midi(0xB0 | (ch & 0x0F), 64, 0, sample_offset);
+            sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, sample_offset);
+            sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, sample_offset);
+        }
+        // The host only drains the ring while blocks are requested — keep the
+        // handshake alive past this panic so it is actually delivered.
+        project.arm_bridge_panic_flush();
+        return;
     }
     for &(channel, pitch) in active {
         project.tracks[ti]
             .midi_block_events
-            .push(Vst3MidiEvent::note_off(0, channel, pitch, 0.0));
+            .push(Vst3MidiEvent::note_off(sample_offset, channel, pitch, 0.0));
     }
     for channel in 0..16 {
         project.tracks[ti]
             .midi_block_events
-            .push(Vst3MidiEvent::control_change(0, channel, 64, 0.0));
+            .push(Vst3MidiEvent::control_change(
+                sample_offset,
+                channel,
+                64,
+                0.0,
+            ));
         project.tracks[ti]
             .midi_block_events
-            .push(Vst3MidiEvent::control_change(0, channel, 123, 0.0));
+            .push(Vst3MidiEvent::control_change(
+                sample_offset,
+                channel,
+                123,
+                0.0,
+            ));
         project.tracks[ti]
             .midi_block_events
-            .push(Vst3MidiEvent::control_change(0, channel, 120, 0.0));
+            .push(Vst3MidiEvent::control_change(
+                sample_offset,
+                channel,
+                120,
+                0.0,
+            ));
         project.tracks[ti]
             .midi_block_events
-            .push(Vst3MidiEvent::control_change(0, channel, 121, 0.0));
+            .push(Vst3MidiEvent::control_change(
+                sample_offset,
+                channel,
+                121,
+                0.0,
+            ));
     }
 }
 
@@ -2135,6 +2297,7 @@ fn build_midi_runtime(
             let active = Vec::with_capacity(128); // bound growth out of the audio callback
             RuntimeMidiTrack {
                 track_id,
+                track_index: None, // resolved by RuntimeProject::resolve_indices
                 events,
                 cursor: 0,
                 active,
@@ -2189,6 +2352,7 @@ fn build_clip_runtime(
     Some(RuntimeClip {
         id: clip.id.clone(),
         track_id: clip.track_id.clone(),
+        track_index: None, // resolved by RuntimeProject::resolve_indices
         start_sample: seconds_to_samples(start_seconds.max(0.0), output_sample_rate),
         duration_samples,
         offset_seconds: clip.offset_seconds.max(0.0),
@@ -2594,11 +2758,15 @@ mod midi_tests {
             input_source: RuntimeTrackInputSource::None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
+            output_track_index: None,
             inserts: vec![RuntimeInsert {
                 id: "insert-1".to_string(),
                 kind: "external-bridge-plugin".to_string(),
+                kind_tag: RuntimeInsertKind::ExternalBridge,
                 enabled: true,
                 params: HashMap::new(),
+                bridge_is_effect: false,
+                bridge_sink: None,
                 dsp: InsertDspState::default(),
                 vst3: None,
                 callback_process_log_done: false,
@@ -2637,6 +2805,9 @@ mod midi_tests {
         let sink = Arc::new(RecordingSink::default());
         p.plugin_bridge_sinks
             .insert("insert-1".to_string(), sink.clone());
+        // Mirror the engine: indices + cached bridge sinks are resolved before
+        // the block path runs.
+        p.resolve_indices();
         (p, sink)
     }
 
@@ -2656,6 +2827,30 @@ mod midi_tests {
     }
 
     #[test]
+    fn loop_wrap_bridge_events_keep_callback_offset() {
+        let (mut p, sink) = bridged_project();
+        p.reset_midi_playback(119_900);
+        sink.take(); // discard the seek panic CCs
+
+        let end_reset = crate::engine::schedule_midi_render_block(
+            &mut p,
+            119_900,
+            300,
+            Some(crate::transport::LoopBounds {
+                start: 96_000,
+                end: 120_000,
+            }),
+        );
+
+        assert!(end_reset.is_none());
+        let events = sink.take();
+        assert!(
+            events.contains(&(0x90, 60, 100, 100)),
+            "wrapped NoteOn should land 100 samples into the callback: {events:?}"
+        );
+    }
+
+    #[test]
     fn stop_panic_pushes_note_offs_and_ccs_and_arms_bridge_flush() {
         let (mut p, sink) = bridged_project();
         p.reset_midi_playback(0);
@@ -2670,9 +2865,18 @@ mod midi_tests {
         assert_eq!(events[0], (0x80, 60, 0, 0));
         // Then Sustain Off / All Notes Off / All Sound Off on every channel.
         for ch in 0u8..16 {
-            assert!(events.contains(&(0xB0 | ch, 64, 0, 0)), "sustain off ch={ch}");
-            assert!(events.contains(&(0xB0 | ch, 123, 0, 0)), "all notes off ch={ch}");
-            assert!(events.contains(&(0xB0 | ch, 120, 0, 0)), "all sound off ch={ch}");
+            assert!(
+                events.contains(&(0xB0 | ch, 64, 0, 0)),
+                "sustain off ch={ch}"
+            );
+            assert!(
+                events.contains(&(0xB0 | ch, 123, 0, 0)),
+                "all notes off ch={ch}"
+            );
+            assert!(
+                events.contains(&(0xB0 | ch, 120, 0, 0)),
+                "all sound off ch={ch}"
+            );
         }
         assert!(p.midi_tracks[0].active.is_empty());
         // The callback must keep requesting bridge blocks so the host actually

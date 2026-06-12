@@ -1,12 +1,12 @@
 use crate::components::timeline::timeline_state::{
-    midi_debug_enabled, ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType, TimelineState,
-    TRACK_HEIGHT,
+    midi_debug_enabled, ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType,
+    MidiControllerKind, MidiControllerPoint, TimelineState, TRACK_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, AppContext, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled,
+    canvas, div, fill, point, px, size, AppContext, Bounds, InteractiveElement, IntoElement,
+    ParentElement, Pixels, StatefulInteractiveElement, Styled,
 };
 
 pub fn midi_clip(
@@ -43,9 +43,13 @@ pub fn midi_clip(
     let note_h = clip_h - 14.0; // height for notes preview
 
     // Draw notes inside notes preview area (clip-relative beats, clip bounds).
-    let mut note_elements = Vec::new();
+    let mut note_elements: Vec<gpui::AnyElement> = Vec::new();
     let clip_len = clip.duration_beats;
-    if let ClipType::Midi { notes, .. } = &clip.clip_type {
+    if let ClipType::Midi {
+        notes,
+        controller_lanes,
+    } = &clip.clip_type
+    {
         let in_bounds: Vec<_> = notes
             .iter()
             .filter(|n| n.start < clip_len && n.start + n.duration > 0.0)
@@ -84,8 +88,48 @@ pub fn midi_clip(
                         let mut c = track_color;
                         c.a = 0.8;
                         c
-                    }),
+                    })
+                    .into_any_element(),
             );
+        }
+
+        let controller_preview_lanes: Vec<(MidiControllerKind, Vec<MidiControllerPoint>)> =
+            controller_lanes
+                .iter()
+                .filter(|lane| lane.visible && !lane.points.is_empty())
+                .take(3)
+                .map(|lane| (lane.kind, lane.points.clone()))
+                .collect();
+        if !controller_preview_lanes.is_empty() {
+            let lane_count = controller_preview_lanes.len();
+            note_elements.push(
+                midi_controller_preview_canvas(
+                    controller_preview_lanes.clone(),
+                    clip_len,
+                    ppb,
+                    track_color,
+                )
+                .absolute()
+                .inset_0()
+                .into_any_element(),
+            );
+            if width >= 44.0 && note_h >= 18.0 {
+                let band_h = controller_preview_band_h(note_h, lane_count);
+                let row_h = (band_h / lane_count as f32).max(4.0);
+                let band_top = (note_h - band_h - 1.0).max(1.0);
+                for (idx, (kind, _)) in controller_preview_lanes.iter().enumerate() {
+                    note_elements.push(
+                        div()
+                            .absolute()
+                            .left(px(3.0))
+                            .top(px(band_top + idx as f32 * row_h))
+                            .text_size(px(7.0))
+                            .text_color(Colors::text_faint())
+                            .child(midi_controller_kind_label(*kind))
+                            .into_any_element(),
+                    );
+                }
+            }
         }
 
         if midi_debug_enabled() {
@@ -272,4 +316,128 @@ pub fn midi_clip(
                     cx.new(|_| drag.clone())
                 }),
         )
+}
+
+fn midi_controller_preview_canvas(
+    lanes: Vec<(MidiControllerKind, Vec<MidiControllerPoint>)>,
+    clip_len: f32,
+    ppb: f32,
+    track_color: gpui::Rgba,
+) -> gpui::Canvas<()> {
+    canvas(
+        |_bounds, _window, _cx| {},
+        move |bounds: Bounds<Pixels>, (), window, _cx| {
+            if lanes.is_empty() {
+                return;
+            }
+            let width: f32 = bounds.size.width.into();
+            let height: f32 = bounds.size.height.into();
+            if width <= 1.0 || height <= 6.0 {
+                return;
+            }
+
+            let lane_count = lanes.len();
+            let band_h = controller_preview_band_h(height, lane_count);
+            let row_h = (band_h / lane_count as f32).max(4.0);
+            let band_top = (height - band_h - 1.0).max(1.0);
+            let columns = width.ceil().clamp(1.0, 1200.0) as usize;
+            let step_px = (width / columns as f32).max(1.0);
+
+            for (lane_idx, (kind, points)) in lanes.iter().enumerate() {
+                let row_top = band_top + lane_idx as f32 * row_h;
+                let default_value = midi_controller_default_value(*kind);
+                let baseline_y = row_top + (1.0 - default_value) * (row_h - 2.0).max(1.0) + 1.0;
+                let mut line_color = match kind {
+                    MidiControllerKind::PitchBend => Colors::accent_primary(),
+                    _ => track_color,
+                };
+                line_color.a = (0.78 - lane_idx as f32 * 0.14).clamp(0.38, 0.78);
+                let mut baseline_color = Colors::text_primary();
+                baseline_color.a = 0.12;
+
+                window.paint_quad(fill(
+                    Bounds::new(
+                        bounds.origin + point(px(0.0), px(baseline_y)),
+                        size(px(width), px(1.0)),
+                    ),
+                    baseline_color,
+                ));
+
+                let mut prev_y: Option<f32> = None;
+                for col in 0..=columns {
+                    let x = (col as f32 * step_px).min(width);
+                    let beat = if ppb <= 0.0 {
+                        0.0
+                    } else {
+                        (x / ppb).clamp(0.0, clip_len.max(0.0))
+                    };
+                    let value = evaluate_midi_controller_points(points, beat, default_value);
+                    let y = row_top + (1.0 - value) * (row_h - 2.0).max(1.0) + 1.0;
+                    if let Some(prev) = prev_y {
+                        let top = prev.min(y);
+                        let h = (prev - y).abs().max(1.4);
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                bounds.origin + point(px(x), px(top)),
+                                size(px(step_px), px(h)),
+                            ),
+                            line_color,
+                        ));
+                    }
+                    prev_y = Some(y);
+                }
+            }
+        },
+    )
+}
+
+fn controller_preview_band_h(height: f32, lane_count: usize) -> f32 {
+    let min_needed = (lane_count as f32 * 6.0).max(8.0);
+    (height * 0.44).clamp(min_needed, 30.0).min(height.max(1.0))
+}
+
+fn midi_controller_default_value(kind: MidiControllerKind) -> f32 {
+    match kind {
+        MidiControllerKind::PitchBend => 0.5,
+        MidiControllerKind::CC(_)
+        | MidiControllerKind::ChannelPressure
+        | MidiControllerKind::PolyPressure => 0.0,
+    }
+}
+
+fn evaluate_midi_controller_points(
+    points: &[MidiControllerPoint],
+    beat: f32,
+    default_value: f32,
+) -> f32 {
+    if points.is_empty() {
+        return default_value.clamp(0.0, 1.0);
+    }
+    let beat = beat.max(0.0);
+    if beat <= points[0].beat {
+        return points[0].value.clamp(0.0, 1.0);
+    }
+    let last = points.len() - 1;
+    if beat >= points[last].beat {
+        return points[last].value.clamp(0.0, 1.0);
+    }
+    for pair in points.windows(2) {
+        let a = &pair[0];
+        let b = &pair[1];
+        if beat >= a.beat && beat <= b.beat {
+            let span = (b.beat - a.beat).max(1.0e-6);
+            let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
+            return (a.value + (b.value - a.value) * t).clamp(0.0, 1.0);
+        }
+    }
+    default_value.clamp(0.0, 1.0)
+}
+
+fn midi_controller_kind_label(kind: MidiControllerKind) -> String {
+    match kind {
+        MidiControllerKind::CC(number) => format!("CC{}", number),
+        MidiControllerKind::PitchBend => "PB".to_string(),
+        MidiControllerKind::ChannelPressure => "AT".to_string(),
+        MidiControllerKind::PolyPressure => "PAT".to_string(),
+    }
 }

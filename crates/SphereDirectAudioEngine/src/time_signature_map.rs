@@ -66,7 +66,7 @@ pub fn default_time_signature_grouping(numerator: u16, denominator: u16) -> Vec<
 fn normalize_grouping(numerator: u16, denominator: u16, grouping: &[u16]) -> Vec<u16> {
     let numerator = numerator.clamp(1, 64);
     if grouping.is_empty()
-        || grouping.iter().any(|&g| g == 0)
+        || grouping.contains(&0)
         || grouping.iter().map(|&g| g as u32).sum::<u32>() != numerator as u32
     {
         default_time_signature_grouping(numerator, denominator)
@@ -138,10 +138,7 @@ impl RuntimeTimeSignatureMapSnapshot {
 
         for (i, pt) in points.iter().enumerate() {
             let seg_start = pt.beat;
-            let seg_end = points
-                .get(i + 1)
-                .map(|p| p.beat)
-                .unwrap_or(f64::INFINITY);
+            let seg_end = points.get(i + 1).map(|p| p.beat).unwrap_or(f64::INFINITY);
             if beat + TS_BEAT_EPSILON < seg_start {
                 continue;
             }
@@ -177,10 +174,7 @@ impl RuntimeTimeSignatureMapSnapshot {
 
         for (i, pt) in points.iter().enumerate() {
             let seg_start = pt.beat;
-            let seg_end = points
-                .get(i + 1)
-                .map(|p| p.beat)
-                .unwrap_or(f64::INFINITY);
+            let seg_end = points.get(i + 1).map(|p| p.beat).unwrap_or(f64::INFINITY);
             let bpb = beats_per_bar_from_sig(pt.numerator, pt.denominator);
             let bars_in_seg = if seg_end.is_finite() {
                 ((seg_end - seg_start) / bpb).floor() as i64
@@ -278,20 +272,25 @@ impl RuntimeTimeSignatureMapSnapshot {
             self.points.clone()
         };
         for pt in &mut points {
-            pt.grouping =
-                normalize_grouping(pt.numerator, pt.denominator, &pt.grouping);
+            pt.grouping = normalize_grouping(pt.numerator, pt.denominator, &pt.grouping);
         }
-        points.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+        points.sort_by(|a, b| {
+            a.beat
+                .partial_cmp(&b.beat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         points
     }
 
     fn sort(&mut self) {
         for pt in &mut self.points {
-            pt.grouping =
-                normalize_grouping(pt.numerator, pt.denominator, &pt.grouping);
+            pt.grouping = normalize_grouping(pt.numerator, pt.denominator, &pt.grouping);
         }
-        self.points
-            .sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+        self.points.sort_by(|a, b| {
+            a.beat
+                .partial_cmp(&b.beat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 }
 

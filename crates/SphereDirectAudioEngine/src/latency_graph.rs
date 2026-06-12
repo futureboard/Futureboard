@@ -306,6 +306,7 @@ mod tests {
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
+            output_track_index: None,
             inserts: Vec::new(),
             sends,
             automation_lanes: Vec::new(),
@@ -333,6 +334,7 @@ mod tests {
         RuntimeSend {
             id: id.to_string(),
             return_track_id: target.to_string(),
+            return_track_index: None,
             level: 1.0,
             enabled: true,
             pre_fader: false,

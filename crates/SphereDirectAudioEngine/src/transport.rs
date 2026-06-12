@@ -9,6 +9,12 @@ use crate::engine::SharedState;
 use crate::runtime::RuntimeProject;
 use crate::tempo_map::TempoMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopBounds {
+    pub start: u64,
+    pub end: u64,
+}
+
 /// Immutable transport state for UI polling and diagnostics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTransportSnapshot {
@@ -74,6 +80,83 @@ pub fn apply_loop_wrap(
         runtime.reset_midi_playback(start);
         let _ = sample_rate;
     }
+}
+
+#[inline]
+pub fn active_loop_bounds(shared: &SharedState) -> Option<LoopBounds> {
+    if !shared.loop_enabled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let start = shared.loop_start_samples.load(Ordering::Relaxed);
+    let end = shared.loop_end_samples.load(Ordering::Relaxed);
+    (end > start).then_some(LoopBounds { start, end })
+}
+
+#[inline]
+pub fn normalize_loop_position(position: u64, loop_bounds: Option<LoopBounds>) -> u64 {
+    let Some(bounds) = loop_bounds else {
+        return position;
+    };
+    if position >= bounds.end {
+        bounds.start
+    } else {
+        position
+    }
+}
+
+#[inline]
+pub fn segment_frames_until_loop_wrap(
+    position: u64,
+    remaining_frames: u64,
+    loop_bounds: Option<LoopBounds>,
+) -> u64 {
+    if remaining_frames == 0 {
+        return 0;
+    }
+    let Some(bounds) = loop_bounds else {
+        return remaining_frames;
+    };
+    if position >= bounds.end {
+        return 1.min(remaining_frames);
+    }
+    let to_end = bounds.end.saturating_sub(position);
+    if to_end == 0 {
+        1.min(remaining_frames)
+    } else {
+        remaining_frames.min(to_end)
+    }
+}
+
+#[inline]
+pub fn advance_loop_position(
+    mut position: u64,
+    mut frames: u64,
+    loop_bounds: Option<LoopBounds>,
+) -> (u64, bool) {
+    let Some(bounds) = loop_bounds else {
+        return (position.saturating_add(frames), false);
+    };
+    let mut wrapped = false;
+    if position >= bounds.end {
+        position = bounds.start;
+        wrapped = true;
+    }
+    while frames > 0 {
+        let to_end = bounds.end.saturating_sub(position);
+        if to_end == 0 {
+            position = bounds.start;
+            wrapped = true;
+            continue;
+        }
+        if frames < to_end {
+            position = position.saturating_add(frames);
+            break;
+        }
+        frames -= to_end;
+        position = bounds.start;
+        wrapped = true;
+    }
+    (position, wrapped)
 }
 
 pub fn store_f64_bits(atomic: &std::sync::atomic::AtomicU64, value: f64) {

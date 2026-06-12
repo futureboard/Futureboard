@@ -957,6 +957,19 @@ impl Timeline {
         self.on_track_param_change = on_track_param_change;
     }
 
+    pub fn seek_to_beat(&mut self, beat: f32, cx: &mut Context<Self>) {
+        let snapped_sec = self
+            .state
+            .snap_time(beat.max(0.0) * self.state.seconds_per_beat());
+        self.state.transport.playhead_beats = snapped_sec / self.state.seconds_per_beat();
+        let beat = self.state.transport.playhead_beats;
+        self.state.recompute_effective_volumes(beat, "seek");
+        if let Some(cb) = self.on_seek_beats.as_ref() {
+            cb(beat, self.state.bpm);
+        }
+        cx.notify();
+    }
+
     fn max_scroll_offsets(&self, window: &Window) -> (f32, f32) {
         self.scroll_geometry(window).2
     }
@@ -1655,16 +1668,7 @@ impl Render for Timeline {
 
         let on_seek = cx.listener(|this, click_x: &f32, _window, cx| {
             let beats = this.state.x_to_beats(*click_x);
-            let snapped_sec = this.state.snap_time(beats * this.state.seconds_per_beat());
-            this.state.transport.playhead_beats = snapped_sec / this.state.seconds_per_beat();
-            // Preview Track Volume automation at the clicked beat immediately so
-            // the fader/inspector update even before the engine seek round-trips.
-            let beat = this.state.transport.playhead_beats;
-            this.state.recompute_effective_volumes(beat, "seek");
-            if let Some(cb) = this.on_seek_beats.as_ref() {
-                cb(this.state.transport.playhead_beats, this.state.bpm);
-            }
-            cx.notify();
+            this.seek_to_beat(beats, cx);
         });
 
         let on_select_tool = cx.listener(|this, tool: &TimelineTool, _window, cx| {

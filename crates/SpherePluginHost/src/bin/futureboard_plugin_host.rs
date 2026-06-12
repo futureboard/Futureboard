@@ -35,7 +35,10 @@ use sphere_plugin_host::plugin_host_preview::{
 };
 
 fn debug_enabled() -> bool {
-    std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+    // Cached: this is checked on the audio producer's per-block path, which
+    // must never take the std env lock.
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some())
 }
 
 /// Whether the **temporary** separate-CPAL preview output is allowed.
@@ -48,13 +51,17 @@ fn debug_enabled() -> bool {
 /// `FUTUREBOARD_PLUGIN_HOST_CPAL_PREVIEW=1` to opt into the legacy audition
 /// stream for manual testing only.
 fn debug_audio_out_enabled() -> bool {
-    std::env::var("FUTUREBOARD_PLUGIN_HOST_DEBUG_AUDIO_OUT")
-        .or_else(|_| std::env::var("FUTUREBOARD_PLUGIN_HOST_CPAL_PREVIEW"))
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
+    // Cached: checked on the audio producer's per-block path (see above).
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FUTUREBOARD_PLUGIN_HOST_DEBUG_AUDIO_OUT")
+            .or_else(|_| std::env::var("FUTUREBOARD_PLUGIN_HOST_CPAL_PREVIEW"))
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn log_host_audio_mode() {
@@ -275,7 +282,10 @@ fn service_audio_bridge(
         dsp.apply_shared_midi(plugin_instance_id, ev);
         midi_count += 1;
     }
-    if midi_count > 0 {
+    // stderr is a pipe to the parent process — writing it from the producer
+    // thread per block can stall block production if the parent is slow to
+    // drain it, so consume traces only exist under the debug flag.
+    if midi_count > 0 && debug_enabled() {
         eprintln!(
             "[plugin-host-midi-consume] seq={req} instance={plugin_instance_id} events={midi_count}"
         );
@@ -287,7 +297,7 @@ fn service_audio_bridge(
         dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value);
         param_count += 1;
     }
-    if param_count > 0 {
+    if param_count > 0 && debug_enabled() {
         eprintln!(
             "[plugin-host-param-consume] seq={req} instance={plugin_instance_id} params={param_count}"
         );
@@ -361,10 +371,12 @@ fn service_audio_bridge(
                 .store(latency as u32, Ordering::Relaxed);
         }
     }
-    // Throttled: at most one audible-output trace per ~256 blocks so the
-    // producer thread never floods stderr while sound is playing.
+    // Throttled and debug-gated: at most one audible-output trace per ~256
+    // blocks, and only when audio-out debugging is on — the producer thread
+    // must not write the parent's stderr pipe in normal operation.
     static VST3_PROCESS_LOG_BLOCKS: AtomicU64 = AtomicU64::new(0);
-    if (peak_l > 0.0001 || peak_r > 0.0001)
+    if debug_audio_out_enabled()
+        && (peak_l > 0.0001 || peak_r > 0.0001)
         && VST3_PROCESS_LOG_BLOCKS.fetch_add(1, Ordering::Relaxed) % 256 == 0
     {
         eprintln!(

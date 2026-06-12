@@ -13,6 +13,14 @@ use DAUx::plugin_bridge::{PluginBridgeSink, SharedPluginBridgeSink};
 
 use crate::audio_bridge::{BridgeKickEvent, SharedAudioRegion, SharedMidiEvent, MAX_BLOCK_FRAMES};
 
+/// `FUTUREBOARD_PLUGIN_BRIDGE_DEBUG=1` enables the ring-full drop traces.
+/// These pushes run on the engine's audio callback, so stderr is debug-only;
+/// drops always count into the shared region's `xrun_count` either way.
+fn bridge_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_BRIDGE_DEBUG").is_some())
+}
+
 /// Wraps the engine-side shared audio region as a realtime [`PluginBridgeSink`].
 pub struct SharedRegionSink {
     region: Arc<SharedAudioRegion>,
@@ -81,7 +89,8 @@ impl PluginBridgeSink for SharedRegionSink {
     }
 
     fn push_midi(&self, status: u8, data1: u8, data2: u8, sample_offset: u32) {
-        let ok = self.region.bridge().midi.try_push(SharedMidiEvent {
+        let bridge = self.region.bridge();
+        let ok = bridge.midi.try_push(SharedMidiEvent {
             sample_offset,
             status,
             data1,
@@ -89,16 +98,18 @@ impl PluginBridgeSink for SharedRegionSink {
             _pad: 0,
         });
         if !ok {
-            eprintln!(
-                "[plugin-dsp-midi] ring_full dropped status=0x{status:02X} pitch={data1} velocity={data2}"
-            );
+            bridge.xrun_count.fetch_add(1, Ordering::Relaxed);
+            if bridge_debug_enabled() {
+                eprintln!(
+                    "[plugin-dsp-midi] ring_full dropped status=0x{status:02X} pitch={data1} velocity={data2}"
+                );
+            }
         }
     }
 
     fn push_param(&self, param_id: u32, value: f32, sample_offset: u32) {
-        let ok = self
-            .region
-            .bridge()
+        let bridge = self.region.bridge();
+        let ok = bridge
             .params
             .try_push(crate::audio_bridge::SharedParamEvent {
                 sample_offset,
@@ -107,7 +118,10 @@ impl PluginBridgeSink for SharedRegionSink {
                 _pad: 0,
             });
         if !ok {
-            eprintln!("[plugin-param] ring_full dropped param_id={param_id} value={value:.4}");
+            bridge.xrun_count.fetch_add(1, Ordering::Relaxed);
+            if bridge_debug_enabled() {
+                eprintln!("[plugin-param] ring_full dropped param_id={param_id} value={value:.4}");
+            }
         }
     }
 

@@ -1,0 +1,71 @@
+//! Offline arrangement export.
+//!
+//! This module renders the audible arrangement *offline* (no audio device, no
+//! realtime callback) by driving the same render kernel the cpal callback uses
+//! — [`render_project_block_interleaved`](crate::engine::render_project_block_interleaved)
+//! and [`schedule_midi_render_block`](crate::engine::schedule_midi_render_block)
+//! — over a plain [`EngineProjectSnapshot`](crate::types::EngineProjectSnapshot).
+//!
+//! Boundaries (see CLAUDE.md): the renderer here produces interleaved PCM
+//! frames; `sphere_encoder` turns them into a container; the UI/layout builds
+//! the snapshot + request. No FFmpeg, no external processes, no realtime device.
+//!
+//! Plugin support: in-process inserts built by `RuntimeProject::build` render
+//! offline. Out-of-process *bridged* plugins are not driven offline (no host
+//! process running) and are effectively bypassed — reported, never silently
+//! claimed as rendered.
+
+mod exporter;
+mod offline_renderer;
+mod render_progress;
+mod render_request;
+
+pub use exporter::{
+    export_arrangement, partial_path_for, ArrangementExportRequest, ArrangementExportSummary,
+};
+pub use offline_renderer::{render_offline, OfflineRenderSummary};
+pub use render_progress::{ExportCancelToken, ExportProgress, ExportStage};
+pub use render_request::{
+    arrangement_bounds_samples, ExportNormalizeMode, ExportTailMode, OfflineRenderRequest,
+};
+
+/// Errors surfaced by the offline export pipeline. Never panics across the
+/// render/encode loop; every failure is one of these.
+#[derive(Debug)]
+pub enum ExportError {
+    /// The runtime graph could not be built from the snapshot.
+    Build(String),
+    /// The encoder rejected the spec or failed to write.
+    Encode(sphere_encoder::EncodeError),
+    Io(std::io::Error),
+    /// The user cancelled; partial output has been removed.
+    Cancelled,
+    /// Request/settings were invalid.
+    Settings(String),
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Build(message) => write!(f, "render graph build failed: {message}"),
+            Self::Encode(error) => write!(f, "encode failed: {error}"),
+            Self::Io(error) => write!(f, "io error: {error}"),
+            Self::Cancelled => write!(f, "export cancelled"),
+            Self::Settings(message) => write!(f, "invalid export settings: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for ExportError {}
+
+impl From<std::io::Error> for ExportError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<sphere_encoder::EncodeError> for ExportError {
+    fn from(value: sphere_encoder::EncodeError) -> Self {
+        Self::Encode(value)
+    }
+}

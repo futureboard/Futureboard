@@ -12,10 +12,11 @@ use gpui::{
 };
 
 use crate::components::mixer_panel::{
-    clamp_mixer_rack_split_px, mixer_panel, MixerCallbacks, MixerSplit, MixerSplitAction,
+    clamp_mixer_section_height_px, mixer_panel, MixerCallbacks, MixerSplit, MixerSplitAction,
+    MixerSplitTarget,
 };
 use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
-use crate::components::title_bar::external_window_titlebar;
+use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::Colors;
 
 pub const MIXER_WINDOW_WIDTH: f32 = 1180.0;
@@ -30,10 +31,12 @@ pub struct MixerSnapshot {
     pub master: MasterBusState,
     pub selected_track_id: Option<String>,
     pub mixer_scroll_x: f32,
-    /// Shared Upper Rack height (clamped by the owner).
-    pub mixer_rack_split_px: f32,
-    /// Whether the splitter is mid-drag (drives the active-handle highlight).
-    pub mixer_rack_is_resizing: bool,
+    /// Shared insert viewport height (clamped by the owner).
+    pub mixer_insert_section_px: f32,
+    /// Shared send viewport height (clamped by the owner).
+    pub mixer_send_section_px: f32,
+    /// Active splitter target while dragging (drives active-handle highlight).
+    pub mixer_split_active_target: Option<MixerSplitTarget>,
 }
 
 pub struct MixerWindow {
@@ -80,22 +83,26 @@ impl MixerWindow {
 impl Render for MixerWindow {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let viewport_width: f32 = window.bounds().size.width.into();
+        let viewport_height: f32 = window.bounds().size.height.into();
         let MixerSnapshot {
             tracks,
             master,
             selected_track_id,
             mixer_scroll_x,
-            mixer_rack_split_px,
-            mixer_rack_is_resizing,
+            mixer_insert_section_px,
+            mixer_send_section_px,
+            mixer_split_active_target,
         } = self.snapshot.clone();
         let mixer_callbacks = self.callbacks.clone();
         let on_mixer_scroll = self.on_mixer_scroll.clone();
         let on_mixer_split = self.on_mixer_split.clone();
         let on_close = self.on_close.clone();
         let mixer_viewport_width = (viewport_width - 90.0).max(100.0);
+        let mixer_viewport_height = (viewport_height - TITLEBAR_HEIGHT).max(0.0);
         let mixer_split = MixerSplit {
-            upper_px: clamp_mixer_rack_split_px(mixer_rack_split_px),
-            is_resizing: mixer_rack_is_resizing,
+            insert_px: clamp_mixer_section_height_px(mixer_insert_section_px),
+            send_px: clamp_mixer_section_height_px(mixer_send_section_px),
+            active_target: mixer_split_active_target,
             on_action: on_mixer_split,
         };
 
@@ -129,6 +136,7 @@ impl Render for MixerWindow {
                         mixer_callbacks,
                         mixer_scroll_x,
                         mixer_viewport_width,
+                        mixer_viewport_height,
                         on_mixer_scroll,
                         mixer_split,
                     )),

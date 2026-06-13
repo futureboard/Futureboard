@@ -1,7 +1,8 @@
 use gpui::{Context, Entity, Window, WindowHandle};
 
 use crate::components::mixer_panel::{
-    clamp_mixer_rack_split_px, MixerCallbacks, MixerSplitAction, MIXER_RACK_SPLIT_DEFAULT_PX,
+    clamp_mixer_section_height_px, MixerCallbacks, MixerSplitAction, MixerSplitTarget,
+    MIXER_INSERT_SECTION_DEFAULT_PX, MIXER_SEND_SECTION_DEFAULT_PX,
 };
 use crate::components::timeline::timeline_state::{self, TrackState};
 use crate::components::{external_mixer_debug, MixerSnapshot};
@@ -20,8 +21,9 @@ impl StudioLayout {
             master: timeline.state.master.clone(),
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
             mixer_scroll_x: self.mixer_scroll_x,
-            mixer_rack_split_px: clamp_mixer_rack_split_px(self.mixer_rack_split_px),
-            mixer_rack_is_resizing: self.mixer_rack_is_resizing,
+            mixer_insert_section_px: clamp_mixer_section_height_px(self.mixer_insert_section_px),
+            mixer_send_section_px: clamp_mixer_section_height_px(self.mixer_send_section_px),
+            mixer_split_active_target: self.mixer_split_active_target,
         }
     }
 
@@ -63,13 +65,17 @@ impl StudioLayout {
         }
     }
 
-    /// Current shared Upper Rack height, clamped to the supported range.
-    pub(crate) fn mixer_rack_split_px(&self) -> f32 {
-        clamp_mixer_rack_split_px(self.mixer_rack_split_px)
+    /// Current shared insert/send viewport heights, clamped to the supported range.
+    pub(crate) fn mixer_insert_section_px(&self) -> f32 {
+        clamp_mixer_section_height_px(self.mixer_insert_section_px)
     }
 
-    pub(crate) fn mixer_rack_is_resizing(&self) -> bool {
-        self.mixer_rack_is_resizing
+    pub(crate) fn mixer_send_section_px(&self) -> f32 {
+        clamp_mixer_section_height_px(self.mixer_send_section_px)
+    }
+
+    pub(crate) fn mixer_split_active_target(&self) -> Option<MixerSplitTarget> {
+        self.mixer_split_active_target
     }
 
     /// Apply a splitter intent from any channel-strip handle. Shared across all
@@ -81,28 +87,56 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         match action {
-            MixerSplitAction::ResizeStart(y) => {
-                self.mixer_rack_resize_start_y = y;
-                self.mixer_rack_resize_start_px = clamp_mixer_rack_split_px(self.mixer_rack_split_px);
-                self.mixer_rack_is_resizing = true;
+            MixerSplitAction::ResizeStart(target, y) => {
+                self.mixer_split_resize_start_y = y;
+                self.mixer_split_resize_start_insert_px =
+                    clamp_mixer_section_height_px(self.mixer_insert_section_px);
+                self.mixer_split_resize_start_send_px =
+                    clamp_mixer_section_height_px(self.mixer_send_section_px);
+                self.mixer_split_active_target = Some(target);
             }
             MixerSplitAction::ResizeMove(y) => {
-                let delta = y - self.mixer_rack_resize_start_y;
-                let new_px = clamp_mixer_rack_split_px(self.mixer_rack_resize_start_px + delta);
-                if (new_px - self.mixer_rack_split_px).abs() <= 0.25 {
+                let Some(target) = self.mixer_split_active_target else {
                     return;
+                };
+                let delta = y - self.mixer_split_resize_start_y;
+                match target {
+                    MixerSplitTarget::InsertSend => {
+                        let new_px = clamp_mixer_section_height_px(
+                            self.mixer_split_resize_start_insert_px + delta,
+                        );
+                        if (new_px - self.mixer_insert_section_px).abs() <= 0.25 {
+                            return;
+                        }
+                        self.mixer_insert_section_px = new_px;
+                    }
+                    MixerSplitTarget::SendFader => {
+                        let new_px = clamp_mixer_section_height_px(
+                            self.mixer_split_resize_start_send_px + delta,
+                        );
+                        if (new_px - self.mixer_send_section_px).abs() <= 0.25 {
+                            return;
+                        }
+                        self.mixer_send_section_px = new_px;
+                    }
                 }
-                self.mixer_rack_split_px = new_px;
             }
             MixerSplitAction::ResizeEnd => {
-                if !self.mixer_rack_is_resizing {
+                if self.mixer_split_active_target.is_none() {
                     return;
                 }
-                self.mixer_rack_is_resizing = false;
+                self.mixer_split_active_target = None;
             }
-            MixerSplitAction::Reset => {
-                self.mixer_rack_split_px = MIXER_RACK_SPLIT_DEFAULT_PX;
-                self.mixer_rack_is_resizing = false;
+            MixerSplitAction::Reset(target) => {
+                match target {
+                    MixerSplitTarget::InsertSend => {
+                        self.mixer_insert_section_px = MIXER_INSERT_SECTION_DEFAULT_PX;
+                    }
+                    MixerSplitTarget::SendFader => {
+                        self.mixer_send_section_px = MIXER_SEND_SECTION_DEFAULT_PX;
+                    }
+                }
+                self.mixer_split_active_target = None;
             }
         }
         self.push_mixer_snapshot_to_window(cx);

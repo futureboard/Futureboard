@@ -257,6 +257,7 @@ pub fn bottom_panel(
 ) -> impl IntoElement {
     let on_tab_click = std::sync::Arc::new(on_tab_click);
     let mut editor_content = editor_content;
+    let mixer_viewport_height = (panel_state.height_px - 28.0).max(0.0);
     div()
         .flex()
         .flex_col()
@@ -337,6 +338,7 @@ pub fn bottom_panel(
                         mixer_callbacks,
                         mixer_scroll_x,
                         mixer_viewport_width,
+                        mixer_viewport_height,
                         on_mixer_scroll,
                         mixer_split,
                     )

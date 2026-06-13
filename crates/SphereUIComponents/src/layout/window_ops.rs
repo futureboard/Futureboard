@@ -472,14 +472,12 @@ impl StudioLayout {
         });
         let split_owner = cx.entity().clone();
         let on_mixer_split: std::sync::Arc<
-            dyn Fn(
-                    crate::components::mixer_panel::MixerSplitAction,
-                    &mut Window,
-                    &mut gpui::App,
-                ) + Send
+            dyn Fn(crate::components::mixer_panel::MixerSplitAction, &mut Window, &mut gpui::App)
+                + Send
                 + Sync,
         > = std::sync::Arc::new(move |action, _w, cx| {
-            let _ = split_owner.update(cx, |layout, cx| layout.apply_mixer_split_action(action, cx));
+            let _ =
+                split_owner.update(cx, |layout, cx| layout.apply_mixer_split_action(action, cx));
         });
 
         match open_mixer_window(

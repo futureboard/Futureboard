@@ -19,8 +19,9 @@
 //! * The master block is pinned to the right edge and has its own bordered
 //!   gutter so the empty middle (when track count is small) reads as
 //!   intentional, not as floating dead space.
-//! * Strip internals are a vertical flex with explicit per-section heights;
-//!   only the fader area grows to fill remaining height.
+//! * Strip internals are a vertical stack with explicit shared insert/send
+//!   viewport heights; only the lower pan/fader area grows to fill remaining
+//!   height.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -40,47 +41,69 @@ use crate::theme::Colors;
 
 // ── Section dimensions ─────────────────────────────────────────────────────
 const STRIP_WIDTH: f32 = 88.0;
-/// Minimum height for a channel strip. Fixed sections sum to 236; below this
-/// the fader area still renders (it uses `flex_1` and `h_full` internals so
-/// the rail/meter/scale shrink with the slot) but the rail becomes hard to
-/// read. The scroll area shows a vertical scrollbar below this threshold.
-/// Sections: header 40 + inserts 44 + sends 44 + pan 60 + buttons 24 +
-/// footer 22 = 234 + at least ~86 for the fader cluster.
+/// Minimum height for a channel strip. Below this the mixer should scroll/clip
+/// as a whole rather than compressing the pan/fader controls into unusability.
 const STRIP_MIN_HEIGHT: f32 = 320.0;
 
 const SEC_HEADER_H: f32 = 40.0;
-const SEC_INSERTS_H: f32 = 44.0;
-const SEC_SENDS_H: f32 = 44.0;
+const SEC_SECTION_HEADER_H: f32 = 20.0;
 const SEC_PAN_H: f32 = 60.0;
 const SEC_BUTTONS_H: f32 = 24.0;
 const SEC_FOOTER_H: f32 = 22.0;
+const SEC_FADER_MIN_H: f32 = 66.0;
+const LOWER_CONTROL_MIN_H: f32 = SEC_PAN_H + SEC_FADER_MIN_H + SEC_BUTTONS_H;
 
-// ── Vertical split (Upper Rack ↔ Lower Control) ─────────────────────────────
-// A horizontal splitter sits between the inserts/sends rack and the
-// pan/fader/meter cluster. The rack height is a *shared* pixel value across
-// every strip (a mixer keeps its insert/send rows aligned), driven by one
-// drag handler in `StudioLayout` and mirrored into the floating window via
-// `MixerSnapshot`. The lower control takes the remaining height (`flex_1`),
-// so the fader scales with the panel/window height as before.
-//
-// We store px (not a ratio against measured height) because this is a
-// stateless render fn with no access to the post-layout strip height. The px
-// is clamped every frame, so it stays bounded and predictable; the rack clips
-// + scrolls internally when its content is taller than the allotted height.
+// ── Vertical mixer section resizing ─────────────────────────────────────────
+// Inserts and sends each own a fixed-height clipped viewport with their own
+// vertical scrolling. Heights are shared across all strips so rows stay aligned
+// across the mixer. Splitter actions are routed to `StudioLayout`, which owns
+// the shared values and mirrors them into the detached mixer window snapshot.
 /// Visual + hitbox height of the splitter handle.
 const SEC_SPLITTER_H: f32 = 6.0;
-/// Minimum allotted height for the Upper Rack.
-const UPPER_RACK_MIN_H: f32 = 88.0;
-/// Maximum allotted height for the Upper Rack — keeps the lower control usable.
-const UPPER_RACK_MAX_H: f32 = 280.0;
-/// Default Upper Rack height (≈ inserts header + 2–3 chips + sends header + 1
-/// chip). Used for the initial value and the double-click reset.
-pub const MIXER_RACK_SPLIT_DEFAULT_PX: f32 = 140.0;
+const SECTION_VIEWPORT_MIN_H: f32 = 42.0;
+const SECTION_VIEWPORT_MAX_H: f32 = 180.0;
+pub const MIXER_INSERT_SECTION_DEFAULT_PX: f32 = 72.0;
+pub const MIXER_SEND_SECTION_DEFAULT_PX: f32 = 54.0;
 
-/// Clamp a desired Upper Rack height into the supported range. Called both by
-/// the owner (`StudioLayout`) and defensively at render time.
-pub fn clamp_mixer_rack_split_px(value: f32) -> f32 {
-    value.clamp(UPPER_RACK_MIN_H, UPPER_RACK_MAX_H)
+/// Clamp one insert/send section height into the static supported range.
+pub fn clamp_mixer_section_height_px(value: f32) -> f32 {
+    value.clamp(SECTION_VIEWPORT_MIN_H, SECTION_VIEWPORT_MAX_H)
+}
+
+/// Clamp both section heights while preserving a usable lower pan/fader area
+/// for the current strip allocation.
+pub fn clamp_mixer_section_heights_for_strip(
+    insert_px: f32,
+    send_px: f32,
+    strip_available_px: f32,
+) -> (f32, f32) {
+    let mut insert_px = clamp_mixer_section_height_px(insert_px);
+    let mut send_px = clamp_mixer_section_height_px(send_px);
+    let fixed_without_sections =
+        2.0 + SEC_HEADER_H + (SEC_SPLITTER_H * 2.0) + LOWER_CONTROL_MIN_H + SEC_FOOTER_H;
+    let max_total = (strip_available_px - fixed_without_sections).max(SECTION_VIEWPORT_MIN_H * 2.0);
+
+    let total = insert_px + send_px;
+    if total > max_total {
+        let overflow = total - max_total;
+        let shrinkable_insert = insert_px - SECTION_VIEWPORT_MIN_H;
+        let shrinkable_send = send_px - SECTION_VIEWPORT_MIN_H;
+        let shrinkable_total = shrinkable_insert + shrinkable_send;
+        if shrinkable_total > 0.0 {
+            insert_px -= overflow * (shrinkable_insert / shrinkable_total);
+            send_px -= overflow * (shrinkable_send / shrinkable_total);
+        }
+        insert_px = clamp_mixer_section_height_px(insert_px);
+        send_px = clamp_mixer_section_height_px(send_px);
+    }
+
+    (insert_px, send_px)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MixerSplitTarget {
+    InsertSend,
+    SendFader,
 }
 
 /// Splitter drag/reset intents emitted by the channel-strip splitter handle.
@@ -88,22 +111,23 @@ pub fn clamp_mixer_rack_split_px(value: f32) -> f32 {
 #[derive(Clone, Copy, Debug)]
 pub enum MixerSplitAction {
     /// Pointer pressed on the splitter — record the drag anchor.
-    ResizeStart(f32),
+    ResizeStart(MixerSplitTarget, f32),
     /// Pointer moved while dragging — recompute the shared rack height.
     ResizeMove(f32),
     /// Pointer released — commit the drag.
     ResizeEnd,
-    /// Double-click — reset to [`MIXER_RACK_SPLIT_DEFAULT_PX`].
-    Reset,
+    /// Double-click — reset the targeted section to its default height.
+    Reset(MixerSplitTarget),
 }
 
-/// Shared split layout passed into the mixer. `upper_px` is the current rack
-/// height (already clamped by the owner); `on_action` routes splitter intents
-/// back to the owner so all strips resize together.
+/// Shared split layout passed into the mixer. Insert/send heights are already
+/// clamped by the owner; `on_action` routes splitter intents back to the owner
+/// so all strips resize together.
 #[derive(Clone)]
 pub struct MixerSplit {
-    pub upper_px: f32,
-    pub is_resizing: bool,
+    pub insert_px: f32,
+    pub send_px: f32,
+    pub active_target: Option<MixerSplitTarget>,
     pub on_action: std::sync::Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + 'static>,
 }
 
@@ -111,8 +135,9 @@ impl MixerSplit {
     /// Inert split for fallback UI (no live owner to route drags to).
     pub fn inert() -> Self {
         Self {
-            upper_px: MIXER_RACK_SPLIT_DEFAULT_PX,
-            is_resizing: false,
+            insert_px: MIXER_INSERT_SECTION_DEFAULT_PX,
+            send_px: MIXER_SEND_SECTION_DEFAULT_PX,
+            active_target: None,
             on_action: std::sync::Arc::new(|_, _, _| {}),
         }
     }
@@ -329,9 +354,10 @@ fn section_header(
         .flex_row()
         .items_center()
         .justify_between()
+        .flex_none()
         .gap(px(3.0))
+        .h(px(SEC_SECTION_HEADER_H))
         .px(px(5.0))
-        .py(px(3.0))
         .child(
             div()
                 .flex()
@@ -360,6 +386,7 @@ fn section_header(
 fn empty_slot() -> impl IntoElement {
     div()
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
         .mx(px(4.0))
@@ -579,6 +606,7 @@ fn insert_chip(
             id_owned
         )))
         .flex()
+        .flex_none()
         .flex_row()
         .items_center()
         .gap(px(3.0))
@@ -691,6 +719,7 @@ fn add_insert_button(
             track_id_owned
         )))
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
         .gap(px(3.0))
@@ -731,6 +760,7 @@ fn inserts_section(
     track: &TrackState,
     _index: usize,
     callbacks: &MixerCallbacks,
+    height_px: f32,
 ) -> impl IntoElement {
     let effect_start = if track.track_type == TrackType::Instrument {
         1
@@ -740,7 +770,7 @@ fn inserts_section(
     let used = track.inserts.len();
     let at_max = used >= MAX_INSERT_SLOTS;
 
-    let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
+    let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
     for (offset, slot) in track.effect_inserts().iter().enumerate() {
         let insert_index = effect_start + offset;
         chips = chips.child(insert_chip(&track.id, insert_index, slot, callbacks));
@@ -770,25 +800,35 @@ fn inserts_section(
     div()
         .flex()
         .flex_col()
-        // `min_h` (not fixed `h`) so the trailing "+ Add Insert" slot is never
-        // clipped once a plugin chip is present — the fader area (flex_1)
-        // absorbs the difference. This was the root cause of the missing slot.
-        .min_h(px(SEC_INSERTS_H))
+        .flex_none()
+        .h(px(height_px))
+        .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .child(section_header("INSERTS", track.color, header_plus))
-        .child(chips)
+        .child(
+            div()
+                .id(gpui::SharedString::from(format!(
+                    "insert-slot-scroll-{}",
+                    track.id
+                )))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(chips),
+        )
 }
 
 fn master_inserts_section(
     accent: gpui::Rgba,
     master: &MasterBusState,
     callbacks: &MixerCallbacks,
+    height_px: f32,
 ) -> impl IntoElement {
     let used = master.inserts.len();
     let at_max = used >= MAX_INSERT_SLOTS;
 
-    let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
+    let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
     for (insert_index, slot) in master.inserts.iter().enumerate() {
         chips = chips.child(insert_chip(MASTER_TRACK_ID, insert_index, slot, callbacks));
     }
@@ -812,11 +852,20 @@ fn master_inserts_section(
     div()
         .flex()
         .flex_col()
-        .min_h(px(SEC_INSERTS_H))
+        .flex_none()
+        .h(px(height_px))
+        .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .child(section_header("INSERTS", accent, header_plus))
-        .child(chips)
+        .child(
+            div()
+                .id("insert-slot-scroll-master")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(chips),
+        )
 }
 
 fn send_chip(
@@ -835,6 +884,7 @@ fn send_chip(
     div()
         .id(gpui::SharedString::from(format!("send-chip-{}", send.id)))
         .flex()
+        .flex_none()
         .flex_row()
         .items_center()
         .gap(px(3.0))
@@ -870,6 +920,7 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
             track_id_owned
         )))
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
         .gap(px(3.0))
@@ -908,11 +959,12 @@ fn sends_section(
     track: &TrackState,
     all_tracks: &[TrackState],
     callbacks: &MixerCallbacks,
+    height_px: f32,
 ) -> impl IntoElement {
     // Routing tracks (bus/return) don't themselves carry an aux-send rack in
     // this slice — they are send *targets*. Show an empty placeholder.
     let is_routing = track.track_type.is_routing();
-    let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
+    let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
     if is_routing {
         chips = chips.child(empty_slot());
     } else {
@@ -932,11 +984,23 @@ fn sends_section(
     div()
         .flex()
         .flex_col()
-        .h(px(SEC_SENDS_H))
+        .flex_none()
+        .h(px(height_px))
+        .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .child(section_header("SENDS", track.color, None))
-        .child(chips)
+        .child(
+            div()
+                .id(gpui::SharedString::from(format!(
+                    "send-slot-scroll-{}",
+                    track.id
+                )))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(chips),
+        )
 }
 
 fn pan_section(
@@ -1016,7 +1080,7 @@ fn fader_area(
         .flex()
         .flex_col()
         .flex_1()
-        .min_h_0()
+        .min_h(px(SEC_FADER_MIN_H))
         .items_center()
         .w_full()
         .px(px(4.0))
@@ -1121,15 +1185,19 @@ fn strip_footer(name: &str) -> impl IntoElement {
 
 // ─── Vertical split handle ───────────────────────────────────────────────────
 
-/// Compact horizontal splitter between the Upper Rack and Lower Control. 6px
-/// hitbox with a short centered grip line; hover/active use theme tokens (no
-/// web-style chunky handle). `id_num` namespaces the GPUI element id per strip
-/// so drag/click state never bleeds between strips. The drag uses the same
+/// Compact horizontal splitter between mixer vertical sections. 6px hitbox
+/// with a short centered grip line; hover/active use theme tokens (no web-style
+/// chunky handle). `id_num` namespaces the GPUI element id per strip so
+/// drag/click state never bleeds between strips. The drag uses the same
 /// `on_drag` + ancestor `on_drag_move` capture pattern as the bottom panel.
-fn vertical_split_handle(id_num: usize, split: &MixerSplit) -> impl IntoElement {
+fn vertical_split_handle(
+    id_num: usize,
+    target: MixerSplitTarget,
+    split: &MixerSplit,
+) -> impl IntoElement {
     let on_down = split.on_action.clone();
     let on_dbl = split.on_action.clone();
-    let is_resizing = split.is_resizing;
+    let is_resizing = split.active_target == Some(target);
 
     let grip = if is_resizing {
         Colors::accent_primary()
@@ -1138,7 +1206,13 @@ fn vertical_split_handle(id_num: usize, split: &MixerSplit) -> impl IntoElement 
     };
 
     let mut handle = div()
-        .id(("mix-split", id_num))
+        .id((
+            match target {
+                MixerSplitTarget::InsertSend => "mix-split-insert-send",
+                MixerSplitTarget::SendFader => "mix-split-send-fader",
+            },
+            id_num,
+        ))
         .flex()
         .flex_none()
         .items_center()
@@ -1149,19 +1223,16 @@ fn vertical_split_handle(id_num: usize, split: &MixerSplit) -> impl IntoElement 
         .border_color(Colors::divider())
         .cursor(gpui::CursorStyle::ResizeUpDown)
         .child(div().w(px(20.0)).h(px(1.0)).rounded_full().bg(grip))
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            move |e: &MouseDownEvent, w, cx| {
-                let y: f32 = e.position.y.into();
-                on_down(MixerSplitAction::ResizeStart(y), w, cx);
-            },
-        )
+        .on_mouse_down(gpui::MouseButton::Left, move |e: &MouseDownEvent, w, cx| {
+            let y: f32 = e.position.y.into();
+            on_down(MixerSplitAction::ResizeStart(target, y), w, cx);
+        })
         .on_drag(MixerSplitDrag, |_drag, _offset, _window, cx| {
             cx.new(|_| MixerSplitDrag)
         })
         .on_click(move |e: &ClickEvent, w, cx| {
             if e.click_count() >= 2 {
-                on_dbl(MixerSplitAction::Reset, w, cx);
+                on_dbl(MixerSplitAction::Reset(target), w, cx);
             }
         })
         .occlude();
@@ -1183,6 +1254,7 @@ fn channel_strip(
     is_selected: bool,
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
+    strip_available_px: f32,
 ) -> impl IntoElement {
     let id_num = {
         use std::hash::{Hash, Hasher};
@@ -1212,6 +1284,11 @@ fn channel_strip(
         };
     let context_id = track.id.clone();
     let on_context = callbacks.on_context_menu.clone();
+    let (insert_h, send_h) = clamp_mixer_section_heights_for_strip(
+        split.insert_px,
+        split.send_px,
+        strip_available_px.max(STRIP_MIN_HEIGHT),
+    );
 
     div()
         .flex()
@@ -1220,6 +1297,7 @@ fn channel_strip(
         .w(px(STRIP_WIDTH))
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
+        .overflow_hidden()
         .bg(strip_bg)
         .border_r(px(1.0))
         .border_color(border_col)
@@ -1238,21 +1316,18 @@ fn channel_strip(
         // Top accent line
         .child(div().w_full().h(px(2.0)).bg(track.color))
         .child(strip_header(track, index))
-        // ── Upper Rack — inserts + sends, fixed (shared) height, clipped and
-        // scrolled internally so tall chains never leak into the fader area.
-        .child(
-            div()
-                .id(("mix-upper-rack", id_num))
-                .flex()
-                .flex_col()
-                .flex_none()
-                .w_full()
-                .h(px(clamp_mixer_rack_split_px(split.upper_px)))
-                .overflow_y_scroll()
-                .child(inserts_section(track, index, callbacks))
-                .child(sends_section(track, all_tracks, callbacks)),
-        )
-        .child(vertical_split_handle(id_num, split))
+        .child(inserts_section(track, index, callbacks, insert_h))
+        .child(vertical_split_handle(
+            id_num,
+            MixerSplitTarget::InsertSend,
+            split,
+        ))
+        .child(sends_section(track, all_tracks, callbacks, send_h))
+        .child(vertical_split_handle(
+            id_num,
+            MixerSplitTarget::SendFader,
+            split,
+        ))
         // ── Lower Control — pan / fader / meter / M·S·R·I. Takes the remaining
         // height; the fader area is the flex_1 child so it absorbs growth and
         // shrinks first when space is tight (pan + buttons stay fixed).
@@ -1261,7 +1336,8 @@ fn channel_strip(
                 .flex()
                 .flex_col()
                 .flex_1()
-                .min_h_0()
+                .min_h(px(LOWER_CONTROL_MIN_H))
+                .overflow_hidden()
                 .w_full()
                 .child(pan_section(track, callbacks, is_selected))
                 .child(fader_area(track, callbacks, is_selected))
@@ -1278,6 +1354,7 @@ fn master_strip(
     on_master_vol_change: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
+    strip_available_px: f32,
 ) -> impl IntoElement {
     // Fixed element-id namespace so the master rack scroll/splitter state never
     // collides with a hashed track id.
@@ -1286,6 +1363,11 @@ fn master_strip(
     let on_change = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
         on_master_vol_change(v, w, cx);
     };
+    let (insert_h, send_h) = clamp_mixer_section_heights_for_strip(
+        split.insert_px,
+        split.send_px,
+        strip_available_px.max(STRIP_MIN_HEIGHT),
+    );
 
     div()
         .flex()
@@ -1294,6 +1376,7 @@ fn master_strip(
         .w(px(STRIP_WIDTH))
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
+        .overflow_hidden()
         .bg(Colors::master_strip_bg())
         .border_l(px(1.0))
         .border_color(Colors::master_strip_border())
@@ -1330,33 +1413,44 @@ fn master_strip(
                         ),
                 ),
         )
-        // ── Upper Rack — master inserts + a sends-sized spacer so the rack
-        // height stays aligned with the channel strips.
+        .child(master_inserts_section(accent, master, callbacks, insert_h))
+        .child(vertical_split_handle(
+            id_num,
+            MixerSplitTarget::InsertSend,
+            split,
+        ))
         .child(
             div()
-                .id(("mix-upper-rack", id_num))
                 .flex()
                 .flex_col()
                 .flex_none()
-                .w_full()
-                .h(px(clamp_mixer_rack_split_px(split.upper_px)))
-                .overflow_y_scroll()
-                .child(master_inserts_section(accent, master, callbacks))
+                .h(px(send_h))
+                .overflow_hidden()
+                .border_b(px(1.0))
+                .border_color(Colors::divider())
+                .child(section_header("SENDS", accent, None))
                 .child(
                     div()
-                        .h(px(SEC_SENDS_H))
-                        .border_b(px(1.0))
-                        .border_color(Colors::divider()),
+                        .id("send-slot-scroll-master")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(empty_slot()),
                 ),
         )
-        .child(vertical_split_handle(id_num, split))
+        .child(vertical_split_handle(
+            id_num,
+            MixerSplitTarget::SendFader,
+            split,
+        ))
         // ── Lower Control — STEREO/OUT row, fader cluster, OUT button.
         .child(
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
-                .min_h_0()
+                .min_h(px(LOWER_CONTROL_MIN_H))
+                .overflow_hidden()
                 .w_full()
                 // Master skips pan; show the level pill in this row instead so
                 // the overall vertical rhythm matches a normal strip.
@@ -1399,7 +1493,7 @@ fn master_strip(
                         .flex()
                         .flex_col()
                         .flex_1()
-                        .min_h_0()
+                        .min_h(px(SEC_FADER_MIN_H))
                         .items_center()
                         .w_full()
                         .px(px(4.0))
@@ -1508,6 +1602,8 @@ pub fn mixer_panel(
     scroll_x: f32,
     // Width of the scrollable channel area in pixels (for computing visibility).
     viewport_width: f32,
+    // Height of this mixer panel in pixels; used to keep the lower strip controls usable.
+    viewport_height: f32,
     // Called with the new clamped scroll_x whenever the user scrolls the mixer.
     on_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     // Shared Upper Rack ↔ Lower Control split (height + drag routing).
@@ -1528,6 +1624,7 @@ pub fn mixer_panel(
     let max_scroll_x = (total_content_w - viewport_width).max(0.0);
     let scroll_x = scroll_x.clamp(0.0, max_scroll_x.max(0.0));
     let spare_channel_w = (viewport_width - total_content_w).max(0.0);
+    let strip_available_px = (viewport_height - 30.0).max(STRIP_MIN_HEIGHT);
 
     let first_visible = (scroll_x / STRIP_WIDTH).floor() as usize;
     let visible_start = first_visible.saturating_sub(MIXER_OVERSCAN);
@@ -1548,7 +1645,16 @@ pub fn mixer_panel(
         .map(|(rel_i, t)| {
             let abs_i = visible_start + rel_i;
             let is_sel = selected_track_id == Some(t.id.as_str());
-            channel_strip(t, tracks, abs_i, is_sel, &callbacks, &split).into_any_element()
+            channel_strip(
+                t,
+                tracks,
+                abs_i,
+                is_sel,
+                &callbacks,
+                &split,
+                strip_available_px,
+            )
+            .into_any_element()
         })
         .collect();
 
@@ -1644,6 +1750,13 @@ pub fn mixer_panel(
                 // Gutter separating channels from the master block.
                 .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
                 // Pinned master block
-                .child(master_strip(accent, master, on_master, &callbacks, &split)),
+                .child(master_strip(
+                    accent,
+                    master,
+                    on_master,
+                    &callbacks,
+                    &split,
+                    strip_available_px,
+                )),
         )
 }

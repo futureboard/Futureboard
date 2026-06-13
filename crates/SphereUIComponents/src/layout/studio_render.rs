@@ -50,9 +50,9 @@ impl Render for StudioLayout {
             })
         };
 
-        // Shared Upper Rack ↔ Lower Control split for the docked mixer. The
-        // splitter handles route every intent through one owner method so all
-        // strips resize together.
+        // Shared insert/send section split for the docked mixer. The splitter
+        // handles route every intent through one owner method so all strips
+        // resize together.
         let mixer_split = {
             let this = cx.entity().clone();
             let on_action: std::sync::Arc<
@@ -65,8 +65,9 @@ impl Render for StudioLayout {
                 let _ = this.update(cx, |this, cx| this.apply_mixer_split_action(action, cx));
             });
             crate::components::mixer_panel::MixerSplit {
-                upper_px: self.mixer_rack_split_px(),
-                is_resizing: self.mixer_rack_is_resizing(),
+                insert_px: self.mixer_insert_section_px(),
+                send_px: self.mixer_send_section_px(),
+                active_target: self.mixer_split_active_target(),
                 on_action,
             }
         };

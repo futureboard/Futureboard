@@ -11,18 +11,16 @@ use gpui::{
 use crate::assets;
 use crate::components::title_bar::{
     draggable_spacer, section_separator, window_control_button, CHROME_PAD_X, CHROME_TITLE_SIZE,
-    STATUSBAR_HEIGHT,
 };
 use crate::components::{text_field, TextInputAction, TextInputState};
 use crate::embedded_assets::APP_LOGO_PATH;
-use crate::feeds::{FeedFilter, FeedItem, FeedProvider, StaticFeedProvider};
 use crate::platform_chrome::PlatformChromePolicy;
 use crate::project::{ProjectCreateOptions, ProjectTemplate, RecentProject, RecentProjectsStore};
 use crate::settings::SettingsSchema;
 use crate::theme::{self, Colors};
 
 /// `FUTUREBOARD_WELCOME_DEBUG=1` enables QA logging for the start screen
-/// (selected tab, resolved default project path, recent/feed activity).
+/// (selected tab, resolved default project path, and recent project activity).
 fn welcome_debug(args: std::fmt::Arguments<'_>) {
     if std::env::var("FUTUREBOARD_WELCOME_DEBUG").as_deref() == Ok("1") {
         eprintln!("[welcome] {args}");
@@ -65,7 +63,6 @@ enum StartupNav {
     NewProject,
     OpenProject,
     RecentProjects,
-    Feeds,
     AudioSetup,
 }
 
@@ -95,9 +92,6 @@ pub struct WelcomeWindow {
     project_sample_rate: u32,
     project_bpm: f32,
     project_time_signature: (u32, u32),
-    // Feeds tab
-    feeds: Vec<FeedItem>,
-    feed_filter: FeedFilter,
     // Default project location (resolved at construction from settings)
     default_project_dir: PathBuf,
     default_dir_configured: bool,
@@ -116,10 +110,6 @@ impl WelcomeWindow {
     ) -> Self {
         let mut recent = RecentProjectsStore::load();
         recent.refresh_missing();
-
-        // Feeds load instantly from the static provider — no network, no block.
-        let feeds = StaticFeedProvider.load_feed_items();
-        welcome_debug!("feed provider returned {} item(s)", feeds.len());
 
         // Default project path + audio readout from saved settings (the global
         // SettingsModel entity does not exist yet at Welcome time).
@@ -150,8 +140,6 @@ impl WelcomeWindow {
             project_sample_rate: schema.general.project_defaults.sample_rate,
             project_bpm: 120.0,
             project_time_signature: (4, 4),
-            feeds,
-            feed_filter: FeedFilter::All,
             default_project_dir,
             default_dir_configured,
             audio_backend: SharedString::from(schema.hardware.audio.driver_type),
@@ -410,11 +398,6 @@ impl WelcomeWindow {
                         self.gpu_status.clone(),
                     )),
             )
-            .child(status_bar(
-                "Startup",
-                self.loading_status.clone(),
-                "Native GPUI",
-            ))
             .into_any_element()
     }
 
@@ -432,22 +415,17 @@ impl WelcomeWindow {
                 self.default_project_dir.clone(),
                 &self.callbacks,
             ),
-            StartupNav::Feeds => feeds_pane(cx, &self.feeds, self.feed_filter),
             StartupNav::OpenProject => open_project_pane(
                 cx,
                 &self.recent_projects,
                 self.open_error.clone(),
                 &self.callbacks,
             ),
-            StartupNav::AudioSetup => audio_setup_pane(
-                self.audio_backend.clone(),
-                self.audio_device_out.clone(),
-                self.gpu_status.clone(),
-            ),
+            StartupNav::AudioSetup => {
+                audio_setup_pane(self.audio_backend.clone(), self.audio_device_out.clone())
+            }
             _ => center_actions(cx, &self.selected, self.selected_template, &self.callbacks),
         };
-
-        let default_path_label = self.default_project_dir.to_string_lossy().to_string();
 
         div()
             .flex()
@@ -471,15 +449,8 @@ impl WelcomeWindow {
                         &self.callbacks,
                         self.default_project_dir.clone(),
                         self.default_dir_configured,
-                        self.audio_backend.clone(),
-                        self.gpu_status.clone(),
                     )),
             )
-            .child(status_bar(
-                format!("Audio · {}", self.audio_backend),
-                SharedString::from(default_path_label),
-                format!("Native GPUI · {}", self.gpu_status),
-            ))
             .into_any_element()
     }
 }
@@ -501,36 +472,36 @@ fn start_rows() -> Vec<StartRow> {
     };
     vec![
         StartRow {
-            title: "Empty Project",
-            description: "Start with a blank arrangement",
+            title: "Blank Project",
+            description: "Clean arrangement",
             shortcut: format!("{modifier} + N"),
             icon: assets::ICON_PLUS_PATH,
             action: WelcomeAction::EmptyProject,
         },
         StartRow {
-            title: "MIDI Composer",
-            description: "Piano roll, instruments, and routing",
+            title: "MIDI Project",
+            description: "Instruments and piano roll",
             shortcut: format!("{modifier} + Shift + M"),
             icon: assets::ICON_MUSIC_PATH,
             action: WelcomeAction::MidiComposer,
         },
         StartRow {
             title: "Audio Session",
-            description: "Recording, editing, and mix-ready tracks",
+            description: "Record and edit audio",
             shortcut: format!("{modifier} + Shift + A"),
             icon: assets::ICON_MIC_PATH,
             action: WelcomeAction::AudioSession,
         },
         StartRow {
             title: "Mix Template",
-            description: "Buses, sends, groups, and master chain",
+            description: "Mixer routing ready",
             shortcut: format!("{modifier} + Shift + T"),
             icon: assets::ICON_SLIDERS_HORIZONTAL_PATH,
             action: WelcomeAction::MixTemplate,
         },
         StartRow {
             title: "Open Project...",
-            description: "Browse for an existing .fbproj project",
+            description: "Choose a project file",
             shortcut: format!("{modifier} + O"),
             icon: assets::ICON_FOLDER_OPEN_PATH,
             action: WelcomeAction::OpenProject,
@@ -634,8 +605,8 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
         .items_center()
         .justify_between()
         .gap(px(16.0))
-        .h(px(86.0))
-        .px(px(18.0))
+        .h(px(72.0))
+        .px(px(20.0))
         .border_b(px(1.0))
         .border_color(Colors::border_startup_soft())
         .bg(Colors::surface_startup_window())
@@ -656,7 +627,11 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
                         .overflow_hidden()
                         .border(px(1.0))
                         .border_color(Colors::border_startup())
-                        .child(img(SharedString::from(APP_LOGO_PATH)).w(px(42.0)).h(px(42.0))),
+                        .child(
+                            img(SharedString::from(APP_LOGO_PATH))
+                                .w(px(42.0))
+                                .h(px(42.0)),
+                        ),
                 )
                 .child(
                     div()
@@ -670,16 +645,14 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
                                 .text_size(px(17.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_startup_strong())
-                                .child("Welcome to Futureboard Studio"),
+                                .child("Futureboard Studio"),
                         )
                         .child(
                             div()
                                 .truncate()
                                 .text_size(px(11.0))
                                 .text_color(Colors::text_startup_muted())
-                                .child(
-                                    "Start a session, open a project, or build a workspace from scratch.",
-                                ),
+                                .child("Create, open, or continue."),
                         ),
                 ),
         )
@@ -697,7 +670,7 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
     div()
         .flex()
         .flex_col()
-        .w(px(190.0))
+        .w(px(176.0))
         .flex_none()
         .border_r(px(1.0))
         .border_color(Colors::border_startup_soft())
@@ -707,7 +680,7 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
         .child(rail_item(
             cx,
             StartupNav::Welcome,
-            "Welcome",
+            "Start",
             assets::ICON_STAR_PATH,
             active,
             None,
@@ -715,7 +688,7 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
         .child(rail_item(
             cx,
             StartupNav::NewProject,
-            "New Project",
+            "New",
             assets::ICON_PLUS_PATH,
             active,
             None,
@@ -731,42 +704,20 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
         .child(rail_item(
             cx,
             StartupNav::RecentProjects,
-            "Recent Projects",
+            "Recent",
             assets::ICON_CLOCK_PATH,
             active,
             None,
         ))
         .child(rail_item(
             cx,
-            StartupNav::Feeds,
-            "Feeds",
-            assets::ICON_NEWSPAPER_PATH,
-            active,
-            None,
-        ))
-        .child(rail_item(
-            cx,
             StartupNav::AudioSetup,
-            "Audio Setup",
+            "Audio",
             assets::ICON_VOLUME_2_PATH,
             active,
             None,
         ))
         .child(div().flex_1())
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .px(px(8.0))
-                .py(px(8.0))
-                .border_t(px(1.0))
-                .border_color(Colors::border_startup_soft())
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_faint())
-                .child("Native GPUI")
-                .child("No WebView"),
-        )
 }
 
 fn rail_item(
@@ -846,7 +797,7 @@ fn rail_item(
 fn center_actions(
     cx: &mut Context<WelcomeWindow>,
     selected: &Option<WelcomeSelection>,
-    selected_template: ProjectTemplate,
+    _selected_template: ProjectTemplate,
     callbacks: &WelcomeCallbacks,
 ) -> gpui::AnyElement {
     let mut rows = div()
@@ -902,19 +853,11 @@ fn center_actions(
         .p(px(16.0))
         .gap(px(12.0))
         .bg(Colors::surface_startup_window())
-        .child(section_label("Start a session"))
+        .child(section_label("Start"))
         .child(rows)
         .child(
             div()
-                .max_w(px(560.0))
-                .w_full()
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_faint())
-                .child(format!("Selected template: {}", selected_template.label())),
-        )
-        .child(
-            div()
-                .mt(px(4.0))
+                .mt(px(2.0))
                 .max_w(px(560.0))
                 .w_full()
                 .child(continue_row(continue_selected, move |window, cx| {
@@ -1043,9 +986,7 @@ fn new_project_pane(
                     div()
                         .text_size(px(10.5))
                         .text_color(Colors::text_startup_muted())
-                        .child(
-                            "Name the session, choose a template, then create the project folder.",
-                        ),
+                        .child("Name it, choose a template, and start."),
                 ),
         )
         .child(form_label("Project Name"))
@@ -1210,54 +1151,43 @@ fn open_project_pane(
                     div()
                         .text_size(px(10.5))
                         .text_color(Colors::text_startup_muted())
-                        .child("Browse for an existing project, or pick a recent one."),
+                        .child("Browse or pick a recent project."),
                 ),
         )
         .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .id("welcome-open-browse")
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .h(px(30.0))
-                        .px(px(12.0))
-                        .rounded_md()
-                        .border(px(1.0))
-                        .border_color(Colors::accent_startup())
-                        .bg(Colors::accent_startup_soft())
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|style| style.bg(Colors::surface_startup_elevated()))
-                        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
-                            let _ = browse_target
-                                .update(cx, |this, cx| this.browse_and_open_project(window, cx));
-                        })
-                        .child(
-                            svg()
-                                .path(assets::ICON_FOLDER_OPEN_PATH)
-                                .w(px(13.0))
-                                .h(px(13.0))
-                                .text_color(Colors::text_startup_strong()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_startup_strong())
-                                .child("Browse…"),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(Colors::text_startup_faint())
-                        .child("Supported: .fbproj, .fbs"),
-                ),
+            div().flex().flex_row().items_center().gap(px(10.0)).child(
+                div()
+                    .id("welcome-open-browse")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .rounded_md()
+                    .border(px(1.0))
+                    .border_color(Colors::accent_startup())
+                    .bg(Colors::accent_startup_soft())
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .hover(|style| style.bg(Colors::surface_startup_elevated()))
+                    .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+                        let _ = browse_target
+                            .update(cx, |this, cx| this.browse_and_open_project(window, cx));
+                    })
+                    .child(
+                        svg()
+                            .path(assets::ICON_FOLDER_OPEN_PATH)
+                            .w(px(13.0))
+                            .h(px(13.0))
+                            .text_color(Colors::text_startup_strong()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::text_startup_strong())
+                            .child("Browse"),
+                    ),
+            ),
         )
         .when_some(open_error, |el, msg| el.child(open_error_banner(msg)))
         .child(section_label("Recent"))
@@ -1416,218 +1346,23 @@ fn continue_row(
                         .text_size(px(12.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_startup_strong())
-                        .child("Open Empty Workspace"),
+                        .child("Continue Without Project"),
                 )
                 .child(
                     div()
                         .truncate()
                         .text_size(px(10.5))
                         .text_color(Colors::text_startup_muted())
-                        .child("Enter the studio without creating a project"),
+                        .child("Use source files until you save"),
                 ),
         )
 }
 
 // ── Feeds tab ───────────────────────────────────────────────────────────────
 
-fn feeds_pane(
-    cx: &mut Context<WelcomeWindow>,
-    feeds: &[FeedItem],
-    filter: FeedFilter,
-) -> gpui::AnyElement {
-    let mut chips = div().flex().flex_row().flex_wrap().gap(px(6.0));
-    for f in FeedFilter::all() {
-        chips = chips.child(feed_filter_chip(cx, f, filter));
-    }
-
-    let visible: Vec<&FeedItem> = feeds.iter().filter(|item| filter.matches(item)).collect();
-
-    let list = if visible.is_empty() {
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .flex_1()
-            .min_h(px(160.0))
-            .text_size(px(11.0))
-            .text_color(Colors::text_startup_faint())
-            .child("No updates in this category yet")
-            .into_any_element()
-    } else {
-        let mut col = div()
-            .id("welcome-feeds-scroll")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .gap(px(8.0))
-            .max_w(px(620.0))
-            .w_full();
-        for item in visible {
-            col = col.child(feed_card(item));
-        }
-        col.into_any_element()
-    };
-
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .p(px(16.0))
-        .gap(px(12.0))
-        .bg(Colors::surface_startup_window())
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_startup_strong())
-                        .child("Feeds"),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(Colors::text_startup_muted())
-                        .child("Announcements, release notes, and project updates."),
-                ),
-        )
-        .child(chips)
-        .child(list)
-        .into_any_element()
-}
-
-fn feed_filter_chip(
-    cx: &mut Context<WelcomeWindow>,
-    filter: FeedFilter,
-    active: FeedFilter,
-) -> impl IntoElement {
-    let is_active = filter == active;
-    let target = cx.entity().clone();
-    div()
-        .id(SharedString::from(format!(
-            "feed-filter-{}",
-            filter.label()
-        )))
-        .flex()
-        .items_center()
-        .h(px(24.0))
-        .px(px(10.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(if is_active {
-            Colors::accent_startup()
-        } else {
-            Colors::border_startup_soft()
-        })
-        .bg(if is_active {
-            Colors::accent_startup_soft()
-        } else {
-            Colors::surface_startup_panel()
-        })
-        .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|style| style.bg(Colors::surface_startup_elevated()))
-        .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
-            let _ = target.update(cx, |this, cx| {
-                this.feed_filter = filter;
-                cx.notify();
-            });
-        })
-        .child(
-            div()
-                .text_size(px(10.5))
-                .font_weight(if is_active {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(if is_active {
-                    Colors::text_startup_strong()
-                } else {
-                    Colors::text_startup_muted()
-                })
-                .child(filter.label()),
-        )
-}
-
-fn feed_card(item: &FeedItem) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_panel())
-        .px(px(12.0))
-        .py(px(10.0))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(category_badge(item.category.label()))
-                .when(item.unread, |row| row.child(unread_dot()))
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(10.0))
-                        .text_color(Colors::text_startup_faint())
-                        .child(item.date.clone()),
-                ),
-        )
-        .child(
-            div()
-                .text_size(px(12.5))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_startup_strong())
-                .child(item.title.clone()),
-        )
-        .child(
-            div()
-                .text_size(px(10.5))
-                .text_color(Colors::text_startup_muted())
-                .child(item.summary.clone()),
-        )
-}
-
-fn category_badge(label: &'static str) -> impl IntoElement {
-    div()
-        .flex_none()
-        .rounded_sm()
-        .bg(Colors::feed_badge_background())
-        .px(px(7.0))
-        .py(px(2.0))
-        .text_size(px(9.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::feed_badge_text())
-        .child(label)
-}
-
-fn unread_dot() -> impl IntoElement {
-    div()
-        .flex_none()
-        .w(px(6.0))
-        .h(px(6.0))
-        .rounded_full()
-        .bg(Colors::feed_unread_dot())
-}
-
 // ── Audio Setup tab ───────────────────────────────────────────────────────────
 
-fn audio_setup_pane(
-    backend: SharedString,
-    device_out: SharedString,
-    gpu_status: SharedString,
-) -> gpui::AnyElement {
+fn audio_setup_pane(backend: SharedString, device_out: SharedString) -> gpui::AnyElement {
     div()
         .flex()
         .flex_col()
@@ -1647,15 +1382,13 @@ fn audio_setup_pane(
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_startup_strong())
-                        .child("Audio Setup"),
+                        .child("Audio"),
                 )
                 .child(
                     div()
                         .text_size(px(10.5))
                         .text_color(Colors::text_startup_muted())
-                        .child(
-                            "Quick view of the saved audio configuration. Full options live in Preferences › Audio.",
-                        ),
+                        .child("Current output settings."),
                 ),
         )
         .child(
@@ -1672,14 +1405,7 @@ fn audio_setup_pane(
                 .px(px(12.0))
                 .py(px(4.0))
                 .child(info_row("Audio Backend", backend))
-                .child(info_row("Output Device", device_out))
-                .child(info_row("GPU Renderer", gpu_status)),
-        )
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_faint())
-                .child("Open a project to access the full audio preferences."),
+                .child(info_row("Output Device", device_out)),
         )
         .into_any_element()
 }
@@ -1707,9 +1433,8 @@ fn info_row(label: &'static str, value: SharedString) -> impl IntoElement {
         )
 }
 
-// ── Right panel: recent + default location + system status ─────────────────────
+// ── Right panel: recent + project location ─────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 fn right_panel(
     cx: &mut Context<WelcomeWindow>,
     recent: &[RecentProject],
@@ -1717,8 +1442,6 @@ fn right_panel(
     callbacks: &WelcomeCallbacks,
     default_dir: PathBuf,
     configured: bool,
-    audio_backend: SharedString,
-    gpu_status: SharedString,
 ) -> impl IntoElement {
     let recent_content = if recent.is_empty() {
         div()
@@ -1777,7 +1500,6 @@ fn right_panel(
                 .child(recent_content),
         )
         .child(default_location_section(cx, default_dir, configured))
-        .child(system_status_section(audio_backend, gpu_status))
 }
 
 fn default_location_section(
@@ -1801,7 +1523,7 @@ fn default_location_section(
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(section_label("Default Project Location"))
+                .child(section_label("Project Location"))
                 .child(
                     div()
                         .id("welcome-change-default-dir")
@@ -1823,7 +1545,7 @@ fn default_location_section(
                                 .text_size(px(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(Colors::text_startup_strong())
-                                .child("Change…"),
+                                .child("Browse"),
                         ),
                 ),
         )
@@ -1842,57 +1564,14 @@ fn default_location_section(
                         .child(path_label),
                 ),
         )
-        .child(
-            div()
-                .text_size(px(9.5))
-                .text_color(Colors::text_startup_faint())
-                .child(if !configured {
-                    "Using the platform default location.".to_string()
-                } else if !exists {
-                    "Folder will be created when needed.".to_string()
-                } else {
-                    "New projects are created here.".to_string()
-                }),
-        )
-}
-
-fn system_status_section(
-    audio_backend: SharedString,
-    gpu_status: SharedString,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .pt(px(10.0))
-        .border_t(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .child(section_label("System"))
-        .child(status_line("Audio Backend", audio_backend))
-        .child(status_line("GPU Renderer", gpu_status))
-        .child(status_line("Runtime", SharedString::from("Native GPUI")))
-}
-
-fn status_line(label: &'static str, value: SharedString) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(10.0))
-        .h(px(20.0))
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_muted())
-                .child(label),
-        )
-        .child(
-            div()
-                .truncate()
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_strong())
-                .child(value),
-        )
+        .when(!configured || !exists, |section| {
+            section.child(
+                div()
+                    .text_size(px(9.5))
+                    .text_color(Colors::text_startup_faint())
+                    .child("Folder will be created when needed."),
+            )
+        })
 }
 
 fn recent_row(
@@ -2029,7 +1708,7 @@ fn loading_rows(status: SharedString, gpu_status: SharedString) -> impl IntoElem
         .w(px(320.0))
         .child(loading_row("Assets", "Ready"))
         .child(loading_row("Recent Projects", "Loaded"))
-        .child(loading_row("Audio System", "Deferred"))
+        .child(loading_row("Audio", "Ready"))
         .child(loading_row("GPU Renderer", gpu_status))
         .child(loading_row("Workspace", status))
 }
@@ -2102,43 +1781,4 @@ fn shortcut_badge(shortcut: String) -> impl IntoElement {
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(Colors::text_startup_faint())
         .child(shortcut)
-}
-
-fn status_bar(
-    left: impl Into<String>,
-    center: impl Into<SharedString>,
-    right: impl Into<String>,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .h(px(STATUSBAR_HEIGHT))
-        .px(px(8.0))
-        .border_t(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_panel())
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_muted())
-                .child(left.into()),
-        )
-        .child(
-            div()
-                .truncate()
-                .min_w_0()
-                .px(px(12.0))
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_faint())
-                .child(center.into()),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(10.0))
-                .text_color(Colors::text_startup_muted())
-                .child(right.into()),
-        )
 }

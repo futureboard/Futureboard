@@ -13,7 +13,7 @@ use super::studio_state::TransportCommand;
 pub(super) fn is_supported_audio_ext(ext: &str) -> bool {
     matches!(
         ext,
-        "wav" | "wave" | "mp3" | "flac" | "ogg" | "oga" | "aiff" | "aif"
+        "wav" | "wave" | "mp3" | "flac" | "ogg" | "oga" | "m4a" | "aiff" | "aif"
     )
 }
 

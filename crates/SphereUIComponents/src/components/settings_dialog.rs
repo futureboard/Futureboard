@@ -429,18 +429,6 @@ fn plugins_section(
             "Failed Plugins",
             settings_readout(format!("{failed_count} quarantined")),
         ))
-        .child(settings_row(
-            "Actions",
-            fb_button(
-                "trigger-plugins-scan",
-                "Scan Plugins Now",
-                FbButtonKind::Primary,
-                true,
-                |_e, _w, _cx| {
-                    eprintln!("[plugins] manual scan triggered from settings dialog");
-                },
-            ),
-        ))
 }
 
 fn files_media_section() -> impl IntoElement {

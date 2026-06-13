@@ -50,7 +50,7 @@ midir = "0.9"
 crossbeam-channel = "0.5"
 base64 = "0.22"
 memmap2 = "0.9"
-symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "aiff", "mp3", "flac", "ogg", "vorbis"] }
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "aiff", "mp3", "flac", "ogg", "vorbis", "isomp4", "aac", "alac"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 wasm-bindgen-test = "0.3"
 serde-wasm-bindgen = "0.6"

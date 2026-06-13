@@ -1,7 +1,7 @@
 //! Audio file decoder for the native playback engine.
 //!
 //! **WAV/WAVE** — decoded by an inline RIFF/WAVE parser (fast, zero extra deps).
-//! **Everything else** — decoded via `symphonia` (MP3, FLAC, OGG Vorbis, AIFF).
+//! **Everything else** — decoded via `symphonia` (MP3, FLAC, OGG Vorbis, M4A, AIFF).
 //!
 //! The result is always interleaved `f32` samples normalised to `−1.0 … 1.0`.
 //! Decoding happens on the control thread; the audio callback only reads the
@@ -39,6 +39,7 @@ pub enum AudioFileFormat {
     Mp3,
     Flac,
     Ogg,
+    M4a,
     Aiff,
     Unknown,
 }
@@ -51,6 +52,7 @@ impl AudioFileFormat {
             Self::Mp3 => "mp3",
             Self::Flac => "flac",
             Self::Ogg => "ogg",
+            Self::M4a => "m4a",
             Self::Aiff => "aiff",
             Self::Unknown => "unknown",
         }
@@ -114,7 +116,7 @@ pub const STREAMING_WAV_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_IN_MEMORY_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Generate a multi-LOD peak summary for any audio format supported by
-/// [`load_audio_file`] (WAV via inline RIFF parser, MP3 / FLAC / OGG /
+/// [`load_audio_file`] (WAV via inline RIFF parser, MP3 / FLAC / OGG / M4A /
 /// AIFF via symphonia). WAV files are scanned from disk in chunks without
 /// loading the full PCM buffer. Other formats decode in memory when small
 /// enough; larger files return an error.
@@ -352,6 +354,7 @@ pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereA
         AudioFileFormat::Mp3
         | AudioFileFormat::Flac
         | AudioFileFormat::Ogg
+        | AudioFileFormat::M4a
         | AudioFileFormat::Aiff => probe_via_symphonia(path, format),
         AudioFileFormat::Unknown => Err(SphereAudioError::NativeError(format!(
             "unsupported audio format for '{}'",
@@ -363,7 +366,7 @@ pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereA
 /// Load an audio file from `path` into a decoded `AudioFileBuffer`.
 ///
 /// Supported extensions: `rauf`, `wav`, `wave`, `mp3`, `flac`, `ogg`, `oga`,
-/// `aiff`, `aif`.
+/// `m4a`, `aiff`, `aif`.
 ///
 /// Returns an error string on failure; the caller logs it and skips the clip.
 pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
@@ -380,7 +383,7 @@ pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
         "rauf" => load_rauf(p),
 
         // Symphonia handles everything else.
-        "mp3" | "flac" | "ogg" | "oga" | "aiff" | "aif" => load_via_symphonia(p),
+        "mp3" | "flac" | "ogg" | "oga" | "m4a" | "aiff" | "aif" => load_via_symphonia(p),
 
         other => Err(format!("unsupported native audio format '{other}'")),
     }
@@ -399,6 +402,7 @@ fn audio_file_format(path: &Path) -> AudioFileFormat {
         "mp3" => AudioFileFormat::Mp3,
         "flac" => AudioFileFormat::Flac,
         "ogg" | "oga" => AudioFileFormat::Ogg,
+        "m4a" => AudioFileFormat::M4a,
         "aiff" | "aif" => AudioFileFormat::Aiff,
         _ => AudioFileFormat::Unknown,
     }

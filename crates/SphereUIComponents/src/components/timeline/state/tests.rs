@@ -705,7 +705,7 @@ mod time_signature_map_tests {
 #[cfg(test)]
 mod midi_edit_tests {
     use super::*;
-    use crate::components::edit::EditCommand;
+    use crate::components::edit::{EditCommand, TrackSnapshot};
 
     /// Build an empty state with one MIDI clip and return `(state, clip_id)`.
     fn state_with_midi_clip() -> (TimelineState, String) {
@@ -740,6 +740,60 @@ mod midi_edit_tests {
             .find(|n| n.id == id)
             .cloned()
             .unwrap()
+    }
+
+    #[test]
+    fn delete_track_command_undo_redo_restores_track_position() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let first_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "First".into(),
+            color: gpui::Rgba {
+                r: 0.1,
+                g: 0.1,
+                b: 0.1,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let second_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Second".into(),
+            color: gpui::Rgba {
+                r: 0.2,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        state.selection.selected_track_id = Some(second_id.clone());
+
+        let snapshot = TrackSnapshot::capture(&state, &second_id).expect("track snapshot");
+        let cmd = EditCommand::DeleteTrack { snapshot };
+
+        cmd.execute(&mut state);
+        assert_eq!(state.tracks.len(), 1);
+        assert_eq!(state.tracks[0].id, first_id);
+
+        cmd.undo(&mut state);
+        assert_eq!(state.tracks.len(), 2);
+        assert_eq!(state.tracks[1].id, second_id);
+        assert_eq!(
+            state.selection.selected_track_id.as_deref(),
+            Some(second_id.as_str())
+        );
+
+        cmd.execute(&mut state);
+        assert_eq!(state.tracks.len(), 1);
+        assert_eq!(state.tracks[0].id, first_id);
     }
 
     #[test]
@@ -923,5 +977,23 @@ mod midi_edit_tests {
             notes.iter().all(|n| n.id != left_id && n.id != right_id),
             "undo removes both parts"
         );
+    }
+
+    #[test]
+    fn update_region_range_normalizes_and_sorts_regions() {
+        let mut state = TimelineState::default();
+        let early = state.add_region_at_beat(4.0);
+        let late = state.add_region_at_beat(12.0);
+
+        assert!(state.update_region_range(&late, 2.0, 1.0));
+
+        let moved = state
+            .regions
+            .iter()
+            .find(|region| region.id == late)
+            .expect("updated region exists");
+        assert_eq!(moved.normalized_range(), (1.0, 2.0));
+        assert_eq!(state.regions[0].id, late, "regions stay sorted by start");
+        assert_eq!(state.regions[1].id, early);
     }
 }

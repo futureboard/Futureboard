@@ -122,4 +122,30 @@ impl TimelineState {
         self.regions.retain(|region| region.id != id);
         before != self.regions.len()
     }
+
+    pub fn update_region_range(&mut self, id: &str, start_beat: f64, end_beat: f64) -> bool {
+        let Some(region) = self.regions.iter_mut().find(|region| region.id == id) else {
+            return false;
+        };
+        let updated = TimelineRegionState::with_id(
+            region.id.clone(),
+            start_beat,
+            end_beat,
+            region.name.clone(),
+            region.color_hex.clone(),
+        );
+        if (region.start_beat - updated.start_beat).abs() < 1.0e-6
+            && (region.end_beat - updated.end_beat).abs() < 1.0e-6
+        {
+            return false;
+        }
+        region.start_beat = updated.start_beat;
+        region.end_beat = updated.end_beat;
+        self.regions.sort_by(|a, b| {
+            a.start_beat
+                .total_cmp(&b.start_beat)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        true
+    }
 }

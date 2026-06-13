@@ -3,7 +3,6 @@ use crate::components::timeline::timeline_state::{
     MidiControllerKind, MidiControllerPoint, TimelineState, TRACK_HEIGHT,
 };
 use crate::theme::Colors;
-use gpui::prelude::FluentBuilder;
 use gpui::{
     canvas, div, fill, point, px, size, AppContext, Bounds, InteractiveElement, IntoElement,
     ParentElement, Pixels, StatefulInteractiveElement, Styled,
@@ -216,21 +215,19 @@ pub fn midi_clip(
                 }
             },
         )
-        .when_some(on_erase_clip.clone(), |this, _erase| {
-            this.on_mouse_down(
-                gpui::MouseButton::Right,
-                move |event: &gpui::MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    if let Some(erase) = erase_cb.as_ref() {
-                        erase(&clip_for_erase, window, cx);
-                    } else if let Some(cb) = ctx_cb.as_ref() {
-                        let x: f32 = event.position.x.into();
-                        let y: f32 = event.position.y.into();
-                        cb(&(context_clip_id.clone(), x, y), window, cx);
-                    }
-                },
-            )
-        })
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                if let Some(cb) = ctx_cb.as_ref() {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    cb(&(context_clip_id.clone(), x, y), window, cx);
+                } else if let Some(erase) = erase_cb.as_ref() {
+                    erase(&clip_for_erase, window, cx);
+                }
+            },
+        )
         .on_drag(
             ClipDragItem {
                 clip_id: drag_clip_id,

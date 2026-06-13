@@ -1,5 +1,5 @@
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipState, TimelineState, TRACK_HEIGHT,
+    ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, TimelineState, TRACK_HEIGHT,
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
 use crate::theme::Colors;
@@ -88,9 +88,22 @@ pub fn audio_clip(
     let on_select = on_select_clip.clone();
     let open_editor = on_open_editor.clone();
     let context_clip_id = clip.id.clone();
+    let ctx_cb = on_context_menu.clone();
     let clip_for_erase = clip.id.clone();
     let erase_cb = on_erase_clip.clone();
-    let ctx_cb = on_context_menu.clone();
+    let resize_left = ClipResizeDrag {
+        clip_id: clip.id.clone(),
+        edge: ClipEdge::Left,
+        start_beat: clip.start_beat,
+        duration_beats: clip.duration_beats,
+    };
+    let resize_right = ClipResizeDrag {
+        clip_id: clip.id.clone(),
+        edge: ClipEdge::Right,
+        start_beat: clip.start_beat,
+        duration_beats: clip.duration_beats,
+    };
+    const RESIZE_HANDLE_W: f32 = 6.0;
 
     div()
         .absolute()
@@ -137,12 +150,12 @@ pub fn audio_clip(
             gpui::MouseButton::Right,
             move |event: &gpui::MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                if let Some(erase) = erase_cb.as_ref() {
-                    erase(&clip_for_erase, window, cx);
-                } else if let Some(cb) = ctx_cb.as_ref() {
+                if let Some(cb) = ctx_cb.as_ref() {
                     let x: f32 = event.position.x.into();
                     let y: f32 = event.position.y.into();
                     cb(&(context_clip_id.clone(), x, y), window, cx);
+                } else if let Some(erase) = erase_cb.as_ref() {
+                    erase(&clip_for_erase, window, cx);
                 }
             },
         )
@@ -204,5 +217,33 @@ pub fn audio_clip(
                         // display duration e.g. "8.0 bt"
                         .child(format!("{:.1} bt", clip.duration_beats)),
                 ),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .h_full()
+                .w(px(RESIZE_HANDLE_W))
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .id(("audio-clip-resize-l", id_num))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_drag(resize_left, |drag, _offset, _window, cx| {
+                    cx.new(|_| drag.clone())
+                }),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .h_full()
+                .w(px(RESIZE_HANDLE_W))
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .id(("audio-clip-resize-r", id_num))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_drag(resize_right, |drag, _offset, _window, cx| {
+                    cx.new(|_| drag.clone())
+                }),
         )
 }

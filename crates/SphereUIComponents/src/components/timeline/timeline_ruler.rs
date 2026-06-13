@@ -18,12 +18,67 @@ impl Render for RulerSeekDrag {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimelineRegionDragMode {
+    Move,
+    Start,
+    End,
+}
+
+#[derive(Clone, Debug)]
+pub struct TimelineRegionDrag {
+    pub region_id: String,
+    pub mode: TimelineRegionDragMode,
+    pub start_beat: f64,
+    pub end_beat: f64,
+    pub pointer_offset_x: f32,
+}
+
+impl Render for TimelineRegionDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TimelineRegionDragUpdate {
+    pub region_id: String,
+    pub start_beat: f64,
+    pub end_beat: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TimelineLoopDrag {
+    pub mode: TimelineRegionDragMode,
+    pub start_beat: f32,
+    pub end_beat: f32,
+    pub pointer_offset_x: f32,
+}
+
+impl Render for TimelineLoopDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TimelineLoopDragUpdate {
+    pub start_beat: f32,
+    pub end_beat: f32,
+}
+
 pub fn timeline_ruler(
     state: &TimelineState,
     on_add_track: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_toggle_snap: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_cycle_grid: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_region_drag: std::sync::Arc<
+        dyn Fn(&TimelineRegionDragUpdate, &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
+    on_loop_drag: std::sync::Arc<
+        dyn Fn(&TimelineLoopDragUpdate, &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     on_ruler_context: std::sync::Arc<
         dyn Fn(&(f32, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
@@ -38,6 +93,10 @@ pub fn timeline_ruler(
 
     let on_seek_clone = on_seek.clone();
     let on_seek_drag = on_seek.clone();
+    let on_region_drag_move = on_region_drag.clone();
+    let state_for_region_drag = state.clone();
+    let on_loop_drag_move = on_loop_drag.clone();
+    let state_for_loop_drag = state.clone();
 
     div()
         .flex()
@@ -212,6 +271,71 @@ pub fn timeline_ruler(
                         cx.stop_propagation();
                     },
                 )
+                .on_drag_move::<TimelineRegionDrag>(
+                    move |event: &gpui::DragMoveEvent<TimelineRegionDrag>, window, cx| {
+                        let drag = event.drag(cx);
+                        let x: f32 = event.event.position.x.into();
+                        let ox: f32 = event.bounds.origin.x.into();
+                        let local_x = (x - ox).max(0.0);
+                        let beat_at_x = |x: f32| {
+                            state_for_region_drag
+                                .snap_beats(state_for_region_drag.x_to_beats(x))
+                                .max(0.0) as f64
+                        };
+                        let (start_beat, end_beat) = match drag.mode {
+                            TimelineRegionDragMode::Move => {
+                                let length = (drag.end_beat - drag.start_beat).max(1.0e-3);
+                                let start = beat_at_x(local_x - drag.pointer_offset_x);
+                                (start, start + length)
+                            }
+                            TimelineRegionDragMode::Start => (beat_at_x(local_x), drag.end_beat),
+                            TimelineRegionDragMode::End => (drag.start_beat, beat_at_x(local_x)),
+                        };
+                        on_region_drag_move(
+                            &TimelineRegionDragUpdate {
+                                region_id: drag.region_id.clone(),
+                                start_beat,
+                                end_beat,
+                            },
+                            window,
+                            cx,
+                        );
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    },
+                )
+                .on_drag_move::<TimelineLoopDrag>(
+                    move |event: &gpui::DragMoveEvent<TimelineLoopDrag>, window, cx| {
+                        let drag = event.drag(cx);
+                        let x: f32 = event.event.position.x.into();
+                        let ox: f32 = event.bounds.origin.x.into();
+                        let local_x = (x - ox).max(0.0);
+                        let beat_at_x = |x: f32| {
+                            state_for_loop_drag
+                                .snap_beats(state_for_loop_drag.x_to_beats(x))
+                                .max(0.0)
+                        };
+                        let (start_beat, end_beat) = match drag.mode {
+                            TimelineRegionDragMode::Move => {
+                                let length = (drag.end_beat - drag.start_beat).max(1.0e-3);
+                                let start = beat_at_x(local_x - drag.pointer_offset_x);
+                                (start, start + length)
+                            }
+                            TimelineRegionDragMode::Start => (beat_at_x(local_x), drag.end_beat),
+                            TimelineRegionDragMode::End => (drag.start_beat, beat_at_x(local_x)),
+                        };
+                        on_loop_drag_move(
+                            &TimelineLoopDragUpdate {
+                                start_beat,
+                                end_beat,
+                            },
+                            window,
+                            cx,
+                        );
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    },
+                )
                 .children(if state.transport.loop_enabled {
                     let lx = state.beats_to_x(state.transport.loop_start_beats);
                     let rx = state.beats_to_x(state.transport.loop_end_beats);
@@ -243,6 +367,33 @@ pub fn timeline_ruler(
                     }
                     let color = crate::color::parse_hex_color(&region.color_hex)
                         .unwrap_or_else(|_| Colors::accent_success());
+                    let id_num = {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        region.id.hash(&mut hasher);
+                        hasher.finish() as usize
+                    };
+                    let body_drag = TimelineRegionDrag {
+                        region_id: region.id.clone(),
+                        mode: TimelineRegionDragMode::Move,
+                        start_beat: start,
+                        end_beat: end,
+                        pointer_offset_x: 0.0,
+                    };
+                    let start_drag = TimelineRegionDrag {
+                        region_id: region.id.clone(),
+                        mode: TimelineRegionDragMode::Start,
+                        start_beat: start,
+                        end_beat: end,
+                        pointer_offset_x: 0.0,
+                    };
+                    let end_drag = TimelineRegionDrag {
+                        region_id: region.id.clone(),
+                        mode: TimelineRegionDragMode::End,
+                        start_beat: start,
+                        end_beat: end,
+                        pointer_offset_x: 0.0,
+                    };
                     Some(
                         div()
                             .absolute()
@@ -255,6 +406,17 @@ pub fn timeline_ruler(
                             .border(px(1.0))
                             .border_color(Colors::with_alpha(color, 0.55))
                             .overflow_hidden()
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .id(("ruler-region", id_num))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .on_drag(body_drag, |drag, offset, _window, cx| {
+                                cx.new(|_| TimelineRegionDrag {
+                                    pointer_offset_x: offset.x.into(),
+                                    ..drag.clone()
+                                })
+                            })
                             .child(
                                 div()
                                     .px(px(4.0))
@@ -263,6 +425,38 @@ pub fn timeline_ruler(
                                     .text_color(color)
                                     .truncate()
                                     .child(region.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(6.0))
+                                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                    .id(("ruler-region-start", id_num))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_drag(start_drag, |drag, _offset, _window, cx| {
+                                        cx.new(|_| drag.clone())
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(6.0))
+                                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                    .id(("ruler-region-end", id_num))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_drag(end_drag, |drag, _offset, _window, cx| {
+                                        cx.new(|_| drag.clone())
+                                    }),
                             ),
                     )
                 }))
@@ -353,6 +547,97 @@ pub fn timeline_ruler(
                         .text_color(text_color)
                         .child(label)
                 }))
+                .children(if state.transport.loop_enabled {
+                    let start = state
+                        .transport
+                        .loop_start_beats
+                        .min(state.transport.loop_end_beats);
+                    let end = state
+                        .transport
+                        .loop_start_beats
+                        .max(state.transport.loop_end_beats);
+                    let lx = state.beats_to_x(start);
+                    let rx = state.beats_to_x(end);
+                    let width = (rx - lx).max(1.0);
+                    if lx > ruler_grid_width + 24.0 || lx + width < -24.0 {
+                        None
+                    } else {
+                        let body_drag = TimelineLoopDrag {
+                            mode: TimelineRegionDragMode::Move,
+                            start_beat: start,
+                            end_beat: end,
+                            pointer_offset_x: 0.0,
+                        };
+                        let start_drag = TimelineLoopDrag {
+                            mode: TimelineRegionDragMode::Start,
+                            start_beat: start,
+                            end_beat: end,
+                            pointer_offset_x: 0.0,
+                        };
+                        let end_drag = TimelineLoopDrag {
+                            mode: TimelineRegionDragMode::End,
+                            start_beat: start,
+                            end_beat: end,
+                            pointer_offset_x: 0.0,
+                        };
+                        Some(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(lx))
+                                .w(px(width))
+                                .id("ruler-loop-hit")
+                                .cursor(gpui::CursorStyle::PointingHand)
+                                .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                })
+                                .on_drag(body_drag, |drag, offset, _window, cx| {
+                                    cx.new(|_| TimelineLoopDrag {
+                                        pointer_offset_x: offset.x.into(),
+                                        ..drag.clone()
+                                    })
+                                })
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(8.0))
+                                        .id("ruler-loop-start-hit")
+                                        .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                        })
+                                        .on_drag(start_drag, |drag, _offset, _window, cx| {
+                                            cx.new(|_| drag.clone())
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .right_0()
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(8.0))
+                                        .id("ruler-loop-end-hit")
+                                        .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                        })
+                                        .on_drag(end_drag, |drag, _offset, _window, cx| {
+                                            cx.new(|_| drag.clone())
+                                        }),
+                                ),
+                        )
+                    }
+                } else {
+                    None
+                })
                 // Tempo markers — lightweight BPM labels anchored to the bottom
                 // of the ruler so they never collide with the bar/beat labels at
                 // the top. Visible whenever the project has tempo automation,

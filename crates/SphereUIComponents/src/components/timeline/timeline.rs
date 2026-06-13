@@ -4,7 +4,9 @@ use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::tempo_track::tempo_track_lane;
 use crate::components::timeline::time_signature_track::time_signature_track_lane;
-use crate::components::timeline::timeline_ruler::timeline_ruler;
+use crate::components::timeline::timeline_ruler::{
+    timeline_ruler, TimelineLoopDragUpdate, TimelineRegionDragUpdate,
+};
 use crate::components::timeline::timeline_state::{
     ClipDragItem, ClipResizeDrag, ClipState, ClipType, SnapDivision, TempoPointDrag,
     TimeSignaturePointDrag, TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem,
@@ -67,7 +69,15 @@ fn is_supported_audio_ext(path: &std::path::Path) -> bool {
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase())
             .as_deref(),
-        Some("wav") | Some("mp3") | Some("flac") | Some("ogg")
+        Some("wav")
+            | Some("wave")
+            | Some("mp3")
+            | Some("flac")
+            | Some("ogg")
+            | Some("oga")
+            | Some("m4a")
+            | Some("aiff")
+            | Some("aif")
     )
 }
 
@@ -90,6 +100,7 @@ pub struct Timeline {
     on_track_param_change:
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
     on_project_changed: Option<TimelineProjectChangedCb>,
+    on_loop_changed: Option<TimelineProjectChangedCb>,
     on_tempo_map_changed: Option<TimelineProjectChangedCb>,
     on_time_signature_map_changed: Option<TimelineProjectChangedCb>,
     on_media_changed: Option<TimelineProjectChangedCb>,
@@ -261,6 +272,7 @@ impl Timeline {
             on_seek_beats: None,
             on_track_param_change: None,
             on_project_changed: None,
+            on_loop_changed: None,
             on_tempo_map_changed: None,
             on_time_signature_map_changed: None,
             on_media_changed: None,
@@ -295,6 +307,7 @@ impl Timeline {
             on_seek_beats: None,
             on_track_param_change: None,
             on_project_changed: None,
+            on_loop_changed: None,
             on_tempo_map_changed: None,
             on_time_signature_map_changed: None,
             on_media_changed: None,
@@ -403,6 +416,10 @@ impl Timeline {
         self.on_project_changed = callback;
     }
 
+    pub fn set_loop_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
+        self.on_loop_changed = callback;
+    }
+
     pub fn set_tempo_map_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
         self.on_tempo_map_changed = callback;
     }
@@ -428,6 +445,14 @@ impl Timeline {
 
     pub(crate) fn mark_time_signature_map_changed(&self, cx: &mut gpui::App) {
         if let Some(callback) = self.on_time_signature_map_changed.as_ref() {
+            callback(cx);
+        } else {
+            self.mark_project_changed(cx);
+        }
+    }
+
+    pub(crate) fn mark_loop_changed(&self, cx: &mut gpui::App) {
+        if let Some(callback) = self.on_loop_changed.as_ref() {
             callback(cx);
         } else {
             self.mark_project_changed(cx);
@@ -1188,11 +1213,6 @@ impl Timeline {
 
         let (drop_x, drop_y) = self.drop_position_or_new_track(force_new_track);
 
-        if self.project_root.is_none() {
-            eprintln!("[AudioImport] blocked: save project before importing audio");
-            return false;
-        }
-
         self.state
             .import_audio_at(path_key.clone(), clip_name, drop_x, drop_y);
         self.mark_project_changed(cx);
@@ -1824,6 +1844,35 @@ impl Render for Timeline {
                 }
             },
         );
+        let on_region_drag = cx.listener(|this, update: &TimelineRegionDragUpdate, _window, cx| {
+            if this
+                .state
+                .update_region_range(&update.region_id, update.start_beat, update.end_beat)
+            {
+                this.mark_project_changed(cx);
+                cx.notify();
+            }
+        });
+        let on_region_drag: std::sync::Arc<
+            dyn Fn(&TimelineRegionDragUpdate, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_region_drag);
+        let on_loop_drag = cx.listener(|this, update: &TimelineLoopDragUpdate, _window, cx| {
+            let start = update.start_beat.min(update.end_beat).max(0.0);
+            let end = update.start_beat.max(update.end_beat).max(start + 1.0e-3);
+            let transport = &mut this.state.transport;
+            if (transport.loop_start_beats - start).abs() > f32::EPSILON
+                || (transport.loop_end_beats - end).abs() > f32::EPSILON
+            {
+                transport.loop_start_beats = start;
+                transport.loop_end_beats = end;
+                transport.loop_enabled = true;
+                this.mark_loop_changed(cx);
+                cx.notify();
+            }
+        });
+        let on_loop_drag: std::sync::Arc<
+            dyn Fn(&TimelineLoopDragUpdate, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_loop_drag);
         let on_ruler_context: std::sync::Arc<
             dyn Fn(&(f32, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_ruler_context);
@@ -2403,6 +2452,8 @@ impl Render for Timeline {
                 on_toggle_snap.clone(),
                 on_cycle_grid.clone(),
                 on_seek.clone(),
+                on_region_drag.clone(),
+                on_loop_drag.clone(),
                 on_ruler_context.clone(),
             ))
             // 1b. Global Tempo Track lane (below ruler, above tracks)

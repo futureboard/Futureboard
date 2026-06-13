@@ -617,6 +617,20 @@ impl StudioLayout {
         {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_loop_changed_callback(Some(Arc::new(move |cx| {
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            this.mark_dirty();
+                            this.sync_loop_controls(cx);
+                        });
+                    });
+                })));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_tempo_map_changed_callback(Some(Arc::new(move |cx| {
                     let target = target.clone();
                     cx.defer(move |cx| {
@@ -1385,7 +1399,7 @@ impl StudioLayout {
                 self.open_mixer_external_window(owner_bounds, cx);
             }
 
-            "track:add" | "project:add-track" => {
+            "track:add" | "track:show-add-dialog" | "project:add-track" => {
                 self.open_add_track_external_window(AddTrackKind::Audio, owner_bounds, cx)
             }
             "track:add-audio" => {
@@ -1422,9 +1436,10 @@ impl StudioLayout {
             "track:arm" => self.toggle_selected_track_arm(cx),
             "mixer:reset-volume" => self.reset_selected_track_volume(cx),
             "mixer:reset-pan" => self.reset_selected_track_pan(cx),
-            "edit:delete" | "clip:delete" | "automation:delete-selected-points" => {
-                self.delete_selected_clip_or_track(cx)
-            }
+            "edit:delete"
+            | "edit:delete-backspace"
+            | "clip:delete"
+            | "automation:delete-selected-points" => self.delete_selected_clip_or_track(cx),
             // Automation editor commands are automation-aware. General edit
             // shortcuts fall back to arrangement clip selection/clipboard.
             "edit:select-all" => self.select_all_timeline_items(cx),
@@ -1450,6 +1465,7 @@ impl StudioLayout {
                 self.mark_dirty();
             }
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
+            "clip:split-at-playhead" => self.split_selected_audio_clip_at_playhead(cx),
 
             // ── Tools — switch the active timeline tool. UI-only; never dirties
             // the engine. The piano roll owns its own tool keys when focused.
@@ -1749,11 +1765,9 @@ impl StudioLayout {
         // updating the entity again would double-lease panic
         // ("cannot read StudioLayout while it is already being updated").
         let project_root = self.project_session.folder_path.clone();
-        if project_root.is_none() {
-            eprintln!("[AudioImport] blocked: save project before importing audio");
-            self.show_import_requires_save_dialog(cx);
-            return;
-        }
+        // Unsaved workspaces intentionally import from the real source path.
+        // The import pipeline keeps peaks in memory until a project folder
+        // exists; saving later copies the audio into the project asset folder.
         // `cx.entity()` only clones the handle (no lease); the downstream
         // `spawn_timeline_import_from_layout` merely downgrades it and does all
         // real work in `cx.spawn`, so handing it the entity here is safe.
@@ -1765,29 +1779,5 @@ impl StudioLayout {
             owner,
             cx,
         );
-    }
-
-    pub(super) fn show_import_requires_save_dialog(&mut self, cx: &mut Context<Self>) {
-        use crate::components::{
-            open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
-        };
-        let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
-            self.cached_studio_window_bounds,
-            self.studio_window_bounds(cx),
-            cx,
-        );
-        let options = MessageBoxOptions {
-            kind: MessageBoxKind::Warning,
-            title: "Save Project".to_string(),
-            message: "Save the project before importing audio so Futureboard can copy files and cache waveforms.".to_string(),
-            detail: None,
-            buttons: vec!["OK".to_string()],
-            default_id: 0,
-            cancel_id: None,
-        };
-        let on_response: std::sync::Arc<
-            dyn Fn(MessageBoxResult, &mut gpui::Window, &mut gpui::App) + Send + Sync,
-        > = std::sync::Arc::new(|_, _, _| {});
-        let _ = open_message_box_window(owner_bounds, options, on_response, cx);
     }
 }

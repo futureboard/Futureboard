@@ -39,7 +39,7 @@ impl FileBrowserEntry {
     pub fn is_audio(&self) -> bool {
         matches!(
             self.extension.as_str(),
-            "wav" | "mp3" | "flac" | "ogg" | "aiff" | "aif"
+            "wav" | "wave" | "mp3" | "flac" | "ogg" | "oga" | "m4a" | "aiff" | "aif"
         )
     }
 
@@ -81,7 +81,7 @@ impl BrowserVisibleNode {
     pub fn is_audio(&self) -> bool {
         matches!(
             self.extension.as_str(),
-            "wav" | "mp3" | "flac" | "ogg" | "aiff" | "aif"
+            "wav" | "wave" | "mp3" | "flac" | "ogg" | "oga" | "m4a" | "aiff" | "aif"
         )
     }
 

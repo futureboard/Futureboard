@@ -7,7 +7,7 @@ use gpui::{
 use crate::assets;
 use crate::components::fader::db_value_pill;
 use crate::components::knob::format_pan_label;
-use crate::components::slider::slider;
+use crate::components::slider::slider_with_reset;
 use crate::components::timeline::timeline_state::{
     volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
     TRACK_HEIGHT,
@@ -250,6 +250,20 @@ pub fn track_header(
             cb(&(vol_id.clone(), *new_norm), window, cx);
         }
     };
+    let reset_vol_id = track_id.clone();
+    let on_volume_reset = {
+        let cb = callbacks.on_volume_change.clone();
+        move |window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(
+                &(
+                    reset_vol_id.clone(),
+                    crate::components::timeline::timeline_state::volume::db_to_norm(0.0),
+                ),
+                window,
+                cx,
+            );
+        }
+    };
     let context_id = track_id.clone();
     let on_context = callbacks.on_context_menu.clone();
     let drag_track_id = track_id.clone();
@@ -452,11 +466,12 @@ pub fn track_header(
                         .border(px(1.0))
                         .border_color(Colors::with_alpha(Colors::text_primary(), 0.03))
                         // Real horizontal slider
-                        .child(slider(
+                        .child(slider_with_reset(
                             format!("track-vol-{}", track.id),
                             track.display_volume(),
                             track.color,
                             on_volume_norm,
+                            Some(on_volume_reset),
                         ))
                         // Pan readout — compact bordered label matching the
                         // dB pill alongside it.

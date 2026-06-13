@@ -33,7 +33,7 @@ pub fn track_lane(
     on_add_clip: std::sync::Arc<
         dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
-    _on_track_context_menu: Option<
+    on_track_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_clip_context_menu: Option<
@@ -43,7 +43,7 @@ pub fn track_lane(
     on_range_start: Option<
         std::sync::Arc<dyn Fn(&(String, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
-    on_erase_start: Option<
+    _on_erase_start: Option<
         std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_erase_clip: Option<
@@ -132,7 +132,6 @@ pub fn track_lane(
 
     let active_tool = state.active_tool;
     let state_ref = state.clone();
-    let state_erase = state.clone();
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -250,19 +249,15 @@ pub fn track_lane(
                 }
             },
         )
-        .when_some(on_erase_start, |this, start_erase| {
-            let start_erase = start_erase.clone();
+        .when_some(on_track_context_menu, |this, open_menu| {
+            let context_track_id = track_id.clone();
             this.on_mouse_down(
                 gpui::MouseButton::Right,
                 move |event: &gpui::MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     let x: f32 = event.position.x.into();
-                    let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
-                    let click_beat = state_erase.x_to_beats(click_x);
-                    let snapped_sec =
-                        state_erase.snap_time(click_beat * state_erase.seconds_per_beat());
-                    let snapped_beat = snapped_sec / state_erase.seconds_per_beat();
-                    start_erase(&snapped_beat, window, cx);
+                    let y: f32 = event.position.y.into();
+                    open_menu(&(context_track_id.clone(), x, y), window, cx);
                 },
             )
         })

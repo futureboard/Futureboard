@@ -1,7 +1,7 @@
 //! Undo/redo edit commands — all timeline mutations go through here.
 
 use crate::components::timeline::timeline_state::{
-    ClipState, MidiControllerKind, MidiControllerPoint, MidiNoteState, TimelineState,
+    ClipState, MidiControllerKind, MidiControllerPoint, MidiNoteState, TimelineState, TrackState,
 };
 
 /// Snapshot of a clip plus its owning track for undo/redo.
@@ -25,6 +25,26 @@ impl ClipSnapshot {
     }
 }
 
+/// Snapshot of a track plus its original index for undo/redo.
+#[derive(Debug, Clone)]
+pub struct TrackSnapshot {
+    pub index: usize,
+    pub track: TrackState,
+}
+
+impl TrackSnapshot {
+    pub fn capture(state: &TimelineState, track_id: &str) -> Option<Self> {
+        state
+            .tracks
+            .iter()
+            .position(|track| track.id == track_id)
+            .map(|index| Self {
+                index,
+                track: state.tracks[index].clone(),
+            })
+    }
+}
+
 /// Editable command with perfect undo.
 #[derive(Debug, Clone)]
 pub enum EditCommand {
@@ -40,6 +60,13 @@ pub enum EditCommand {
     },
     BatchDeleteClips {
         snapshots: Vec<ClipSnapshot>,
+    },
+    ReplaceClipWithClips {
+        snapshot: ClipSnapshot,
+        clips: Vec<(String, ClipState)>,
+    },
+    DeleteTrack {
+        snapshot: TrackSnapshot,
     },
     CreateMidiNote {
         clip_id: String,
@@ -94,6 +121,8 @@ impl EditCommand {
             EditCommand::BatchCreateClips { .. } => "Create Clips",
             EditCommand::DeleteClip { .. } => "Delete Clip",
             EditCommand::BatchDeleteClips { .. } => "Delete Clips",
+            EditCommand::ReplaceClipWithClips { .. } => "Split Clip",
+            EditCommand::DeleteTrack { .. } => "Delete Track",
             EditCommand::CreateMidiNote { .. } => "Create MIDI Note",
             EditCommand::CreateMidiNotes { .. } => "Add MIDI Notes",
             EditCommand::DeleteMidiNotes { .. } => "Delete MIDI Notes",
@@ -141,6 +170,22 @@ impl EditCommand {
                 for snap in snapshots {
                     state.delete_clip(&snap.clip.id);
                 }
+            }
+            EditCommand::ReplaceClipWithClips { snapshot, clips } => {
+                state.delete_clip(&snapshot.clip.id);
+                for (track_id, clip) in clips {
+                    if let Some(track) = state.tracks.iter_mut().find(|t| t.id == *track_id) {
+                        if !track.clips.iter().any(|c| c.id == clip.id) {
+                            track.clips.push(clip.clone());
+                        }
+                    }
+                }
+                state.selection.selected_track_id = Some(snapshot.track_id.clone());
+                state.selection.selected_clip_ids =
+                    clips.iter().map(|(_, clip)| clip.id.clone()).collect();
+            }
+            EditCommand::DeleteTrack { snapshot } => {
+                state.delete_track(&snapshot.track.id);
             }
             EditCommand::CreateMidiNote { clip_id, note } => {
                 if let Some(notes) = state.midi_clip_notes_mut(clip_id) {
@@ -221,6 +266,17 @@ impl EditCommand {
                     restore_clip_snapshot(state, snap);
                 }
             }
+            EditCommand::ReplaceClipWithClips { snapshot, clips } => {
+                for (_, clip) in clips {
+                    state.delete_clip(&clip.id);
+                }
+                restore_clip_snapshot(state, snapshot);
+                state.selection.selected_track_id = Some(snapshot.track_id.clone());
+                state.selection.selected_clip_ids = vec![snapshot.clip.id.clone()];
+            }
+            EditCommand::DeleteTrack { snapshot } => {
+                restore_track_snapshot(state, snapshot);
+            }
             EditCommand::CreateMidiNote { clip_id, note } => {
                 state.delete_midi_notes(clip_id, &[note.id]);
             }
@@ -281,6 +337,20 @@ fn restore_clip_snapshot(state: &mut TimelineState, snapshot: &ClipSnapshot) {
             track.clips.push(snapshot.clip.clone());
         }
     }
+}
+
+fn restore_track_snapshot(state: &mut TimelineState, snapshot: &TrackSnapshot) {
+    if state
+        .tracks
+        .iter()
+        .any(|track| track.id == snapshot.track.id)
+    {
+        return;
+    }
+    let index = snapshot.index.min(state.tracks.len());
+    state.tracks.insert(index, snapshot.track.clone());
+    state.selection.selected_track_id = Some(snapshot.track.id.clone());
+    state.selection.selected_clip_ids.clear();
 }
 
 /// Bounded undo/redo stack.

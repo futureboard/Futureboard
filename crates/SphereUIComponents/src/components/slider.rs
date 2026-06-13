@@ -6,6 +6,7 @@
 //! slider to update. This keeps accidental clicks on the rail from changing
 //! volume.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Window,
@@ -41,6 +42,22 @@ pub fn slider(
     value_norm: f32,
     accent: gpui::Rgba,
     on_change: impl Fn(&f32, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    slider_with_reset(
+        id,
+        value_norm,
+        accent,
+        on_change,
+        None::<fn(&mut Window, &mut App)>,
+    )
+}
+
+pub fn slider_with_reset(
+    id: impl Into<gpui::SharedString>,
+    value_norm: f32,
+    accent: gpui::Rgba,
+    on_change: impl Fn(&f32, &mut Window, &mut App) + 'static,
+    on_double_click_reset: Option<impl Fn(&mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let id_str: gpui::SharedString = id.into();
     let id_string = id_str.to_string();
@@ -142,5 +159,12 @@ pub fn slider(
             let ow: f32 = f32::from(bounds.size.width).max(1.0);
             let new_value = ((x - ox) / ow).clamp(0.0, 1.0);
             on_change(&new_value, window, cx);
+        })
+        .when_some(on_double_click_reset, |this, reset| {
+            this.on_click(move |event, window, cx| {
+                if event.click_count() >= 2 {
+                    reset(window, cx);
+                }
+            })
         })
 }

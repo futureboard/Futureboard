@@ -463,6 +463,16 @@ pub struct StudioLayout {
     /// Current horizontal scroll offset for the mixer channel strip area.
     /// Updated by the mixer scroll-wheel handler and clamped each frame.
     mixer_scroll_x: f32,
+    /// Shared Upper Rack (inserts/sends) height in px for every mixer channel
+    /// strip. One value keeps the insert/send rows aligned across strips. Driven
+    /// by the splitter drag, clamped each frame, mirrored into the floating
+    /// mixer window via `MixerSnapshot`.
+    mixer_rack_split_px: f32,
+    /// Transient splitter-drag anchors recorded on pointer-down so the move
+    /// handler can recompute height as a pure function of the current pointer Y.
+    mixer_rack_resize_start_y: f32,
+    mixer_rack_resize_start_px: f32,
+    mixer_rack_is_resizing: bool,
 
     // ── Project file system ───────────────────────────────────────────────────
     /// Centralized filesystem paths for the entire application.
@@ -810,6 +820,10 @@ impl StudioLayout {
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
             mixer_scroll_x: 0.0,
+            mixer_rack_split_px: crate::components::mixer_panel::MIXER_RACK_SPLIT_DEFAULT_PX,
+            mixer_rack_resize_start_y: 0.0,
+            mixer_rack_resize_start_px: 0.0,
+            mixer_rack_is_resizing: false,
             paths,
             project_session: crate::project::ProjectSession::default(),
             project_path: None,
@@ -1026,6 +1040,34 @@ impl StudioLayout {
         }
         if let Some(command) = transport_command_from_id(command_id) {
             self.dispatch_transport_command(command, cx);
+            return;
+        }
+        if let Some(rest) = command_id.strip_prefix("mixer:add-send-to:") {
+            if let Some((track_id, target_track_id)) = rest.split_once(':') {
+                let added = self.timeline.update(cx, |timeline, _cx| {
+                    timeline.state.add_send_to_target(track_id, target_track_id)
+                });
+                self.open_popover = None;
+                if added.is_some() {
+                    self.mark_dirty();
+                    self.engine_project_dirty = true;
+                    self.schedule_audio_project_sync(cx, false, "mixer_add_send");
+                }
+                cx.notify();
+            }
+            return;
+        }
+        if let Some(track_id) = command_id.strip_prefix("mixer:create-return-send:") {
+            let added = self.timeline.update(cx, |timeline, _cx| {
+                timeline.state.create_return_and_send(track_id)
+            });
+            self.open_popover = None;
+            if added.is_some() {
+                self.mark_dirty();
+                self.engine_project_dirty = true;
+                self.schedule_audio_project_sync(cx, false, "mixer_create_return_send");
+            }
+            cx.notify();
             return;
         }
         match command_id {

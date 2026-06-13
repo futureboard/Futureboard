@@ -50,6 +50,27 @@ impl Render for StudioLayout {
             })
         };
 
+        // Shared Upper Rack ↔ Lower Control split for the docked mixer. The
+        // splitter handles route every intent through one owner method so all
+        // strips resize together.
+        let mixer_split = {
+            let this = cx.entity().clone();
+            let on_action: std::sync::Arc<
+                dyn Fn(
+                        crate::components::mixer_panel::MixerSplitAction,
+                        &mut gpui::Window,
+                        &mut gpui::App,
+                    ) + 'static,
+            > = std::sync::Arc::new(move |action, _w, cx| {
+                let _ = this.update(cx, |this, cx| this.apply_mixer_split_action(action, cx));
+            });
+            crate::components::mixer_panel::MixerSplit {
+                upper_px: self.mixer_rack_split_px(),
+                is_resizing: self.mixer_rack_is_resizing(),
+                on_action,
+            }
+        };
+
         let on_resize_start = cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
             let bs = &mut this.bottom_panel_state;
             bs.is_resizing = true;
@@ -1162,6 +1183,7 @@ impl Render for StudioLayout {
                         mixer_scroll_x,
                         mixer_viewport_width,
                         on_mixer_scroll,
+                        mixer_split,
                         Some(self.clip_editor_panel.clone().into_any_element()),
                         on_tab_click,
                         on_resize_start,

@@ -1,4 +1,4 @@
-use super::mixer_panel::{mixer_panel as render_mixer_panel, MixerCallbacks};
+use super::mixer_panel::{mixer_panel as render_mixer_panel, MixerCallbacks, MixerSplit};
 use crate::assets;
 use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 use crate::theme::Colors;
@@ -247,6 +247,7 @@ pub fn bottom_panel(
     mixer_scroll_x: f32,
     mixer_viewport_width: f32,
     on_mixer_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    mixer_split: MixerSplit,
     editor_content: Option<gpui::AnyElement>,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
     on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -337,6 +338,7 @@ pub fn bottom_panel(
                         mixer_scroll_x,
                         mixer_viewport_width,
                         on_mixer_scroll,
+                        mixer_split,
                     )
                     .into_any_element(),
                     BottomTab::Editor => editor_content

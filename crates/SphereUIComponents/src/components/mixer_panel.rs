@@ -23,13 +23,17 @@
 //!   only the fader area grows to fill remaining height.
 
 use gpui::prelude::FluentBuilder;
-use gpui::{div, px, svg, App, InteractiveElement, IntoElement, ParentElement, Styled, Window};
+use gpui::{
+    div, px, svg, App, AppContext, ClickEvent, DragMoveEvent, Empty, InteractiveElement,
+    IntoElement, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+};
 
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
 use crate::components::knob::knob_bipolar;
 use crate::components::timeline::timeline_state::{
-    volume, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState, TrackState, TrackType,
+    volume, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState, TrackState,
+    TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::theme::Colors;
@@ -50,6 +54,81 @@ const SEC_SENDS_H: f32 = 44.0;
 const SEC_PAN_H: f32 = 60.0;
 const SEC_BUTTONS_H: f32 = 24.0;
 const SEC_FOOTER_H: f32 = 22.0;
+
+// ── Vertical split (Upper Rack ↔ Lower Control) ─────────────────────────────
+// A horizontal splitter sits between the inserts/sends rack and the
+// pan/fader/meter cluster. The rack height is a *shared* pixel value across
+// every strip (a mixer keeps its insert/send rows aligned), driven by one
+// drag handler in `StudioLayout` and mirrored into the floating window via
+// `MixerSnapshot`. The lower control takes the remaining height (`flex_1`),
+// so the fader scales with the panel/window height as before.
+//
+// We store px (not a ratio against measured height) because this is a
+// stateless render fn with no access to the post-layout strip height. The px
+// is clamped every frame, so it stays bounded and predictable; the rack clips
+// + scrolls internally when its content is taller than the allotted height.
+/// Visual + hitbox height of the splitter handle.
+const SEC_SPLITTER_H: f32 = 6.0;
+/// Minimum allotted height for the Upper Rack.
+const UPPER_RACK_MIN_H: f32 = 88.0;
+/// Maximum allotted height for the Upper Rack — keeps the lower control usable.
+const UPPER_RACK_MAX_H: f32 = 280.0;
+/// Default Upper Rack height (≈ inserts header + 2–3 chips + sends header + 1
+/// chip). Used for the initial value and the double-click reset.
+pub const MIXER_RACK_SPLIT_DEFAULT_PX: f32 = 140.0;
+
+/// Clamp a desired Upper Rack height into the supported range. Called both by
+/// the owner (`StudioLayout`) and defensively at render time.
+pub fn clamp_mixer_rack_split_px(value: f32) -> f32 {
+    value.clamp(UPPER_RACK_MIN_H, UPPER_RACK_MAX_H)
+}
+
+/// Splitter drag/reset intents emitted by the channel-strip splitter handle.
+/// Pointer Y values are window-space (matches `MouseDownEvent::position.y`).
+#[derive(Clone, Copy, Debug)]
+pub enum MixerSplitAction {
+    /// Pointer pressed on the splitter — record the drag anchor.
+    ResizeStart(f32),
+    /// Pointer moved while dragging — recompute the shared rack height.
+    ResizeMove(f32),
+    /// Pointer released — commit the drag.
+    ResizeEnd,
+    /// Double-click — reset to [`MIXER_RACK_SPLIT_DEFAULT_PX`].
+    Reset,
+}
+
+/// Shared split layout passed into the mixer. `upper_px` is the current rack
+/// height (already clamped by the owner); `on_action` routes splitter intents
+/// back to the owner so all strips resize together.
+#[derive(Clone)]
+pub struct MixerSplit {
+    pub upper_px: f32,
+    pub is_resizing: bool,
+    pub on_action: std::sync::Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + 'static>,
+}
+
+impl MixerSplit {
+    /// Inert split for fallback UI (no live owner to route drags to).
+    pub fn inert() -> Self {
+        Self {
+            upper_px: MIXER_RACK_SPLIT_DEFAULT_PX,
+            is_resizing: false,
+            on_action: std::sync::Arc::new(|_, _, _| {}),
+        }
+    }
+}
+
+/// Zero-sized GPUI drag payload for the mixer splitter handle. Mirrors the
+/// bottom-panel resize pattern: `on_drag` registers it, `on_drag_move` on the
+/// mixer root recomputes height while the pointer is captured.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MixerSplitDrag;
+
+impl Render for MixerSplitDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 /// Maximum insert slots per track. Once reached, the trailing empty "+ Add
 /// Insert" slot and the INSERTS header "+" are hidden/disabled.
@@ -106,9 +185,9 @@ pub struct MixerCallbacks {
     pub on_open_insert_editor: std::sync::Arc<
         dyn Fn(&(String, usize, String), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
-    /// Add an aux send from the track to the first available Bus/Return
-    /// (Phase 3). A target picker is a follow-up.
-    pub on_add_send: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Open the send target picker for `(track_id, x, y)`.
+    pub on_add_send:
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     /// Remove the named send `(track_id, send_id)`.
     pub on_remove_send:
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -125,6 +204,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_insert_pair = Arc::new(|_: &(String, String), _: &mut Window, _: &mut App| {});
     let noop_insert_open = Arc::new(|_: &(String, usize, String), _: &mut Window, _: &mut App| {});
     let noop_insert_move = Arc::new(|_: &(String, String, bool), _: &mut Window, _: &mut App| {});
+    let noop_add_send = Arc::new(|_: &(String, f32, f32), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
         on_volume_change: noop_vol,
@@ -140,7 +220,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_toggle_insert_bypass: noop_insert_pair.clone(),
         on_move_insert: noop_insert_move,
         on_open_insert_editor: noop_insert_open.clone(),
-        on_add_send: noop_track,
+        on_add_send: noop_add_send,
         on_remove_send: noop_insert_pair,
     }
 }
@@ -700,6 +780,45 @@ fn inserts_section(
         .child(chips)
 }
 
+fn master_inserts_section(
+    accent: gpui::Rgba,
+    master: &MasterBusState,
+    callbacks: &MixerCallbacks,
+) -> impl IntoElement {
+    let used = master.inserts.len();
+    let at_max = used >= MAX_INSERT_SLOTS;
+
+    let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
+    for (insert_index, slot) in master.inserts.iter().enumerate() {
+        chips = chips.child(insert_chip(MASTER_TRACK_ID, insert_index, slot, callbacks));
+    }
+    if !at_max {
+        chips = chips.child(add_insert_button(MASTER_TRACK_ID, used, callbacks));
+    }
+
+    let header_plus = if at_max {
+        None
+    } else {
+        let on_add = callbacks.on_add_insert.clone();
+        Some(HeaderPlus {
+            id: gpui::SharedString::from("insert-header-add-master"),
+            on_click: std::sync::Arc::new(move |w, cx| {
+                eprintln!("[mixer] INSERTS header + clicked track=master slot={used}");
+                on_add(&MASTER_TRACK_ID.to_string(), w, cx);
+            }),
+        })
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .min_h(px(SEC_INSERTS_H))
+        .border_b(px(1.0))
+        .border_color(Colors::divider())
+        .child(section_header("INSERTS", accent, header_plus))
+        .child(chips)
+}
+
 fn send_chip(
     track_id: &str,
     send: &SendSlotState,
@@ -777,8 +896,10 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
                 .text_color(Colors::text_faint()),
         )
         .child("Send")
-        .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
-            on_add(&track_id_owned, w, cx);
+        .on_mouse_down(gpui::MouseButton::Left, move |event, w, cx| {
+            let x: f32 = event.position.x.into();
+            let y: f32 = event.position.y.into();
+            on_add(&(track_id_owned.clone(), x, y), w, cx);
         })
         .occlude()
 }
@@ -998,6 +1119,61 @@ fn strip_footer(name: &str) -> impl IntoElement {
         )
 }
 
+// ─── Vertical split handle ───────────────────────────────────────────────────
+
+/// Compact horizontal splitter between the Upper Rack and Lower Control. 6px
+/// hitbox with a short centered grip line; hover/active use theme tokens (no
+/// web-style chunky handle). `id_num` namespaces the GPUI element id per strip
+/// so drag/click state never bleeds between strips. The drag uses the same
+/// `on_drag` + ancestor `on_drag_move` capture pattern as the bottom panel.
+fn vertical_split_handle(id_num: usize, split: &MixerSplit) -> impl IntoElement {
+    let on_down = split.on_action.clone();
+    let on_dbl = split.on_action.clone();
+    let is_resizing = split.is_resizing;
+
+    let grip = if is_resizing {
+        Colors::accent_primary()
+    } else {
+        Colors::strip_border()
+    };
+
+    let mut handle = div()
+        .id(("mix-split", id_num))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .h(px(SEC_SPLITTER_H))
+        .border_b(px(1.0))
+        .border_color(Colors::divider())
+        .cursor(gpui::CursorStyle::ResizeUpDown)
+        .child(div().w(px(20.0)).h(px(1.0)).rounded_full().bg(grip))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |e: &MouseDownEvent, w, cx| {
+                let y: f32 = e.position.y.into();
+                on_down(MixerSplitAction::ResizeStart(y), w, cx);
+            },
+        )
+        .on_drag(MixerSplitDrag, |_drag, _offset, _window, cx| {
+            cx.new(|_| MixerSplitDrag)
+        })
+        .on_click(move |e: &ClickEvent, w, cx| {
+            if e.click_count() >= 2 {
+                on_dbl(MixerSplitAction::Reset, w, cx);
+            }
+        })
+        .occlude();
+
+    if is_resizing {
+        handle = handle.bg(Colors::accent_soft());
+    } else {
+        handle = handle.hover(|s| s.bg(Colors::surface_control_hover()));
+    }
+    handle
+}
+
 // ─── Channel strip ──────────────────────────────────────────────────────────
 
 fn channel_strip(
@@ -1006,6 +1182,7 @@ fn channel_strip(
     index: usize,
     is_selected: bool,
     callbacks: &MixerCallbacks,
+    split: &MixerSplit,
 ) -> impl IntoElement {
     let id_num = {
         use std::hash::{Hash, Hasher};
@@ -1061,11 +1238,35 @@ fn channel_strip(
         // Top accent line
         .child(div().w_full().h(px(2.0)).bg(track.color))
         .child(strip_header(track, index))
-        .child(inserts_section(track, index, callbacks))
-        .child(sends_section(track, all_tracks, callbacks))
-        .child(pan_section(track, callbacks, is_selected))
-        .child(fader_area(track, callbacks, is_selected))
-        .child(button_row(track, callbacks, id_num))
+        // ── Upper Rack — inserts + sends, fixed (shared) height, clipped and
+        // scrolled internally so tall chains never leak into the fader area.
+        .child(
+            div()
+                .id(("mix-upper-rack", id_num))
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w_full()
+                .h(px(clamp_mixer_rack_split_px(split.upper_px)))
+                .overflow_y_scroll()
+                .child(inserts_section(track, index, callbacks))
+                .child(sends_section(track, all_tracks, callbacks)),
+        )
+        .child(vertical_split_handle(id_num, split))
+        // ── Lower Control — pan / fader / meter / M·S·R·I. Takes the remaining
+        // height; the fader area is the flex_1 child so it absorbs growth and
+        // shrinks first when space is tight (pan + buttons stay fixed).
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(pan_section(track, callbacks, is_selected))
+                .child(fader_area(track, callbacks, is_selected))
+                .child(button_row(track, callbacks, id_num)),
+        )
         .child(strip_footer(&track.name))
 }
 
@@ -1075,7 +1276,12 @@ fn master_strip(
     accent: gpui::Rgba,
     master: &MasterBusState,
     on_master_vol_change: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    callbacks: &MixerCallbacks,
+    split: &MixerSplit,
 ) -> impl IntoElement {
+    // Fixed element-id namespace so the master rack scroll/splitter state never
+    // collides with a hashed track id.
+    let id_num = usize::MAX;
     let db_str = volume::format_db(master.volume);
     let on_change = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
         on_master_vol_change(v, w, cx);
@@ -1124,128 +1330,139 @@ fn master_strip(
                         ),
                 ),
         )
+        // ── Upper Rack — master inserts + a sends-sized spacer so the rack
+        // height stays aligned with the channel strips.
         .child(
             div()
+                .id(("mix-upper-rack", id_num))
                 .flex()
                 .flex_col()
-                .h(px(SEC_INSERTS_H))
-                .border_b(px(1.0))
-                .border_color(Colors::divider())
-                .child(section_header("INSERTS", accent, None))
-                .child(empty_slot()),
-        )
-        // Master skips sends, but we keep a same-sized spacer so its rows
-        // line up with the channel strips.
-        .child(
-            div()
-                .h(px(SEC_SENDS_H))
-                .border_b(px(1.0))
-                .border_color(Colors::divider()),
-        )
-        // Master skips pan; show the level pill in this row instead so the
-        // overall vertical rhythm matches a normal strip.
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(4.0))
-                .h(px(SEC_PAN_H))
-                .border_b(px(1.0))
-                .border_color(Colors::divider())
+                .flex_none()
+                .w_full()
+                .h(px(clamp_mixer_rack_split_px(split.upper_px)))
+                .overflow_y_scroll()
+                .child(master_inserts_section(accent, master, callbacks))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .min_w(px(46.0))
-                        .px(px(6.0))
-                        .h(px(14.0))
-                        .rounded_sm()
-                        .bg(Colors::slot_bg())
-                        .border(px(1.0))
-                        .border_color(Colors::with_alpha(accent, 0.55)) // Approved: dynamic accent border highlight
-                        .text_size(px(9.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_secondary())
-                        .child("STEREO"),
-                )
-                .child(
-                    div()
-                        .text_size(px(7.5))
-                        .text_color(Colors::text_faint())
-                        .child("OUT 1-2"),
+                        .h(px(SEC_SENDS_H))
+                        .border_b(px(1.0))
+                        .border_color(Colors::divider()),
                 ),
         )
+        .child(vertical_split_handle(id_num, split))
+        // ── Lower Control — STEREO/OUT row, fader cluster, OUT button.
         .child(
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h_0()
-                .items_center()
                 .w_full()
-                .px(px(4.0))
-                .pt(px(5.0))
-                .pb(px(6.0))
-                .gap(px(5.0))
-                .child(db_value_pill(db_str.clone(), true))
+                // Master skips pan; show the level pill in this row instead so
+                // the overall vertical rhythm matches a normal strip.
                 .child(
                     div()
                         .flex()
-                        .flex_row()
-                        .gap(px(2.0))
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(4.0))
+                        .h(px(SEC_PAN_H))
+                        .border_b(px(1.0))
+                        .border_color(Colors::divider())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .min_w(px(46.0))
+                                .px(px(6.0))
+                                .h(px(14.0))
+                                .rounded_sm()
+                                .bg(Colors::slot_bg())
+                                .border(px(1.0))
+                                .border_color(Colors::with_alpha(accent, 0.55)) // Approved: dynamic accent border highlight
+                                .text_size(px(9.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_secondary())
+                                .child("STEREO"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(7.5))
+                                .text_color(Colors::text_faint())
+                                .child("OUT 1-2"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_h_0()
+                        .items_center()
                         .w_full()
-                        .justify_center()
-                        .child(db_scale_column())
+                        .px(px(4.0))
+                        .pt(px(5.0))
+                        .pb(px(6.0))
+                        .gap(px(5.0))
+                        .child(db_value_pill(db_str.clone(), true))
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
-                                .h_full()
-                                .items_center()
+                                .gap(px(2.0))
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
                                 .justify_center()
-                                .child(render_fader(
-                                    "mix-fader-master",
-                                    master.volume,
-                                    accent,
-                                    on_change,
+                                .child(db_scale_column())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .h_full()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(render_fader(
+                                            "mix-fader-master",
+                                            master.volume,
+                                            accent,
+                                            on_change,
+                                        )),
+                                )
+                                .child(meter_surface(
+                                    master.meter_level_l,
+                                    master.meter_level_r,
+                                    master.meter_peak_hold_l,
+                                    master.meter_peak_hold_r,
+                                    master.meter_clip,
                                 )),
-                        )
-                        .child(meter_surface(
-                            master.meter_level_l,
-                            master.meter_level_r,
-                            master.meter_peak_hold_l,
-                            master.meter_peak_hold_r,
-                            master.meter_clip,
-                        )),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(SEC_BUTTONS_H))
-                .px(px(4.0))
+                        ),
+                )
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .h(px(16.0))
-                        .px(px(6.0))
-                        .rounded_sm()
-                        .bg(Colors::slot_bg())
-                        .border(px(1.0))
-                        .border_color(Colors::slot_border())
-                        .text_size(px(8.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_muted())
-                        .child("OUT 1·2"),
+                        .h(px(SEC_BUTTONS_H))
+                        .px(px(4.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .h(px(16.0))
+                                .px(px(6.0))
+                                .rounded_sm()
+                                .bg(Colors::slot_bg())
+                                .border(px(1.0))
+                                .border_color(Colors::slot_border())
+                                .text_size(px(8.5))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_muted())
+                                .child("OUT 1·2"),
+                        ),
                 ),
         )
         .child(strip_footer("Master"))
@@ -1293,6 +1510,8 @@ pub fn mixer_panel(
     viewport_width: f32,
     // Called with the new clamped scroll_x whenever the user scrolls the mixer.
     on_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    // Shared Upper Rack ↔ Lower Control split (height + drag routing).
+    split: MixerSplit,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("MixerPanel");
     let track_count = tracks.len();
@@ -1329,7 +1548,7 @@ pub fn mixer_panel(
         .map(|(rel_i, t)| {
             let abs_i = visible_start + rel_i;
             let is_sel = selected_track_id == Some(t.id.as_str());
-            channel_strip(t, tracks, abs_i, is_sel, &callbacks).into_any_element()
+            channel_strip(t, tracks, abs_i, is_sel, &callbacks, &split).into_any_element()
         })
         .collect();
 
@@ -1348,11 +1567,25 @@ pub fn mixer_panel(
         }
     };
 
+    // Splitter drag capture: any strip's handle starts the drag (records the
+    // anchor via ResizeStart); the move/up events land on this root so the
+    // pointer stays captured across the whole mixer surface (bottom-panel
+    // resize pattern). ResizeEnd is a cheap no-op unless a drag is live.
+    let split_for_move = split.clone();
+    let split_for_end = split.clone();
+
     div()
         .flex()
         .flex_col()
         .size_full()
         .bg(Colors::mixer_bg())
+        .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
+            let y: f32 = event.event.position.y.into();
+            (split_for_move.on_action)(MixerSplitAction::ResizeMove(y), w, cx);
+        })
+        .on_mouse_up(gpui::MouseButton::Left, move |_e, w, cx| {
+            (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
+        })
         .child(mixer_sub_header(track_count))
         // Content row: scrollable channels (flex_1) + master block (fixed).
         .child(
@@ -1411,6 +1644,6 @@ pub fn mixer_panel(
                 // Gutter separating channels from the master block.
                 .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
                 // Pinned master block
-                .child(master_strip(accent, master, on_master)),
+                .child(master_strip(accent, master, on_master, &callbacks, &split)),
         )
 }

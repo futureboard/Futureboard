@@ -11,7 +11,9 @@ use gpui::{
     WindowHandle, WindowKind,
 };
 
-use crate::components::mixer_panel::{mixer_panel, MixerCallbacks};
+use crate::components::mixer_panel::{
+    clamp_mixer_rack_split_px, mixer_panel, MixerCallbacks, MixerSplit, MixerSplitAction,
+};
 use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 use crate::components::title_bar::external_window_titlebar;
 use crate::theme::Colors;
@@ -28,6 +30,10 @@ pub struct MixerSnapshot {
     pub master: MasterBusState,
     pub selected_track_id: Option<String>,
     pub mixer_scroll_x: f32,
+    /// Shared Upper Rack height (clamped by the owner).
+    pub mixer_rack_split_px: f32,
+    /// Whether the splitter is mid-drag (drives the active-handle highlight).
+    pub mixer_rack_is_resizing: bool,
 }
 
 pub struct MixerWindow {
@@ -35,6 +41,7 @@ pub struct MixerWindow {
     callbacks: MixerCallbacks,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
+    on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
     focus_handle: FocusHandle,
 }
 
@@ -44,6 +51,7 @@ impl MixerWindow {
         callbacks: MixerCallbacks,
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
+        on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
         cx: &mut Context<Self>,
     ) -> Self {
         external_mixer_debug(&format!(
@@ -55,6 +63,7 @@ impl MixerWindow {
             callbacks,
             on_close,
             on_mixer_scroll,
+            on_mixer_split,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -76,11 +85,19 @@ impl Render for MixerWindow {
             master,
             selected_track_id,
             mixer_scroll_x,
+            mixer_rack_split_px,
+            mixer_rack_is_resizing,
         } = self.snapshot.clone();
         let mixer_callbacks = self.callbacks.clone();
         let on_mixer_scroll = self.on_mixer_scroll.clone();
+        let on_mixer_split = self.on_mixer_split.clone();
         let on_close = self.on_close.clone();
         let mixer_viewport_width = (viewport_width - 90.0).max(100.0);
+        let mixer_split = MixerSplit {
+            upper_px: clamp_mixer_rack_split_px(mixer_rack_split_px),
+            is_resizing: mixer_rack_is_resizing,
+            on_action: on_mixer_split,
+        };
 
         div()
             .flex()
@@ -113,6 +130,7 @@ impl Render for MixerWindow {
                         mixer_scroll_x,
                         mixer_viewport_width,
                         on_mixer_scroll,
+                        mixer_split,
                     )),
             )
     }
@@ -124,6 +142,7 @@ pub fn open_mixer_window(
     callbacks: MixerCallbacks,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
+    on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
     cx: &mut App,
 ) -> Result<WindowHandle<MixerWindow>, String> {
     external_mixer_debug(&format!(
@@ -156,7 +175,16 @@ pub fn open_mixer_window(
     crate::window_position::apply_owner_display(&mut options, Some(owner_bounds), cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| MixerWindow::new(snapshot, callbacks, on_close, on_mixer_scroll, cx))
+        cx.new(|cx| {
+            MixerWindow::new(
+                snapshot,
+                callbacks,
+                on_close,
+                on_mixer_scroll,
+                on_mixer_split,
+                cx,
+            )
+        })
     })
     .map_err(|e| e.to_string())
 }

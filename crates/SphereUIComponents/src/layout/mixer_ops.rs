@@ -1,6 +1,8 @@
 use gpui::{Context, Entity, Window, WindowHandle};
 
-use crate::components::mixer_panel::MixerCallbacks;
+use crate::components::mixer_panel::{
+    clamp_mixer_rack_split_px, MixerCallbacks, MixerSplitAction, MIXER_RACK_SPLIT_DEFAULT_PX,
+};
 use crate::components::timeline::timeline_state::{self, TrackState};
 use crate::components::{external_mixer_debug, MixerSnapshot};
 
@@ -18,6 +20,8 @@ impl StudioLayout {
             master: timeline.state.master.clone(),
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
             mixer_scroll_x: self.mixer_scroll_x,
+            mixer_rack_split_px: clamp_mixer_rack_split_px(self.mixer_rack_split_px),
+            mixer_rack_is_resizing: self.mixer_rack_is_resizing,
         }
     }
 
@@ -57,6 +61,52 @@ impl StudioLayout {
         } else {
             false
         }
+    }
+
+    /// Current shared Upper Rack height, clamped to the supported range.
+    pub(crate) fn mixer_rack_split_px(&self) -> f32 {
+        clamp_mixer_rack_split_px(self.mixer_rack_split_px)
+    }
+
+    pub(crate) fn mixer_rack_is_resizing(&self) -> bool {
+        self.mixer_rack_is_resizing
+    }
+
+    /// Apply a splitter intent from any channel-strip handle. Shared across all
+    /// strips, so one drag resizes the whole mixer. Pushes the new height to the
+    /// floating mixer window and repaints when something changed.
+    pub(crate) fn apply_mixer_split_action(
+        &mut self,
+        action: MixerSplitAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            MixerSplitAction::ResizeStart(y) => {
+                self.mixer_rack_resize_start_y = y;
+                self.mixer_rack_resize_start_px = clamp_mixer_rack_split_px(self.mixer_rack_split_px);
+                self.mixer_rack_is_resizing = true;
+            }
+            MixerSplitAction::ResizeMove(y) => {
+                let delta = y - self.mixer_rack_resize_start_y;
+                let new_px = clamp_mixer_rack_split_px(self.mixer_rack_resize_start_px + delta);
+                if (new_px - self.mixer_rack_split_px).abs() <= 0.25 {
+                    return;
+                }
+                self.mixer_rack_split_px = new_px;
+            }
+            MixerSplitAction::ResizeEnd => {
+                if !self.mixer_rack_is_resizing {
+                    return;
+                }
+                self.mixer_rack_is_resizing = false;
+            }
+            MixerSplitAction::Reset => {
+                self.mixer_rack_split_px = MIXER_RACK_SPLIT_DEFAULT_PX;
+                self.mixer_rack_is_resizing = false;
+            }
+        }
+        self.push_mixer_snapshot_to_window(cx);
+        cx.notify();
     }
 
     pub(crate) fn mixer_window_handle(&self) -> Option<WindowHandle<MixerWindow>> {
@@ -373,22 +423,23 @@ impl StudioLayout {
         };
 
         // ── Send callbacks (Phase 3) ─────────────────────────────────────
-        // add_send auto-targets the first eligible Bus/Return (a target picker
-        // is a follow-up). Both flip `engine_project_dirty` so the next audio
-        // sync carries the send list down to the runtime.
-        let on_add_send: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> = {
+        // Add Send opens a target picker at the click point. The command chosen
+        // from that menu performs the actual state mutation and engine sync.
+        let on_add_send: std::sync::Arc<
+            dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
             let this = owner.clone();
-            std::sync::Arc::new(move |track_id: &String, _w, cx| {
+            std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), _w, cx| {
                 let track_id = track_id.clone();
+                let x = *x;
+                let y = *y;
                 StudioLayout::defer_update(&this, cx, move |this, cx| {
-                    let added = this
-                        .timeline
-                        .update(cx, |timeline, _cx| timeline.state.add_send(&track_id));
-                    if added.is_some() {
-                        this.mark_dirty();
-                        this.engine_project_dirty = true;
-                        cx.notify();
-                    }
+                    this.open_popover = Some(OpenPopover::Context {
+                        target: ContextTarget::SendPicker { track_id },
+                        x,
+                        y,
+                    });
+                    cx.notify();
                 });
             })
         };

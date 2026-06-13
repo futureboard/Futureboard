@@ -7,7 +7,7 @@ use crate::components::plugin_picker::{
     sync_selection_from_highlight, visible_plugin_id_at, PluginPickerState,
 };
 use crate::components::text_input::{TextInputAction, TextInputState};
-use crate::components::timeline::timeline_state::ClipType;
+use crate::components::timeline::timeline_state::{ClipType, TrackType};
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
 use super::project_ops::ProjectOpenOptions;
@@ -846,6 +846,61 @@ impl StudioLayout {
                 ContextMenuEntry::item("Mute", "track:mute"),
                 ContextMenuEntry::item("Solo", "track:solo"),
             ],
+            ContextTarget::SendPicker { track_id } => {
+                let state = &self.timeline.read(cx).state;
+                let Some(source) = state.find_track(track_id) else {
+                    return vec![ContextMenuEntry::disabled_item("Track unavailable", "noop")];
+                };
+                let mut entries = vec![ContextMenuEntry::Header("Send To".to_string())];
+                if source.track_type.is_routing() {
+                    entries.push(ContextMenuEntry::disabled_item(
+                        "Routing tracks cannot send",
+                        "noop",
+                    ));
+                    return entries;
+                }
+                let existing: std::collections::HashSet<&str> = source
+                    .sends
+                    .iter()
+                    .map(|send| send.target_track_id.as_str())
+                    .collect();
+                let mut available = 0usize;
+                for target in state
+                    .tracks
+                    .iter()
+                    .filter(|target| target.id != *track_id && target.track_type.is_routing())
+                {
+                    let type_label = match target.track_type {
+                        TrackType::Bus => "Bus",
+                        TrackType::Return => "Return",
+                        _ => "",
+                    };
+                    if existing.contains(target.id.as_str()) {
+                        entries.push(ContextMenuEntry::disabled_item(
+                            format!("{} ({type_label}) - already sending", target.name),
+                            "noop",
+                        ));
+                    } else {
+                        available += 1;
+                        entries.push(ContextMenuEntry::item(
+                            format!("{} ({type_label})", target.name),
+                            format!("mixer:add-send-to:{}:{}", track_id, target.id),
+                        ));
+                    }
+                }
+                if available == 0 {
+                    entries.push(ContextMenuEntry::disabled_item(
+                        "No available bus/return",
+                        "noop",
+                    ));
+                }
+                entries.push(ContextMenuEntry::Separator);
+                entries.push(ContextMenuEntry::item(
+                    "Create Return and Send",
+                    format!("mixer:create-return-send:{track_id}"),
+                ));
+                entries
+            }
             ContextTarget::TimeSignature => {
                 let state = &self.timeline.read(cx).state;
                 let pt = state.time_signature_at_playhead();

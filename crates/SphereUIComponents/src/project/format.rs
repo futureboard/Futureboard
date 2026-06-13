@@ -21,7 +21,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v11 adds a content fingerprint per project asset for cross-session import
 /// dedup. Pre-v11 files have no asset fingerprint and load with `None`.
 /// v13 adds timeline markers and regions. v14 adds internal RAUF clip sources.
-pub const PROJECT_VERSION: u32 = 14;
+/// v15 adds persisted master-bus inserts.
+pub const PROJECT_VERSION: u32 = 15;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -691,6 +692,10 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
 
     // Mixer
     w.write_f32(project.mixer.master_volume_norm);
+    w.write_u32(project.mixer.master_inserts.len() as u32);
+    for ins in &project.mixer.master_inserts {
+        encode_insert(&mut w, ins);
+    }
 
     // Tracks
     w.write_u32(project.tracks.len() as u32);
@@ -1218,6 +1223,16 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
     let bit_depth = r.read_u32()?;
 
     let master_volume_norm = r.read_f32()?;
+    let master_inserts = if version >= 15 {
+        let insert_count = r.read_u32()? as usize;
+        let mut inserts = Vec::with_capacity(insert_count);
+        for _ in 0..insert_count {
+            inserts.push(decode_insert(&mut r)?);
+        }
+        inserts
+    } else {
+        Vec::new()
+    };
 
     let track_count = r.read_u32()? as usize;
     let mut tracks = Vec::with_capacity(track_count);
@@ -1336,7 +1351,10 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             bit_depth,
         },
         tracks,
-        mixer: ProjectMixer { master_volume_norm },
+        mixer: ProjectMixer {
+            master_volume_norm,
+            master_inserts,
+        },
         assets,
     })
 }

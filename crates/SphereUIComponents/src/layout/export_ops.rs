@@ -6,7 +6,7 @@
 
 use gpui::{Bounds, Context};
 
-use super::engine_snapshot::{build_engine_project_snapshot, volume_norm_to_linear};
+use super::engine_snapshot::{build_engine_project_snapshot_for_export, volume_norm_to_linear};
 use super::StudioLayout;
 use crate::export::{open_export_arrangement_window, ExportProjectDefaults};
 
@@ -43,8 +43,15 @@ impl StudioLayout {
             .folder_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
-        let snapshot =
-            build_engine_project_snapshot(&tl_state, sample_rate, project_root.as_deref(), None);
+        // Export renders plugins in-process from the saved VST3 state captured by
+        // refresh_bridge_plugin_states above — the isolated offline graph has no
+        // out-of-process bridge host attached.
+        let snapshot = build_engine_project_snapshot_for_export(
+            &tl_state,
+            sample_rate,
+            project_root.as_deref(),
+            None,
+        );
         let master_volume = volume_norm_to_linear(tl_state.master.volume);
         let content_end_beat = snapshot
             .clips

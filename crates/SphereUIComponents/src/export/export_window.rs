@@ -643,7 +643,7 @@ impl ExportArrangementWindow {
         };
         let options = vec![
             SelectOption::new("none", "None"),
-            SelectOption::new("fixed", "Fixed 2 s"),
+            SelectOption::new("fixed", "Fixed 5 s"),
             SelectOption::new("silence", "Until silence"),
         ];
         let control = self.dropdown(
@@ -734,7 +734,7 @@ impl ExportArrangementWindow {
             }
             SelectField::Tail => {
                 self.settings.tail = match value {
-                    "fixed" => ExportTailChoice::FixedSeconds(2.0),
+                    "fixed" => ExportTailChoice::FixedSeconds(5.0),
                     "silence" => ExportTailChoice::UntilSilence {
                         max_seconds: 10.0,
                         threshold_db: -60.0,

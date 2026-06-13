@@ -334,6 +334,11 @@ pub struct EngineInsertSnapshot {
     pub kind: String,
     pub enabled: bool,
     pub params: std::collections::HashMap<String, serde_json::Value>,
+    /// Packed `Vst3PluginState` ("FBV3" blob) to restore into an in-process
+    /// processor before rendering. Set only by the offline-export snapshot
+    /// builder; `None` (and omitted from serialization) on the live path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

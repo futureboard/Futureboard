@@ -52,6 +52,10 @@ pub fn render_offline(
         RuntimeProject::build(snapshot, request.sample_rate, &mut audio_cache, None, false)
             .map_err(|e| ExportError::Build(e.to_string()))?;
     runtime.sample_rate = request.sample_rate;
+    // Restore each in-process VST3 insert's saved state before any process() call
+    // so instruments/effects render with the user's current tweaks. Runs once on
+    // this worker thread, never the audio callback.
+    restore_offline_plugin_states(snapshot, &mut runtime);
     runtime.reset_midi_playback(request.start_sample);
 
     let channels = request.channels.max(1) as usize;
@@ -192,6 +196,72 @@ pub fn render_offline(
     })
 }
 
+#[inline]
+fn plugin_state_debug_enabled() -> bool {
+    std::env::var("FUTUREBOARD_PLUGIN_STATE_DEBUG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Restore saved VST3 state into the freshly-built in-process processors.
+///
+/// Matches snapshot inserts to runtime inserts by track id + insert id, decodes
+/// the packed `Vst3PluginState` blob carried by the offline-export snapshot, and
+/// applies it. Inserts that failed to instantiate (`vst3 == None`, e.g. a plugin
+/// that refuses a second instance) are skipped — the render still completes; the
+/// kernel bypasses them (instrument → silence, effect → dry). Bad/empty blobs are
+/// ignored. Control-thread only.
+fn restore_offline_plugin_states(snapshot: &EngineProjectSnapshot, runtime: &mut RuntimeProject) {
+    use crate::vst3_processor::Vst3PluginState;
+
+    let debug = plugin_state_debug_enabled();
+    for snap_track in &snapshot.tracks {
+        let Some(rt_track) = runtime.tracks.iter_mut().find(|t| t.id == snap_track.id) else {
+            continue;
+        };
+        for snap_insert in &snap_track.inserts {
+            let Some(bytes) = snap_insert.state.as_ref() else {
+                continue;
+            };
+            let Some(rt_insert) = rt_track.inserts.iter().find(|i| i.id == snap_insert.id) else {
+                continue;
+            };
+            let Some(vst3) = rt_insert.vst3.as_ref() else {
+                if debug {
+                    eprintln!(
+                        "[export-state] skip insert={} track={} reason=not_instantiated",
+                        snap_insert.id, snap_track.id
+                    );
+                }
+                continue;
+            };
+            match Vst3PluginState::from_packed_bytes(bytes) {
+                Some(state) => {
+                    let ok = vst3.set_state(&state);
+                    if debug {
+                        eprintln!(
+                            "[export-state] restore insert={} track={} bytes={} ok={}",
+                            snap_insert.id,
+                            snap_track.id,
+                            bytes.len(),
+                            ok
+                        );
+                    }
+                }
+                None if debug => {
+                    eprintln!(
+                        "[export-state] skip insert={} track={} reason=unparseable_blob bytes={}",
+                        snap_insert.id,
+                        snap_track.id,
+                        bytes.len()
+                    );
+                }
+                None => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn silence_snapshot(sample_rate: u32) -> EngineProjectSnapshot {
     use crate::types::{EngineRoutingSnapshot, EngineTrackSnapshot};
@@ -287,6 +357,36 @@ mod tests {
         let cancel = ExportCancelToken::new();
         let result = render_offline(&snapshot, &req, &cancel, 1.0, |_b| Ok(()), |_p| {});
         assert!(matches!(result, Err(ExportError::Settings(_))));
+    }
+
+    #[test]
+    fn restore_offline_plugin_states_skips_uninstantiated_insert() {
+        use crate::types::EngineInsertSnapshot;
+        use std::collections::HashMap;
+
+        let mut snapshot = silence_snapshot(48_000);
+        // native-plugin insert with no module path → no in-process processor is
+        // created (from_params returns None before any FFI). It still carries a
+        // garbage state blob; restore must skip it without panicking.
+        let mut params: HashMap<String, serde_json::Value> = HashMap::new();
+        params.insert("format".to_string(), serde_json::json!("VST3"));
+        snapshot.tracks[0].inserts.push(EngineInsertSnapshot {
+            id: "insert-1".to_string(),
+            kind: "native-plugin".to_string(),
+            enabled: true,
+            params,
+            state: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+        });
+
+        let mut cache = HashMap::new();
+        let mut runtime =
+            RuntimeProject::build(&snapshot, 48_000, &mut cache, None, false).expect("build");
+        assert!(
+            runtime.tracks[0].inserts[0].vst3.is_none(),
+            "insert without a module path must not instantiate a processor"
+        );
+        // Must not panic on a missing processor / unparseable blob.
+        restore_offline_plugin_states(&snapshot, &mut runtime);
     }
 
     #[test]

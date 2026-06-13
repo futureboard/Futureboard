@@ -1,6 +1,7 @@
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::timeline::timeline_state::{
-    self, ClipType, MidiControllerKind, TimelineState, TrackState, TrackType,
+    self, ClipType, InsertSlotState, MidiControllerKind, TimelineState, TrackState, TrackType,
+    MASTER_TRACK_ID,
 };
 
 use DAUx::types::{
@@ -102,20 +103,27 @@ fn log_track_insert_chain(track_id: &str, inserts: &[EngineInsertSnapshot]) {
     );
 }
 
-fn bridge_insert_role(track: &TrackState, slot_index: usize) -> &'static str {
-    if matches!(track.track_type, TrackType::Instrument | TrackType::Midi) && slot_index == 0 {
+fn bridge_insert_role(track_type: TrackType, slot_index: usize) -> &'static str {
+    if matches!(track_type, TrackType::Instrument | TrackType::Midi) && slot_index == 0 {
         "instrument"
     } else {
         "effect"
     }
 }
 
-fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
+fn build_engine_inserts_for(
+    track_id: &str,
+    track_type: TrackType,
+    slots: &[InsertSlotState],
+    export_mode: bool,
+) -> Vec<EngineInsertSnapshot> {
     use crate::components::timeline::timeline_state::InsertPluginFormat;
 
-    if super::plugin_bridge_runtime::bridge_enabled() {
-        return track
-            .inserts
+    // Offline export always renders plugins in-process (the live out-of-process
+    // bridge has no host attached to the isolated offline graph), so it skips the
+    // bridge branch and carries each insert's saved VST3 state for restore.
+    if !export_mode && super::plugin_bridge_runtime::bridge_enabled() {
+        return slots
             .iter()
             .enumerate()
             .filter_map(|(slot_index, slot)| {
@@ -132,7 +140,7 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
                     .map(|p| p.to_string_lossy().into_owned())
                     .filter(|p| !p.trim().is_empty())?;
 
-                let role = bridge_insert_role(track, slot_index);
+                let role = bridge_insert_role(track_type, slot_index);
 
                 let mut params: std::collections::HashMap<String, serde_json::Value> =
                     std::collections::HashMap::new();
@@ -151,7 +159,7 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
 
                 eprintln!(
                     "[GraphBuild] track={} insert={} instance={} kind=external-bridge-plugin",
-                    track.id, slot.id, slot.id
+                    track_id, slot.id, slot.id
                 );
 
                 Some(EngineInsertSnapshot {
@@ -159,13 +167,13 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
                     kind: "external-bridge-plugin".to_string(),
                     enabled: slot.enabled && !slot.bypassed,
                     params,
+                    state: None,
                 })
             })
             .collect();
     }
 
-    track
-        .inserts
+    slots
         .iter()
         .filter_map(|slot| {
             let plugin_id = slot.plugin_id.as_deref()?;
@@ -201,9 +209,22 @@ fn build_engine_inserts(track: &TrackState) -> Vec<EngineInsertSnapshot> {
                 kind: "native-plugin".to_string(),
                 enabled: slot.enabled && !slot.bypassed,
                 params,
+                // Carry the saved VST3 state into the offline graph so the
+                // freshly-instantiated in-process processor renders with the
+                // user's current tweaks. Live in-process builds keep `None`
+                // (their state is restored through the existing engine path).
+                state: if export_mode {
+                    slot.vst3_state.as_ref().map(|a| a.as_ref().clone())
+                } else {
+                    None
+                },
             })
         })
         .collect()
+}
+
+fn build_engine_inserts(track: &TrackState, export_mode: bool) -> Vec<EngineInsertSnapshot> {
+    build_engine_inserts_for(&track.id, track.track_type, &track.inserts, export_mode)
 }
 
 /// Build the DAUx send descriptors for one track (Phase 3). Each send carries
@@ -282,11 +303,47 @@ fn build_engine_automation_lanes(track: &TrackState) -> Vec<EngineAutomationLane
         .collect()
 }
 
+/// Live-path snapshot: plugin inserts follow the configured backend (bridged by
+/// default). Used by every realtime engine sync.
 pub(super) fn build_engine_project_snapshot(
     state: &TimelineState,
     sample_rate: u32,
     project_root: Option<&str>,
     preferred_input_device: Option<&str>,
+) -> EngineProjectSnapshot {
+    build_engine_project_snapshot_inner(
+        state,
+        sample_rate,
+        project_root,
+        preferred_input_device,
+        false,
+    )
+}
+
+/// Offline-export snapshot: plugin inserts are forced in-process and carry their
+/// saved VST3 state so the isolated offline graph renders instruments/effects the
+/// out-of-process bridge would otherwise own. See `export_ops` / `offline_renderer`.
+pub(super) fn build_engine_project_snapshot_for_export(
+    state: &TimelineState,
+    sample_rate: u32,
+    project_root: Option<&str>,
+    preferred_input_device: Option<&str>,
+) -> EngineProjectSnapshot {
+    build_engine_project_snapshot_inner(
+        state,
+        sample_rate,
+        project_root,
+        preferred_input_device,
+        true,
+    )
+}
+
+fn build_engine_project_snapshot_inner(
+    state: &TimelineState,
+    sample_rate: u32,
+    project_root: Option<&str>,
+    preferred_input_device: Option<&str>,
+    export_mode: bool,
 ) -> EngineProjectSnapshot {
     let mut tracks: Vec<EngineTrackSnapshot> = state
         .tracks
@@ -312,7 +369,7 @@ pub(super) fn build_engine_project_snapshot(
                 | timeline_state::TrackOutputRouting::HardwareOutput { .. } => None,
             },
             inserts: {
-                let inserts = build_engine_inserts(track);
+                let inserts = build_engine_inserts(track, export_mode);
                 log_track_insert_chain(&track.id, &inserts);
                 inserts
             },
@@ -320,6 +377,14 @@ pub(super) fn build_engine_project_snapshot(
             automation_lanes: build_engine_automation_lanes(track),
         })
         .collect();
+
+    let master_inserts = build_engine_inserts_for(
+        MASTER_TRACK_ID,
+        TrackType::Master,
+        &state.master.inserts,
+        export_mode,
+    );
+    log_track_insert_chain(MASTER_TRACK_ID, &master_inserts);
 
     tracks.push(EngineTrackSnapshot {
         id: "master".to_string(),
@@ -336,7 +401,7 @@ pub(super) fn build_engine_project_snapshot(
         },
         preview_mode: "stereo".to_string(),
         output_track_id: None,
-        inserts: Vec::new(),
+        inserts: master_inserts,
         sends: Vec::new(),
         automation_lanes: Vec::new(),
     });
@@ -677,6 +742,80 @@ mod tests {
     }
 
     #[test]
+    fn export_snapshot_forces_in_process_inserts_and_carries_state() {
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "FX".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "class-a".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/a.vst3")),
+            InsertPluginFormat::Vst3,
+            "Plugin A".to_string(),
+        );
+        // Stamp a saved-state blob the way refresh_bridge_plugin_states does
+        // before an export.
+        let state_bytes = vec![9u8, 8, 7, 6];
+        for track in &mut state.tracks {
+            for ins in &mut track.inserts {
+                if ins.id == slot {
+                    ins.vst3_state = Some(std::sync::Arc::new(state_bytes.clone()));
+                }
+            }
+        }
+
+        // Export snapshot: in-process kind + carried state, regardless of the
+        // live bridge setting.
+        let exported = build_engine_project_snapshot_for_export(&state, 48_000, None, None);
+        let insert = exported
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.inserts.iter().find(|i| i.id == slot))
+            .expect("insert in export snapshot");
+        assert_eq!(
+            insert.kind, "native-plugin",
+            "export must force in-process inserts"
+        );
+        assert_eq!(
+            insert.state.as_deref(),
+            Some(state_bytes.as_slice()),
+            "export must carry the saved VST3 state"
+        );
+
+        // Live snapshot never carries the export state (bridged host owns restore).
+        let live = build_engine_project_snapshot(&state, 48_000, None, None);
+        if let Some(live_insert) = live
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.inserts.iter().find(|i| i.id == slot))
+        {
+            assert!(
+                live_insert.state.is_none(),
+                "live snapshot must not carry export state"
+            );
+        }
+    }
+
+    #[test]
     fn instrument_track_marks_only_first_bridge_insert_as_instrument() {
         use crate::components::timeline::timeline_state::InsertPluginFormat;
 
@@ -720,8 +859,8 @@ mod tests {
         let track = state
             .find_track(&track_id)
             .expect("instrument track in state");
-        assert_eq!(bridge_insert_role(track, 0), "instrument");
-        assert_eq!(bridge_insert_role(track, 1), "effect");
+        assert_eq!(bridge_insert_role(track.track_type, 0), "instrument");
+        assert_eq!(bridge_insert_role(track.track_type, 1), "effect");
     }
 
     #[test]

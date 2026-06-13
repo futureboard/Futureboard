@@ -377,6 +377,7 @@ pub struct ProjectTrack {
 #[derive(Debug, Clone)]
 pub struct ProjectMixer {
     pub master_volume_norm: f32,
+    pub master_inserts: Vec<ProjectInsert>,
 }
 
 impl Default for ProjectMixer {
@@ -385,6 +386,7 @@ impl Default for ProjectMixer {
             master_volume_norm: crate::components::timeline::timeline_state::volume::db_to_norm(
                 0.0,
             ),
+            master_inserts: Vec::new(),
         }
     }
 }
@@ -534,8 +536,111 @@ pub fn hex_to_rgba(hex: &str) -> gpui::Rgba {
 // ── From TimelineState ────────────────────────────────────────────────────────
 
 use crate::components::timeline::timeline_state::{
-    ClipType, TimelineMarkerState, TimelineRegionState, TimelineState, TrackType as TlTrackType,
+    ClipType, InsertSlotState, TimelineMarkerState, TimelineRegionState, TimelineState,
+    TrackType as TlTrackType,
 };
+
+fn timeline_insert_to_project(idx: usize, slot: &InsertSlotState) -> ProjectInsert {
+    use crate::components::timeline::timeline_state::InsertPluginFormat;
+
+    let plugin = slot.plugin_id.as_ref().map(|pid| {
+        let format = match slot.plugin_format {
+            Some(InsertPluginFormat::Vst3) => PluginFormat::Vst3,
+            Some(InsertPluginFormat::Clap) => PluginFormat::Clap,
+            Some(InsertPluginFormat::Au) => PluginFormat::Au,
+            Some(InsertPluginFormat::Lv2) => PluginFormat::Lv2,
+            _ => PluginFormat::Unknown,
+        };
+        ProjectPluginInstance {
+            instance_id: slot.id.clone(),
+            format,
+            plugin_path: slot.plugin_path.clone(),
+            plugin_uid: pid.clone(),
+            display_name: slot.display_name.clone(),
+            state: PluginStateBlob {
+                plugin_id: pid.clone(),
+                format: Some(format),
+                state_bytes: slot
+                    .vst3_state
+                    .as_ref()
+                    .map(|state| state.as_ref().clone())
+                    .unwrap_or_default(),
+                vendor: None,
+                name: Some(slot.display_name.clone()),
+                version: None,
+            },
+        }
+    });
+    ProjectInsert {
+        id: slot.id.clone(),
+        slot_index: idx as u32,
+        bypassed: slot.bypassed,
+        plugin,
+    }
+}
+
+fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
+    use crate::components::timeline::timeline_state::{
+        InsertLoadStatus, InsertPluginFormat, PluginRuntimeBackend, PluginRuntimeState,
+    };
+
+    match &pi.plugin {
+        Some(plugin) => {
+            let plugin_format = match plugin.format {
+                PluginFormat::Vst3 => InsertPluginFormat::Vst3,
+                PluginFormat::Clap => InsertPluginFormat::Clap,
+                PluginFormat::Au => InsertPluginFormat::Au,
+                PluginFormat::Lv2 => InsertPluginFormat::Lv2,
+                PluginFormat::Unknown => InsertPluginFormat::Unknown,
+            };
+            let bridge = sphere_plugin_host::plugin_host_client::plugin_host_bridge_enabled()
+                && plugin_format == InsertPluginFormat::Vst3;
+            let path_missing = plugin
+                .plugin_path
+                .as_ref()
+                .is_none_or(|path| !path.exists());
+            let (load_status, runtime_state, runtime_backend) = if path_missing {
+                (
+                    InsertLoadStatus::Missing("Plugin file not found".to_string()),
+                    PluginRuntimeState::Missing("Plugin file not found".to_string()),
+                    if bridge {
+                        PluginRuntimeBackend::ExternalBridge
+                    } else {
+                        PluginRuntimeBackend::InProcess
+                    },
+                )
+            } else {
+                (
+                    InsertLoadStatus::Loading,
+                    PluginRuntimeState::NotLoaded,
+                    if bridge {
+                        PluginRuntimeBackend::ExternalBridge
+                    } else {
+                        PluginRuntimeBackend::InProcess
+                    },
+                )
+            };
+            InsertSlotState {
+                id: pi.id.clone(),
+                plugin_id: Some(plugin.plugin_uid.clone()),
+                plugin_path: plugin.plugin_path.clone(),
+                plugin_format: Some(plugin_format),
+                display_name: plugin.display_name.clone(),
+                enabled: true,
+                bypassed: pi.bypassed,
+                load_status,
+                runtime_backend,
+                runtime_state,
+                host_pid: None,
+                parameters: Vec::new(),
+                pending_open_editor: false,
+                vst3_state: (!plugin.state.state_bytes.is_empty())
+                    .then(|| std::sync::Arc::new(plugin.state.state_bytes.clone())),
+            }
+        }
+        None => InsertSlotState::empty(pi.id.clone()),
+    }
+}
 
 impl From<&TimelineState> for FutureboardProject {
     fn from(tl: &TimelineState) -> Self {
@@ -687,45 +792,7 @@ impl From<&TimelineState> for FutureboardProject {
                         .inserts
                         .iter()
                         .enumerate()
-                        .map(|(idx, slot)| {
-                            use crate::components::timeline::timeline_state::InsertPluginFormat;
-                            let plugin = slot.plugin_id.as_ref().map(|pid| {
-                                let format = match slot.plugin_format {
-                                    Some(InsertPluginFormat::Vst3) => PluginFormat::Vst3,
-                                    Some(InsertPluginFormat::Clap) => PluginFormat::Clap,
-                                    Some(InsertPluginFormat::Au) => PluginFormat::Au,
-                                    Some(InsertPluginFormat::Lv2) => PluginFormat::Lv2,
-                                    _ => PluginFormat::Unknown,
-                                };
-                                ProjectPluginInstance {
-                                    instance_id: slot.id.clone(),
-                                    format,
-                                    plugin_path: slot.plugin_path.clone(),
-                                    plugin_uid: pid.clone(),
-                                    display_name: slot.display_name.clone(),
-                                    // Packed VST3 state captured from the plugin
-                                    // host on save (see refresh_bridge_plugin_states).
-                                    state: PluginStateBlob {
-                                        plugin_id: pid.clone(),
-                                        format: Some(format),
-                                        state_bytes: slot
-                                            .vst3_state
-                                            .as_ref()
-                                            .map(|state| state.as_ref().clone())
-                                            .unwrap_or_default(),
-                                        vendor: None,
-                                        name: Some(slot.display_name.clone()),
-                                        version: None,
-                                    },
-                                }
-                            });
-                            ProjectInsert {
-                                id: slot.id.clone(),
-                                slot_index: idx as u32,
-                                bypassed: slot.bypassed,
-                                plugin,
-                            }
-                        })
+                        .map(|(idx, slot)| timeline_insert_to_project(idx, slot))
                         .collect(),
                     automation_lanes,
                     clips,
@@ -782,6 +849,13 @@ impl From<&TimelineState> for FutureboardProject {
         project.settings.time_sig_den = tl.time_signature_den;
         project.tracks = tracks;
         project.mixer.master_volume_norm = tl.master.volume;
+        project.mixer.master_inserts = tl
+            .master
+            .inserts
+            .iter()
+            .enumerate()
+            .map(|(idx, slot)| timeline_insert_to_project(idx, slot))
+            .collect();
         project
     }
 }
@@ -874,6 +948,12 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
     }
     tl.sync_legacy_time_signature_fields();
     tl.master.volume = project.mixer.master_volume_norm;
+    tl.master.inserts = project
+        .mixer
+        .master_inserts
+        .iter()
+        .map(project_insert_to_timeline)
+        .collect();
 
     tl.tracks = project
         .tracks
@@ -984,78 +1064,10 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         .collect(),
                 })
                 .collect();
-            let inserts: Vec<
-                crate::components::timeline::timeline_state::InsertSlotState,
-            > = pt
+            let inserts: Vec<InsertSlotState> = pt
                 .inserts
                 .iter()
-                .map(|pi| {
-                    use crate::components::timeline::timeline_state::{
-                        InsertLoadStatus, InsertPluginFormat, InsertSlotState,
-                        PluginRuntimeBackend, PluginRuntimeState,
-                    };
-                    match &pi.plugin {
-                        Some(plugin) => {
-                            let plugin_format = match plugin.format {
-                                PluginFormat::Vst3 => InsertPluginFormat::Vst3,
-                                PluginFormat::Clap => InsertPluginFormat::Clap,
-                                PluginFormat::Au => InsertPluginFormat::Au,
-                                PluginFormat::Lv2 => InsertPluginFormat::Lv2,
-                                PluginFormat::Unknown => InsertPluginFormat::Unknown,
-                            };
-                            let bridge = sphere_plugin_host::plugin_host_client::plugin_host_bridge_enabled()
-                                && plugin_format == InsertPluginFormat::Vst3;
-                            let path_missing = plugin
-                                .plugin_path
-                                .as_ref()
-                                .is_none_or(|path| !path.exists());
-                            let (load_status, runtime_state, runtime_backend) = if path_missing {
-                                (
-                                    InsertLoadStatus::Missing(
-                                        "Plugin file not found".to_string(),
-                                    ),
-                                    PluginRuntimeState::Missing(
-                                        "Plugin file not found".to_string(),
-                                    ),
-                                    if bridge {
-                                        PluginRuntimeBackend::ExternalBridge
-                                    } else {
-                                        PluginRuntimeBackend::InProcess
-                                    },
-                                )
-                            } else {
-                                (
-                                    InsertLoadStatus::Loading,
-                                    PluginRuntimeState::NotLoaded,
-                                    if bridge {
-                                        PluginRuntimeBackend::ExternalBridge
-                                    } else {
-                                        PluginRuntimeBackend::InProcess
-                                    },
-                                )
-                            };
-                            InsertSlotState {
-                                id: pi.id.clone(),
-                                plugin_id: Some(plugin.plugin_uid.clone()),
-                                plugin_path: plugin.plugin_path.clone(),
-                                plugin_format: Some(plugin_format),
-                                display_name: plugin.display_name.clone(),
-                                enabled: true,
-                                bypassed: pi.bypassed,
-                                load_status,
-                                runtime_backend,
-                                runtime_state,
-                                host_pid: None,
-                                parameters: Vec::new(),
-                                pending_open_editor: false,
-                                vst3_state: (!plugin.state.state_bytes.is_empty()).then(|| {
-                                    std::sync::Arc::new(plugin.state.state_bytes.clone())
-                                }),
-                            }
-                        }
-                        None => InsertSlotState::empty(pi.id.clone()),
-                    }
-                })
+                .map(project_insert_to_timeline)
                 .collect();
             let sends = pt
                 .routing

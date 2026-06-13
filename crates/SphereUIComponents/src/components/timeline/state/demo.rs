@@ -199,6 +199,7 @@ impl TimelineState {
             tracks: vec![track1, track2, track3],
             master: MasterBusState {
                 volume: volume::db_to_norm(0.0),
+                inserts: Vec::new(),
                 meter_level_l: 0.0,
                 meter_level_r: 0.0,
                 meter_peak_hold_l: 0.0,

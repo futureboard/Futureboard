@@ -148,35 +148,83 @@ impl InsertSlotState {
     }
 }
 
+pub const MASTER_TRACK_ID: &str = "master";
+
 impl TimelineState {
+    pub fn insert_slots(&self, track_id: &str) -> Option<&Vec<InsertSlotState>> {
+        if track_id == MASTER_TRACK_ID {
+            Some(&self.master.inserts)
+        } else {
+            self.tracks
+                .iter()
+                .find(|track| track.id == track_id)
+                .map(|track| &track.inserts)
+        }
+    }
+
+    pub fn insert_slots_mut(&mut self, track_id: &str) -> Option<&mut Vec<InsertSlotState>> {
+        if track_id == MASTER_TRACK_ID {
+            Some(&mut self.master.inserts)
+        } else {
+            self.tracks
+                .iter_mut()
+                .find(|track| track.id == track_id)
+                .map(|track| &mut track.inserts)
+        }
+    }
+
+    pub fn insert_slot_at(&self, track_id: &str, slot_index: usize) -> Option<&InsertSlotState> {
+        self.insert_slots(track_id)
+            .and_then(|slots| slots.get(slot_index))
+    }
+
+    pub fn find_insert_slot(&self, track_id: &str, insert_id: &str) -> Option<&InsertSlotState> {
+        self.insert_slots(track_id)?
+            .iter()
+            .find(|slot| slot.id == insert_id)
+    }
+
+    pub fn insert_owner_ids_containing(&self, insert_id: &str) -> Vec<String> {
+        let mut owners: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|track| track.inserts.iter().any(|slot| slot.id == insert_id))
+            .map(|track| track.id.clone())
+            .collect();
+        if self.master.inserts.iter().any(|slot| slot.id == insert_id) {
+            owners.push(MASTER_TRACK_ID.to_string());
+        }
+        owners
+    }
+
     /// Append an empty insert slot to a track and return the slot id.
     /// Phase 1 — purely UI state; runtime is updated on the next project
     /// sync (the engine ignores unknown plugin descriptors gracefully).
     pub fn add_insert(&mut self, track_id: &str) -> Option<String> {
-        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
-        let slot_id = Self::next_insert_slot_id(track);
+        let slots = self.insert_slots_mut(track_id)?;
+        let slot_id = Self::next_insert_slot_id_for(track_id, slots);
         let slot = InsertSlotState::empty(&slot_id);
         if plugin_debug_enabled() {
             eprintln!("[plugin] add_insert track={} slot_id={}", track_id, slot_id);
         }
-        track.inserts.push(slot);
+        slots.push(slot);
         crate::forensic_trace::log_trace_plugin(track_id, &slot_id);
         Some(slot_id)
     }
 
     pub fn ensure_insert_slot_at(&mut self, track_id: &str, slot_index: usize) -> Option<String> {
-        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
-        while track.inserts.len() <= slot_index {
-            let slot_id = Self::next_insert_slot_id(track);
+        let slots = self.insert_slots_mut(track_id)?;
+        while slots.len() <= slot_index {
+            let slot_id = Self::next_insert_slot_id_for(track_id, slots);
             if plugin_debug_enabled() {
                 eprintln!("[plugin] add_insert track={} slot_id={}", track_id, slot_id);
             }
-            track.inserts.push(InsertSlotState::empty(&slot_id));
+            slots.push(InsertSlotState::empty(&slot_id));
         }
-        track.inserts.get(slot_index).map(|slot| slot.id.clone())
+        slots.get(slot_index).map(|slot| slot.id.clone())
     }
 
-    fn next_insert_slot_id(track: &TrackState) -> String {
+    fn next_insert_slot_id_for(owner_id: &str, slots: &[InsertSlotState]) -> String {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT_INSERT_SLOT_SEQ: AtomicU64 = AtomicU64::new(1);
         // Session-monotonic so a removed slot's id is NEVER regenerated. The
@@ -188,8 +236,8 @@ impl TimelineState {
         // with one loaded from a saved project (whose suffixes are arbitrary).
         loop {
             let seq = NEXT_INSERT_SLOT_SEQ.fetch_add(1, Ordering::Relaxed);
-            let candidate = format!("insert-{}-{}", track.id, seq);
-            if track.inserts.iter().all(|slot| slot.id != candidate) {
+            let candidate = format!("insert-{}-{}", owner_id, seq);
+            if slots.iter().all(|slot| slot.id != candidate) {
                 return candidate;
             }
         }
@@ -207,6 +255,30 @@ impl TimelineState {
         plugin_format: InsertPluginFormat,
         display_name: String,
     ) {
+        if track_id == MASTER_TRACK_ID {
+            let Some(slot) = self.master.inserts.iter_mut().find(|i| i.id == insert_id) else {
+                return;
+            };
+            slot.plugin_id = Some(plugin_id);
+            slot.plugin_path = plugin_path;
+            slot.plugin_format = Some(plugin_format);
+            slot.display_name = display_name;
+            slot.load_status = InsertLoadStatus::Ready;
+            slot.runtime_backend = PluginRuntimeBackend::InProcess;
+            slot.runtime_state = PluginRuntimeState::Ready;
+            slot.host_pid = None;
+            slot.bypassed = false;
+            slot.parameters.clear();
+            crate::forensic_trace::log_trace_plugin(track_id, insert_id);
+            if plugin_debug_enabled() {
+                eprintln!(
+                    "[plugin] set_insert_plugin track={} slot={} -> {}",
+                    track_id, insert_id, slot.display_name
+                );
+            }
+            return;
+        }
+
         let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
             return;
         };
@@ -253,10 +325,10 @@ impl TimelineState {
         state: PluginRuntimeState,
         host_pid: Option<u32>,
     ) -> bool {
-        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
             return false;
         };
-        let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+        let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
             return false;
         };
         let status = match &state {
@@ -290,6 +362,21 @@ impl TimelineState {
     }
 
     pub fn remove_insert(&mut self, track_id: &str, insert_id: &str) {
+        if track_id == MASTER_TRACK_ID {
+            let was_present = self.master.inserts.iter().any(|i| i.id == insert_id);
+            self.master.inserts.retain(|i| i.id != insert_id);
+            if was_present {
+                eprintln!("[PluginUnload] model remove_insert track={track_id} slot={insert_id}");
+            }
+            if plugin_debug_enabled() {
+                eprintln!(
+                    "[plugin] remove_insert track={} slot={}",
+                    track_id, insert_id
+                );
+            }
+            return;
+        }
+
         let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
             return;
         };
@@ -341,9 +428,23 @@ impl TimelineState {
         track_id: &str,
         old_insert_id: &str,
     ) -> Option<String> {
+        if track_id == MASTER_TRACK_ID {
+            let idx = self
+                .master
+                .inserts
+                .iter()
+                .position(|s| s.id == old_insert_id)?;
+            let fresh_id = Self::next_insert_slot_id_for(track_id, &self.master.inserts);
+            self.master.inserts[idx] = InsertSlotState::empty(&fresh_id);
+            eprintln!(
+                "[PluginAdd] replace_insert_with_fresh_slot track={track_id} old={old_insert_id} new={fresh_id}"
+            );
+            return Some(fresh_id);
+        }
+
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
         let idx = track.inserts.iter().position(|s| s.id == old_insert_id)?;
-        let fresh_id = Self::next_insert_slot_id(track);
+        let fresh_id = Self::next_insert_slot_id_for(track_id, &track.inserts);
         track.inserts[idx] = InsertSlotState::empty(&fresh_id);
         // Drop automation lanes bound to the OLD instance so no old state leaks
         // into the fresh instance (which gets a brand-new id below).
@@ -366,10 +467,10 @@ impl TimelineState {
     /// `Vec` is sufficient for the engine — the next project sync carries the
     /// new chain order down to the runtime.
     pub fn move_insert(&mut self, track_id: &str, insert_id: &str, up: bool) -> bool {
-        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
             return false;
         };
-        let Some(idx) = track.inserts.iter().position(|i| i.id == insert_id) else {
+        let Some(idx) = slots.iter().position(|i| i.id == insert_id) else {
             return false;
         };
         let target = if up {
@@ -378,12 +479,12 @@ impl TimelineState {
             }
             idx - 1
         } else {
-            if idx + 1 >= track.inserts.len() {
+            if idx + 1 >= slots.len() {
                 return false;
             }
             idx + 1
         };
-        track.inserts.swap(idx, target);
+        slots.swap(idx, target);
         if plugin_debug_enabled() {
             eprintln!(
                 "[plugin] move_insert track={} slot={} {}",
@@ -396,8 +497,10 @@ impl TimelineState {
     }
 
     pub fn toggle_insert_bypass(&mut self, track_id: &str, insert_id: &str) -> Option<bool> {
-        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
-        let slot = track.inserts.iter_mut().find(|i| i.id == insert_id)?;
+        let slot = self
+            .insert_slots_mut(track_id)?
+            .iter_mut()
+            .find(|i| i.id == insert_id)?;
         slot.bypassed = !slot.bypassed;
         if plugin_debug_enabled() {
             eprintln!(
@@ -409,8 +512,10 @@ impl TimelineState {
     }
 
     pub fn toggle_insert_enabled(&mut self, track_id: &str, insert_id: &str) -> Option<bool> {
-        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
-        let slot = track.inserts.iter_mut().find(|i| i.id == insert_id)?;
+        let slot = self
+            .insert_slots_mut(track_id)?
+            .iter_mut()
+            .find(|i| i.id == insert_id)?;
         slot.enabled = !slot.enabled;
         if plugin_debug_enabled() {
             eprintln!(
@@ -431,10 +536,10 @@ impl TimelineState {
         insert_id: &str,
         status: InsertLoadStatus,
     ) -> bool {
-        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
             return false;
         };
-        let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+        let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
             return false;
         };
         if slot.load_status == status {
@@ -456,10 +561,10 @@ impl TimelineState {
         insert_id: &str,
         pending: bool,
     ) -> bool {
-        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
             return false;
         };
-        let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+        let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
             return false;
         };
         if slot.pending_open_editor == pending {
@@ -471,6 +576,12 @@ impl TimelineState {
 
     pub fn take_pending_insert_editor_opens(&mut self) -> Vec<(String, usize, String)> {
         let mut pending = Vec::new();
+        for (index, slot) in self.master.inserts.iter_mut().enumerate() {
+            if slot.pending_open_editor {
+                slot.pending_open_editor = false;
+                pending.push((MASTER_TRACK_ID.to_string(), index, slot.id.clone()));
+            }
+        }
         for track in &mut self.tracks {
             for (index, slot) in track.inserts.iter_mut().enumerate() {
                 if slot.pending_open_editor {

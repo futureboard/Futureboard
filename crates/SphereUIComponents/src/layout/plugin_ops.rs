@@ -90,18 +90,9 @@ impl StudioLayout {
                     eprintln!("[plugin-bridge] event PluginLoading instance={plugin_instance_id}");
                     let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
                     changed |= self.timeline.update(cx, |timeline, _cx| {
-                        let track_ids: Vec<String> = timeline
+                        let track_ids = timeline
                             .state
-                            .tracks
-                            .iter()
-                            .filter(|track| {
-                                track
-                                    .inserts
-                                    .iter()
-                                    .any(|slot| slot.id == plugin_instance_id)
-                            })
-                            .map(|track| track.id.clone())
-                            .collect();
+                            .insert_owner_ids_containing(&plugin_instance_id);
                         track_ids.into_iter().any(|track_id| {
                             timeline.state.set_insert_runtime(
                                 &track_id,
@@ -174,18 +165,9 @@ impl StudioLayout {
                     };
                     let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
                     changed |= self.timeline.update(cx, |timeline, _cx| {
-                        let track_ids: Vec<String> = timeline
+                        let track_ids = timeline
                             .state
-                            .tracks
-                            .iter()
-                            .filter(|track| {
-                                track
-                                    .inserts
-                                    .iter()
-                                    .any(|slot| slot.id == plugin_instance_id)
-                            })
-                            .map(|track| track.id.clone())
-                            .collect();
+                            .insert_owner_ids_containing(&plugin_instance_id);
                         track_ids.into_iter().any(|track_id| {
                             timeline.state.set_insert_runtime(
                                 &track_id,
@@ -243,18 +225,9 @@ impl StudioLayout {
                     eprintln!("[plugin-runtime] dsp_output=ready");
                     let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
                     changed |= self.timeline.update(cx, |timeline, _cx| {
-                        let track_ids: Vec<String> = timeline
+                        let track_ids = timeline
                             .state
-                            .tracks
-                            .iter()
-                            .filter(|track| {
-                                track
-                                    .inserts
-                                    .iter()
-                                    .any(|slot| slot.id == plugin_instance_id)
-                            })
-                            .map(|track| track.id.clone())
-                            .collect();
+                            .insert_owner_ids_containing(&plugin_instance_id);
                         track_ids.into_iter().any(|track_id| {
                             timeline.state.set_insert_runtime(
                                 &track_id,
@@ -783,8 +756,10 @@ impl StudioLayout {
 
         let resolved = {
             let timeline = self.timeline.read(cx);
-            timeline.state.find_track(track_id).and_then(|track| {
-                track.inserts.get(insert_index).map(|slot| {
+            timeline
+                .state
+                .insert_slot_at(track_id, insert_index)
+                .map(|slot| {
                     let insert_found = slot.id == plugin_instance_id;
                     (
                         insert_found,
@@ -799,7 +774,6 @@ impl StudioLayout {
                         slot.load_status.clone(),
                     )
                 })
-            })
         };
         let Some((
             insert_found,
@@ -1212,11 +1186,9 @@ impl StudioLayout {
         }
         let stale: Vec<(String, String)> = {
             let state = &self.timeline.read(cx).state;
-            let is_stale =
-                |(track_id, insert_id): &&(String, String)| match state.find_track(track_id) {
-                    None => true,
-                    Some(track) => !track.inserts.iter().any(|insert| &insert.id == insert_id),
-                };
+            let is_stale = |(track_id, insert_id): &&(String, String)| {
+                state.find_insert_slot(track_id, insert_id).is_none()
+            };
             self.open_plugin_editors
                 .keys()
                 .filter(is_stale)
@@ -1356,16 +1328,25 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::components::timeline::timeline_state::TrackType;
+        use crate::components::timeline::timeline_state::{TrackType, MASTER_TRACK_ID};
 
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
         let started = std::time::Instant::now();
-        let track_info = self
-            .timeline
-            .read(cx)
-            .state
-            .find_track(track_id)
-            .map(|track| (track.name.clone(), track.track_type, track.inserts.len()));
+        let track_info = {
+            let timeline = self.timeline.read(cx);
+            if track_id == MASTER_TRACK_ID {
+                Some((
+                    "Master".to_string(),
+                    TrackType::Master,
+                    timeline.state.master.inserts.len(),
+                ))
+            } else {
+                timeline
+                    .state
+                    .find_track(track_id)
+                    .map(|track| (track.name.clone(), track.track_type, track.inserts.len()))
+            }
+        };
         let (track_name, track_type, next_slot) =
             track_info.unwrap_or((track_id.to_string(), TrackType::Audio, 0));
         let target_slot = slot_index.unwrap_or_else(|| {
@@ -1492,8 +1473,7 @@ impl StudioLayout {
             .timeline
             .read(cx)
             .state
-            .find_track(&track_id)
-            .and_then(|track| track.inserts.get(target_slot_index))
+            .insert_slot_at(&track_id, target_slot_index)
             .filter(|slot| !slot.is_empty())
             .map(|slot| slot.id.clone());
         let new_slot_id = if let Some(old_slot_id) = existing_slot_id {
@@ -1541,8 +1521,7 @@ impl StudioLayout {
                     .timeline
                     .read(cx)
                     .state
-                    .find_track(&track_id)
-                    .and_then(|track| track.inserts.iter().find(|slot| slot.id == slot_id))
+                    .find_insert_slot(&track_id, &slot_id)
                     .and_then(|slot| slot.plugin_path.as_ref())
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_default();
@@ -1691,9 +1670,9 @@ impl StudioLayout {
         if !super::plugin_bridge_runtime::bridge_enabled() {
             return Vec::new();
         }
-        self.timeline
-            .read(cx)
-            .state
+        let timeline = self.timeline.read(cx);
+        let state = &timeline.state;
+        let mut slots: Vec<(String, String)> = state
             .tracks
             .iter()
             .flat_map(|track| {
@@ -1710,7 +1689,28 @@ impl StudioLayout {
                     })
                     .map(|slot| (track.id.clone(), slot.id.clone()))
             })
-            .collect()
+            .collect();
+        slots.extend(
+            state
+                .master
+                .inserts
+                .iter()
+                .filter(|slot| {
+                    slot.plugin_id.as_deref() != Some(STUB_PLUGIN_ID)
+                        && slot.plugin_format == Some(InsertPluginFormat::Vst3)
+                        && slot
+                            .plugin_path
+                            .as_ref()
+                            .is_some_and(|path| !path.as_os_str().is_empty())
+                })
+                .map(|slot| {
+                    (
+                        crate::components::timeline::timeline_state::MASTER_TRACK_ID.to_string(),
+                        slot.id.clone(),
+                    )
+                }),
+        );
+        slots
     }
 
     /// Pull current VST3 states from the plugin host into the timeline slots
@@ -1744,6 +1744,11 @@ impl StudioLayout {
             instance_ids.len()
         );
         self.timeline.update(cx, |timeline, _cx| {
+            for slot in &mut timeline.state.master.inserts {
+                if let Some(packed) = states.get(&slot.id) {
+                    slot.vst3_state = Some(std::sync::Arc::new(packed.clone()));
+                }
+            }
             for track in &mut timeline.state.tracks {
                 for slot in &mut track.inserts {
                     if let Some(packed) = states.get(&slot.id) {
@@ -1820,18 +1825,7 @@ impl StudioLayout {
         let mut pending_opens = Vec::new();
         let slot_changed = self.timeline.update(cx, |timeline, _cx| {
             let mut local_changed = false;
-            let track_ids: Vec<String> = timeline
-                .state
-                .tracks
-                .iter()
-                .filter(|track| {
-                    track
-                        .inserts
-                        .iter()
-                        .any(|slot| slot.id == plugin_instance_id)
-                })
-                .map(|track| track.id.clone())
-                .collect();
+            let track_ids = timeline.state.insert_owner_ids_containing(plugin_instance_id);
             for track_id in &track_ids {
                 eprintln!(
                     "[PluginRestore] graph insert bound track={track_id} slot={plugin_instance_id} instance_id={plugin_instance_id} plugin={name}"
@@ -1847,23 +1841,23 @@ impl StudioLayout {
                 ) {
                     local_changed = true;
                 }
-                if let Some(track) = timeline.state.find_track(&track_id) {
-                    if let Some((index, slot)) = track
-                        .inserts
+                let pending = timeline
+                    .state
+                    .insert_slots(&track_id)
+                    .and_then(|slots| {
+                        slots
                         .iter()
                         .enumerate()
                         .find(|(_, slot)| slot.id == plugin_instance_id)
-                    {
-                        if slot.pending_open_editor {
-                            timeline.state.set_insert_pending_editor_open(
-                                &track_id,
-                                plugin_instance_id,
-                                false,
-                            );
-                            pending_opens
-                                .push((track_id.clone(), index, plugin_instance_id.to_string()));
-                        }
-                    }
+                            .map(|(index, slot)| (index, slot.pending_open_editor))
+                    });
+                if let Some((index, true)) = pending {
+                    timeline.state.set_insert_pending_editor_open(
+                        &track_id,
+                        plugin_instance_id,
+                        false,
+                    );
+                    pending_opens.push((track_id.clone(), index, plugin_instance_id.to_string()));
                 }
             }
             local_changed
@@ -1896,8 +1890,7 @@ impl StudioLayout {
             .timeline
             .read(cx)
             .state
-            .find_track(track_id)
-            .and_then(|track| track.inserts.iter().find(|slot| slot.id == slot_id))
+            .find_insert_slot(track_id, slot_id)
             .cloned();
         let Some(slot) = slot else {
             return false;
@@ -2061,20 +2054,7 @@ impl StudioLayout {
             return;
         }
 
-        let inserts: Vec<(String, String)> = self
-            .timeline
-            .read(cx)
-            .state
-            .tracks
-            .iter()
-            .flat_map(|track| {
-                track
-                    .inserts
-                    .iter()
-                    .filter(|slot| slot.plugin_id.is_some() && !slot.is_empty())
-                    .map(|slot| (track.id.clone(), slot.id.clone()))
-            })
-            .collect();
+        let inserts = self.bridge_vst3_insert_slots(cx);
 
         let wanted: std::collections::HashSet<String> =
             inserts.iter().map(|(_, slot_id)| slot_id.clone()).collect();
@@ -2100,8 +2080,7 @@ impl StudioLayout {
                 .timeline
                 .read(cx)
                 .state
-                .find_track(&track_id)
-                .and_then(|track| track.inserts.iter().find(|s| s.id == slot_id))
+                .find_insert_slot(&track_id, &slot_id)
                 .map(|slot| {
                     !matches!(
                         slot.runtime_state,

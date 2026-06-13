@@ -15,6 +15,9 @@ pub struct TransportState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MasterBusState {
     pub volume: f32,
+    /// Master-bus insert chain. Uses the same slot model as track inserts,
+    /// owned by the synthetic `"master"` route in the engine graph.
+    pub inserts: Vec<InsertSlotState>,
     pub meter_level_l: f32,
     pub meter_level_r: f32,
     /// Held peak levels (slow release) for the master peak-hold tick. UI-only.
@@ -109,6 +112,7 @@ impl Default for TimelineState {
             tracks: Vec::new(),
             master: MasterBusState {
                 volume: volume::db_to_norm(0.0),
+                inserts: Vec::new(),
                 meter_level_l: 0.0,
                 meter_level_r: 0.0,
                 meter_peak_hold_l: 0.0,

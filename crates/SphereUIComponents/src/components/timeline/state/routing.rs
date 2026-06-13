@@ -302,9 +302,25 @@ impl TimelineState {
             .iter()
             .find(|t| t.id != track_id && t.track_type.is_routing() && !existing.contains(&t.id))?;
         let target_id = target.id.clone();
-        let target_name = target.name.clone();
+        self.add_send_to_target(track_id, &target_id)
+    }
+
+    pub fn add_send_to_target(&mut self, track_id: &str, target_track_id: &str) -> Option<String> {
+        if track_id == target_track_id {
+            return None;
+        }
+        let (target_id, target_name) = self
+            .tracks
+            .iter()
+            .find(|t| t.id == target_track_id && t.track_type.is_routing())
+            .map(|target| (target.id.clone(), target.name.clone()))?;
 
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
+        if track.track_type.is_routing()
+            || track.sends.iter().any(|s| s.target_track_id == target_id)
+        {
+            return None;
+        }
         let send_id = format!("send-{}-{}", track.id, track.sends.len() + 1);
         track.sends.push(SendSlotState {
             id: send_id.clone(),
@@ -321,6 +337,34 @@ impl TimelineState {
             );
         }
         Some(send_id)
+    }
+
+    pub fn create_return_and_send(&mut self, track_id: &str) -> Option<(String, String)> {
+        if self
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .is_none_or(|track| track.track_type.is_routing())
+        {
+            return None;
+        }
+        let next_return = self
+            .tracks
+            .iter()
+            .filter(|track| track.track_type == TrackType::Return)
+            .count()
+            + 1;
+        let return_id = self.create_track(CreateTrackOptions {
+            track_type: TrackType::Return,
+            name: format!("Return {next_return}"),
+            color: self.track_color_for_index(self.tracks.len()),
+            volume: volume::db_to_norm(0.0),
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let send_id = self.add_send_to_target(track_id, &return_id)?;
+        Some((return_id, send_id))
     }
 
     pub fn remove_send(&mut self, track_id: &str, send_id: &str) {

@@ -49,6 +49,9 @@ pub enum ContextTarget {
     Clip(String),
     Browser(Option<PathBuf>),
     Mixer(String),
+    SendPicker {
+        track_id: String,
+    },
     /// The compact tempo menu opened from the transport BPM display.
     Tempo,
     /// The compact time signature menu from the transport display.

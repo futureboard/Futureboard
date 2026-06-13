@@ -131,7 +131,9 @@ impl Default for ExportSettings {
             flac_compression_level: Some(5),
             mp3_bitrate_kbps: 256,
             normalize: ExportNormalizeChoice::Off,
-            tail: ExportTailChoice::None,
+            // Capture reverb/delay/instrument-release tails past the last content
+            // by default so exports don't hard-cut the decay.
+            tail: ExportTailChoice::FixedSeconds(5.0),
         }
     }
 }

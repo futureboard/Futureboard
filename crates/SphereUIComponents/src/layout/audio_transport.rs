@@ -9,6 +9,71 @@ use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
 use super::transport_freeze_debug::{self, PlayWatchdog};
 use super::{ContextTarget, OpenPopover, StudioLayout};
 
+/// Transient state for the vertical BPM scrub gesture (FL Studio–style infinite
+/// drag). Extracted from `StudioLayout` as the first god-struct decomposition
+/// slice — every access lives in this module. Built via [`Default`] at studio
+/// construction; the drag handler overwrites the relevant fields per gesture.
+#[derive(Debug)]
+pub(crate) struct BpmDragState {
+    /// Active drag id (matches `BpmDragSample::drag_id`); `None` when idle.
+    pub active_id: Option<u64>,
+    /// Previous cursor Y from the last sample — the per-move delta source.
+    pub prev_y: f32,
+    /// Accumulated signed BPM offset for the active drag.
+    pub accum: f32,
+    /// Screen-space cursor anchor (physical px) warped back each move so the
+    /// drag never stops at the screen edge.
+    pub anchor: Option<(i32, i32)>,
+    /// Window scale factor captured at drag start.
+    pub scale: f32,
+    /// `Some(id)` edits one tempo marker; `None` edits the fixed project BPM.
+    pub target_point_id: Option<String>,
+    /// BPM value captured at drag start — the accumulation base.
+    pub start_value: f32,
+}
+
+impl Default for BpmDragState {
+    fn default() -> Self {
+        Self {
+            active_id: None,
+            prev_y: 0.0,
+            accum: 0.0,
+            anchor: None,
+            scale: 1.0,
+            target_point_id: None,
+            start_value: 120.0,
+        }
+    }
+}
+
+/// Throttle / sync timestamps for engine ↔ UI bridging — last applied playhead,
+/// last engine snapshot sync, last meter push, and last tempo commit. `Instant`
+/// has no `Default`, so this is built via a manual `Default` (now()). Decomp
+/// slice; all access lives in this module.
+#[derive(Debug)]
+pub(crate) struct EngineSyncState {
+    /// Last engine playhead beat pushed into timeline state.
+    pub playhead_beat: f32,
+    /// Last time the engine snapshot was synced to the UI.
+    pub synced_at: Instant,
+    /// Last time engine meter levels were pushed into timeline state (PowerMode
+    /// throttle so low-end GPUs don't repaint 60 Hz for sub-perceptual wiggles).
+    pub meter_applied_at: Instant,
+    /// Last time `engine.set_bpm` was sent during a live BPM drag (~30 Hz cap).
+    pub bpm_committed_at: Option<Instant>,
+}
+
+impl Default for EngineSyncState {
+    fn default() -> Self {
+        Self {
+            playhead_beat: 0.0,
+            synced_at: Instant::now(),
+            meter_applied_at: Instant::now(),
+            bpm_committed_at: None,
+        }
+    }
+}
+
 impl StudioLayout {
     pub(super) fn dispatch_midi_preview_command(
         &mut self,
@@ -31,7 +96,7 @@ impl StudioLayout {
         // it was held used to freeze the UI. Probe with `try_lock`; if it is busy
         // but this track has a bridged instrument, route through the lock-free
         // engine command bus anyway (the correct path once a bridge plugin exists).
-        let sink_ready = match self.plugin_bridge_runtime.as_ref().map(|rt| rt.try_lock()) {
+        let sink_ready = match self.plugin_editors.bridge_runtime.as_ref().map(|rt| rt.try_lock()) {
             Some(Ok(bridge)) => bridge
                 .loaded_instance_ids()
                 .into_iter()
@@ -102,7 +167,7 @@ impl StudioLayout {
         }
 
         if let Some(instance_id) = bridge_instance {
-            if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
+            if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
                 // try_lock, not lock: this IPC fallback runs on the GPUI thread
                 // and must not stall it if a background bridge op holds the mutex.
                 // On contention we fall through to the engine MIDI-preview path.
@@ -221,7 +286,7 @@ impl StudioLayout {
             _ => None,
         }
         .or_else(|| {
-            self.plugin_bridge_runtime.as_ref().and_then(|runtime| {
+            self.plugin_editors.bridge_runtime.as_ref().and_then(|runtime| {
                 runtime
                     .lock()
                     .ok()
@@ -310,15 +375,15 @@ impl StudioLayout {
         self.audio_last_error = stats.last_error.clone();
 
         let engine_beat = stats.position_beats.max(0.0) as f32;
-        let sync_changed = (engine_beat - self.last_engine_playhead_beat).abs() > 0.0001
+        let sync_changed = (engine_beat - self.engine_sync.playhead_beat).abs() > 0.0001
             || self
                 .audio_stats
                 .as_ref()
                 .map(|previous| previous.transport_playing != stats.transport_playing)
                 .unwrap_or(true);
         if sync_changed {
-            self.last_engine_playhead_beat = engine_beat;
-            self.last_engine_sync = Instant::now();
+            self.engine_sync.playhead_beat = engine_beat;
+            self.engine_sync.synced_at = Instant::now();
         }
         let meter_changed = self.apply_engine_meters(cx);
 
@@ -430,10 +495,10 @@ impl StudioLayout {
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
         if !playing {
-            return self.last_engine_playhead_beat;
+            return self.engine_sync.playhead_beat;
         }
-        self.last_engine_playhead_beat
-            + self.last_engine_sync.elapsed().as_secs_f32() * bpm.max(1.0) / 60.0
+        self.engine_sync.playhead_beat
+            + self.engine_sync.synced_at.elapsed().as_secs_f32() * bpm.max(1.0) / 60.0
     }
 
     /// Update smoothed meter levels in timeline state. Does not call
@@ -448,10 +513,10 @@ impl StudioLayout {
         // and the resulting notify cascade is what drove FPS drops.
         let power = crate::perf::power_mode();
         let min_interval = Duration::from_secs_f32(1.0 / power.meter_update_hz().max(1.0));
-        if self.last_meter_apply.elapsed() < min_interval {
+        if self.engine_sync.meter_applied_at.elapsed() < min_interval {
             return false;
         }
-        self.last_meter_apply = Instant::now();
+        self.engine_sync.meter_applied_at = Instant::now();
         let meters = engine.meters();
         if crate::forensic_trace::forensic_trace_enabled() {
             for track_meter in &meters.tracks {
@@ -1041,15 +1106,15 @@ impl StudioLayout {
         sample: components::BpmDragSample,
         cx: &mut Context<Self>,
     ) {
-        let new_drag = self.bpm_drag_active_id != Some(sample.drag_id);
+        let new_drag = self.bpm_drag.active_id != Some(sample.drag_id);
         if new_drag {
-            self.bpm_drag_active_id = Some(sample.drag_id);
-            self.bpm_drag_prev_y = sample.cur_y;
-            self.bpm_drag_accum = 0.0;
-            self.last_engine_bpm_commit = None;
+            self.bpm_drag.active_id = Some(sample.drag_id);
+            self.bpm_drag.prev_y = sample.cur_y;
+            self.bpm_drag.accum = 0.0;
+            self.engine_sync.bpm_committed_at = None;
             // Capture the cursor anchor + window scale for warp-based dragging.
-            self.bpm_drag_anchor = cursor_pos_phys();
-            self.bpm_drag_scale = cx
+            self.bpm_drag.anchor = cursor_pos_phys();
+            self.bpm_drag.scale = cx
                 .windows()
                 .first()
                 .and_then(|w| w.update(cx, |_, window, _| window.scale_factor()).ok())
@@ -1078,16 +1143,16 @@ impl StudioLayout {
                     (None, state.bpm)
                 }
             };
-            self.bpm_drag_target_point_id = target_point_id;
-            self.bpm_drag_start_value = start_value;
+            self.bpm_drag.target_point_id = target_point_id;
+            self.bpm_drag.start_value = start_value;
             if components::bpm_debug_enabled() {
                 eprintln!(
                     "[transport-bpm] drag_start id={} start_value={:.2} target_point_id={:?} scale={:.2} anchor={:?}",
                     sample.drag_id,
                     start_value,
-                    self.bpm_drag_target_point_id,
-                    self.bpm_drag_scale,
-                    self.bpm_drag_anchor
+                    self.bpm_drag.target_point_id,
+                    self.bpm_drag.scale,
+                    self.bpm_drag.anchor
                 );
             }
             return;
@@ -1098,11 +1163,11 @@ impl StudioLayout {
         let dy_logical = match self.warp_drag_delta_y() {
             Some(dy) => dy,
             None => {
-                let raw_delta = sample.cur_y - self.bpm_drag_prev_y;
+                let raw_delta = sample.cur_y - self.bpm_drag.prev_y;
                 if raw_delta.abs() < components::BPM_DRAG_DEADZONE_PX {
                     return;
                 }
-                self.bpm_drag_prev_y = sample.cur_y;
+                self.bpm_drag.prev_y = sample.cur_y;
                 raw_delta
             }
         };
@@ -1113,9 +1178,9 @@ impl StudioLayout {
         let coarse = sample.control || sample.platform || sample.alt;
         let sensitivity = components::bpm_drag_sensitivity(sample.shift, coarse);
         // Up = positive BPM change. Screen Y grows downward, so negate.
-        self.bpm_drag_accum -= dy_logical * sensitivity;
+        self.bpm_drag.accum -= dy_logical * sensitivity;
 
-        let raw = self.bpm_drag_start_value + self.bpm_drag_accum;
+        let raw = self.bpm_drag.start_value + self.bpm_drag.accum;
         let clamped = raw.clamp(components::BPM_MIN, components::BPM_MAX);
         let snapped = if sample.shift {
             (clamped * 10.0).round() / 10.0
@@ -1126,14 +1191,14 @@ impl StudioLayout {
         };
 
         let now = Instant::now();
-        let engine_due = match self.last_engine_bpm_commit {
+        let engine_due = match self.engine_sync.bpm_committed_at {
             Some(t) => now.duration_since(t) >= Duration::from_millis(33),
             None => true,
         };
-        let target_point_id = self.bpm_drag_target_point_id.clone();
+        let target_point_id = self.bpm_drag.target_point_id.clone();
         self.apply_bpm_value(snapped, target_point_id.as_deref(), engine_due, cx);
         if engine_due {
-            self.last_engine_bpm_commit = Some(now);
+            self.engine_sync.bpm_committed_at = Some(now);
         }
     }
 
@@ -1143,7 +1208,7 @@ impl StudioLayout {
     /// Returns `None` on platforms without cursor warp so callers fall back to
     /// window-relative deltas.
     fn warp_drag_delta_y(&mut self) -> Option<f32> {
-        let anchor = self.bpm_drag_anchor?;
+        let anchor = self.bpm_drag.anchor?;
         let cur = cursor_pos_phys()?;
         let dy_phys = cur.1 - anchor.1;
         if dy_phys == 0 {
@@ -1151,17 +1216,17 @@ impl StudioLayout {
             return Some(0.0);
         }
         set_cursor_pos_phys(anchor.0, anchor.1);
-        Some(dy_phys as f32 / self.bpm_drag_scale)
+        Some(dy_phys as f32 / self.bpm_drag.scale)
     }
 
     /// Cancel the active BPM drag, restoring the value captured at drag start.
     /// Wired to Escape.
     pub(super) fn cancel_bpm_drag(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.bpm_drag_active_id.is_none() {
+        if self.bpm_drag.active_id.is_none() {
             return false;
         }
-        let start = self.bpm_drag_start_value;
-        let target_point_id = self.bpm_drag_target_point_id.clone();
+        let start = self.bpm_drag.start_value;
+        let target_point_id = self.bpm_drag.target_point_id.clone();
         self.apply_bpm_value(start, target_point_id.as_deref(), true, cx);
         self.end_bpm_drag();
         true
@@ -1170,9 +1235,9 @@ impl StudioLayout {
     /// Clears transient BPM-drag bookkeeping. The next `on_drag` gets a fresh
     /// `drag_id`, so this is only needed for explicit cancel.
     pub(super) fn end_bpm_drag(&mut self) {
-        self.bpm_drag_active_id = None;
-        self.bpm_drag_anchor = None;
-        self.bpm_drag_accum = 0.0;
+        self.bpm_drag.active_id = None;
+        self.bpm_drag.anchor = None;
+        self.bpm_drag.accum = 0.0;
     }
 
     /// Apply a BPM value to the correct target: a tempo marker (mapped mode) or
@@ -1498,20 +1563,20 @@ impl StudioLayout {
         } else {
             format!("{bpm:.2}")
         };
-        self.bpm_input.set_value(text);
-        self.bpm_input.select_all();
-        self.bpm_editing = true;
+        self.tempo_edit.bpm_input.set_value(text);
+        self.tempo_edit.bpm_input.select_all();
+        self.tempo_edit.bpm_editing = true;
         cx.notify();
     }
 
     /// Commit the inline BPM editor: parse the field and apply to the active
     /// tempo target (marker at playhead when automation exists, else fixed BPM).
     pub(super) fn commit_bpm_edit(&mut self, cx: &mut Context<Self>) {
-        if !self.bpm_editing {
+        if !self.tempo_edit.bpm_editing {
             return;
         }
-        let parsed = self.bpm_input.value.trim().parse::<f32>().ok();
-        self.bpm_editing = false;
+        let parsed = self.tempo_edit.bpm_input.value.trim().parse::<f32>().ok();
+        self.tempo_edit.bpm_editing = false;
         if let Some(bpm) = parsed {
             let target_point_id = {
                 let state = &self.timeline.read(cx).state;
@@ -1532,10 +1597,10 @@ impl StudioLayout {
 
     /// Cancel the inline BPM editor without applying.
     pub(super) fn cancel_bpm_edit(&mut self, cx: &mut Context<Self>) {
-        if !self.bpm_editing {
+        if !self.tempo_edit.bpm_editing {
             return;
         }
-        self.bpm_editing = false;
+        self.tempo_edit.bpm_editing = false;
         cx.notify();
     }
 
@@ -1756,29 +1821,29 @@ impl StudioLayout {
                 (pt.numerator, pt.denominator)
             }
         };
-        self.ts_edit_point_id = point_id.or_else(|| {
+        self.tempo_edit.ts_edit_point_id = point_id.or_else(|| {
             self.timeline
                 .read(cx)
                 .state
                 .selected_time_signature_point_id
                 .clone()
         });
-        self.ts_num_input.set_value(num.to_string());
-        self.ts_den_input.set_value(den.to_string());
-        self.ts_num_input.select_all();
-        self.ts_editing = true;
-        self.ts_edit_focus_num = true;
+        self.tempo_edit.ts_num_input.set_value(num.to_string());
+        self.tempo_edit.ts_den_input.set_value(den.to_string());
+        self.tempo_edit.ts_num_input.select_all();
+        self.tempo_edit.ts_editing = true;
+        self.tempo_edit.ts_edit_focus_num = true;
         cx.notify();
     }
 
     pub(super) fn commit_ts_edit(&mut self, cx: &mut Context<Self>) {
-        if !self.ts_editing {
+        if !self.tempo_edit.ts_editing {
             return;
         }
-        let num = self.ts_num_input.value.trim().parse::<u16>().ok();
-        let den = self.ts_den_input.value.trim().parse::<u16>().ok();
-        self.ts_editing = false;
-        self.ts_edit_focus_num = true;
+        let num = self.tempo_edit.ts_num_input.value.trim().parse::<u16>().ok();
+        let den = self.tempo_edit.ts_den_input.value.trim().parse::<u16>().ok();
+        self.tempo_edit.ts_editing = false;
+        self.tempo_edit.ts_edit_focus_num = true;
         let Some(num) = num.filter(|n| (1..=64).contains(n)) else {
             cx.notify();
             return;
@@ -1793,7 +1858,7 @@ impl StudioLayout {
             return;
         };
 
-        let point_id = self.ts_edit_point_id.clone();
+        let point_id = self.tempo_edit.ts_edit_point_id.clone();
         let changed = self.timeline.update(cx, |timeline, cx| {
             let changed = if let Some(id) = point_id {
                 timeline.state.update_time_signature_point(&id, num, den)
@@ -1807,7 +1872,7 @@ impl StudioLayout {
             }
             changed
         });
-        self.ts_edit_point_id = None;
+        self.tempo_edit.ts_edit_point_id = None;
         if changed {
             self.mark_dirty();
             self.sync_time_signature_map_to_engine(cx);
@@ -1816,12 +1881,12 @@ impl StudioLayout {
     }
 
     pub(super) fn cancel_ts_edit(&mut self, cx: &mut Context<Self>) {
-        if !self.ts_editing {
+        if !self.tempo_edit.ts_editing {
             return;
         }
-        self.ts_editing = false;
-        self.ts_edit_point_id = None;
-        self.ts_edit_focus_num = true;
+        self.tempo_edit.ts_editing = false;
+        self.tempo_edit.ts_edit_point_id = None;
+        self.tempo_edit.ts_edit_focus_num = true;
         cx.notify();
     }
 
@@ -1854,8 +1919,8 @@ impl StudioLayout {
                 eprintln!("[audio] seek failed: {error}");
             }
         }
-        self.last_engine_playhead_beat = beat;
-        self.last_engine_sync = Instant::now();
+        self.engine_sync.playhead_beat = beat;
+        self.engine_sync.synced_at = Instant::now();
         let _ = self.timeline.update(cx, move |timeline, cx| {
             timeline.state.transport.playhead_beats = beat;
             // Preview Track Volume automation at the new playhead so a stopped

@@ -85,16 +85,16 @@ impl StudioLayout {
         let owner_bounds =
             resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
 
-        if self.available_plugins.is_none()
+        if self.plugin_catalog.available.is_none()
             || !matches!(
-                self.plugin_catalog_status,
+                self.plugin_catalog.status,
                 crate::components::plugin_picker::CatalogStatus::Ready
             )
         {
             self.arm_catalog_load(cx);
         }
         let instrument_plugins: Vec<sphere_plugin_host::RegistryPlugin> = self
-            .available_plugins
+            .plugin_catalog.available
             .as_ref()
             .map(|plugins| {
                 plugins

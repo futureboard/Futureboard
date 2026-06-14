@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, size, svg, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
+    div, px, size, svg, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
     IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
@@ -20,7 +20,7 @@ use crate::assets;
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::plugin_format_badge::plugin_format_badge;
 use crate::components::text_input::{
-    bind_mouse_selection, text_field_with_callbacks, TextInputAction, TextInputCallbacks,
+    bind_mouse_selection, text_field_with_callbacks_and_ime, TextInputAction, TextInputCallbacks,
     TextInputState,
 };
 use crate::components::title_bar::external_window_titlebar;
@@ -814,6 +814,7 @@ pub fn plugin_manager_panel(
     search_input: &TextInputState,
     search_focused: bool,
     search_callbacks: TextInputCallbacks,
+    search_ime_target: Entity<PluginManagerWindow>,
     callbacks: PluginManagerCallbacks,
 ) -> impl IntoElement {
     let rescan = callbacks.on_rescan.clone();
@@ -977,10 +978,11 @@ pub fn plugin_manager_panel(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .child(text_field_with_callbacks(
+                                .child(text_field_with_callbacks_and_ime(
                                     search_input,
                                     search_focused,
                                     search_callbacks,
+                                    search_ime_target,
                                 )),
                         )
                         .child(
@@ -1539,6 +1541,11 @@ impl PluginManagerWindow {
     }
 }
 
+// Route platform IME (CJK/Thai composition + candidate-window positioning) to
+// the search field. Coexists with `handle_key_with_clipboard` (handle_key);
+// GPUI suppresses key dispatch for keystrokes the IME consumes.
+crate::impl_single_input_window_ime!(PluginManagerWindow, search_input);
+
 impl Render for PluginManagerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.initial_cache_loaded {
@@ -1755,6 +1762,7 @@ impl Render for PluginManagerWindow {
                 &self.search_input,
                 search_focused,
                 bind_mouse_selection(cx.entity().clone(), |this| &mut this.search_input),
+                target.clone(),
                 callbacks,
             ))
     }

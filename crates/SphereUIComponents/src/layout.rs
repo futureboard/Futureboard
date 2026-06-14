@@ -6,15 +6,13 @@ use gpui::{
 pub use crate::shutdown::ShutdownState;
 pub use close_ops::PendingCloseAction;
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use crate::components;
 use crate::components::add_track_dialog::{AddTrackKind, AddTrackWindow};
 use crate::components::edit::ClipSnapshot;
 use crate::components::file_browser::FileBrowserState;
-use crate::components::message_box_dialog::MessageBoxWindow;
 use crate::components::midi_editor_window::MidiEditorWindow;
-use crate::components::plugin_editor_window::PluginEditorWindow;
 use crate::components::plugin_manager::PluginManagerWindow;
 use crate::components::plugin_picker::{
     compute_filter_result, ensure_default_highlight, plugin_picker_overlay,
@@ -321,16 +319,11 @@ pub struct StudioLayout {
     project_switcher: ProjectSwitcherState,
     project_switcher_search_input: TextInputState,
     browser_search_input: TextInputState,
-    /// Inspector track-name edit field. Hosted here (not in the stateless
-    /// inspector render fn) so it owns a real focus handle and routes keys
-    /// through the same machinery as the other main-window text fields.
-    inspector_name_input: TextInputState,
-    /// Track id the `inspector_name_input` is currently editing. When the
-    /// selected track changes, render reloads the field from the new track's
-    /// name (see `studio_render`). `None` when no track is selected.
-    inspector_name_bound: Option<String>,
-    inspector_clip_name_input: TextInputState,
-    inspector_clip_name_bound: Option<String>,
+    /// Inspector track-name + clip-name inline edit fields (focus-handle-backed
+    /// so keys route through the main-window text machinery) and the ids they
+    /// are currently bound to. Grouped into
+    /// [`input_ops::InspectorNameEditState`] (decomposition slice).
+    inspector_name_edit: input_ops::InspectorNameEditState,
     /// UI-only selected plugin insert `(track_id, insert_id)` driving the
     /// Plugin Insert inspector target. Pure selection — never marks dirty.
     selected_insert: Option<(String, String)>,
@@ -344,32 +337,15 @@ pub struct StudioLayout {
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
     export_arrangement_window: Option<WindowHandle<crate::export::ExportArrangementWindow>>,
-    /// Cached plugin registry scan result. `None` until the first
-    /// `+ Add Insert` click triggers a sync scan (or the Plugin Manager
-    /// dialog populates it). Phase 2a uses the first insert-capable
-    /// entry; Phase 2b adds a real picker overlay.
-    available_plugins: Option<Vec<sphere_plugin_host::RegistryPlugin>>,
-    /// `true` if the cached preset directory exists on disk. Drives the
-    /// "No plugin index found" message in the picker.
-    plugin_cache_present: bool,
-    /// Picker catalog state — drives the skeleton / error UI in the overlay.
-    /// `Loading` while the background SQLite read is in flight; `Ready` once
-    /// `available_plugins` has been populated.
-    plugin_catalog_status: PluginCatalogStatus,
-    /// Open native plugin editor windows (Phase 4). Keyed by
-    /// `(track_id, insert_id)` → the GPUI-hosted editor window handle. GPUI
-    /// owns the borderless shell; the C++ backend embeds the VST3 IPlugView in
-    /// a native child region. Dropping the window entity detaches the view.
-    open_plugin_editors:
-        std::collections::HashMap<(String, String), WindowHandle<PluginEditorWindow>>,
-    /// Native main-owned plugin editor shells for the external-bridge path. The
-    /// editor lives in a real Win32 top-level window (no GPUI flip-model swap
-    /// chain over it), so the host process's `IPlugView` child actually paints.
-    /// Keyed by `(track_id, plugin_instance_id)`.
-    bridge_editors: std::collections::HashMap<(String, String), plugin_ops::BridgeEditorSession>,
-    plugin_bridge_runtime: Option<plugin_bridge_runtime::SharedPluginBridgeRuntime>,
-    /// Editor opens requested while the insert runtime was still loading.
-    deferred_insert_editor_opens: Vec<(String, usize, String)>,
+    /// Plugin catalog / registry-scan state backing the insert picker (cached
+    /// scan result, preset-cache presence, catalog load phase). Grouped into
+    /// [`plugin_ops::PluginCatalogState`] (decomposition slice).
+    plugin_catalog: plugin_ops::PluginCatalogState,
+    /// Plugin-editor window handles — GPUI-hosted editor shells, native
+    /// external-bridge editor sessions, the shared bridge runtime, and editor
+    /// opens deferred while an insert runtime was loading. Grouped into
+    /// [`plugin_ops::PluginEditorWindows`] (decomposition slice).
+    plugin_editors: plugin_ops::PluginEditorWindows,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
     /// Detached mixer window for multi-monitor layouts.
@@ -396,56 +372,22 @@ pub struct StudioLayout {
     audio_sync_pending: bool,
     /// Start transport once the current background sync completes.
     pending_play_after_sync: bool,
-    /// Beat position when the current recording session started.
-    recording_start_beat: f32,
-    recording_ui_state: RecordingUiState,
-    /// Live recording waveform preview (Part 1). `Some` while a take is drawing
-    /// a growing preview clip in the arrangement.
-    recording_preview: Option<RecordingPreviewUi>,
-    last_engine_playhead_beat: f32,
-    last_engine_sync: Instant,
-    /// Last time we pushed engine meter levels into timeline state. Used to
-    /// throttle meter updates per the active `PowerMode` so low-end GPUs
-    /// don't repaint 60 Hz for sub-perceptual meter wiggles.
-    last_meter_apply: Instant,
-    /// Active BPM drag id (matches `BpmDragSample::drag_id`). Resets when a
-    /// new drag begins. Drives delta-accumulated BPM editing.
-    bpm_drag_active_id: Option<u64>,
-    /// Previous cursor Y from the last BPM drag sample. Each new sample
-    /// applies `cur_y - prev_y`, so dragging is unbounded by window
-    /// height — FL Studio–style behavior.
-    bpm_drag_prev_y: f32,
-    /// Accumulated BPM offset (signed) for the active drag.
-    bpm_drag_accum: f32,
-    /// Screen-space cursor anchor (physical px) for the active BPM drag. On
-    /// Windows the OS cursor is warped back here every move so the drag never
-    /// stops at the screen edge — true DAW-style infinite scrubbing.
-    bpm_drag_anchor: Option<(i32, i32)>,
-    /// Window scale factor captured at drag start, used to convert physical
-    /// cursor deltas to a screen-independent BPM feel.
-    bpm_drag_scale: f32,
-    /// What the active BPM drag edits: `Some(id)` updates only that tempo
-    /// marker (mapped-tempo mode); `None` updates the fixed project BPM.
-    bpm_drag_target_point_id: Option<String>,
-    /// BPM value captured at drag start for the active drag target. The drag
-    /// accumulates against this rather than the displayed (possibly
-    /// interpolated) value.
-    bpm_drag_start_value: f32,
-    /// Inline numeric BPM editor state + whether it is open. Opened by
-    /// double-click on the BPM display or the "Edit BPM…" menu item.
-    bpm_input: TextInputState,
-    bpm_editing: bool,
-    /// Inline time-signature editor (numerator / denominator).
-    ts_num_input: TextInputState,
-    ts_den_input: TextInputState,
-    ts_editing: bool,
-    ts_edit_point_id: Option<String>,
-    ts_edit_focus_num: bool,
-    /// Last time we sent `engine.set_bpm` during a live BPM drag. Throttles
-    /// audio-engine tempo commits to ~30 Hz; the UI state still updates
-    /// every event, but we don't flood the engine with sub-perceptual
-    /// tempo writes during fast vertical drags.
-    last_engine_bpm_commit: Option<Instant>,
+    /// Active recording-session UI state (take start position, UI phase, live
+    /// growing-waveform preview). Grouped into
+    /// [`recording_ops::RecordingSessionState`] (decomposition slice).
+    recording: recording_ops::RecordingSessionState,
+    /// Throttle / sync timestamps for engine ↔ UI bridging (playhead, snapshot
+    /// sync, meter push, tempo commit). Grouped into
+    /// [`audio_transport::EngineSyncState`] (decomposition slice).
+    engine_sync: audio_transport::EngineSyncState,
+    /// Transient BPM vertical-drag gesture state (FL Studio–style infinite
+    /// scrub). Mutated only by the transport BPM drag handler. Grouped into
+    /// [`audio_transport::BpmDragState`] so this god-struct carries one cohesive
+    /// field instead of seven loose ones (first decomposition slice).
+    bpm_drag: audio_transport::BpmDragState,
+    /// Inline BPM + time-signature numeric editors opened from the transport
+    /// bar. Grouped into [`transport_ops::TempoEditState`] (decomposition slice).
+    tempo_edit: transport_ops::TempoEditState,
     /// Owns keyboard focus for the studio surface. Without a focused
     /// element GPUI never dispatches key events to `capture_key_down`,
     /// so we focus this handle on first render — that is what makes
@@ -498,13 +440,10 @@ pub struct StudioLayout {
     /// `do_close_project`. The app layer owns Welcome window construction, so
     /// the studio crate stays decoupled from native window options.
     on_request_welcome: Option<Arc<dyn Fn(&mut gpui::App) + 'static>>,
-    /// Live unsaved-changes guard dialog (Save / Don't Save / Cancel), if one
-    /// is currently shown. Tracked so New/Open/Close/Quit don't stack dialogs.
-    unsaved_guard_window: Option<WindowHandle<MessageBoxWindow>>,
-    /// Close/quit action waiting on the unsaved-changes dialog.
-    pending_close_action: Option<close_ops::PendingCloseAction>,
-    /// New/Open lifecycle action waiting on the unsaved-changes dialog.
-    pending_lifecycle_action: Option<project_ops::LifecycleAction>,
+    /// Pending project-lifecycle dialog state (unsaved-changes guard + parked
+    /// close/new/open action + last failed open path). Grouped into
+    /// [`close_ops::LifecycleGuardState`] (decomposition slice).
+    lifecycle_guard: close_ops::LifecycleGuardState,
     /// Active keyboard shortcut profile. The default profile is bundled; other
     /// profiles load from `<app dir>/Keymaps/<id>.json`. Drives `shortcut_command_id`.
     active_keymap: crate::keymap::Keymap,
@@ -513,8 +452,6 @@ pub struct StudioLayout {
     project_state: crate::app_state::ProjectState,
     /// Last OS window title applied in render, to avoid redundant set calls.
     last_window_title: Option<String>,
-    /// Path of the last failed project open, used by recovery dialogs.
-    pending_failed_open_path: Option<PathBuf>,
 }
 
 impl StudioLayout {
@@ -758,15 +695,7 @@ impl StudioLayout {
             .with_placeholder("Search projects..."),
             browser_search_input: TextInputState::new("browser-search-input", cx.focus_handle())
                 .with_placeholder("Search..."),
-            inspector_name_input: TextInputState::new("inspector-name-input", cx.focus_handle())
-                .with_placeholder("Track name"),
-            inspector_name_bound: None,
-            inspector_clip_name_input: TextInputState::new(
-                "inspector-clip-name-input",
-                cx.focus_handle(),
-            )
-            .with_placeholder("Clip name"),
-            inspector_clip_name_bound: None,
+            inspector_name_edit: input_ops::InspectorNameEditState::new(cx),
             selected_insert: None,
             plugin_picker: PluginPickerState::closed(),
             plugin_picker_search_input: TextInputState::new(
@@ -781,13 +710,8 @@ impl StudioLayout {
             add_track_window: None,
             plugin_manager_window: None,
             export_arrangement_window: None,
-            available_plugins: None,
-            plugin_cache_present: false,
-            plugin_catalog_status: PluginCatalogStatus::Loading,
-            open_plugin_editors: std::collections::HashMap::new(),
-            bridge_editors: std::collections::HashMap::new(),
-            plugin_bridge_runtime: None,
-            deferred_insert_editor_opens: Vec::new(),
+            plugin_catalog: plugin_ops::PluginCatalogState::default(),
+            plugin_editors: plugin_ops::PluginEditorWindows::default(),
             settings_window: None,
             mixer_window: None,
             pending_mixer_external_open: None,
@@ -808,27 +732,10 @@ impl StudioLayout {
             audio_sync_in_flight: false,
             audio_sync_pending: false,
             pending_play_after_sync: false,
-            recording_start_beat: 0.0,
-            recording_ui_state: RecordingUiState::Idle,
-            recording_preview: None,
-            last_engine_playhead_beat: 0.0,
-            last_engine_sync: Instant::now(),
-            last_meter_apply: Instant::now(),
-            bpm_drag_active_id: None,
-            bpm_drag_prev_y: 0.0,
-            bpm_drag_accum: 0.0,
-            bpm_drag_anchor: None,
-            bpm_drag_scale: 1.0,
-            bpm_drag_target_point_id: None,
-            bpm_drag_start_value: 120.0,
-            bpm_input: TextInputState::new("transport-bpm-input", cx.focus_handle()),
-            bpm_editing: false,
-            ts_num_input: TextInputState::new("transport-ts-num-input", cx.focus_handle()),
-            ts_den_input: TextInputState::new("transport-ts-den-input", cx.focus_handle()),
-            ts_editing: false,
-            ts_edit_point_id: None,
-            ts_edit_focus_num: true,
-            last_engine_bpm_commit: None,
+            recording: recording_ops::RecordingSessionState::default(),
+            engine_sync: audio_transport::EngineSyncState::default(),
+            bpm_drag: audio_transport::BpmDragState::default(),
+            tempo_edit: transport_ops::TempoEditState::new(cx),
             focus_handle: cx.focus_handle(),
             clip_clipboard: Vec::new(),
             logged_unsupported_commands: HashSet::new(),
@@ -849,13 +756,10 @@ impl StudioLayout {
             self_window: None,
             cached_studio_window_bounds: None,
             on_request_welcome: None,
-            unsaved_guard_window: None,
-            pending_close_action: None,
-            pending_lifecycle_action: None,
+            lifecycle_guard: close_ops::LifecycleGuardState::default(),
             active_keymap: crate::keymap::Keymap::bundled_default(),
             project_state: crate::app_state::ProjectState::NoProject,
             last_window_title: None,
-            pending_failed_open_path: None,
         };
 
         layout.spawn_audio_engine_warmup(cx);

@@ -194,9 +194,9 @@ impl Render for InsertPickerWindow {
                 let target = target.clone();
                 move |_: &(), _w, cx| {
                     let snapshot = owner.update(cx, |layout, cx| {
-                        layout.available_plugins = None;
+                        layout.plugin_catalog.available = None;
                         layout.plugin_search_index = None;
-                        layout.plugin_catalog_status = CatalogStatus::Loading;
+                        layout.plugin_catalog.status = CatalogStatus::Loading;
                         layout.arm_catalog_load(cx);
                         cx.notify();
                         layout.insert_picker_snapshot()
@@ -225,9 +225,9 @@ impl Render for InsertPickerWindow {
                 move |_: &(), _w, cx| {
                     let snapshot = owner.update(cx, |layout, cx| {
                         let _ = sphere_plugin_host::plugin_db::delete_database_file();
-                        layout.available_plugins = None;
+                        layout.plugin_catalog.available = None;
                         layout.plugin_search_index = None;
-                        layout.plugin_catalog_status = CatalogStatus::Loading;
+                        layout.plugin_catalog.status = CatalogStatus::Loading;
                         layout.arm_catalog_load(cx);
                         cx.notify();
                         layout.insert_picker_snapshot()
@@ -318,7 +318,7 @@ impl StudioLayout {
             picker: self.plugin_picker.clone(),
             index: self.plugin_search_index.clone(),
             prefs: self.plugin_picker_prefs.clone(),
-            catalog_status: self.plugin_catalog_status.clone(),
+            catalog_status: self.plugin_catalog.status.clone(),
             search_input: self.plugin_picker_search_input.clone(),
             au_error: self.plugin_picker_au_error.clone(),
         }

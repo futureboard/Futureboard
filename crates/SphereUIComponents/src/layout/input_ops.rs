@@ -13,6 +13,33 @@ use super::helpers::{is_supported_audio_ext, is_text_input_key};
 use super::project_ops::ProjectOpenOptions;
 use super::{ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
 
+/// Inspector inline name-edit fields — the focus-handle-backed track-name and
+/// clip-name text inputs plus the ids they are currently bound to. `StudioLayout`
+/// decomposition slice; built via `new(cx)` (the inputs need a focus handle).
+pub(crate) struct InspectorNameEditState {
+    /// Inspector track-name edit field.
+    pub name_input: TextInputState,
+    /// Track id the `name_input` is currently editing; `None` when none selected.
+    pub name_bound: Option<String>,
+    /// Inspector clip-name edit field.
+    pub clip_name_input: TextInputState,
+    /// Clip id the `clip_name_input` is currently editing; `None` when none.
+    pub clip_name_bound: Option<String>,
+}
+
+impl InspectorNameEditState {
+    pub(super) fn new(cx: &mut Context<StudioLayout>) -> Self {
+        Self {
+            name_input: TextInputState::new("inspector-name-input", cx.focus_handle())
+                .with_placeholder("Track name"),
+            name_bound: None,
+            clip_name_input: TextInputState::new("inspector-clip-name-input", cx.focus_handle())
+                .with_placeholder("Clip name"),
+            clip_name_bound: None,
+        }
+    }
+}
+
 fn menu_item_enabled(
     label: impl Into<String>,
     command: impl Into<String>,
@@ -203,13 +230,13 @@ impl StudioLayout {
         _window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.bpm_editing {
+        if !self.tempo_edit.bpm_editing {
             return false;
         }
         if event.is_held {
             return true;
         }
-        let action = self.bpm_input.handle_key_with_clipboard(event, Some(cx));
+        let action = self.tempo_edit.bpm_input.handle_key_with_clipboard(event, Some(cx));
         match action {
             TextInputAction::Submit => self.commit_bpm_edit(cx),
             TextInputAction::Cancel => self.cancel_bpm_edit(cx),
@@ -225,7 +252,7 @@ impl StudioLayout {
         _window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.ts_editing {
+        if !self.tempo_edit.ts_editing {
             return false;
         }
         if event.is_held {
@@ -236,19 +263,19 @@ impl StudioLayout {
             return true;
         }
         if event.keystroke.key == "tab" {
-            self.ts_edit_focus_num = !self.ts_edit_focus_num;
-            if self.ts_edit_focus_num {
-                self.ts_num_input.select_all();
+            self.tempo_edit.ts_edit_focus_num = !self.tempo_edit.ts_edit_focus_num;
+            if self.tempo_edit.ts_edit_focus_num {
+                self.tempo_edit.ts_num_input.select_all();
             } else {
-                self.ts_den_input.select_all();
+                self.tempo_edit.ts_den_input.select_all();
             }
             cx.notify();
             return true;
         }
-        let active = if self.ts_edit_focus_num {
-            &mut self.ts_num_input
+        let active = if self.tempo_edit.ts_edit_focus_num {
+            &mut self.tempo_edit.ts_num_input
         } else {
-            &mut self.ts_den_input
+            &mut self.tempo_edit.ts_den_input
         };
         let action = active.handle_key_with_clipboard(event, Some(cx));
         match action {
@@ -547,8 +574,8 @@ impl StudioLayout {
             TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &mut self.plugin_picker_search_input,
-            TextMenuTarget::InspectorName => &mut self.inspector_name_input,
-            TextMenuTarget::InspectorClipName => &mut self.inspector_clip_name_input,
+            TextMenuTarget::InspectorName => &mut self.inspector_name_edit.name_input,
+            TextMenuTarget::InspectorClipName => &mut self.inspector_name_edit.clip_name_input,
         }
     }
 
@@ -558,8 +585,8 @@ impl StudioLayout {
             TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &self.plugin_picker_search_input,
-            TextMenuTarget::InspectorName => &self.inspector_name_input,
-            TextMenuTarget::InspectorClipName => &self.inspector_clip_name_input,
+            TextMenuTarget::InspectorName => &self.inspector_name_edit.name_input,
+            TextMenuTarget::InspectorClipName => &self.inspector_name_edit.clip_name_input,
         }
     }
 
@@ -606,8 +633,8 @@ impl StudioLayout {
             || self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
             || self.plugin_picker_search_input.is_focused(window)
-            || self.inspector_name_input.is_focused(window)
-            || self.inspector_clip_name_input.is_focused(window)
+            || self.inspector_name_edit.name_input.is_focused(window)
+            || self.inspector_name_edit.clip_name_input.is_focused(window)
     }
 
     /// Route a key to the Inspector's track-name field when it owns focus.
@@ -620,8 +647,8 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let track_name_focused = self.inspector_name_input.is_focused(window);
-        let clip_name_focused = self.inspector_clip_name_input.is_focused(window);
+        let track_name_focused = self.inspector_name_edit.name_input.is_focused(window);
+        let clip_name_focused = self.inspector_name_edit.clip_name_input.is_focused(window);
         if !track_name_focused && !clip_name_focused {
             return false;
         }
@@ -629,10 +656,10 @@ impl StudioLayout {
             return true;
         }
         let action = if clip_name_focused {
-            self.inspector_clip_name_input
+            self.inspector_name_edit.clip_name_input
                 .handle_key_with_clipboard(event, Some(cx))
         } else {
-            self.inspector_name_input
+            self.inspector_name_edit.name_input
                 .handle_key_with_clipboard(event, Some(cx))
         };
         match action {
@@ -664,10 +691,10 @@ impl StudioLayout {
     /// whether the stored name changed). Never marks the engine dirty — a name
     /// is project metadata only.
     pub(super) fn commit_inspector_name(&mut self, cx: &mut Context<Self>) {
-        let Some(track_id) = self.inspector_name_bound.clone() else {
+        let Some(track_id) = self.inspector_name_edit.name_bound.clone() else {
             return;
         };
-        let new_name = self.inspector_name_input.value.clone();
+        let new_name = self.inspector_name_edit.name_input.value.clone();
         let changed = self.timeline.update(cx, |t, cx| {
             let changed = t.state.rename_track(&track_id, &new_name);
             if changed {
@@ -685,10 +712,10 @@ impl StudioLayout {
     }
 
     pub(super) fn commit_inspector_clip_name(&mut self, cx: &mut Context<Self>) {
-        let Some(clip_id) = self.inspector_clip_name_bound.clone() else {
+        let Some(clip_id) = self.inspector_name_edit.clip_name_bound.clone() else {
             return;
         };
-        let new_name = self.inspector_clip_name_input.value.clone();
+        let new_name = self.inspector_name_edit.clip_name_input.value.clone();
         let changed = self.timeline.update(cx, |t, cx| {
             let changed = t.state.rename_clip(&clip_id, &new_name);
             if changed {
@@ -720,8 +747,8 @@ impl StudioLayout {
                 && self.project_switcher_search_input.is_focused(window))
             || (self.plugin_picker.is_open && self.plugin_picker_search_input.is_focused(window))
             || self.browser_search_input.is_focused(window)
-            || self.inspector_name_input.is_focused(window)
-            || self.inspector_clip_name_input.is_focused(window)
+            || self.inspector_name_edit.name_input.is_focused(window)
+            || self.inspector_name_edit.clip_name_input.is_focused(window)
     }
 
     pub(super) fn context_entries(

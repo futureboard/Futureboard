@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use gpui::{App, Bounds, Context, Window};
 
 use crate::components::native_editor_shell::{shell_defaults, NativeEditorShell};
@@ -9,6 +11,31 @@ use crate::components::timeline::timeline_state::{PluginRuntimeBackend, PluginRu
 use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
 
 use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
+
+/// `FUTUREBOARD_PLUGIN_EDITOR_DEBUG=1` gates the structured editor-lifecycle
+/// logs (open request / result / failure / timing). These fire only on state
+/// transitions — never from the paint loop or the audio callback.
+pub(crate) fn plugin_editor_debug() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_EDITOR_DEBUG").is_some())
+}
+
+/// Structured editor log, gated by [`plugin_editor_debug`]. Prefix `[plugin-editor]`.
+macro_rules! ped_log {
+    ($($arg:tt)*) => {
+        if plugin_editor_debug() {
+            eprintln!("[plugin-editor] {}", format_args!($($arg)*));
+        }
+    };
+}
+
+/// Editor open watchdog (spec A6). A bridge session that has not reached
+/// `Attached` within this window is marked `Failed` so the next Open click
+/// retries instead of focusing a dead loading shell — the concrete "Plugin
+/// Editor sometimes cannot open again" regression. The wrapper window lives in
+/// the main process, so the user can always close a timed-out shell too.
+const EDITOR_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Lifecycle state of a native main-owned bridge editor session.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +67,9 @@ pub(crate) struct BridgeEditorSession {
     pub(crate) last_content: (i32, i32),
     /// Plugin-host child HWND reported in `EditorAttached` (0 until attached).
     pub(crate) host_hwnd: u64,
+    /// When the open request was issued. Drives the open watchdog
+    /// ([`EDITOR_OPEN_TIMEOUT`]) and the request→attach timing logs (spec A4).
+    pub(crate) requested_at: Instant,
 }
 
 /// Logical→physical DPI passthrough for `ResizeEditor`. The host sizes the view
@@ -296,6 +326,12 @@ impl StudioLayout {
                 let was = session.state.clone();
                 session.state = BridgeEditorState::Attached;
                 session.host_hwnd = host_hwnd;
+                ped_log!(
+                    "Open Result instance={plugin_instance_id} hwnd=0x{host_hwnd:x} \
+                     view_size={preferred_width}x{preferred_height} resizable={resizable} \
+                     mode=external_main_owned state=Open total_ms={}",
+                    session.requested_at.elapsed().as_millis()
+                );
                 session.shell.mark_attached();
                 // VST3 resize contract (IPlugView::canResize): fixed-size
                 // editors lock the wrapper so dragging can never open blank
@@ -417,11 +453,17 @@ impl StudioLayout {
                                 eprintln!(
                                     "[plugin-bridge] ConfirmEditorContentReady FAILED instance={plugin_instance_id} err={e}"
                                 );
+                                ped_log!(
+                                    "Open Failed instance={plugin_instance_id} reason=ipc_error detail={e}"
+                                );
                                 session
                                     .shell
                                     .set_status(&format!("Editor failed: {e}"), true);
                                 session.state = BridgeEditorState::Failed(e.to_string());
                             } else {
+                                ped_log!(
+                                    "state Preparing -> AwaitingAttach instance={plugin_instance_id} content={cw}x{ch}"
+                                );
                                 session.state = BridgeEditorState::AwaitingAttach;
                             }
                         }
@@ -431,6 +473,10 @@ impl StudioLayout {
                 }
             }
             ClientEvent::Host(HostEvent::EditorAttachFailed { error, .. }) => {
+                ped_log!(
+                    "Open Failed instance={plugin_instance_id} reason=attach_failed detail={error} total_ms={}",
+                    session.requested_at.elapsed().as_millis()
+                );
                 eprintln!(
                     "[plugin-view][host] EditorAttachFailed instance={plugin_instance_id} error={error}"
                 );
@@ -521,15 +567,47 @@ impl StudioLayout {
         owner_hwnd: Option<u64>,
         cx: &mut Context<Self>,
     ) {
+        let request_started = Instant::now();
         eprintln!("[plugin-editor-window] ownership=main_owned forced=true");
         self.log_editor_engine_state("open requested while", track_id, instance_id);
         crate::forensic_trace::log_trace_plugin(track_id, instance_id);
         let key = (track_id.to_string(), instance_id.to_string());
-        if let Some(session) = self.bridge_editors.get(&key) {
-            session.shell.focus();
-            eprintln!("[plugin-editor-window] existing native editor focus instance={instance_id}");
-            return;
+
+        // Re-open semantics (spec A6). An existing session is one of:
+        //   * Attached / in-flight  -> focus the live (or loading) shell; never
+        //     spawn a duplicate window for the same plugin instance.
+        //   * Failed (incl. timed out) -> drop it and fall through to a fresh
+        //     open. This is the fix for "cannot open again": the old code
+        //     focused ANY existing session, so a stalled/failed open
+        //     permanently blocked reopen.
+        let existing = self
+            .bridge_editors
+            .get(&key)
+            .map(|s| (s.state.clone(), s.requested_at));
+        if let Some((state, requested_at)) = existing {
+            if let BridgeEditorState::Failed(reason) = &state {
+                ped_log!(
+                    "Open Request track={track_id} slot={instance_id} prior=Failed({reason}) -> retry (dropping stale session)"
+                );
+                self.close_bridge_editor(cx, track_id, instance_id);
+                // fall through to a fresh open below
+            } else {
+                if let Some(session) = self.bridge_editors.get(&key) {
+                    session.shell.focus();
+                }
+                ped_log!(
+                    "Open Request track={track_id} slot={instance_id} state={state:?} -> focus existing (in_flight_ms={})",
+                    requested_at.elapsed().as_millis()
+                );
+                eprintln!(
+                    "[plugin-editor-window] existing native editor focus instance={instance_id}"
+                );
+                return;
+            }
         }
+        ped_log!(
+            "Open Request track={track_id} slot={instance_id} state=Closed plugin={display_name} command=PrepareEditorView"
+        );
         let Some(runtime) = self.plugin_bridge_runtime.as_ref().cloned() else {
             eprintln!(
                 "[plugin-runtime] external bridge mandatory but no runtime for editor instance={instance_id}"
@@ -580,6 +658,10 @@ impl StudioLayout {
                     );
                 });
                 eprintln!("[PluginHost] editor reopen requested id={instance_id}");
+                ped_log!(
+                    "Open dispatched track={track_id} slot={instance_id} state=Preparing request_to_ipc_ms={}",
+                    request_started.elapsed().as_millis()
+                );
                 self.bridge_editors.insert(
                     key,
                     BridgeEditorSession {
@@ -591,6 +673,7 @@ impl StudioLayout {
                         preferred_applied: false,
                         last_content: (cw, ch),
                         host_hwnd: 0,
+                        requested_at: request_started,
                     },
                 );
                 if let Some(engine) = self.audio_engine.as_ref() {
@@ -604,6 +687,9 @@ impl StudioLayout {
                 cx.notify();
             }
             Err(e) => {
+                ped_log!(
+                    "Open Failed track={track_id} slot={instance_id} reason=ipc_error detail={e}"
+                );
                 eprintln!(
                     "[plugin-editor-window] open bridge editor FAILED instance={instance_id} err={e}"
                 );
@@ -643,6 +729,29 @@ impl StudioLayout {
         let mut changed = false;
         for (key, session) in self.bridge_editors.iter_mut() {
             session.shell.pump_messages();
+            // Open watchdog (spec A6): a session still loading past the deadline
+            // is marked Failed so a subsequent Open click retries instead of
+            // re-focusing a dead loading shell. Leaves the window up with a
+            // status message so the user can also just close it.
+            if matches!(
+                session.state,
+                BridgeEditorState::Preparing | BridgeEditorState::AwaitingAttach
+            ) && session.requested_at.elapsed() >= EDITOR_OPEN_TIMEOUT
+            {
+                ped_log!(
+                    "Open Failed instance={} reason=timeout state={:?} elapsed_s={}",
+                    session.instance_id,
+                    session.state,
+                    session.requested_at.elapsed().as_secs()
+                );
+                session
+                    .shell
+                    .set_status("Plugin editor timed out. Close and open it again.", true);
+                session.state =
+                    BridgeEditorState::Failed("Editor open timed out".to_string());
+                changed = true;
+                continue;
+            }
             let poll = session.shell.poll();
             if poll.close_requested {
                 eprintln!(

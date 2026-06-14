@@ -156,7 +156,7 @@ impl StudioLayout {
     /// the same `TimelineState` instance owned by the Timeline entity, so the
     /// TrackHeader and Mixer always read identical values.
     pub(crate) fn build_mixer_callbacks(&self, owner: Entity<Self>) -> MixerCallbacks {
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline_select = self.timeline.clone();
         let owner_select = owner.clone();
         let on_select_track: std::sync::Arc<
@@ -196,7 +196,7 @@ impl StudioLayout {
             }
         });
 
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline_pan = self.timeline.clone();
         let owner_dirty = owner.clone();
         let on_pan_change: std::sync::Arc<
@@ -220,7 +220,7 @@ impl StudioLayout {
             }
         });
 
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline_mute = self.timeline.clone();
         let owner_dirty = owner.clone();
         let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
@@ -246,7 +246,7 @@ impl StudioLayout {
                 }
             });
 
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline_solo = self.timeline.clone();
         let owner_dirty = owner.clone();
         let on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
@@ -315,7 +315,7 @@ impl StudioLayout {
             }
         });
 
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline_master = self.timeline.clone();
         let owner_dirty = owner.clone();
         let on_master_volume_change: std::sync::Arc<
@@ -413,7 +413,7 @@ impl StudioLayout {
                         timeline.state.toggle_insert_bypass(&track_id, &insert_id);
                     });
                     this.mark_dirty();
-                    this.engine_project_dirty = true;
+                    this.audio_bridge.project_dirty = true;
                     cx.notify();
                 });
             })
@@ -459,7 +459,7 @@ impl StudioLayout {
                         });
                         if changed {
                             this.mark_dirty();
-                            this.engine_project_dirty = true;
+                            this.audio_bridge.project_dirty = true;
                             this.schedule_audio_project_sync(cx, true, "mixer_reorder_insert");
                             this.push_mixer_snapshot_to_window(cx);
                             cx.notify();
@@ -516,7 +516,7 @@ impl StudioLayout {
                         timeline.state.remove_send(&track_id, &send_id);
                     });
                     this.mark_dirty();
-                    this.engine_project_dirty = true;
+                    this.audio_bridge.project_dirty = true;
                     cx.notify();
                 });
             })

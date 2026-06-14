@@ -307,7 +307,7 @@ impl StudioLayout {
         let settings = self.settings.clone();
         let owner = cx.entity().clone();
 
-        let mut available_inputs = if let Some(ref engine) = self.audio_engine {
+        let mut available_inputs = if let Some(ref engine) = self.audio_bridge.engine {
             engine
                 .list_input_devices()
                 .into_iter()
@@ -327,7 +327,7 @@ impl StudioLayout {
         }
         available_inputs = dedupe_preserve_order(&available_inputs);
 
-        let mut available_outputs = if let Some(ref engine) = self.audio_engine {
+        let mut available_outputs = if let Some(ref engine) = self.audio_bridge.engine {
             engine
                 .list_output_devices()
                 .into_iter()
@@ -348,7 +348,7 @@ impl StudioLayout {
 
         // (device name, channel count) for the read-only channel lists (Phase C).
         let available_input_channels: Vec<(String, u32)> = self
-            .audio_engine
+            .audio_bridge.engine
             .as_ref()
             .map(|engine| {
                 engine
@@ -359,7 +359,7 @@ impl StudioLayout {
             })
             .unwrap_or_default();
         let available_output_channels: Vec<(String, u32)> = self
-            .audio_engine
+            .audio_bridge.engine
             .as_ref()
             .map(|engine| {
                 engine
@@ -387,7 +387,7 @@ impl StudioLayout {
             });
         });
 
-        let engine_for_latency = self.audio_engine.clone();
+        let engine_for_latency = self.audio_bridge.engine.clone();
         let latency_provider: crate::components::settings_dialog::AudioLatencySnapshotProvider =
             Arc::new(move || {
                 engine_for_latency
@@ -396,7 +396,7 @@ impl StudioLayout {
                     .unwrap_or_else(crate::settings::SettingsAudioLatencySnapshot::unavailable)
             });
         let input_test_start: Option<crate::components::settings_dialog::InputTestStartFn> =
-            self.audio_engine.clone().map(|engine| {
+            self.audio_bridge.engine.clone().map(|engine| {
                 Arc::new(move |device_id: Option<String>| {
                     let device_id = device_id.filter(|id| !id.trim().is_empty());
                     engine
@@ -405,13 +405,13 @@ impl StudioLayout {
                 }) as crate::components::settings_dialog::InputTestStartFn
             });
         let input_test_stop: Option<crate::components::settings_dialog::InputTestStopFn> =
-            self.audio_engine.clone().map(|engine| {
+            self.audio_bridge.engine.clone().map(|engine| {
                 Arc::new(move || {
                     engine.stop_input_test();
                 }) as crate::components::settings_dialog::InputTestStopFn
             });
         let input_test_level: Option<crate::components::settings_dialog::InputTestLevelFn> =
-            self.audio_engine.clone().map(|engine| {
+            self.audio_bridge.engine.clone().map(|engine| {
                 Arc::new(move || engine.input_test_level())
                     as crate::components::settings_dialog::InputTestLevelFn
             });

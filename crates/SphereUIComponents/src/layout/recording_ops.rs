@@ -50,7 +50,7 @@ impl StudioLayout {
         let project_root = match self.project_folder.as_ref() {
             Some(path) => path.clone(),
             None => {
-                self.audio_last_error =
+                self.audio_bridge.last_error =
                     Some("save the project to a folder before recording".to_string());
                 self.recording.ui_state = RecordingUiState::Failed {
                     reason: "save the project to a folder before recording".to_string(),
@@ -66,7 +66,7 @@ impl StudioLayout {
         // precondition is validated (see below), rather than before — clicking
         // Record on a project that cannot start a take (no engine, no armed
         // audio track, device conflict) must not silently save the project.
-        let Some(engine_handle) = self.audio_engine.clone() else {
+        let Some(engine_handle) = self.audio_bridge.engine.clone() else {
             self.fail_recording_start("audio engine unavailable", cx);
             return;
         };
@@ -216,7 +216,7 @@ impl StudioLayout {
         }
 
         self.recording.start_beat = start_beat.max(0.0);
-        self.audio_last_error = None;
+        self.audio_bridge.last_error = None;
         self.recording.ui_state = RecordingUiState::Recording;
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.recording = true;
@@ -224,7 +224,7 @@ impl StudioLayout {
         });
 
         let playing = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|s| s.transport_playing)
             .unwrap_or(false);
@@ -236,7 +236,7 @@ impl StudioLayout {
     pub(super) fn stop_native_recording(&mut self, cx: &mut Context<Self>) {
         self.stop_recording_transport_ui(cx);
 
-        let Some(engine) = self.audio_engine.clone() else {
+        let Some(engine) = self.audio_bridge.engine.clone() else {
             self.recording.ui_state = RecordingUiState::Failed {
                 reason: "audio engine unavailable".to_string(),
             };
@@ -246,10 +246,10 @@ impl StudioLayout {
 
         let engine_recording = engine.recording_status().active;
         if let Err(error) = engine.pause() {
-            self.audio_last_error = Some(error.to_string());
+            self.audio_bridge.last_error = Some(error.to_string());
             eprintln!("[audio] stop transport while recording failed: {error}");
         }
-        self.audio_stats = Some(engine.stats());
+        self.audio_bridge.stats = Some(engine.stats());
 
         if !engine_recording {
             self.recording.ui_state = RecordingUiState::Idle;
@@ -263,7 +263,7 @@ impl StudioLayout {
         let results = match engine.stop_recording() {
             Ok(results) => results,
             Err(error) => {
-                self.audio_last_error = Some(error.to_string());
+                self.audio_bridge.last_error = Some(error.to_string());
                 self.recording.ui_state = RecordingUiState::Failed {
                     reason: error.to_string(),
                 };
@@ -360,14 +360,14 @@ impl StudioLayout {
 
         if !failed_tracks.is_empty() {
             let reason = format!("recording finalize failed ({})", failed_tracks.join("; "));
-            self.audio_last_error = Some(reason.clone());
+            self.audio_bridge.last_error = Some(reason.clone());
             self.recording.ui_state = RecordingUiState::Failed { reason };
             cx.notify();
             return;
         }
 
-        self.engine_project_dirty = true;
-        self.engine_media_dirty = true;
+        self.audio_bridge.project_dirty = true;
+        self.audio_bridge.media_dirty = true;
         self.schedule_audio_project_sync(cx, true, "recording_commit");
 
         for (path, path_key) in import_paths {
@@ -387,7 +387,7 @@ impl StudioLayout {
             self.finish_recording_preview(cx);
             return;
         }
-        let Some(engine) = self.audio_engine.clone() else {
+        let Some(engine) = self.audio_bridge.engine.clone() else {
             return;
         };
         let info = engine.recording_preview_info();
@@ -508,7 +508,7 @@ impl StudioLayout {
     }
 
     fn fail_recording_start(&mut self, message: &str, cx: &mut Context<Self>) {
-        self.audio_last_error = Some(message.to_string());
+        self.audio_bridge.last_error = Some(message.to_string());
         self.recording.ui_state = RecordingUiState::Failed {
             reason: message.to_string(),
         };
@@ -526,7 +526,7 @@ impl StudioLayout {
         &self,
         cx: &Context<Self>,
     ) -> Option<(String, u32)> {
-        let engine = self.audio_engine.as_ref()?;
+        let engine = self.audio_bridge.engine.as_ref()?;
         let wanted = self
             .settings
             .read(cx)
@@ -554,7 +554,7 @@ impl StudioLayout {
         &self,
         cx: &Context<Self>,
     ) -> Option<(String, u32)> {
-        let engine = self.audio_engine.as_ref()?;
+        let engine = self.audio_bridge.engine.as_ref()?;
         let wanted = self
             .settings
             .read(cx)

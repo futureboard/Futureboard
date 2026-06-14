@@ -71,7 +71,7 @@ fn stretch_commit_field(
 
 impl StudioLayout {
     pub(crate) fn build_inspector_callbacks(&self, owner: Entity<Self>) -> InspectorCallbacks {
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline_vol = self.timeline.clone();
         let owner_vol = owner.clone();
         let on_volume: StrF32Cb = Arc::new(move |(id, v): &(String, f32), _w, cx| {
@@ -97,7 +97,7 @@ impl StudioLayout {
             }
         });
 
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline_pan = self.timeline.clone();
         let owner_pan = owner.clone();
         let on_pan: StrF32Cb = Arc::new(move |(id, v): &(String, f32), _w, cx| {
@@ -145,7 +145,7 @@ impl StudioLayout {
                 // action, not a per-tick event) so playback honors read on/off,
                 // and refresh the mixer view.
                 StudioLayout::defer_update(&owner_auto, cx, |this, cx| {
-                    this.engine_project_dirty = true;
+                    this.audio_bridge.project_dirty = true;
                     this.schedule_audio_project_sync(cx, false, "inspector_volume_automation_read");
                     this.push_mixer_snapshot_to_window(cx);
                 });
@@ -649,7 +649,7 @@ impl StudioLayout {
                     "insert bypass track={track_id} insert={insert_id} bypass={bypassed}"
                 ));
                 this.mark_dirty();
-                this.engine_project_dirty = true;
+                this.audio_bridge.project_dirty = true;
                 this.push_mixer_snapshot_to_window(cx);
                 cx.notify();
             });
@@ -673,7 +673,7 @@ impl StudioLayout {
                     "insert enabled track={track_id} insert={insert_id} enabled={enabled}"
                 ));
                 this.mark_dirty();
-                this.engine_project_dirty = true;
+                this.audio_bridge.project_dirty = true;
                 this.push_mixer_snapshot_to_window(cx);
                 cx.notify();
             });
@@ -699,7 +699,7 @@ impl StudioLayout {
                             "insert move track={track_id} insert={insert_id} up={up}"
                         ));
                         this.mark_dirty();
-                        this.engine_project_dirty = true;
+                        this.audio_bridge.project_dirty = true;
                         this.push_mixer_snapshot_to_window(cx);
                         cx.notify();
                     }
@@ -748,7 +748,7 @@ impl StudioLayout {
                             "insert reorder track={track_id} insert={insert_id} gap={insertion_index}"
                         ));
                         this.mark_dirty();
-                        this.engine_project_dirty = true;
+                        this.audio_bridge.project_dirty = true;
                         this.schedule_audio_project_sync(cx, true, "inspector_reorder_insert");
                         this.push_mixer_snapshot_to_window(cx);
                         cx.notify();
@@ -937,7 +937,7 @@ impl StudioLayout {
     /// dirty / mixer-resync plumbing; only the state mutation + realtime param
     /// differ. Input-monitor has no realtime param (UI-only for now).
     fn track_toggle_cb(&self, owner: Entity<Self>, kind: TrackToggle) -> StrCb {
-        let audio_engine = self.audio_engine.clone();
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline = self.timeline.clone();
         Arc::new(move |id: &String, _w, cx: &mut App| {
             let id = id.clone();

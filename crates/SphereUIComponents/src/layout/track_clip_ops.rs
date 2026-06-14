@@ -89,7 +89,7 @@ impl StudioLayout {
         // 1. Silence the track's instrument now (Part 13: delete while sounding).
         //    The engine reload also panics on project_load, but doing it here
         //    stops audio without waiting for the background sync.
-        if let Some(engine) = self.audio_engine.as_ref() {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
             if let Err(error) = engine.midi_preview_all_notes_off(track_id.to_string()) {
                 eprintln!("[TrackDelete] midi panic failed track_id={track_id} err={error}");
             }

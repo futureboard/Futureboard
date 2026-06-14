@@ -226,7 +226,7 @@ impl StudioLayout {
                     if let Ok(mut bridge) = runtime.lock() {
                         bridge.mark_plugin_load_failed(&plugin_instance_id);
                     }
-                    if let Some(engine) = self.audio_engine.as_ref() {
+                    if let Some(engine) = self.audio_bridge.engine.as_ref() {
                         let _ = engine.set_plugin_bridge_sink(plugin_instance_id.clone(), None);
                     }
                     let user_error = if error.contains("CPU") || error.contains("runtime") {
@@ -313,7 +313,7 @@ impl StudioLayout {
                         })
                     });
                     self.sync_plugin_bridge_sinks_to_engine(cx, "processing_prepared");
-                    self.engine_project_dirty = true;
+                    self.audio_bridge.project_dirty = true;
                     self.schedule_audio_project_sync(cx, true, "bridge_processing_prepared");
                 }
                 _ => {}
@@ -720,7 +720,7 @@ impl StudioLayout {
                         requested_at: request_started,
                     },
                 );
-                if let Some(engine) = self.audio_engine.as_ref() {
+                if let Some(engine) = self.audio_bridge.engine.as_ref() {
                     let _ = engine.set_bridge_editor_active(track_id.to_string(), true);
                 }
                 self.log_editor_engine_state(
@@ -746,7 +746,7 @@ impl StudioLayout {
     /// content child is resized synchronously in the shell `WndProc`; this only
     /// pushes the matching `onSize` to the plugin.
     fn log_editor_engine_state(&self, phase: &str, track_id: &str, instance_id: &str) {
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             eprintln!(
                 "[PluginEditor] {phase} engine_state_before=unknown transport_playing=unknown instance={instance_id}"
             );
@@ -856,7 +856,7 @@ impl StudioLayout {
         let key = (track_id.to_string(), instance_id.to_string());
         self.log_editor_engine_state("close engine_state_before=", track_id, instance_id);
         if let Some(session) = self.plugin_editors.bridge.remove(&key) {
-            if let Some(engine) = self.audio_engine.as_ref() {
+            if let Some(engine) = self.audio_bridge.engine.as_ref() {
                 let _ = engine.set_bridge_editor_active(track_id.to_string(), false);
             }
             if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
@@ -1059,7 +1059,7 @@ impl StudioLayout {
         // The editor attaches to the EXISTING runtime VST3 instance for this
         // insert — never a new component/controller. Look it up from the engine;
         // if the insert has no ready native processor, there is nothing to edit.
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             if debug {
                 eprintln!("[plugin-view] no audio engine track={track_id} slot={insert_id}");
             }
@@ -1185,7 +1185,7 @@ impl StudioLayout {
         // 3. Engine realtime sink: keyed by instance id and PRESERVED across
         //    LoadProject, so the snapshot reconcile alone never drops it. Remove
         //    it explicitly or the removed plugin keeps mixing into the master.
-        if let Some(engine) = self.audio_engine.as_ref() {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
             match engine.set_plugin_bridge_sink(insert_id.to_string(), None) {
                 Ok(()) => eprintln!(
                     "[PluginUnload] engine_sink_removed track={track_id} instance={insert_id}"
@@ -1226,7 +1226,7 @@ impl StudioLayout {
             cx.notify();
         });
         self.mark_dirty();
-        self.engine_project_dirty = true;
+        self.audio_bridge.project_dirty = true;
         // Push the snapshot now instead of waiting for the idle poll: the engine
         // reconcile drops the old processor clone and the sink removal applies
         // immediately, so the removed VSTi can never sound again.
@@ -1680,7 +1680,7 @@ impl StudioLayout {
                     .unwrap_or_default();
                 let sample_rate = self.current_audio_sample_rate();
                 let max_block_size = self
-                    .audio_engine
+                    .audio_bridge.engine
                     .as_ref()
                     .map(|engine| engine.config().buffer_size)
                     .unwrap_or(256);
@@ -1746,14 +1746,14 @@ impl StudioLayout {
                         );
                         let _ = bridge_sink;
                         self.sync_plugin_bridge_sinks_to_engine(cx, "bridge_plugin_loaded");
-                        if let Some(engine) = self.audio_engine.as_ref() {
+                        if let Some(engine) = self.audio_bridge.engine.as_ref() {
                             eprintln!(
                                 "[PluginAdd] was_playing={} state_before={:?} source=bridge_plugin_loaded",
                                 engine.transport_playing(),
                                 engine.engine_state(),
                             );
                         }
-                        self.engine_project_dirty = true;
+                        self.audio_bridge.project_dirty = true;
                         self.schedule_audio_project_sync(cx, true, "bridge_plugin_loaded");
                         self.mark_dirty();
                     }
@@ -1777,7 +1777,7 @@ impl StudioLayout {
                 eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
                 eprintln!("[plugin-runtime] legacy path may hang GPU/OpenGL/JUCE plugin editors");
                 self.mark_dirty();
-                self.engine_project_dirty = true;
+                self.audio_bridge.project_dirty = true;
             }
             if std::env::var_os("FUTUREBOARD_INSPECTOR_DEBUG").is_some()
                 || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_DEBUG").is_some()
@@ -1923,7 +1923,7 @@ impl StudioLayout {
         if slots.is_empty() {
             return false;
         }
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             eprintln!(
                 "[PluginRestore] bridge sink deferred reason=no_audio_engine source={reason}"
             );
@@ -2018,7 +2018,7 @@ impl StudioLayout {
         self.plugin_editors.deferred_opens.extend(pending_opens);
         eprintln!("[plugin-runtime] state Loading -> Active source={source}");
         self.sync_plugin_bridge_sinks_to_engine(cx, source);
-        self.engine_project_dirty = true;
+        self.audio_bridge.project_dirty = true;
         self.schedule_audio_project_sync(cx, true, source);
         slot_changed
     }
@@ -2081,7 +2081,7 @@ impl StudioLayout {
 
         let sample_rate = self.current_audio_sample_rate();
         let max_block_size = self
-            .audio_engine
+            .audio_bridge.engine
             .as_ref()
             .map(|engine| engine.config().buffer_size)
             .unwrap_or(256);
@@ -2147,14 +2147,14 @@ impl StudioLayout {
                 };
                 let _ = bridge_sink;
                 self.sync_plugin_bridge_sinks_to_engine(cx, "plugin_restore");
-                if let Some(engine) = self.audio_engine.as_ref() {
+                if let Some(engine) = self.audio_bridge.engine.as_ref() {
                     eprintln!(
                         "[PluginAdd] was_playing={} state_before={:?} source=plugin_restore",
                         engine.transport_playing(),
                         engine.engine_state(),
                     );
                 }
-                self.engine_project_dirty = true;
+                self.audio_bridge.project_dirty = true;
                 self.schedule_audio_project_sync(cx, true, "plugin_restore");
                 self.mark_dirty();
                 true
@@ -2183,7 +2183,7 @@ impl StudioLayout {
             return;
         }
         let slots = self.bridge_vst3_insert_slots(cx);
-        if let Some(engine) = self.audio_engine.as_ref() {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
             for (_, insert_id) in &slots {
                 let _ = engine.set_plugin_bridge_sink(insert_id.clone(), None);
             }

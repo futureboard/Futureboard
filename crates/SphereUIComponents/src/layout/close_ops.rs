@@ -221,7 +221,7 @@ impl StudioLayout {
         self.stop_native_playback(cx);
 
         shutdown::log("phase: audio engine shutdown");
-        if let Some(engine) = self.audio_engine.as_mut() {
+        if let Some(engine) = self.audio_bridge.engine.as_mut() {
             engine.shutdown();
         }
 

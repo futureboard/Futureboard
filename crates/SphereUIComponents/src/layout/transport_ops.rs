@@ -97,7 +97,7 @@ impl StudioLayout {
                     return;
                 }
                 let playing = self
-                    .audio_stats
+                    .audio_bridge.stats
                     .as_ref()
                     .map(|stats| stats.transport_playing)
                     .unwrap_or(false);
@@ -131,7 +131,7 @@ impl StudioLayout {
                     cx.notify();
                     enabled
                 });
-                if let (enabled, Some(engine)) = (enabled, self.audio_engine.as_ref()) {
+                if let (enabled, Some(engine)) = (enabled, self.audio_bridge.engine.as_ref()) {
                     if let Err(error) = engine.set_metronome_enabled(enabled) {
                         if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
                             eprintln!("[audio] set metronome failed: {error}");
@@ -163,7 +163,7 @@ impl StudioLayout {
         self.timeline.read(cx).state.transport.recording
             || self.recording.preview.is_some()
             || self
-                .audio_engine
+                .audio_bridge.engine
                 .as_ref()
                 .map(|engine| engine.recording_status().active)
                 .unwrap_or(false)
@@ -224,7 +224,7 @@ impl StudioLayout {
                 timeline.state.time_signature_has_markers(),
                 timeline.state.transport.recording
                     || self
-                        .audio_engine
+                        .audio_bridge.engine
                         .as_ref()
                         .map(|engine| engine.recording_status().active)
                         .unwrap_or(false),
@@ -234,7 +234,7 @@ impl StudioLayout {
             )
         };
         let playing = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
@@ -362,8 +362,8 @@ impl StudioLayout {
     pub(super) fn status_text(&self) -> (String, String) {
         let left = match (
             self.recording.ui_state.status_text(),
-            &self.audio_last_error,
-            &self.audio_stats,
+            &self.audio_bridge.last_error,
+            &self.audio_bridge.stats,
         ) {
             (Some(status), _, _) => status,
             (None, Some(error), _) => format!("Audio: {error}"),
@@ -372,7 +372,7 @@ impl StudioLayout {
             (None, _, _) => "Ready".to_string(),
         };
         let audio = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|stats| {
                 format!(
@@ -397,7 +397,7 @@ impl StudioLayout {
 
     pub(super) fn frame_reason(&self) -> &'static str {
         let playing = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|s| s.transport_playing)
             .unwrap_or(false);

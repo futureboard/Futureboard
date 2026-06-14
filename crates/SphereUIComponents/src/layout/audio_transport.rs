@@ -74,6 +74,51 @@ impl Default for EngineSyncState {
     }
 }
 
+/// Audio-engine bridge / sync state — the live engine handle, transport stats,
+/// last error, dirty flags driving project/media re-sync, and the background
+/// sync handshake (in-flight / pending / play-after-sync). `StudioLayout`
+/// decomposition slice. Manual `Default` (project/media start dirty so the first
+/// sync runs).
+pub(crate) struct AudioBridgeState {
+    /// Live native audio engine handle; `None` until opened.
+    pub engine: Option<DAUx::AudioEngine>,
+    /// Whether the engine is currently running.
+    pub running: bool,
+    /// Last audio error surfaced to the UI.
+    pub last_error: Option<String>,
+    /// Latest engine transport/stats snapshot.
+    pub stats: Option<DAUx::EngineStats>,
+    /// Signature of the last project synced to the engine (skips redundant syncs).
+    pub last_project_signature: Option<String>,
+    /// Project graph changed and needs re-sync to the engine.
+    pub project_dirty: bool,
+    /// Media (clips/assets) changed and needs re-sync.
+    pub media_dirty: bool,
+    /// True while a background `load_project` (file decode) is running.
+    pub sync_in_flight: bool,
+    /// Queued when media/project changes during an in-flight sync.
+    pub sync_pending: bool,
+    /// Start transport once the current background sync completes.
+    pub play_after_sync: bool,
+}
+
+impl Default for AudioBridgeState {
+    fn default() -> Self {
+        Self {
+            engine: None,
+            running: false,
+            last_error: None,
+            stats: None,
+            last_project_signature: None,
+            project_dirty: true,
+            media_dirty: true,
+            sync_in_flight: false,
+            sync_pending: false,
+            play_after_sync: false,
+        }
+    }
+}
+
 impl StudioLayout {
     pub(super) fn dispatch_midi_preview_command(
         &mut self,
@@ -109,7 +154,7 @@ impl StudioLayout {
             // Shared-memory bridge is live — always route through the main DAW
             // engine (track → mixer → master), even if timeline runtime_backend
             // has not caught up yet.
-            let Some(engine) = self.audio_engine.as_ref() else {
+            let Some(engine) = self.audio_bridge.engine.as_ref() else {
                 eprintln!("[midi-preview-ui] engine_command_bus_connected=false");
                 return;
             };
@@ -204,7 +249,7 @@ impl StudioLayout {
             }
         }
 
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             eprintln!("[PopoutMidiEditor] engine_command_bus_connected=false");
             return;
         };
@@ -340,11 +385,11 @@ impl StudioLayout {
             return false;
         }
         let _s = crate::perf::PerfScope::enter("poll_native_audio");
-        if self.audio_engine.is_none() {
+        if self.audio_bridge.engine.is_none() {
             return false;
         }
 
-        if self.engine_project_dirty || self.engine_media_dirty {
+        if self.audio_bridge.project_dirty || self.audio_bridge.media_dirty {
             self.schedule_audio_project_sync(cx, false, "engine_dirty_poll");
         }
 
@@ -356,14 +401,14 @@ impl StudioLayout {
         // Drive native main-owned editor shells: honor OS close + forward resizes.
         self.drive_bridge_editors(cx);
 
-        let engine = self.audio_engine.as_ref().expect("checked above");
+        let engine = self.audio_bridge.engine.as_ref().expect("checked above");
         // Throttled raw/bus input-peak trace (gated by FUTUREBOARD_INPUT_DEBUG).
         engine.log_input_debug();
         let stats = engine.stats();
         // State-transition signal — used to notify the root layout even
         // when the transport is paused (e.g. error appears, stream opens).
         let state_changed = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|previous| {
                 previous.transport_playing != stats.transport_playing
@@ -371,13 +416,13 @@ impl StudioLayout {
                     || previous.last_error != stats.last_error
             })
             .unwrap_or(true);
-        self.audio_running = stats.running;
-        self.audio_last_error = stats.last_error.clone();
+        self.audio_bridge.running = stats.running;
+        self.audio_bridge.last_error = stats.last_error.clone();
 
         let engine_beat = stats.position_beats.max(0.0) as f32;
         let sync_changed = (engine_beat - self.engine_sync.playhead_beat).abs() > 0.0001
             || self
-                .audio_stats
+                .audio_bridge.stats
                 .as_ref()
                 .map(|previous| previous.transport_playing != stats.transport_playing)
                 .unwrap_or(true);
@@ -438,7 +483,7 @@ impl StudioLayout {
         }
 
         let was_playing = stats.transport_playing;
-        self.audio_stats = Some(stats);
+        self.audio_bridge.stats = Some(stats);
         // While playing the root layout must repaint every tick so the
         // transport chrome (bar:beat:tick, status line) tracks the
         // playhead. Otherwise we'd be limited to engine-snapshot cadence
@@ -490,7 +535,7 @@ impl StudioLayout {
 
     pub(super) fn interpolated_playhead_beat(&self, bpm: f32) -> f32 {
         let playing = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
@@ -505,7 +550,7 @@ impl StudioLayout {
     /// `cx.notify` — repaints are driven by the audio poll when transport
     /// is active, or by user interaction when idle.
     pub(super) fn apply_engine_meters(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return false;
         };
         // Throttle meter polling to `PowerMode::meter_update_hz`. The audio
@@ -585,13 +630,13 @@ impl StudioLayout {
         if crate::shutdown::ShutdownState::global().is_shutting_down() {
             return;
         }
-        let Some(engine) = self.audio_engine.clone() else {
-            self.audio_last_error = Some("audio engine unavailable".to_string());
+        let Some(engine) = self.audio_bridge.engine.clone() else {
+            self.audio_bridge.last_error = Some("audio engine unavailable".to_string());
             return;
         };
 
-        if self.audio_sync_in_flight {
-            self.audio_sync_pending = true;
+        if self.audio_bridge.sync_in_flight {
+            self.audio_bridge.sync_pending = true;
             self.queue_background_task(
                 "native-sync-pending",
                 crate::components::BackgroundTaskKind::NativeSync,
@@ -601,7 +646,7 @@ impl StudioLayout {
             return;
         }
 
-        if !force && !self.engine_project_dirty && !self.engine_media_dirty {
+        if !force && !self.audio_bridge.project_dirty && !self.audio_bridge.media_dirty {
             return;
         }
 
@@ -637,17 +682,17 @@ impl StudioLayout {
         };
         log_engine_sync_snapshot(
             &snapshot,
-            self.engine_project_dirty || self.engine_media_dirty,
+            self.audio_bridge.project_dirty || self.audio_bridge.media_dirty,
             reason,
         );
         let signature = serde_json::to_string(&snapshot).unwrap_or_default();
-        if !force && self.last_audio_project_signature.as_deref() == Some(signature.as_str()) {
-            self.engine_project_dirty = false;
-            self.engine_media_dirty = false;
+        if !force && self.audio_bridge.last_project_signature.as_deref() == Some(signature.as_str()) {
+            self.audio_bridge.project_dirty = false;
+            self.audio_bridge.media_dirty = false;
             return;
         }
 
-        self.audio_sync_in_flight = true;
+        self.audio_bridge.sync_in_flight = true;
         self.start_background_task(
             "native-sync",
             crate::components::BackgroundTaskKind::NativeSync,
@@ -688,13 +733,13 @@ impl StudioLayout {
         result: Result<(), DAUx::SphereAudioError>,
         signature: String,
     ) {
-        self.audio_sync_in_flight = false;
+        self.audio_bridge.sync_in_flight = false;
         match result {
             Ok(()) => {
-                self.last_audio_project_signature = Some(signature);
-                self.engine_project_dirty = false;
-                self.engine_media_dirty = false;
-                self.audio_last_error = None;
+                self.audio_bridge.last_project_signature = Some(signature);
+                self.audio_bridge.project_dirty = false;
+                self.audio_bridge.media_dirty = false;
+                self.audio_bridge.last_error = None;
                 self.complete_background_task(
                     "native-sync",
                     Some("Engine graph ready".to_string()),
@@ -702,12 +747,12 @@ impl StudioLayout {
                 self.complete_background_task("native-sync-pending", None);
             }
             Err(error) => {
-                self.audio_last_error = Some(error.to_string());
+                self.audio_bridge.last_error = Some(error.to_string());
                 eprintln!("[audio] load_project failed: {error}");
                 self.fail_background_task("native-sync", error.to_string());
                 // Clear dirty so a failed decode does not retry every poll tick.
-                self.engine_project_dirty = false;
-                self.engine_media_dirty = false;
+                self.audio_bridge.project_dirty = false;
+                self.audio_bridge.media_dirty = false;
             }
         }
 
@@ -723,15 +768,15 @@ impl StudioLayout {
             eprintln!("[PluginRestore] graph snapshot swapped generation=post_sync");
         }
 
-        let pending_sync = self.audio_sync_pending;
-        self.audio_sync_pending = false;
+        let pending_sync = self.audio_bridge.sync_pending;
+        self.audio_bridge.sync_pending = false;
         if pending_sync {
             self.schedule_audio_project_sync(cx, false, "audio_sync_pending");
             return;
         }
 
-        if self.pending_play_after_sync {
-            self.pending_play_after_sync = false;
+        if self.audio_bridge.play_after_sync {
+            self.audio_bridge.play_after_sync = false;
             self.start_native_playback(cx);
         }
     }
@@ -744,7 +789,7 @@ impl StudioLayout {
     /// loop — so the runtime mutex is locked at most once per project change.
     pub(super) fn apply_engine_insert_statuses(&mut self, cx: &mut Context<Self>) {
         use crate::components::timeline::timeline_state::InsertLoadStatus;
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return;
         };
         let statuses = engine.insert_statuses();
@@ -776,29 +821,29 @@ impl StudioLayout {
     }
 
     pub(super) fn mark_engine_project_dirty(&mut self) {
-        self.engine_project_dirty = true;
+        self.audio_bridge.project_dirty = true;
     }
 
     pub(crate) fn mark_engine_media_dirty(&mut self) {
-        self.engine_project_dirty = true;
-        self.engine_media_dirty = true;
+        self.audio_bridge.project_dirty = true;
+        self.audio_bridge.media_dirty = true;
     }
 
     pub(super) fn ensure_audio_stream_warm(&mut self) -> bool {
         transport_freeze_debug::log("ensure_audio_stream_warm enter");
         let stream_ready = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|stats| stats.stream_open && stats.running)
             .unwrap_or(false)
-            || self.audio_running;
+            || self.audio_bridge.running;
         if stream_ready {
             transport_freeze_debug::log("ensure_audio_stream_warm already warm");
             return true;
         }
 
-        let Some(engine) = self.audio_engine.as_mut() else {
-            self.audio_last_error = Some("audio engine unavailable".to_string());
+        let Some(engine) = self.audio_bridge.engine.as_mut() else {
+            self.audio_bridge.last_error = Some("audio engine unavailable".to_string());
             transport_freeze_debug::log("ensure_audio_stream_warm no engine");
             return false;
         };
@@ -808,14 +853,14 @@ impl StudioLayout {
         match engine.start() {
             Ok(()) => {
                 transport_freeze_debug::log("ensure_audio_stream_warm after engine.start ok");
-                self.audio_stats = Some(engine.stats());
-                self.audio_running = true;
-                self.audio_last_error = None;
+                self.audio_bridge.stats = Some(engine.stats());
+                self.audio_bridge.running = true;
+                self.audio_bridge.last_error = None;
                 true
             }
             Err(error) => {
-                self.audio_running = false;
-                self.audio_last_error = Some(error.to_string());
+                self.audio_bridge.running = false;
+                self.audio_bridge.last_error = Some(error.to_string());
                 eprintln!("[audio] stream warm-up failed: {error}");
                 transport_freeze_debug::log("ensure_audio_stream_warm engine.start failed");
                 false
@@ -824,12 +869,12 @@ impl StudioLayout {
     }
 
     pub(super) fn current_audio_sample_rate(&self) -> u32 {
-        self.audio_stats
+        self.audio_bridge.stats
             .as_ref()
             .map(|stats| stats.sample_rate)
             .filter(|sample_rate| *sample_rate > 0)
             .or_else(|| {
-                self.audio_engine
+                self.audio_bridge.engine
                     .as_ref()
                     .map(|engine| engine.config().sample_rate)
                     .filter(|sample_rate| *sample_rate > 0)
@@ -846,14 +891,14 @@ impl StudioLayout {
             crate::forensic_trace::dump_midi_model(&timeline.state);
         }
 
-        if self.audio_engine.is_none() {
-            self.audio_last_error = Some("audio engine unavailable".to_string());
+        if self.audio_bridge.engine.is_none() {
+            self.audio_bridge.last_error = Some("audio engine unavailable".to_string());
             transport_freeze_debug::log("abort: no audio engine");
             return;
         }
 
         let already_playing = self
-            .audio_stats
+            .audio_bridge.stats
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
@@ -863,13 +908,13 @@ impl StudioLayout {
         }
 
         transport_freeze_debug::log("before sync/dirty gates");
-        if self.audio_sync_in_flight {
-            self.pending_play_after_sync = true;
+        if self.audio_bridge.sync_in_flight {
+            self.audio_bridge.play_after_sync = true;
             transport_freeze_debug::log("defer: audio_sync_in_flight");
             return;
         }
-        if self.engine_project_dirty || self.engine_media_dirty {
-            self.pending_play_after_sync = true;
+        if self.audio_bridge.project_dirty || self.audio_bridge.media_dirty {
+            self.audio_bridge.play_after_sync = true;
             transport_freeze_debug::log("defer: schedule_audio_project_sync");
             self.schedule_audio_project_sync(cx, false, "transport_play_pending_sync");
             return;
@@ -933,7 +978,7 @@ impl StudioLayout {
             )
         };
 
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             transport_freeze_debug::log("abort: engine handle missing");
             return;
         };
@@ -976,7 +1021,7 @@ impl StudioLayout {
 
         transport_freeze_debug::log("before engine.seek");
         if let Err(error) = engine.seek(playhead_seconds) {
-            self.audio_last_error = Some(error.to_string());
+            self.audio_bridge.last_error = Some(error.to_string());
             eprintln!("[audio] seek before play failed: {error}");
             transport_freeze_debug::log("abort: seek failed");
             return;
@@ -1008,14 +1053,14 @@ impl StudioLayout {
 
         transport_freeze_debug::log("before engine.play");
         if let Err(error) = engine.play() {
-            self.audio_last_error = Some(error.to_string());
+            self.audio_bridge.last_error = Some(error.to_string());
             eprintln!("[audio] play failed: {error}");
             transport_freeze_debug::log("abort: engine.play failed");
             return;
         }
         transport_freeze_debug::log("after engine.play");
 
-        self.audio_stats = Some(engine.stats());
+        self.audio_bridge.stats = Some(engine.stats());
         transport_freeze_debug::log("before timeline.update playing=true");
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.playing = true;
@@ -1032,7 +1077,7 @@ impl StudioLayout {
                     .await;
                 let _ = owner.update(cx, |this, _cx| {
                     let playing = this
-                        .audio_stats
+                        .audio_bridge.stats
                         .as_ref()
                         .map(|stats| stats.transport_playing)
                         .unwrap_or(false);
@@ -1049,7 +1094,7 @@ impl StudioLayout {
     }
 
     pub(super) fn sync_metronome_controls(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return;
         };
         let (enabled, bpm) = {
@@ -1073,7 +1118,7 @@ impl StudioLayout {
     }
 
     pub(super) fn sync_loop_controls(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return;
         };
         let (enabled, start_beats, end_beats, bpm) = {
@@ -1303,7 +1348,7 @@ impl StudioLayout {
             return;
         }
         if commit_to_engine {
-            if let Some(engine) = self.audio_engine.as_ref() {
+            if let Some(engine) = self.audio_bridge.engine.as_ref() {
                 if let Err(error) = engine.set_bpm(bpm as f64) {
                     if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
                         eprintln!("[audio] set BPM failed: {error}");
@@ -1622,7 +1667,7 @@ impl StudioLayout {
                     .collect::<Vec<_>>(),
             )
         };
-        if let Some(engine) = self.audio_engine.as_ref() {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
             if let Err(error) = engine.set_tempo_map(default_bpm, points) {
                 if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
                     eprintln!("[audio] sync tempo map failed: {error}");
@@ -1648,7 +1693,7 @@ impl StudioLayout {
                 )
                 .collect::<Vec<_>>()
         };
-        if let Some(engine) = self.audio_engine.as_ref() {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
             if let Err(error) = engine.set_time_signature_map(points) {
                 if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
                     eprintln!("[audio] sync time signature map failed: {error}");
@@ -1891,15 +1936,15 @@ impl StudioLayout {
     }
 
     pub(super) fn stop_native_playback(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.audio_engine.as_ref() else {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return;
         };
         if let Err(error) = engine.pause() {
-            self.audio_last_error = Some(error.to_string());
+            self.audio_bridge.last_error = Some(error.to_string());
             eprintln!("[audio] stop transport failed: {error}");
             return;
         }
-        self.audio_stats = Some(engine.stats());
+        self.audio_bridge.stats = Some(engine.stats());
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.playing = false;
             cx.notify();
@@ -1912,10 +1957,10 @@ impl StudioLayout {
             let timeline = self.timeline.read(cx);
             timeline.state.bpm
         };
-        if let Some(engine) = self.audio_engine.as_ref() {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
             let seconds = beat as f64 * 60.0 / bpm.max(1.0) as f64;
             if let Err(error) = engine.seek(seconds) {
-                self.audio_last_error = Some(error.to_string());
+                self.audio_bridge.last_error = Some(error.to_string());
                 eprintln!("[audio] seek failed: {error}");
             }
         }

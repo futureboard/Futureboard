@@ -352,19 +352,10 @@ pub struct StudioLayout {
     open_popover: Option<OpenPopover>,
     open_inspector_routing_combo: Option<crate::components::panel::InspectorRoutingCombo>,
     inspector_routing_combo_anchor: Option<crate::overlay::OverlayAnchor>,
-    audio_engine: Option<DAUx::AudioEngine>,
-    audio_running: bool,
-    audio_last_error: Option<String>,
-    audio_stats: Option<DAUx::EngineStats>,
-    last_audio_project_signature: Option<String>,
-    engine_project_dirty: bool,
-    engine_media_dirty: bool,
-    /// True while a background `load_project` (file decode) is running.
-    audio_sync_in_flight: bool,
-    /// Queued when media/project changes during an in-flight sync.
-    audio_sync_pending: bool,
-    /// Start transport once the current background sync completes.
-    pending_play_after_sync: bool,
+    /// Audio-engine bridge / sync state (engine handle, stats, last error, dirty
+    /// flags, background-sync handshake). Grouped into
+    /// [`audio_transport::AudioBridgeState`] (decomposition slice).
+    audio_bridge: audio_transport::AudioBridgeState,
     /// Active recording-session UI state (take start position, UI phase, live
     /// growing-waveform preview). Grouped into
     /// [`recording_ops::RecordingSessionState`] (decomposition slice).
@@ -701,16 +692,7 @@ impl StudioLayout {
             open_popover: None,
             open_inspector_routing_combo: None,
             inspector_routing_combo_anchor: None,
-            audio_engine: None,
-            audio_running: false,
-            audio_last_error: None,
-            audio_stats: None,
-            last_audio_project_signature: None,
-            engine_project_dirty: true,
-            engine_media_dirty: true,
-            audio_sync_in_flight: false,
-            audio_sync_pending: false,
-            pending_play_after_sync: false,
+            audio_bridge: audio_transport::AudioBridgeState::default(),
             recording: recording_ops::RecordingSessionState::default(),
             engine_sync: audio_transport::EngineSyncState::default(),
             bpm_drag: audio_transport::BpmDragState::default(),
@@ -745,11 +727,11 @@ impl StudioLayout {
     }
 
     fn spawn_audio_engine_warmup(&mut self, cx: &mut Context<Self>) {
-        if self.audio_engine.is_some() {
+        if self.audio_bridge.engine.is_some() {
             return;
         }
         let schema = self.settings.read(cx).current.clone();
-        self.audio_last_error = Some("Initializing audio...".to_string());
+        self.audio_bridge.last_error = Some("Initializing audio...".to_string());
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -759,10 +741,10 @@ impl StudioLayout {
             let _ = this.update(cx, |this, cx| match result {
                 Ok((engine, stats)) => {
                     this.install_audio_callbacks(&engine, cx);
-                    this.audio_running = stats.running;
-                    this.audio_stats = Some(stats);
-                    this.audio_last_error = None;
-                    this.audio_engine = Some(engine);
+                    this.audio_bridge.running = stats.running;
+                    this.audio_bridge.stats = Some(stats);
+                    this.audio_bridge.last_error = None;
+                    this.audio_bridge.engine = Some(engine);
                     this.sync_plugin_bridge_sinks_to_engine(cx, "studio_audio_ready");
                     this.schedule_audio_project_sync(cx, true, "studio_audio_ready");
                     crate::boot::log("audio engine handle ready");
@@ -770,7 +752,7 @@ impl StudioLayout {
                 }
                 Err(error) => {
                     eprintln!("[audio] failed to initialize engine: {error}");
-                    this.audio_last_error = Some(error);
+                    this.audio_bridge.last_error = Some(error);
                     cx.notify();
                 }
             });
@@ -948,7 +930,7 @@ impl StudioLayout {
                 self.open_popover = None;
                 if added.is_some() {
                     self.mark_dirty();
-                    self.engine_project_dirty = true;
+                    self.audio_bridge.project_dirty = true;
                     self.schedule_audio_project_sync(cx, false, "mixer_add_send");
                 }
                 cx.notify();
@@ -962,7 +944,7 @@ impl StudioLayout {
             self.open_popover = None;
             if added.is_some() {
                 self.mark_dirty();
-                self.engine_project_dirty = true;
+                self.audio_bridge.project_dirty = true;
                 self.schedule_audio_project_sync(cx, false, "mixer_create_return_send");
             }
             cx.notify();
@@ -1358,7 +1340,7 @@ impl StudioLayout {
                     // chain order, track/insert restore, …). Flag the engine
                     // dirty so the next poll re-syncs; the sync is signature-
                     // gated, so this is a no-op when audio is unaffected.
-                    self.engine_project_dirty = true;
+                    self.audio_bridge.project_dirty = true;
                     self.schedule_audio_project_sync(cx, false, "edit_undo");
                 }
             }
@@ -1368,7 +1350,7 @@ impl StudioLayout {
                     .update(cx, |timeline, cx| timeline.redo_edit(cx));
                 self.mark_dirty();
                 if redone {
-                    self.engine_project_dirty = true;
+                    self.audio_bridge.project_dirty = true;
                     self.schedule_audio_project_sync(cx, false, "edit_redo");
                 }
             }
@@ -1508,7 +1490,7 @@ impl StudioLayout {
     fn sync_settings_to_systems(&mut self, cx: &mut Context<Self>) {
         let schema = self.settings.read(cx).current.clone();
 
-        if let Some(ref engine) = self.audio_engine {
+        if let Some(ref engine) = self.audio_bridge.engine {
             let desired_pdc = schema.playback.latency_compensation;
             if engine.pdc_enabled() != desired_pdc {
                 engine.set_pdc_enabled(desired_pdc);
@@ -1530,7 +1512,7 @@ impl StudioLayout {
         let schema = self.settings.read(cx).current.clone();
 
         let mut rebuild = false;
-        if let Some(ref engine) = self.audio_engine {
+        if let Some(ref engine) = self.audio_bridge.engine {
             let config = engine.config();
             let desired_backend = match schema.hardware.audio.driver_type.as_str() {
                 "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
@@ -1550,7 +1532,7 @@ impl StudioLayout {
             eprintln!("[audio] settings changed, rebuilding audio engine stream...");
 
             // Stop and release active engine
-            if let Some(mut engine) = self.audio_engine.take() {
+            if let Some(mut engine) = self.audio_bridge.engine.take() {
                 let _ = engine.stop();
             }
 
@@ -1614,19 +1596,19 @@ impl StudioLayout {
                                 );
                             });
 
-                            self.audio_engine = Some(engine);
-                            self.audio_running = true;
-                            self.audio_last_error = None;
+                            self.audio_bridge.engine = Some(engine);
+                            self.audio_bridge.running = true;
+                            self.audio_bridge.last_error = None;
                         }
                         Err(error) => {
                             eprintln!("[audio] settings sync: warm-up failed: {error}");
-                            self.audio_last_error = Some(error.to_string());
+                            self.audio_bridge.last_error = Some(error.to_string());
                         }
                     }
                 }
                 Err(error) => {
                     eprintln!("[audio] settings sync: failed to initialize engine: {error}");
-                    self.audio_last_error = Some(error.to_string());
+                    self.audio_bridge.last_error = Some(error.to_string());
                 }
             }
         }

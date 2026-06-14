@@ -173,7 +173,7 @@ impl StudioLayout {
         project_lifecycle_log!("error: {title}: {message}");
         self.lifecycle_guard.pending_failed_open_path = failed_path.clone();
         let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
-            self.cached_studio_window_bounds,
+            self.window_hooks.cached_bounds,
             self.studio_window_bounds(cx),
             cx,
         );
@@ -512,11 +512,11 @@ impl StudioLayout {
             self.schedule_audio_project_sync(cx, true, "close_project");
         }
 
-        if let Some(request_welcome) = self.on_request_welcome.clone() {
+        if let Some(request_welcome) = self.window_hooks.on_request_welcome.clone() {
             request_welcome(cx);
         }
 
-        if let Some(handle) = self.self_window.take() {
+        if let Some(handle) = self.window_hooks.self_window.take() {
             cx.spawn(async move |_this, cx| {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(0))

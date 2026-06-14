@@ -12,7 +12,6 @@ use crate::components;
 use crate::components::add_track_dialog::{AddTrackKind, AddTrackWindow};
 use crate::components::edit::ClipSnapshot;
 use crate::components::file_browser::FileBrowserState;
-use crate::components::midi_editor_window::MidiEditorWindow;
 use crate::components::plugin_manager::PluginManagerWindow;
 use crate::components::plugin_picker::{
     compute_filter_result, ensure_default_highlight, plugin_picker_overlay,
@@ -304,9 +303,10 @@ pub struct StudioLayout {
     clip_editor_panel: Entity<components::ClipEditorPanel>,
     /// Second piano-roll instance for the floating MIDI editor (same timeline).
     piano_roll_floating: Entity<components::piano_roll::PianoRoll>,
-    /// Global floating MIDI editor window (one instance; switches clip on open).
-    midi_editor_window: Option<WindowHandle<MidiEditorWindow>>,
-    pending_midi_editor_open: Option<Bounds<gpui::Pixels>>,
+    /// Floating MIDI editor window (one instance; switches clip on open) + the
+    /// owner bounds for a deferred open. Grouped into
+    /// [`window_ops::MidiEditorWindowState`] (decomposition slice).
+    midi_editor: window_ops::MidiEditorWindowState,
     file_browser: FileBrowserState,
     /// Stable scroll handle for the browser tree. Lives on the layout
     /// (not in `FileBrowserState`) so the state stays free of gpui types
@@ -428,18 +428,10 @@ pub struct StudioLayout {
     project_folder: Option<PathBuf>,
     /// Persistent recent-projects list backed by `<AppData>/Futureboard Studio/recent.json`.
     recent_projects: RecentProjectsStore,
-    /// Handle to this workspace's own window. Set by the app layer right after
-    /// the window opens so `close_project` can close it when returning to
-    /// Welcome. `None` until wired (e.g. in tests / headless contexts).
-    self_window: Option<WindowHandle<StudioLayout>>,
-    /// Last known main workspace bounds. Updated during render so code running
-    /// inside a `StudioLayout` update can position child windows without
-    /// re-entering the root `WindowHandle<StudioLayout>`.
-    cached_studio_window_bounds: Option<Bounds<gpui::Pixels>>,
-    /// App-level hook that re-opens the Welcome window. Invoked by
-    /// `do_close_project`. The app layer owns Welcome window construction, so
-    /// the studio crate stays decoupled from native window options.
-    on_request_welcome: Option<Arc<dyn Fn(&mut gpui::App) + 'static>>,
+    /// Studio-window / app-integration hooks (own window handle, last known
+    /// window bounds, app-level re-open-Welcome hook). Grouped into
+    /// [`window_ops::StudioWindowHooks`] (decomposition slice).
+    window_hooks: window_ops::StudioWindowHooks,
     /// Pending project-lifecycle dialog state (unsaved-changes guard + parked
     /// close/new/open action + last failed open path). Grouped into
     /// [`close_ops::LifecycleGuardState`] (decomposition slice).
@@ -675,8 +667,7 @@ impl StudioLayout {
             audio_editor,
             clip_editor_panel,
             piano_roll_floating,
-            midi_editor_window: None,
-            pending_midi_editor_open: None,
+            midi_editor: window_ops::MidiEditorWindowState::default(),
             file_browser: FileBrowserState::default(),
             browser_scroll: UniformListScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
@@ -753,9 +744,7 @@ impl StudioLayout {
             project_path: None,
             project_folder: None,
             recent_projects: RecentProjectsStore::load(),
-            self_window: None,
-            cached_studio_window_bounds: None,
-            on_request_welcome: None,
+            window_hooks: window_ops::StudioWindowHooks::default(),
             lifecycle_guard: close_ops::LifecycleGuardState::default(),
             active_keymap: crate::keymap::Keymap::bundled_default(),
             project_state: crate::app_state::ProjectState::NoProject,
@@ -863,7 +852,7 @@ impl StudioLayout {
     /// Wire this layout to its own window handle so `close_project` can close
     /// the workspace window when returning to Welcome.
     pub fn set_self_window(&mut self, handle: WindowHandle<StudioLayout>) {
-        self.self_window = Some(handle);
+        self.window_hooks.self_window = Some(handle);
     }
 
     /// Wire the app-level "return to Welcome" hook used by `close_project`.
@@ -871,7 +860,7 @@ impl StudioLayout {
         &mut self,
         callback: Arc<dyn Fn(&mut gpui::App) + 'static>,
     ) {
-        self.on_request_welcome = Some(callback);
+        self.window_hooks.on_request_welcome = Some(callback);
     }
 }
 
@@ -944,7 +933,7 @@ impl StudioLayout {
 
     /// Main workspace window bounds — preferred owner for dialogs on Windows.
     pub(super) fn studio_window_bounds(&self, _cx: &mut gpui::App) -> Option<Bounds<gpui::Pixels>> {
-        self.cached_studio_window_bounds
+        self.window_hooks.cached_bounds
             .filter(|bounds| crate::window_position::is_valid_owner_bounds(*bounds))
     }
 
@@ -1497,7 +1486,7 @@ impl StudioLayout {
     }
 
     fn dispatch_midi_editor_menu_command(&mut self, command_id: &str, cx: &mut Context<Self>) {
-        let roll = if self.midi_editor_window.is_some() {
+        let roll = if self.midi_editor.window.is_some() {
             self.piano_roll_floating.clone()
         } else {
             self.piano_roll.clone()

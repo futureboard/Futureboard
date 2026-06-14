@@ -17,6 +17,33 @@ use sphere_plugin_host::{PluginFormat as RegistryPluginFormat, PluginKind};
 
 use super::helpers::{cleaned_track_name, numbered_name_stem};
 use super::{ContextTarget, OpenPopover, StudioLayout};
+
+/// Studio-window / app-integration hooks — this workspace's own window handle,
+/// the last known window bounds (used to position child windows without
+/// re-entering the root `WindowHandle`), and the app-level "re-open Welcome"
+/// hook. `StudioLayout` decomposition slice (all Option → derived `Default`).
+#[derive(Default)]
+pub(crate) struct StudioWindowHooks {
+    /// Handle to this workspace's own window; `None` until wired by the app layer.
+    pub self_window: Option<gpui::WindowHandle<StudioLayout>>,
+    /// Last known main workspace bounds, updated during render.
+    pub cached_bounds: Option<Bounds<gpui::Pixels>>,
+    /// App-level hook that re-opens the Welcome window (invoked by close_project).
+    pub on_request_welcome: Option<Arc<dyn Fn(&mut gpui::App) + 'static>>,
+}
+
+/// Floating MIDI editor window state — the single editor window handle (switches
+/// clip on open) and the owner bounds parked for a deferred open. `StudioLayout`
+/// decomposition slice (both Option → derived `Default`).
+#[derive(Default)]
+pub(crate) struct MidiEditorWindowState {
+    /// Global floating MIDI editor window; `None` when closed.
+    pub window:
+        Option<gpui::WindowHandle<crate::components::midi_editor_window::MidiEditorWindow>>,
+    /// Owner bounds for a deferred editor open.
+    pub pending_open: Option<Bounds<gpui::Pixels>>,
+}
+
 impl StudioLayout {
     pub(super) fn open_add_track_external_window(
         &mut self,
@@ -532,13 +559,13 @@ impl StudioLayout {
         }
         let owner_bounds =
             resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
-        self.pending_midi_editor_open = owner_bounds;
+        self.midi_editor.pending_open = owner_bounds;
         self.schedule_pending_midi_editor_open(cx);
         cx.notify();
     }
 
     pub(super) fn schedule_pending_midi_editor_open(&mut self, cx: &mut Context<Self>) {
-        if self.pending_midi_editor_open.is_none() {
+        if self.midi_editor.pending_open.is_none() {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -552,7 +579,7 @@ impl StudioLayout {
 
     pub(super) fn flush_pending_midi_editor_open(&mut self, cx: &mut Context<Self>) {
         let owner_bounds = resolve_owner_bounds_with_preferred(
-            self.pending_midi_editor_open.take(),
+            self.midi_editor.pending_open.take(),
             self.studio_window_bounds(cx),
             cx,
         );
@@ -578,7 +605,7 @@ impl StudioLayout {
         }
 
         self.prune_midi_editor_window(cx);
-        if let Some(handle) = self.midi_editor_window.clone() {
+        if let Some(handle) = self.midi_editor.window.clone() {
             if handle
                 .update(cx, |_w, window, _cx| window.activate_window())
                 .is_ok()
@@ -595,7 +622,7 @@ impl StudioLayout {
                 cx.notify();
                 return;
             }
-            self.midi_editor_window = None;
+            self.midi_editor.window = None;
         }
 
         let clip_label = self
@@ -638,7 +665,7 @@ impl StudioLayout {
             cx,
         ) {
             Ok(handle) => {
-                self.midi_editor_window = Some(handle);
+                self.midi_editor.window = Some(handle);
                 cx.notify();
             }
             Err(err) => eprintln!("[midi-editor] failed to open window: {err}"),
@@ -649,7 +676,7 @@ impl StudioLayout {
         let _ = self.piano_roll_floating.update(cx, |roll, cx| {
             roll.preview_all_notes_off("editor_close", cx);
         });
-        if let Some(handle) = self.midi_editor_window.take() {
+        if let Some(handle) = self.midi_editor.window.take() {
             let _ = handle.update(cx, |_w, window, _cx| window.remove_window());
         }
         cx.notify();
@@ -659,16 +686,16 @@ impl StudioLayout {
         let _ = self.piano_roll_floating.update(cx, |roll, cx| {
             roll.preview_all_notes_off("editor_close", cx);
         });
-        self.midi_editor_window = None;
+        self.midi_editor.window = None;
         cx.notify();
     }
 
     pub(super) fn prune_midi_editor_window(&mut self, cx: &mut Context<Self>) {
-        let Some(handle) = self.midi_editor_window.clone() else {
+        let Some(handle) = self.midi_editor.window.clone() else {
             return;
         };
         if handle.update(cx, |_w, _window, _cx| ()).is_err() {
-            self.midi_editor_window = None;
+            self.midi_editor.window = None;
         }
     }
 }

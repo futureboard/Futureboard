@@ -17,14 +17,14 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         // Focus an already-open export window instead of spawning a second one.
-        if let Some(handle) = self.export_arrangement_window.clone() {
+        if let Some(handle) = self.external_windows.export_arrangement.clone() {
             if handle
                 .update(cx, |_w, window, _cx| window.activate_window())
                 .is_ok()
             {
                 return;
             }
-            self.export_arrangement_window = None;
+            self.external_windows.export_arrangement = None;
         }
 
         // Dismiss menus/popovers like the other external-window commands.
@@ -98,7 +98,7 @@ impl StudioLayout {
             default_output,
             cx,
         ) {
-            Ok(handle) => self.export_arrangement_window = Some(handle),
+            Ok(handle) => self.external_windows.export_arrangement = Some(handle),
             Err(err) => eprintln!("[export] failed to open export window: {err}"),
         }
     }

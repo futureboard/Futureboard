@@ -44,6 +44,27 @@ pub(crate) struct MidiEditorWindowState {
     pub pending_open: Option<Bounds<gpui::Pixels>>,
 }
 
+/// Detached / external window handles owned by the studio (settings, mixer,
+/// add-track, plugin-manager, export-arrangement) plus the bounds parked for a
+/// deferred external-mixer open. `StudioLayout` decomposition slice (all Option
+/// → derived `Default`).
+#[derive(Default)]
+pub(crate) struct ExternalWindows {
+    /// External Settings window; `None` when closed.
+    pub settings: Option<gpui::WindowHandle<crate::components::settings_dialog::SettingsWindow>>,
+    /// Detached mixer window (multi-monitor layouts).
+    pub mixer: Option<gpui::WindowHandle<crate::components::MixerWindow>>,
+    /// Bounds for an external-mixer open deferred to after the current update.
+    pub pending_mixer_open: Option<Bounds<gpui::Pixels>>,
+    /// Add Track dialog window.
+    pub add_track: Option<gpui::WindowHandle<crate::components::add_track_dialog::AddTrackWindow>>,
+    /// Plugin Manager window.
+    pub plugin_manager:
+        Option<gpui::WindowHandle<crate::components::plugin_manager::PluginManagerWindow>>,
+    /// Export Arrangement window.
+    pub export_arrangement: Option<gpui::WindowHandle<crate::export::ExportArrangementWindow>>,
+}
+
 impl StudioLayout {
     pub(super) fn open_add_track_external_window(
         &mut self,
@@ -91,7 +112,7 @@ impl StudioLayout {
             .recording
             .default_monitor_mode
             .add_track_value();
-        if let Some(handle) = self.add_track_window.clone() {
+        if let Some(handle) = self.external_windows.add_track.clone() {
             if handle
                 .update(cx, |win, window, _cx| {
                     win.set_context(kind, track_count, has_master_track, default_monitor_mode);
@@ -101,7 +122,7 @@ impl StudioLayout {
             {
                 return;
             }
-            self.add_track_window = None;
+            self.external_windows.add_track = None;
         }
 
         self.menu_bar.open_menu_id = None;
@@ -254,7 +275,7 @@ impl StudioLayout {
             on_confirm_request,
             cx,
         ) {
-            Ok(handle) => self.add_track_window = Some(handle),
+            Ok(handle) => self.external_windows.add_track = Some(handle),
             Err(err) => eprintln!("[add-track] failed to open window: {err}"),
         }
     }
@@ -265,14 +286,14 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         // If window is already open, activate it
-        if let Some(handle) = self.settings_window.clone() {
+        if let Some(handle) = self.external_windows.settings.clone() {
             if handle
                 .update(cx, |_settings, window, _cx| window.activate_window())
                 .is_ok()
             {
                 return;
             }
-            self.settings_window = None;
+            self.external_windows.settings = None;
         }
 
         self.menu_bar.open_menu_id = None;
@@ -410,13 +431,13 @@ impl StudioLayout {
             on_update,
             cx,
         ) {
-            Ok(handle) => self.settings_window = Some(handle),
+            Ok(handle) => self.external_windows.settings = Some(handle),
             Err(err) => eprintln!("[settings] failed to open settings window: {err}"),
         }
     }
 
     pub(super) fn close_settings_dialog(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.settings_window.take() {
+        if let Some(handle) = self.external_windows.settings.take() {
             let _ = handle.update(cx, |_settings, window, _cx| window.remove_window());
         }
         self.text_context_menu = None;
@@ -431,13 +452,13 @@ impl StudioLayout {
         external_mixer_debug("external mixer open requested");
         let owner_bounds =
             resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
-        self.pending_mixer_external_open = owner_bounds;
+        self.external_windows.pending_mixer_open = owner_bounds;
         self.schedule_pending_mixer_external_open(cx);
         cx.notify();
     }
 
     pub(super) fn schedule_pending_mixer_external_open(&mut self, cx: &mut Context<Self>) {
-        if self.pending_mixer_external_open.is_none() {
+        if self.external_windows.pending_mixer_open.is_none() {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -453,7 +474,7 @@ impl StudioLayout {
 
     pub(super) fn flush_pending_mixer_external_open(&mut self, cx: &mut Context<Self>) {
         let owner_bounds = resolve_owner_bounds_with_preferred(
-            self.pending_mixer_external_open.take(),
+            self.external_windows.pending_mixer_open.take(),
             self.studio_window_bounds(cx),
             cx,
         );
@@ -462,7 +483,7 @@ impl StudioLayout {
         };
 
         self.prune_mixer_window(cx);
-        if let Some(handle) = self.mixer_window.clone() {
+        if let Some(handle) = self.external_windows.mixer.clone() {
             if handle
                 .update(cx, |_mixer, window, _cx| window.activate_window())
                 .is_ok()
@@ -472,7 +493,7 @@ impl StudioLayout {
                 cx.notify();
                 return;
             }
-            self.mixer_window = None;
+            self.external_windows.mixer = None;
         }
 
         self.menu_bar.open_menu_id = None;
@@ -517,7 +538,7 @@ impl StudioLayout {
             cx,
         ) {
             Ok(handle) => {
-                self.mixer_window = Some(handle);
+                self.external_windows.mixer = Some(handle);
                 cx.notify();
             }
             Err(err) => {
@@ -529,23 +550,23 @@ impl StudioLayout {
     }
 
     pub(crate) fn close_mixer_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.mixer_window.take() {
+        if let Some(handle) = self.external_windows.mixer.take() {
             let _ = handle.update(cx, |_mixer, window, _cx| window.remove_window());
         }
         cx.notify();
     }
 
     pub(super) fn note_mixer_window_closed(&mut self, cx: &mut Context<Self>) {
-        self.mixer_window = None;
+        self.external_windows.mixer = None;
         cx.notify();
     }
 
     pub(super) fn prune_mixer_window(&mut self, cx: &mut Context<Self>) {
-        let Some(handle) = self.mixer_window.clone() else {
+        let Some(handle) = self.external_windows.mixer.clone() else {
             return;
         };
         if handle.update(cx, |_mixer, _window, _cx| ()).is_err() {
-            self.mixer_window = None;
+            self.external_windows.mixer = None;
         }
     }
 

@@ -317,7 +317,7 @@ impl StudioLayout {
                     return (false, None);
                 }
                 let changed = this.poll_native_audio(cx);
-                (changed, this.mixer_window.clone())
+                (changed, this.external_windows.mixer.clone())
             }) else {
                 continue;
             };

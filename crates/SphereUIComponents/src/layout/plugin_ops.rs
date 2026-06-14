@@ -2257,14 +2257,14 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(handle) = self.plugin_manager_window.clone() {
+        if let Some(handle) = self.external_windows.plugin_manager.clone() {
             if handle
                 .update(cx, |_pm, window, _cx| window.activate_window())
                 .is_ok()
             {
                 return;
             }
-            self.plugin_manager_window = None;
+            self.external_windows.plugin_manager = None;
         }
 
         self.menu_bar.open_menu_id = None;
@@ -2279,7 +2279,7 @@ impl StudioLayout {
         );
 
         match open_plugin_manager_window(owner_bounds, cx) {
-            Ok(handle) => self.plugin_manager_window = Some(handle),
+            Ok(handle) => self.external_windows.plugin_manager = Some(handle),
             Err(err) => eprintln!("[plugin-manager] failed to open window: {err}"),
         }
     }

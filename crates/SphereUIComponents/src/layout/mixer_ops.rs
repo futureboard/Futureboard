@@ -47,7 +47,7 @@ impl StudioLayout {
     }
 
     pub(crate) fn push_mixer_snapshot_to_window(&mut self, cx: &mut Context<Self>) {
-        let Some(handle) = self.mixer_window.clone() else {
+        let Some(handle) = self.external_windows.mixer.clone() else {
             return;
         };
         let snapshot = self.build_mixer_snapshot(cx);
@@ -145,11 +145,11 @@ impl StudioLayout {
     }
 
     pub(crate) fn mixer_window_handle(&self) -> Option<WindowHandle<MixerWindow>> {
-        self.mixer_window.clone()
+        self.external_windows.mixer.clone()
     }
 
     pub(super) fn mixer_panel_chrome_visible(&self) -> bool {
-        self.panels.mixer_docked || self.mixer_window.is_some()
+        self.panels.mixer_docked || self.external_windows.mixer.is_some()
     }
 
     /// Build the callback bundle used by the mixer. Every mutation lands in

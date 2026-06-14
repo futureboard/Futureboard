@@ -9,17 +9,15 @@ pub use close_ops::PendingCloseAction;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use crate::components;
-use crate::components::add_track_dialog::{AddTrackKind, AddTrackWindow};
+use crate::components::add_track_dialog::AddTrackKind;
 use crate::components::edit::ClipSnapshot;
 use crate::components::file_browser::FileBrowserState;
-use crate::components::plugin_manager::PluginManagerWindow;
 use crate::components::plugin_picker::{
     compute_filter_result, ensure_default_highlight, plugin_picker_overlay,
     CatalogStatus as PluginCatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
     PluginPickerState, PluginSearchIndex,
 };
 use crate::components::project_switcher::ProjectSwitcherState;
-use crate::components::settings_dialog::SettingsWindow;
 use crate::components::text_input::{
     text_input_context_entries, TextInputCallbacks, TextInputState,
 };
@@ -334,9 +332,10 @@ pub struct StudioLayout {
     plugin_search_index: Option<PluginSearchIndex>,
     plugin_picker_au_error: Option<String>,
     plugin_picker_window: Option<WindowHandle<plugin_picker_window::InsertPickerWindow>>,
-    add_track_window: Option<WindowHandle<AddTrackWindow>>,
-    plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
-    export_arrangement_window: Option<WindowHandle<crate::export::ExportArrangementWindow>>,
+    /// Detached / external window handles (settings, mixer, add-track,
+    /// plugin-manager, export) + deferred external-mixer open bounds. Grouped
+    /// into [`window_ops::ExternalWindows`] (decomposition slice).
+    external_windows: window_ops::ExternalWindows,
     /// Plugin catalog / registry-scan state backing the insert picker (cached
     /// scan result, preset-cache presence, catalog load phase). Grouped into
     /// [`plugin_ops::PluginCatalogState`] (decomposition slice).
@@ -346,12 +345,6 @@ pub struct StudioLayout {
     /// opens deferred while an insert runtime was loading. Grouped into
     /// [`plugin_ops::PluginEditorWindows`] (decomposition slice).
     plugin_editors: plugin_ops::PluginEditorWindows,
-    /// External settings window handle; None when closed.
-    settings_window: Option<WindowHandle<SettingsWindow>>,
-    /// Detached mixer window for multi-monitor layouts.
-    mixer_window: Option<WindowHandle<MixerWindow>>,
-    /// Open external mixer after the current studio update completes.
-    pending_mixer_external_open: Option<Bounds<gpui::Pixels>>,
     panels: StudioPanelVisibility,
     settings: gpui::Entity<SettingsModel>,
 
@@ -698,14 +691,9 @@ impl StudioLayout {
             plugin_search_index: None,
             plugin_picker_au_error: load_au_cache_state().last_error,
             plugin_picker_window: None,
-            add_track_window: None,
-            plugin_manager_window: None,
-            export_arrangement_window: None,
+            external_windows: window_ops::ExternalWindows::default(),
             plugin_catalog: plugin_ops::PluginCatalogState::default(),
             plugin_editors: plugin_ops::PluginEditorWindows::default(),
-            settings_window: None,
-            mixer_window: None,
-            pending_mixer_external_open: None,
             panels: StudioPanelVisibility::default(),
             settings,
 
@@ -1450,7 +1438,7 @@ impl StudioLayout {
     }
 
     pub(crate) fn toggle_mixer_panel(&mut self, cx: &mut Context<Self>) {
-        if self.mixer_window.is_some() {
+        if self.external_windows.mixer.is_some() {
             self.close_mixer_window(cx);
             self.panels.mixer_docked = true;
         } else {

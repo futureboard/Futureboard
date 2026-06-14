@@ -12,6 +12,104 @@ use gpui::{
 use crate::components::context_menu::ContextMenuEntry;
 use crate::theme::Colors;
 
+/// Generate a window/view's [`gpui::EntityInputHandler`] by routing every
+/// platform IME call to one owned [`TextInputState`] field. This is the single
+/// place the 8-method delegation lives, so any text-hosting window opts into
+/// systemwide IME (CJK/Thai composition + caret-anchored candidate window) by
+/// naming its input field — no hand-written, drift-prone per-window impl. The
+/// view must own `field: TextInputState` and pass `cx.entity()` as the
+/// `ime_target` to [`text_field_with_callbacks_and_ime`]. Mirrors the proven
+/// AddTrack bridge. Raw `handle_key_with_clipboard` may coexist: GPUI suppresses
+/// key dispatch for keystrokes the platform IME consumes, so text never doubles.
+///
+/// ```ignore
+/// crate::impl_single_input_window_ime!(PluginManagerWindow, search_input);
+/// ```
+#[macro_export]
+macro_rules! impl_single_input_window_ime {
+    ($view:ty, $field:ident) => {
+        impl ::gpui::EntityInputHandler for $view {
+            fn text_for_range(
+                &mut self,
+                range: ::std::ops::Range<usize>,
+                actual_range: &mut ::std::option::Option<::std::ops::Range<usize>>,
+                _window: &mut ::gpui::Window,
+                _cx: &mut ::gpui::Context<Self>,
+            ) -> ::std::option::Option<::std::string::String> {
+                self.$field.text_for_utf16_range(range, actual_range)
+            }
+
+            fn selected_text_range(
+                &mut self,
+                ignore_disabled_input: bool,
+                _window: &mut ::gpui::Window,
+                _cx: &mut ::gpui::Context<Self>,
+            ) -> ::std::option::Option<::gpui::UTF16Selection> {
+                self.$field.selected_text_range_utf16(ignore_disabled_input)
+            }
+
+            fn marked_text_range(
+                &self,
+                _window: &mut ::gpui::Window,
+                _cx: &mut ::gpui::Context<Self>,
+            ) -> ::std::option::Option<::std::ops::Range<usize>> {
+                self.$field.marked_text_range_utf16()
+            }
+
+            fn unmark_text(&mut self, _window: &mut ::gpui::Window, cx: &mut ::gpui::Context<Self>) {
+                self.$field.unmark_text();
+                cx.notify();
+            }
+
+            fn replace_text_in_range(
+                &mut self,
+                range: ::std::option::Option<::std::ops::Range<usize>>,
+                text: &str,
+                _window: &mut ::gpui::Window,
+                cx: &mut ::gpui::Context<Self>,
+            ) {
+                self.$field.replace_text_in_utf16_range(range, text);
+                cx.notify();
+            }
+
+            fn replace_and_mark_text_in_range(
+                &mut self,
+                range: ::std::option::Option<::std::ops::Range<usize>>,
+                new_text: &str,
+                new_selected_range: ::std::option::Option<::std::ops::Range<usize>>,
+                _window: &mut ::gpui::Window,
+                cx: &mut ::gpui::Context<Self>,
+            ) {
+                self.$field.replace_and_mark_text_in_utf16_range(
+                    range,
+                    new_text,
+                    new_selected_range,
+                );
+                cx.notify();
+            }
+
+            fn bounds_for_range(
+                &mut self,
+                range_utf16: ::std::ops::Range<usize>,
+                bounds: ::gpui::Bounds<::gpui::Pixels>,
+                _window: &mut ::gpui::Window,
+                _cx: &mut ::gpui::Context<Self>,
+            ) -> ::std::option::Option<::gpui::Bounds<::gpui::Pixels>> {
+                self.$field.bounds_for_utf16_range(range_utf16, bounds)
+            }
+
+            fn character_index_for_point(
+                &mut self,
+                _point: ::gpui::Point<::gpui::Pixels>,
+                _window: &mut ::gpui::Window,
+                _cx: &mut ::gpui::Context<Self>,
+            ) -> ::std::option::Option<usize> {
+                None
+            }
+        }
+    };
+}
+
 pub const TEXT_INPUT_CUT: &str = "text-input:cut";
 pub const TEXT_INPUT_COPY: &str = "text-input:copy";
 pub const TEXT_INPUT_PASTE: &str = "text-input:paste";

@@ -1,5 +1,6 @@
 use gpui::{Context, Entity, Window, WindowHandle};
 
+use crate::components::edit::EditCommand;
 use crate::components::mixer_panel::{
     clamp_mixer_section_height_px, MixerCallbacks, MixerSplitAction, MixerSplitTarget,
     MIXER_INSERT_SECTION_DEFAULT_PX, MIXER_SEND_SECTION_DEFAULT_PX,
@@ -417,24 +418,50 @@ impl StudioLayout {
                 });
             })
         };
-        let on_move_insert: std::sync::Arc<
-            dyn Fn(&(String, String, bool), &mut Window, &mut gpui::App) + 'static,
+        // Drag-reorder commit (mirrors the Inspector's `reorder_insert_cb`). The
+        // drop handler supplies the dragged `plugin_instance_id` and the
+        // insertion gap; we snapshot the current id order, compute the new order,
+        // and apply it as a single `EditCommand::ReorderFxSlot` so one drag is one
+        // undo entry. The command only reorders existing slots (never recreates an
+        // instance), so bypass / preset / parameter / editor / automation state
+        // follow each instance. A forced project sync rebuilds the engine's chain
+        // order (DSP order == UI order); editor windows are keyed by instance id,
+        // so they stay attached.
+        let on_reorder_insert: std::sync::Arc<
+            dyn Fn(&(String, String, usize), &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = owner.clone();
             std::sync::Arc::new(
-                move |(track_id, insert_id, up): &(String, String, bool), _w, cx| {
+                move |(track_id, insert_id, insertion_index): &(String, String, usize), _w, cx| {
                     let track_id = track_id.clone();
                     let insert_id = insert_id.clone();
-                    let up = *up;
+                    let insertion_index = *insertion_index;
                     StudioLayout::defer_update(&this, cx, move |this, cx| {
-                        let moved = this.timeline.update(cx, |timeline, _cx| {
-                            timeline.state.move_insert(&track_id, &insert_id, up)
+                        let changed = this.timeline.update(cx, |timeline, cx| {
+                            let before = timeline.state.insert_order(&track_id);
+                            let after = timeline_state::TimelineState::reordered_insert_ids(
+                                &before,
+                                &insert_id,
+                                insertion_index,
+                            );
+                            if before == after {
+                                return false;
+                            }
+                            timeline.run_edit_command(
+                                EditCommand::ReorderFxSlot {
+                                    track_id: track_id.clone(),
+                                    before_order: before,
+                                    after_order: after,
+                                },
+                                cx,
+                            );
+                            true
                         });
-                        // Only commit + resync the engine when the order actually
-                        // changed (boundary clicks are a no-op, not a dirty edit).
-                        if moved {
+                        if changed {
                             this.mark_dirty();
                             this.engine_project_dirty = true;
+                            this.schedule_audio_project_sync(cx, true, "mixer_reorder_insert");
+                            this.push_mixer_snapshot_to_window(cx);
                             cx.notify();
                         }
                     });
@@ -508,7 +535,7 @@ impl StudioLayout {
             on_add_insert,
             on_remove_insert,
             on_toggle_insert_bypass,
-            on_move_insert,
+            on_reorder_insert,
             on_open_insert_editor,
             on_add_send,
             on_remove_send,

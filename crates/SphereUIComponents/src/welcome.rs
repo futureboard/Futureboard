@@ -12,7 +12,8 @@ use crate::assets;
 use crate::components::title_bar::{
     draggable_spacer, section_separator, window_control_button, CHROME_PAD_X, CHROME_TITLE_SIZE,
 };
-use crate::components::{text_field, TextInputAction, TextInputState};
+use crate::components::text_input::{text_field_with_callbacks_and_ime, TextInputCallbacks};
+use crate::components::{TextInputAction, TextInputState};
 use crate::embedded_assets::APP_LOGO_PATH;
 use crate::platform_chrome::PlatformChromePolicy;
 use crate::project::{ProjectCreateOptions, ProjectTemplate, RecentProject, RecentProjectsStore};
@@ -314,6 +315,11 @@ impl WelcomeWindow {
         .detach();
     }
 }
+
+// Route platform IME (CJK/Thai composition + candidate-window positioning) to
+// the project-name field. Coexists with handle_key_with_clipboard; GPUI
+// suppresses key dispatch for keystrokes the IME consumes.
+crate::impl_single_input_window_ime!(WelcomeWindow, project_name_input);
 
 impl Render for WelcomeWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -990,7 +996,12 @@ fn new_project_pane(
                 ),
         )
         .child(form_label("Project Name"))
-        .child(text_field(project_name_input, name_focused))
+        .child(text_field_with_callbacks_and_ime(
+            project_name_input,
+            name_focused,
+            TextInputCallbacks::default(),
+            target.clone(),
+        ))
         .child(form_label("Location"))
         .child(
             div()

@@ -1365,7 +1365,7 @@ impl StudioLayout {
     /// Open the compact tempo menu (anchored at screen `x`,`y`) from the
     /// transport BPM display. Reuses the shared context-menu overlay.
     pub(super) fn open_tempo_menu(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        self.open_popover = Some(OpenPopover::Context {
+        self.overlay.open_popover = Some(OpenPopover::Context {
             target: ContextTarget::Tempo,
             x,
             y,
@@ -1443,7 +1443,7 @@ impl StudioLayout {
     }
 
     pub(super) fn tempo_track_context_position(&self) -> Option<(f64, f64)> {
-        match &self.open_popover {
+        match &self.overlay.open_popover {
             Some(OpenPopover::Context {
                 target: ContextTarget::TempoTrack { beat, bpm, .. },
                 ..
@@ -1453,7 +1453,7 @@ impl StudioLayout {
     }
 
     pub(super) fn tempo_track_context_point_id(&self) -> Option<String> {
-        match &self.open_popover {
+        match &self.overlay.open_popover {
             Some(OpenPopover::Context {
                 target: ContextTarget::TempoTrack { point_id, .. },
                 ..
@@ -1703,7 +1703,7 @@ impl StudioLayout {
     }
 
     pub(super) fn open_time_signature_menu(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        self.open_popover = Some(OpenPopover::Context {
+        self.overlay.open_popover = Some(OpenPopover::Context {
             target: ContextTarget::TimeSignature,
             x,
             y,
@@ -1819,7 +1819,7 @@ impl StudioLayout {
     }
 
     pub(super) fn ts_track_context_position(&self) -> Option<f64> {
-        match &self.open_popover {
+        match &self.overlay.open_popover {
             Some(OpenPopover::Context {
                 target:
                     ContextTarget::TimeSignatureTrack { beat, .. }
@@ -1835,7 +1835,7 @@ impl StudioLayout {
     }
 
     pub(super) fn ts_track_context_point_id(&self) -> Option<String> {
-        match &self.open_popover {
+        match &self.overlay.open_popover {
             Some(OpenPopover::Context {
                 target: ContextTarget::TimeSignatureTrack { point_id, .. },
                 ..

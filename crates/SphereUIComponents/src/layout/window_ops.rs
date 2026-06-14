@@ -127,8 +127,8 @@ impl StudioLayout {
 
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
-        self.open_popover = None;
-        self.text_context_menu = None;
+        self.overlay.open_popover = None;
+        self.overlay.text_context_menu = None;
 
         let owner_bounds =
             resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
@@ -298,9 +298,9 @@ impl StudioLayout {
 
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
-        self.open_popover = None;
+        self.overlay.open_popover = None;
         self.project_switcher.is_open = false;
-        self.text_context_menu = None;
+        self.overlay.text_context_menu = None;
 
         let owner_bounds =
             resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
@@ -440,7 +440,7 @@ impl StudioLayout {
         if let Some(handle) = self.external_windows.settings.take() {
             let _ = handle.update(cx, |_settings, window, _cx| window.remove_window());
         }
-        self.text_context_menu = None;
+        self.overlay.text_context_menu = None;
         cx.notify();
     }
 
@@ -498,7 +498,7 @@ impl StudioLayout {
 
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
-        self.open_popover = None;
+        self.overlay.open_popover = None;
         self.panels.mixer_docked = false;
 
         let snapshot = self.build_mixer_snapshot(cx);
@@ -611,7 +611,7 @@ impl StudioLayout {
         if let Some(OpenPopover::Context {
             target: ContextTarget::Clip(clip_id),
             ..
-        }) = self.open_popover.as_ref()
+        }) = self.overlay.open_popover.as_ref()
         {
             let clip_id = clip_id.clone();
             if self

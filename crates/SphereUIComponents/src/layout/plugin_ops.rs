@@ -2269,8 +2269,8 @@ impl StudioLayout {
 
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
-        self.open_popover = None;
-        self.text_context_menu = None;
+        self.overlay.open_popover = None;
+        self.overlay.text_context_menu = None;
 
         let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
             owner_bounds,

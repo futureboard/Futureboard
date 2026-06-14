@@ -89,7 +89,7 @@ impl StudioLayout {
         match key {
             "escape" => {
                 self.command_palette.close();
-                self.text_context_menu = None;
+                self.overlay.text_context_menu = None;
                 self.focus_handle.focus(window, cx);
                 true
             }
@@ -168,7 +168,7 @@ impl StudioLayout {
             return true;
         }
         let key = event.keystroke.key.as_str();
-        if self.text_context_menu.take().is_some() && key == "escape" {
+        if self.overlay.text_context_menu.take().is_some() && key == "escape" {
             cx.notify();
             return true;
         }
@@ -177,7 +177,7 @@ impl StudioLayout {
         match key {
             "escape" => {
                 self.project_switcher.is_open = false;
-                self.text_context_menu = None;
+                self.overlay.text_context_menu = None;
                 true
             }
             "arrow_down" | "arrowdown" | "down" => {
@@ -301,7 +301,7 @@ impl StudioLayout {
             return true;
         }
         let key = event.keystroke.key.as_str();
-        if self.text_context_menu.take().is_some() && key == "escape" {
+        if self.overlay.text_context_menu.take().is_some() && key == "escape" {
             cx.notify();
             return true;
         }
@@ -1258,7 +1258,7 @@ impl StudioLayout {
 
     /// Beat under the cursor for the active timeline-ruler context menu, if any.
     pub(super) fn ruler_context_beat(&self) -> Option<f64> {
-        match &self.open_popover {
+        match &self.overlay.open_popover {
             Some(OpenPopover::Context {
                 target: ContextTarget::TimelineRuler { beat },
                 ..

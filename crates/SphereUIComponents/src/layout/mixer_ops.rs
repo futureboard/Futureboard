@@ -355,7 +355,7 @@ impl StudioLayout {
                     this.menu_bar.open_menu_id = None;
                     this.menu_bar.submenu_path.clear();
                     this.project_switcher.is_open = false;
-                    this.open_popover = Some(OpenPopover::Context {
+                    this.overlay.open_popover = Some(OpenPopover::Context {
                         target: ContextTarget::Mixer(track_id),
                         x,
                         y,
@@ -495,7 +495,7 @@ impl StudioLayout {
                 let x = *x;
                 let y = *y;
                 StudioLayout::defer_update(&this, cx, move |this, cx| {
-                    this.open_popover = Some(OpenPopover::Context {
+                    this.overlay.open_popover = Some(OpenPopover::Context {
                         target: ContextTarget::SendPicker { track_id },
                         x,
                         y,

@@ -348,10 +348,10 @@ pub struct StudioLayout {
     panels: StudioPanelVisibility,
     settings: gpui::Entity<SettingsModel>,
 
-    text_context_menu: Option<TextContextMenu>,
-    open_popover: Option<OpenPopover>,
-    open_inspector_routing_combo: Option<crate::components::panel::InspectorRoutingCombo>,
-    inspector_routing_combo_anchor: Option<crate::overlay::OverlayAnchor>,
+    /// Transient overlay state (text context menu, open popover, inspector
+    /// routing combo + anchor). Grouped into [`studio_state::OverlayState`]
+    /// (decomposition slice).
+    overlay: studio_state::OverlayState,
     /// Audio-engine bridge / sync state (engine handle, stats, last error, dirty
     /// flags, background-sync handshake). Grouped into
     /// [`audio_transport::AudioBridgeState`] (decomposition slice).
@@ -688,10 +688,7 @@ impl StudioLayout {
             panels: StudioPanelVisibility::default(),
             settings,
 
-            text_context_menu: None,
-            open_popover: None,
-            open_inspector_routing_combo: None,
-            inspector_routing_combo_anchor: None,
+            overlay: studio_state::OverlayState::default(),
             audio_bridge: audio_transport::AudioBridgeState::default(),
             recording: recording_ops::RecordingSessionState::default(),
             engine_sync: audio_transport::EngineSyncState::default(),
@@ -927,7 +924,7 @@ impl StudioLayout {
                 let added = self.timeline.update(cx, |timeline, _cx| {
                     timeline.state.add_send_to_target(track_id, target_track_id)
                 });
-                self.open_popover = None;
+                self.overlay.open_popover = None;
                 if added.is_some() {
                     self.mark_dirty();
                     self.audio_bridge.project_dirty = true;
@@ -941,7 +938,7 @@ impl StudioLayout {
             let added = self.timeline.update(cx, |timeline, _cx| {
                 timeline.state.create_return_and_send(track_id)
             });
-            self.open_popover = None;
+            self.overlay.open_popover = None;
             if added.is_some() {
                 self.mark_dirty();
                 self.audio_bridge.project_dirty = true;
@@ -956,7 +953,7 @@ impl StudioLayout {
             "tools:command-palette" => {
                 self.command_palette.open();
                 self.command_palette_input.set_value("");
-                self.open_popover = None;
+                self.overlay.open_popover = None;
                 self.project_switcher.is_open = false;
                 self.plugin_picker.is_open = false;
                 cx.notify();
@@ -1087,7 +1084,7 @@ impl StudioLayout {
             }
 
             "browser:import" => {
-                let path = match &self.open_popover {
+                let path = match &self.overlay.open_popover {
                     Some(OpenPopover::Context {
                         target: ContextTarget::Browser(path),
                         ..
@@ -1134,7 +1131,7 @@ impl StudioLayout {
                 }
             }
             "browser:reveal" => {
-                let path = match &self.open_popover {
+                let path = match &self.overlay.open_popover {
                     Some(OpenPopover::Context {
                         target: ContextTarget::Browser(path),
                         ..
@@ -1161,7 +1158,7 @@ impl StudioLayout {
                 }
             }
             "browser:refresh" => {
-                let path = match &self.open_popover {
+                let path = match &self.overlay.open_popover {
                     Some(OpenPopover::Context {
                         target: ContextTarget::Browser(path),
                         ..
@@ -1180,7 +1177,7 @@ impl StudioLayout {
                 }
             }
             "browser:copy-path" => {
-                let path = match &self.open_popover {
+                let path = match &self.overlay.open_popover {
                     Some(OpenPopover::Context {
                         target: ContextTarget::Browser(path),
                         ..
@@ -1193,7 +1190,7 @@ impl StudioLayout {
                 }
             }
             "browser:open" => {
-                let path = match &self.open_popover {
+                let path = match &self.overlay.open_popover {
                     Some(OpenPopover::Context {
                         target: ContextTarget::Browser(path),
                         ..

@@ -30,8 +30,8 @@ impl StudioLayout {
         // Dismiss menus/popovers like the other external-window commands.
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
-        self.open_popover = None;
-        self.text_context_menu = None;
+        self.overlay.open_popover = None;
+        self.overlay.text_context_menu = None;
 
         // Capture a plain snapshot of project state under a short borrow — the
         // export job receives only this owned data, never a live entity.

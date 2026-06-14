@@ -407,7 +407,7 @@ impl StudioLayout {
         if self.bottom_panel_state.is_resizing {
             return "panel-resize";
         }
-        if self.open_popover.is_some() || self.menu_bar.open_menu_id.is_some() {
+        if self.overlay.open_popover.is_some() || self.menu_bar.open_menu_id.is_some() {
             return "menu";
         }
         "idle/interaction"

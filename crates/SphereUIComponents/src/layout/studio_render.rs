@@ -122,14 +122,14 @@ impl Render for StudioLayout {
 
         // Enumerate the selected input device's channels only while the audio-input
         // combo is open (avoids per-frame device enumeration).
-        let audio_input_device = if self.open_inspector_routing_combo
+        let audio_input_device = if self.overlay.inspector_routing_combo
             == Some(crate::components::panel::InspectorRoutingCombo::AudioInput)
         {
             self.selected_input_device_channels(cx)
         } else {
             None
         };
-        let audio_output_buses: Vec<(String, String)> = if self.open_inspector_routing_combo
+        let audio_output_buses: Vec<(String, String)> = if self.overlay.inspector_routing_combo
             == Some(crate::components::panel::InspectorRoutingCombo::AudioOutput)
         {
             tracks
@@ -140,7 +140,7 @@ impl Render for StudioLayout {
         } else {
             Vec::new()
         };
-        let audio_output_device = if self.open_inspector_routing_combo
+        let audio_output_device = if self.overlay.inspector_routing_combo
             == Some(crate::components::panel::InspectorRoutingCombo::AudioOutput)
         {
             self.selected_output_device_channels(cx)
@@ -149,8 +149,8 @@ impl Render for StudioLayout {
         };
         let inspector_routing_combo_overlay: Option<gpui::AnyElement> =
             if let (Some(combo), Some(anchor)) = (
-                self.open_inspector_routing_combo,
-                self.inspector_routing_combo_anchor,
+                self.overlay.inspector_routing_combo,
+                self.overlay.inspector_routing_combo_anchor,
             ) {
                 selected_track_id.as_deref().and_then(|tid| {
                     tracks.iter().find(|t| t.id == tid).map(|track| {
@@ -158,8 +158,8 @@ impl Render for StudioLayout {
                             let this = cx.entity().clone();
                             move |cx: &mut gpui::App| {
                                 let _ = this.update(cx, |layout, cx| {
-                                    layout.open_inspector_routing_combo = None;
-                                    layout.inspector_routing_combo_anchor = None;
+                                    layout.overlay.inspector_routing_combo = None;
+                                    layout.overlay.inspector_routing_combo_anchor = None;
                                     cx.notify();
                                 });
                             }
@@ -233,7 +233,7 @@ impl Render for StudioLayout {
                     this.menu_bar.open_menu_id = None;
                     this.menu_bar.submenu_path.clear();
                     this.project_switcher.is_open = false;
-                    this.text_context_menu = Some(TextContextMenu {
+                    this.overlay.text_context_menu = Some(TextContextMenu {
                         target: TextMenuTarget::BrowserSearch,
                         x,
                         y,
@@ -346,7 +346,7 @@ impl Render for StudioLayout {
                     this.menu_bar.open_menu_id = None;
                     this.menu_bar.submenu_path.clear();
                     this.project_switcher.is_open = false;
-                    this.open_popover = Some(OpenPopover::Context {
+                    this.overlay.open_popover = Some(OpenPopover::Context {
                         target: ContextTarget::Browser(path),
                         x,
                         y,
@@ -440,7 +440,7 @@ impl Render for StudioLayout {
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
                         this.project_switcher.is_open = false;
-                        this.open_popover = Some(OpenPopover::Context {
+                        this.overlay.open_popover = Some(OpenPopover::Context {
                             target: context_target,
                             x,
                             y,
@@ -490,7 +490,7 @@ impl Render for StudioLayout {
                         this.menu_bar.anchor = titlebar_label_anchor(anchor_x);
                     }
                     this.menu_bar.submenu_path.clear();
-                    this.open_popover = None;
+                    this.overlay.open_popover = None;
                     this.project_switcher.is_open = false;
                     cx.notify();
                 });
@@ -534,7 +534,7 @@ impl Render for StudioLayout {
                 let command = command.clone();
                 let _ = this.update(cx, |this, cx| {
                     this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
-                    this.open_popover = None;
+                    this.overlay.open_popover = None;
                     this.project_switcher.is_open = false;
                     cx.notify();
                 });
@@ -547,8 +547,8 @@ impl Render for StudioLayout {
                 let _ = this.update(cx, |this, cx| {
                     this.menu_bar.open_menu_id = None;
                     this.menu_bar.submenu_path.clear();
-                    this.open_popover = None;
-                    this.text_context_menu = None;
+                    this.overlay.open_popover = None;
+                    this.overlay.text_context_menu = None;
                     this.project_switcher.is_open = !this.project_switcher.is_open;
                     this.project_switcher.anchor = project_title_anchor(anchor_x);
                     if this.project_switcher.is_open {
@@ -610,10 +610,10 @@ impl Render for StudioLayout {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |_: &(), _w, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    this.open_popover = None;
+                    this.overlay.open_popover = None;
                     this.project_switcher.is_open = false;
                     this.command_palette.close();
-                    this.text_context_menu = None;
+                    this.overlay.text_context_menu = None;
                     cx.notify();
                 });
             })
@@ -636,7 +636,7 @@ impl Render for StudioLayout {
                     } else {
                         this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
                     }
-                    this.open_popover = None;
+                    this.overlay.open_popover = None;
                     this.project_switcher.is_open = false;
                     this.command_palette.close();
                     cx.notify();
@@ -699,7 +699,7 @@ impl Render for StudioLayout {
                         let x = *x;
                         let y = *y;
                         let _ = this.update(cx, |this, cx| {
-                            this.text_context_menu = Some(TextContextMenu {
+                            this.overlay.text_context_menu = Some(TextContextMenu {
                                 target: TextMenuTarget::ProjectSwitcherSearch,
                                 x,
                                 y,
@@ -724,7 +724,7 @@ impl Render for StudioLayout {
                 .into_any_element(),
             )
         } else {
-            match self.open_popover.clone() {
+            match self.overlay.open_popover.clone() {
                 Some(OpenPopover::Context { target, x, y }) => Some(
                     components::context_menu::context_menu_overlay(
                         self.context_entries(&target, cx),
@@ -742,7 +742,7 @@ impl Render for StudioLayout {
         };
         // Settings is now an external window — no overlay needed.
         let settings_overlay: Option<gpui::AnyElement> = None;
-        let text_context_overlay = self.text_context_menu.map(|menu| {
+        let text_context_overlay = self.overlay.text_context_menu.map(|menu| {
             let clipboard_has_text = cx
                 .read_from_clipboard()
                 .and_then(|item| item.text())
@@ -760,18 +760,18 @@ impl Render for StudioLayout {
                 Arc::new(move |command: &String, _window, cx| {
                     let command = command.clone();
                     let _ = command_target.update(cx, |this, cx| {
-                        if let Some(menu) = this.text_context_menu {
+                        if let Some(menu) = this.overlay.text_context_menu {
                             let input = this.text_input_mut(menu.target);
                             let _ = input.apply_context_command(&command, cx);
                             this.sync_text_input_target(menu.target);
                         }
-                        this.text_context_menu = None;
+                        this.overlay.text_context_menu = None;
                         cx.notify();
                     });
                 }),
                 Arc::new(move |_: &(), _window, cx| {
                     let _ = close_target.update(cx, |this, cx| {
-                        this.text_context_menu = None;
+                        this.overlay.text_context_menu = None;
                         cx.notify();
                     });
                 }),
@@ -790,7 +790,7 @@ impl Render for StudioLayout {
                         let x = *x;
                         let y = *y;
                         let _ = this.update(cx, |this, cx| {
-                            this.text_context_menu = Some(TextContextMenu {
+                            this.overlay.text_context_menu = Some(TextContextMenu {
                                 target: TextMenuTarget::PluginPickerSearch,
                                 x,
                                 y,
@@ -1096,8 +1096,8 @@ impl Render for StudioLayout {
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
                         this.command_palette.close();
-                        this.open_popover = None;
-                        this.text_context_menu = None;
+                        this.overlay.open_popover = None;
+                        this.overlay.text_context_menu = None;
                         this.project_switcher.is_open = false;
                         cx.notify();
                     });

@@ -42,6 +42,21 @@ pub(super) struct TextContextMenu {
     pub(super) y: f32,
 }
 
+/// Transient overlay state — the text-field context menu, the open popover, and
+/// the inspector routing combo (dropdown + its screen anchor). `StudioLayout`
+/// decomposition slice (all Option → derived `Default`).
+#[derive(Default)]
+pub(super) struct OverlayState {
+    /// Open text-field context menu (cut/copy/paste), if any.
+    pub(super) text_context_menu: Option<TextContextMenu>,
+    /// Open popover (context menu / dropdown), if any.
+    pub(super) open_popover: Option<OpenPopover>,
+    /// Open inspector routing-combo dropdown, if any.
+    pub(super) inspector_routing_combo: Option<crate::components::panel::InspectorRoutingCombo>,
+    /// Screen anchor for the open inspector routing combo.
+    pub(super) inspector_routing_combo_anchor: Option<crate::overlay::OverlayAnchor>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ContextTarget {
     TimelineEmpty,

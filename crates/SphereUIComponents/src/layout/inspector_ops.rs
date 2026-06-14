@@ -179,19 +179,19 @@ impl StudioLayout {
         let on_open_clip_external_midi_editor =
             self.open_clip_external_midi_editor_cb(owner.clone());
 
-        let open_routing_combo = self.open_inspector_routing_combo;
+        let open_routing_combo = self.overlay.inspector_routing_combo;
         let owner_routing_combo = owner.clone();
         let on_toggle_routing_combo: Arc<
             dyn Fn(InspectorRoutingCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static,
         > = Arc::new(
             move |combo: InspectorRoutingCombo, anchor: Option<OverlayAnchor>, _w, cx| {
                 StudioLayout::defer_update(&owner_routing_combo, cx, move |this, cx| {
-                    if this.open_inspector_routing_combo == Some(combo) {
-                        this.open_inspector_routing_combo = None;
-                        this.inspector_routing_combo_anchor = None;
+                    if this.overlay.inspector_routing_combo == Some(combo) {
+                        this.overlay.inspector_routing_combo = None;
+                        this.overlay.inspector_routing_combo_anchor = None;
                     } else {
-                        this.open_inspector_routing_combo = Some(combo);
-                        this.inspector_routing_combo_anchor = anchor;
+                        this.overlay.inspector_routing_combo = Some(combo);
+                        this.overlay.inspector_routing_combo_anchor = anchor;
                     }
                     cx.notify();
                 });

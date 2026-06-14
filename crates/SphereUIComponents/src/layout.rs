@@ -337,18 +337,10 @@ pub struct StudioLayout {
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
     export_arrangement_window: Option<WindowHandle<crate::export::ExportArrangementWindow>>,
-    /// Cached plugin registry scan result. `None` until the first
-    /// `+ Add Insert` click triggers a sync scan (or the Plugin Manager
-    /// dialog populates it). Phase 2a uses the first insert-capable
-    /// entry; Phase 2b adds a real picker overlay.
-    available_plugins: Option<Vec<sphere_plugin_host::RegistryPlugin>>,
-    /// `true` if the cached preset directory exists on disk. Drives the
-    /// "No plugin index found" message in the picker.
-    plugin_cache_present: bool,
-    /// Picker catalog state — drives the skeleton / error UI in the overlay.
-    /// `Loading` while the background SQLite read is in flight; `Ready` once
-    /// `available_plugins` has been populated.
-    plugin_catalog_status: PluginCatalogStatus,
+    /// Plugin catalog / registry-scan state backing the insert picker (cached
+    /// scan result, preset-cache presence, catalog load phase). Grouped into
+    /// [`plugin_ops::PluginCatalogState`] (decomposition slice).
+    plugin_catalog: plugin_ops::PluginCatalogState,
     /// Plugin-editor window handles — GPUI-hosted editor shells, native
     /// external-bridge editor sessions, the shared bridge runtime, and editor
     /// opens deferred while an insert runtime was loading. Grouped into
@@ -718,9 +710,7 @@ impl StudioLayout {
             add_track_window: None,
             plugin_manager_window: None,
             export_arrangement_window: None,
-            available_plugins: None,
-            plugin_cache_present: false,
-            plugin_catalog_status: PluginCatalogStatus::Loading,
+            plugin_catalog: plugin_ops::PluginCatalogState::default(),
             plugin_editors: plugin_ops::PluginEditorWindows::default(),
             settings_window: None,
             mixer_window: None,

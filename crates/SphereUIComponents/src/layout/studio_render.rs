@@ -879,9 +879,9 @@ impl Render for StudioLayout {
                     let this = cx.entity().clone();
                     move |_: &(), _w, cx| {
                         let _ = this.update(cx, |this, cx| {
-                            this.available_plugins = None;
+                            this.plugin_catalog.available = None;
                             this.plugin_search_index = None;
-                            this.plugin_catalog_status = PluginCatalogStatus::Loading;
+                            this.plugin_catalog.status = PluginCatalogStatus::Loading;
                             this.arm_catalog_load(cx);
                             cx.notify();
                         });
@@ -905,16 +905,16 @@ impl Render for StudioLayout {
                             // Drop the SQLite file outright; next picker open
                             // reports MissingDatabase, prompting Scan Now.
                             let _ = sphere_plugin_host::plugin_db::delete_database_file();
-                            this.available_plugins = None;
+                            this.plugin_catalog.available = None;
                             this.plugin_search_index = None;
-                            this.plugin_catalog_status = PluginCatalogStatus::Loading;
+                            this.plugin_catalog.status = PluginCatalogStatus::Loading;
                             this.arm_catalog_load(cx);
                             cx.notify();
                         });
                     }
                 }),
             };
-            let catalog_status = self.plugin_catalog_status.clone();
+            let catalog_status = self.plugin_catalog.status.clone();
             Some(
                 plugin_picker_overlay(
                     &self.plugin_picker,

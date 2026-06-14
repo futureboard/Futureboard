@@ -12,6 +12,28 @@ use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
 
 use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
 
+/// Plugin catalog / registry-scan state backing the insert picker — the cached
+/// scan result, whether the preset cache exists on disk, and the catalog load
+/// phase. `StudioLayout` decomposition slice (manual `Default`: status=Loading).
+pub(crate) struct PluginCatalogState {
+    /// Cached plugin registry scan result; `None` until the first scan.
+    pub available: Option<Vec<sphere_plugin_host::RegistryPlugin>>,
+    /// `true` if the cached preset directory exists on disk.
+    pub cache_present: bool,
+    /// Catalog load phase (Loading / Ready / …) driving the picker skeleton/error UI.
+    pub status: PluginCatalogStatus,
+}
+
+impl Default for PluginCatalogState {
+    fn default() -> Self {
+        Self {
+            available: None,
+            cache_present: false,
+            status: PluginCatalogStatus::Loading,
+        }
+    }
+}
+
 /// Plugin-editor window handles owned by the studio — the GPUI-hosted editor
 /// shells, the native external-bridge editor sessions, the shared bridge
 /// runtime, and editor opens deferred while an insert runtime was still loading.
@@ -1359,17 +1381,17 @@ impl StudioLayout {
     /// binaries. The picker's open path must stay UI-only.
     pub(super) fn arm_catalog_load(&mut self, cx: &mut Context<Self>) {
         // Already loaded and not stale → nothing to do.
-        if matches!(self.plugin_catalog_status, PluginCatalogStatus::Ready)
-            && self.available_plugins.is_some()
+        if matches!(self.plugin_catalog.status, PluginCatalogStatus::Ready)
+            && self.plugin_catalog.available.is_some()
         {
             return;
         }
-        if matches!(self.plugin_catalog_status, PluginCatalogStatus::Loading)
-            && self.available_plugins.is_none()
+        if matches!(self.plugin_catalog.status, PluginCatalogStatus::Loading)
+            && self.plugin_catalog.available.is_none()
         {
             // Spawn-in-progress (initial boot path also fires this).
         } else {
-            self.plugin_catalog_status = PluginCatalogStatus::Loading;
+            self.plugin_catalog.status = PluginCatalogStatus::Loading;
         }
 
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some()
@@ -1393,11 +1415,11 @@ impl StudioLayout {
                             .iter()
                             .map(|e| e.to_registry_plugin())
                             .collect();
-                        this.available_plugins = Some(plugins.clone());
+                        this.plugin_catalog.available = Some(plugins.clone());
                         this.plugin_search_index = Some(PluginSearchIndex::from_plugins(plugins));
                         this.plugin_picker_au_error = load_au_cache_state().last_error;
-                        this.plugin_cache_present = true;
-                        this.plugin_catalog_status = PluginCatalogStatus::Ready;
+                        this.plugin_catalog.cache_present = true;
+                        this.plugin_catalog.status = PluginCatalogStatus::Ready;
                         if debug {
                             eprintln!(
                                 "[plugin-db] loaded rows={count} sqlite_ms={sqlite_ms} path={} total_ms={}",
@@ -1407,9 +1429,9 @@ impl StudioLayout {
                         }
                     }
                     CatalogLoad::MissingDatabase { path } => {
-                        this.available_plugins = Some(Vec::new());
-                        this.plugin_cache_present = false;
-                        this.plugin_catalog_status = PluginCatalogStatus::MissingDatabase;
+                        this.plugin_catalog.available = Some(Vec::new());
+                        this.plugin_catalog.cache_present = false;
+                        this.plugin_catalog.status = PluginCatalogStatus::MissingDatabase;
                         if debug {
                             eprintln!(
                                 "[plugin-db] path={} exists=false",
@@ -1418,9 +1440,9 @@ impl StudioLayout {
                         }
                     }
                     CatalogLoad::Error { path, message } => {
-                        this.available_plugins = Some(Vec::new());
-                        this.plugin_cache_present = path.exists();
-                        this.plugin_catalog_status =
+                        this.plugin_catalog.available = Some(Vec::new());
+                        this.plugin_catalog.cache_present = path.exists();
+                        this.plugin_catalog.status =
                             PluginCatalogStatus::Error(message.clone());
                         if debug {
                             eprintln!(
@@ -1510,13 +1532,13 @@ impl StudioLayout {
         }
         // Kick off (or rejoin) the background SQLite load. Picker shell is
         // visible immediately; skeleton rows fill in until the catalog lands.
-        if self.available_plugins.is_none()
-            || !matches!(self.plugin_catalog_status, PluginCatalogStatus::Ready)
+        if self.plugin_catalog.available.is_none()
+            || !matches!(self.plugin_catalog.status, PluginCatalogStatus::Ready)
         {
             self.arm_catalog_load(cx);
         }
         if debug {
-            let state_label = match &self.plugin_catalog_status {
+            let state_label = match &self.plugin_catalog.status {
                 PluginCatalogStatus::Loading => "LoadingCatalog",
                 PluginCatalogStatus::Ready => "Ready",
                 PluginCatalogStatus::MissingDatabase => "MissingDatabase",
@@ -1554,7 +1576,7 @@ impl StudioLayout {
         }
 
         if plugin_id != STUB_PLUGIN_ID {
-            if let Some(plugins) = self.available_plugins.as_ref() {
+            if let Some(plugins) = self.plugin_catalog.available.as_ref() {
                 if let Some(reg) = plugins.iter().find(|p| p.id == plugin_id) {
                     if validate_insert(reg, &self.plugin_picker.insert_target)
                         != crate::components::plugin_picker::InsertValidation::Ok
@@ -1569,7 +1591,7 @@ impl StudioLayout {
         let descriptor = if plugin_id == STUB_PLUGIN_ID {
             None
         } else {
-            self.available_plugins
+            self.plugin_catalog.available
                 .as_ref()
                 .and_then(|plugins| plugins.iter().find(|p| p.id == plugin_id))
                 .map(|reg| {

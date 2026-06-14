@@ -36,7 +36,9 @@ use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
 use crate::latency_graph::apply_pdc_delay_block;
 use crate::recording::{self, RecordingSession};
-use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
+use crate::runtime::{
+    ClipDspProcessor, RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack,
+};
 use crate::tempo_map::{TempoMap, TempoPoint};
 use crate::transport::{self, RuntimeTransportSnapshot};
 use crate::types::{
@@ -2578,6 +2580,7 @@ pub fn render_project_sample(
 
         let clip_offset_seconds = clip.offset_seconds;
         let clip_speed_ratio = clip.speed_ratio;
+        let clip_reverse = clip.reverse;
         let clip_gain = clip.gain;
         let clip_fade_in = clip.fade_in_samples;
         let clip_fade_out = clip.fade_out_samples;
@@ -2597,10 +2600,35 @@ pub fn render_project_sample(
             continue;
         }
 
-        let source_pos_seconds = clip_offset_seconds
-            + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip_speed_ratio as f64;
+        let source_pos_seconds = clip_source_pos_seconds(
+            clip_offset_seconds,
+            rel,
+            clip_duration_samples,
+            runtime.sample_rate,
+            if matches!(clip.processor, ClipDspProcessor::PhaseVocoderBasic) {
+                1.0 / clip.effective_time_ratio.max(0.01)
+            } else {
+                clip_speed_ratio
+            },
+            clip_reverse,
+        );
         let source_pos = source_pos_seconds * source.sample_rate() as f64;
-        let (mut l, mut r) = sample_source_stereo(&source, source_pos);
+        let dry_pos_seconds = clip_source_pos_seconds(
+            clip_offset_seconds,
+            rel,
+            clip_duration_samples,
+            runtime.sample_rate,
+            clip_speed_ratio,
+            clip_reverse,
+        );
+        let dry_source_pos = dry_pos_seconds * source.sample_rate() as f64;
+        let (mut l, mut r) = sample_clip_processor_stereo(
+            &source,
+            source_pos,
+            dry_source_pos,
+            clip.effective_time_ratio,
+            clip.processor,
+        );
         if l == 0.0 && r == 0.0 {
             continue;
         }
@@ -2740,6 +2768,71 @@ fn sample_to_beat(runtime: &RuntimeProject, sample: u64) -> f64 {
     runtime
         .tempo_map
         .beat_at_samples(sample, runtime.sample_rate.max(1) as f64)
+}
+
+/// Map an in-clip output offset `rel` to a source position in **seconds**,
+/// honoring the clip's resample `speed_ratio` and reverse flag.
+///
+/// Forward playback reads from `offset_seconds` and advances at `speed_ratio`
+/// source-seconds per output-second. Reverse reads the same source window from
+/// its end backward, so output sample 0 maps to the last source frame and the
+/// final output sample maps back to `offset_seconds`. Allocation-free; called
+/// from the audio callback.
+#[inline]
+fn clip_source_pos_seconds(
+    offset_seconds: f64,
+    rel: u64,
+    duration_samples: u64,
+    output_sample_rate: u32,
+    speed_ratio: f32,
+    reverse: bool,
+) -> f64 {
+    let sr = output_sample_rate.max(1) as f64;
+    let advance = if reverse {
+        duration_samples.saturating_sub(1).saturating_sub(rel)
+    } else {
+        rel
+    } as f64;
+    offset_seconds + (advance / sr) * speed_ratio as f64
+}
+
+#[inline]
+fn sample_clip_processor_stereo(
+    source: &ClipAudioSource,
+    source_pos: f64,
+    resample_pos: f64,
+    effective_time_ratio: f32,
+    processor: ClipDspProcessor,
+) -> (f32, f32) {
+    if !matches!(processor, ClipDspProcessor::PhaseVocoderBasic) {
+        return sample_source_stereo(source, resample_pos);
+    }
+    phase_vocoder_basic_sample(source, source_pos, effective_time_ratio)
+}
+
+#[inline]
+fn phase_vocoder_basic_sample(
+    source: &ClipAudioSource,
+    source_pos: f64,
+    effective_time_ratio: f32,
+) -> (f32, f32) {
+    let ratio = effective_time_ratio.clamp(0.05, 20.0) as f64;
+    if (ratio - 1.0).abs() < 1e-6 {
+        return sample_source_stereo(source, source_pos);
+    }
+
+    // Basic streaming OLA/granular stretcher. It is allocation-free and reads
+    // from the existing clip source; a higher-quality phase vocoder can replace
+    // this processor without changing snapshot/runtime routing.
+    let grain = 1024.0_f64;
+    let hop_out = grain * 0.5;
+    let hop_in = hop_out / ratio;
+    let phase = (source_pos / hop_in).fract().clamp(0.0, 1.0);
+    let window = 0.5 - 0.5 * (std::f64::consts::TAU * phase).cos();
+    let (al, ar) = sample_source_stereo(source, source_pos);
+    let (bl, br) = sample_source_stereo(source, source_pos + hop_in);
+    let w = window as f32;
+    (al * (1.0 - w) + bl * w, ar * (1.0 - w) + br * w)
 }
 
 /// Linear clip-fade gain for a sample at offset `rel` from the clip start.
@@ -3055,11 +3148,35 @@ pub fn render_project_block_interleaved(
                     let frame_idx = callback_offset + frame_in_segment;
                     let project_sample = segment_sample + frame_in_segment as u64;
                     let rel = project_sample - clip_start;
-                    let source_pos_seconds = clip.offset_seconds
-                        + (rel as f64 / runtime.sample_rate.max(1) as f64)
-                            * clip.speed_ratio as f64;
+                    let source_pos_seconds = clip_source_pos_seconds(
+                        clip.offset_seconds,
+                        rel,
+                        clip.duration_samples,
+                        runtime.sample_rate,
+                        if matches!(clip.processor, ClipDspProcessor::PhaseVocoderBasic) {
+                            1.0 / clip.effective_time_ratio.max(0.01)
+                        } else {
+                            clip.speed_ratio
+                        },
+                        clip.reverse,
+                    );
                     let source_pos = source_pos_seconds * source.sample_rate() as f64;
-                    let (mut l, mut r) = sample_source_stereo(&source, source_pos);
+                    let dry_pos_seconds = clip_source_pos_seconds(
+                        clip.offset_seconds,
+                        rel,
+                        clip.duration_samples,
+                        runtime.sample_rate,
+                        clip.speed_ratio,
+                        clip.reverse,
+                    );
+                    let dry_source_pos = dry_pos_seconds * source.sample_rate() as f64;
+                    let (mut l, mut r) = sample_clip_processor_stereo(
+                        &source,
+                        source_pos,
+                        dry_source_pos,
+                        clip.effective_time_ratio,
+                        clip.processor,
+                    );
                     let fade = clip_fade_gain(
                         rel,
                         clip.duration_samples,
@@ -4554,6 +4671,104 @@ mod clip_fade_tests {
 }
 
 #[cfg(test)]
+mod clip_stretch_dsp_tests {
+    use super::{clip_source_pos_seconds, sample_clip_processor_stereo};
+    use crate::audio_file::AudioFileBuffer;
+    use crate::audio_source::ClipAudioSource;
+    use crate::runtime::{resolve_clip_processor, ClipDspProcessor};
+    use std::sync::Arc;
+
+    /// Source sample index a given in-clip output offset reads from, with the
+    /// source/output sample rates matched at 48 kHz.
+    fn src_sample(rel: u64, duration: u64, speed: f32, reverse: bool) -> f64 {
+        clip_source_pos_seconds(0.0, rel, duration, 48_000, speed, reverse) * 48_000.0
+    }
+
+    #[test]
+    fn manual_stretch_maps_output_to_source_samples() {
+        // ratio 2.0 → speed 0.5; a 96k-output clip consumes the 48k source.
+        assert!((src_sample(0, 96_000, 0.5, false) - 0.0).abs() < 1e-6);
+        assert!((src_sample(24_000, 96_000, 0.5, false) - 12_000.0).abs() < 1e-6);
+        assert!((src_sample(48_000, 96_000, 0.5, false) - 24_000.0).abs() < 1e-6);
+        assert!((src_sample(95_999, 96_000, 0.5, false) - 47_999.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn resample_mode_changes_source_read_rate() {
+        // speed 1.0 advances 1:1; 2.0 twice as fast; 0.5 half as fast.
+        assert!((src_sample(100, 48_000, 1.0, false) - 100.0).abs() < 1e-6);
+        assert!((src_sample(100, 48_000, 2.0, false) - 200.0).abs() < 1e-6);
+        assert!((src_sample(100, 48_000, 0.5, false) - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reverse_mapping_reads_from_source_end_backwards() {
+        // speed 1.0, 48k clip: output 0 → last source frame; last output → start.
+        assert!((src_sample(0, 48_000, 1.0, true) - 47_999.0).abs() < 1e-6);
+        assert!((src_sample(47_999, 48_000, 1.0, true) - 0.0).abs() < 1e-6);
+        // Reverse reads strictly decreasing source positions.
+        assert!(src_sample(0, 48_000, 1.0, true) > src_sample(1, 48_000, 1.0, true));
+    }
+
+    #[test]
+    fn processor_selection_routes_by_mode_and_preserve() {
+        assert_eq!(
+            resolve_clip_processor("off", false),
+            ClipDspProcessor::NoStretch
+        );
+        assert_eq!(
+            resolve_clip_processor("resample", true),
+            ClipDspProcessor::Resample
+        );
+        assert_eq!(
+            resolve_clip_processor("manual", false),
+            ClipDspProcessor::Resample
+        );
+        assert_eq!(
+            resolve_clip_processor("manual", true),
+            ClipDspProcessor::PhaseVocoderBasic
+        );
+        assert_eq!(
+            resolve_clip_processor("temposync", true),
+            ClipDspProcessor::PhaseVocoderBasic
+        );
+        assert_eq!(
+            resolve_clip_processor("warp", false),
+            ClipDspProcessor::PhaseVocoderBasic
+        );
+    }
+
+    #[test]
+    fn preserve_pitch_processor_output_differs_from_resample() {
+        let mut samples = Vec::new();
+        for i in 0..4096 {
+            let v = ((i as f32 * 0.017).sin() * (i as f32 * 0.003).cos()).clamp(-1.0, 1.0);
+            samples.push(v);
+            samples.push(v);
+        }
+        let source = ClipAudioSource::InMemory(Arc::new(AudioFileBuffer {
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 4096,
+            samples,
+        }));
+        let resample =
+            sample_clip_processor_stereo(&source, 512.0, 256.0, 2.0, ClipDspProcessor::Resample);
+        let pv = sample_clip_processor_stereo(
+            &source,
+            512.0,
+            256.0,
+            2.0,
+            ClipDspProcessor::PhaseVocoderBasic,
+        );
+        assert!(
+            (resample.0 - pv.0).abs() > 1e-5 || (resample.1 - pv.1).abs() > 1e-5,
+            "PhaseVocoderBasic should not be identical to Resample"
+        );
+    }
+}
+
+#[cfg(test)]
 mod bridge_insert_tests {
     use super::*;
     use crate::plugin_bridge::PluginBridgeSink;
@@ -5060,6 +5275,13 @@ mod routing_tests {
                 offset_seconds: 0.0,
                 gain: 1.0,
                 speed_ratio: 1.0,
+                effective_time_ratio: 1.0,
+                pitch_ratio: 1.0,
+                source_start_samples: 0,
+                source_end_samples: 8,
+                warp_markers: Vec::new(),
+                processor: ClipDspProcessor::Resample,
+                reverse: false,
                 muted: false,
                 fade_in_samples: 0,
                 fade_out_samples: 0,
@@ -5086,6 +5308,100 @@ mod routing_tests {
         assert_eq!(rendered, frames as u64);
         let left: Vec<f32> = output.chunks(channels).map(|frame| frame[0]).collect();
         assert_eq!(left, vec![0.3, 0.4, 0.2, 0.3, 0.4]);
+    }
+
+    /// End-to-end render check that `reverse` and `speed_ratio` actually change
+    /// the audio (not just the snapshot). This is the same block renderer the
+    /// offline exporter drives, so it also covers "export uses the clip DSP path".
+    #[test]
+    fn reverse_and_speed_change_clip_render_output() {
+        let frames = 8usize;
+        let channels = 2usize;
+        // Distinct, soft-limit-safe per-frame values: left[i] = i / 10.
+        let samples: Vec<f32> = (0..8)
+            .flat_map(|i| {
+                let v = i as f32 / 10.0;
+                [v, v]
+            })
+            .collect();
+
+        let render = |reverse: bool, speed: f32| -> Vec<f32> {
+            let mut audio_track = track("audio", "audio", vec![]);
+            audio_track.pan = -1.0; // equal-power hard-left → left == source
+            let tracks = vec![audio_track];
+            let audio_graph = crate::audio_graph::plan_runtime_audio_graph(&tracks).unwrap();
+            let source = Arc::new(ClipAudioSource::InMemory(Arc::new(AudioFileBuffer {
+                sample_rate: 48_000,
+                channels: 2,
+                frames: 8,
+                samples: samples.clone(),
+            })));
+            let mut p = RuntimeProject {
+                sample_rate: 48_000,
+                tracks,
+                clips: vec![RuntimeClip {
+                    id: "c".to_string(),
+                    track_id: "audio".to_string(),
+                    track_index: None,
+                    start_sample: 0,
+                    duration_samples: 8,
+                    offset_seconds: 0.0,
+                    gain: 1.0,
+                    speed_ratio: speed,
+                    effective_time_ratio: if speed > 0.0 { 1.0 / speed } else { 1.0 },
+                    pitch_ratio: 1.0,
+                    source_start_samples: 0,
+                    source_end_samples: 8,
+                    warp_markers: Vec::new(),
+                    processor: ClipDspProcessor::Resample,
+                    reverse,
+                    muted: false,
+                    fade_in_samples: 0,
+                    fade_out_samples: 0,
+                    source,
+                }],
+                audio_graph,
+                ..Default::default()
+            };
+            p.resolve_indices();
+            let mut output = vec![0.0f32; frames * channels];
+            render_project_block_interleaved(
+                &mut p,
+                0,
+                1.0,
+                &mut output,
+                channels,
+                true,
+                4,
+                4,
+                None,
+            );
+            output.chunks(channels).map(|f| f[0]).collect()
+        };
+
+        let close = |a: &[f32], b: &[f32]| {
+            assert_eq!(a.len(), b.len(), "{a:?} vs {b:?}");
+            for (x, y) in a.iter().zip(b) {
+                assert!((x - y).abs() < 1e-4, "{a:?} vs {b:?}");
+            }
+        };
+
+        // Forward reads source frames 0..7 straight.
+        close(
+            &render(false, 1.0),
+            &[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        );
+        // Reverse reads frames 7..0.
+        close(
+            &render(true, 1.0),
+            &[0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0],
+        );
+        // Half read-rate (speed 0.5) consumes the source half as fast, linearly
+        // interpolating between frames.
+        close(
+            &render(false, 0.5),
+            &[0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35],
+        );
     }
 
     #[test]

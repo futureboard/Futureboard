@@ -45,6 +45,10 @@ pub struct ClipState {
     pub muted: bool,
     /// Populated for imported audio clips; drives clip chrome + waveform UI.
     pub audio_import: AudioImportState,
+    /// Non-destructive clip-level time-stretch / pitch state. Present on every
+    /// clip; only meaningful for audio clips (MIDI clips carry a default `Off`
+    /// instance). See [`AudioClipStretchState`].
+    pub stretch: AudioClipStretchState,
 }
 
 impl ClipState {
@@ -200,6 +204,31 @@ impl TimelineState {
             if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
                 if (clip.gain - gain).abs() > 0.0001 {
                     clip.gain = gain;
+                    return true;
+                }
+                return false;
+            }
+        }
+        false
+    }
+
+    /// Read-only access to a clip's non-destructive stretch/pitch state.
+    pub fn clip_stretch(&self, clip_id: &str) -> Option<&AudioClipStretchState> {
+        for track in &self.tracks {
+            if let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) {
+                return Some(&clip.stretch);
+            }
+        }
+        None
+    }
+
+    /// Replace a clip's stretch/pitch state. Returns `true` when it changed.
+    /// UI-mutating only — the caller marks the project dirty / records undo.
+    pub fn set_clip_stretch(&mut self, clip_id: &str, stretch: AudioClipStretchState) -> bool {
+        for track in &mut self.tracks {
+            if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
+                if clip.stretch != stretch {
+                    clip.stretch = stretch;
                     return true;
                 }
                 return false;

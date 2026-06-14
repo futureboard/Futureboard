@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    div, px, App, AppContext, InteractiveElement, IntoElement, MouseButton, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
 
@@ -22,11 +22,19 @@ use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
 use crate::components::controls::{
     fb_button, fb_checkbox, fb_form_row, fb_section_header, FbButtonKind,
 };
+use crate::components::inspector::{
+    inspector_checkbox as shared_inspector_checkbox, inspector_hint_text, inspector_mini_button,
+    inspector_numeric_stepper, inspector_row as shared_inspector_row,
+    inspector_section as shared_inspector_section, inspector_select, inspector_value,
+    InspectorSelectOption,
+};
+use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::slider::slider;
 use crate::components::text_input::{text_field, TextInputState};
 use crate::components::timeline::timeline_state::{
-    volume, ClipType, InsertLoadStatus, InsertSlotState, TrackAudioFormat, TrackInputRouting,
-    TrackMidiInputRouting, TrackOutputRouting, TrackState, TrackType,
+    volume, AudioClipStretchState, ClipType, InsertLoadStatus, InsertSlotState, StretchAlgorithm,
+    StretchMode, TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
+    TrackState, TrackType,
 };
 use crate::overlay::{inspector_combo_menu_position, OverlayAnchor};
 use crate::theme::Colors;
@@ -48,6 +56,41 @@ type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) +
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
 type ClipBoolCb = Arc<dyn Fn(&(String, bool), &mut Window, &mut App) + 'static>;
+/// Apply a full replacement of a clip's stretch/pitch state. One callback drives
+/// every stretch control; the inspector builds the mutated state and the layout
+/// records it as a single undo entry (see `set_clip_stretch_cb`).
+type ClipStretchCb = Arc<dyn Fn(&(String, AudioClipStretchState), &mut Window, &mut App) + 'static>;
+/// Reorder an FX/insert slot via drag. `(track_id, dragged_insert_id,
+/// insertion_index)` where `insertion_index` is the gap (0..=len) the dragged
+/// slot should move into. Identity is the stable `plugin_instance_id`, never
+/// the visual index. One completed drag = one undo entry (see
+/// `reorder_insert_cb`).
+type InsertReorderCb = Arc<dyn Fn(&(String, String, usize), &mut Window, &mut App) + 'static>;
+
+/// Drag payload for FX/insert reorder. Carries the stable instance identity
+/// plus a label rendered in the drag preview. Cloned into the GPUI drag view.
+#[derive(Clone)]
+pub struct FxSlotDrag {
+    pub track_id: String,
+    pub insert_id: String,
+    pub display_name: String,
+}
+
+impl gpui::Render for FxSlotDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(3.0))
+            .rounded_sm()
+            .bg(Colors::surface_raised())
+            .border(px(1.0))
+            .border_color(Colors::accent_primary())
+            .text_size(px(11.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(Colors::text_primary())
+            .child(self.display_name.clone())
+    }
+}
 
 /// Open routing ComboBox in the Inspector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,11 +129,19 @@ pub struct InspectorCallbacks {
     pub on_toggle_insert_bypass: InsertPairCb,
     pub on_toggle_insert_enabled: InsertPairCb,
     pub on_move_insert: InsertMoveCb,
+    /// Drag-reorder commit for an FX/insert slot (one undo entry per drag).
+    pub on_reorder_insert: InsertReorderCb,
     pub on_open_insert_editor: InsertOpenCb,
     pub on_set_clip_start: ClipF32Cb,
     pub on_set_clip_length: ClipF32Cb,
     pub on_set_clip_gain: ClipF32Cb,
     pub on_set_clip_muted: ClipBoolCb,
+    /// Apply a new stretch/pitch state to an audio clip (one undo entry).
+    pub on_set_clip_stretch: ClipStretchCb,
+    /// Append a warp marker at the current playhead on the given clip.
+    pub on_clip_warp_add_at_playhead: StrCb,
+    /// Remove all warp markers from the given clip.
+    pub on_clip_warp_clear: StrCb,
     pub on_open_clip_bottom_editor: StrCb,
     pub on_open_clip_external_midi_editor: StrCb,
     pub open_routing_combo: Option<InspectorRoutingCombo>,
@@ -133,6 +184,10 @@ pub struct SelectedClipSummary<'a> {
     pub note_count: Option<usize>,
     pub kind: &'static str,
     pub track_name: &'a str,
+    /// Live stretch/pitch state of the selected clip (for the audio Inspector).
+    pub stretch: &'a AudioClipStretchState,
+    /// Current project tempo, shown as the read-only Tempo-Sync target.
+    pub project_bpm: f64,
 }
 
 /// What the Inspector is currently editing. Resolved fresh from the live
@@ -1110,22 +1165,64 @@ fn plugin_slot_row(
     can_move_down: bool,
     is_instrument: bool,
 ) -> impl IntoElement {
+    // Drag source: the grip handle carries the stable plugin_instance_id, so
+    // reorder identity follows the instance — never the visual index — and
+    // bypass / preset / editor / automation state come along untouched (the
+    // model only reorders existing slots, see `set_insert_order`).
+    let drag_payload = FxSlotDrag {
+        track_id: track.id.clone(),
+        insert_id: slot.id.clone(),
+        display_name: plugin_slot_name(Some(slot), "Empty Slot"),
+    };
+    let handle = drag_handle()
+        .id(("fx-drag-handle", slot_index))
+        .on_drag(drag_payload, |drag, _offset, _window, cx| {
+            cx.new(|_| drag.clone())
+        });
+
+    // Drop target: dropping a compatible drag onto this row moves it into the
+    // gap *above* this slot (`insertion_index == slot_index`). `can_drop`
+    // restricts drops to the same track, and `drag_over` paints the accent
+    // drop-position line. The row is NOT a drag source, so the action buttons
+    // and right-click keep their own hit-testing (only the handle drags).
+    let drop_track = track.id.clone();
+    let can_drop_track = track.id.clone();
+    let reorder = callbacks.on_reorder_insert.clone();
+    let gap = slot_index;
+
     div()
+        .id(("fx-drop-row", slot_index))
         .flex()
         .flex_col()
         .gap(px(5.0))
         .py(px(7.0))
         .border_t(px(1.0))
         .border_color(Colors::border_subtle())
+        .can_drop(move |dragged, _window, _cx| {
+            dragged
+                .downcast_ref::<FxSlotDrag>()
+                .is_some_and(|d| d.track_id == can_drop_track)
+        })
+        .drag_over::<FxSlotDrag>(|style, _drag, _window, _cx| drop_over_highlight(style))
+        .on_drop::<FxSlotDrag>(move |drag, window, cx| {
+            if drag.track_id == drop_track {
+                reorder(
+                    &(drop_track.clone(), drag.insert_id.clone(), gap),
+                    window,
+                    cx,
+                );
+            }
+        })
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
+                .child(handle)
                 .child(
                     div()
-                        .w(px(22.0))
+                        .w(px(18.0))
                         .text_size(px(10.0))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(Colors::text_faint())
@@ -1232,6 +1329,33 @@ fn insert_effects_section(track: &TrackState, callbacks: &InspectorCallbacks) ->
                 false,
             ));
         }
+        // Trailing drop zone so a dragged slot can land at the very end of the
+        // chain (insertion gap == inserts.len()); rows above only cover the
+        // gaps before each slot. Same-track guarded; shows the accent line.
+        let end_track = track.id.clone();
+        let end_can_track = track.id.clone();
+        let end_reorder = callbacks.on_reorder_insert.clone();
+        let end_gap = track.inserts.len();
+        section = section.child(
+            div()
+                .id("fx-drop-end")
+                .h(px(8.0))
+                .can_drop(move |dragged, _window, _cx| {
+                    dragged
+                        .downcast_ref::<FxSlotDrag>()
+                        .is_some_and(|d| d.track_id == end_can_track)
+                })
+                .drag_over::<FxSlotDrag>(|style, _drag, _window, _cx| drop_over_highlight(style))
+                .on_drop::<FxSlotDrag>(move |drag, window, cx| {
+                    if drag.track_id == end_track {
+                        end_reorder(
+                            &(end_track.clone(), drag.insert_id.clone(), end_gap),
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+        );
     }
 
     let track_id = track.id.clone();
@@ -1523,26 +1647,6 @@ fn readonly_value(text: impl Into<String>) -> impl IntoElement {
         .child(text.into())
 }
 
-fn disabled_value(text: impl Into<String>) -> impl IntoElement {
-    div()
-        .w(px(92.0))
-        .h(px(26.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_end()
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_input())
-        .opacity(0.5)
-        .px(px(8.0))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::text_secondary())
-        .child(text.into())
-}
-
 fn small_step_button(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
@@ -1669,6 +1773,457 @@ fn truncate_value(text: impl Into<String>) -> impl IntoElement {
         .child(text.into())
 }
 
+// ── Audio-clip stretch inspector controls (Slice 2) ─────────────────────────
+//
+// Every control produces a fully-formed next `AudioClipStretchState` and routes
+// it through the single `on_set_clip_stretch` callback, so each edit is one
+// undo entry. The controls edit real persisted state; the audio engine wires it
+// to playback/export in a later slice (the Stretch section says so honestly).
+
+const STRETCH_MODE_OPTIONS: &[InspectorSelectOption<StretchMode>] = &[
+    InspectorSelectOption {
+        label: "Off",
+        value: StretchMode::Off,
+    },
+    InspectorSelectOption {
+        label: "Resample",
+        value: StretchMode::Resample,
+    },
+    InspectorSelectOption {
+        label: "Tempo Sync",
+        value: StretchMode::TempoSync,
+    },
+    InspectorSelectOption {
+        label: "Manual",
+        value: StretchMode::Manual,
+    },
+    InspectorSelectOption {
+        label: "Warp",
+        value: StretchMode::Warp,
+    },
+];
+
+const STRETCH_ALGORITHM_OPTIONS: &[InspectorSelectOption<StretchAlgorithm>] = &[
+    InspectorSelectOption {
+        label: "Auto",
+        value: StretchAlgorithm::Auto,
+    },
+    InspectorSelectOption {
+        label: "Phase Vocoder",
+        value: StretchAlgorithm::PhaseVocoder,
+    },
+    InspectorSelectOption {
+        label: "Transient",
+        value: StretchAlgorithm::Transient,
+    },
+    InspectorSelectOption {
+        label: "Solo",
+        value: StretchAlgorithm::Solo,
+    },
+    InspectorSelectOption {
+        label: "Texture",
+        value: StretchAlgorithm::Texture,
+    },
+    InspectorSelectOption {
+        label: "Elastique",
+        value: StretchAlgorithm::ElastiqueLike,
+    },
+    InspectorSelectOption {
+        label: "Resample Only",
+        value: StretchAlgorithm::ResampleOnly,
+    },
+];
+
+fn mode_supports_preserve_pitch(mode: StretchMode) -> bool {
+    matches!(mode, StretchMode::Manual | StretchMode::TempoSync)
+}
+
+fn with_mode(s: &AudioClipStretchState, mode: StretchMode) -> AudioClipStretchState {
+    let mut n = s.clone();
+    n.mode = mode;
+    if !mode_supports_preserve_pitch(mode) {
+        n.preserve_pitch = false;
+    }
+    n.dirty = true;
+    n
+}
+
+#[cfg(test)]
+mod stretch_inspector_tests {
+    use super::*;
+
+    #[test]
+    fn preserve_pitch_availability_matches_mode() {
+        assert!(!mode_supports_preserve_pitch(StretchMode::Resample));
+        assert!(mode_supports_preserve_pitch(StretchMode::Manual));
+        assert!(mode_supports_preserve_pitch(StretchMode::TempoSync));
+        assert!(!mode_supports_preserve_pitch(StretchMode::Warp));
+    }
+
+    #[test]
+    fn switching_to_resample_clears_preserve_pitch() {
+        let state = AudioClipStretchState {
+            preserve_pitch: true,
+            ..AudioClipStretchState::default()
+        };
+        let next = with_mode(&state, StretchMode::Resample);
+        assert!(!next.preserve_pitch);
+    }
+}
+
+/// STRETCH section body — mode/algorithm/preserve/ratio/percent/BPM.
+fn stretch_section_body(
+    clip_id: &str,
+    s: &AudioClipStretchState,
+    project_bpm: f64,
+    cb: &ClipStretchCb,
+) -> impl IntoElement {
+    let cur_src_bpm = s.bpm_source.unwrap_or(project_bpm);
+    let src_bpm_label = s
+        .bpm_source
+        .map(|b| format!("{b:.2}"))
+        .unwrap_or_else(|| "—".to_string());
+    let preserve_disabled = !mode_supports_preserve_pitch(s.mode);
+    let stretch_note = match s.mode {
+        StretchMode::Resample => Some("Resample is tape-style; pitch follows speed"),
+        StretchMode::Warp => Some("Warp markers stored; playback uses global stretch"),
+        StretchMode::Manual | StretchMode::TempoSync if s.preserve_pitch => {
+            Some("Preserve pitch uses basic fallback")
+        }
+        _ => None,
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .children(stretch_note.map(inspector_hint_text))
+        .child(shared_inspector_row(
+            "Mode",
+            false,
+            inspector_select("clip-stretch-mode", s.mode, STRETCH_MODE_OPTIONS, false, {
+                let s = s.clone();
+                let cb = cb.clone();
+                let clip_id = clip_id.to_string();
+                move |mode, w, cx| {
+                    cb(&(clip_id.clone(), with_mode(&s, mode)), w, cx);
+                }
+            }),
+        ))
+        .child(shared_inspector_row(
+            "Algorithm",
+            false,
+            inspector_select(
+                "clip-stretch-algo",
+                s.algorithm,
+                STRETCH_ALGORITHM_OPTIONS,
+                false,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |algorithm, w, cx| {
+                        let mut next = s.clone();
+                        next.algorithm = algorithm;
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Preserve",
+            preserve_disabled,
+            shared_inspector_checkbox(
+                "clip-stretch-preserve",
+                s.preserve_pitch,
+                preserve_disabled,
+                if s.preserve_pitch { "On" } else { "Off" },
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |checked, w, cx| {
+                        let mut next = s.clone();
+                        next.preserve_pitch = checked && mode_supports_preserve_pitch(next.mode);
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Ratio",
+            false,
+            inspector_numeric_stepper(
+                "clip-stretch-ratio",
+                s.stretch_ratio,
+                format!("{:.3}x", s.stretch_ratio),
+                AudioClipStretchState::MIN_RATIO,
+                AudioClipStretchState::MAX_RATIO,
+                0.05,
+                false,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |ratio, w, cx| {
+                        let mut next = s.clone();
+                        next.set_stretch_ratio(ratio);
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Percent",
+            false,
+            inspector_numeric_stepper(
+                "clip-stretch-pct",
+                s.stretch_percent(),
+                format!("{:.1} %", s.stretch_percent()),
+                AudioClipStretchState::MIN_RATIO * 100.0,
+                AudioClipStretchState::MAX_RATIO * 100.0,
+                5.0,
+                false,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |percent, w, cx| {
+                        let mut next = s.clone();
+                        next.set_stretch_percent(percent);
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Source BPM",
+            false,
+            inspector_numeric_stepper(
+                "clip-stretch-srcbpm",
+                cur_src_bpm,
+                src_bpm_label,
+                1.0,
+                999.0,
+                1.0,
+                false,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |bpm, w, cx| {
+                        let mut next = s.clone();
+                        next.bpm_source = Some(bpm);
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Target BPM",
+            false,
+            inspector_value(format!("{project_bpm:.2}")),
+        ))
+}
+
+/// PITCH section body — semitone / fine-cents / formant.
+fn pitch_section_body(
+    clip_id: &str,
+    s: &AudioClipStretchState,
+    cb: &ClipStretchCb,
+) -> impl IntoElement {
+    let semi = s.pitch_shift_semitones.trunc() as f64;
+    let fine = ((s.pitch_shift_semitones as f64 - semi) * 100.0).round();
+    let pitch_note = (s.preserve_pitch && mode_supports_preserve_pitch(s.mode))
+        .then_some("Independent pitch shift pending in preserve mode");
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .children(pitch_note.map(inspector_hint_text))
+        .child(shared_inspector_row(
+            "Semi",
+            false,
+            inspector_numeric_stepper(
+                "clip-pitch-semi",
+                semi,
+                format!("{:+.2} st", s.pitch_shift_semitones),
+                -48.0,
+                48.0,
+                1.0,
+                false,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |semi, w, cx| {
+                        let fine = (s.pitch_shift_semitones as f64
+                            - s.pitch_shift_semitones.trunc() as f64)
+                            as f32;
+                        let mut next = s.clone();
+                        next.pitch_shift_semitones = (semi as f32 + fine).clamp(-48.0, 48.0);
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Fine",
+            false,
+            inspector_numeric_stepper(
+                "clip-pitch-fine",
+                fine,
+                format!("{fine:+.0} ct"),
+                -99.0,
+                99.0,
+                50.0,
+                false,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |fine, w, cx| {
+                        let semi = s.pitch_shift_semitones.trunc();
+                        let mut next = s.clone();
+                        next.pitch_shift_semitones =
+                            (semi + (fine as f32 / 100.0)).clamp(-48.0, 48.0);
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Formant",
+            false,
+            shared_inspector_checkbox(
+                "clip-pitch-formant",
+                s.formant_preserve,
+                false,
+                if s.formant_preserve { "On" } else { "Off" },
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |checked, w, cx| {
+                        let mut next = s.clone();
+                        next.formant_preserve = checked;
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+}
+
+/// TRANSIENT section body — preserve + sensitivity.
+fn transient_section_body(
+    clip_id: &str,
+    s: &AudioClipStretchState,
+    cb: &ClipStretchCb,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .child(shared_inspector_row(
+            "Preserve",
+            false,
+            shared_inspector_checkbox(
+                "clip-trans-preserve",
+                s.transient_preserve,
+                false,
+                if s.transient_preserve { "On" } else { "Off" },
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |checked, w, cx| {
+                        let mut next = s.clone();
+                        next.transient_preserve = checked;
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(shared_inspector_row(
+            "Sensitivity",
+            false,
+            inspector_numeric_stepper(
+                "clip-trans-sens",
+                s.transient_sensitivity as f64,
+                format!("{:.2}", s.transient_sensitivity),
+                0.0,
+                1.0,
+                0.05,
+                false,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.to_string();
+                    move |value, w, cx| {
+                        let mut next = s.clone();
+                        next.transient_sensitivity = value as f32;
+                        next.dirty = true;
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+}
+
+/// WARP section body — marker count + add/clear, with an honest pending note.
+fn warp_section_body(
+    clip_id: &str,
+    s: &AudioClipStretchState,
+    callbacks: &InspectorCallbacks,
+) -> impl IntoElement {
+    let add = callbacks.on_clip_warp_add_at_playhead.clone();
+    let clear = callbacks.on_clip_warp_clear.clone();
+    let add_id = clip_id.to_string();
+    let clear_id = clip_id.to_string();
+    let has_markers = !s.warp_markers.is_empty();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .child(shared_inspector_row(
+            "Markers",
+            false,
+            inspector_value(s.warp_markers.len().to_string()),
+        ))
+        .child(shared_inspector_row(
+            "",
+            false,
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(4.0))
+                .child(inspector_mini_button(
+                    "clip-warp-add",
+                    "Add at Playhead",
+                    true,
+                    move |_, w, cx| add(&add_id, w, cx),
+                ))
+                .child(inspector_mini_button(
+                    "clip-warp-clear",
+                    "Clear",
+                    has_markers,
+                    move |_, w, cx| clear(&clear_id, w, cx),
+                )),
+        ))
+        .child(inspector_hint_text(
+            "Warp markers stored; playback uses global stretch",
+        ))
+}
+
 fn file_name_from_path(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
@@ -1700,6 +2255,15 @@ fn clip_inspector(
         let gain_db = linear_gain_to_db(clip.gain);
         let muted_id = clip.clip_id.to_string();
         let mute_cb = callbacks.on_set_clip_muted.clone();
+        let s = clip.stretch;
+        let stretch_cb = callbacks.on_set_clip_stretch.clone();
+        // Precomputed next-states for the inline AUDIO-section stretch controls.
+        let reverse_next = {
+            let mut n = s.clone();
+            n.reverse = !s.reverse;
+            n.dirty = true;
+            n
+        };
         let mut body = scroll_body()
             .gap(px(10.0))
             .child(
@@ -1814,46 +2378,124 @@ fn clip_inspector(
                         "Gain",
                         gain_stepper(clip.clip_id, clip.gain, callbacks.on_set_clip_gain.clone()),
                     ))
-                    .child(compact_property_row("Fade In", disabled_value("0.00 ms")))
-                    .child(compact_property_row("Fade Out", disabled_value("0.00 ms")))
                     .child(compact_property_row(
-                        "Actions",
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(4.0))
-                            // TODO(audio-actions): wire these to non-destructive clip processors.
-                            .child(compact_action_button(
-                                "clip-normalize",
-                                "Normalize",
-                                false,
-                                |_, _, _| {},
-                            ))
-                            .child(compact_action_button(
-                                "clip-reverse",
-                                "Reverse",
-                                false,
-                                |_, _, _| {},
-                            )),
+                        "Reverse",
+                        shared_inspector_checkbox(
+                            "clip-reverse",
+                            s.reverse,
+                            false,
+                            if s.reverse { "On" } else { "Off" },
+                            {
+                                let clip_id = clip.clip_id.to_string();
+                                let stretch_cb = stretch_cb.clone();
+                                move |_, w, cx| {
+                                    stretch_cb(&(clip_id.clone(), reverse_next.clone()), w, cx);
+                                }
+                            },
+                        ),
+                    ))
+                    .child(compact_property_row(
+                        "Normalize",
+                        shared_inspector_checkbox(
+                            "clip-normalize",
+                            s.normalize_gain,
+                            true,
+                            "Pending",
+                            |_, _, _| {},
+                        ),
+                    ))
+                    .child(compact_property_row(
+                        "Fade In",
+                        inspector_numeric_stepper(
+                            "clip-fade-in",
+                            s.fade_in_ms as f64,
+                            format!("{:.0} ms", s.fade_in_ms),
+                            0.0,
+                            60_000.0,
+                            5.0,
+                            false,
+                            {
+                                let s = s.clone();
+                                let stretch_cb = stretch_cb.clone();
+                                let clip_id = clip.clip_id.to_string();
+                                move |value, w, cx| {
+                                    let mut next = s.clone();
+                                    next.fade_in_ms = value as f32;
+                                    next.dirty = true;
+                                    stretch_cb(&(clip_id.clone(), next), w, cx);
+                                }
+                            },
+                        ),
+                    ))
+                    .child(compact_property_row(
+                        "Fade Out",
+                        inspector_numeric_stepper(
+                            "clip-fade-out",
+                            s.fade_out_ms as f64,
+                            format!("{:.0} ms", s.fade_out_ms),
+                            0.0,
+                            60_000.0,
+                            5.0,
+                            false,
+                            {
+                                let s = s.clone();
+                                let stretch_cb = stretch_cb.clone();
+                                let clip_id = clip.clip_id.to_string();
+                                move |value, w, cx| {
+                                    let mut next = s.clone();
+                                    next.fade_out_ms = value as f32;
+                                    next.dirty = true;
+                                    stretch_cb(&(clip_id.clone(), next), w, cx);
+                                }
+                            },
+                        ),
                     )),
             ))
-            .child(inspector_section(
-                "SOURCE",
+            .child(shared_inspector_section(
+                "Stretch",
+                None::<String>,
+                stretch_section_body(clip.clip_id, s, clip.project_bpm, &stretch_cb),
+            ))
+            .child(shared_inspector_section(
+                "Pitch",
+                None::<String>,
+                pitch_section_body(clip.clip_id, s, &stretch_cb),
+            ))
+            .child(shared_inspector_section(
+                "Transient",
+                None::<String>,
+                transient_section_body(clip.clip_id, s, &stretch_cb),
+            ))
+            .child(shared_inspector_section(
+                "Warp",
+                None::<String>,
+                warp_section_body(clip.clip_id, s, callbacks),
+            ))
+            .child(shared_inspector_section(
+                "Source",
+                None::<String>,
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
-                    .child(compact_property_row("File", truncate_value(file_name)))
-                    .child(compact_property_row(
+                    .child(shared_inspector_row(
+                        "File",
+                        false,
+                        truncate_value(file_name),
+                    ))
+                    .child(shared_inspector_row(
                         "Duration",
+                        false,
                         truncate_value(source_duration),
                     ))
-                    .child(compact_property_row(
+                    .child(shared_inspector_row(
                         "Path",
+                        false,
                         truncate_value(path.to_string()),
                     ))
-                    .child(compact_property_row(
+                    .child(shared_inspector_row(
                         "",
+                        false,
                         div()
                             .flex()
                             .flex_row()

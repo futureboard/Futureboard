@@ -8,9 +8,10 @@ use crate::components::timeline::timeline_ruler::{
     timeline_ruler, TimelineLoopDragUpdate, TimelineRegionDragUpdate,
 };
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipResizeDrag, ClipState, ClipType, SnapDivision, TempoPointDrag,
-    TimeSignaturePointDrag, TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem,
-    TrackType, HEADER_WIDTH, RULER_HEIGHT, TEMPO_LANE_PAD, TRACK_HEIGHT,
+    hit_test_arrangement, ArrangementCoordinateContext, ArrangementHitTarget, ClipDragItem,
+    ClipResizeDrag, ClipState, ClipType, SnapDivision, TempoPointDrag, TimeSignaturePointDrag,
+    TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem, TrackType, HEADER_WIDTH,
+    RULER_HEIGHT, TEMPO_LANE_PAD, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -151,8 +152,33 @@ pub type TimelineOpenEditorCb = std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gp
 #[derive(Clone, Debug)]
 pub enum TimelineContextTarget {
     TimelineEmpty,
+    TrackLane {
+        track_id: String,
+        beat: f64,
+    },
     TrackHeader(String),
+    AudioClip {
+        track_id: String,
+        clip_id: String,
+        beat: f64,
+        local_beat: f64,
+    },
+    MidiClip {
+        track_id: String,
+        clip_id: String,
+        beat: f64,
+        local_beat: f64,
+    },
     Clip(String),
+    Marker {
+        marker_id: String,
+        beat: f64,
+    },
+    AutomationLane {
+        track_id: String,
+        lane_id: String,
+        beat: f64,
+    },
     /// Right-click on the arrangement ruler. Carries the beat under the cursor.
     Ruler(f64),
     /// Right-click on the global Tempo Track lane.
@@ -213,6 +239,11 @@ impl Render for ClipResizeDrag {
 }
 
 impl Timeline {
+    fn hit_test_debug_enabled() -> bool {
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_HITTEST_DEBUG").is_some())
+    }
+
     fn input_debug_enabled() -> bool {
         static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *FLAG.get_or_init(|| {
@@ -234,6 +265,97 @@ impl Timeline {
                 self.clip_drag_origin.is_some(),
                 self.pan_last_position.is_some(),
             );
+        }
+    }
+
+    fn arrangement_coordinate_context(&self) -> ArrangementCoordinateContext {
+        let panel_origin_px = gpui::point(px(SIDEBAR_WIDTH), px(APP_CHROME_HEIGHT));
+        let viewport_origin_px = gpui::point(
+            px(SIDEBAR_WIDTH + HEADER_WIDTH),
+            px(APP_CHROME_HEIGHT + self.state.arrangement_content_top()),
+        );
+        ArrangementCoordinateContext {
+            panel_origin_px,
+            viewport_origin_px,
+            scroll_x_px: self.state.viewport.scroll_x,
+            scroll_y_px: self.state.viewport.scroll_y,
+            zoom_px_per_beat: self.state.viewport.pixels_per_beat.max(0.0001),
+            ruler_height_px: RULER_HEIGHT,
+            track_header_width_px: HEADER_WIDTH,
+        }
+    }
+
+    fn resolve_context_target_from_window_point(
+        &self,
+        position: gpui::Point<gpui::Pixels>,
+    ) -> TimelineContextTarget {
+        let ctx = self.arrangement_coordinate_context();
+        let result = hit_test_arrangement(&self.state, position, &ctx);
+        if Self::hit_test_debug_enabled() {
+            let screen_x: f32 = position.x.into();
+            let screen_y: f32 = position.y.into();
+            eprintln!(
+                "Arrangement hit-test:\nscreen=({screen_x:.1},{screen_y:.1})\nlocal=({:.1},{:.1})\ntarget={}\n{}\nz_priority={}",
+                result.local.viewport_x,
+                result.local.viewport_y,
+                result.target.kind(),
+                format_arrangement_target_debug(&result.target),
+                result.z_priority,
+            );
+        }
+        match result.target {
+            ArrangementHitTarget::EmptyArrangement { .. } => TimelineContextTarget::TimelineEmpty,
+            ArrangementHitTarget::TrackHeader { track_id } => {
+                TimelineContextTarget::TrackHeader(track_id)
+            }
+            ArrangementHitTarget::TrackLane {
+                track_id,
+                timeline_beat,
+            } => TimelineContextTarget::TrackLane {
+                track_id,
+                beat: timeline_beat,
+            },
+            ArrangementHitTarget::AudioClip {
+                track_id,
+                clip_id,
+                timeline_beat,
+                local_beat,
+            } => TimelineContextTarget::AudioClip {
+                track_id,
+                clip_id,
+                beat: timeline_beat,
+                local_beat,
+            },
+            ArrangementHitTarget::MidiClip {
+                track_id,
+                clip_id,
+                timeline_beat,
+                local_beat,
+            } => TimelineContextTarget::MidiClip {
+                track_id,
+                clip_id,
+                beat: timeline_beat,
+                local_beat,
+            },
+            ArrangementHitTarget::Ruler { timeline_beat } => {
+                TimelineContextTarget::Ruler(timeline_beat)
+            }
+            ArrangementHitTarget::Marker {
+                marker_id,
+                timeline_beat,
+            } => TimelineContextTarget::Marker {
+                marker_id,
+                beat: timeline_beat,
+            },
+            ArrangementHitTarget::AutomationLane {
+                track_id,
+                lane_id,
+                timeline_beat,
+            } => TimelineContextTarget::AutomationLane {
+                track_id,
+                lane_id,
+                beat: timeline_beat,
+            },
         }
     }
 
@@ -2373,6 +2495,17 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        let on_arrangement_context_menu = on_timeline_context.clone().map(|cb| {
+            cx.listener(
+                move |this, event: &gpui::MouseDownEvent, window: &mut gpui::Window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    let target = this.resolve_context_target_from_window_point(event.position);
+                    cb(&(target, x, y), window, cx);
+                },
+            )
+        });
+
         div()
             .flex()
             .flex_col()
@@ -2409,12 +2542,8 @@ impl Render for Timeline {
             .on_drag_move::<TrackDragItem>(on_track_drag_move)
             .on_drop::<TrackDragItem>(on_track_dropped)
             .on_mouse_down(gpui::MouseButton::Middle, on_middle_pan_start)
-            .when_some(on_timeline_context, |this, cb| {
-                this.on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
-                    let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
-                    cb(&(TimelineContextTarget::TimelineEmpty, x, y), window, cx);
-                })
+            .when_some(on_arrangement_context_menu, |this, cb| {
+                this.on_mouse_down(gpui::MouseButton::Right, cb)
             })
             .on_mouse_move(on_middle_pan_move)
             .on_mouse_move(on_edit_mouse_move)
@@ -2897,6 +3026,46 @@ fn format_clip_length(length_beats: f32, beats_per_bar: f32) -> String {
         format!("{:.1} bars", bars)
     } else {
         format!("{:.1} bt", length_beats)
+    }
+}
+
+fn format_arrangement_target_debug(target: &ArrangementHitTarget) -> String {
+    match target {
+        ArrangementHitTarget::EmptyArrangement {
+            timeline_beat,
+            track_id,
+        } => format!("track_id={track_id:?}\ntimeline_beat={timeline_beat:.3}"),
+        ArrangementHitTarget::TrackHeader { track_id } => format!("track_id={track_id}"),
+        ArrangementHitTarget::TrackLane {
+            track_id,
+            timeline_beat,
+        } => format!("track_id={track_id}\ntimeline_beat={timeline_beat:.3}"),
+        ArrangementHitTarget::AudioClip {
+            track_id,
+            clip_id,
+            timeline_beat,
+            local_beat,
+        }
+        | ArrangementHitTarget::MidiClip {
+            track_id,
+            clip_id,
+            timeline_beat,
+            local_beat,
+        } => format!(
+            "track_id={track_id}\nclip_id={clip_id}\ntimeline_beat={timeline_beat:.3}\nlocal_beat={local_beat:.3}"
+        ),
+        ArrangementHitTarget::Ruler { timeline_beat } => {
+            format!("timeline_beat={timeline_beat:.3}")
+        }
+        ArrangementHitTarget::Marker {
+            marker_id,
+            timeline_beat,
+        } => format!("marker_id={marker_id}\ntimeline_beat={timeline_beat:.3}"),
+        ArrangementHitTarget::AutomationLane {
+            track_id,
+            lane_id,
+            timeline_beat,
+        } => format!("track_id={track_id}\nlane_id={lane_id}\ntimeline_beat={timeline_beat:.3}"),
     }
 }
 

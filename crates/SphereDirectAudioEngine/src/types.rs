@@ -431,10 +431,38 @@ pub struct EngineFadeSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct EngineClipAudioProcess {
     pub speed_ratio: f64,
+    #[serde(default = "default_one_f64")]
+    pub effective_time_ratio: f64,
+    #[serde(default = "default_one_f64")]
+    pub pitch_ratio: f64,
     pub pitch_semitones: f64,
     pub preserve_pitch: bool,
     pub mode: String,
     pub quality: String,
+    #[serde(default)]
+    pub source_start_samples: u64,
+    #[serde(default)]
+    pub source_end_samples: u64,
+    #[serde(default)]
+    pub warp_markers: Vec<EngineWarpMarkerSnapshot>,
+    /// Play the source window backwards. `speed_ratio` already folds time-stretch
+    /// and pitch; reverse only flips the read direction. Defaulted so older
+    /// snapshots deserialize.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+fn default_one_f64() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineWarpMarkerSnapshot {
+    pub id: u64,
+    pub source_sample: u64,
+    pub timeline_beat: f64,
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

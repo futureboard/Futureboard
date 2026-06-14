@@ -496,6 +496,76 @@ impl TimelineState {
         true
     }
 
+    /// Current insert-chain order as a list of slot ids (DSP order == UI order).
+    pub fn insert_order(&self, track_id: &str) -> Vec<String> {
+        self.insert_slots(track_id)
+            .map(|slots| slots.iter().map(|slot| slot.id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Reorder a track's insert chain so its slot ids match `ordered_ids`.
+    /// Slots named in `ordered_ids` are placed in that order; any slot NOT named
+    /// (defensive — should never happen for a complete order) is kept at the end
+    /// in its current relative order, so no slot is ever dropped.
+    ///
+    /// The existing [`InsertSlotState`] structs are reordered **in place** —
+    /// never recreated — so every per-instance field (bypass, enabled,
+    /// `vst3_state`, parameters, runtime state, host pid) follows the plugin
+    /// instance across the move. The engine reconciles live VST3 instances by
+    /// insert id, so reordering the `Vec` is all the runtime needs: the next
+    /// project sync carries the new chain order down without recreating any
+    /// instance. Automation lanes target `PluginParameter { insert_id, .. }`, so
+    /// they also follow the instance untouched. Returns `true` if order changed.
+    pub fn set_insert_order(&mut self, track_id: &str, ordered_ids: &[String]) -> bool {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
+            return false;
+        };
+        let before: Vec<String> = slots.iter().map(|slot| slot.id.clone()).collect();
+        let mut remaining: Vec<InsertSlotState> = std::mem::take(slots);
+        let mut reordered: Vec<InsertSlotState> = Vec::with_capacity(remaining.len());
+        for id in ordered_ids {
+            if let Some(pos) = remaining.iter().position(|slot| &slot.id == id) {
+                reordered.push(remaining.remove(pos));
+            }
+        }
+        // Defensive: keep any slot the caller did not name, in current order.
+        reordered.append(&mut remaining);
+        let after: Vec<String> = reordered.iter().map(|slot| slot.id.clone()).collect();
+        *slots = reordered;
+        let changed = before != after;
+        if changed && plugin_debug_enabled() {
+            eprintln!("[plugin] set_insert_order track={track_id} {before:?} -> {after:?}");
+        }
+        changed
+    }
+
+    /// Pure helper: the insert-id order produced by moving `insert_id` into the
+    /// gap at `insertion_index` (0..=len, the position *between* items where the
+    /// drop indicator sits). Handles the removal/reinsertion off-by-one so the
+    /// item lands exactly at the visual gap regardless of drag direction. Used
+    /// by the drag-reorder drop handler to build the `ReorderFxSlot` command's
+    /// `after_order`. Returns `current` unchanged if `insert_id` is absent.
+    pub fn reordered_insert_ids(
+        current: &[String],
+        insert_id: &str,
+        insertion_index: usize,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = current.to_vec();
+        let Some(from) = ids.iter().position(|id| id == insert_id) else {
+            return ids;
+        };
+        let id = ids.remove(from);
+        // The gap index is in pre-removal coordinates; if the item was before
+        // the gap, removing it shifts the gap left by one.
+        let mut to = insertion_index;
+        if from < to {
+            to -= 1;
+        }
+        let to = to.min(ids.len());
+        ids.insert(to, id);
+        ids
+    }
+
     pub fn toggle_insert_bypass(&mut self, track_id: &str, insert_id: &str) -> Option<bool> {
         let slot = self
             .insert_slots_mut(track_id)?

@@ -627,6 +627,7 @@ pub fn resolve_project_relative_path(project_root: &Path, relative: &str) -> Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::timeline::timeline_state::AudioClipStretchState;
     use crate::project::{
         format::{encode_project, ProjectError, PROJECT_HEADER_SIZE},
         ClipSource, FutureboardProject, ProjectAsset, ProjectClip, ProjectSession, ProjectTrack,
@@ -783,6 +784,7 @@ mod tests {
                     asset_id: source.to_string_lossy().into_owned(),
                     source_path: Some(source.clone()),
                 },
+                stretch: AudioClipStretchState::default(),
             }],
         });
 
@@ -818,6 +820,7 @@ mod tests {
                 asset_id: source.to_string_lossy().into_owned(),
                 source_path: Some(source.to_path_buf()),
             },
+            stretch: AudioClipStretchState::default(),
         }
     }
 

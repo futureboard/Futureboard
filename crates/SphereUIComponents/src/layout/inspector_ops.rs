@@ -11,11 +11,13 @@ use std::sync::Arc;
 
 use gpui::{App, Entity, Window};
 
+use crate::components::edit::EditCommand;
 use crate::components::inspector_debug;
 use crate::components::panel::{InspectorCallbacks, InspectorRoutingCombo};
 use crate::components::plugin_picker::PluginInsertKind;
 use crate::components::timeline::timeline_state::{
-    TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
+    clip_output_local_to_source_sample, AudioClipStretchState, TimelineState, TrackAudioFormat,
+    TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting, WarpMarker,
 };
 use crate::overlay::OverlayAnchor;
 
@@ -33,9 +35,39 @@ type MidiChannelCb = Arc<dyn Fn(&(String, Option<u8>), &mut Window, &mut App) + 
 type InsertPairCb = Arc<dyn Fn(&(String, String), &mut Window, &mut App) + 'static>;
 type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) + 'static>;
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
+type InsertReorderCb = Arc<dyn Fn(&(String, String, usize), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
 type ClipBoolCb = Arc<dyn Fn(&(String, bool), &mut Window, &mut App) + 'static>;
+type ClipStretchCb = Arc<dyn Fn(&(String, AudioClipStretchState), &mut Window, &mut App) + 'static>;
+
+fn clip_dsp_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_CLIP_DSP_DEBUG").is_some())
+}
+
+fn stretch_commit_field(
+    prev: &AudioClipStretchState,
+    next: &AudioClipStretchState,
+) -> &'static str {
+    if (prev.stretch_ratio - next.stretch_ratio).abs() > f64::EPSILON {
+        "ratio"
+    } else if prev.mode != next.mode {
+        "mode"
+    } else if prev.algorithm != next.algorithm {
+        "algorithm"
+    } else if prev.preserve_pitch != next.preserve_pitch {
+        "preserve_pitch"
+    } else if (prev.pitch_shift_semitones - next.pitch_shift_semitones).abs() > f32::EPSILON {
+        "pitch"
+    } else if prev.reverse != next.reverse {
+        "reverse"
+    } else if prev.warp_markers.len() != next.warp_markers.len() {
+        "warp_markers"
+    } else {
+        "other"
+    }
+}
 
 impl StudioLayout {
     pub(crate) fn build_inspector_callbacks(&self, owner: Entity<Self>) -> InspectorCallbacks {
@@ -134,11 +166,15 @@ impl StudioLayout {
         let on_toggle_insert_bypass = self.toggle_insert_bypass_cb(owner.clone());
         let on_toggle_insert_enabled = self.toggle_insert_enabled_cb(owner.clone());
         let on_move_insert = self.move_insert_cb(owner.clone());
+        let on_reorder_insert = self.reorder_insert_cb(owner.clone());
         let on_open_insert_editor = self.open_insert_editor_cb(owner.clone());
         let on_set_clip_start = self.set_clip_start_cb(owner.clone());
         let on_set_clip_length = self.set_clip_length_cb(owner.clone());
         let on_set_clip_gain = self.set_clip_gain_cb(owner.clone());
         let on_set_clip_muted = self.set_clip_muted_cb(owner.clone());
+        let on_set_clip_stretch = self.set_clip_stretch_cb(owner.clone());
+        let on_clip_warp_add_at_playhead = self.clip_warp_add_at_playhead_cb(owner.clone());
+        let on_clip_warp_clear = self.clip_warp_clear_cb(owner.clone());
         let on_open_clip_bottom_editor = self.open_clip_bottom_editor_cb(owner.clone());
         let on_open_clip_external_midi_editor =
             self.open_clip_external_midi_editor_cb(owner.clone());
@@ -202,11 +238,15 @@ impl StudioLayout {
             on_toggle_insert_bypass,
             on_toggle_insert_enabled,
             on_move_insert,
+            on_reorder_insert,
             on_open_insert_editor,
             on_set_clip_start,
             on_set_clip_length,
             on_set_clip_gain,
             on_set_clip_muted,
+            on_set_clip_stretch,
+            on_clip_warp_add_at_playhead,
+            on_clip_warp_clear,
             on_open_clip_bottom_editor,
             on_open_clip_external_midi_editor,
             open_routing_combo,
@@ -318,6 +358,196 @@ impl StudioLayout {
                     this.mark_dirty();
                     this.mark_engine_media_dirty();
                     this.schedule_audio_project_sync(cx, false, "inspector_clip_muted");
+                    cx.notify();
+                });
+            }
+        })
+    }
+
+    /// Apply a full replacement of a clip's stretch/pitch state as one undo
+    /// entry. The inspector builds the mutated `AudioClipStretchState`; here we
+    /// snapshot the previous value, apply, and record a reversible command.
+    fn set_clip_stretch_cb(&self, owner: Entity<Self>) -> ClipStretchCb {
+        let timeline = self.timeline.clone();
+        Arc::new(
+            move |(clip_id, next): &(String, AudioClipStretchState), _w, cx| {
+                let clip_id = clip_id.clone();
+                let next = next.clone();
+                let changed = timeline.update(cx, |t, cx| {
+                    let project_bpm = t.state.bpm as f64;
+                    let Some(prev) = t.state.clip_stretch(&clip_id).cloned() else {
+                        return false;
+                    };
+                    if prev == next {
+                        return false;
+                    }
+                    let changed_field = stretch_commit_field(&prev, &next);
+                    let prev_len = t.state.clip_duration_beats(&clip_id).unwrap_or(0.0);
+                    // Couple the clip's timeline length to the time-stretch ratio
+                    // so the visual, audible, and exported lengths stay equal
+                    // (spec §10). Only the ratio component scales length; toggles
+                    // like reverse/fade leave it unchanged.
+                    let old_ratio = prev.effective_time_ratio(project_bpm);
+                    let new_ratio = next.effective_time_ratio(project_bpm);
+                    let next_len = if old_ratio > 1e-6 && (old_ratio - new_ratio).abs() > 1e-9 {
+                        (prev_len as f64 * (new_ratio / old_ratio)) as f32
+                    } else {
+                        prev_len
+                    };
+                    if clip_dsp_debug_enabled() {
+                        eprintln!(
+                            "[clip-dsp][inspector-commit] clip_id={} field={} old_ratio={:.3} new_ratio={:.3} old_duration={:.3} new_duration={:.3} snapshot_rebuild=true speed_ratio={:.6} pitch_shift={:+.2} pitch_ratio={:.4} preserve_pitch={}",
+                            clip_id,
+                            changed_field,
+                            old_ratio,
+                            new_ratio,
+                            prev_len,
+                            next_len,
+                            next.resample_speed_ratio(project_bpm),
+                            next.pitch_shift_semitones,
+                            AudioClipStretchState::pitch_ratio_from_semitones(
+                                next.pitch_shift_semitones
+                            ),
+                            next.preserve_pitch,
+                        );
+                    }
+                    t.state.set_clip_stretch(&clip_id, next.clone());
+                    if (next_len - prev_len).abs() > 1e-4 {
+                        t.state.set_clip_length(&clip_id, next_len);
+                    }
+                    t.record_executed_command(
+                        EditCommand::SetClipStretch {
+                            clip_id: clip_id.clone(),
+                            prev,
+                            next: next.clone(),
+                            prev_duration_beats: prev_len,
+                            next_duration_beats: next_len,
+                        },
+                        cx,
+                    );
+                    true
+                });
+                if changed {
+                    inspector_debug(&format!(
+                        "clip stretch clip={clip_id} mode={:?} ratio={:.3}",
+                        next.mode, next.stretch_ratio
+                    ));
+                    StudioLayout::defer_update(&owner, cx, |this, cx| {
+                        this.mark_dirty();
+                        this.mark_engine_media_dirty();
+                        this.schedule_audio_project_sync(cx, false, "inspector_clip_stretch");
+                        cx.notify();
+                    });
+                }
+            },
+        )
+    }
+
+    /// Append a warp marker at the current playhead (clamped within the clip),
+    /// mapping the timeline beat to a source-sample position across the active
+    /// source window. Stored only — segment-warp playback is pending.
+    fn clip_warp_add_at_playhead_cb(&self, owner: Entity<Self>) -> StrCb {
+        let timeline = self.timeline.clone();
+        Arc::new(move |clip_id: &String, _w, cx| {
+            let clip_id = clip_id.clone();
+            let changed = timeline.update(cx, |t, cx| {
+                let playhead = t.state.transport.playhead_beats as f64;
+                let Some((prev, start, dur)) = t.state.find_clip(&clip_id).map(|(_, c)| {
+                    (
+                        c.stretch.clone(),
+                        c.start_beat as f64,
+                        c.duration_beats as f64,
+                    )
+                }) else {
+                    return false;
+                };
+                let clip_end = start + dur.max(0.0);
+                if playhead < start || playhead > clip_end || dur <= 0.0 {
+                    return false;
+                }
+                let local_frac = ((playhead - start) / dur.max(f64::EPSILON)).clamp(0.0, 1.0);
+                let output_len = (prev.source_len_samples() as f64)
+                    * prev.effective_time_ratio(t.state.bpm as f64);
+                let source_sample = clip_output_local_to_source_sample(
+                    local_frac * output_len,
+                    prev.source_start_samples,
+                    prev.source_end_samples,
+                    prev.effective_time_ratio(t.state.bpm as f64),
+                    prev.reverse,
+                )
+                .round() as u64;
+                let id = prev.warp_markers.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+                let mut next = prev.clone();
+                next.warp_markers.push(WarpMarker {
+                    id,
+                    source_sample,
+                    timeline_beat: playhead,
+                    locked: false,
+                });
+                next.warp_markers
+                    .sort_by(|a, b| a.timeline_beat.total_cmp(&b.timeline_beat));
+                next.dirty = true;
+                let len = t.state.clip_duration_beats(&clip_id).unwrap_or(0.0);
+                t.state.set_clip_stretch(&clip_id, next.clone());
+                t.record_executed_command(
+                    EditCommand::SetClipStretch {
+                        clip_id: clip_id.clone(),
+                        prev,
+                        next,
+                        prev_duration_beats: len,
+                        next_duration_beats: len,
+                    },
+                    cx,
+                );
+                true
+            });
+            if changed {
+                inspector_debug(&format!("clip warp add clip={clip_id}"));
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
+                    this.mark_dirty();
+                    this.mark_engine_media_dirty();
+                    this.schedule_audio_project_sync(cx, false, "inspector_clip_warp_add");
+                    cx.notify();
+                });
+            }
+        })
+    }
+
+    /// Remove every warp marker from a clip (one undo entry).
+    fn clip_warp_clear_cb(&self, owner: Entity<Self>) -> StrCb {
+        let timeline = self.timeline.clone();
+        Arc::new(move |clip_id: &String, _w, cx| {
+            let clip_id = clip_id.clone();
+            let changed = timeline.update(cx, |t, cx| {
+                let Some(prev) = t.state.clip_stretch(&clip_id).cloned() else {
+                    return false;
+                };
+                if prev.warp_markers.is_empty() {
+                    return false;
+                }
+                let mut next = prev.clone();
+                next.warp_markers.clear();
+                next.dirty = true;
+                let len = t.state.clip_duration_beats(&clip_id).unwrap_or(0.0);
+                t.state.set_clip_stretch(&clip_id, next.clone());
+                t.record_executed_command(
+                    EditCommand::SetClipStretch {
+                        clip_id: clip_id.clone(),
+                        prev,
+                        next,
+                        prev_duration_beats: len,
+                        next_duration_beats: len,
+                    },
+                    cx,
+                );
+                true
+            });
+            if changed {
+                inspector_debug(&format!("clip warp clear clip={clip_id}"));
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
+                    this.mark_dirty();
+                    this.mark_engine_media_dirty();
+                    this.schedule_audio_project_sync(cx, false, "inspector_clip_warp_clear");
                     cx.notify();
                 });
             }
@@ -470,6 +700,56 @@ impl StudioLayout {
                         ));
                         this.mark_dirty();
                         this.engine_project_dirty = true;
+                        this.push_mixer_snapshot_to_window(cx);
+                        cx.notify();
+                    }
+                });
+            },
+        )
+    }
+
+    /// Drag-reorder commit. The drop handler supplies the dragged
+    /// `plugin_instance_id` and the insertion gap; we snapshot the current id
+    /// order, compute the new order, and apply it as a single
+    /// [`EditCommand::ReorderFxSlot`] so one drag is one undo entry. The command
+    /// only reorders existing slots (never recreates an instance), so bypass /
+    /// preset / parameter / editor / automation state follow each instance. A
+    /// forced project sync rebuilds the engine's chain order (DSP order == UI
+    /// order); editor windows are keyed by instance id, so they stay attached.
+    fn reorder_insert_cb(&self, owner: Entity<Self>) -> InsertReorderCb {
+        Arc::new(
+            move |(track_id, insert_id, insertion_index): &(String, String, usize), _w, cx| {
+                let track_id = track_id.clone();
+                let insert_id = insert_id.clone();
+                let insertion_index = *insertion_index;
+                StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                    let changed = this.timeline.update(cx, |timeline, cx| {
+                        let before = timeline.state.insert_order(&track_id);
+                        let after = TimelineState::reordered_insert_ids(
+                            &before,
+                            &insert_id,
+                            insertion_index,
+                        );
+                        if before == after {
+                            return false;
+                        }
+                        timeline.run_edit_command(
+                            EditCommand::ReorderFxSlot {
+                                track_id: track_id.clone(),
+                                before_order: before,
+                                after_order: after,
+                            },
+                            cx,
+                        );
+                        true
+                    });
+                    if changed {
+                        inspector_debug(&format!(
+                            "insert reorder track={track_id} insert={insert_id} gap={insertion_index}"
+                        ));
+                        this.mark_dirty();
+                        this.engine_project_dirty = true;
+                        this.schedule_audio_project_sync(cx, true, "inspector_reorder_insert");
                         this.push_mixer_snapshot_to_window(cx);
                         cx.notify();
                     }

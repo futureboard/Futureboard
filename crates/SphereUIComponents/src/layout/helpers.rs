@@ -169,6 +169,7 @@ pub(super) fn update_meter_clip(clip: &mut bool, raw_peak_l: f64, raw_peak_r: f6
 pub(super) fn find_clip_summary<'a>(
     tracks: &'a [TrackState],
     clip_id: Option<&str>,
+    project_bpm: f64,
 ) -> Option<crate::components::panel::SelectedClipSummary<'a>> {
     let id = clip_id?;
     for t in tracks {
@@ -195,6 +196,8 @@ pub(super) fn find_clip_summary<'a>(
                 note_count,
                 kind,
                 track_name: &t.name,
+                stretch: &c.stretch,
+                project_bpm,
             });
         }
     }

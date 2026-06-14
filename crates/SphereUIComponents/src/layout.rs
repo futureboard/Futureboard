@@ -1276,6 +1276,21 @@ impl StudioLayout {
                         target: ContextTarget::Browser(path),
                         ..
                     }) => path.clone(),
+                    Some(OpenPopover::Context {
+                        target: ContextTarget::Clip(clip_id),
+                        ..
+                    }) => self
+                        .timeline
+                        .read(cx)
+                        .state
+                        .find_clip(clip_id)
+                        .and_then(|(_, clip)| match &clip.clip_type {
+                            ClipType::Audio {
+                                source_path: Some(path),
+                                ..
+                            } if !path.is_empty() => Some(PathBuf::from(path)),
+                            _ => None,
+                        }),
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1453,16 +1468,28 @@ impl StudioLayout {
             "automation:toggle-mode" => self.toggle_selected_track_automation_mode(cx),
             "automation:cycle-target" => self.cycle_selected_track_automation_target(cx),
             "edit:undo" => {
-                let _ = self.timeline.update(cx, |timeline, cx| {
-                    timeline.undo_edit(cx);
-                });
+                let undone = self
+                    .timeline
+                    .update(cx, |timeline, cx| timeline.undo_edit(cx));
                 self.mark_dirty();
+                if undone {
+                    // An undone edit may change the project's audio graph (FX
+                    // chain order, track/insert restore, …). Flag the engine
+                    // dirty so the next poll re-syncs; the sync is signature-
+                    // gated, so this is a no-op when audio is unaffected.
+                    self.engine_project_dirty = true;
+                    self.schedule_audio_project_sync(cx, false, "edit_undo");
+                }
             }
             "edit:redo" => {
-                let _ = self.timeline.update(cx, |timeline, cx| {
-                    timeline.redo_edit(cx);
-                });
+                let redone = self
+                    .timeline
+                    .update(cx, |timeline, cx| timeline.redo_edit(cx));
                 self.mark_dirty();
+                if redone {
+                    self.engine_project_dirty = true;
+                    self.schedule_audio_project_sync(cx, false, "edit_redo");
+                }
             }
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
             "clip:split-at-playhead" => self.split_selected_audio_clip_at_playhead(cx),

@@ -1,16 +1,29 @@
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::timeline::timeline_state::{
-    self, ClipType, InsertSlotState, MidiControllerKind, TimelineState, TrackState, TrackType,
-    MASTER_TRACK_ID,
+    self, ClipType, InsertSlotState, MidiControllerKind, StretchMode, TimelineState, TrackState,
+    TrackType, MASTER_TRACK_ID,
 };
 
 use DAUx::types::{
     EngineAutomationLaneSnapshot, EngineAutomationPointSnapshot, EngineAutomationTargetSnapshot,
-    EngineClipAudioProcess, EngineClipSnapshot, EngineInsertSnapshot, EngineMidiClipSnapshot,
-    EngineMidiControllerLane, EngineMidiControllerPoint, EngineMidiNoteSnapshot,
-    EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot, EngineTempoPointSnapshot,
-    EngineTrackInputSourceSnapshot, EngineTrackSnapshot,
+    EngineClipAudioProcess, EngineClipSnapshot, EngineFadeSnapshot, EngineInsertSnapshot,
+    EngineMidiClipSnapshot, EngineMidiControllerLane, EngineMidiControllerPoint,
+    EngineMidiNoteSnapshot, EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot,
+    EngineTempoPointSnapshot, EngineTrackInputSourceSnapshot, EngineTrackSnapshot,
+    EngineWarpMarkerSnapshot,
 };
+
+/// Canonical engine `mode` key for a clip's stretch mode (matches
+/// `runtime::resolve_clip_processor`).
+fn stretch_mode_key(mode: StretchMode) -> &'static str {
+    match mode {
+        StretchMode::Off => "off",
+        StretchMode::Resample => "resample",
+        StretchMode::TempoSync => "temposync",
+        StretchMode::Manual => "manual",
+        StretchMode::Warp => "warp",
+    }
+}
 
 /// Map a controller lane kind to its VST3 controller number, or `None` for
 /// kinds with no global controller mapping (poly pressure is per-note and not
@@ -425,6 +438,38 @@ fn build_engine_project_snapshot_inner(
                     return None;
                 }
 
+                // Resolve the non-destructive stretch/pitch state into the
+                // engine's render parameters. `speed_ratio` folds time-stretch
+                // and pitch (see `AudioClipStretchState::resample_speed_ratio`);
+                // the clip's `duration_beats` already reflects the ratio (the
+                // inspector couples length to ratio), so playback and export —
+                // which share `render_project_block_interleaved` — stay in sync.
+                //
+                // `ClipState::gain` and track pan remain the canonical gain/pan
+                // sources for this slice. The stored stretch gain/pan fields are
+                // intentionally not applied here so the engine cannot double-gain
+                // a clip before the inspector is migrated to a single process
+                // state.
+                let stretch = &clip.stretch;
+                let project_bpm = state.bpm.max(1.0) as f64;
+                let effective_time_ratio = stretch.effective_time_ratio(project_bpm);
+                let pitch_ratio = timeline_state::AudioClipStretchState::pitch_ratio_from_semitones(
+                    stretch.pitch_shift_semitones,
+                );
+                let preserve_pitch =
+                    matches!(stretch.mode, StretchMode::Manual | StretchMode::TempoSync)
+                        && stretch.preserve_pitch;
+                let fades = if stretch.fade_in_ms > 0.0 || stretch.fade_out_ms > 0.0 {
+                    Some(EngineFadeSnapshot {
+                        in_duration: (stretch.fade_in_ms.max(0.0) as f64) / 1000.0,
+                        out_duration: (stretch.fade_out_ms.max(0.0) as f64) / 1000.0,
+                        in_curve: "linear".to_string(),
+                        out_curve: "linear".to_string(),
+                    })
+                } else {
+                    None
+                };
+
                 Some(EngineClipSnapshot {
                     id: clip.id.clone(),
                     track_id: track.id.clone(),
@@ -435,13 +480,32 @@ fn build_engine_project_snapshot_inner(
                     offset_seconds: state.beats_to_seconds(clip.offset_beats.max(0.0)) as f64,
                     gain: clip.gain.clamp(0.0, 4.0),
                     muted: clip.muted,
-                    fades: None,
+                    fades,
                     audio_process: Some(EngineClipAudioProcess {
-                        speed_ratio: 1.0,
-                        pitch_semitones: 0.0,
-                        preserve_pitch: false,
-                        mode: "none".to_string(),
-                        quality: "balanced".to_string(),
+                        speed_ratio: stretch.resample_speed_ratio(project_bpm),
+                        effective_time_ratio,
+                        pitch_ratio,
+                        pitch_semitones: stretch.pitch_shift_semitones as f64,
+                        preserve_pitch,
+                        mode: stretch_mode_key(stretch.mode).to_string(),
+                        quality: stretch.algorithm.label().to_string(),
+                        source_start_samples: stretch.source_start_samples,
+                        source_end_samples: stretch.source_end_samples,
+                        warp_markers: {
+                            let mut markers: Vec<_> = stretch
+                                .warp_markers
+                                .iter()
+                                .map(|marker| EngineWarpMarkerSnapshot {
+                                    id: marker.id,
+                                    source_sample: marker.source_sample,
+                                    timeline_beat: marker.timeline_beat,
+                                    locked: marker.locked,
+                                })
+                                .collect();
+                            markers.sort_by(|a, b| a.timeline_beat.total_cmp(&b.timeline_beat));
+                            markers
+                        },
+                        reverse: stretch.reverse,
                     }),
                 })
             })
@@ -652,6 +716,34 @@ mod tests {
         (state, clip_id)
     }
 
+    fn audio_state_with_clip() -> (TimelineState, String) {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Audio".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let clip_id = state.insert_audio_clip_with_duration(
+            track_id,
+            "C:/audio/loop.wav".to_string(),
+            "loop".to_string(),
+            0.0,
+            4.0,
+            Some(2.0),
+        );
+        (state, clip_id)
+    }
+
     #[test]
     fn muted_notes_excluded_from_engine_snapshot() {
         let (mut state, clip_id) = instrument_state_with_clip();
@@ -739,6 +831,73 @@ mod tests {
         );
         assert_eq!(track.inserts[0].id, slot_a);
         assert_eq!(track.inserts[1].id, slot_b);
+    }
+
+    #[test]
+    fn resample_snapshot_ignores_preserve_pitch() {
+        let (mut state, clip_id) = audio_state_with_clip();
+        let mut stretch = state.clip_stretch(&clip_id).cloned().unwrap();
+        stretch.mode = StretchMode::Resample;
+        stretch.preserve_pitch = true;
+        state.set_clip_stretch(&clip_id, stretch);
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let process = snap.clips[0].audio_process.as_ref().unwrap();
+        assert_eq!(process.mode, "resample");
+        assert!(!process.preserve_pitch);
+    }
+
+    #[test]
+    fn manual_snapshot_routes_preserve_pitch_and_pitch_values() {
+        let (mut state, clip_id) = audio_state_with_clip();
+        let mut stretch = state.clip_stretch(&clip_id).cloned().unwrap();
+        stretch.mode = StretchMode::Manual;
+        stretch.preserve_pitch = true;
+        stretch.pitch_shift_semitones = 12.5;
+        state.set_clip_stretch(&clip_id, stretch);
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let process = snap.clips[0].audio_process.as_ref().unwrap();
+        assert_eq!(process.mode, "manual");
+        assert!(process.preserve_pitch);
+        assert!((process.pitch_semitones - 12.5).abs() < 1e-6);
+        assert!(
+            (process.pitch_ratio
+                - timeline_state::AudioClipStretchState::pitch_ratio_from_semitones(12.5))
+            .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn warp_markers_reach_engine_snapshot_sorted() {
+        let (mut state, clip_id) = audio_state_with_clip();
+        let mut stretch = state.clip_stretch(&clip_id).cloned().unwrap();
+        stretch.mode = StretchMode::Warp;
+        stretch.set_stretch_ratio(2.0);
+        stretch.warp_markers = vec![
+            timeline_state::WarpMarker {
+                id: 2,
+                source_sample: 2_000,
+                timeline_beat: 3.0,
+                locked: false,
+            },
+            timeline_state::WarpMarker {
+                id: 1,
+                source_sample: 1_000,
+                timeline_beat: 1.0,
+                locked: true,
+            },
+        ];
+        state.set_clip_stretch(&clip_id, stretch);
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let process = snap.clips[0].audio_process.as_ref().unwrap();
+        assert_eq!(process.mode, "warp");
+        assert_eq!(process.warp_markers.len(), 2);
+        assert_eq!(process.warp_markers[0].id, 1);
+        assert_eq!(process.warp_markers[1].id, 2);
+        assert!((process.effective_time_ratio - 2.0).abs() < 1e-9);
     }
 
     #[test]

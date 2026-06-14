@@ -1,7 +1,8 @@
 //! Undo/redo edit commands — all timeline mutations go through here.
 
 use crate::components::timeline::timeline_state::{
-    ClipState, MidiControllerKind, MidiControllerPoint, MidiNoteState, TimelineState, TrackState,
+    AudioClipStretchState, ClipState, MidiControllerKind, MidiControllerPoint, MidiNoteState,
+    TimelineState, TrackState,
 };
 
 /// Snapshot of a clip plus its owning track for undo/redo.
@@ -112,6 +113,29 @@ pub enum EditCommand {
         original: MidiNoteState,
         parts: Vec<MidiNoteState>,
     },
+    /// Set an audio clip's non-destructive stretch/pitch state. `prev`/`next`
+    /// snapshot the whole struct so one inspector edit (or one stretch-drag
+    /// gesture) is a single, perfectly reversible undo entry. The clip's
+    /// timeline length is coupled to the time-stretch ratio (so visual =
+    /// audible length, spec §10), hence the duration is snapshotted too.
+    SetClipStretch {
+        clip_id: String,
+        prev: AudioClipStretchState,
+        next: AudioClipStretchState,
+        prev_duration_beats: f32,
+        next_duration_beats: f32,
+    },
+    /// Reorder a track's FX / insert chain. Stores the full before/after
+    /// slot-id order so undo and redo are exact regardless of how the new order
+    /// was computed (drag gap math lives in the drop handler, not here). The
+    /// operation only reorders the existing slots — it never recreates a plugin
+    /// instance — so bypass / enabled / preset / parameter / editor state all
+    /// follow each `plugin_instance_id`. One undo entry per completed drag.
+    ReorderFxSlot {
+        track_id: String,
+        before_order: Vec<String>,
+        after_order: Vec<String>,
+    },
 }
 
 impl EditCommand {
@@ -136,6 +160,8 @@ impl EditCommand {
             EditCommand::EditMidiNotes { .. } => "Edit MIDI Notes",
             EditCommand::SetControllerPoints { .. } => "Edit CC Lane",
             EditCommand::SplitMidiNote { .. } => "Split MIDI Note",
+            EditCommand::SetClipStretch { .. } => "Edit Stretch",
+            EditCommand::ReorderFxSlot { .. } => "Reorder FX",
         }
     }
 
@@ -245,6 +271,22 @@ impl EditCommand {
                 }
                 state.expand_clip_to_contain_notes(clip_id);
             }
+            EditCommand::SetClipStretch {
+                clip_id,
+                next,
+                next_duration_beats,
+                ..
+            } => {
+                state.set_clip_stretch(clip_id, next.clone());
+                state.set_clip_length(clip_id, *next_duration_beats);
+            }
+            EditCommand::ReorderFxSlot {
+                track_id,
+                after_order,
+                ..
+            } => {
+                state.set_insert_order(track_id, after_order);
+            }
         }
     }
 
@@ -327,6 +369,22 @@ impl EditCommand {
                 }
                 state.expand_clip_to_contain_notes(clip_id);
             }
+            EditCommand::SetClipStretch {
+                clip_id,
+                prev,
+                prev_duration_beats,
+                ..
+            } => {
+                state.set_clip_stretch(clip_id, prev.clone());
+                state.set_clip_length(clip_id, *prev_duration_beats);
+            }
+            EditCommand::ReorderFxSlot {
+                track_id,
+                before_order,
+                ..
+            } => {
+                state.set_insert_order(track_id, before_order);
+            }
         }
     }
 }
@@ -336,6 +394,49 @@ fn restore_clip_snapshot(state: &mut TimelineState, snapshot: &ClipSnapshot) {
         if !track.clips.iter().any(|c| c.id == snapshot.clip.id) {
             track.clips.push(snapshot.clip.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod stretch_command_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::StretchMode;
+
+    #[test]
+    fn set_clip_stretch_executes_undoes_and_redoes() {
+        let mut state = TimelineState::demo_project();
+        let prev = state
+            .clip_stretch("clip-1")
+            .cloned()
+            .expect("demo audio clip-1");
+        let prev_len = state.clip_duration_beats("clip-1").expect("clip-1 length");
+        let mut next = prev.clone();
+        next.mode = StretchMode::Manual;
+        next.set_stretch_ratio(1.5);
+        let next_len = prev_len * 1.5; // length follows the ratio (spec §10)
+        assert_ne!(prev, next, "test setup must produce a real change");
+
+        let cmd = EditCommand::SetClipStretch {
+            clip_id: "clip-1".to_string(),
+            prev: prev.clone(),
+            next: next.clone(),
+            prev_duration_beats: prev_len,
+            next_duration_beats: next_len,
+        };
+        assert_eq!(cmd.label(), "Edit Stretch");
+
+        cmd.execute(&mut state);
+        assert_eq!(state.clip_stretch("clip-1"), Some(&next));
+        assert!((state.clip_duration_beats("clip-1").unwrap() - next_len).abs() < 0.001);
+
+        cmd.undo(&mut state);
+        assert_eq!(state.clip_stretch("clip-1"), Some(&prev));
+        assert!((state.clip_duration_beats("clip-1").unwrap() - prev_len).abs() < 0.001);
+
+        // Redo re-applies `next` and its coupled length.
+        cmd.execute(&mut state);
+        assert_eq!(state.clip_stretch("clip-1"), Some(&next));
+        assert!((state.clip_duration_beats("clip-1").unwrap() - next_len).abs() < 0.001);
     }
 }
 

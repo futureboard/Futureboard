@@ -45,6 +45,7 @@ impl TimelineState {
             },
             muted: false,
             audio_import: AudioImportState::Pending,
+            stretch: AudioClipStretchState::default(),
         };
         if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             track.clips.push(clip);

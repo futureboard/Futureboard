@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::audio_source::ClipAudioSource;
 use crate::engine::{render_project_block_interleaved, schedule_midi_render_block};
-use crate::runtime::RuntimeProject;
+use crate::runtime::{clip_dsp_debug_enabled, describe_clip_dsp_state, RuntimeProject};
 use crate::types::EngineProjectSnapshot;
 
 use super::render_progress::{ExportCancelToken, ExportProgress, ExportStage};
@@ -62,6 +62,17 @@ pub fn render_offline(
     let block = request.block_size.max(1);
     let ts_num = snapshot.time_signature[0].max(1);
     let ts_den = snapshot.time_signature[1].max(1);
+
+    if clip_dsp_debug_enabled() {
+        for clip in &snapshot.clips {
+            if let Some(process) = &clip.audio_process {
+                eprintln!(
+                    "[clip-dsp][export-start] {}",
+                    describe_clip_dsp_state(clip, process, snapshot.bpm)
+                );
+            }
+        }
+    }
 
     // The kernel renders stereo (channels >= 2). We always render into a 2-ch
     // scratch and fold down to mono on output when requested.

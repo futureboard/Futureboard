@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use super::viewport::TimelineViewport;
 use crate::components::timeline::timeline_state::{
-    ClipState, ClipType, GridLineLevel, TimelineState, TrackState, TRACK_HEIGHT,
+    clip_output_local_to_source_sample, ClipState, ClipType, GridLineLevel, TimelineState,
+    TrackState, TRACK_HEIGHT,
 };
 use crate::components::timeline::waveform_cache::{
     self, WaveformDisplayStatus, CHUNK_PEAKS, PEAK_FINE_SPP,
@@ -351,18 +352,41 @@ fn waveform_handle_for_clip(
         _ => (PEAK_FINE_SPP as u32, 0),
     };
 
-    let src_start = clip.offset_beats.max(0.0) as f64 * state.seconds_per_beat() as f64;
-    let clip_dur = (clip.duration_beats as f64 * state.seconds_per_beat() as f64).max(1e-6);
-    let frac0 = 0.0_f64;
-    let frac1 = 1.0_f64;
-    let t0 = src_start + frac0 * clip_dur;
-    let t1 = src_start + frac1 * clip_dur;
     let sample_rate = waveform_cache::get_file_status(asset_key)
         .ready_meta()
         .map(|m| m.sample_rate)
         .unwrap_or(48_000);
-    let p0 = time_to_peak_index(t0, sample_rate, samples_per_peak as usize);
-    let p1 = time_to_peak_index(t1, sample_rate, samples_per_peak as usize)
+    let source_start = clip.stretch.source_start_samples;
+    let effective_time_ratio = clip.stretch.effective_time_ratio(state.bpm as f64);
+    let source_end = if clip.stretch.source_end_samples > source_start {
+        clip.stretch.source_end_samples
+    } else {
+        let source_duration_beats =
+            clip.duration_beats.max(0.0) as f64 / effective_time_ratio.max(1e-6);
+        ((clip.offset_beats.max(0.0) as f64 + source_duration_beats)
+            * state.seconds_per_beat() as f64
+            * sample_rate as f64)
+            .round()
+            .max(source_start as f64) as u64
+    };
+    let output_len =
+        (source_end.saturating_sub(source_start) as f64 * effective_time_ratio).max(1.0);
+    let s0 = clip_output_local_to_source_sample(
+        0.0,
+        source_start,
+        source_end,
+        effective_time_ratio,
+        clip.stretch.reverse,
+    );
+    let s1 = clip_output_local_to_source_sample(
+        output_len,
+        source_start,
+        source_end,
+        effective_time_ratio,
+        clip.stretch.reverse,
+    );
+    let p0 = sample_to_peak_index(s0.min(s1), samples_per_peak as usize);
+    let p1 = sample_to_peak_index(s0.max(s1), samples_per_peak as usize)
         .max(p0)
         .min(peak_count.saturating_sub(1));
 
@@ -377,9 +401,8 @@ fn waveform_handle_for_clip(
     }
 }
 
-fn time_to_peak_index(time_sec: f64, sample_rate: u32, samples_per_peak: usize) -> usize {
-    let frame = (time_sec * sample_rate as f64).max(0.0) as usize;
-    frame / samples_per_peak.max(1)
+fn sample_to_peak_index(sample: f64, samples_per_peak: usize) -> usize {
+    sample.max(0.0) as usize / samples_per_peak.max(1)
 }
 
 fn build_bar_shades(state: &TimelineState, viewport: &TimelineViewport) -> Vec<BarShadeSnapshot> {

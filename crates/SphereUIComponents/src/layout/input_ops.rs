@@ -12,6 +12,35 @@ use crate::components::timeline::timeline_state::{ClipType, TrackType};
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
 use super::project_ops::ProjectOpenOptions;
 use super::{ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
+
+fn menu_item_enabled(
+    label: impl Into<String>,
+    command: impl Into<String>,
+    enabled: bool,
+) -> ContextMenuEntry {
+    let label = label.into();
+    let command = command.into();
+    if enabled {
+        ContextMenuEntry::item(label, command)
+    } else {
+        ContextMenuEntry::disabled_item(label, command)
+    }
+}
+
+fn danger_menu_item_enabled(
+    label: impl Into<String>,
+    command: impl Into<String>,
+    enabled: bool,
+) -> ContextMenuEntry {
+    let label = label.into();
+    let command = command.into();
+    if enabled {
+        ContextMenuEntry::danger_item(label, command)
+    } else {
+        ContextMenuEntry::disabled_item(label, command)
+    }
+}
+
 impl StudioLayout {
     pub(super) fn command_palette_visible_count(&self) -> usize {
         crate::components::command_palette_entries(&self.command_palette.query).len()
@@ -705,78 +734,154 @@ impl StudioLayout {
                 ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
                 ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
                 ContextMenuEntry::Separator,
-                ContextMenuEntry::item("Paste", "edit:paste").with_shortcut("Ctrl+V"),
+                menu_item_enabled("Paste", "edit:paste", !self.clip_clipboard.is_empty())
+                    .with_shortcut("Ctrl+V"),
                 ContextMenuEntry::Separator,
                 ContextMenuEntry::item("Zoom In", "view:zoom-in"),
                 ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
             ],
+            ContextTarget::TrackLane { .. } => {
+                let split_enabled = {
+                    let state = &self.timeline.read(cx).state;
+                    state.selection.selected_clip_ids.iter().any(|id| {
+                        state.find_clip(id).is_some_and(|(_, clip)| {
+                            let playhead = state.transport.playhead_beats;
+                            matches!(clip.clip_type, ClipType::Audio { .. })
+                                && playhead > clip.start_beat + 0.25
+                                && playhead < clip.start_beat + clip.duration_beats - 0.25
+                        })
+                    })
+                };
+                vec![
+                    menu_item_enabled("Paste", "edit:paste", !self.clip_clipboard.is_empty())
+                        .with_shortcut("Ctrl+V"),
+                    menu_item_enabled("Split at Playhead", "clip:split-at-playhead", split_enabled),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
+                    ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Zoom In", "view:zoom-in"),
+                    ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+                ]
+            }
             ContextTarget::Clip(clip_id) => {
                 let clip_info = self.timeline.read(cx).state.find_clip(clip_id);
                 let exists = clip_info.is_some();
                 let is_midi =
                     clip_info.is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }));
+                let is_audio =
+                    clip_info.is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Audio { .. }));
+                let reveal_enabled = clip_info.is_some_and(|(_, c)| {
+                    matches!(
+                        &c.clip_type,
+                        ClipType::Audio {
+                            source_path: Some(path),
+                            ..
+                        } if !path.is_empty()
+                    )
+                });
+                let split_enabled = clip_info.is_some_and(|(_, c)| {
+                    let state = &self.timeline.read(cx).state;
+                    let playhead = state.transport.playhead_beats;
+                    is_audio
+                        && playhead > c.start_beat + 0.25
+                        && playhead < c.start_beat + c.duration_beats - 0.25
+                });
+                let selected_count = self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .selection
+                    .selected_clip_ids
+                    .len();
                 let mut entries = Vec::new();
                 if is_midi {
-                    entries.push(ContextMenuEntry::item(
+                    entries.push(menu_item_enabled(
                         "Open in Bottom Editor",
                         "editor:open-bottom",
+                        exists,
                     ));
-                    entries.push(ContextMenuEntry::item(
+                    entries.push(menu_item_enabled(
                         "Open in New MIDI Editor Window",
                         "midi:open-editor",
+                        exists,
                     ));
                     entries.push(ContextMenuEntry::Separator);
                 }
-                entries.push(ContextMenuEntry::disabled_item("Rename", "clip:rename"));
+                entries.push(menu_item_enabled("Rename", "clip:rename", exists));
                 entries.push(
-                    ContextMenuEntry::item("Duplicate", "clip:duplicate").with_shortcut("Ctrl+D"),
+                    menu_item_enabled("Duplicate", "clip:duplicate", exists || selected_count > 0)
+                        .with_shortcut("Ctrl+D"),
                 );
-                entries.push(ContextMenuEntry::danger_item("Delete", "clip:delete"));
+                entries.push(danger_menu_item_enabled(
+                    "Delete",
+                    "clip:delete",
+                    exists || selected_count > 0,
+                ));
                 entries.push(ContextMenuEntry::Separator);
-                entries.push(ContextMenuEntry::item(
+                entries.push(menu_item_enabled(
                     "Split at Playhead",
                     "clip:split-at-playhead",
+                    split_enabled,
                 ));
-                entries.push(ContextMenuEntry::disabled_item(
-                    if exists {
-                        "Reveal in Browser"
-                    } else {
-                        "Clip unavailable"
-                    },
-                    "browser:reveal",
+                if is_audio {
+                    entries.push(menu_item_enabled(
+                        if exists {
+                            "Reveal in Browser"
+                        } else {
+                            "Clip unavailable"
+                        },
+                        "browser:reveal",
+                        reveal_enabled,
+                    ));
+                }
+                if is_midi {
+                    entries.push(menu_item_enabled("Quantize", "midi:quantize", exists));
+                }
+                entries.push(ContextMenuEntry::Separator);
+                entries.push(menu_item_enabled(
+                    "Clip Properties",
+                    "clip:properties",
+                    exists,
                 ));
                 entries
             }
             ContextTarget::Track(track_id) => {
                 let track = self.timeline.read(cx).state.find_track(track_id).cloned();
-                let (muted, solo, armed) = track
-                    .as_ref()
-                    .map(|t| (t.muted, t.solo, t.armed))
-                    .unwrap_or((false, false, false));
-                let automation_on = track
-                    .as_ref()
-                    .map(|t| {
-                        t.lane_mode
-                            == crate::components::timeline::timeline_state::TrackLaneMode::Automation
-                    })
-                    .unwrap_or(false);
+                let exists = track.is_some();
                 vec![
-                    ContextMenuEntry::disabled_item("Rename Track", "track:rename"),
-                    ContextMenuEntry::disabled_item("Duplicate Track", "track:duplicate"),
-                    ContextMenuEntry::danger_item("Delete Track", "track:delete"),
+                    menu_item_enabled("Rename Track", "track:rename", exists),
+                    menu_item_enabled("Duplicate Track", "track:duplicate", false),
+                    danger_menu_item_enabled("Delete Track", "track:delete", exists),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::checked_item("Mute", "track:mute", muted),
-                    ContextMenuEntry::checked_item("Solo", "track:solo", solo),
-                    ContextMenuEntry::checked_item("Arm", "track:arm", armed),
+                    ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
+                    ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::checked_item(
-                        "Automation Mode",
-                        "automation:toggle-mode",
-                        automation_on,
-                    ),
-                    ContextMenuEntry::item("Cycle Automation Target", "automation:cycle-target"),
+                    menu_item_enabled("Track Color", "track:color", exists),
+                    menu_item_enabled("Track Settings", "track:settings", exists),
                 ]
             }
+            ContextTarget::TimelineMarker { beat, .. } => {
+                let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);
+                vec![
+                    ContextMenuEntry::disabled_item(format!("Marker at {label}"), "noop"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Add Marker", "ruler:add-marker"),
+                    ContextMenuEntry::item("Add Tempo Marker", "ruler:add-tempo-marker"),
+                    ContextMenuEntry::item("Add Time Signature Marker", "ruler:add-ts-marker"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Zoom In", "view:zoom-in"),
+                    ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+                ]
+            }
+            ContextTarget::AutomationLane { .. } => vec![
+                ContextMenuEntry::item("Cycle Automation Target", "automation:cycle-target"),
+                ContextMenuEntry::item("Select All Points", "automation:select-all-points"),
+                ContextMenuEntry::item("Clear Selection", "automation:clear-selection"),
+                ContextMenuEntry::Separator,
+                ContextMenuEntry::item("Zoom In", "view:zoom-in"),
+                ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+            ],
             ContextTarget::Browser(path_opt) => {
                 let mut entries = Vec::new();
                 if let Some(path) = path_opt {

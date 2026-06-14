@@ -407,6 +407,7 @@ mod audio_asset_key_tests {
             },
             muted: false,
             audio_import: AudioImportState::Pending,
+            stretch: AudioClipStretchState::default(),
         }
     }
 
@@ -471,6 +472,15 @@ mod audio_asset_key_tests {
                 .map(|(_, clip)| &clip.audio_import),
             Some(&AudioImportState::Ready)
         );
+    }
+
+    #[test]
+    fn stretch_ratio_change_keeps_waveform_cache_key_stable() {
+        let mut clip = audio_clip("asset-1", Some("C:/a/loop.wav"));
+        let before = clip.audio_asset_key().map(str::to_string);
+        clip.stretch.mode = StretchMode::Manual;
+        clip.stretch.set_stretch_ratio(2.0);
+        assert_eq!(clip.audio_asset_key(), before.as_deref());
     }
 }
 
@@ -995,5 +1005,158 @@ mod midi_edit_tests {
         assert_eq!(moved.normalized_range(), (1.0, 2.0));
         assert_eq!(state.regions[0].id, late, "regions stay sorted by start");
         assert_eq!(state.regions[1].id, early);
+    }
+}
+
+/// FX-chain drag reorder (Slice B): model order ops, the gap-math helper, and
+/// the `ReorderFxSlot` undo command. Verifies reorder never recreates instances
+/// and that per-instance state (bypass / preset / parameters) follows the id.
+#[cfg(test)]
+mod fx_reorder_tests {
+    use super::*;
+    use crate::components::edit::edit_commands::{EditCommand, EditHistory};
+
+    /// Audio track with three effect inserts loaded; returns (track_id, [a,b,c]).
+    fn track_with_three_fx(state: &mut TimelineState) -> (String, [String; 3]) {
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Audio".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let mut ids = Vec::new();
+        for (i, name) in ["fx-a", "fx-b", "fx-c"].iter().enumerate() {
+            let slot = state.ensure_insert_slot_at(&track_id, i).expect("slot");
+            state.set_insert_plugin(
+                &track_id,
+                &slot,
+                name.to_string(),
+                Some(std::path::PathBuf::from(format!("C:/p/{name}.vst3"))),
+                InsertPluginFormat::Vst3,
+                name.to_string(),
+            );
+            ids.push(slot);
+        }
+        (track_id, [ids[0].clone(), ids[1].clone(), ids[2].clone()])
+    }
+
+    #[test]
+    fn set_insert_order_reorders_in_place_and_reports_change() {
+        let mut state = TimelineState::default();
+        let (track, [a, b, c]) = track_with_three_fx(&mut state);
+
+        // A,B,C -> B,A,C
+        assert!(state.set_insert_order(&track, &[b.clone(), a.clone(), c.clone()]));
+        assert_eq!(state.insert_order(&track), vec![b.clone(), a.clone(), c.clone()]);
+        // Idempotent: re-applying the same order is a no-op (no undo churn).
+        assert!(!state.set_insert_order(&track, &[b.clone(), a.clone(), c.clone()]));
+    }
+
+    #[test]
+    fn reorder_preserves_per_instance_state() {
+        let mut state = TimelineState::default();
+        let (track, [a, b, c]) = track_with_three_fx(&mut state);
+
+        // Bypass B and give it a captured plugin-state blob + a parameter.
+        assert_eq!(state.toggle_insert_bypass(&track, &b), Some(true));
+        {
+            let slot = state
+                .insert_slots_mut(&track)
+                .unwrap()
+                .iter_mut()
+                .find(|s| s.id == b)
+                .unwrap();
+            slot.vst3_state = Some(std::sync::Arc::new(vec![1, 2, 3, 4]));
+            slot.parameters.push(PluginParameterState {
+                id: 7,
+                name: "Cutoff".to_string(),
+                value_normalized: 0.5,
+            });
+        }
+
+        // Reorder B to the front.
+        state.set_insert_order(&track, &[b.clone(), a.clone(), c.clone()]);
+
+        let slot_b = state.find_insert_slot(&track, &b).expect("b survives");
+        assert_eq!(slot_b.id, b, "instance id is unchanged by reorder");
+        assert!(slot_b.bypassed, "bypass follows the instance");
+        assert_eq!(
+            slot_b.vst3_state.as_deref(),
+            Some(&vec![1, 2, 3, 4]),
+            "preset/state follows the instance"
+        );
+        assert_eq!(slot_b.parameters.len(), 1, "parameters follow the instance");
+        // Sanity: still exactly three slots, no recreation, A and C intact.
+        assert_eq!(state.insert_order(&track), vec![b, a, c]);
+    }
+
+    #[test]
+    fn reordered_insert_ids_gap_math() {
+        let ids = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        // Move A down into the B|C gap (gap 2) -> B,A,C.
+        assert_eq!(
+            TimelineState::reordered_insert_ids(&ids, "A", 2),
+            vec!["B", "A", "C"]
+        );
+        // Move C up into the A|B gap (gap 1) -> A,C,B.
+        assert_eq!(
+            TimelineState::reordered_insert_ids(&ids, "C", 1),
+            vec!["A", "C", "B"]
+        );
+        // Drop into the same place (gap 0 / gap before itself) is a no-op.
+        assert_eq!(
+            TimelineState::reordered_insert_ids(&ids, "A", 0),
+            vec!["A", "B", "C"]
+        );
+        // Drop at the very end (gap == len) -> append.
+        assert_eq!(
+            TimelineState::reordered_insert_ids(&ids, "A", 3),
+            vec!["B", "C", "A"]
+        );
+        // Unknown id leaves the order untouched.
+        assert_eq!(
+            TimelineState::reordered_insert_ids(&ids, "Z", 1),
+            vec!["A", "B", "C"]
+        );
+    }
+
+    #[test]
+    fn reorder_fx_slot_command_undo_redo_is_exact() {
+        let mut state = TimelineState::default();
+        let (track, [a, b, c]) = track_with_three_fx(&mut state);
+        let before = state.insert_order(&track); // [a,b,c]
+        let after = vec![b.clone(), a.clone(), c.clone()]; // [b,a,c]
+
+        let mut history = EditHistory::new(16);
+        let cmd = EditCommand::ReorderFxSlot {
+            track_id: track.clone(),
+            before_order: before.clone(),
+            after_order: after.clone(),
+        };
+        cmd.execute(&mut state);
+        history.push(cmd);
+        assert_eq!(state.insert_order(&track), after, "execute applies new order");
+
+        assert!(history.undo(&mut state));
+        assert_eq!(state.insert_order(&track), before, "undo restores order");
+
+        assert!(history.redo(&mut state));
+        assert_eq!(state.insert_order(&track), after, "redo re-applies order");
+
+        // Instance ids are stable across the whole cycle (no recreation).
+        let mut sorted = state.insert_order(&track);
+        sorted.sort();
+        let mut expected = vec![a, b, c];
+        expected.sort();
+        assert_eq!(sorted, expected);
     }
 }

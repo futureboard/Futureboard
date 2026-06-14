@@ -17,6 +17,7 @@ pub mod file_browser;
 pub mod form;
 mod icon;
 mod icon_button;
+pub mod inspector;
 pub mod knob;
 pub mod menu_bar;
 pub mod menu_dropdown;
@@ -37,6 +38,7 @@ pub mod plugin_picker;
 pub mod plugin_shell_text;
 pub mod progress_dialog;
 pub mod project_switcher;
+pub mod reorder;
 pub mod settings_components;
 pub mod settings_dialog;
 pub mod settings_layout;
@@ -84,6 +86,10 @@ pub use editor_panel::ClipEditorPanel;
 pub use fader::fader;
 pub use icon::icon;
 pub use icon_button::icon_button;
+pub use inspector::{
+    inspector_checkbox, inspector_hint_text, inspector_mini_button, inspector_numeric_stepper,
+    inspector_row, inspector_section, inspector_select, inspector_value, InspectorSelectOption,
+};
 pub use knob::knob;
 pub use menu_bar::{menu_bar, menu_label_button};
 pub use message_box_dialog::{

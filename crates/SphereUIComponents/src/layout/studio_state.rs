@@ -45,8 +45,21 @@ pub(super) struct TextContextMenu {
 #[derive(Debug, Clone)]
 pub enum ContextTarget {
     TimelineEmpty,
+    TrackLane {
+        track_id: String,
+        beat: f64,
+    },
     Track(String),
     Clip(String),
+    TimelineMarker {
+        marker_id: String,
+        beat: f64,
+    },
+    AutomationLane {
+        track_id: String,
+        lane_id: String,
+        beat: f64,
+    },
     Browser(Option<PathBuf>),
     Mixer(String),
     SendPicker {

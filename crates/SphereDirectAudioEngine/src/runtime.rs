@@ -16,7 +16,8 @@ use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPlugi
 
 use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint};
 use crate::types::{
-    EngineAutomationLaneSnapshot, EngineClipSnapshot, EngineMidiClipSnapshot, EngineProjectSnapshot,
+    EngineAutomationLaneSnapshot, EngineClipAudioProcess, EngineClipSnapshot,
+    EngineMidiClipSnapshot, EngineProjectSnapshot,
 };
 use crate::vst3_processor::{vst3_midi_debug_enabled, Vst3MidiEvent, Vst3RuntimeProcessor};
 
@@ -430,6 +431,16 @@ pub struct RuntimeClip {
     pub offset_seconds: f64,
     pub gain: f32,
     pub speed_ratio: f32,
+    pub effective_time_ratio: f32,
+    pub pitch_ratio: f32,
+    pub source_start_samples: u64,
+    pub source_end_samples: u64,
+    pub warp_markers: Vec<RuntimeWarpMarker>,
+    pub processor: ClipDspProcessor,
+    /// Play the source window backwards (resolved from the snapshot's
+    /// `audio_process.reverse`). The render maps output → source from the clip
+    /// end instead of the start; `speed_ratio` is unchanged.
+    pub reverse: bool,
     /// Clip-level mute — a muted clip is skipped entirely during render.
     pub muted: bool,
     /// Linear fade lengths in output samples, resolved from the snapshot's
@@ -439,6 +450,16 @@ pub struct RuntimeClip {
     pub fade_in_samples: u64,
     pub fade_out_samples: u64,
     pub source: Arc<ClipAudioSource>,
+}
+
+pub type AudioClip = EngineClipSnapshot;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeWarpMarker {
+    pub id: u64,
+    pub source_sample: u64,
+    pub timeline_beat: f64,
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2310,6 +2331,83 @@ fn build_midi_runtime(
     (clips, midi_tracks)
 }
 
+/// `FUTUREBOARD_CLIP_DSP_DEBUG=1` enables a one-line-per-clip diagnostic of the
+/// resolved stretch DSP path, printed once at graph-build time (never from the
+/// audio callback). Cached on first read.
+pub fn clip_dsp_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_CLIP_DSP_DEBUG").is_some())
+}
+
+/// The clip-stretch DSP path resolved for a clip. `PhaseVocoderBasic` is a
+/// basic streaming OLA/granular stretcher today; the enum keeps processor
+/// selection explicit and leaves room for a higher-quality phase vocoder without
+/// changing snapshot/runtime wiring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipDspProcessor {
+    NoStretch,
+    Resample,
+    PhaseVocoderBasic,
+}
+
+/// Resolve the DSP path from the snapshot's `mode` key (see
+/// `engine_snapshot::stretch_mode_key`) and `preserve_pitch` flag.
+pub fn resolve_clip_processor(mode: &str, preserve_pitch: bool) -> ClipDspProcessor {
+    match mode {
+        "off" | "none" => ClipDspProcessor::NoStretch,
+        "resample" => ClipDspProcessor::Resample,
+        "manual" | "temposync" => {
+            if preserve_pitch {
+                ClipDspProcessor::PhaseVocoderBasic
+            } else {
+                ClipDspProcessor::Resample
+            }
+        }
+        "warp" => ClipDspProcessor::PhaseVocoderBasic,
+        _ => ClipDspProcessor::Resample,
+    }
+}
+
+pub fn describe_clip_dsp_state(
+    clip: &AudioClip,
+    process: &EngineClipAudioProcess,
+    project_bpm: f64,
+) -> String {
+    let processor = resolve_clip_processor(&process.mode, process.preserve_pitch);
+    let pending = if matches!(processor, ClipDspProcessor::PhaseVocoderBasic)
+        && process.pitch_semitones.abs() > f64::EPSILON
+    {
+        " pitch_shift=pending"
+    } else {
+        ""
+    };
+    let duration_samples = process
+        .source_end_samples
+        .saturating_sub(process.source_start_samples) as f64
+        * process.effective_time_ratio.max(0.0);
+    format!(
+        "Clip DSP Snapshot: clip_id={} name={} mode={} ratio={:.6} percent={:.2} algorithm={} effective_time_ratio={:.6} pitch_ratio={:.6} speed_ratio={:.6} preserve_pitch={} reverse={} duration_samples={} source_start={} source_end={} processor={:?}{} warp_markers={} project_bpm={:.3}",
+        clip.id,
+        clip.asset_id,
+        process.mode,
+        process.effective_time_ratio,
+        process.effective_time_ratio * 100.0,
+        process.quality,
+        process.effective_time_ratio,
+        process.pitch_ratio,
+        process.speed_ratio,
+        process.preserve_pitch,
+        process.reverse,
+        duration_samples.round() as u64,
+        process.source_start_samples,
+        process.source_end_samples,
+        processor,
+        pending,
+        process.warp_markers.len(),
+        project_bpm,
+    )
+}
+
 fn build_clip_runtime(
     clip: &EngineClipSnapshot,
     source: Arc<ClipAudioSource>,
@@ -2332,6 +2430,65 @@ fn build_clip_runtime(
         .map(|p| p.speed_ratio as f32)
         .unwrap_or(1.0)
         .clamp(0.01, 16.0);
+    let effective_time_ratio = clip
+        .audio_process
+        .as_ref()
+        .map(|p| p.effective_time_ratio as f32)
+        .unwrap_or(1.0)
+        .clamp(0.01, 20.0);
+    let pitch_ratio = clip
+        .audio_process
+        .as_ref()
+        .map(|p| p.pitch_ratio as f32)
+        .unwrap_or(1.0)
+        .clamp(0.01, 16.0);
+    let processor = clip
+        .audio_process
+        .as_ref()
+        .map(|p| resolve_clip_processor(&p.mode, p.preserve_pitch))
+        .unwrap_or(ClipDspProcessor::NoStretch);
+    let reverse = clip
+        .audio_process
+        .as_ref()
+        .map(|p| p.reverse)
+        .unwrap_or(false);
+    let source_start_samples = clip
+        .audio_process
+        .as_ref()
+        .map(|p| p.source_start_samples)
+        .unwrap_or(0);
+    let source_end_samples = clip
+        .audio_process
+        .as_ref()
+        .map(|p| p.source_end_samples)
+        .unwrap_or(0);
+    let mut warp_markers: Vec<RuntimeWarpMarker> = clip
+        .audio_process
+        .as_ref()
+        .map(|p| {
+            p.warp_markers
+                .iter()
+                .map(|m| RuntimeWarpMarker {
+                    id: m.id,
+                    source_sample: m.source_sample,
+                    timeline_beat: m.timeline_beat,
+                    locked: m.locked,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    warp_markers.sort_by(|a, b| a.timeline_beat.total_cmp(&b.timeline_beat));
+
+    // One-time, control-thread-only diagnostic of the resolved clip DSP path
+    // (never logs from the audio callback). Gated behind a debug flag.
+    if clip_dsp_debug_enabled() {
+        if let Some(p) = clip.audio_process.as_ref() {
+            eprintln!(
+                "[clip-dsp] {}",
+                describe_clip_dsp_state(clip, p, beats_per_second * 60.0)
+            );
+        }
+    }
 
     let duration_samples = seconds_to_samples(duration_seconds, output_sample_rate).max(1);
 
@@ -2358,6 +2515,13 @@ fn build_clip_runtime(
         offset_seconds: clip.offset_seconds.max(0.0),
         gain: clip.gain.clamp(0.0, 4.0),
         speed_ratio,
+        effective_time_ratio,
+        pitch_ratio,
+        source_start_samples,
+        source_end_samples,
+        warp_markers,
+        processor,
+        reverse,
         muted: clip.muted,
         fade_in_samples,
         fade_out_samples,

@@ -351,6 +351,10 @@ pub struct ProjectClip {
     pub gain: f32,
     pub muted: bool,
     pub source: ClipSource,
+    /// Non-destructive clip-level stretch / pitch state (persisted v16+). Loads
+    /// as [`AudioClipStretchState::default`] (mode Off, ratio 1.0) for older
+    /// projects.
+    pub stretch: AudioClipStretchState,
 }
 
 #[derive(Debug, Clone)]
@@ -536,8 +540,8 @@ pub fn hex_to_rgba(hex: &str) -> gpui::Rgba {
 // ── From TimelineState ────────────────────────────────────────────────────────
 
 use crate::components::timeline::timeline_state::{
-    ClipType, InsertSlotState, TimelineMarkerState, TimelineRegionState, TimelineState,
-    TrackType as TlTrackType,
+    AudioClipStretchState, ClipType, InsertSlotState, TimelineMarkerState, TimelineRegionState,
+    TimelineState, TrackType as TlTrackType,
 };
 
 fn timeline_insert_to_project(idx: usize, slot: &InsertSlotState) -> ProjectInsert {
@@ -736,6 +740,7 @@ impl From<&TimelineState> for FutureboardProject {
                             gain: c.gain,
                             muted: c.muted,
                             source,
+                            stretch: c.stretch.clone(),
                         }
                     })
                     .collect();
@@ -1039,6 +1044,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         clip_type,
                         muted: pc.muted,
                         audio_import: crate::components::timeline::timeline_state::AudioImportState::default(),
+                        stretch: pc.stretch.clone(),
                     }
                 })
                 .collect();

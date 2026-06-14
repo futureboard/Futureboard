@@ -6,6 +6,9 @@ use super::{
     ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting,
     ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
 };
+use crate::components::timeline::timeline_state::{
+    AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
+};
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 
@@ -22,7 +25,10 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// dedup. Pre-v11 files have no asset fingerprint and load with `None`.
 /// v13 adds timeline markers and regions. v14 adds internal RAUF clip sources.
 /// v15 adds persisted master-bus inserts.
-pub const PROJECT_VERSION: u32 = 15;
+/// v16 adds a per-clip non-destructive stretch/pitch block (mode, algorithm,
+/// ratio, BPM pair, pitch/formant/transient/fade/gain/pan, warp markers). Pre-v16
+/// clips load with [`AudioClipStretchState::default`] (mode Off, ratio 1.0).
+pub const PROJECT_VERSION: u32 = 16;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -473,6 +479,41 @@ fn encode_controller_lane(w: &mut FbWriter, lane: &MidiControllerLane) {
     }
 }
 
+/// v16: per-clip non-destructive stretch/pitch block. `dirty` is transient and
+/// intentionally not persisted (decodes as `false`).
+fn encode_stretch(w: &mut FbWriter, s: &AudioClipStretchState) {
+    w.write_u8(s.mode.to_tag());
+    w.write_u8(s.algorithm.to_tag());
+    w.write_u32(s.original_sample_rate);
+    w.write_u32(s.project_sample_rate);
+    w.write_u64(s.original_duration_samples);
+    w.write_u64(s.source_start_samples);
+    w.write_u64(s.source_end_samples);
+    w.write_f64(s.clip_timeline_start_beats);
+    w.write_f64(s.clip_timeline_duration_beats);
+    w.write_f64(s.stretch_ratio);
+    w.write_opt_f64(&s.bpm_source);
+    w.write_opt_f64(&s.bpm_target);
+    w.write_bool(s.preserve_pitch);
+    w.write_f32(s.pitch_shift_semitones);
+    w.write_bool(s.formant_preserve);
+    w.write_bool(s.transient_preserve);
+    w.write_f32(s.transient_sensitivity);
+    w.write_bool(s.reverse);
+    w.write_bool(s.normalize_gain);
+    w.write_f32(s.fade_in_ms);
+    w.write_f32(s.fade_out_ms);
+    w.write_f32(s.gain_db);
+    w.write_f32(s.pan);
+    w.write_u32(s.warp_markers.len() as u32);
+    for m in &s.warp_markers {
+        w.write_u64(m.id);
+        w.write_u64(m.source_sample);
+        w.write_f64(m.timeline_beat);
+        w.write_bool(m.locked);
+    }
+}
+
 fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
     w.write_str(&c.id);
     w.write_str(&c.name);
@@ -527,6 +568,8 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
             }
         }
     }
+    // v16: stretch/pitch block trails the source for every clip.
+    encode_stretch(w, &c.stretch);
 }
 
 fn encode_input_monitor(w: &mut FbWriter, m: InputMonitorMode) {
@@ -921,6 +964,71 @@ fn decode_controller_lane(r: &mut FbReader) -> Result<MidiControllerLane, Projec
     })
 }
 
+/// v16: per-clip stretch/pitch block. See [`encode_stretch`].
+fn decode_stretch(r: &mut FbReader) -> Result<AudioClipStretchState, ProjectError> {
+    let mode = StretchMode::from_tag(r.read_u8()?);
+    let algorithm = StretchAlgorithm::from_tag(r.read_u8()?);
+    let original_sample_rate = r.read_u32()?;
+    let project_sample_rate = r.read_u32()?;
+    let original_duration_samples = r.read_u64()?;
+    let source_start_samples = r.read_u64()?;
+    let source_end_samples = r.read_u64()?;
+    let clip_timeline_start_beats = r.read_f64()?;
+    let clip_timeline_duration_beats = r.read_f64()?;
+    let stretch_ratio = r.read_f64()?;
+    let bpm_source = r.read_opt_f64()?;
+    let bpm_target = r.read_opt_f64()?;
+    let preserve_pitch = r.read_bool()?;
+    let pitch_shift_semitones = r.read_f32()?;
+    let formant_preserve = r.read_bool()?;
+    let transient_preserve = r.read_bool()?;
+    let transient_sensitivity = r.read_f32()?;
+    let reverse = r.read_bool()?;
+    let normalize_gain = r.read_bool()?;
+    let fade_in_ms = r.read_f32()?;
+    let fade_out_ms = r.read_f32()?;
+    let gain_db = r.read_f32()?;
+    let pan = r.read_f32()?;
+    let marker_count = r.read_u32()? as usize;
+    let mut warp_markers = Vec::with_capacity(marker_count);
+    for _ in 0..marker_count {
+        warp_markers.push(WarpMarker {
+            id: r.read_u64()?,
+            source_sample: r.read_u64()?,
+            timeline_beat: r.read_f64()?,
+            locked: r.read_bool()?,
+        });
+    }
+    Ok(AudioClipStretchState {
+        mode,
+        algorithm,
+        original_sample_rate,
+        project_sample_rate,
+        original_duration_samples,
+        source_start_samples,
+        source_end_samples,
+        clip_timeline_start_beats,
+        clip_timeline_duration_beats,
+        stretch_ratio,
+        bpm_source,
+        bpm_target,
+        preserve_pitch,
+        pitch_shift_semitones,
+        formant_preserve,
+        transient_preserve,
+        transient_sensitivity,
+        reverse,
+        normalize_gain,
+        fade_in_ms,
+        fade_out_ms,
+        gain_db,
+        pan,
+        // Transient: a freshly loaded clip is not pending re-process.
+        dirty: false,
+        warp_markers,
+    })
+}
+
 fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectError> {
     let id = r.read_str()?;
     let name = r.read_str()?;
@@ -973,6 +1081,13 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
             )))
         }
     };
+    // v16: stretch/pitch block trails the source. Older files have none and
+    // default to an un-stretched clip.
+    let stretch = if version >= 16 {
+        decode_stretch(r)?
+    } else {
+        AudioClipStretchState::default()
+    };
     Ok(ProjectClip {
         id,
         name,
@@ -982,6 +1097,7 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
         gain,
         muted,
         source,
+        stretch,
     })
 }
 
@@ -1696,5 +1812,138 @@ mod tests {
             let mut r = FbReader::new(&bytes);
             assert_eq!(decode_controller_kind(&mut r).unwrap(), kind);
         }
+    }
+
+    fn sample_stretch() -> AudioClipStretchState {
+        AudioClipStretchState {
+            mode: StretchMode::TempoSync,
+            algorithm: StretchAlgorithm::PhaseVocoder,
+            original_sample_rate: 44_100,
+            project_sample_rate: 48_000,
+            original_duration_samples: 88_200,
+            source_start_samples: 100,
+            source_end_samples: 80_000,
+            clip_timeline_start_beats: 4.0,
+            clip_timeline_duration_beats: 8.0,
+            stretch_ratio: 0.857_142_857,
+            bpm_source: Some(120.0),
+            bpm_target: Some(140.0),
+            preserve_pitch: true,
+            pitch_shift_semitones: -3.0,
+            formant_preserve: true,
+            transient_preserve: false,
+            transient_sensitivity: 0.65,
+            reverse: true,
+            normalize_gain: true,
+            fade_in_ms: 5.0,
+            fade_out_ms: 12.5,
+            gain_db: -2.0,
+            pan: -0.25,
+            dirty: false,
+            warp_markers: vec![
+                WarpMarker {
+                    id: 1,
+                    source_sample: 0,
+                    timeline_beat: 0.0,
+                    locked: true,
+                },
+                WarpMarker {
+                    id: 2,
+                    source_sample: 22_050,
+                    timeline_beat: 2.0,
+                    locked: false,
+                },
+            ],
+        }
+    }
+
+    fn empty_clip_with_stretch(stretch: AudioClipStretchState) -> ProjectClip {
+        ProjectClip {
+            id: "c1".to_string(),
+            name: "clip".to_string(),
+            start_beat: 1.0,
+            duration_beats: 4.0,
+            offset_beats: 0.0,
+            gain: 1.0,
+            muted: false,
+            source: ClipSource::Empty,
+            stretch,
+        }
+    }
+
+    #[test]
+    fn stretch_roundtrips_v16() {
+        let clip = empty_clip_with_stretch(sample_stretch());
+        let mut w = FbWriter::new();
+        encode_clip(&mut w, &clip);
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_clip(&mut r, PROJECT_VERSION).unwrap();
+        assert_eq!(decoded.stretch, clip.stretch);
+    }
+
+    #[test]
+    fn warp_marker_serialization() {
+        let clip = empty_clip_with_stretch(sample_stretch());
+        let mut w = FbWriter::new();
+        encode_clip(&mut w, &clip);
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_clip(&mut r, PROJECT_VERSION).unwrap();
+        assert_eq!(decoded.stretch.warp_markers.len(), 2);
+        assert_eq!(decoded.stretch.warp_markers[1].source_sample, 22_050);
+        assert!(decoded.stretch.warp_markers[0].locked);
+    }
+
+    #[test]
+    fn old_project_load_defaults() {
+        // Hand-encode a pre-v16 clip body (no stretch trailer) and decode at v15:
+        // the clip must fall back to the un-stretched defaults (spec §13).
+        let mut w = FbWriter::new();
+        w.write_str("c1");
+        w.write_str("clip");
+        w.write_f64(0.0);
+        w.write_f64(4.0);
+        w.write_f32(0.0);
+        w.write_f32(1.0);
+        w.write_bool(false);
+        w.write_u8(0); // ClipSource::Empty
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_clip(&mut r, 15).unwrap();
+        assert_eq!(decoded.stretch, AudioClipStretchState::default());
+        assert_eq!(decoded.stretch.mode, StretchMode::Off);
+        assert_eq!(decoded.stretch.stretch_ratio, 1.0);
+        assert!(decoded.stretch.preserve_pitch);
+    }
+
+    fn track_with_clip(clip: ProjectClip) -> ProjectTrack {
+        ProjectTrack {
+            id: "t1".to_string(),
+            name: "Audio 1".to_string(),
+            track_type: ProjectTrackType::Audio,
+            color_hex: "#56C7C9".to_string(),
+            volume_norm: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_arm: false,
+            input_monitor: InputMonitorMode::Off,
+            routing: TrackRouting::default(),
+            inserts: Vec::new(),
+            automation_lanes: Vec::new(),
+            clips: vec![clip],
+        }
+    }
+
+    #[test]
+    fn stretch_survives_full_project_roundtrip() {
+        let mut project = FutureboardProject::new("Stretch");
+        project
+            .tracks
+            .push(track_with_clip(empty_clip_with_stretch(sample_stretch())));
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode");
+        assert_eq!(decoded.tracks[0].clips[0].stretch, sample_stretch());
     }
 }

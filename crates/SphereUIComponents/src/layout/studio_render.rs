@@ -105,13 +105,14 @@ impl Render for StudioLayout {
         // Pull the live track list and current selection out of the Timeline so
         // the Mixer and Inspector render against the same data the TrackHeader
         // sees. Cloning the Vec is cheap relative to a full render.
-        let (tracks, master, selected_track_id, selected_clip_id) = {
+        let (tracks, master, selected_track_id, selected_clip_id, project_bpm) = {
             let t = self.timeline.read(cx);
             (
                 t.state.tracks.clone(),
                 t.state.master.clone(),
                 t.state.selection.selected_track_id.clone(),
                 t.state.selection.selected_clip_ids.first().cloned(),
+                t.state.bpm as f64,
             )
         };
 
@@ -368,6 +369,9 @@ impl Render for StudioLayout {
                     let _ = this.update(cx, |this, cx| {
                         let context_target = match target {
                             TimelineContextTarget::TimelineEmpty => ContextTarget::TimelineEmpty,
+                            TimelineContextTarget::TrackLane { track_id, beat } => {
+                                ContextTarget::TrackLane { track_id, beat }
+                            }
                             TimelineContextTarget::TrackHeader(id) => {
                                 let _ = this.timeline.update(cx, |timeline, cx| {
                                     timeline.state.select_track(&id);
@@ -382,6 +386,37 @@ impl Render for StudioLayout {
                                 });
                                 ContextTarget::Clip(id)
                             }
+                            TimelineContextTarget::AudioClip { clip_id, .. }
+                            | TimelineContextTarget::MidiClip { clip_id, .. } => {
+                                let _ = this.timeline.update(cx, |timeline, cx| {
+                                    // Context-click convention for arrangement clips:
+                                    // unselected clip becomes the sole context target;
+                                    // selected clip preserves the current multi-selection.
+                                    if !timeline
+                                        .state
+                                        .selection
+                                        .selected_clip_ids
+                                        .iter()
+                                        .any(|id| id == &clip_id)
+                                    {
+                                        timeline.state.select_clip(&clip_id);
+                                        cx.notify();
+                                    }
+                                });
+                                ContextTarget::Clip(clip_id)
+                            }
+                            TimelineContextTarget::Marker { marker_id, beat } => {
+                                ContextTarget::TimelineMarker { marker_id, beat }
+                            }
+                            TimelineContextTarget::AutomationLane {
+                                track_id,
+                                lane_id,
+                                beat,
+                            } => ContextTarget::AutomationLane {
+                                track_id,
+                                lane_id,
+                                beat,
+                            },
                             TimelineContextTarget::Ruler(beat) => {
                                 ContextTarget::TimelineRuler { beat }
                             }
@@ -1160,7 +1195,7 @@ impl Render for StudioLayout {
                             &tracks,
                             selected_track_id.as_deref(),
                             selected_clip_id.as_deref(),
-                            find_clip_summary(&tracks, selected_clip_id.as_deref()),
+                            find_clip_summary(&tracks, selected_clip_id.as_deref(), project_bpm),
                             &self.inspector_name_input,
                             inspector_name_focused,
                             &self.inspector_clip_name_input,

@@ -1,4 +1,6 @@
-use super::timeline_state::{AudioImportState, ClipState, TimelineState};
+use super::timeline_state::{
+    clip_output_local_to_source_sample, AudioImportState, ClipState, TimelineState,
+};
 use super::waveform_cache::{self, WaveformDisplayStatus, WaveformPeak};
 use crate::theme::Colors;
 use gpui::{
@@ -161,8 +163,21 @@ fn draw_chunk_waveform_locked(
     let desired_spp =
         waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate);
     let spp = waveform_cache::best_available_samples_per_peak_in_entry(entry, desired_spp);
-    let src_start = clip.offset_beats.max(0.0) as f64 * state.seconds_per_beat() as f64;
-    let clip_dur = (clip.duration_beats as f64 * state.seconds_per_beat() as f64).max(1e-6);
+    let source_start = clip.stretch.source_start_samples;
+    let effective_time_ratio = clip.stretch.effective_time_ratio(state.bpm as f64);
+    let source_end = if clip.stretch.source_end_samples > source_start {
+        clip.stretch.source_end_samples
+    } else {
+        let source_duration_beats =
+            clip.duration_beats.max(0.0) as f64 / effective_time_ratio.max(1e-6);
+        ((clip.offset_beats.max(0.0) as f64 + source_duration_beats)
+            * state.seconds_per_beat() as f64
+            * meta.sample_rate as f64)
+            .round()
+            .max(source_start as f64) as u64
+    };
+    let output_len =
+        (source_end.saturating_sub(source_start) as f64 * effective_time_ratio).max(1.0);
 
     let h = 48.0_f32;
     let center = h / 2.0;
@@ -173,12 +188,24 @@ fn draw_chunk_waveform_locked(
     for col in 0..num_cols {
         let x0 = visible_start + col as f32;
         let x1 = x0 + 1.0;
-        let frac0 = ((x0 as f64) / clip_w).clamp(0.0, 1.0);
-        let frac1 = ((x1 as f64) / clip_w).clamp(0.0, 1.0);
-        let t0 = src_start + frac0 * clip_dur;
-        let t1 = src_start + frac1 * clip_dur;
-        let p0 = time_to_peak_index(t0, meta.sample_rate, spp);
-        let p1 = time_to_peak_index(t1, meta.sample_rate, spp).max(p0);
+        let out0 = ((x0 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
+        let out1 = ((x1 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
+        let s0 = clip_output_local_to_source_sample(
+            out0,
+            source_start,
+            source_end,
+            effective_time_ratio,
+            clip.stretch.reverse,
+        );
+        let s1 = clip_output_local_to_source_sample(
+            out1,
+            source_start,
+            source_end,
+            effective_time_ratio,
+            clip.stretch.reverse,
+        );
+        let p0 = sample_to_peak_index(s0.min(s1), spp);
+        let p1 = sample_to_peak_index(s0.max(s1), spp).max(p0);
         let WaveformPeak { min, max } =
             waveform_cache::aggregate_peak_range_in_entry(entry, spp, p0, p1 + 1);
         if min == 0.0 && max == 0.0 {
@@ -217,9 +244,8 @@ fn draw_chunk_waveform_locked(
         .child(element)
 }
 
-fn time_to_peak_index(time_sec: f64, sample_rate: u32, samples_per_peak: usize) -> usize {
-    let frame = (time_sec * sample_rate as f64).max(0.0) as usize;
-    frame / samples_per_peak.max(1)
+fn sample_to_peak_index(sample: f64, samples_per_peak: usize) -> usize {
+    sample.max(0.0) as usize / samples_per_peak.max(1)
 }
 
 fn draw_preview_waveform(

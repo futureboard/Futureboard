@@ -1,0 +1,1924 @@
+//! Split out of `piano_roll.rs` (god-file decomposition). These are
+//! `impl PianoRoll` extension blocks; `use super::*` pulls in the shared
+//! piano-roll vocabulary (struct fields via the type, consts, free fns).
+
+use super::*;
+
+impl PianoRoll {
+    pub(super) fn display_note(&self, n: &MidiNoteState) -> DisplayNote {
+        let mut start = n.start;
+        let mut pitch = n.pitch;
+        let mut duration = n.duration;
+        match &self.drag {
+            PianoDrag::Move {
+                prev,
+                dx_beats,
+                dpitch,
+                ..
+            } => {
+                if prev.iter().any(|(id, _, _)| *id == n.id) {
+                    // Snap the absolute resulting start (WebUI semantics), not
+                    // the raw delta, so notes always land on the grid.
+                    start = self.snap_beats(n.start + dx_beats);
+                    pitch = (n.pitch as i32 + dpitch).clamp(0, 127) as u8;
+                }
+            }
+            PianoDrag::Resize { id, new_dur, .. } if *id == n.id => {
+                duration = *new_dur;
+            }
+            _ => {}
+        }
+        DisplayNote {
+            id: n.id,
+            pitch,
+            start,
+            duration,
+            velocity: n.velocity,
+        }
+    }
+
+    pub(super) fn note_to_rect(&self, note: &DisplayNote) -> (f32, f32, f32, f32) {
+        let x = self.beat_to_x(note.start);
+        let w = (note.duration * self.ppb).max(3.0);
+        let y = self.pitch_to_y(note.pitch) + 1.0;
+        let h = ROW_H - 2.0;
+        (x, y, x + w, y + h)
+    }
+
+    pub(super) fn marquee_hits(
+        &self,
+        cx: &Context<Self>,
+        clip_id: &str,
+        marquee: (f32, f32, f32, f32),
+    ) -> HashSet<u64> {
+        let tl = self.timeline.read(cx);
+        let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
+            return HashSet::new();
+        };
+        notes
+            .iter()
+            .filter(|n| {
+                let d = self.display_note(n);
+                Self::rects_intersect(marquee, self.note_to_rect(&d))
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+
+    pub(super) fn build_draw_note_preview(&self) -> Option<gpui::AnyElement> {
+        let PianoDrag::DrawNote {
+            pitch,
+            start_beat,
+            end_beat,
+        } = &self.drag
+        else {
+            return None;
+        };
+        let (lo, hi) = normalize_range(*start_beat, *end_beat);
+        let step = self.step_beats().max(MIN_NOTE_BEATS);
+        let duration = (hi - lo).max(step);
+        let x = self.beat_to_x(lo);
+        let w = (duration * self.ppb).max(3.0);
+        let y = self.pitch_to_y(*pitch);
+        Some(
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(y + 1.0))
+                .w(px(w))
+                .h(px(ROW_H - 2.0))
+                .rounded(px(2.0))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.35))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.85))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn build_erase_overlay(&self) -> Option<gpui::AnyElement> {
+        let PianoDrag::EraseNotes {
+            start_x,
+            start_y,
+            current_x,
+            current_y,
+            ..
+        } = &self.drag
+        else {
+            return None;
+        };
+        let (view_w, view_h) = self.grid_view_size();
+        let (left, top, right, bottom) = Self::normalized_marquee_rect(
+            *start_x, *start_y, *current_x, *current_y, view_w, view_h,
+        );
+        let w = (right - left).max(0.0);
+        let h = (bottom - top).max(0.0);
+        if w < 1.0 && h < 1.0 {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(w.max(1.0)))
+                .h(px(h.max(1.0)))
+                .bg(Colors::with_alpha(Colors::status_error(), 0.12))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::status_error(), 0.75))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn build_marquee_overlay(&self) -> Option<gpui::AnyElement> {
+        let PianoDrag::MarqueeSelect {
+            start_x,
+            start_y,
+            current_x,
+            current_y,
+            dragging: true,
+            ..
+        } = &self.drag
+        else {
+            return None;
+        };
+
+        let (view_w, view_h) = self.grid_view_size();
+        let (left, top, right, bottom) = Self::normalized_marquee_rect(
+            *start_x, *start_y, *current_x, *current_y, view_w, view_h,
+        );
+        let w = (right - left).max(0.0);
+        let h = (bottom - top).max(0.0);
+        if w < 1.0 || h < 1.0 {
+            return None;
+        }
+
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(w))
+                .h(px(h))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.15))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.85))
+                .into_any_element(),
+        )
+    }
+}
+
+impl Render for PianoRoll {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_lost_subscription.is_none() {
+            self.focus_lost_subscription = Some(cx.on_focus_lost(window, |this, _window, cx| {
+                if !matches!(this.drag, PianoDrag::None) || this.active_preview_note.is_some() {
+                    this.cancel_active_gesture(cx);
+                }
+            }));
+        }
+
+        let clip_id = self.editing_clip_id(cx);
+        self.prune_transient_state(cx, clip_id.as_deref());
+
+        if clip_id != self.last_editing_clip {
+            // Editing target changed (clip/track switch) — stop any audition note
+            // before it strands on the previous track's instrument.
+            if self.active_preview_note.is_some() {
+                self.preview_all_notes_off("clip_change", cx);
+            }
+            if midi_debug_enabled() {
+                if let Some(cid) = clip_id.as_deref() {
+                    let tl = self.timeline.read(cx);
+                    let track_id = tl
+                        .state
+                        .tracks
+                        .iter()
+                        .find(|t| t.clips.iter().any(|c| c.id == cid))
+                        .map(|t| t.id.as_str())
+                        .unwrap_or("<none>");
+                    let notes = tl.state.midi_clip_notes(cid).map(|n| n.len()).unwrap_or(0);
+                    eprintln!(
+                        "[midi] open_editor clip_id={} track_id={} notes={}",
+                        cid, track_id, notes
+                    );
+                }
+            }
+            self.last_editing_clip = clip_id.clone();
+            self.fitted_clip_id = None;
+        }
+
+        if let Some(cid) = clip_id.as_deref() {
+            if self.fitted_clip_id.as_deref() != Some(cid) {
+                self.fit_piano_roll_to_notes(cx, cid);
+                self.fitted_clip_id = Some(cid.to_string());
+            }
+        }
+
+        // Toolbar is always shown; the body shows a hint when no MIDI clip is
+        // selected.
+        let toolbar = self.render_toolbar(cx, clip_id.as_deref());
+
+        let body: gpui::AnyElement = match clip_id {
+            Some(cid) => self.render_body(cx, &cid).into_any_element(),
+            None => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.0))
+                .text_color(Colors::text_muted())
+                .child("Select or double-click a MIDI clip to edit")
+                .into_any_element(),
+        };
+
+        div()
+            .key_context("PianoRoll")
+            .track_focus(&self.focus)
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(Colors::surface_base())
+            .on_key_down(cx.listener(Self::on_key))
+            .on_mouse_move(cx.listener(Self::on_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_up))
+            .on_scroll_wheel(cx.listener(Self::on_wheel))
+            .child(toolbar)
+            .child(body)
+    }
+}
+
+impl PianoRoll {
+    /// Compact selector for the single controller lane: a button showing the
+    /// active lane that opens a dropdown of choices (Velocity / common CCs /
+    /// pitch-bend / pressure / custom CC), plus a collapse toggle. Alt+wheel on
+    /// the button cycles lanes. Replaces the old "Lane / +Lane / −Lane" trio —
+    /// switching here only changes what the one lane shows, never the data.
+    pub(super) fn render_lane_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.current_lane();
+        let label = format!("Lane: {}", self.lane_name());
+        let open = self.lane_menu_open;
+        let visible = self.lane_visible;
+        let custom = self.custom_cc;
+
+        let mut dropdown: Option<gpui::Div> = None;
+        if open {
+            let mut panel = div()
+                .absolute()
+                .top(px(26.0))
+                .left_0()
+                .w(px(176.0))
+                .flex()
+                .flex_col()
+                .p(px(3.0))
+                .gap(px(1.0))
+                .rounded(px(6.0))
+                .bg(Colors::surface_card())
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation());
+            for (i, kind) in LANE_CYCLE.iter().enumerate() {
+                let kind = *kind;
+                let selected = kind == current;
+                let text = match kind {
+                    ControllerLaneKind::Velocity => "Velocity".to_string(),
+                    ControllerLaneKind::Controller(k) => cc_kind_label(k),
+                };
+                panel = panel.child(
+                    div()
+                        .id(("pr-lane-opt", i))
+                        .flex()
+                        .items_center()
+                        .h(px(20.0))
+                        .px(px(7.0))
+                        .rounded(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(if selected {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_secondary()
+                        })
+                        .hover(|s| s.bg(Colors::surface_hover()))
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.set_lane(kind, cx);
+                        }))
+                        .child(text),
+                );
+            }
+            // Custom CC row: − / CCnn (select) / + . Steppers keep the menu open.
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(22.0))
+                    .px(px(4.0))
+                    .mt(px(2.0))
+                    .border_t(px(1.0))
+                    .border_color(Colors::divider())
+                    .child(
+                        div()
+                            .id(("pr-lane-custom", 0usize))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(16.0))
+                            .rounded(px(3.0))
+                            .text_size(px(11.0))
+                            .text_color(Colors::text_secondary())
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(|this, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.custom_cc = this.custom_cc.saturating_sub(1);
+                                cx.notify();
+                            }))
+                            .child("−"),
+                    )
+                    .child(
+                        div()
+                            .id(("pr-lane-custom", 1usize))
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(18.0))
+                            .rounded(px(3.0))
+                            .text_size(px(10.0))
+                            .text_color(
+                                if current
+                                    == ControllerLaneKind::Controller(MidiControllerKind::CC(
+                                        custom,
+                                    ))
+                                {
+                                    Colors::accent_primary()
+                                } else {
+                                    Colors::text_primary()
+                                },
+                            )
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.set_lane(
+                                    ControllerLaneKind::Controller(MidiControllerKind::CC(
+                                        this.custom_cc,
+                                    )),
+                                    cx,
+                                )
+                            }))
+                            .child(format!("Custom CC{custom}")),
+                    )
+                    .child(
+                        div()
+                            .id(("pr-lane-custom", 2usize))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(16.0))
+                            .rounded(px(3.0))
+                            .text_size(px(11.0))
+                            .text_color(Colors::text_secondary())
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(|this, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.custom_cc = (this.custom_cc + 1).min(127);
+                                cx.notify();
+                            }))
+                            .child("+"),
+                    ),
+            );
+            dropdown = Some(panel);
+        }
+
+        div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .occlude()
+            .child(
+                div()
+                    .id("pr-lane-select")
+                    .flex()
+                    .items_center()
+                    .h(px(22.0))
+                    .min_w(px(122.0))
+                    .pl(px(7.0))
+                    .pr(px(5.0))
+                    .gap(px(6.0))
+                    .rounded(px(4.0))
+                    .text_size(px(10.0))
+                    .text_color(if open {
+                        Colors::text_primary()
+                    } else {
+                        Colors::text_secondary()
+                    })
+                    .bg(if open {
+                        Colors::surface_hover()
+                    } else {
+                        Colors::with_alpha(Colors::text_primary(), 0.0)
+                    })
+                    .border(px(1.0))
+                    .border_color(if open {
+                        Colors::border_subtle()
+                    } else {
+                        Colors::with_alpha(Colors::text_primary(), 0.0)
+                    })
+                    .hover(|s| s.bg(Colors::surface_hover()))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.lane_menu_open = !this.lane_menu_open;
+                        cx.notify();
+                    }))
+                    // Alt + mouse wheel cycles lanes (Part 7 optional shortcut).
+                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _w, cx| {
+                        if !ev.modifiers.alt {
+                            return;
+                        }
+                        let dy = match ev.delta {
+                            gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
+                            gpui::ScrollDelta::Lines(p) => p.y,
+                        };
+                        if dy != 0.0 {
+                            this.cycle_lane(if dy < 0.0 { 1 } else { -1 }, cx);
+                        }
+                    }))
+                    .child(div().flex_1().truncate().child(label))
+                    .child(
+                        svg()
+                            .path(assets::ICON_CHEVRON_DOWN_PATH)
+                            .w(px(10.0))
+                            .h(px(10.0))
+                            .flex_shrink_0()
+                            .text_color(if open {
+                                Colors::text_secondary()
+                            } else {
+                                Colors::text_faint()
+                            }),
+                    ),
+            )
+            // Collapse / expand the whole lane.
+            .child(tool_btn(
+                "pr-lane-toggle",
+                if visible { "▾" } else { "▸" },
+                !visible,
+                cx.listener(|this, _ev, _w, cx| this.toggle_lane_visible(cx)),
+            ))
+            .when_some(dropdown, |root, panel| {
+                root.child(deferred(panel).with_priority(LANE_MENU_PRIORITY))
+            })
+    }
+
+    pub(super) fn render_toolbar(&self, cx: &mut Context<Self>, clip_id: Option<&str>) -> impl IntoElement {
+        let note_count = clip_id
+            .and_then(|cid| {
+                self.timeline
+                    .read(cx)
+                    .state
+                    .midi_clip_notes(cid)
+                    .map(|n| n.len())
+            })
+            .unwrap_or(0);
+        let sel_count = self.selection.len();
+        let tool = self.tool;
+        let snap_on = self.snap_on;
+        let grid_label = format!("Grid: {}", self.grid_res.label());
+        let status = self.toolbar_status(note_count, sel_count);
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(34.0))
+            .px(px(8.0))
+            .border_b(px(1.0))
+            .border_color(Colors::panel_border())
+            .bg(Colors::surface_panel())
+            .child(
+                toolbar_group("Tools")
+                    .child(tool_btn(
+                        "pr-select",
+                        "Select",
+                        tool == PianoTool::Select,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Select;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-draw",
+                        "Draw",
+                        tool == PianoTool::Draw,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Draw;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-erase",
+                        "Erase",
+                        tool == PianoTool::Erase,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Erase;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-split",
+                        "Split",
+                        tool == PianoTool::Split,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Split;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-mute-tool",
+                        "Mute",
+                        tool == PianoTool::Mute,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Mute;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(
+                toolbar_group("Snap")
+                    .child(tool_btn(
+                        "pr-snap",
+                        "Snap",
+                        snap_on,
+                        cx.listener(|this, _, _w, cx| {
+                            this.snap_on = !this.snap_on;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-grid",
+                        &grid_label,
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.grid_res = this.grid_res.cycle();
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(
+                toolbar_group("Edit")
+                    .child(
+                        div()
+                            .id("pr-quantize")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(22.0))
+                            .min_w(px(24.0))
+                            .px(px(7.0))
+                            .rounded(px(4.0))
+                            .text_size(px(10.0))
+                            .text_color(if self.quantize_preview {
+                                Colors::text_primary()
+                            } else {
+                                Colors::text_secondary()
+                            })
+                            .bg(if self.quantize_preview {
+                                Colors::surface_hover()
+                            } else {
+                                Colors::with_alpha(Colors::text_primary(), 0.0)
+                            })
+                            .border(px(1.0))
+                            .border_color(if self.quantize_preview {
+                                Colors::border_subtle()
+                            } else {
+                                Colors::with_alpha(Colors::text_primary(), 0.0)
+                            })
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_hover(cx.listener(|this, hovered: &bool, _w, cx| {
+                                this.quantize_preview = *hovered;
+                                cx.notify();
+                            }))
+                            .on_click(cx.listener(|this, _, _w, cx| this.quantize_selection(cx)))
+                            .child("Quantize"),
+                    )
+                    .child(tool_btn(
+                        "pr-delete",
+                        "Del",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-dup",
+                        "Dup",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
+                    )),
+            )
+            .child(toolbar_group("Controller").child(self.render_lane_selector(cx)))
+            .child(
+                toolbar_group("View")
+                    .child(tool_btn(
+                        "pr-fit",
+                        "Fit",
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            if let Some(cid) = this.editing_clip_id(cx) {
+                                this.fit_piano_roll_to_notes(cx, &cid);
+                                cx.notify();
+                            }
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-zoom-out",
+                        "−",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.zoom_by(0.8, cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-zoom-in",
+                        "+",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.zoom_by(1.25, cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-c4",
+                        "C4",
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.scroll_to_pitch(60);
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .min_w(px(132.0))
+                    .text_size(px(9.0))
+                    .text_color(Colors::text_muted())
+                    .truncate()
+                    .child(status),
+            )
+            .when_some(self.on_pop_out.clone(), |row, pop_out| {
+                row.child(
+                    div()
+                        .id("pr-pop-out")
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded_md()
+                        .text_size(px(9.0))
+                        .text_color(Colors::text_secondary())
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .hover(|s| s.bg(Colors::surface_hover()))
+                        .on_click(move |_, window, cx| pop_out(window, cx))
+                        .child("Pop out"),
+                )
+            })
+    }
+
+    pub(super) fn render_body(&mut self, cx: &mut Context<Self>, clip_id: &str) -> impl IntoElement {
+        let (view_w, view_h) = self.grid_view_size();
+        let track_color = self.track_color_for_clip(cx, clip_id);
+        let (bpb, clip_len, show_playhead, playing, playhead_rel, loop_region) = {
+            let tl = self.timeline.read(cx);
+            let bpb = tl.state.beats_per_bar().max(1.0);
+            let (clip_start, clip_len) = self.clip_meta(cx, clip_id);
+            let t = &tl.state.transport;
+            let playhead_rel = t.playhead_beats - clip_start;
+            // Playhead is visible whenever it sits within the clip — playing or
+            // paused — so the user always sees the current position.
+            let show_playhead = playhead_rel >= 0.0 && playhead_rel <= clip_len;
+            // Loop region in clip-local beats (transport stores project-global).
+            let loop_region = if t.loop_enabled && t.loop_end_beats > t.loop_start_beats {
+                Some((
+                    t.loop_start_beats - clip_start,
+                    t.loop_end_beats - clip_start,
+                ))
+            } else {
+                None
+            };
+            (
+                bpb,
+                clip_len,
+                show_playhead,
+                t.playing,
+                playhead_rel,
+                loop_region,
+            )
+        };
+
+        // Visible ranges (only build geometry for what's on screen).
+        let first_pitch = (self.y_to_pitch(view_h) as i32 - 1).max(0);
+        let last_pitch = (self.y_to_pitch(0.0) as i32 + 1).min(PITCH_CNT - 1);
+        let start_beat = self.x_to_beat(0.0);
+        let end_beat = self.x_to_beat(view_w);
+
+        // Piano key lane.
+        // Label policy: show every note name when each row has enough vertical
+        // room (>= 14 px), otherwise fall back to C-only labels so the lane
+        // stays readable.
+        let show_all_labels = ROW_H >= 14.0;
+        let pressed_pitch = self.key_lane_pressed_pitch;
+        let keys: Vec<_> = (first_pitch..=last_pitch)
+            .map(|p| {
+                let y = self.pitch_to_y(p as u8);
+                let black = is_black(p);
+                let is_c = p.rem_euclid(12) == 0;
+                let pressed = pressed_pitch == Some(p as u8);
+                let label_color = if is_c {
+                    Colors::text_primary()
+                } else if black {
+                    Colors::text_muted()
+                } else {
+                    Colors::text_secondary()
+                };
+                let show_label = is_c || show_all_labels;
+                div()
+                    .absolute()
+                    .top(px(y))
+                    .left_0()
+                    .w_full()
+                    .h(px(ROW_H))
+                    // Pressed/auditioned key reads with the accent fill (both black
+                    // and white keys); otherwise the usual black/white surface.
+                    .bg(if pressed {
+                        Colors::accent_primary()
+                    } else if black {
+                        Colors::surface_base()
+                    } else {
+                        Colors::surface_raised()
+                    })
+                    .border_b(px(1.0))
+                    .border_color(Colors::border_subtle())
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .pr(px(5.0))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    // Mouse-down starts a key-lane scrub. The matching note-off /
+                    // state reset happens centrally in `on_up` (wired to both
+                    // mouse-up and mouse-up-out on the root), and drag tracking
+                    // happens in `on_move` — so no per-key up/move handlers here.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            eprintln!("[PianoKeyPreview] down note={p}");
+                            this.piano_key_drag_active = true;
+                            this.key_lane_pressed_pitch = Some(p as u8);
+                            this.begin_preview_note(p as u8, 100, "piano_key_down", cx);
+                            cx.notify();
+                        }),
+                    )
+                    .when(show_label, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(8.0))
+                                .text_color(label_color)
+                                .child(note_name(p)),
+                        )
+                    })
+            })
+            .collect();
+
+        let grid_lines = self.build_grid_lines(
+            start_beat,
+            end_beat,
+            view_w,
+            view_h,
+            first_pitch,
+            last_pitch,
+            bpb,
+            clip_len,
+        );
+        let clip_bounds = self.build_clip_bounds_overlay(clip_len, view_w, view_h);
+        let loop_overlay = self.build_loop_overlay(loop_region, view_w, view_h);
+        let playhead_line = if show_playhead {
+            Some(self.build_playhead_line(playhead_rel, playing))
+        } else {
+            None
+        };
+        let mut ruler = self.build_ruler(start_beat, end_beat, bpb);
+        ruler.extend(self.build_loop_ruler_markers(loop_region));
+        let notes_geo = self.build_note_elements(cx, clip_id, track_color);
+        let quantize_preview = self.build_quantize_preview(cx, clip_id);
+        let marquee_overlay = self.build_marquee_overlay();
+        let draw_preview = self.build_draw_note_preview();
+        let erase_overlay = self.build_erase_overlay();
+        let note_inspector = self.render_note_inspector(cx, clip_id);
+
+        // ── Single unified controller lane ───────────────────────────────────
+        // Exactly one lane is built per frame: velocity OR the active controller.
+        // Switching the selector only changes which is built — the hidden lane's
+        // data (note velocities / other controller points) is left untouched.
+        let lane_header: Option<gpui::AnyElement> = self.lane_visible.then(|| {
+            div()
+                .h(px(LANE_H))
+                .w_full()
+                .border_t(px(1.0))
+                .border_color(Colors::panel_border())
+                .bg(Colors::surface_panel())
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(2.0))
+                .text_size(px(9.0))
+                .text_color(Colors::text_secondary())
+                .child(self.lane_name())
+                .child(
+                    div()
+                        .text_size(px(7.0))
+                        .text_color(Colors::text_faint())
+                        .child(self.lane_range()),
+                )
+                .into_any_element()
+        });
+        let lane_body: Option<gpui::AnyElement> = if !self.lane_visible {
+            None
+        } else if self.lane_shows_velocity {
+            let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
+            let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
+            let velocity_bounds = self.cc_bounds.clone();
+            let velocity_bounds_canvas = canvas(
+                move |bounds, _w, _cx| velocity_bounds.set(Some(bounds)),
+                |_bounds, _scene, _w, _cx| {},
+            )
+            .absolute()
+            .inset_0();
+            let velocity_empty =
+                (note_count_for_clip(cx, &self.timeline, clip_id) == 0).then(|| {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.0))
+                        .text_color(Colors::text_faint())
+                        .child("No notes — draw notes above to edit velocity")
+                });
+            let velocity_value_chip = matches!(self.drag, PianoDrag::Velocity { .. }).then(|| {
+                value_chip(
+                    self.drag_value_status.as_deref().unwrap_or("Velocity"),
+                    8.0,
+                    8.0,
+                )
+            });
+            Some(
+                div()
+                    .id("piano-vel")
+                    .h(px(LANE_H))
+                    .w_full()
+                    .relative()
+                    .overflow_hidden()
+                    .border_t(px(1.0))
+                    .border_color(Colors::panel_border())
+                    .bg(Colors::surface_panel_alt())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                            this.begin_velocity_lane_click(ev, window, cx);
+                        }),
+                    )
+                    .child(velocity_bounds_canvas)
+                    .children(vel_grid)
+                    .children(vel_bars)
+                    .children(velocity_empty)
+                    .children(velocity_value_chip)
+                    .into_any_element(),
+            )
+        } else {
+            Some(
+                self.render_cc_lane(cx, clip_id, start_beat, end_beat, bpb)
+                    .into_any_element(),
+            )
+        };
+        let grid_cursor = if self.tool == PianoTool::Draw {
+            gpui::CursorStyle::Crosshair
+        } else {
+            gpui::CursorStyle::Arrow
+        };
+
+        // Capture grid bounds so empty-area clicks can be mapped to beat/pitch.
+        let grid_bounds = self.grid_bounds.clone();
+        let grid_canvas = canvas(
+            move |bounds, _w, _cx| {
+                grid_bounds.set(Some(bounds));
+            },
+            |_b, _r, _w, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+
+        // Capture the key-lane viewport bounds so a window-space cursor can be
+        // hit-tested + mapped to a pitch during drag-scrub (see `on_move`). Sits
+        // behind the keys and carries no handlers, so it never intercepts the
+        // per-key mouse-down.
+        let key_lane_bounds = self.key_lane_bounds.clone();
+        let key_lane_canvas = canvas(
+            move |bounds, _w, _cx| {
+                key_lane_bounds.set(Some(bounds));
+            },
+            |_b, _r, _w, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+
+        let ruler_bounds = self.ruler_bounds.clone();
+        let ruler_bounds_canvas = canvas(
+            move |bounds, _w, _cx| {
+                ruler_bounds.set(Some(bounds));
+            },
+            |_b, _r, _w, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            // Left: piano keys.
+            .child(
+                div()
+                    .w(px(key_lane_width()))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    // Corner spacer so the keys line up with the grid (below the
+                    // ruler row on the right).
+                    .child(
+                        div()
+                            .h(px(RULER_H))
+                            .w_full()
+                            .bg(Colors::surface_panel())
+                            .border_b(px(1.0))
+                            .border_r(px(1.0))
+                            .border_color(Colors::panel_border()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .overflow_hidden()
+                            .bg(Colors::surface_panel())
+                            .border_r(px(1.0))
+                            .border_color(Colors::panel_border())
+                            // Drag-scrub (move/up) is handled by the root-level
+                            // `on_move`/`on_up` using `key_lane_bounds` captured
+                            // here — never read raw window coords as if they were
+                            // lane-local (the old bug).
+                            .child(key_lane_canvas)
+                            .children(keys),
+                    )
+                    // Single unified controller-lane header (name + range).
+                    .children(lane_header),
+            )
+            // Right: grid + single controller lane.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    // Ruler header — bar/beat labels aligned to the grid below.
+                    .child(
+                        div()
+                            .h(px(RULER_H))
+                            .w_full()
+                            .relative()
+                            .overflow_hidden()
+                            .bg(Colors::surface_panel())
+                            .border_b(px(1.0))
+                            .border_color(Colors::panel_border())
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .child(ruler_bounds_canvas)
+                            .children(ruler)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    window.focus(&this.focus, cx);
+                                    if let Some((lx, _)) = this.ruler_local(ev.position) {
+                                        this.drag = PianoDrag::RulerSeek;
+                                        this.seek_ruler_at(lx, cx);
+                                    }
+                                }),
+                            ),
+                    )
+                    // Note grid.
+                    .child(
+                        div()
+                            .id("piano-grid")
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .overflow_hidden()
+                            .bg(Colors::surface_base())
+                            .cursor(grid_cursor)
+                            .child(grid_canvas)
+                            .children(grid_lines)
+                            .children(clip_bounds)
+                            .children(loop_overlay)
+                            .when_some(playhead_line, |el, line| el.child(line))
+                            .children(notes_geo)
+                            .children(quantize_preview)
+                            .when_some(marquee_overlay, |el, overlay| el.child(overlay))
+                            .when_some(draw_preview, |el, overlay| el.child(overlay))
+                            .when_some(erase_overlay, |el, overlay| el.child(overlay))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_grid_down))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(Self::on_grid_right_down),
+                            ),
+                    )
+                    // Single unified controller lane (velocity / CC / etc).
+                    .children(lane_body),
+            )
+            .child(note_inspector)
+    }
+
+    pub(super) fn render_note_inspector(&self, cx: &mut Context<Self>, clip_id: &str) -> impl IntoElement {
+        let snapshot = self.note_inspector_snapshot(cx, clip_id);
+        let count = snapshot.count();
+        let step = self.grid_res.beats().max(MIN_NOTE_BEATS);
+        let fine_step = (step * 0.25).max(MIN_NOTE_BEATS);
+
+        let mut content: Vec<gpui::AnyElement> = Vec::new();
+        content.push(note_inspector_label("NOTE INSPECTOR").into_any_element());
+
+        if count == 0 {
+            content.push(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_muted())
+                    .line_height(px(15.0))
+                    .child("Select notes in the piano roll to edit pitch, timing, and velocity.")
+                    .into_any_element(),
+            );
+        } else if count == 1 {
+            let note = &snapshot.selected[0];
+            content.push(note_value_row("Pitch", snapshot.pitch_label()).into_any_element());
+            content.push(note_value_row("Start", format_beats(note.start)).into_any_element());
+            content.push(note_value_row("Length", format_beats(note.duration)).into_any_element());
+            content.push(
+                note_value_row("End", format_beats(note.start + note.duration)).into_any_element(),
+            );
+            content.push(note_value_row("Velocity", note.velocity.to_string()).into_any_element());
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-pitch-down",
+                        "-1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(-1, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-pitch-up",
+                        "+1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(1, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-start-down",
+                        "-Start",
+                        cx.listener(move |this, _, _w, cx| this.nudge_selected_start(-step, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-start-up",
+                        "+Start",
+                        cx.listener(move |this, _, _w, cx| this.nudge_selected_start(step, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-len-down",
+                        "-Len",
+                        cx.listener(move |this, _, _w, cx| {
+                            this.nudge_selected_length(-fine_step, cx)
+                        }),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-len-up",
+                        "+Len",
+                        cx.listener(move |this, _, _w, cx| {
+                            this.nudge_selected_length(fine_step, cx)
+                        }),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-vel-down",
+                        "Vel -5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(-5, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-vel-up",
+                        "Vel +5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(5, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            let mute_label = if note.muted { "Unmute" } else { "Mute" };
+            content.push(
+                note_button_row(vec![note_action_button(
+                    "pr-note-mute",
+                    mute_label,
+                    cx.listener(|this, _, _w, cx| this.toggle_mute_selection(cx)),
+                )
+                .into_any_element()])
+                .into_any_element(),
+            );
+        } else {
+            content.push(note_value_row("Selected", count.to_string()).into_any_element());
+            content.push(note_value_row("Pitch", snapshot.pitch_label()).into_any_element());
+            content.push(note_value_row("Range", snapshot.end_label()).into_any_element());
+            content.push(note_value_row("Start", snapshot.start_label()).into_any_element());
+            content.push(note_value_row("Length", snapshot.length_label()).into_any_element());
+            content.push(note_value_row("Velocity", snapshot.velocity_label()).into_any_element());
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-trans-down",
+                        "-1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(-1, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-trans-up",
+                        "+1 st",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_pitch(1, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-vel-down",
+                        "Vel -5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(-5, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-vel-up",
+                        "Vel +5",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_velocity(5, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-quantize",
+                        "Quantize",
+                        cx.listener(|this, _, _w, cx| this.quantize_selection(cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-delete",
+                        "Delete",
+                        cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-mute",
+                        "Mute",
+                        cx.listener(|this, _, _w, cx| this.toggle_mute_selection(cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-duplicate",
+                        "Duplicate",
+                        cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+        }
+
+        div()
+            .w(px(216.0))
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .p(px(8.0))
+            .border_l(px(1.0))
+            .border_color(Colors::panel_border())
+            .bg(Colors::surface_panel())
+            .children(content)
+    }
+
+    pub(super) fn track_color_for_clip(&self, cx: &Context<Self>, clip_id: &str) -> gpui::Rgba {
+        let tl = self.timeline.read(cx);
+        tl.state
+            .tracks
+            .iter()
+            .find(|t| t.clips.iter().any(|c| c.id == clip_id))
+            .map(|t| t.color)
+            .unwrap_or_else(Colors::accent_primary)
+    }
+
+    /// Compute the visible vertical gridlines with a zoom-aware subdivision
+    /// tier. Returns `(x_px, kind)` for each line in `[start_beat, end_beat]`.
+    ///
+    /// Tiering by `px_per_beat` (`self.ppb`):
+    /// - always: bar lines
+    /// - `ppb >= 10`: beat lines
+    /// - subdivision (snap step) lines only when they're at least ~7 px apart
+    ///   and the view is zoomed in enough — keeps far-zoom views uncluttered.
+    pub(super) fn visible_grid_lines(
+        &self,
+        start_beat: f32,
+        end_beat: f32,
+        bpb: f32,
+    ) -> Vec<(f32, GridLineKind)> {
+        let ppb = self.ppb.max(0.0001);
+        let bpb = bpb.max(1.0);
+        let show_beats = ppb >= 10.0;
+        let sub_step = self.grid_res.beats().max(1.0 / 32.0);
+        let show_subs = show_beats && sub_step * ppb >= 7.0 && ppb >= 24.0;
+
+        let iter_step = if show_subs {
+            sub_step
+        } else if show_beats {
+            1.0
+        } else {
+            bpb
+        };
+
+        let mut out = Vec::new();
+        let mut beat = (start_beat / iter_step).floor() * iter_step;
+        let mut guard = 0;
+        while beat <= end_beat + iter_step && guard < 8000 {
+            guard += 1;
+            let b = beat;
+            beat += iter_step;
+            if b < -1.0e-3 {
+                continue;
+            }
+            let kind = if is_multiple(b, bpb) {
+                GridLineKind::Bar
+            } else if is_multiple(b, 1.0) {
+                GridLineKind::Beat
+            } else {
+                GridLineKind::Subdivision
+            };
+            let keep = match kind {
+                GridLineKind::Bar => true,
+                GridLineKind::Beat => show_beats,
+                GridLineKind::Subdivision => show_subs,
+            };
+            if keep {
+                out.push((self.beat_to_x(b), kind));
+            }
+        }
+        out
+    }
+
+    pub(super) fn build_clip_bounds_overlay(
+        &self,
+        clip_len: f32,
+        view_w: f32,
+        view_h: f32,
+    ) -> Vec<gpui::AnyElement> {
+        let mut out = Vec::new();
+        let end_x = self.beat_to_x(clip_len);
+        if end_x < view_w {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(end_x))
+                    .top_0()
+                    .w(px((view_w - end_x).max(0.0)))
+                    .h(px(view_h))
+                    .bg(Colors::with_alpha(Colors::surface_base(), 0.55))
+                    .into_any_element(),
+            );
+        }
+        out.push(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top_0()
+                .w(px(1.0))
+                .h(px(view_h))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.35))
+                .into_any_element(),
+        );
+        if end_x > 0.0 && end_x <= view_w + 2.0 {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(end_x))
+                    .top_0()
+                    .w(px(1.0))
+                    .h(px(view_h))
+                    .bg(Colors::with_alpha(Colors::accent_primary(), 0.55))
+                    .into_any_element(),
+            );
+        }
+        out
+    }
+
+    pub(super) fn build_playhead_line(&self, rel_beat: f32, playing: bool) -> gpui::AnyElement {
+        let x = self.beat_to_x(rel_beat);
+        // Dimmer when parked so a stopped playhead reads as a marker, not motion.
+        let alpha = if playing { 0.9 } else { 0.45 };
+        div()
+            .absolute()
+            .left(px(x))
+            .top_0()
+            .w(px(1.0))
+            .h_full()
+            .bg(Colors::with_alpha(Colors::status_warning(), alpha))
+            .into_any_element()
+    }
+
+    /// Loop region band + edge lines over the note grid (clip-local beats).
+    /// Returns empty when looping is off or the region is fully off-screen.
+    pub(super) fn build_loop_overlay(
+        &self,
+        loop_region: Option<(f32, f32)>,
+        view_w: f32,
+        view_h: f32,
+    ) -> Vec<gpui::AnyElement> {
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+        let Some((lo, hi)) = loop_region else {
+            return out;
+        };
+        let band_x0 = self.beat_to_x(lo).max(0.0);
+        let band_x1 = self.beat_to_x(hi).min(view_w);
+        if band_x1 <= 0.0 || band_x0 >= view_w || band_x1 <= band_x0 {
+            return out;
+        }
+        let accent = Colors::accent_primary();
+        out.push(
+            div()
+                .absolute()
+                .left(px(band_x0))
+                .top_0()
+                .w(px(band_x1 - band_x0))
+                .h(px(view_h))
+                .bg(Colors::with_alpha(accent, 0.06))
+                .into_any_element(),
+        );
+        // Edge lines, drawn only when their exact beat is on-screen.
+        for edge in [lo, hi] {
+            let ex = self.beat_to_x(edge);
+            if ex >= 0.0 && ex <= view_w {
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(ex))
+                        .top_0()
+                        .w(px(1.0))
+                        .h(px(view_h))
+                        .bg(Colors::with_alpha(accent, 0.5))
+                        .into_any_element(),
+                );
+            }
+        }
+        out
+    }
+
+    /// Loop region band in the ruler header (clip-local beats).
+    pub(super) fn build_loop_ruler_markers(&self, loop_region: Option<(f32, f32)>) -> Vec<gpui::AnyElement> {
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+        let Some((lo, hi)) = loop_region else {
+            return out;
+        };
+        let left = self.beat_to_x(lo).max(0.0);
+        let right = self.beat_to_x(hi);
+        if right <= left {
+            return out;
+        }
+        out.push(
+            div()
+                .absolute()
+                .top_0()
+                .left(px(left))
+                .w(px(right - left))
+                .h(px(3.0))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.6))
+                .into_any_element(),
+        );
+        out
+    }
+
+    pub(super) fn build_grid_lines(
+        &self,
+        start_beat: f32,
+        end_beat: f32,
+        view_w: f32,
+        _view_h: f32,
+        first_pitch: i32,
+        last_pitch: i32,
+        bpb: f32,
+        clip_len: f32,
+    ) -> Vec<gpui::AnyElement> {
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+
+        // ── Pitch row backgrounds: shade black-key rows, highlight C rows ──
+        for p in first_pitch..=last_pitch {
+            let y = self.pitch_to_y(p as u8);
+            if is_black(p) {
+                out.push(
+                    div()
+                        .absolute()
+                        .top(px(y))
+                        .left_0()
+                        .w(px(view_w))
+                        .h(px(ROW_H))
+                        .bg(Colors::with_alpha(Colors::surface_base(), 0.45))
+                        .into_any_element(),
+                );
+            } else if p % 12 == 0 {
+                // C row — a touch brighter so octaves are easy to scan.
+                out.push(
+                    div()
+                        .absolute()
+                        .top(px(y))
+                        .left_0()
+                        .w(px(view_w))
+                        .h(px(ROW_H))
+                        .bg(Colors::with_alpha(Colors::text_primary(), 0.03))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        // Clip end marker inside the visible beat range.
+        let end_x = self.beat_to_x(clip_len);
+        if end_x >= 0.0 && end_x <= view_w {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px((end_x - 0.5).max(0.0)))
+                    .top_0()
+                    .w(px(1.0))
+                    .h_full()
+                    .bg(Colors::with_alpha(Colors::accent_primary(), 0.4))
+                    .into_any_element(),
+            );
+        }
+
+        // ── Vertical timing gridlines (zoom-aware hierarchy) ──
+        for (x, kind) in self.visible_grid_lines(start_beat, end_beat.min(clip_len + bpb), bpb) {
+            let (alpha, w) = match kind {
+                GridLineKind::Bar => (0.26, 1.0),
+                GridLineKind::Beat => (0.13, 1.0),
+                GridLineKind::Subdivision => (0.06, 1.0),
+            };
+            out.push(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(x))
+                    .w(px(w))
+                    .h_full()
+                    .bg(Colors::with_alpha(Colors::text_primary(), alpha))
+                    .into_any_element(),
+            );
+        }
+
+        // ── Horizontal pitch row lines ──
+        // Draw a line for every visible semitone row so editing reads like a
+        // real piano roll. C gets the strongest line (octave boundary), F gets
+        // a medium line (the other white-white separator on a piano), and every
+        // other row gets a faint hairline.
+        for p in first_pitch..=last_pitch {
+            let m = p.rem_euclid(12);
+            let alpha = match m {
+                0 => 0.14,  // C: octave boundary
+                5 => 0.07,  // F: white/white separator
+                _ => 0.035, // every other semitone row
+            };
+            let y = self.pitch_to_y(p as u8);
+            out.push(
+                div()
+                    .absolute()
+                    .top(px(y))
+                    .left_0()
+                    .w(px(view_w))
+                    .h(px(1.0))
+                    .bg(Colors::with_alpha(Colors::text_primary(), alpha))
+                    .into_any_element(),
+            );
+        }
+
+        out
+    }
+
+    /// Bar/beat ruler header labels, aligned to the note grid via `beat_to_x`.
+    pub(super) fn build_ruler(&self, start_beat: f32, end_beat: f32, bpb: f32) -> Vec<gpui::AnyElement> {
+        let ppb = self.ppb.max(0.0001);
+        let bpb = bpb.max(1.0);
+        // Label each beat when zoomed in; otherwise label only bar starts.
+        let label_beats = ppb >= 36.0;
+        let step = if label_beats { 1.0 } else { bpb };
+
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+        let mut beat = (start_beat / step).floor() * step;
+        let mut guard = 0;
+        while beat <= end_beat + step && guard < 2000 {
+            guard += 1;
+            let b = beat;
+            beat += step;
+            if b < -1.0e-3 {
+                continue;
+            }
+            let x = self.beat_to_x(b);
+            let bar = (b / bpb).floor() as i32 + 1;
+            let on_bar = is_multiple(b, bpb);
+            let text = if label_beats {
+                let beat_in_bar = (b - (bar - 1) as f32 * bpb).floor() as i32 + 1;
+                format!("{}.{}", bar, beat_in_bar)
+            } else {
+                format!("{}", bar)
+            };
+            out.push(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(x + 2.0))
+                    .text_size(px(8.5))
+                    .text_color(if on_bar {
+                        Colors::text_secondary()
+                    } else {
+                        Colors::text_muted()
+                    })
+                    .child(text)
+                    .into_any_element(),
+            );
+            // Tick mark at the bottom of the ruler.
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .bottom_0()
+                    .w(px(1.0))
+                    .h(px(if on_bar { 6.0 } else { 4.0 }))
+                    .bg(Colors::with_alpha(
+                        Colors::text_primary(),
+                        if on_bar { 0.26 } else { 0.13 },
+                    ))
+                    .into_any_element(),
+            );
+        }
+        out
+    }
+
+    /// Bar/beat vertical lines through the velocity lane (aligned with the grid;
+    /// subdivisions omitted to keep the lane uncluttered).
+    pub(super) fn build_velocity_grid(
+        &self,
+        start_beat: f32,
+        end_beat: f32,
+        bpb: f32,
+    ) -> Vec<gpui::AnyElement> {
+        self.visible_grid_lines(start_beat, end_beat, bpb)
+            .into_iter()
+            .filter(|(_, kind)| *kind != GridLineKind::Subdivision)
+            .map(|(x, kind)| {
+                let alpha = if kind == GridLineKind::Bar {
+                    0.20
+                } else {
+                    0.10
+                };
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(x))
+                    .w(px(1.0))
+                    .h_full()
+                    .bg(Colors::with_alpha(Colors::text_primary(), alpha))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    /// Ghost outlines showing where the affected notes would land after a
+    /// quantize. Empty unless the Quantize button is hovered. Mirrors
+    /// [`Self::quantize_selection`]'s target set: the selection, or every note
+    /// when nothing is selected. Notes already on the grid are skipped.
+    pub(super) fn build_quantize_preview(&self, cx: &Context<Self>, clip_id: &str) -> Vec<gpui::AnyElement> {
+        if !self.quantize_preview {
+            return Vec::new();
+        }
+        let (view_w, view_h) = self.grid_view_size();
+        let step = self.quantize_res.beats().max(MIN_NOTE_BEATS);
+        let only_selected = !self.selection.is_empty();
+        let accent = Colors::accent_primary();
+        let tl = self.timeline.read(cx);
+        let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
+            return Vec::new();
+        };
+        notes
+            .iter()
+            .filter(|n| !only_selected || self.selection.contains(&n.id))
+            .filter_map(|n| {
+                let q_start = (n.start / step).round() * step;
+                if (q_start - n.start).abs() < 1.0e-4 {
+                    return None;
+                }
+                let x = self.beat_to_x(q_start);
+                let w = (n.duration * self.ppb).max(3.0);
+                let y = self.pitch_to_y(n.pitch);
+                if x + w < 0.0 || x > view_w || y + ROW_H < 0.0 || y > view_h {
+                    return None;
+                }
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y + 1.0))
+                        .w(px(w))
+                        .h(px(ROW_H - 2.0))
+                        .rounded(px(2.0))
+                        .border(px(1.0))
+                        .border_color(Colors::with_alpha(accent, 0.9))
+                        .bg(Colors::with_alpha(accent, 0.12))
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn build_note_elements(
+        &mut self,
+        cx: &mut Context<Self>,
+        clip_id: &str,
+        track_color: gpui::Rgba,
+    ) -> Vec<gpui::AnyElement> {
+        let (view_w, view_h) = self.grid_view_size();
+        // Collect owned geometry first so the timeline read borrow is released
+        // before we build per-note listeners (which borrow `cx` mutably).
+        let geos: Vec<(u64, u8, f32, f32, f32, f32, f32, u8, bool, bool, bool)> = {
+            let tl = self.timeline.read(cx);
+            let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
+                return Vec::new();
+            };
+            notes
+                .iter()
+                .filter_map(|n| {
+                    let d = self.display_note(n);
+                    let x = self.beat_to_x(d.start);
+                    let w = (d.duration * self.ppb).max(5.0);
+                    let y = self.pitch_to_y(d.pitch);
+                    // Cull off-screen notes.
+                    if x + w < 0.0 || x > view_w || y + ROW_H < 0.0 || y > view_h {
+                        return None;
+                    }
+                    Some((
+                        d.id,
+                        d.pitch,
+                        d.start,
+                        d.duration,
+                        x,
+                        y,
+                        w,
+                        d.velocity,
+                        self.selection.contains(&d.id),
+                        self.erase_preview_ids.contains(&d.id),
+                        n.muted,
+                    ))
+                })
+                .collect()
+        };
+
+        geos.into_iter()
+            .map(
+                |(id, pitch, start, duration, x, y, w, velocity, selected, erase_target, muted)| {
+                    let mut fill = track_color;
+                    fill.a = if erase_target {
+                        0.45
+                    } else if muted {
+                        // Muted notes read as hollow/dim so they stand apart from
+                        // active notes without leaving the grid.
+                        0.18
+                    } else if selected {
+                        1.0
+                    } else {
+                        0.78
+                    };
+                    let border = if erase_target {
+                        Colors::status_error()
+                    } else if selected {
+                        Colors::accent_primary()
+                    } else if muted {
+                        Colors::with_alpha(Colors::text_muted(), 0.7)
+                    } else {
+                        Colors::with_alpha(track_color, 0.55)
+                    };
+                    let mut note = div()
+                        .id(("pr-note", id as usize))
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y + 1.0))
+                        .w(px(w))
+                        .h(px(ROW_H - 2.0))
+                        .rounded(px(2.0))
+                        .bg(fill)
+                        .border(px(1.0))
+                        .border_color(border)
+                        .shadow(if selected {
+                            vec![gpui::BoxShadow {
+                                color: Colors::with_alpha(Colors::accent_primary(), 0.35).into(),
+                                offset: gpui::point(px(0.0), px(0.0)),
+                                blur_radius: px(8.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            }]
+                        } else {
+                            Vec::new()
+                        })
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                            this.hover_note_status = hovered.then(|| {
+                                format!(
+                                    "{} · start {:.2} · len {:.2} · vel {}{}",
+                                    note_name(pitch as i32),
+                                    start,
+                                    duration,
+                                    velocity,
+                                    if muted { " · muted" } else { "" }
+                                )
+                            });
+                            cx.notify();
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.note_mouse_down(id, ev, window, cx);
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                let (lx, ly) = this.grid_local(ev.position).unwrap_or((0.0, 0.0));
+                                this.note_right_down(id, lx, ly, cx);
+                            }),
+                        );
+                    // Note-name label, shown only when the block is large enough to
+                    // read so dense clips stay clean.
+                    if w >= 22.0 && ROW_H >= 11.0 {
+                        let label_color = if muted {
+                            Colors::with_alpha(Colors::text_muted(), 0.8)
+                        } else if selected {
+                            Colors::text_primary()
+                        } else {
+                            Colors::with_alpha(Colors::text_primary(), 0.85)
+                        };
+                        note = note.child(
+                            div()
+                                .absolute()
+                                .left(px(3.0))
+                                .top_0()
+                                .bottom_0()
+                                .flex()
+                                .items_center()
+                                .text_size(px(8.0))
+                                .text_color(label_color)
+                                .child(note_name(pitch as i32)),
+                        );
+                    }
+                    // Right-edge resize handle (only when the note is wide enough to
+                    // leave room for a separate move/resize zone).
+                    if w >= 12.0 {
+                        note = note.child(
+                            div()
+                                .id(("pr-note-edge", id as usize))
+                                .absolute()
+                                .right_0()
+                                .top_0()
+                                .w(px(RESIZE_ZONE))
+                                .h_full()
+                                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                .hover(|s| s.bg(Colors::with_alpha(Colors::text_primary(), 0.35)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_resize_drag(id, ev, window, cx);
+                                    }),
+                                ),
+                        );
+                    }
+                    note.into_any_element()
+                },
+            )
+            .collect()
+    }
+
+    pub(super) fn build_velocity_bars(
+        &mut self,
+        cx: &mut Context<Self>,
+        clip_id: &str,
+        track_color: gpui::Rgba,
+    ) -> Vec<gpui::AnyElement> {
+        let (view_w, _) = self.grid_view_size();
+        let geos: Vec<(u64, u8, f32, bool)> = {
+            let tl = self.timeline.read(cx);
+            let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
+                return Vec::new();
+            };
+            notes
+                .iter()
+                .filter_map(|n| {
+                    let d = self.display_note(n);
+                    let x = self.beat_to_x(d.start);
+                    if x < -8.0 || x > view_w {
+                        return None;
+                    }
+                    Some((d.id, d.velocity, x, self.selection.contains(&d.id)))
+                })
+                .collect()
+        };
+
+        geos.into_iter()
+            .map(|(id, vel, x, selected)| {
+                let bar_h = (((vel as f32 - 1.0) / 126.0) * (LANE_H - 8.0)).max(1.0);
+                let mut fill = track_color;
+                fill.a = if selected { 1.0 } else { 0.5 };
+                // Full-height invisible hit column so even low-velocity bars are
+                // easy to grab; the colored bar sits inside it at the bottom.
+                div()
+                    .id(("pr-vel", id as usize))
+                    .absolute()
+                    .left(px(x))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(8.0))
+                    .cursor(gpui::CursorStyle::ResizeUpDown)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.begin_velocity_drag(id, vel, ev, window, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .bottom(px(2.0))
+                            .w(px(6.0))
+                            .h(px(bar_h))
+                            .rounded_t(px(1.0))
+                            .bg(fill),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+}

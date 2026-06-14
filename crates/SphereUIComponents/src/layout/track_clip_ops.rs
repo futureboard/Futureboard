@@ -73,7 +73,7 @@ impl StudioLayout {
             })
             .unwrap_or_default();
         let insert_ids: Vec<String> = self
-            .open_plugin_editors
+            .plugin_editors.open
             .keys()
             .filter(|(tid, _)| tid == track_id)
             .map(|(_, insert_id)| insert_id.clone())

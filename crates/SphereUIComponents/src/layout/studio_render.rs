@@ -185,39 +185,39 @@ impl Render for StudioLayout {
         // Reconcile the Inspector name field with the current track selection.
         // Only reload when the bound track actually changes, so typing into the
         // field for the *selected* track is never clobbered mid-edit.
-        if self.inspector_name_bound.as_deref() != selected_track_id.as_deref() {
+        if self.inspector_name_edit.name_bound.as_deref() != selected_track_id.as_deref() {
             match selected_track_id
                 .as_deref()
                 .and_then(|tid| tracks.iter().find(|t| t.id == tid))
             {
                 Some(t) => {
-                    self.inspector_name_input.set_value(t.name.clone());
-                    self.inspector_name_bound = Some(t.id.clone());
+                    self.inspector_name_edit.name_input.set_value(t.name.clone());
+                    self.inspector_name_edit.name_bound = Some(t.id.clone());
                 }
                 None => {
-                    self.inspector_name_input.set_value("");
-                    self.inspector_name_bound = None;
+                    self.inspector_name_edit.name_input.set_value("");
+                    self.inspector_name_edit.name_bound = None;
                 }
             }
         }
-        let inspector_name_focused = self.inspector_name_input.is_focused(window);
-        if self.inspector_clip_name_bound.as_deref() != selected_clip_id.as_deref() {
+        let inspector_name_focused = self.inspector_name_edit.name_input.is_focused(window);
+        if self.inspector_name_edit.clip_name_bound.as_deref() != selected_clip_id.as_deref() {
             match selected_clip_id.as_deref().and_then(|cid| {
                 tracks
                     .iter()
                     .find_map(|t| t.clips.iter().find(|c| c.id == cid))
             }) {
                 Some(c) => {
-                    self.inspector_clip_name_input.set_value(c.name.clone());
-                    self.inspector_clip_name_bound = Some(c.id.clone());
+                    self.inspector_name_edit.clip_name_input.set_value(c.name.clone());
+                    self.inspector_name_edit.clip_name_bound = Some(c.id.clone());
                 }
                 None => {
-                    self.inspector_clip_name_input.set_value("");
-                    self.inspector_clip_name_bound = None;
+                    self.inspector_name_edit.clip_name_input.set_value("");
+                    self.inspector_name_edit.clip_name_bound = None;
                 }
             }
         }
-        let inspector_clip_name_focused = self.inspector_clip_name_input.is_focused(window);
+        let inspector_clip_name_focused = self.inspector_name_edit.clip_name_input.is_focused(window);
 
         crate::perf::count("tracks", tracks.len() as u64);
 
@@ -1196,9 +1196,9 @@ impl Render for StudioLayout {
                             selected_track_id.as_deref(),
                             selected_clip_id.as_deref(),
                             find_clip_summary(&tracks, selected_clip_id.as_deref(), project_bpm),
-                            &self.inspector_name_input,
+                            &self.inspector_name_edit.name_input,
                             inspector_name_focused,
-                            &self.inspector_clip_name_input,
+                            &self.inspector_name_edit.clip_name_input,
                             inspector_clip_name_focused,
                             &inspector_callbacks,
                         )

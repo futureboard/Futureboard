@@ -10,6 +10,29 @@ use crate::components::timeline::waveform_cache::{self, WaveformPeak};
 use super::{RecordingPreviewUi, RecordingUiState, StudioLayout, RECORDING_PREVIEW_CLIP_ID};
 use DAUx::types::{JsRecordingTrackConfig, JsStartRecordingConfig};
 
+/// Active recording-session UI state — the take's start position, the UI phase,
+/// and the live growing-waveform preview. `StudioLayout` decomposition slice;
+/// accessed from the recording + transport ops modules.
+pub(crate) struct RecordingSessionState {
+    /// Beat position when the current recording session started.
+    pub start_beat: f32,
+    /// Recording UI phase (Idle / Arming / Recording / …).
+    pub ui_state: RecordingUiState,
+    /// Live recording waveform preview (Part 1). `Some` while a take draws a
+    /// growing preview clip in the arrangement.
+    pub preview: Option<RecordingPreviewUi>,
+}
+
+impl Default for RecordingSessionState {
+    fn default() -> Self {
+        Self {
+            start_beat: 0.0,
+            ui_state: RecordingUiState::Idle,
+            preview: None,
+        }
+    }
+}
+
 impl StudioLayout {
     pub(super) fn toggle_native_recording(&mut self, cx: &mut Context<Self>) {
         let recording = self.is_recording_active(cx);
@@ -21,7 +44,7 @@ impl StudioLayout {
     }
 
     pub(super) fn start_native_recording(&mut self, cx: &mut Context<Self>) {
-        self.recording_ui_state = RecordingUiState::Preparing;
+        self.recording.ui_state = RecordingUiState::Preparing;
         cx.notify();
 
         let project_root = match self.project_folder.as_ref() {
@@ -29,7 +52,7 @@ impl StudioLayout {
             None => {
                 self.audio_last_error =
                     Some("save the project to a folder before recording".to_string());
-                self.recording_ui_state = RecordingUiState::Failed {
+                self.recording.ui_state = RecordingUiState::Failed {
                     reason: "save the project to a folder before recording".to_string(),
                 };
                 eprintln!("[recording] no project folder — save project first");
@@ -192,9 +215,9 @@ impl StudioLayout {
             return;
         }
 
-        self.recording_start_beat = start_beat.max(0.0);
+        self.recording.start_beat = start_beat.max(0.0);
         self.audio_last_error = None;
-        self.recording_ui_state = RecordingUiState::Recording;
+        self.recording.ui_state = RecordingUiState::Recording;
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.recording = true;
             cx.notify();
@@ -214,7 +237,7 @@ impl StudioLayout {
         self.stop_recording_transport_ui(cx);
 
         let Some(engine) = self.audio_engine.clone() else {
-            self.recording_ui_state = RecordingUiState::Failed {
+            self.recording.ui_state = RecordingUiState::Failed {
                 reason: "audio engine unavailable".to_string(),
             };
             cx.notify();
@@ -229,19 +252,19 @@ impl StudioLayout {
         self.audio_stats = Some(engine.stats());
 
         if !engine_recording {
-            self.recording_ui_state = RecordingUiState::Idle;
+            self.recording.ui_state = RecordingUiState::Idle;
             cx.notify();
             return;
         }
 
-        self.recording_ui_state = RecordingUiState::Finalizing;
+        self.recording.ui_state = RecordingUiState::Finalizing;
         cx.notify();
 
         let results = match engine.stop_recording() {
             Ok(results) => results,
             Err(error) => {
                 self.audio_last_error = Some(error.to_string());
-                self.recording_ui_state = RecordingUiState::Failed {
+                self.recording.ui_state = RecordingUiState::Failed {
                     reason: error.to_string(),
                 };
                 eprintln!("[recording] stop failed: {error}");
@@ -250,8 +273,8 @@ impl StudioLayout {
         };
 
         self.commit_recording_results(cx, results);
-        if !matches!(self.recording_ui_state, RecordingUiState::Failed { .. }) {
-            self.recording_ui_state = RecordingUiState::Idle;
+        if !matches!(self.recording.ui_state, RecordingUiState::Failed { .. }) {
+            self.recording.ui_state = RecordingUiState::Idle;
             cx.notify();
         }
     }
@@ -338,7 +361,7 @@ impl StudioLayout {
         if !failed_tracks.is_empty() {
             let reason = format!("recording finalize failed ({})", failed_tracks.join("; "));
             self.audio_last_error = Some(reason.clone());
-            self.recording_ui_state = RecordingUiState::Failed { reason };
+            self.recording.ui_state = RecordingUiState::Failed { reason };
             cx.notify();
             return;
         }
@@ -356,7 +379,7 @@ impl StudioLayout {
     /// clip + its streamed waveform in sync (Part 1). Called every audio tick.
     pub(super) fn update_recording_preview(&mut self, cx: &mut Context<Self>) {
         if !self.timeline.read(cx).state.transport.recording {
-            if self.recording_preview.is_some()
+            if self.recording.preview.is_some()
                 && std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some()
             {
                 eprintln!("[RecordingPreviewUI] ignored_late_peaks transport_recording=false");
@@ -376,7 +399,7 @@ impl StudioLayout {
 
         // (Re)initialize the preview clip for a new take.
         let need_init = self
-            .recording_preview
+            .recording.preview
             .as_ref()
             .map(|p| p.recording_id != rec_id)
             .unwrap_or(true);
@@ -394,7 +417,7 @@ impl StudioLayout {
             let Some(track_id) = track_id else {
                 return;
             };
-            let start_beat = self.recording_start_beat.max(0.0);
+            let start_beat = self.recording.start_beat.max(0.0);
             let clip_id = RECORDING_PREVIEW_CLIP_ID.to_string();
             waveform_cache::clear_recording_preview(&clip_id);
             if std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some() {
@@ -407,7 +430,7 @@ impl StudioLayout {
                     .begin_recording_preview_clip(&cid, &tid, start_beat);
                 cx.notify();
             });
-            self.recording_preview = Some(RecordingPreviewUi {
+            self.recording.preview = Some(RecordingPreviewUi {
                 clip_id,
                 recording_id: rec_id,
                 track_id,
@@ -426,7 +449,7 @@ impl StudioLayout {
 
         // Drain newly produced peaks and republish the preview waveform.
         let mut length_update: Option<(String, f32)> = None;
-        if let Some(p) = self.recording_preview.as_mut() {
+        if let Some(p) = self.recording.preview.as_mut() {
             let new = engine.drain_recording_preview_peaks(p.drained as f64);
             if !new.is_empty() {
                 p.drained += new.len() as u64;
@@ -466,7 +489,7 @@ impl StudioLayout {
 
     /// Tear down the live recording preview clip + registry entry.
     pub(super) fn finish_recording_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(preview) = self.recording_preview.take() else {
+        let Some(preview) = self.recording.preview.take() else {
             return;
         };
         if std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some() {
@@ -486,7 +509,7 @@ impl StudioLayout {
 
     fn fail_recording_start(&mut self, message: &str, cx: &mut Context<Self>) {
         self.audio_last_error = Some(message.to_string());
-        self.recording_ui_state = RecordingUiState::Failed {
+        self.recording.ui_state = RecordingUiState::Failed {
             reason: message.to_string(),
         };
         eprintln!("[recording] start blocked: {message}");

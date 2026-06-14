@@ -12,6 +12,24 @@ use crate::shutdown::{self, ShutdownState};
 use super::project_ops::LifecycleAction;
 use super::StudioLayout;
 
+/// Pending project-lifecycle dialog state — the close/quit/new/open actions
+/// parked while the unsaved-changes guard dialog is shown, plus the last failed
+/// open path used by recovery. Third `StudioLayout` decomposition slice; every
+/// field is `Option`, so `Default` (all `None`) is derived.
+#[derive(Default)]
+pub(crate) struct LifecycleGuardState {
+    /// Live unsaved-changes guard dialog (Save / Don't Save / Cancel), if shown.
+    /// Tracked so New/Open/Close/Quit don't stack dialogs.
+    pub unsaved_guard_window:
+        Option<gpui::WindowHandle<crate::components::message_box_dialog::MessageBoxWindow>>,
+    /// Close/quit action waiting on the unsaved-changes dialog.
+    pub pending_close_action: Option<PendingCloseAction>,
+    /// New/Open lifecycle action waiting on the unsaved-changes dialog.
+    pub pending_lifecycle_action: Option<LifecycleAction>,
+    /// Path of the last failed project open, used by recovery dialogs.
+    pub pending_failed_open_path: Option<std::path::PathBuf>,
+}
+
 /// User-initiated close that may require an unsaved-changes prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingCloseAction {
@@ -50,7 +68,7 @@ impl StudioLayout {
             "close requested action={} dirty={dirty}",
             action.label()
         ));
-        self.pending_close_action = Some(action);
+        self.lifecycle_guard.pending_close_action = Some(action);
         if !dirty {
             self.perform_pending_close(cx);
             return;
@@ -78,7 +96,7 @@ impl StudioLayout {
             self.run_lifecycle_action(action, cx);
             return;
         }
-        self.pending_lifecycle_action = Some(action);
+        self.lifecycle_guard.pending_lifecycle_action = Some(action);
         self.show_unsaved_changes_dialog(owner_bounds, cx);
     }
 
@@ -87,7 +105,7 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(handle) = self.unsaved_guard_window.clone() {
+        if let Some(handle) = self.lifecycle_guard.unsaved_guard_window.clone() {
             if handle
                 .update(cx, |_mb, window, _cx| window.activate_window())
                 .is_ok()
@@ -95,7 +113,7 @@ impl StudioLayout {
                 shutdown::log("unsaved dialog already open — focused");
                 return;
             }
-            self.unsaved_guard_window = None;
+            self.lifecycle_guard.unsaved_guard_window = None;
         }
 
         let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
@@ -126,7 +144,7 @@ impl StudioLayout {
                     return;
                 }
                 let _ = owner.update(cx, |this, cx| {
-                    this.unsaved_guard_window = None;
+                    this.lifecycle_guard.unsaved_guard_window = None;
                     match result.response {
                         0 => {
                             shutdown::log("unsaved dialog: Save");
@@ -138,8 +156,8 @@ impl StudioLayout {
                         }
                         _ => {
                             shutdown::log("unsaved dialog: Cancel");
-                            this.pending_close_action = None;
-                            this.pending_lifecycle_action = None;
+                            this.lifecycle_guard.pending_close_action = None;
+                            this.lifecycle_guard.pending_lifecycle_action = None;
                         }
                     }
                 });
@@ -147,31 +165,31 @@ impl StudioLayout {
 
         match open_message_box_window(owner_bounds, options, on_response, cx) {
             Ok(handle) => {
-                self.unsaved_guard_window = Some(handle);
+                self.lifecycle_guard.unsaved_guard_window = Some(handle);
                 shutdown::log("unsaved dialog shown");
             }
             Err(err) => {
                 eprintln!("[project] unsaved-changes dialog unavailable: {err}");
-                self.pending_close_action = None;
-                self.pending_lifecycle_action = None;
+                self.lifecycle_guard.pending_close_action = None;
+                self.lifecycle_guard.pending_lifecycle_action = None;
                 shutdown::log("unsaved dialog failed — close aborted (stay open)");
             }
         }
     }
 
     fn save_then_pending(&mut self, cx: &mut Context<Self>) {
-        if let Some(action) = self.pending_lifecycle_action.take() {
+        if let Some(action) = self.lifecycle_guard.pending_lifecycle_action.take() {
             self.save_lifecycle_then(action, cx);
             return;
         }
-        if self.pending_close_action.is_some() {
+        if self.lifecycle_guard.pending_close_action.is_some() {
             self.save_close_then(cx);
         }
     }
 
     fn perform_pending_after_guard(&mut self, cx: &mut Context<Self>) {
-        if self.pending_lifecycle_action.is_some() {
-            let action = self.pending_lifecycle_action.take().expect("checked");
+        if self.lifecycle_guard.pending_lifecycle_action.is_some() {
+            let action = self.lifecycle_guard.pending_lifecycle_action.take().expect("checked");
             self.run_lifecycle_action(action, cx);
             return;
         }
@@ -179,7 +197,7 @@ impl StudioLayout {
     }
 
     pub(super) fn perform_pending_close(&mut self, cx: &mut Context<Self>) {
-        let Some(action) = self.pending_close_action.take() else {
+        let Some(action) = self.lifecycle_guard.pending_close_action.take() else {
             return;
         };
         shutdown::log(&format!("perform_pending_close action={}", action.label()));
@@ -211,7 +229,7 @@ impl StudioLayout {
         self.shutdown_plugin_editors(cx);
 
         shutdown::log("phase: plugin bridge hosts");
-        super::plugin_bridge_runtime::shutdown_plugin_bridge(&mut self.plugin_bridge_runtime);
+        super::plugin_bridge_runtime::shutdown_plugin_bridge(&mut self.plugin_editors.bridge_runtime);
 
         shutdown::log("shutdown_studio end");
     }

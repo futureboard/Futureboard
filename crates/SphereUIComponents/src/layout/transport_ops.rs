@@ -3,8 +3,46 @@ use gpui::{Context, Window};
 use std::sync::Arc;
 
 use crate::components;
+use crate::components::text_input::TextInputState;
 
 use super::{StudioLayout, TransportCommand};
+
+/// Inline BPM + time-signature numeric editors opened from the transport bar
+/// (the small pop-up fields on the BPM / time-sig displays). Second
+/// `StudioLayout` decomposition slice — accessed across the transport ops
+/// modules. Holds focus-handle-backed text inputs, so it is built via
+/// `new(cx)` rather than `Default`.
+pub(crate) struct TempoEditState {
+    /// Inline numeric BPM editor field.
+    pub bpm_input: TextInputState,
+    /// Whether the inline BPM editor is open.
+    pub bpm_editing: bool,
+    /// Inline time-signature numerator field.
+    pub ts_num_input: TextInputState,
+    /// Inline time-signature denominator field.
+    pub ts_den_input: TextInputState,
+    /// Whether the inline time-signature editor is open.
+    pub ts_editing: bool,
+    /// `Some(id)` edits one time-sig marker; `None` edits the project default.
+    pub ts_edit_point_id: Option<String>,
+    /// True while the numerator field holds focus (false → denominator).
+    pub ts_edit_focus_num: bool,
+}
+
+impl TempoEditState {
+    pub(super) fn new(cx: &mut Context<StudioLayout>) -> Self {
+        Self {
+            bpm_input: TextInputState::new("transport-bpm-input", cx.focus_handle()),
+            bpm_editing: false,
+            ts_num_input: TextInputState::new("transport-ts-num-input", cx.focus_handle()),
+            ts_den_input: TextInputState::new("transport-ts-den-input", cx.focus_handle()),
+            ts_editing: false,
+            ts_edit_point_id: None,
+            ts_edit_focus_num: true,
+        }
+    }
+}
+
 impl StudioLayout {
     pub(super) fn zoom_timeline_by(&self, cx: &mut Context<Self>, factor: f32) {
         let _ = self.timeline.update(cx, |timeline, cx| {
@@ -123,7 +161,7 @@ impl StudioLayout {
 
     pub(super) fn is_recording_active(&self, cx: &mut Context<Self>) -> bool {
         self.timeline.read(cx).state.transport.recording
-            || self.recording_preview.is_some()
+            || self.recording.preview.is_some()
             || self
                 .audio_engine
                 .as_ref()
@@ -141,7 +179,7 @@ impl StudioLayout {
             event,
             timeline.state.transport.playing,
             timeline.state.transport.recording,
-            self.recording_preview.as_ref().map(|p| p.recording_id),
+            self.recording.preview.as_ref().map(|p| p.recording_id),
             action
         );
     }
@@ -294,17 +332,17 @@ impl StudioLayout {
             bpm: bpm_value,
             bpm_label,
             bpm_has_automation,
-            bpm_editing: self.bpm_editing,
-            bpm_input: self.bpm_input.clone(),
+            bpm_editing: self.tempo_edit.bpm_editing,
+            bpm_input: self.tempo_edit.bpm_input.clone(),
             // The layout's key handler routes keys while editing, so render the
             // caret whenever the editor is open.
-            bpm_edit_focused: self.bpm_editing,
+            bpm_edit_focused: self.tempo_edit.bpm_editing,
             time_signature_label,
             ts_has_markers,
-            ts_editing: self.ts_editing,
-            ts_num_input: self.ts_num_input.clone(),
-            ts_den_input: self.ts_den_input.clone(),
-            ts_edit_focus_num: self.ts_edit_focus_num,
+            ts_editing: self.tempo_edit.ts_editing,
+            ts_num_input: self.tempo_edit.ts_num_input.clone(),
+            ts_den_input: self.tempo_edit.ts_den_input.clone(),
+            ts_edit_focus_num: self.tempo_edit.ts_edit_focus_num,
             on_ts_menu,
             on_ts_edit_start,
             on_return_to_start,
@@ -323,7 +361,7 @@ impl StudioLayout {
 
     pub(super) fn status_text(&self) -> (String, String) {
         let left = match (
-            self.recording_ui_state.status_text(),
+            self.recording.ui_state.status_text(),
             &self.audio_last_error,
             &self.audio_stats,
         ) {

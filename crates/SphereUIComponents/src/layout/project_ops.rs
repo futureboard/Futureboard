@@ -171,7 +171,7 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         project_lifecycle_log!("error: {title}: {message}");
-        self.pending_failed_open_path = failed_path.clone();
+        self.lifecycle_guard.pending_failed_open_path = failed_path.clone();
         let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
             self.cached_studio_window_bounds,
             self.studio_window_bounds(cx),
@@ -214,7 +214,7 @@ impl StudioLayout {
             dyn Fn(MessageBoxResult, &mut gpui::Window, &mut gpui::App) + Send + Sync,
         > = Arc::new(move |result, _window, cx| {
             let _ = owner.update(cx, |this, cx| {
-                this.pending_failed_open_path = None;
+                this.lifecycle_guard.pending_failed_open_path = None;
                 let Some(path) = failed_path_for_dialog.clone() else {
                     return;
                 };
@@ -478,8 +478,8 @@ impl StudioLayout {
                 });
             } else {
                 let _ = entity.update(cx, |this, _cx| {
-                    this.pending_close_action = None;
-                    this.pending_lifecycle_action = None;
+                    this.lifecycle_guard.pending_close_action = None;
+                    this.lifecycle_guard.pending_lifecycle_action = None;
                 });
             }
         })

@@ -12,6 +12,28 @@ use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
 
 use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
 
+/// Plugin-editor window handles owned by the studio — the GPUI-hosted editor
+/// shells, the native external-bridge editor sessions, the shared bridge
+/// runtime, and editor opens deferred while an insert runtime was still loading.
+/// `StudioLayout` decomposition slice (every field is `Default`).
+#[derive(Default)]
+pub(crate) struct PluginEditorWindows {
+    /// Open native plugin editor windows keyed by `(track_id, insert_id)` →
+    /// GPUI-hosted editor window handle (GPUI borderless shell, native VST3
+    /// child region; dropping the entity detaches the view).
+    pub open: std::collections::HashMap<
+        (String, String),
+        gpui::WindowHandle<crate::components::plugin_editor_window::PluginEditorWindow>,
+    >,
+    /// Native main-owned external-bridge editor shells, keyed by
+    /// `(track_id, plugin_instance_id)`.
+    pub bridge: std::collections::HashMap<(String, String), BridgeEditorSession>,
+    /// Shared external-bridge plugin runtime, if active.
+    pub bridge_runtime: Option<super::plugin_bridge_runtime::SharedPluginBridgeRuntime>,
+    /// Editor opens requested while the insert runtime was still loading.
+    pub deferred_opens: Vec<(String, usize, String)>,
+}
+
 /// `FUTUREBOARD_PLUGIN_EDITOR_DEBUG=1` gates the structured editor-lifecycle
 /// logs (open request / result / failure / timing). These fire only on state
 /// transitions — never from the paint loop or the audio callback.
@@ -86,7 +108,7 @@ impl StudioLayout {
         use sphere_plugin_host::ipc::HostEvent;
         use sphere_plugin_host::plugin_host_client::ClientEvent;
 
-        let Some(runtime) = self.plugin_bridge_runtime.as_ref().cloned() else {
+        let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() else {
             return;
         };
         let events = runtime
@@ -302,9 +324,9 @@ impl StudioLayout {
 
         // Clone the shared-runtime Arc up front so we can send ResizeEditor while
         // holding a `&mut` borrow of the matched session.
-        let runtime = self.plugin_bridge_runtime.as_ref().cloned();
+        let runtime = self.plugin_editors.bridge_runtime.as_ref().cloned();
         let Some((_, session)) = self
-            .bridge_editors
+            .plugin_editors.bridge
             .iter_mut()
             .find(|((_, id), _)| id == plugin_instance_id)
         else {
@@ -541,10 +563,10 @@ impl StudioLayout {
     /// Host process disconnected (crash/exit): mark every open native editor
     /// session failed so none waits forever (spec Part 9 — surface, no fallback).
     fn broadcast_editor_disconnect(&mut self, cx: &mut Context<Self>) {
-        if self.bridge_editors.is_empty() {
+        if self.plugin_editors.bridge.is_empty() {
             return;
         }
-        for session in self.bridge_editors.values_mut() {
+        for session in self.plugin_editors.bridge.values_mut() {
             session
                 .shell
                 .set_status("Plugin host disconnected (crashed or exited).", true);
@@ -581,7 +603,7 @@ impl StudioLayout {
         //     focused ANY existing session, so a stalled/failed open
         //     permanently blocked reopen.
         let existing = self
-            .bridge_editors
+            .plugin_editors.bridge
             .get(&key)
             .map(|s| (s.state.clone(), s.requested_at));
         if let Some((state, requested_at)) = existing {
@@ -592,7 +614,7 @@ impl StudioLayout {
                 self.close_bridge_editor(cx, track_id, instance_id);
                 // fall through to a fresh open below
             } else {
-                if let Some(session) = self.bridge_editors.get(&key) {
+                if let Some(session) = self.plugin_editors.bridge.get(&key) {
                     session.shell.focus();
                 }
                 ped_log!(
@@ -608,7 +630,7 @@ impl StudioLayout {
         ped_log!(
             "Open Request track={track_id} slot={instance_id} state=Closed plugin={display_name} command=PrepareEditorView"
         );
-        let Some(runtime) = self.plugin_bridge_runtime.as_ref().cloned() else {
+        let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() else {
             eprintln!(
                 "[plugin-runtime] external bridge mandatory but no runtime for editor instance={instance_id}"
             );
@@ -662,7 +684,7 @@ impl StudioLayout {
                     "Open dispatched track={track_id} slot={instance_id} state=Preparing request_to_ipc_ms={}",
                     request_started.elapsed().as_millis()
                 );
-                self.bridge_editors.insert(
+                self.plugin_editors.bridge.insert(
                     key,
                     BridgeEditorSession {
                         track_id: track_id.to_string(),
@@ -721,13 +743,13 @@ impl StudioLayout {
     }
 
     pub(super) fn drive_bridge_editors(&mut self, cx: &mut Context<Self>) {
-        if self.bridge_editors.is_empty() {
+        if self.plugin_editors.bridge.is_empty() {
             return;
         }
-        let runtime = self.plugin_bridge_runtime.as_ref().cloned();
+        let runtime = self.plugin_editors.bridge_runtime.as_ref().cloned();
         let mut to_close: Vec<(String, String)> = Vec::new();
         let mut changed = false;
-        for (key, session) in self.bridge_editors.iter_mut() {
+        for (key, session) in self.plugin_editors.bridge.iter_mut() {
             session.shell.pump_messages();
             // Open watchdog (spec A6): a session still loading past the deadline
             // is marked Failed so a subsequent Open click retries instead of
@@ -811,11 +833,11 @@ impl StudioLayout {
     ) {
         let key = (track_id.to_string(), instance_id.to_string());
         self.log_editor_engine_state("close engine_state_before=", track_id, instance_id);
-        if let Some(session) = self.bridge_editors.remove(&key) {
+        if let Some(session) = self.plugin_editors.bridge.remove(&key) {
             if let Some(engine) = self.audio_engine.as_ref() {
                 let _ = engine.set_bridge_editor_active(track_id.to_string(), false);
             }
-            if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
+            if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
                 if let Ok(mut r) = runtime.lock() {
                     r.close_editor(session.instance_id.clone());
                 }
@@ -825,7 +847,7 @@ impl StudioLayout {
             );
             self.log_editor_engine_state("close engine_state_after=", track_id, instance_id);
             let host_pid = self
-                .plugin_bridge_runtime
+                .plugin_editors.bridge_runtime
                 .as_ref()
                 .and_then(|rt| rt.lock().ok())
                 .and_then(|r| r.host_pid());
@@ -934,7 +956,7 @@ impl StudioLayout {
                         .state
                         .set_insert_pending_editor_open(track_id, insert_id, true);
                 });
-                self.deferred_insert_editor_opens.push((
+                self.plugin_editors.deferred_opens.push((
                     track_id.to_string(),
                     insert_index,
                     resolved_plugin_instance_id.clone(),
@@ -951,7 +973,7 @@ impl StudioLayout {
         // One editor window per insert. If a live editor already exists for this
         // slot, focus/raise it instead of opening (or instantiating) a second
         // one. Only drop the handle when its window is actually gone.
-        if let Some(handle) = self.open_plugin_editors.get(&key) {
+        if let Some(handle) = self.plugin_editors.open.get(&key) {
             if handle
                 .update(cx, |_, window, _| {
                     window.activate_window();
@@ -969,7 +991,7 @@ impl StudioLayout {
             if debug {
                 eprintln!("[plugin-view] stale editor handle track={track_id} slot={insert_id} → recreating");
             }
-            self.open_plugin_editors.remove(&key);
+            self.plugin_editors.open.remove(&key);
         }
 
         let path = plugin_path.filter(|p| !p.trim().is_empty());
@@ -985,7 +1007,7 @@ impl StudioLayout {
 
         if super::plugin_bridge_runtime::bridge_enabled() {
             let bridge_loaded = self
-                .plugin_bridge_runtime
+                .plugin_editors.bridge_runtime
                 .as_ref()
                 .and_then(|runtime| runtime.lock().ok())
                 .and_then(|runtime| runtime.loaded_descriptor(insert_id))
@@ -998,7 +1020,7 @@ impl StudioLayout {
                             .state
                             .set_insert_pending_editor_open(track_id, insert_id, true);
                     });
-                    self.deferred_insert_editor_opens.push((
+                    self.plugin_editors.deferred_opens.push((
                         track_id.to_string(),
                         insert_index,
                         resolved_plugin_instance_id.clone(),
@@ -1042,7 +1064,7 @@ impl StudioLayout {
             cx,
         ) {
             Ok(handle) => {
-                self.open_plugin_editors.insert(key, handle);
+                self.plugin_editors.open.insert(key, handle);
                 if debug {
                     eprintln!("[plugin-view] open track={track_id} slot={insert_id}");
                 }
@@ -1069,7 +1091,7 @@ impl StudioLayout {
         self.close_bridge_editor(cx, track_id, insert_id);
         // Legacy GPUI-window editor (FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS only).
         let key = (track_id.to_string(), insert_id.to_string());
-        if let Some(handle) = self.open_plugin_editors.remove(&key) {
+        if let Some(handle) = self.plugin_editors.open.remove(&key) {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
             eprintln!("[PluginEditorClose] plugin={insert_id} removed_called=true");
             if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
@@ -1079,7 +1101,7 @@ impl StudioLayout {
     }
 
     pub(super) fn unload_bridge_plugin(&mut self, insert_id: &str) {
-        if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
+        if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
             if let Ok(mut runtime) = runtime.lock() {
                 runtime.unload_plugin(insert_id.to_string());
             }
@@ -1213,12 +1235,12 @@ impl StudioLayout {
             (slot_present, instrument_ptr)
         };
         let editor_open = self
-            .open_plugin_editors
+            .plugin_editors.open
             .keys()
-            .chain(self.bridge_editors.keys())
+            .chain(self.plugin_editors.bridge.keys())
             .any(|(_, id)| id == insert_id);
         let bridge_loaded = self
-            .plugin_bridge_runtime
+            .plugin_editors.bridge_runtime
             .as_ref()
             .and_then(|runtime| runtime.lock().ok().map(|r| r.is_loaded(insert_id)))
             .unwrap_or(false);
@@ -1260,9 +1282,9 @@ impl StudioLayout {
                 .collect();
             // Defensive: also catch any editor whose model slot already vanished.
             for key in self
-                .open_plugin_editors
+                .plugin_editors.open
                 .keys()
-                .chain(self.bridge_editors.keys())
+                .chain(self.plugin_editors.bridge.keys())
             {
                 if !pairs.contains(key) {
                     pairs.push(key.clone());
@@ -1290,7 +1312,7 @@ impl StudioLayout {
     /// being destroyed (Part 11). Cheap: only inspects state when an editor is
     /// open, and only closes when its backing slot is genuinely gone.
     pub(super) fn reconcile_open_plugin_editors(&mut self, cx: &mut Context<Self>) {
-        if self.open_plugin_editors.is_empty() && self.bridge_editors.is_empty() {
+        if self.plugin_editors.open.is_empty() && self.plugin_editors.bridge.is_empty() {
             return;
         }
         let stale: Vec<(String, String)> = {
@@ -1298,10 +1320,10 @@ impl StudioLayout {
             let is_stale = |(track_id, insert_id): &&(String, String)| {
                 state.find_insert_slot(track_id, insert_id).is_none()
             };
-            self.open_plugin_editors
+            self.plugin_editors.open
                 .keys()
                 .filter(is_stale)
-                .chain(self.bridge_editors.keys().filter(is_stale))
+                .chain(self.plugin_editors.bridge.keys().filter(is_stale))
                 .cloned()
                 .collect()
         };
@@ -1317,9 +1339,9 @@ impl StudioLayout {
     /// application exit (avoids HWND/VST3 teardown during TLS destruction).
     pub(super) fn shutdown_plugin_editors(&mut self, cx: &mut Context<Self>) {
         let keys: Vec<(String, String)> = self
-            .open_plugin_editors
+            .plugin_editors.open
             .keys()
-            .chain(self.bridge_editors.keys())
+            .chain(self.plugin_editors.bridge.keys())
             .cloned()
             .collect();
         for (track_id, insert_id) in keys {
@@ -1648,7 +1670,7 @@ impl StudioLayout {
                     display_name: log_display_name.clone(),
                 };
                 match super::plugin_bridge_runtime::PluginBridgeRuntime::ensure_shared(
-                    &mut self.plugin_bridge_runtime,
+                    &mut self.plugin_editors.bridge_runtime,
                 ) {
                     Ok(runtime) => {
                         let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
@@ -1762,10 +1784,10 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.deferred_insert_editor_opens.is_empty() {
+        if self.plugin_editors.deferred_opens.is_empty() {
             return;
         }
-        let pending: Vec<_> = self.deferred_insert_editor_opens.drain(..).collect();
+        let pending: Vec<_> = self.plugin_editors.deferred_opens.drain(..).collect();
         for (track_id, insert_index, instance_id) in pending {
             self.open_insert_editor(&track_id, insert_index, &instance_id, window, cx);
         }
@@ -1831,7 +1853,7 @@ impl StudioLayout {
         if slots.is_empty() {
             return;
         }
-        let Some(runtime) = self.plugin_bridge_runtime.as_ref() else {
+        let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() else {
             return;
         };
         let instance_ids: Vec<String> = slots.iter().map(|(_, id)| id.clone()).collect();
@@ -1885,7 +1907,7 @@ impl StudioLayout {
             );
             return false;
         };
-        let Some(runtime_arc) = self.plugin_bridge_runtime.as_ref() else {
+        let Some(runtime_arc) = self.plugin_editors.bridge_runtime.as_ref() else {
             return false;
         };
         let Ok(runtime) = runtime_arc.lock() else {
@@ -1971,7 +1993,7 @@ impl StudioLayout {
             }
             local_changed
         });
-        self.deferred_insert_editor_opens.extend(pending_opens);
+        self.plugin_editors.deferred_opens.extend(pending_opens);
         eprintln!("[plugin-runtime] state Loading -> Active source={source}");
         self.sync_plugin_bridge_sinks_to_engine(cx, source);
         self.engine_project_dirty = true;
@@ -2050,7 +2072,7 @@ impl StudioLayout {
         };
 
         match super::plugin_bridge_runtime::PluginBridgeRuntime::ensure_shared(
-            &mut self.plugin_bridge_runtime,
+            &mut self.plugin_editors.bridge_runtime,
         ) {
             Ok(runtime) => {
                 let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
@@ -2144,7 +2166,7 @@ impl StudioLayout {
                 let _ = engine.set_plugin_bridge_sink(insert_id.clone(), None);
             }
         }
-        if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
+        if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
             if let Ok(mut runtime) = runtime.lock() {
                 for instance_id in runtime.loaded_instance_ids() {
                     runtime.unload_plugin(instance_id);
@@ -2167,7 +2189,7 @@ impl StudioLayout {
 
         let wanted: std::collections::HashSet<String> =
             inserts.iter().map(|(_, slot_id)| slot_id.clone()).collect();
-        if let Some(runtime) = self.plugin_bridge_runtime.as_ref() {
+        if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
             if let Ok(mut runtime) = runtime.lock() {
                 let stale: Vec<String> = runtime
                     .loaded_instance_ids()

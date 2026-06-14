@@ -1,7 +1,7 @@
 //! Main-app-owned **content child HWND** for separated-process plugin editor
 //! hosting (`FUTUREBOARD_PLUGIN_EDITOR_OWNERSHIP=host_process`).
 //!
-//! Spec Part 2: when the editor lives in `FutureboardPluginHost-x64.exe`, the
+//! Spec Part 2: when the editor lives in `FutureboardPluginHostX64.exe`, the
 //! *window* still belongs to the GPUI main app. The GPUI plugin-editor window
 //! supplies its top HWND; this module creates a real `WS_CHILD` content HWND
 //! under it and hands the content HWND's handle to the host process over IPC.

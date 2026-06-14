@@ -1,5 +1,5 @@
-//! Cross-process IPC protocol between `futureboard_native.exe` (the GPUI main
-//! app, IPC *client*) and `FutureboardPluginHost-x64.exe` (the plugin host
+//! Cross-process IPC protocol between `FutureboardNative.exe` (the GPUI main
+//! app, IPC *client*) and `FutureboardPluginHostX64.exe` (the plugin host
 //! process, IPC *server*).
 //!
 //! Transport is **newline-delimited JSON** over the child process's

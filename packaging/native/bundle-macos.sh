@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Bundle target/release/futureboard_native into a macOS .app using apps/shared assets.
+# Bundle target/release/FutureboardNative into a macOS .app using apps/shared assets.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="${1:-$ROOT/target/release/futureboard_native}"
+BIN="${1:-$ROOT/target/release/FutureboardNative}"
 OUT="${2:-$ROOT/packaging/native/out}"
 APP_NAME="Futureboard Studio"
 APP_DIR="$OUT/$APP_NAME.app"

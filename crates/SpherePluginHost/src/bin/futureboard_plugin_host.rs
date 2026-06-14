@@ -1,4 +1,4 @@
-//! `FutureboardPluginHost-x64.exe` — the separated VST3 plugin/editor host
+//! `FutureboardPluginHostX64.exe` — the separated VST3 plugin/editor host
 //! process (IPC *server*).
 //!
 //! VST3 editor hosting follows public.sdk/samples/vst-hosting/editorhost

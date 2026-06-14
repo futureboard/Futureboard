@@ -1,5 +1,5 @@
 //! Main-app side of the separated plugin-host IPC: spawns
-//! `FutureboardPluginHost-x64.exe`, sends [`HostCommand`]s on its stdin, and
+//! `FutureboardPluginHostX64.exe`, sends [`HostCommand`]s on its stdin, and
 //! delivers [`HostEvent`]s (plus a synthetic disconnect signal) over a
 //! `crossbeam-channel` so the GPUI UI thread can poll without ever blocking
 //! (spec Part 9).
@@ -49,7 +49,7 @@ impl std::fmt::Display for PluginHostClientError {
 
 impl std::error::Error for PluginHostClientError {}
 
-const BINARY_STEM: &str = "FutureboardPluginHost-x64";
+const BINARY_STEM: &str = "FutureboardPluginHostX64";
 
 /// Strip main-app-only renderer/compositor environment from the plugin-host
 /// child process before spawning it.
@@ -57,7 +57,7 @@ const BINARY_STEM: &str = "FutureboardPluginHost-x64";
 /// The GPUI main app sets `GPUI_DISABLE_DIRECT_COMPOSITION=1` (and may set other
 /// `GPUI_*` renderer flags) for its *own* swap-chain / DirectComposition needs.
 /// Those flags are meaningless — and potentially harmful — inside the separate
-/// `FutureboardPluginHost-x64.exe`, which hosts arbitrary plugin GPU / WebView /
+/// `FutureboardPluginHostX64.exe`, which hosts arbitrary plugin GPU / WebView /
 /// DirectComposition UI frameworks. Inheriting them can leave the plugin editor
 /// blank. The host must run with a clean native environment by default (spec
 /// Part 1/2); a PluginHost-specific opt-in
@@ -197,7 +197,7 @@ pub fn locate_plugin_host_binary() -> Result<PathBuf, PluginHostClientError> {
     }
 }
 
-/// A live connection to one `FutureboardPluginHost-x64.exe` process.
+/// A live connection to one `FutureboardPluginHostX64.exe` process.
 ///
 /// Drop sends `Shutdown` (best-effort) and then kills the child, so a dropped
 /// client never leaves an orphan host process.

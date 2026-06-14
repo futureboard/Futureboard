@@ -1,6 +1,6 @@
 //! Stage 2: the lock-free **shared-memory audio bridge** layout between the main
-//! `SphereDirectAudioEngine` (in `futureboard_native.exe`) and the separated
-//! `FutureboardPluginHost-x64.exe`.
+//! `SphereDirectAudioEngine` (in `FutureboardNative.exe`) and the separated
+//! `FutureboardPluginHostX64.exe`.
 //!
 //! The region is a single `#[repr(C)]` POD ([`SharedAudioBridge`]) placed in
 //! OS shared memory (a named, pagefile-backed file mapping on Windows). It

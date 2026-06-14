@@ -1,4 +1,4 @@
-//! End-to-end IPC round-trip against a real spawned `FutureboardPluginHost-x64`
+//! End-to-end IPC round-trip against a real spawned `FutureboardPluginHostX64`
 //! process. Gated behind `plugin-host-bin` so it only runs when the host
 //! binary is actually built:
 //!
@@ -27,7 +27,7 @@ fn wait_event(client: &PluginHostClient, timeout: Duration) -> Option<ClientEven
 
 #[test]
 fn ready_then_attach_failed_for_invalid_hwnd() {
-    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHost-x64");
+    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHostX64");
 
     // Host announces itself on startup.
     match wait_event(&client, Duration::from_secs(10)) {
@@ -71,7 +71,7 @@ fn ready_then_attach_failed_for_invalid_hwnd() {
 /// sides.
 #[test]
 fn plugin_state_commands_answer_for_unloaded_instance() {
-    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHost-x64");
+    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHostX64");
 
     client
         .get_plugin_state("track1:insert1")
@@ -125,7 +125,7 @@ fn plugin_state_commands_answer_for_unloaded_instance() {
 
 #[test]
 fn ping_is_answered_with_pong() {
-    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHost-x64");
+    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHostX64");
 
     // Drain the startup Ready, then Ping and expect Pong carrying the host pid.
     let mut saw_pong = false;

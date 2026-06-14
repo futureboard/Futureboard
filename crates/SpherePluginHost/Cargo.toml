@@ -9,14 +9,14 @@ name = "sphere_plugin_host"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "futureboard_plugin_scanner"
+name = "FutureboardPluginScanner"
 path = "src/bin/futureboard_plugin_scanner.rs"
 required-features = ["plugin-scanner-bin"]
 
 # Separated plugin/editor host process. Workspace builds skip it unless the
 # feature is enabled, mirroring the scanner bin.
 [[bin]]
-name = "FutureboardPluginHost-x64"
+name = "FutureboardPluginHostX64"
 path = "src/bin/futureboard_plugin_host.rs"
 required-features = ["plugin-host-bin"]
 

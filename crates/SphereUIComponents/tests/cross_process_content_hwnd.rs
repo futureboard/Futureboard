@@ -5,7 +5,7 @@
 //!   1. the main app (this test process) creates a top HWND + a real `WS_CHILD`
 //!      content HWND (`content_hwnd != top_hwnd`, parented correctly);
 //!   2. the content HWND's handle is sent to a spawned
-//!      `FutureboardPluginHost-x64.exe` over IPC;
+//!      `FutureboardPluginHostX64.exe` over IPC;
 //!   3. the host process — a *different* process — recognizes the foreign HWND
 //!      (`IsWindow == true`) and attempts to attach. With a bogus plugin path it
 //!      returns `EditorAttachFailed`, which still proves cross-process HWND
@@ -13,7 +13,7 @@
 //!
 //! Windows-only, and skipped (passes) if the host binary has not been built —
 //! build it first with:
-//!   cargo build -p sphere-plugin-host --features plugin-host-bin --bin FutureboardPluginHost-x64
+//!   cargo build -p sphere-plugin-host --features plugin-host-bin --bin FutureboardPluginHostX64
 #![cfg(target_os = "windows")]
 
 use std::time::{Duration, Instant};
@@ -101,8 +101,8 @@ fn host_process_recognizes_main_owned_content_hwnd() {
     // feature). Not a failure: this test validates the wiring, not the build.
     if locate_plugin_host_binary().is_err() {
         eprintln!(
-            "skipping: FutureboardPluginHost-x64 not built \
-             (cargo build -p sphere-plugin-host --features plugin-host-bin --bin FutureboardPluginHost-x64)"
+            "skipping: FutureboardPluginHostX64 not built \
+             (cargo build -p sphere-plugin-host --features plugin-host-bin --bin FutureboardPluginHostX64)"
         );
         return;
     }

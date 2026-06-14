@@ -23,6 +23,13 @@ description = "SphereDirectAudioEngine — native Rust audio backend for Futureb
 name = "DAUx"
 crate-type = ["rlib", "cdylib"]
 
+# ── Main native executable ───────────────────────────────────────────────────
+# Output: SphereDirectAudioEngine.exe (explicit bin name; the package keeps its
+# `sphere-direct-audio-engine` name so dependency references are unaffected).
+[[bin]]
+name = "SphereDirectAudioEngine"
+path = "src/main.rs"
+
 # ── CLI test harness ─────────────────────────────────────────────────────────
 #
 # Build manually with:

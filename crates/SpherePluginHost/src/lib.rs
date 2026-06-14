@@ -9,13 +9,13 @@
 pub mod au_scanner;
 /// Stage 2 lock-free shared-memory audio bridge layout (audio in/out, MIDI ring,
 /// parameter-automation ring, status/latency/meter block) shared by the engine
-/// and the `FutureboardPluginHost-x64` process.
+/// and the `FutureboardPluginHostX64` process.
 pub mod audio_bridge;
 pub mod editor_quirk;
 #[cfg(feature = "napi")]
 mod editor_window;
 /// Cross-process IPC protocol (commands/events + JSON framing) shared by the
-/// main app and the `FutureboardPluginHost-x64` process.
+/// main app and the `FutureboardPluginHostX64` process.
 pub mod ipc;
 /// Plain-Rust facade over the editor C ABI — always built so the native
 /// binary can drive the IPlugView lifecycle without N-API.

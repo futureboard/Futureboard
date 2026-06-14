@@ -144,8 +144,8 @@ Arc + NVIDIA + iGPU (this is the riskiest change; it is last and independently r
 cargo check -p sphere_plugin_host && cargo build -p sphere_plugin_host --release
 cargo check -p sphere-direct-audio-engine && cargo test -p sphere-direct-audio-engine
 cargo check -p sphere_ui_components
-cargo build --release   # workspace, rebuilds futureboard_native + FutureboardPluginHost-x64
-target/release/FutureboardPluginHost-x64.exe --selftest
+cargo build --release   # workspace, rebuilds FutureboardNative + FutureboardPluginHostX64
+target/release/FutureboardPluginHostX64.exe --selftest
 ```
 
 Runtime smoke (each on NVIDIA, Intel iGPU, Intel Arc; FUTUREBOARD_UI_PERF=1 + FUTUREBOARD_PLUGIN_VIEW_DEBUG=1):

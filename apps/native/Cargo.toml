@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [[bin]]
-name = "futureboard_native"
+name = "FutureboardNative"
 path = "src/main.rs"
 
 [dependencies]

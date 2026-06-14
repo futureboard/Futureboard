@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $Bin) {
-    $Bin = Join-Path $Root "target\release\futureboard_native.exe"
+    $Bin = Join-Path $Root "target\release\FutureboardNative.exe"
 }
 if (-not $Out) {
     $Out = Join-Path $Root "packaging\native\out\win"

@@ -278,7 +278,7 @@ impl PluginEditorWindow {
         let status = if bridge_required && host.is_none() {
             eprintln!("[plugin-view] editor open failed because mandatory bridge is unavailable");
             PluginEditorStatus::Failed(
-                "External PluginHost bridge is mandatory, but the FutureboardPluginHost-x64 \
+                "External PluginHost bridge is mandatory, but the FutureboardPluginHostX64 \
                  process could not be started. The in-process editor is disabled unless \
                  FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1 is set."
                     .to_string(),
@@ -842,7 +842,7 @@ impl PluginEditorWindow {
     // --- Host-process editor path (gated; in-process path above is untouched) ---
 
     /// Drive the separated-process editor lifecycle. Mirrors `drive` but the
-    /// VST3 view lives in `FutureboardPluginHost-x64.exe`: the main app creates a
+    /// VST3 view lives in `FutureboardPluginHostX64.exe`: the main app creates a
     /// content child HWND under its GPUI window and hands the handle to the host
     /// over IPC. Attach is event-driven (`HostEvent::EditorAttached`).
     fn drive_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {

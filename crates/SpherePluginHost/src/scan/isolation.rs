@@ -46,7 +46,7 @@ pub fn locate_scanner_binary() -> Result<PathBuf, PluginScanError> {
     }
 
     Err(PluginScanError::ScannerBinaryMissing(
-        "{appdir}/futureboard_plugin_scanner.exe".into(),
+        "{appdir}/FutureboardPluginScanner.exe".into(),
     ))
 }
 
@@ -114,11 +114,11 @@ fn bundle_scan_format(bundle: &Path) -> Option<PluginScanFormat> {
 fn scanner_binary_name(dir: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        dir.join("futureboard_plugin_scanner.exe")
+        dir.join("FutureboardPluginScanner.exe")
     }
     #[cfg(not(windows))]
     {
-        dir.join("futureboard_plugin_scanner")
+        dir.join("FutureboardPluginScanner")
     }
 }
 

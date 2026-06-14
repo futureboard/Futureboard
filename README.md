@@ -321,7 +321,7 @@ cargo build --release -p futureboard_native
 The optimized binary is emitted to:
 
 ```text
-target/release/futureboard_native
+target/release/FutureboardNative
 ```
 
 On Windows, the binary will use the `.exe` extension.

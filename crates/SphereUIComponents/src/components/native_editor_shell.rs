@@ -6,7 +6,7 @@
 //! composites over the entire client area and cannot let a foreign `WS_CHILD`
 //! show through. So a plugin `IPlugView` parented under a GPUI window never
 //! paints. This shell is a real native Win32 window (no swap chain over the
-//! content), so the separated `FutureboardPluginHost-x64.exe` can attach the
+//! content), so the separated `FutureboardPluginHostX64.exe` can attach the
 //! VST3 view into the content HWND and it paints.
 //!
 //! Why borderless + custom chrome: the OS title bar is suppressed
@@ -17,7 +17,7 @@
 //! while keeping the reliable native painting (spec Part 1/2/5/8 — "Native
 //! borderless + custom chrome").
 //!
-//! Still **main-owned**: created and controlled by `futureboard_native.exe`.
+//! Still **main-owned**: created and controlled by `FutureboardNative.exe`.
 //! NOT `host_detached` (PluginHost-owned) and NOT in-process hosting.
 //!
 //! Non-Windows targets get no-op stubs so the crate compiles everywhere.

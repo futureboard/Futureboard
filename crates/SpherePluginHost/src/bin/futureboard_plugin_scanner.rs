@@ -92,8 +92,8 @@ fn print_help() {
     eprintln!(
         "FutureboardPluginScanner\n\
          Usage:\n\
-           futureboard_plugin_scanner --format vst3|clap|audiounit --json [--path <dir>]...\n\
-           futureboard_plugin_scanner --format audiounit --json --validate <component-id>\n\
-           futureboard_plugin_scanner --format audiounit --json --validate-plugins"
+           FutureboardPluginScanner --format vst3|clap|audiounit --json [--path <dir>]...\n\
+           FutureboardPluginScanner --format audiounit --json --validate <component-id>\n\
+           FutureboardPluginScanner --format audiounit --json --validate-plugins"
     );
 }

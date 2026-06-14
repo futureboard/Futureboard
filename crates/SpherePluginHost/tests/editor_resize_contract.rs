@@ -139,7 +139,7 @@ fn resize_contract_with_real_plugin() {
     );
 
     let instance = "smoke:resize1";
-    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHost-x64");
+    let mut client = PluginHostClient::spawn().expect("spawn FutureboardPluginHostX64");
     assert!(
         wait_for(&client, Duration::from_secs(10), |ev| matches!(
             ev,

@@ -1,6 +1,6 @@
-//! Windows Job Object and coordinated shutdown for `FutureboardPluginHost-x64.exe`
+//! Windows Job Object and coordinated shutdown for `FutureboardPluginHostX64.exe`
 //! child processes. Keeps plugin hosts owned by the main app lifecycle so they
-//! cannot outlive `futureboard_native.exe`.
+//! cannot outlive `FutureboardNative.exe`.
 
 use std::collections::HashMap;
 use std::process::Child;

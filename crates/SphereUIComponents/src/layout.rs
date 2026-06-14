@@ -386,19 +386,9 @@ pub struct StudioLayout {
     /// Repaint-rate diagnostics. Ticks once per `Render`, smoothed
     /// EMA frame time, exposed in the status bar.
     frame_diag: FrameDiagnostics,
-    /// Current horizontal scroll offset for the mixer channel strip area.
-    /// Updated by the mixer scroll-wheel handler and clamped each frame.
-    mixer_scroll_x: f32,
-    /// Shared Inserts viewport height in px for every mixer channel strip.
-    mixer_insert_section_px: f32,
-    /// Shared Sends viewport height in px for every mixer channel strip.
-    mixer_send_section_px: f32,
-    /// Transient splitter-drag anchors recorded on pointer-down so the move
-    /// handler can recompute height as a pure function of the current pointer Y.
-    mixer_split_resize_start_y: f32,
-    mixer_split_resize_start_insert_px: f32,
-    mixer_split_resize_start_send_px: f32,
-    mixer_split_active_target: Option<crate::components::mixer_panel::MixerSplitTarget>,
+    /// Mixer-panel view state (scroll, insert/send section heights, splitter-drag
+    /// anchors). Grouped into [`mixer_ops::MixerViewState`] (decomposition slice).
+    mixer_view: mixer_ops::MixerViewState,
 
     // ── Project file system ───────────────────────────────────────────────────
     /// Centralized filesystem paths for the entire application.
@@ -698,14 +688,7 @@ impl StudioLayout {
             clip_clipboard: Vec::new(),
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
-            mixer_scroll_x: 0.0,
-            mixer_insert_section_px:
-                crate::components::mixer_panel::MIXER_INSERT_SECTION_DEFAULT_PX,
-            mixer_send_section_px: crate::components::mixer_panel::MIXER_SEND_SECTION_DEFAULT_PX,
-            mixer_split_resize_start_y: 0.0,
-            mixer_split_resize_start_insert_px: 0.0,
-            mixer_split_resize_start_send_px: 0.0,
-            mixer_split_active_target: None,
+            mixer_view: mixer_ops::MixerViewState::default(),
             paths,
             project_session: crate::project::ProjectSession::default(),
             project_path: None,

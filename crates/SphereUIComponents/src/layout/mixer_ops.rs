@@ -10,6 +10,41 @@ use crate::components::{external_mixer_debug, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
 use super::{ContextTarget, MixerWindow, OpenPopover, StudioLayout};
+
+/// Mixer-panel view state — horizontal scroll, the shared insert/send section
+/// heights, and the transient splitter-drag anchors. `StudioLayout` decomposition
+/// slice. Manual `Default` (insert/send sections start at their default px).
+pub(crate) struct MixerViewState {
+    /// Horizontal scroll offset for the channel-strip area.
+    pub scroll_x: f32,
+    /// Shared Inserts viewport height (px) for every channel strip.
+    pub insert_section_px: f32,
+    /// Shared Sends viewport height (px) for every channel strip.
+    pub send_section_px: f32,
+    /// Splitter-drag pointer-Y anchor recorded on pointer-down.
+    pub split_resize_start_y: f32,
+    /// Insert-section height captured at splitter-drag start.
+    pub split_resize_start_insert_px: f32,
+    /// Send-section height captured at splitter-drag start.
+    pub split_resize_start_send_px: f32,
+    /// Active splitter-drag target, if a drag is in progress.
+    pub split_active_target: Option<MixerSplitTarget>,
+}
+
+impl Default for MixerViewState {
+    fn default() -> Self {
+        Self {
+            scroll_x: 0.0,
+            insert_section_px: MIXER_INSERT_SECTION_DEFAULT_PX,
+            send_section_px: MIXER_SEND_SECTION_DEFAULT_PX,
+            split_resize_start_y: 0.0,
+            split_resize_start_insert_px: 0.0,
+            split_resize_start_send_px: 0.0,
+            split_active_target: None,
+        }
+    }
+}
+
 impl StudioLayout {
     pub(crate) fn notify_mixer_window(&mut self, cx: &mut Context<Self>) {
         self.push_mixer_snapshot_to_window(cx);
@@ -21,10 +56,10 @@ impl StudioLayout {
             tracks: timeline.state.tracks.clone(),
             master: timeline.state.master.clone(),
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
-            mixer_scroll_x: self.mixer_scroll_x,
-            mixer_insert_section_px: clamp_mixer_section_height_px(self.mixer_insert_section_px),
-            mixer_send_section_px: clamp_mixer_section_height_px(self.mixer_send_section_px),
-            mixer_split_active_target: self.mixer_split_active_target,
+            mixer_scroll_x: self.mixer_view.scroll_x,
+            mixer_insert_section_px: clamp_mixer_section_height_px(self.mixer_view.insert_section_px),
+            mixer_send_section_px: clamp_mixer_section_height_px(self.mixer_view.send_section_px),
+            mixer_split_active_target: self.mixer_view.split_active_target,
         }
     }
 
@@ -58,8 +93,8 @@ impl StudioLayout {
     }
 
     pub(crate) fn set_mixer_scroll_x(&mut self, scroll_x: f32, _cx: &mut Context<Self>) -> bool {
-        if (self.mixer_scroll_x - scroll_x).abs() > 0.25 {
-            self.mixer_scroll_x = scroll_x;
+        if (self.mixer_view.scroll_x - scroll_x).abs() > 0.25 {
+            self.mixer_view.scroll_x = scroll_x;
             true
         } else {
             false
@@ -68,15 +103,15 @@ impl StudioLayout {
 
     /// Current shared insert/send viewport heights, clamped to the supported range.
     pub(crate) fn mixer_insert_section_px(&self) -> f32 {
-        clamp_mixer_section_height_px(self.mixer_insert_section_px)
+        clamp_mixer_section_height_px(self.mixer_view.insert_section_px)
     }
 
     pub(crate) fn mixer_send_section_px(&self) -> f32 {
-        clamp_mixer_section_height_px(self.mixer_send_section_px)
+        clamp_mixer_section_height_px(self.mixer_view.send_section_px)
     }
 
     pub(crate) fn mixer_split_active_target(&self) -> Option<MixerSplitTarget> {
-        self.mixer_split_active_target
+        self.mixer_view.split_active_target
     }
 
     /// Apply a splitter intent from any channel-strip handle. Shared across all
@@ -89,55 +124,55 @@ impl StudioLayout {
     ) {
         match action {
             MixerSplitAction::ResizeStart(target, y) => {
-                self.mixer_split_resize_start_y = y;
-                self.mixer_split_resize_start_insert_px =
-                    clamp_mixer_section_height_px(self.mixer_insert_section_px);
-                self.mixer_split_resize_start_send_px =
-                    clamp_mixer_section_height_px(self.mixer_send_section_px);
-                self.mixer_split_active_target = Some(target);
+                self.mixer_view.split_resize_start_y = y;
+                self.mixer_view.split_resize_start_insert_px =
+                    clamp_mixer_section_height_px(self.mixer_view.insert_section_px);
+                self.mixer_view.split_resize_start_send_px =
+                    clamp_mixer_section_height_px(self.mixer_view.send_section_px);
+                self.mixer_view.split_active_target = Some(target);
             }
             MixerSplitAction::ResizeMove(y) => {
-                let Some(target) = self.mixer_split_active_target else {
+                let Some(target) = self.mixer_view.split_active_target else {
                     return;
                 };
-                let delta = y - self.mixer_split_resize_start_y;
+                let delta = y - self.mixer_view.split_resize_start_y;
                 match target {
                     MixerSplitTarget::InsertSend => {
                         let new_px = clamp_mixer_section_height_px(
-                            self.mixer_split_resize_start_insert_px + delta,
+                            self.mixer_view.split_resize_start_insert_px + delta,
                         );
-                        if (new_px - self.mixer_insert_section_px).abs() <= 0.25 {
+                        if (new_px - self.mixer_view.insert_section_px).abs() <= 0.25 {
                             return;
                         }
-                        self.mixer_insert_section_px = new_px;
+                        self.mixer_view.insert_section_px = new_px;
                     }
                     MixerSplitTarget::SendFader => {
                         let new_px = clamp_mixer_section_height_px(
-                            self.mixer_split_resize_start_send_px + delta,
+                            self.mixer_view.split_resize_start_send_px + delta,
                         );
-                        if (new_px - self.mixer_send_section_px).abs() <= 0.25 {
+                        if (new_px - self.mixer_view.send_section_px).abs() <= 0.25 {
                             return;
                         }
-                        self.mixer_send_section_px = new_px;
+                        self.mixer_view.send_section_px = new_px;
                     }
                 }
             }
             MixerSplitAction::ResizeEnd => {
-                if self.mixer_split_active_target.is_none() {
+                if self.mixer_view.split_active_target.is_none() {
                     return;
                 }
-                self.mixer_split_active_target = None;
+                self.mixer_view.split_active_target = None;
             }
             MixerSplitAction::Reset(target) => {
                 match target {
                     MixerSplitTarget::InsertSend => {
-                        self.mixer_insert_section_px = MIXER_INSERT_SECTION_DEFAULT_PX;
+                        self.mixer_view.insert_section_px = MIXER_INSERT_SECTION_DEFAULT_PX;
                     }
                     MixerSplitTarget::SendFader => {
-                        self.mixer_send_section_px = MIXER_SEND_SECTION_DEFAULT_PX;
+                        self.mixer_view.send_section_px = MIXER_SEND_SECTION_DEFAULT_PX;
                     }
                 }
-                self.mixer_split_active_target = None;
+                self.mixer_view.split_active_target = None;
             }
         }
         self.push_mixer_snapshot_to_window(cx);

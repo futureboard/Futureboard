@@ -31,7 +31,7 @@ impl Render for StudioLayout {
         });
 
         // Mixer scroll — updated by the mixer scroll-wheel handler.
-        let mixer_scroll_x = self.mixer_scroll_x;
+        let mixer_scroll_x = self.mixer_view.scroll_x;
         // Approximate the scrollable channel area width: full window minus the
         // master strip (STRIP_WIDTH) plus gutter (1px) and a small margin.
         let window_w: f32 = window.bounds().size.width.into();

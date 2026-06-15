@@ -397,10 +397,35 @@ impl TextEditBuffer {
         self.handle_key_with_clipboard(event, None)
     }
 
+    /// Key handling for a field WITHOUT an OS IME bridge. Printable characters are
+    /// inserted here from the platform-resolved `key_char` (covers Thai, accents,
+    /// AltGr, and dead-key results), since no `replace_text_in_range` will arrive.
     pub fn handle_key_with_clipboard(
         &mut self,
         event: &KeyDownEvent,
         cx: Option<&mut App>,
+    ) -> TextInputAction {
+        self.handle_key_inner(event, cx, false)
+    }
+
+    /// Key handling for a field WITH an OS IME bridge (`window.handle_input`
+    /// registered). Navigation, deletion, and shortcuts are handled here, but
+    /// printable text is NOT inserted — it arrives through the platform input
+    /// handler (WM_CHAR / IME composition) as `replace_text_in_range`. Inserting
+    /// here as well would double every character. Use this for every bridged field.
+    pub fn handle_key_ime(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: Option<&mut App>,
+    ) -> TextInputAction {
+        self.handle_key_inner(event, cx, true)
+    }
+
+    fn handle_key_inner(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: Option<&mut App>,
+        ime_active: bool,
     ) -> TextInputAction {
         if self.disabled {
             return TextInputAction::Pass;
@@ -486,7 +511,18 @@ impl TextEditBuffer {
             "enter" | "numpad_enter" => TextInputAction::Submit,
             "escape" => TextInputAction::Cancel,
             _ if !self.read_only => {
-                if let Some(text) = printable_text(key) {
+                if ime_active {
+                    // Printable text is delivered by the OS input handler
+                    // (WM_CHAR / IME composition) as `replace_text_in_range`, not
+                    // from KeyDown — inserting here too would double it. Still
+                    // report a character key as consumed so the host treats it as
+                    // text rather than dispatching a shortcut.
+                    if event.keystroke.key_char.is_some() || printable_text(key).is_some() {
+                        TextInputAction::Consumed
+                    } else {
+                        TextInputAction::Pass
+                    }
+                } else if let Some(text) = char_to_insert(event) {
                     self.insert_str(text);
                     TextInputAction::Consumed
                 } else {
@@ -1063,6 +1099,19 @@ fn printable_text(key: &str) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+/// The text a key press should insert into a non-IME field. Prefers the
+/// platform-resolved `key_char` (correct for Thai, accents, AltGr, dead-key
+/// results, and case), falling back to the logical key for plain ASCII. Control
+/// characters (Enter/Tab/Backspace, already handled above) are rejected.
+fn char_to_insert(event: &KeyDownEvent) -> Option<&str> {
+    if let Some(key_char) = event.keystroke.key_char.as_deref() {
+        if !key_char.is_empty() && !key_char.chars().next().is_some_and(char::is_control) {
+            return Some(key_char);
+        }
+    }
+    printable_text(event.keystroke.key.as_str())
 }
 
 fn char_range_from_utf16_text(text: &str, range: Range<usize>) -> Range<usize> {

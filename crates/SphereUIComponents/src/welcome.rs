@@ -169,7 +169,7 @@ impl WelcomeWindow {
         if self.project_name_input.is_focused(window) {
             let action = self
                 .project_name_input
-                .handle_key_with_clipboard(event, Some(cx));
+                .handle_key_ime(event, Some(cx));
             welcome_debug!("project name typed -> {}", self.project_name_input.value);
             match action {
                 TextInputAction::Submit => self.create_project_from_welcome(window, cx),

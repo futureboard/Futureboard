@@ -1,7 +1,7 @@
 #include <winuser.h>
 
 // Application icon (../icons/icon.ico)
-1 ICON "icon.ico"
+1 ICON "../icons/icon.ico"
 
 // DPI / compatibility manifest
 1 RT_MANIFEST "app.manifest"

@@ -1464,7 +1464,7 @@ impl AddTrackWindow {
         if self.track_name_input.is_focused(window) {
             let action = self
                 .track_name_input
-                .handle_key_with_clipboard(event, Some(cx));
+                .handle_key_ime(event, Some(cx));
             self.state.track_name = self.track_name_input.value.clone();
             match action {
                 crate::components::text_input::TextInputAction::Submit => {

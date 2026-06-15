@@ -125,7 +125,7 @@ impl StudioLayout {
                 if focused || is_text_input_key(event) {
                     let action = self
                         .command_palette_input
-                        .handle_key_with_clipboard(event, Some(cx));
+                        .handle_key_ime(event, Some(cx));
                     self.sync_text_input_target(TextMenuTarget::CommandPalette);
                     return !matches!(action, TextInputAction::Pass);
                 }
@@ -216,7 +216,7 @@ impl StudioLayout {
                 if search_focused || is_text_input_key(event) {
                     let action = self
                         .project_switcher_search_input
-                        .handle_key_with_clipboard(event, Some(cx));
+                        .handle_key_ime(event, Some(cx));
                     self.sync_text_input_target(TextMenuTarget::ProjectSwitcherSearch);
                     return !matches!(action, TextInputAction::Pass);
                 }
@@ -399,7 +399,7 @@ impl StudioLayout {
                 if search_focused || is_text_input_key(event) {
                     let action = self
                         .browser_search_input
-                        .handle_key_with_clipboard(event, Some(cx));
+                        .handle_key_ime(event, Some(cx));
                     self.sync_text_input_target(TextMenuTarget::BrowserSearch);
                     return !matches!(action, TextInputAction::Pass);
                 }
@@ -560,6 +560,12 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) -> bool {
         if self.plugin_picker_search_input.is_focused(window) || is_text_input_key(event) {
+            // NOTE: stays on the non-IME path because this field is *also* hosted
+            // in the separate InsertPickerWindow (a snapshot-mirrored entity that
+            // can't share the StudioLayout IME bridge). `handle_key_with_clipboard`
+            // inserts from key_char (Thai/accents work); it is deliberately excluded
+            // from `focused_text_target` so the inline overlay is never bridged
+            // either — keeping both hosts consistent and double-free.
             let action = self
                 .plugin_picker_search_input
                 .handle_key_with_clipboard(event, Some(cx));
@@ -661,10 +667,10 @@ impl StudioLayout {
         }
         let action = if clip_name_focused {
             self.inspector_name_edit.clip_name_input
-                .handle_key_with_clipboard(event, Some(cx))
+                .handle_key_ime(event, Some(cx))
         } else {
             self.inspector_name_edit.name_input
-                .handle_key_with_clipboard(event, Some(cx))
+                .handle_key_ime(event, Some(cx))
         };
         match action {
             TextInputAction::Pass => false,
@@ -1278,10 +1284,13 @@ impl StudioLayout {
     /// time-signature inline editors are intentionally excluded — they accept
     /// ASCII digits only and run through their own key handlers.
     pub(super) fn focused_text_target(&self, window: &Window) -> Option<TextMenuTarget> {
-        const TARGETS: [TextMenuTarget; 6] = [
+        // PluginPickerSearch is intentionally absent: that field is also hosted by
+        // the separate InsertPickerWindow, which can't share this bridge, so it
+        // stays on the key_char insertion path in both hosts (see
+        // `handle_plugin_picker_text_input`).
+        const TARGETS: [TextMenuTarget; 5] = [
             TextMenuTarget::CommandPalette,
             TextMenuTarget::ProjectSwitcherSearch,
-            TextMenuTarget::PluginPickerSearch,
             TextMenuTarget::BrowserSearch,
             TextMenuTarget::InspectorName,
             TextMenuTarget::InspectorClipName,

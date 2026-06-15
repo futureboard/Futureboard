@@ -1528,7 +1528,7 @@ impl PluginManagerWindow {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_input.is_focused(window) {
-            let action = self.search_input.handle_key_with_clipboard(event, Some(cx));
+            let action = self.search_input.handle_key_ime(event, Some(cx));
             if matches!(action, TextInputAction::Cancel) {
                 window.remove_window();
             }

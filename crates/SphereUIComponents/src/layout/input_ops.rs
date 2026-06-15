@@ -10,7 +10,7 @@ use crate::components::plugin_picker::{
     compute_filter_result, ensure_default_highlight, move_highlight, page_size_for_height,
     sync_selection_from_highlight, visible_plugin_id_at, PluginPickerState,
 };
-use crate::components::text_input::{TextInputAction, TextInputState};
+use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, TextInputState};
 use crate::components::timeline::timeline_state::{ClipType, TrackType};
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
@@ -35,10 +35,12 @@ impl InspectorNameEditState {
     pub(super) fn new(cx: &mut Context<StudioLayout>) -> Self {
         Self {
             name_input: TextInputState::new("inspector-name-input", cx.focus_handle())
-                .with_placeholder("Track name"),
+                .with_placeholder("Track name")
+                .blur_on_outside_click(true),
             name_bound: None,
             clip_name_input: TextInputState::new("inspector-clip-name-input", cx.focus_handle())
-                .with_placeholder("Clip name"),
+                .with_placeholder("Clip name")
+                .blur_on_outside_click(true),
             clip_name_bound: None,
         }
     }
@@ -86,7 +88,7 @@ impl StudioLayout {
         if !self.command_palette.is_open {
             return false;
         }
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
         let key = event.keystroke.key.as_str();
@@ -168,7 +170,7 @@ impl StudioLayout {
         if !self.project_switcher.is_open {
             return false;
         }
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
         let key = event.keystroke.key.as_str();
@@ -237,7 +239,7 @@ impl StudioLayout {
         if !self.tempo_edit.bpm_editing {
             return false;
         }
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
         let action = self.tempo_edit.bpm_input.handle_key_with_clipboard(event, Some(cx));
@@ -259,7 +261,7 @@ impl StudioLayout {
         if !self.tempo_edit.ts_editing {
             return false;
         }
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
         if event.keystroke.key == "escape" {
@@ -301,7 +303,7 @@ impl StudioLayout {
         if !search_focused {
             return false;
         }
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
         let key = event.keystroke.key.as_str();
@@ -437,7 +439,7 @@ impl StudioLayout {
         if !self.plugin_picker.is_open {
             return false;
         }
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
 
@@ -662,7 +664,7 @@ impl StudioLayout {
         if !track_name_focused && !clip_name_focused {
             return false;
         }
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
         let action = if clip_name_focused {

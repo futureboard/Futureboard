@@ -659,7 +659,8 @@ impl StudioLayout {
             )
             .with_placeholder("Search projects..."),
             browser_search_input: TextInputState::new("browser-search-input", cx.focus_handle())
-                .with_placeholder("Search..."),
+                .with_placeholder("Search...")
+                .blur_on_outside_click(true),
             inspector_name_edit: input_ops::InspectorNameEditState::new(cx),
             selected_insert: None,
             plugin_picker: PluginPickerState::closed(),

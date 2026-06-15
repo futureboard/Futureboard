@@ -32,8 +32,6 @@ const MAX_TRACK_COUNT: u32 = 128;
 const FORM_LABEL_WIDTH: f32 = 86.0;
 const FORM_GAP: f32 = 10.0;
 const BODY_PAD_X: f32 = 14.0;
-const NAME_INPUT_X_OFFSET: f32 = BODY_PAD_X + FORM_LABEL_WIDTH + FORM_GAP;
-const COUNT_INPUT_X_OFFSET: f32 = NAME_INPUT_X_OFFSET + 34.0;
 
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type KindCb = Arc<dyn Fn(&AddTrackKind, &mut Window, &mut App) + 'static>;
@@ -1908,15 +1906,18 @@ impl Render for AddTrackWindow {
             on_mouse: Some(Arc::new({
                 let target = target.clone();
                 move |event: &TextInputMouseEvent, _w, cx| {
-                    let x = event.x - NAME_INPUT_X_OFFSET;
                     let phase = event.phase;
+                    let index = event.index;
+                    let extend = event.extend;
                     let _ = target.update(cx, |this, cx| {
                         this.count_editing = false;
                         match phase {
                             TextInputMousePhase::Down => {
-                                this.track_name_input.handle_mouse_down(x, false)
+                                this.track_name_input.handle_mouse_down(index, extend)
                             }
-                            TextInputMousePhase::Drag => this.track_name_input.handle_mouse_drag(x),
+                            TextInputMousePhase::Drag => {
+                                this.track_name_input.handle_mouse_drag(index)
+                            }
                             TextInputMousePhase::Up => this.track_name_input.handle_mouse_up(),
                         }
                         cx.notify();
@@ -1929,17 +1930,18 @@ impl Render for AddTrackWindow {
             on_mouse: Some(Arc::new({
                 let target = target.clone();
                 move |event: &TextInputMouseEvent, _w, cx| {
-                    let x = event.x - COUNT_INPUT_X_OFFSET;
                     let phase = event.phase;
+                    let index = event.index;
+                    let extend = event.extend;
                     let _ = target.update(cx, |this, cx| {
                         if !this.count_editing {
                             this.begin_count_edit();
                         }
                         match phase {
                             TextInputMousePhase::Down => {
-                                this.count_input.handle_mouse_down(x, false)
+                                this.count_input.handle_mouse_down(index, extend)
                             }
-                            TextInputMousePhase::Drag => this.count_input.handle_mouse_drag(x),
+                            TextInputMousePhase::Drag => this.count_input.handle_mouse_drag(index),
                             TextInputMousePhase::Up => this.count_input.handle_mouse_up(),
                         }
                         cx.notify();

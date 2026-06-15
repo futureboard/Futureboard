@@ -12,7 +12,9 @@ use crate::assets;
 use crate::components::title_bar::{
     draggable_spacer, section_separator, window_control_button, CHROME_PAD_X, CHROME_TITLE_SIZE,
 };
-use crate::components::text_input::{text_field_with_callbacks_and_ime, TextInputCallbacks};
+use crate::components::text_input::{
+    is_repeatable_edit_key, text_field_with_callbacks_and_ime, TextInputCallbacks,
+};
 use crate::components::{TextInputAction, TextInputState};
 use crate::embedded_assets::APP_LOGO_PATH;
 use crate::platform_chrome::PlatformChromePolicy;
@@ -163,7 +165,7 @@ impl WelcomeWindow {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.is_held {
+        if event.is_held && !is_repeatable_edit_key(event) {
             return;
         }
         if self.project_name_input.is_focused(window) {

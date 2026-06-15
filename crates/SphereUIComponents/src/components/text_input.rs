@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -8,7 +10,7 @@ use gpui::{
     div, point, px, relative, App, Bounds, ClipboardItem, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, GlobalElementId, InteractiveElement, IntoElement,
     KeyDownEvent, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Style, Styled, UTF16Selection, Window,
+    ShapedLine, Style, Styled, TextRun, UTF16Selection, Window,
 };
 
 use crate::components::context_menu::ContextMenuEntry;
@@ -138,8 +140,10 @@ pub enum TextInputMousePhase {
 #[derive(Debug, Clone, Copy)]
 pub struct TextInputMouseEvent {
     pub phase: TextInputMousePhase,
-    /// X position in the input's local coordinate space.
-    pub x: f32,
+    /// Grapheme/char index under the pointer, resolved from the shaped line.
+    pub index: usize,
+    /// Whether Shift was held (extend the existing selection).
+    pub extend: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +262,10 @@ pub struct TextInputState {
     pub focus_handle: FocusHandle,
     pub placeholder: Option<String>,
     pub buffer: TextEditBuffer,
+    /// When true, a mouse-down outside this field (while it is focused) releases
+    /// keyboard focus via `window.blur()`. Off by default so modal dialogs keep
+    /// their field focused; the always-visible main-window fields opt in.
+    pub blur_on_click_outside: bool,
     mouse_selecting: bool,
 }
 
@@ -281,6 +289,7 @@ impl TextInputState {
             focus_handle,
             placeholder: None,
             buffer: TextEditBuffer::default(),
+            blur_on_click_outside: false,
             mouse_selecting: false,
         }
     }
@@ -290,50 +299,39 @@ impl TextInputState {
         self
     }
 
+    /// Opt into releasing keyboard focus when the user clicks outside this field.
+    pub fn blur_on_outside_click(mut self, enabled: bool) -> Self {
+        self.blur_on_click_outside = enabled;
+        self
+    }
+
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
     }
 
-    /// Begin mouse selection/cursor placement.
-    ///
-    /// Note: `x` is treated as local-x within the text field. Since GPUI does not
-    /// currently expose element-local coordinates here, we use a best-effort mapping
-    /// that is "good enough" for drag selection.
-    pub fn handle_mouse_down(&mut self, x: f32, extend: bool) {
-        if self.buffer.disabled {
-            return;
-        }
-        let idx = self.cursor_from_x(x);
+    /// Place the caret / begin a drag selection at the given grapheme index
+    /// (resolved from the shaped line). `extend` (Shift) keeps the existing
+    /// anchor and moves only the caret.
+    pub fn handle_mouse_down(&mut self, index: usize, extend: bool) {
         if extend {
-            self.buffer.move_cursor_to(idx, true);
+            self.buffer.select_to(index);
         } else {
-            self.buffer.unmark_text();
-            self.buffer.cursor = idx;
-            self.buffer.selection_anchor = Some(idx);
+            self.buffer.place_cursor(index);
         }
         self.mouse_selecting = true;
     }
 
-    pub fn handle_mouse_drag(&mut self, x: f32) {
-        if self.buffer.disabled || !self.mouse_selecting {
+    /// Extend the active drag selection to the given grapheme index.
+    pub fn handle_mouse_drag(&mut self, index: usize) {
+        if !self.mouse_selecting {
             return;
         }
-        let idx = self.cursor_from_x(x);
-        self.buffer.move_cursor_to(idx, true);
+        self.buffer.select_to(index);
     }
 
     pub fn handle_mouse_up(&mut self) {
         self.mouse_selecting = false;
-        // Collapse empty selection created by click.
-        if self.buffer.selection_anchor == Some(self.buffer.cursor) {
-            self.buffer.clear_selection();
-        }
-    }
-
-    fn cursor_from_x(&self, x: f32) -> usize {
-        let local = (x - TEXT_INPUT_PAD_X).max(0.0);
-        let idx = (local / TEXT_INPUT_CHAR_W).round() as isize;
-        idx.clamp(0, self.buffer.char_count() as isize) as usize
+        self.buffer.collapse_empty_selection();
     }
 }
 
@@ -362,6 +360,36 @@ impl TextEditBuffer {
         if count > 0 {
             self.selection_anchor = Some(0);
             self.cursor = count;
+        }
+    }
+
+    /// Place the caret at `index` (clamped), collapsing any selection. Drives a
+    /// plain mouse-down. Index is in committed-char space.
+    pub fn place_cursor(&mut self, index: usize) {
+        if self.disabled {
+            return;
+        }
+        let idx = index.min(self.char_count());
+        self.unmark_text();
+        self.cursor = idx;
+        self.selection_anchor = Some(idx);
+    }
+
+    /// Move the caret to `index` (clamped) while keeping the selection anchor —
+    /// the mouse-drag / Shift-click selection primitive.
+    pub fn select_to(&mut self, index: usize) {
+        if self.disabled {
+            return;
+        }
+        let idx = index.min(self.char_count());
+        self.move_cursor_to(idx, true);
+    }
+
+    /// Drop a zero-width selection left by a plain click (so it renders as a caret,
+    /// not an empty highlight). Mouse-up uses this.
+    pub fn collapse_empty_selection(&mut self) {
+        if self.selection_anchor == Some(self.cursor) {
+            self.clear_selection();
         }
     }
 
@@ -1163,26 +1191,17 @@ pub fn bind_mouse_selection<T: gpui::Render>(
     target: gpui::Entity<T>,
     get: impl Fn(&mut T) -> &mut TextInputState + Send + Sync + 'static,
 ) -> TextInputCallbacks {
-    bind_mouse_selection_with_offset(target, get, 0.0)
-}
-
-/// Same as [`bind_mouse_selection`], with a known window-local x offset for
-/// text fields nested in labeled form rows.
-pub fn bind_mouse_selection_with_offset<T: gpui::Render>(
-    target: gpui::Entity<T>,
-    get: impl Fn(&mut T) -> &mut TextInputState + Send + Sync + 'static,
-    local_x_offset: f32,
-) -> TextInputCallbacks {
     TextInputCallbacks {
         on_context_menu: None,
         on_mouse: Some(Arc::new(move |event: &TextInputMouseEvent, _w, cx| {
-            let x = event.x - local_x_offset;
             let phase = event.phase;
+            let index = event.index;
+            let extend = event.extend;
             let _ = target.update(cx, |this, cx| {
                 let input = get(this);
                 match phase {
-                    TextInputMousePhase::Down => input.handle_mouse_down(x, false),
-                    TextInputMousePhase::Drag => input.handle_mouse_drag(x),
+                    TextInputMousePhase::Down => input.handle_mouse_down(index, extend),
+                    TextInputMousePhase::Drag => input.handle_mouse_drag(index),
                     TextInputMousePhase::Up => input.handle_mouse_up(),
                 }
                 cx.notify();
@@ -1284,8 +1303,10 @@ fn text_field_inner(
     let fh_click = state.focus_handle.clone();
     let fh_right = state.focus_handle.clone();
     let fh_track = state.focus_handle.clone();
+    let fh_out = state.focus_handle.clone();
     let disabled = state.disabled;
     let focused = focused && !disabled;
+    let blur_outside = state.blur_on_click_outside;
     let value = state.display_value();
     let placeholder = state.placeholder.clone().unwrap_or_default();
     let selection = state.selection_range();
@@ -1295,6 +1316,11 @@ fn text_field_inner(
     let on_mouse_move = callbacks.on_mouse.clone();
     let on_mouse_up = callbacks.on_mouse.clone();
     let on_mouse_up_out = callbacks.on_mouse.clone();
+    // Per-render shaped-line layout, written by the hit probe in prepaint and read
+    // by the mouse handlers below to map a pointer x to a grapheme index.
+    let hit: FieldHitCell = Rc::new(RefCell::new(None));
+    let hit_down = hit.clone();
+    let hit_move = hit.clone();
 
     let border = if focused {
         Colors::border_focus()
@@ -1412,11 +1438,12 @@ fn text_field_inner(
                 fh_click.focus(window, cx);
                 cx.stop_propagation();
                 if let Some(cb) = on_mouse_down.as_ref() {
-                    let x: f32 = event.position.x.into();
+                    let gx: f32 = event.position.x.into();
                     cb(
                         &TextInputMouseEvent {
                             phase: TextInputMousePhase::Down,
-                            x,
+                            index: hit_index(&hit_down, gx),
+                            extend: event.modifiers.shift,
                         },
                         window,
                         cx,
@@ -1429,11 +1456,12 @@ fn text_field_inner(
                 return;
             }
             if let Some(cb) = on_mouse_move.as_ref() {
-                let x: f32 = event.position.x.into();
+                let gx: f32 = event.position.x.into();
                 cb(
                     &TextInputMouseEvent {
                         phase: TextInputMousePhase::Drag,
-                        x,
+                        index: hit_index(&hit_move, gx),
+                        extend: false,
                     },
                     window,
                     cx,
@@ -1442,16 +1470,16 @@ fn text_field_inner(
         })
         .on_mouse_up(
             MouseButton::Left,
-            move |event: &MouseUpEvent, window, cx| {
+            move |_event: &MouseUpEvent, window, cx| {
                 if disabled {
                     return;
                 }
                 if let Some(cb) = on_mouse_up.as_ref() {
-                    let x: f32 = event.position.x.into();
                     cb(
                         &TextInputMouseEvent {
                             phase: TextInputMousePhase::Up,
-                            x,
+                            index: 0,
+                            extend: false,
                         },
                         window,
                         cx,
@@ -1461,16 +1489,16 @@ fn text_field_inner(
         )
         .on_mouse_up_out(
             MouseButton::Left,
-            move |event: &MouseUpEvent, window, cx| {
+            move |_event: &MouseUpEvent, window, cx| {
                 if disabled {
                     return;
                 }
                 if let Some(cb) = on_mouse_up_out.as_ref() {
-                    let x: f32 = event.position.x.into();
                     cb(
                         &TextInputMouseEvent {
                             phase: TextInputMousePhase::Up,
-                            x,
+                            index: 0,
+                            extend: false,
                         },
                         window,
                         cx,
@@ -1478,6 +1506,17 @@ fn text_field_inner(
                 }
             },
         )
+        // Release focus when the user mouses down outside this field (capture
+        // phase, so a click landing on another field still transfers focus to it
+        // afterward). Only when the field opted in, and only if it is the focused
+        // one — so dialogs that keep their field focused are unaffected.
+        .when(blur_outside, |this| {
+            this.on_mouse_down_out(move |_event, window, _cx| {
+                if fh_out.is_focused(window) {
+                    window.blur();
+                }
+            })
+        })
         .on_mouse_down(MouseButton::Right, move |event, window, cx| {
             if disabled {
                 return;
@@ -1489,7 +1528,26 @@ fn text_field_inner(
                 callback(&(x, y), window, cx);
             }
         })
-        .child(content)
+        .child(
+            // Wrapper owns the text content rect; the transparent hit probe shapes
+            // the same text to drive grapheme-accurate pointer hit-testing without
+            // affecting the visible layout.
+            div()
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(content)
+                .child(
+                    div().absolute().inset_0().child(TextHitProbe {
+                        text: value.clone(),
+                        hit: hit.clone(),
+                    }),
+                ),
+        )
         .children(ime_layer)
 }
 
@@ -1515,6 +1573,145 @@ fn caret() -> impl IntoElement {
         .h(px(15.0))
         .bg(Colors::accent_primary())
         .rounded_sm()
+}
+
+/// Whether a key should keep firing on OS auto-repeat while a text field is
+/// focused. Editing/navigation keys repeat (hold-to-delete, hold-to-move);
+/// submit/cancel/shortcut keys do not. The per-context key handlers use this to
+/// stop swallowing repeated KeyDown events for these keys.
+pub fn is_repeatable_edit_key(event: &KeyDownEvent) -> bool {
+    matches!(
+        event.keystroke.key.as_str(),
+        "backspace"
+            | "delete"
+            | "left"
+            | "arrow_left"
+            | "right"
+            | "arrow_right"
+            | "up"
+            | "arrow_up"
+            | "down"
+            | "arrow_down"
+            | "home"
+            | "end"
+    )
+}
+
+/// Shaped-line layout for one text field, recorded by [`TextHitProbe`] during
+/// prepaint and read by the field's mouse handlers to map a pointer x to a
+/// grapheme index. Behind `Rc<RefCell>` because the probe (writer) and the mouse
+/// closures (readers) are built in the same render pass.
+struct FieldHit {
+    bounds: Bounds<Pixels>,
+    line: ShapedLine,
+    text: String,
+}
+
+type FieldHitCell = Rc<RefCell<Option<FieldHit>>>;
+
+/// Map a window-space pointer x to a grapheme/char index using the last shaped
+/// line. Returns 0 before the first paint. The byte offset from the shaped line
+/// is always a glyph boundary, so the char conversion is grapheme-safe.
+fn hit_index(hit: &FieldHitCell, global_x: f32) -> usize {
+    let guard = hit.borrow();
+    let Some(h) = guard.as_ref() else {
+        return 0;
+    };
+    let left: f32 = h.bounds.left().into();
+    let local = (global_x - left).max(0.0);
+    let byte = h.line.closest_index_for_x(px(local)).min(h.text.len());
+    h.text[..byte].chars().count()
+}
+
+/// Invisible overlay element that shapes the field's text each frame and records
+/// the layout for grapheme-accurate mouse hit-testing. Paints nothing and adds no
+/// hitbox, so it never affects rendering or click routing.
+struct TextHitProbe {
+    text: String,
+    hit: FieldHitCell,
+}
+
+impl IntoElement for TextHitProbe {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TextHitProbe {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.0).into();
+        style.size.height = relative(1.0).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+        // Shape with the ambient UI font at the field's fixed 12px text size — the
+        // same as the visible `text_segment` glyphs — so x positions line up.
+        let (font, color) = {
+            let style = window.text_style();
+            (style.font(), style.color)
+        };
+        let runs = if self.text.is_empty() {
+            Vec::new()
+        } else {
+            vec![TextRun {
+                len: self.text.len(),
+                font,
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }]
+        };
+        let line = window
+            .text_system()
+            .shape_line(self.text.clone().into(), px(12.0), &runs, None);
+        *self.hit.borrow_mut() = Some(FieldHit {
+            bounds,
+            line,
+            text: self.text.clone(),
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
 }
 
 struct TextInputImeLayer<V: EntityInputHandler> {
@@ -1835,5 +2032,95 @@ mod tests {
         assert!(!ev(&mut b, Ev::InsertText("x".into())));
         assert!(!ev(&mut b, Ev::MoveLeft));
         assert_eq!(b.value, "hi");
+    }
+
+    // ── Mouse drag selection (Bug 1) ────────────────────────────────────────
+    // These drive the same buffer primitives the field's mouse handlers call,
+    // with the pointer→index hit-test (shaped line) stubbed by an explicit index.
+
+    #[test]
+    fn mouse_drag_selection_left_to_right() {
+        let mut b = buf("hello world");
+        b.place_cursor(2); // mouse down
+        assert!(b.selection().is_empty());
+        b.select_to(7); // drag right
+        assert_eq!(b.selection().range(), 2..7);
+        assert_eq!(b.cursor, 7);
+    }
+
+    #[test]
+    fn mouse_drag_selection_right_to_left() {
+        let mut b = buf("hello world");
+        b.place_cursor(8); // mouse down
+        b.select_to(3); // drag left
+        let sel = b.selection();
+        assert_eq!(sel.range(), 3..8);
+        assert_eq!(sel.anchor, 8, "anchor stays where the drag began");
+        assert_eq!(b.cursor, 3);
+    }
+
+    #[test]
+    fn click_release_collapses_empty_selection() {
+        let mut b = buf("hello");
+        b.place_cursor(3);
+        b.collapse_empty_selection(); // mouse up after a plain click
+        assert!(!b.has_selection());
+        assert_eq!(b.cursor, 3);
+    }
+
+    #[test]
+    fn drag_release_keeps_nonempty_selection() {
+        let mut b = buf("hello world");
+        b.place_cursor(2);
+        b.select_to(7);
+        b.collapse_empty_selection(); // non-empty -> preserved
+        assert_eq!(b.selection().range(), 2..7);
+        assert!(b.has_selection());
+    }
+
+    #[test]
+    fn drag_selection_is_grapheme_safe() {
+        // chars: a(0) 👍(1) ก(2) ; selecting 1..3 grabs the emoji + Thai char.
+        let mut b = buf("a👍ก");
+        b.place_cursor(1);
+        b.select_to(3);
+        assert_eq!(b.selected_text().as_deref(), Some("👍ก"));
+    }
+
+    #[test]
+    fn selection_backspace_then_repeat_deletes_before_cursor() {
+        // Bug 3 + selection: first Backspace removes the selection, subsequent
+        // (auto-repeat) Backspaces delete char-by-char before the caret.
+        let mut b = buf("abcdef");
+        b.place_cursor(1);
+        b.select_to(4); // select "bcd"
+        ev(&mut b, Ev::DeleteBackward);
+        assert_eq!(b.value, "aef");
+        ev(&mut b, Ev::DeleteBackward);
+        assert_eq!(b.value, "ef");
+    }
+
+    // ── Key repeat classification (Bug 3) ───────────────────────────────────
+
+    fn key_event(key: &str) -> gpui::KeyDownEvent {
+        gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: key.to_string(),
+                ..Default::default()
+            },
+            is_held: true,
+            prefer_character_input: false,
+        }
+    }
+
+    #[test]
+    fn repeatable_edit_keys_are_classified() {
+        use super::is_repeatable_edit_key;
+        for k in ["backspace", "delete", "left", "arrow_left", "right", "home", "end"] {
+            assert!(is_repeatable_edit_key(&key_event(k)), "{k} should repeat");
+        }
+        for k in ["enter", "escape", "a", "tab"] {
+            assert!(!is_repeatable_edit_key(&key_event(k)), "{k} should not repeat");
+        }
     }
 }

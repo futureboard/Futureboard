@@ -10,6 +10,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "SphereNotationEngine"
+version = "0.1.0"
+
+[[package]]
+name = "SphereSoundfontPlayer"
+version = "0.1.0"
+
+[[package]]
 name = "accesskit"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3530,6 +3538,10 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "livestage"
+version = "0.1.0"
 
 [[package]]
 name = "lock_api"

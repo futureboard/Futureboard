@@ -1,3 +1,4 @@
+use crate::frame_scheduler::FrameRateMode;
 use crate::paths::FutureboardPaths;
 use gpui::AppContext;
 use serde::{Deserialize, Serialize};
@@ -531,6 +532,11 @@ pub struct PerformanceSettings {
     pub render_mode: RenderMode,
     #[serde(default)]
     pub gpu_device: GpuDevicePreference,
+    /// Frame pacing mode. `DisplaySync` (default) tracks the monitor refresh
+    /// rate; the fixed/battery modes are caps for debug/low-power. Overridable
+    /// at runtime via `FUTUREBOARD_FRAME_RATE_MODE`.
+    #[serde(default)]
+    pub frame_rate: FrameRateMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

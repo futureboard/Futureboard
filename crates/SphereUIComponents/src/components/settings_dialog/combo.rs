@@ -341,6 +341,33 @@ pub(crate) fn hardware_combo_overlay(
             )
             .into_any_element()
         }
+        HardwareCombo::FrameRate => {
+            use crate::frame_scheduler::FrameRateMode;
+            let selected = schema.performance.frame_rate.label().to_string();
+            let options: Vec<String> = FrameRateMode::all()
+                .iter()
+                .map(|m| m.label().to_string())
+                .collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-performance-frame-rate-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    if let Some(mode) =
+                        FrameRateMode::all().into_iter().find(|m| m.label() == value)
+                    {
+                        up(
+                            Arc::new(move |s| s.performance.frame_rate = mode),
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .into_any_element()
+        }
     };
 
     div()

@@ -303,6 +303,17 @@ pub(crate) fn performance_section(
         "settings-performance-gpu-device-trigger",
         &gpu_device_label,
         open_combo,
+        on_toggle.clone(),
+    );
+
+    // Frame pacing mode. Applies live (no restart) — the scheduler re-reads it
+    // each frame and republishes the poll cadence.
+    let frame_rate_label = schema.performance.frame_rate.label().to_string();
+    let frame_rate_row = hardware_select(
+        HardwareCombo::FrameRate,
+        "settings-performance-frame-rate-trigger",
+        &frame_rate_label,
+        open_combo,
         on_toggle,
     );
 
@@ -327,6 +338,10 @@ pub(crate) fn performance_section(
         ))
         .child(settings_row_restart("Renderer", true, renderer_row))
         .child(settings_row_restart("GPU Device", true, gpu_device_row))
+        .child(settings_daw_row("Frame Rate", frame_rate_row))
+        .child(settings_section_hint(
+            "Display Sync tracks your monitor refresh rate. Fixed caps and Battery Saver are for debugging or saving power; idle frames are always drawn on demand.",
+        ))
         .child(settings_daw_row(
             "Status",
             div()
@@ -411,6 +426,7 @@ pub(crate) fn tab_matches_search(
         SettingsTab::Performance => {
             is_match("Renderer", &["renderer", "gpu", "cpu", "wgpu"])
                 || is_match("GPU Device", &["gpu", "device", "adapter"])
+                || is_match("Frame Rate", &["frame", "fps", "refresh", "vsync", "display sync"])
                 || is_match("Performance", &["cpu", "engine"])
         }
         SettingsTab::Advanced => is_match("Advanced", &["experimental"]),

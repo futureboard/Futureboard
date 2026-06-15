@@ -43,6 +43,7 @@ pub mod embedded_assets;
 pub mod export;
 pub mod feeds;
 pub mod forensic_trace;
+pub mod frame_scheduler;
 pub mod i18n;
 pub mod keymap;
 pub mod layout;

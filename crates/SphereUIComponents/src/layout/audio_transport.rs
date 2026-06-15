@@ -1,5 +1,7 @@
 use gpui::{App, Context};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::components;
@@ -61,6 +63,10 @@ pub(crate) struct EngineSyncState {
     pub meter_applied_at: Instant,
     /// Last time `engine.set_bpm` was sent during a live BPM drag (~30 Hz cap).
     pub bpm_committed_at: Option<Instant>,
+    /// Last time the heavy plugin-editor / bridge reconciliation ran. The poll
+    /// loop ticks at the display refresh (up to 240 Hz); this caps that
+    /// bookkeeping to ~60 Hz so a high-refresh monitor doesn't multiply it.
+    pub bridge_reconciled_at: Instant,
 }
 
 impl Default for EngineSyncState {
@@ -70,6 +76,7 @@ impl Default for EngineSyncState {
             synced_at: Instant::now(),
             meter_applied_at: Instant::now(),
             bpm_committed_at: None,
+            bridge_reconciled_at: Instant::now() - Duration::from_secs(1),
         }
     }
 }
@@ -342,18 +349,32 @@ impl StudioLayout {
     }
 
     pub(super) fn spawn_audio_poll(cx: &mut Context<Self>) {
-        // 16 ms ≈ 60 Hz — matches a typical display refresh and is fine for
-        // VU + transport-time animation. The engine produces position
-        // snapshots at audio-block boundaries (~5-10 ms at 256-sample
-        // buffers), but the UI never needs to repaint faster than the
-        // display, so we cap polling at the refresh interval and let
-        // `interpolated_playhead_beat` smooth between engine snapshots.
+        // The poll cadence is owned by the frame scheduler (display-synced by
+        // default, fixed/battery caps for settings/debug). The loop reads the
+        // scheduler's lock-free interval each tick, so a mode change applies on
+        // the next iteration. The engine produces position snapshots at
+        // audio-block boundaries (~5-10 ms); the UI never repaints faster than
+        // the chosen cadence and `interpolated_playhead_beat` smooths between
+        // engine snapshots. Until the entity exists we fall back to ~60 Hz.
+        const FALLBACK_INTERVAL_NANOS: u64 = 16_666_667; // ~60 Hz
         let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| loop {
-            if crate::shutdown::ShutdownState::global().is_shutting_down() {
-                break;
-            }
-            executor.timer(Duration::from_millis(16)).await;
+        cx.spawn(async move |this, cx| {
+            let mut interval_handle: Option<Arc<AtomicU64>> = None;
+            loop {
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    break;
+                }
+                if interval_handle.is_none() {
+                    interval_handle = this
+                        .update(cx, |this, _| this.frame_scheduler.continuous_nanos_handle())
+                        .ok();
+                }
+                let interval_nanos = interval_handle
+                    .as_ref()
+                    .map(|h| h.load(Ordering::Relaxed))
+                    .filter(|n| *n > 0)
+                    .unwrap_or(FALLBACK_INTERVAL_NANOS);
+                executor.timer(Duration::from_nanos(interval_nanos)).await;
             if crate::shutdown::ShutdownState::global().is_shutting_down() {
                 break;
             }
@@ -376,6 +397,7 @@ impl StudioLayout {
                     });
                 }
             }
+            }
         })
         .detach();
     }
@@ -396,10 +418,18 @@ impl StudioLayout {
         // Backstop: close editors whose track/insert was removed by any path
         // (notably the track-header delete button, which mutates the Timeline
         // entity directly and never reaches the StudioLayout delete commands).
-        self.reconcile_open_plugin_editors(cx);
-        self.poll_plugin_bridge_runtime(cx);
-        // Drive native main-owned editor shells: honor OS close + forward resizes.
-        self.drive_bridge_editors(cx);
+        //
+        // This bookkeeping is UI-sync only (not realtime) and doesn't need to
+        // run at the display refresh, so cap it to ~60 Hz. On a 60 Hz monitor
+        // the poll already ticks at ~16 ms so this runs every tick (unchanged);
+        // on a 144 Hz monitor it stops the work from tripling.
+        if self.engine_sync.bridge_reconciled_at.elapsed() >= Duration::from_millis(16) {
+            self.engine_sync.bridge_reconciled_at = Instant::now();
+            self.reconcile_open_plugin_editors(cx);
+            self.poll_plugin_bridge_runtime(cx);
+            // Drive native main-owned editor shells: honor OS close + forward resizes.
+            self.drive_bridge_editors(cx);
+        }
 
         let engine = self.audio_bridge.engine.as_ref().expect("checked above");
         // Throttled raw/bus input-peak trace (gated by FUTUREBOARD_INPUT_DEBUG).
@@ -557,7 +587,12 @@ impl StudioLayout {
         // poll fires at 60 Hz; on low-end GPUs that's too many meter writes
         // and the resulting notify cascade is what drove FPS drops.
         let power = crate::perf::power_mode();
-        let min_interval = Duration::from_secs_f32(1.0 / power.meter_update_hz().max(1.0));
+        // Cap meters to the slower of: the PowerMode rate (60/30/15) and the
+        // frame scheduler's meter rate (≤60 Hz). On a high-refresh DisplaySync
+        // monitor this keeps VU updates at 60 Hz instead of the full refresh;
+        // BatterySaver naturally slows them further.
+        let min_interval = Duration::from_secs_f32(1.0 / power.meter_update_hz().max(1.0))
+            .max(self.frame_scheduler.meter_min_interval());
         if self.engine_sync.meter_applied_at.elapsed() < min_interval {
             return false;
         }

@@ -405,10 +405,13 @@ impl StudioLayout {
         let renderer =
             crate::components::timeline::timeline_surface::active_timeline_renderer_backend();
         // UI repaint cadence. Idle scenes stop updating when nothing is dirty.
+        // The scheduler label shows the target pacing (e.g. "Display Sync 144Hz");
+        // `frame_diag.hud()` shows the *actual* measured repaint rate.
         let right = format!(
-            "{}  •  UI {}  •  {}",
+            "{}  •  UI {}  •  {}  •  {}",
             audio,
             renderer,
+            self.frame_scheduler.describe(),
             self.frame_diag.hud()
         );
         (left, right)

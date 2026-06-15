@@ -386,6 +386,10 @@ pub struct StudioLayout {
     /// Repaint-rate diagnostics. Ticks once per `Render`, smoothed
     /// EMA frame time, exposed in the status bar.
     frame_diag: FrameDiagnostics,
+    /// Deterministic display-synced frame pacing. Owns the resolved
+    /// [`crate::frame_scheduler::FrameRateMode`] + detected refresh rate and
+    /// publishes the continuous poll cadence the audio loop reads.
+    frame_scheduler: crate::frame_scheduler::FrameScheduler,
     /// Mixer-panel view state (scroll, insert/send section heights, splitter-drag
     /// anchors). Grouped into [`mixer_ops::MixerViewState`] (decomposition slice).
     mixer_view: mixer_ops::MixerViewState,
@@ -456,6 +460,7 @@ impl StudioLayout {
         crate::boot::log("settings loaded");
 
         let schema = settings.read(cx).current.clone();
+        let frame_rate_mode = schema.performance.frame_rate;
 
         // Apply saved Renderer choice — Settings is "* Restart required", so
         // this only takes effect at process start. Idempotent: the same
@@ -689,6 +694,7 @@ impl StudioLayout {
             clip_clipboard: Vec::new(),
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
+            frame_scheduler: crate::frame_scheduler::FrameScheduler::new(frame_rate_mode),
             mixer_view: mixer_ops::MixerViewState::default(),
             paths,
             project_session: crate::project::ProjectSession::default(),

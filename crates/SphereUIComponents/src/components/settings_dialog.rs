@@ -220,6 +220,7 @@ pub enum HardwareCombo {
     BufferSize,
     Renderer,
     GpuDevice,
+    FrameRate,
 }
 
 #[derive(Clone)]

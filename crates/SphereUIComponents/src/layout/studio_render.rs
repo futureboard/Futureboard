@@ -14,6 +14,11 @@ impl Render for StudioLayout {
         };
         self.frame_diag.tick(reason);
         crate::perf::tick_root_frame(reason_static);
+        // Re-resolve the frame-pacing mode from settings (env override still
+        // wins) and republish the poll cadence. Cheap; applies a Settings change
+        // on the next frame without a dedicated observer.
+        let frame_rate_mode = self.settings.read(cx).current.performance.frame_rate;
+        self.frame_scheduler.refresh_from_settings(frame_rate_mode);
         self.window_hooks.cached_bounds = Some(window.bounds());
         self.flush_deferred_insert_editor_opens(window, cx);
 

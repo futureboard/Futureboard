@@ -1,35 +1,53 @@
+
 [workspace]
 resolver = "3"
-members = ["
-    "apps/native/*",
-    "crates/*",
+
+members = [
+    "apps/native/studio",
+    "apps/native/livestage",
+
+    "crates/SphereAudioEditor",
+    "crates/SphereAudioPlugins",
+    "crates/SphereDirectAudioEngine",
+    "crates/SphereEncoder",
+    "crates/SphereGraphicEngine",
+    "crates/SphereNotationEngine",
+    "crates/SpherePluginHost",
+    "crates/SphereSoundfontPlayer",
+    "crates/SphereUIComponents",
+    "crates/SphereWebAudioCore",
 ]
+
 exclude = [
-    # Vendored gpui: a self-contained nested workspace under crates/gpui (it
-    # carries its own [workspace] and resolves its internals against the
-    # published `-gpui-standalone` crates). Excluded here so it is consumed
-    # purely as a path dependency rather than claimed as a root member (a crate
-    # cannot be both a workspace root and a member of another workspace).
+    # Vendored GPUI is a nested workspace. It is consumed as path dependencies,
+    # but must not be claimed as a member of the Futureboard root workspace.
     "crates/gpui",
-    # JS/Rust extension templates — built independently, not part of the workspace.
+
+    # JS/Rust extension templates — built independently.
     "extensions",
     "extensions/template",
     "extensions/template-react",
     "extensions/template-vue",
-    # Quarantined experimental/placeholder crates (no implementation yet).
-    # See ARCHITECTURE.md → "Experimental crates policy". Promote back into the
-    # workspace by removing the corresponding line once a crate has real content.
+
+    # Experimental / placeholder crates. Promote only when implementation is real.
     "crates/SphereExtensionHost",
     "crates/SphereMediaUtils",
     "crates/SphereNoiseRemover",
     "crates/SphereSettings",
     "crates/SphereStemExtractor",
+    "crates/SphereVoiceTune",
 ]
+
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+
+# =============================================================================
+# Futureboard / Sphere workspace crates
+# =============================================================================
 
 [workspace.dependencies]
 sphere_ui_components = { path = "crates/SphereUIComponents" }
@@ -37,60 +55,14 @@ sphere-direct-audio-engine = { path = "crates/SphereDirectAudioEngine", default-
 sphere-audio-editor = { path = "crates/SphereAudioEditor" }
 sphere-audio-plugins = { path = "crates/SphereAudioPlugins" }
 sphere-encoder = { path = "crates/SphereEncoder" }
-sphere-plugin-host = { path = "crates/SpherePluginHost", default-features = false }
 sphere-graphic-engine = { path = "crates/SphereGraphicEngine" }
-napi = { version = "2", features = ["napi4"] }
-napi-derive = "2"
-napi-build = "2"
-cc = "1"
-pkg-config = "0.3"
-embed-resource = "3.0"
-cpal = "0.15"
-midir = "0.9"
-crossbeam-channel = "0.5"
-base64 = "0.22"
-memmap2 = "0.9"
-symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "aiff", "mp3", "flac", "ogg", "vorbis", "isomp4", "aac", "alac"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
-wasm-bindgen-test = "0.3"
-serde-wasm-bindgen = "0.6"
-console_error_panic_hook = "0.1"
-rfd = "0.15"
-crc32fast = "1"
-raw-window-handle = { version = "0.6" }
-accesskit = "0.24.0"
-accesskit_macos = "0.26.0"
-accesskit_unix = "0.21.0"
-accesskit_windows = "0.32.1"
-anyhow = "1.0.86"
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification", "open_uri", "file_chooser", "settings", "trash"] }
-async-channel = "2.5.0"
-async-compression = { version = "0.4", features = ["bzip2", "gzip", "futures-io"] }
-async-fs = "2.1"
-async-tar = "0.5.1"
-async-task = "4.7"
-async_zip = { version = "0.0.18", features = ["deflate", "deflate64"] }
-backtrace = "0.3"
-bitflags = "2.6.0"
-bytes = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-cocoa = "=0.26.0"
-cocoa-foundation = "=0.2.0"
-collections = { path = "crates/collections", version = "0.1.0" }
-core-foundation = "=0.10.0"
-core-foundation-sys = "0.8.6"
-core-video = { version = "0.5.2", features = ["metal"] }
-criterion = { version = "0.5", features = ["html_reports"] }
-ctor = "1.0.6"
-derive_more = { version = "2.1.1", features = ["add", "add_assign", "deref", "deref_mut", "display", "from_str", "mul", "mul_assign", "not"] }
-derive_refineable = { path = "crates/refineable/derive_refineable" }
-dirs = "5"
-dunce = "1.0"
-env_logger = "0.11"
-futures = "0.3.32"
-futures-concurrency = "7.7.1"
-futures-lite = "1.13"
-globset = "0.4"
+sphere-plugin-host = { path = "crates/SpherePluginHost", default-features = false }
+
+
+# =============================================================================
+# Native UI / GPUI vendored stack
+# =============================================================================
+
 gpui = { path = "crates/gpui", version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_linux = { path = "crates/gpui/crates/gpui_linux", default-features = false }
 gpui_macos = { path = "crates/gpui/crates/gpui_macos", default-features = false }
@@ -101,84 +73,326 @@ gpui_util = { path = "crates/gpui/crates/gpui_util" }
 gpui_web = { path = "crates/gpui/crates/gpui_web" }
 gpui_wgpu = { path = "crates/gpui/crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui/crates/gpui_windows", default-features = false }
-hdrhistogram = "7"
-heapless = "0.9.2"
-heck = "0.5"
-http = "1.1"
-http-body = "1.0"
+
+
+# =============================================================================
+# Zed / GPUI support crates vendored in this repository
+# =============================================================================
+
+collections = { path = "crates/collections", version = "0.1.0" }
+derive_refineable = { path = "crates/refineable/derive_refineable" }
 http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
-image = "0.25.1"
-indexmap = { version = "2.7.0", features = ["serde"] }
-inventory = "0.3.19"
-itertools = "0.14.0"
-libc = "0.2"
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
-mach2 = "0.5"
 media = { path = "crates/media" }
-metal = "0.33"
-nix = "0.29"
-objc = "0.2"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSGraphics"] }
-parking_lot = "0.12"
-percent-encoding = "2.3.2"
 perf = { path = "tooling/perf" }
-pollster = "0.4"
-postage = { version = "0.5", features = ["futures-traits"] }
-pretty_assertions = { version = "1.3.0", features = ["unstable"] }
-proc-macro2 = "1.0.93"
-profiling = "1"
-proptest = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b", features = ["attr-macro"] }
-quote = "1.0.9"
-rand = "0.9"
-rayon = "1.8"
 refineable = { path = "crates/refineable" }
-regex = "1.5"
-reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = ["charset", "http2", "macos-system-configuration", "multipart", "rustls-tls-native-roots", "socks", "stream"], package = "zed-reqwest", version = "0.12.15-zed" }
 reqwest_client = { path = "crates/reqwest_client" }
-rust-embed = { version = "8.11", features = ["include-exclude"] }
-rustc-hash = "2.1.0"
-rustls = { version = "0.23.26" }
-rustls-platform-verifier = "0.5.0"
-scap = { git = "https://github.com/zed-industries/scap", rev = "4afea48c3b002197176fb19cd0f9b180dd36eaac", default-features = false, package = "zed-scap", version = "0.0.8-zed" }
 scheduler = { path = "crates/scheduler" }
+sum_tree = { path = "crates/sum_tree" }
+util = { path = "crates/util" }
+util_macros = { path = "crates/util_macros" }
+zlog = { path = "crates/zlog" }
+ztracing = { path = "crates/ztracing" }
+ztracing_macro = { path = "crates/ztracing_macro" }
+
+
+# =============================================================================
+# Audio / MIDI / media
+# =============================================================================
+
+base64 = "0.22"
+cpal = "0.15"
+crc32fast = "1"
+crossbeam-channel = "0.5"
+heapless = "0.9.2"
+memmap2 = "0.9"
+midir = "0.9"
+symphonia = { version = "0.5", default-features = false, features = [
+    "wav",
+    "pcm",
+    "aiff",
+    "mp3",
+    "flac",
+    "ogg",
+    "vorbis",
+    "isomp4",
+    "aac",
+    "alac",
+] }
+
+
+# =============================================================================
+# Async / tasks / channels
+# =============================================================================
+
+async-channel = "2.5.0"
+async-compression = { version = "0.4", features = ["bzip2", "gzip", "futures-io"] }
+async-fs = "2.1"
+async-tar = "0.5.1"
+async-task = "4.7"
+async_zip = { version = "0.0.18", features = ["deflate", "deflate64"] }
+futures = "0.3.32"
+futures-concurrency = "7.7.1"
+futures-lite = "1.13"
+postage = { version = "0.5", features = ["futures-traits"] }
+smol = "2.0"
+tokio = { version = "1" }
+
+
+# =============================================================================
+# Serialization / data / IDs
+# =============================================================================
+
+anyhow = "1.0.86"
+bitflags = "2.6.0"
+chrono = { version = "0.4", features = ["serde"] }
+indexmap = { version = "2.7.0", features = ["serde"] }
 schemars = { version = "1.0", features = ["indexmap2"] }
 semver = { version = "1.0", features = ["serde"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
 serde_urlencoded = "0.7"
+slotmap = "1.0.6"
+smol_str = "0.3.6"
+thiserror = "2.0.12"
+uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
+
+
+# =============================================================================
+# N-API / native addon compatibility
+# =============================================================================
+
+napi = { version = "2", features = ["napi4"] }
+napi-build = "2"
+napi-derive = "2"
+
+
+# =============================================================================
+# Native platform / OS integration
+# =============================================================================
+
+accesskit = "0.24.0"
+accesskit_macos = "0.26.0"
+accesskit_unix = "0.21.0"
+accesskit_windows = "0.32.1"
+ashpd = { version = "0.13", default-features = false, features = [
+    "async-io",
+    "notification",
+    "open_uri",
+    "file_chooser",
+    "settings",
+    "trash",
+] }
+backtrace = "0.3"
+cc = "1"
+ctor = "1.0.6"
+dirs = "5"
+dunce = "1.0"
+embed-resource = "3.0"
+env_logger = "0.11"
+globset = "0.4"
+hdrhistogram = "7"
+libc = "0.2"
+log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+nix = "0.29"
+parking_lot = "0.12"
+pkg-config = "0.3"
+pollster = "0.4"
+profiling = "1"
+raw-window-handle = { version = "0.6" }
+rfd = "0.15"
+rustc-hash = "2.1.0"
+tempfile = "3.20.0"
+tracing = "0.1.40"
+walkdir = "2.5"
+which = "6.0.0"
+
+
+# =============================================================================
+# Graphics / GPU / images
+# =============================================================================
+
+core-video = { version = "0.5.2", features = ["metal"] }
+image = "0.25.1"
+rust-embed = { version = "8.11", features = ["include-exclude"] }
+wgpu = { version = "29.0.3", default-features = false, features = ["std", "wgsl", "vulkan", "metal", "gles"] }
+
+
+# =============================================================================
+# macOS platform
+# =============================================================================
+
+cocoa = "=0.26.0"
+cocoa-foundation = "=0.2.0"
+core-foundation = "=0.10.0"
+core-foundation-sys = "0.8.6"
+mach2 = "0.5"
+metal = "0.33"
+objc = "0.2"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSGraphics"] }
+
+
+# =============================================================================
+# Windows platform
+# =============================================================================
+
+windows = { version = "0.61", features = [
+    "Foundation_Numerics",
+    "Globalization_DateTimeFormatting",
+    "Storage_Search",
+    "Storage_Streams",
+    "System_Threading",
+    "UI_ViewManagement",
+    "Wdk_System_SystemServices",
+
+    "Win32_Foundation",
+    "Win32_Globalization",
+
+    "Win32_Devices_Properties",
+
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectManipulation",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Hlsl",
+    "Win32_Graphics_Imaging",
+
+    "Win32_Media",
+    "Win32_Media_Audio",
+
+    "Win32_Networking_WinSock",
+
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+
+    "Win32_Storage_FileSystem",
+
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_RestartManager",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.61"
+
+
+# =============================================================================
+# Web / WASM
+# =============================================================================
+
+console_error_panic_hook = "0.1"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2.120"
+wasm-bindgen-test = "0.3"
+web-time = "1.1.0"
+
+
+# =============================================================================
+# Networking / cloud / collaboration
+# =============================================================================
+
+bytes = "1.0"
+http = "1.1"
+http-body = "1.0"
+percent-encoding = "2.3.2"
+reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = [
+    "charset",
+    "http2",
+    "macos-system-configuration",
+    "multipart",
+    "rustls-tls-native-roots",
+    "socks",
+    "stream",
+], package = "zed-reqwest", version = "0.12.15-zed" }
+rustls = { version = "0.23.26" }
+rustls-platform-verifier = "0.5.0"
+url = "2.2"
+
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+derive_more = { version = "2.1.1", features = [
+    "add",
+    "add_assign",
+    "deref",
+    "deref_mut",
+    "display",
+    "from_str",
+    "mul",
+    "mul_assign",
+    "not",
+] }
+heck = "0.5"
+inventory = "0.3.19"
+itertools = "0.14.0"
+pretty_assertions = { version = "1.3.0", features = ["unstable"] }
+proc-macro2 = "1.0.93"
+quote = "1.0.9"
+rand = "0.9"
+rayon = "1.8"
+regex = "1.5"
+scap = { git = "https://github.com/zed-industries/scap", rev = "4afea48c3b002197176fb19cd0f9b180dd36eaac", default-features = false, package = "zed-scap", version = "0.0.8-zed" }
 sha2 = "0.10"
 shlex = "1.3.0"
-slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
-smol_str = "0.3.6"
-smol = "2.0"
 stacksafe = "0.1"
 strum = { version = "0.27.2", features = ["derive"] }
-sum_tree = { path = "crates/sum_tree" }
 syn = { version = "2.0.101", features = ["full", "extra-traits", "visit-mut"] }
 take-until = "0.2.0"
-tempfile = "3.20.0"
-thiserror = "2.0.12"
-tokio = { version = "1" }
-tracing = "0.1.40"
 unicase = "2.6"
 unicode-segmentation = "1.10"
-url = "2.2"
-util = { path = "crates/util" }
-util_macros = { path = "crates/util_macros" }
-uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
-walkdir = "2.5"
-wasm-bindgen = "0.2.120"
-web-time = "1.1.0"
-wgpu = { version = "29.0.3", default-features = false, features = ["std", "wgsl", "vulkan", "metal", "gles"] }
-which = "6.0.0"
-windows = { version = "0.61", features = ["Foundation_Numerics", "Globalization_DateTimeFormatting", "Storage_Search", "Storage_Streams", "System_Threading", "UI_ViewManagement", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_DirectWrite", "Win32_Graphics_DirectManipulation", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_Graphics_Hlsl", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_DataExchange", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_RestartManager", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging", "Win32_Media", "Win32_Media_Audio", "Win32_Devices_Properties"] }
-windows-core = "0.61"
-zlog = { path = "crates/zlog" }
-ztracing = { path = "crates/ztracing" }
-ztracing_macro = { path = "crates/ztracing_macro" }
+
+
+# =============================================================================
+# Database / plugin registry
+# =============================================================================
+
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+
+# =============================================================================
+# Tests / benchmarks
+# =============================================================================
+
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b", features = ["attr-macro"] }
+
+
+# =============================================================================
+# Workspace lints
+# =============================================================================
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }
@@ -189,6 +403,7 @@ todo = "deny"
 declare_interior_mutable_const = "deny"
 redundant_clone = "deny"
 disallowed_methods = "deny"
+
 style = { level = "allow", priority = -1 }
 type_complexity = "allow"
 let_underscore_future = "allow"
@@ -197,16 +412,28 @@ too_many_arguments = "allow"
 large_enum_variant = "allow"
 nonminimal_bool = "allow"
 
+
+# =============================================================================
+# Patches
+# =============================================================================
+
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+calloop = { git = "https://github.com/zed-industries/calloop" }
 notify = { git = "https://github.com/zed-industries/notify.git", rev = "ce58c24cad542c28e04ced02e20325a4ec28a31d" }
 notify-types = { git = "https://github.com/zed-industries/notify.git", rev = "ce58c24cad542c28e04ced02e20325a4ec28a31d" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
-calloop = { git = "https://github.com/zed-industries/calloop" }
-livekit = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "c3a55bbc207008f1ca3474b6037fdd3c443cad0f" }
+
+# These patches are needed only if the collab/live stack is present in the graph.
+# Remove them if Cargo warns they are unused after Electron/collab cleanup.
 libwebrtc = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "c3a55bbc207008f1ca3474b6037fdd3c443cad0f" }
+livekit = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "c3a55bbc207008f1ca3474b6037fdd3c443cad0f" }
 webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "c3a55bbc207008f1ca3474b6037fdd3c443cad0f" }
 
+
+# =============================================================================
+# Profiles
+# =============================================================================
 
 [profile.release]
 opt-level = 3

@@ -139,7 +139,7 @@ bun run build:all               # all surfaces (WASM + native)
 
 | Script | Description |
 | --- | --- |
-| `dev:web` · `dev:native` · `dev:server`| Run a surface in dev |
+| `dev:web` · `dev:native`| Run a surface in dev |
 | `build:web` · `build:wasm` · `build:native[:debug]` | Production / debug builds |
 | `build:audio:plugins` | Check stock plugin crate + extension template |
 | `bundle:native:mac[:dmg]` · `bundle:native:win` | Package distributables |

@@ -3,13 +3,6 @@
 version = 4
 
 [[package]]
-name = "SphereFBVoiceTune"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "SphereNotationEngine"
 version = "0.1.0"
 

@@ -2,7 +2,7 @@
 //!
 //! Decoding and peak generation run on background threads via [`super::audio_import`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -104,6 +104,15 @@ pub(crate) struct FileEntry {
     chunks: HashMap<(u32, u32), Arc<Vec<WaveformPeak>>>,
     /// Full LOD ladder for zoom selection once complete.
     preview: Option<Arc<WaveformPreview>>,
+    /// Monotonic counter bumped whenever the peak data changes (new chunk,
+    /// preview installed, rebuild started). The render-side geometry cache
+    /// folds this into its key so cached bars are discarded when peaks change.
+    revision: u64,
+}
+
+/// Revision of a locked entry — see [`FileEntry::revision`].
+pub(crate) fn entry_revision(entry: &FileEntry) -> u64 {
+    entry.revision
 }
 
 /// LOD levels — mirrors `DAUx::PEAK_LOD_LEVELS`.
@@ -323,6 +332,7 @@ pub fn try_begin_import(path_key: &str) -> bool {
             chunks_ready: 0,
             chunks: HashMap::new(),
             preview: None,
+            revision: 0,
         },
     );
     true
@@ -339,6 +349,7 @@ pub fn set_import_state(path_key: &str, state: AudioImportState) {
                 chunks_ready: 0,
                 chunks: HashMap::new(),
                 preview: None,
+                revision: 0,
             });
         entry.import = state;
     }
@@ -355,12 +366,14 @@ pub fn begin_peak_build(path_key: &str, meta: Arc<WaveformFileMeta>, chunks_tota
                 chunks_ready: 0,
                 chunks: HashMap::new(),
                 preview: None,
+                revision: 0,
             });
         entry.meta = Some(Arc::clone(&meta));
         entry.chunks_total = chunks_total;
         entry.chunks_ready = 0;
         entry.chunks.clear();
         entry.import = AudioImportState::GeneratingPeaks { progress: 0.0 };
+        entry.revision = entry.revision.wrapping_add(1);
     }
 }
 
@@ -375,6 +388,7 @@ pub fn install_chunk(
             return;
         };
         entry.chunks.insert((samples_per_peak, chunk_index), peaks);
+        entry.revision = entry.revision.wrapping_add(1);
         let primary = entry
             .meta
             .as_ref()
@@ -399,6 +413,7 @@ pub fn finish_peak_build(path_key: &str, preview: Arc<WaveformPreview>) {
         };
         entry.preview = Some(preview);
         entry.import = AudioImportState::Ready;
+        entry.revision = entry.revision.wrapping_add(1);
         if let Some(meta) = &entry.meta {
             entry.chunks_ready = entry.chunks_total.max(entry.chunks_ready);
             waveform_debug_log(&format!(
@@ -460,6 +475,7 @@ pub fn install_failed(path_key: &str, message: String) {
                 chunks_ready: 0,
                 chunks: HashMap::new(),
                 preview: None,
+                revision: 0,
             },
         );
     }
@@ -866,6 +882,76 @@ fn synth_sample(kind: SynthKind, t: f32, duration: f32) -> f32 {
     }
 }
 
+// ── Render geometry cache ─────────────────────────────────────────────────────
+//
+// The render path turns peaks into one min/max bar per visible pixel column.
+// That per-column aggregation used to re-run (and re-allocate) on *every*
+// timeline repaint — including every playhead tick and meter notify — even when
+// nothing about a clip's geometry changed. This cache stores the finished bar
+// list keyed by a hash of everything that affects the geometry (peak revision,
+// LOD, visible window, clip size, stretch/reverse). On a hit the render path
+// reuses an immutable `Arc<WaveformBars>` and skips both the aggregation and the
+// allocation; on a miss it computes once and publishes. Bars hold no color, so
+// two clips with identical geometry share one entry.
+
+/// `(x_in_canvas, top, height)` per drawn column.
+pub type WaveformBars = Vec<(f32, f32, f32)>;
+
+/// FIFO-bounded so memory stays flat (clips × zoom states cycle through). Not
+/// strict LRU — insertion-order eviction is enough because stale geometries
+/// (old scroll/zoom/revision) are never looked up again and fall off the back.
+struct GeometryCache {
+    map: HashMap<u64, Arc<WaveformBars>>,
+    order: VecDeque<u64>,
+    cap: usize,
+}
+
+impl GeometryCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn get(&self, key: u64) -> Option<Arc<WaveformBars>> {
+        self.map.get(&key).cloned()
+    }
+
+    fn insert(&mut self, key: u64, bars: Arc<WaveformBars>) {
+        if self.map.insert(key, bars).is_none() {
+            self.order.push_back(key);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+static GEOMETRY_CACHE: OnceLock<Mutex<GeometryCache>> = OnceLock::new();
+
+fn geometry_cache() -> &'static Mutex<GeometryCache> {
+    // ~1k entries keeps memory bounded (a full-viewport-width bar list is tens
+    // of KB at most) while far exceeding the live working set (visible clips ×
+    // a handful of recent zoom/scroll states).
+    GEOMETRY_CACHE.get_or_init(|| Mutex::new(GeometryCache::new(1024)))
+}
+
+/// Look up precomputed bars for a geometry signature (see [`WaveformBars`]).
+pub fn geometry_cache_get(key: u64) -> Option<Arc<WaveformBars>> {
+    geometry_cache().lock().ok()?.get(key)
+}
+
+/// Publish precomputed bars for a geometry signature.
+pub fn geometry_cache_put(key: u64, bars: Arc<WaveformBars>) {
+    if let Ok(mut cache) = geometry_cache().lock() {
+        cache.insert(key, bars);
+    }
+}
+
 pub fn pick_lod<'a>(
     preview: &'a WaveformPreview,
     samples_per_pixel: f32,
@@ -883,4 +969,84 @@ pub fn pick_lod<'a>(
         }
     }
     Some(best)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lod_selection_tracks_zoom() {
+        let sr = 48_000;
+        // Zoomed out (few px/s) → coarse LOD; zoomed in (thousands px/s) → finest.
+        let coarse = pick_best_samples_per_peak(5.0, sr);
+        let fine = pick_best_samples_per_peak(5_000.0, sr);
+        assert!(
+            coarse >= 8192,
+            "zoomed-out should pick a coarse LOD, got {coarse}"
+        );
+        assert_eq!(fine, LOD_LEVELS[0], "zoomed-in should pick the finest LOD");
+        // Zooming in must never select a coarser LOD than zooming out.
+        assert!(fine <= coarse);
+    }
+
+    #[test]
+    fn lod_selection_always_returns_a_real_level() {
+        let sr = 48_000;
+        for pps in [1.0, 10.0, 50.0, 250.0, 1_000.0, 8_000.0] {
+            let spp = pick_best_samples_per_peak(pps, sr);
+            assert!(
+                LOD_LEVELS.contains(&spp),
+                "spp {spp} is not a real LOD level (pps={pps})"
+            );
+        }
+    }
+
+    #[test]
+    fn pick_lod_prefers_coarsest_within_budget() {
+        let preview = WaveformPreview {
+            sample_rate: 48_000,
+            channels: 1,
+            duration_seconds: 1.0,
+            total_frames: 48_000,
+            lods: LOD_LEVELS
+                .iter()
+                .map(|&spp| WaveformLod {
+                    samples_per_peak: spp,
+                    peaks: vec![WaveformPeak {
+                        min: -0.5,
+                        max: 0.5,
+                    }],
+                })
+                .collect(),
+        };
+        // budget 1000 spp → coarsest level whose spp ≤ 1000 is 512.
+        assert_eq!(pick_lod(&preview, 1000.0).unwrap().samples_per_peak, 512);
+        // budget below the finest level → finest available.
+        assert_eq!(
+            pick_lod(&preview, 1.0).unwrap().samples_per_peak,
+            LOD_LEVELS[0]
+        );
+    }
+
+    #[test]
+    fn geometry_cache_roundtrips() {
+        let bars: Arc<WaveformBars> = Arc::new(vec![(1.0, 2.0, 3.0)]);
+        let key = 0x5151_5151_5151_5151;
+        geometry_cache_put(key, Arc::clone(&bars));
+        let got = geometry_cache_get(key).expect("cached bars present");
+        assert_eq!(got.as_slice(), &[(1.0, 2.0, 3.0)]);
+        assert!(geometry_cache_get(0x0123_4567_89AB_CDEF).is_none());
+    }
+
+    #[test]
+    fn geometry_cache_evicts_fifo_when_over_cap() {
+        let mut cache = GeometryCache::new(2);
+        cache.insert(1, Arc::new(vec![]));
+        cache.insert(2, Arc::new(vec![]));
+        cache.insert(3, Arc::new(vec![])); // pushes 1 off the back
+        assert!(cache.get(1).is_none(), "oldest entry should be evicted");
+        assert!(cache.get(2).is_some());
+        assert!(cache.get(3).is_some());
+    }
 }

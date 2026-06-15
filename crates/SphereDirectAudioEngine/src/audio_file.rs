@@ -125,7 +125,7 @@ pub fn generate_audio_peaks(path: impl AsRef<Path>) -> Result<AudioPeakFile, Sph
     let info = probe_audio_file(path)?;
     match info.format {
         AudioFileFormat::Wav => generate_wav_peaks_streaming(path, &info),
-        AudioFileFormat::Rauf => generate_peaks_in_memory(path, &info),
+        AudioFileFormat::Rauf => generate_rauf_peaks_streaming(path, &info),
         _ => generate_peaks_in_memory(path, &info),
     }
 }
@@ -255,6 +255,103 @@ fn generate_wav_peaks_streaming(
                 let value = decode_wav_sample(&buffer, sample_byte, &fmt).map_err(|e| {
                     SphereAudioError::NativeError(format!("sample decode failed: {e}"))
                 })?;
+                sum += value;
+            }
+            let mono = (sum / channels as f32).clamp(-1.0, 1.0);
+            for b in &mut builders {
+                b.push(mono);
+            }
+        }
+
+        remaining = remaining.saturating_sub((frame_count * bytes_per_frame) as u64);
+    }
+
+    for b in &mut builders {
+        b.flush_partial();
+    }
+
+    let lods: Vec<AudioPeakLod> = builders.into_iter().map(PeakLodBuilder::finalize).collect();
+
+    Ok(AudioPeakFile {
+        source_path: info.path.clone(),
+        sample_rate: info.sample_rate,
+        channels: info.channels,
+        total_frames: info.total_frames.max(frames),
+        duration_seconds: info.duration_seconds,
+        format: info.format,
+        lods,
+    })
+}
+
+/// Stream `.rauf` peaks straight from disk in 1 MiB chunks instead of decoding
+/// the whole recording into memory. RAUF v1 is raw interleaved S32/F32 LE PCM,
+/// so we decode each frame in place and average channels to mono — RAM stays
+/// bounded by the read buffer + the (small) peak ladder regardless of take
+/// length.
+fn generate_rauf_peaks_streaming(
+    path: &Path,
+    info: &AudioFileInfo,
+) -> Result<AudioPeakFile, SphereAudioError> {
+    let reader = RaufReader::open(path)
+        .map_err(|e| SphereAudioError::NativeError(format!("RAUF open failed: {e}")))?;
+    let header = reader.header().clone();
+    if !header.interleaved {
+        return Err(SphereAudioError::NativeError(
+            "RAUF peak scan requires interleaved PCM".to_string(),
+        ));
+    }
+    let frames = if header.flags & sphere_encoder::rauf::RAUF_FLAG_FINALIZED != 0 {
+        header.frames_written
+    } else {
+        reader
+            .recover_frames_from_size()
+            .map_err(|e| SphereAudioError::NativeError(format!("RAUF recovery failed: {e}")))?
+    };
+
+    let channels = (header.channels as usize).max(1);
+    let bytes_per_sample = 4usize; // S32 / F32 little-endian
+    let bytes_per_frame = channels * bytes_per_sample;
+    let data_len = frames.saturating_mul(bytes_per_frame as u64);
+
+    let mut builders: Vec<PeakLodBuilder> = PEAK_LOD_LEVELS
+        .iter()
+        .map(|&spp| PeakLodBuilder::with_capacity(spp, frames))
+        .collect();
+
+    let mut file = File::open(path)
+        .map_err(|e| SphereAudioError::NativeError(format!("RAUF open failed: {e}")))?;
+    file.seek(SeekFrom::Start(header.data_offset))
+        .map_err(|e| SphereAudioError::NativeError(format!("RAUF seek failed: {e}")))?;
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut remaining = data_len;
+    let format = header.sample_format;
+
+    while remaining > 0 {
+        let wanted = buffer.len().min(remaining as usize);
+        let aligned = if remaining as usize <= buffer.len() {
+            wanted
+        } else {
+            (wanted / bytes_per_frame).max(1) * bytes_per_frame
+        };
+        let read = file
+            .read(&mut buffer[..aligned])
+            .map_err(|e| SphereAudioError::NativeError(format!("RAUF read failed: {e}")))?;
+        if read == 0 {
+            break;
+        }
+
+        let frame_count = read / bytes_per_frame;
+        for frame in 0..frame_count {
+            let frame_byte = frame * bytes_per_frame;
+            let mut sum = 0.0f32;
+            for ch in 0..channels {
+                let sb = frame_byte + ch * bytes_per_sample;
+                let raw = [buffer[sb], buffer[sb + 1], buffer[sb + 2], buffer[sb + 3]];
+                let value = match format {
+                    RaufSampleFormat::S32 => i32::from_le_bytes(raw) as f32 / 2_147_483_648.0,
+                    RaufSampleFormat::F32 => f32::from_le_bytes(raw),
+                };
                 sum += value;
             }
             let mono = (sum / channels as f32).clamp(-1.0, 1.0);
@@ -1123,4 +1220,83 @@ fn clamp_i16_as_i32(value: f32) -> i32 {
     (value.clamp(-1.0, 1.0) * 32767.0)
         .round()
         .clamp(-32768.0, 32767.0) as i32
+}
+
+#[cfg(test)]
+mod peak_tests {
+    use super::*;
+    use sphere_encoder::rauf::{RaufConfig, RaufSampleFormat, RaufWriter};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fb_rauf_peak_{label}_{}_{}.rauf",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    /// Full-scale S32 value for a normalized sample in `-1.0..=1.0`.
+    fn s32(value: f32) -> i32 {
+        (value * 2_147_483_648.0).clamp(-2_147_483_648.0, 2_147_483_647.0) as i32
+    }
+
+    fn write_rauf(path: &PathBuf, channels: u16, interleaved_frames: &[i32]) {
+        let mut writer = RaufWriter::create(
+            path,
+            RaufConfig {
+                sample_rate: 48_000,
+                channels,
+                sample_format: RaufSampleFormat::S32,
+                interleaved: true,
+                project_start_sample: 0,
+                take_id: [0u8; 16],
+            },
+        )
+        .unwrap();
+        writer.write_s32le_interleaved(interleaved_frames).unwrap();
+        writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn rauf_streaming_peaks_capture_mono_min_max() {
+        // 600 mono frames alternating +0.5 / -0.5 → finest-LOD peaks span both.
+        let path = temp_path("mono");
+        let samples: Vec<i32> = (0..600)
+            .map(|i| if i % 2 == 0 { s32(0.5) } else { s32(-0.5) })
+            .collect();
+        write_rauf(&path, 1, &samples);
+
+        let peaks = generate_audio_peaks(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(peaks.channels, 1);
+        assert_eq!(peaks.total_frames, 600);
+        assert_eq!(peaks.lods.len(), PEAK_LOD_LEVELS.len());
+        let finest = &peaks.lods[0];
+        assert_eq!(finest.samples_per_peak, PEAK_LOD_LEVELS[0]);
+        let first = finest.peaks.first().expect("at least one peak");
+        assert!((first.max - 0.5).abs() < 1e-3, "max was {}", first.max);
+        assert!((first.min + 0.5).abs() < 1e-3, "min was {}", first.min);
+    }
+
+    #[test]
+    fn rauf_streaming_peaks_average_stereo_to_mono() {
+        // Both channels at +0.5 → mono average stays +0.5 (max), min 0.0.
+        let path = temp_path("stereo");
+        let frames: Vec<i32> = (0..512).flat_map(|_| [s32(0.5), s32(0.5)]).collect();
+        write_rauf(&path, 2, &frames);
+
+        let peaks = generate_audio_peaks(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(peaks.channels, 2);
+        assert_eq!(peaks.total_frames, 512);
+        let first = peaks.lods[0].peaks.first().expect("at least one peak");
+        assert!((first.max - 0.5).abs() < 1e-3, "max was {}", first.max);
+    }
 }

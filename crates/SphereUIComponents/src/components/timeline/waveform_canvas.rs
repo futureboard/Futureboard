@@ -1,11 +1,19 @@
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
 use super::timeline_state::{
     clip_output_local_to_source_sample, AudioImportState, ClipState, TimelineState,
 };
-use super::waveform_cache::{self, WaveformDisplayStatus, WaveformPeak};
+use super::waveform_cache::{self, WaveformBars, WaveformDisplayStatus, WaveformPeak};
 use crate::theme::Colors;
 use gpui::{
     canvas, div, fill, point, px, size, Bounds, IntoElement, ParentElement, Pixels, Styled,
 };
+
+/// Waveform bar height in clip-local pixels (the canvas fills the clip body and
+/// these bars are drawn centered). Folded into the geometry-cache key so a
+/// future height change can't reuse stale bars.
+const WAVEFORM_BAR_AREA_H: f32 = 48.0;
 
 /// One bar per visible CSS pixel column. No hard cap on number of bars —
 /// the visible-range clamp naturally bounds it by viewport width.
@@ -21,7 +29,8 @@ pub fn waveform_canvas(
     // so the temporary preview clip never falls through to the file cache or the
     // synthetic placeholder.
     if let Some(preview) = waveform_cache::recording_preview(&clip.id) {
-        return draw_preview_waveform(preview.as_ref(), color, state, clip_left, clip_width);
+        // Live take: peaks change every poll, so never cache (identity = None).
+        return draw_preview_waveform(preview.as_ref(), color, state, clip_left, clip_width, None);
     }
     match clip.audio_asset_key() {
         Some(asset_key) => waveform_cache::with_file_entry(asset_key, |entry| {
@@ -34,6 +43,7 @@ pub fn waveform_canvas(
                 | WaveformDisplayStatus::Partial { meta, .. } => {
                     let pixels_per_second = state.viewport.pixels_per_second;
                     draw_chunk_waveform_locked(
+                        asset_key,
                         entry,
                         meta.as_ref(),
                         color,
@@ -61,7 +71,17 @@ pub fn waveform_canvas(
                 clip.duration_beats,
                 state.bpm,
             );
-            draw_preview_waveform(preview.as_ref(), color, state, clip_left, clip_width)
+            // Synthetic placeholder is cached in `clip_cache`, so its `Arc` ptr
+            // is a stable identity for the geometry cache.
+            let identity = Arc::as_ptr(&preview) as usize as u64;
+            draw_preview_waveform(
+                preview.as_ref(),
+                color,
+                state,
+                clip_left,
+                clip_width,
+                Some(identity),
+            )
         }
     }
 }
@@ -133,7 +153,15 @@ fn import_status_canvas(
 /// One min/max bar per visible CSS pixel column. Bars are computed once and
 /// drawn from a single GPUI `canvas` element via `paint_quad` — no per-pixel
 /// child elements, no `MAX_VISIBLE_WIDTH` cap.
+///
+/// The per-column aggregation is the expensive part and is cached: a signature
+/// over `(asset, peak revision, LOD, visible window, clip size, stretch)` keys
+/// an immutable `Arc<WaveformBars>` so repeated repaints with unchanged geometry
+/// (playback playhead, meters, hover, selection) reuse the bars instead of
+/// re-aggregating and re-allocating on the UI thread.
+#[allow(clippy::too_many_arguments)]
 fn draw_chunk_waveform_locked(
+    asset_key: &str,
     entry: &waveform_cache::FileEntry,
     meta: &waveform_cache::WaveformFileMeta,
     color: gpui::Rgba,
@@ -158,7 +186,6 @@ fn draw_chunk_waveform_locked(
 
     let num_cols = (visible_w.ceil() as usize).max(1);
     waveform_cache::record_timeline_render(1, num_cols, true);
-    crate::perf::count("peak_points_drawn", num_cols as u64);
 
     let desired_spp =
         waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate);
@@ -179,45 +206,73 @@ fn draw_chunk_waveform_locked(
     let output_len =
         (source_end.saturating_sub(source_start) as f64 * effective_time_ratio).max(1.0);
 
-    let h = 48.0_f32;
+    let h = WAVEFORM_BAR_AREA_H;
     let center = h / 2.0;
     let clip_w = clip_width.max(1.0) as f64;
 
-    // Precompute bars: (x_in_canvas, top, height).
-    let mut bars: Vec<(f32, f32, f32)> = Vec::with_capacity(num_cols);
-    for col in 0..num_cols {
-        let x0 = visible_start + col as f32;
-        let x1 = x0 + 1.0;
-        let out0 = ((x0 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
-        let out1 = ((x1 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
-        let s0 = clip_output_local_to_source_sample(
-            out0,
-            source_start,
-            source_end,
-            effective_time_ratio,
-            clip.stretch.reverse,
-        );
-        let s1 = clip_output_local_to_source_sample(
-            out1,
-            source_start,
-            source_end,
-            effective_time_ratio,
-            clip.stretch.reverse,
-        );
-        let p0 = sample_to_peak_index(s0.min(s1), spp);
-        let p1 = sample_to_peak_index(s0.max(s1), spp).max(p0);
-        let WaveformPeak { min, max } =
-            waveform_cache::aggregate_peak_range_in_entry(entry, spp, p0, p1 + 1);
-        if min == 0.0 && max == 0.0 {
-            continue;
+    // Geometry signature: everything the bar list depends on. Peak *values* are
+    // covered by the cache entry's revision; peak→pixel mapping by the stretch
+    // window + clip width + visible span; vertical scale by `h`.
+    let key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        asset_key.hash(&mut hasher);
+        waveform_cache::entry_revision(entry).hash(&mut hasher);
+        (spp as u64).hash(&mut hasher);
+        (num_cols as u64).hash(&mut hasher);
+        visible_start.to_bits().hash(&mut hasher);
+        clip_width.to_bits().hash(&mut hasher);
+        source_start.hash(&mut hasher);
+        source_end.hash(&mut hasher);
+        effective_time_ratio.to_bits().hash(&mut hasher);
+        (clip.stretch.reverse as u8).hash(&mut hasher);
+        h.to_bits().hash(&mut hasher);
+        hasher.finish()
+    };
+
+    let bars = if let Some(cached) = waveform_cache::geometry_cache_get(key) {
+        crate::perf::count("waveform_geo_cache_hit", 1);
+        cached
+    } else {
+        crate::perf::count("waveform_geo_cache_miss", 1);
+        crate::perf::count("peak_points_drawn", num_cols as u64);
+        let mut bars: WaveformBars = Vec::with_capacity(num_cols);
+        for col in 0..num_cols {
+            let x0 = visible_start + col as f32;
+            let x1 = x0 + 1.0;
+            let out0 = ((x0 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
+            let out1 = ((x1 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
+            let s0 = clip_output_local_to_source_sample(
+                out0,
+                source_start,
+                source_end,
+                effective_time_ratio,
+                clip.stretch.reverse,
+            );
+            let s1 = clip_output_local_to_source_sample(
+                out1,
+                source_start,
+                source_end,
+                effective_time_ratio,
+                clip.stretch.reverse,
+            );
+            let p0 = sample_to_peak_index(s0.min(s1), spp);
+            let p1 = sample_to_peak_index(s0.max(s1), spp).max(p0);
+            let WaveformPeak { min, max } =
+                waveform_cache::aggregate_peak_range_in_entry(entry, spp, p0, p1 + 1);
+            if min == 0.0 && max == 0.0 {
+                continue;
+            }
+            let mn = min.max(-1.0);
+            let mx = max.min(1.0);
+            let top = center - mx * center;
+            let bottom = center - mn * center;
+            let bar_h = (bottom - top).max(1.0);
+            bars.push((x0, top, bar_h));
         }
-        let mn = min.max(-1.0);
-        let mx = max.min(1.0);
-        let top = center - mx * center;
-        let bottom = center - mn * center;
-        let bar_h = (bottom - top).max(1.0);
-        bars.push((x0, top, bar_h));
-    }
+        let bars = Arc::new(bars);
+        waveform_cache::geometry_cache_put(key, Arc::clone(&bars));
+        bars
+    };
 
     let mut waveform_color = color;
     waveform_color.a = 0.72;
@@ -225,7 +280,7 @@ fn draw_chunk_waveform_locked(
     let element = canvas(
         |_bounds, _window, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
-            for (x, top, bh) in &bars {
+            for (x, top, bh) in bars.iter() {
                 let r = Bounds::new(
                     bounds.origin + point(px(*x), px(*top)),
                     size(px(1.0), px(bh.max(1.0))),
@@ -248,12 +303,16 @@ fn sample_to_peak_index(sample: f64, samples_per_peak: usize) -> usize {
     sample.max(0.0) as usize / samples_per_peak.max(1)
 }
 
+/// `identity` is a stable id for the underlying preview (e.g. its `Arc` ptr) or
+/// `None` for fast-changing sources (a live recording take) that should never
+/// be cached. When `Some`, the bar geometry is reused via the shared cache.
 fn draw_preview_waveform(
     preview: &waveform_cache::WaveformPreview,
     color: gpui::Rgba,
     state: &TimelineState,
     clip_left: f32,
     clip_width: f32,
+    identity: Option<u64>,
 ) -> gpui::Div {
     let viewport_w = state.viewport.viewport_width.max(1.0);
     let visible_start = (-clip_left).max(0.0);
@@ -270,25 +329,47 @@ fn draw_preview_waveform(
     };
 
     let num_cols = (visible_w.ceil() as usize).max(1);
-    let h = 48.0_f32;
+    let h = WAVEFORM_BAR_AREA_H;
     let center = h / 2.0;
     let total_peaks = lod.peaks.len().max(1);
     let clip_w = clip_width.max(1.0);
 
-    let mut bars: Vec<(f32, f32, f32)> = Vec::with_capacity(num_cols);
-    for col in 0..num_cols {
-        let x0 = visible_start + col as f32;
-        let x1 = x0 + 1.0;
-        let frac0 = (x0 / clip_w).max(0.0);
-        let frac1 = (x1 / clip_w).min(1.0);
-        let p0 = (frac0 * total_peaks as f32).floor() as usize;
-        let p1 = (frac1 * total_peaks as f32).ceil() as usize;
-        let end = p1.min(total_peaks).max(p0 + 1);
-        let agg = aggregate_slice(&lod.peaks[p0..end]);
-        let top = center - agg.max.min(1.0) * center;
-        let bottom = center - agg.min.max(-1.0) * center;
-        bars.push((x0, top, (bottom - top).max(1.0)));
-    }
+    let key = identity.map(|id| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut hasher);
+        (lod.samples_per_peak as u64).hash(&mut hasher);
+        (total_peaks as u64).hash(&mut hasher);
+        (num_cols as u64).hash(&mut hasher);
+        visible_start.to_bits().hash(&mut hasher);
+        clip_width.to_bits().hash(&mut hasher);
+        h.to_bits().hash(&mut hasher);
+        hasher.finish()
+    });
+
+    let bars = match key.and_then(waveform_cache::geometry_cache_get) {
+        Some(cached) => cached,
+        None => {
+            let mut bars: WaveformBars = Vec::with_capacity(num_cols);
+            for col in 0..num_cols {
+                let x0 = visible_start + col as f32;
+                let x1 = x0 + 1.0;
+                let frac0 = (x0 / clip_w).max(0.0);
+                let frac1 = (x1 / clip_w).min(1.0);
+                let p0 = (frac0 * total_peaks as f32).floor() as usize;
+                let p1 = (frac1 * total_peaks as f32).ceil() as usize;
+                let end = p1.min(total_peaks).max(p0 + 1);
+                let agg = aggregate_slice(&lod.peaks[p0..end]);
+                let top = center - agg.max.min(1.0) * center;
+                let bottom = center - agg.min.max(-1.0) * center;
+                bars.push((x0, top, (bottom - top).max(1.0)));
+            }
+            let bars = Arc::new(bars);
+            if let Some(key) = key {
+                waveform_cache::geometry_cache_put(key, Arc::clone(&bars));
+            }
+            bars
+        }
+    };
 
     let mut waveform_color = color;
     waveform_color.a = 0.72;
@@ -296,7 +377,7 @@ fn draw_preview_waveform(
     let element = canvas(
         |_b, _w, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
-            for (x, top, bh) in &bars {
+            for (x, top, bh) in bars.iter() {
                 let r = Bounds::new(
                     bounds.origin + point(px(*x), px(*top)),
                     size(px(1.0), px(bh.max(1.0))),

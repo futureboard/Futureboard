@@ -1088,7 +1088,7 @@ mod tests {
         let asset_id = "Assets/Audio/loop.wav";
         let peak_rel = waveform_peak_relative_path_for_asset(asset_id);
         let peak_path = resolve_project_relative_path(&root, &peak_rel);
-        write_peak_file(&peak_path, asset_id, &sample_peak_preview()).unwrap();
+        write_peak_file(&peak_path, asset_id, &sample_peak_preview(), None).unwrap();
         assert!(peak_path.exists());
 
         let mut project = FutureboardProject::new("PeakA");
@@ -1111,7 +1111,7 @@ mod tests {
         let layout = ProjectFolderLayout::from_root(root.clone());
         assert!(layout.media_audio.exists());
         assert!(layout.cache_waveforms.exists());
-        read_peak_file(&peak_path, Some(asset_id)).unwrap();
+        read_peak_file(&peak_path, Some(asset_id), None).unwrap();
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(ext);
@@ -1132,7 +1132,7 @@ mod tests {
 
         let peak_rel = waveform_peak_relative_path_for_asset(asset_id);
         let peak_path = resolve_project_relative_path(&root, &peak_rel);
-        write_peak_file(&peak_path, asset_id, &sample_peak_preview()).unwrap();
+        write_peak_file(&peak_path, asset_id, &sample_peak_preview(), None).unwrap();
 
         let mut project = FutureboardProject::new("PeakB");
         project.assets.push(ProjectAsset {
@@ -1161,7 +1161,7 @@ mod tests {
                 .as_ref()
                 .unwrap(),
         );
-        let preview = read_peak_file(&peak_path, Some(asset_id)).unwrap();
+        let preview = read_peak_file(&peak_path, Some(asset_id), None).unwrap();
         assert_eq!(preview.lods[0].peaks.len(), 2);
 
         let _ = fs::remove_dir_all(root);
@@ -1206,7 +1206,7 @@ mod tests {
                 asset_id,
             ),
         );
-        let err = read_peak_file(&peak_path, Some(asset_id)).unwrap_err();
+        let err = read_peak_file(&peak_path, Some(asset_id), None).unwrap_err();
         assert!(matches!(
             err,
             PeakFileError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound

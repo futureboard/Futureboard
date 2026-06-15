@@ -14,6 +14,7 @@ use super::timeline_state::AudioImportState;
 use super::waveform_cache::{self, WaveformFileMeta, WaveformPreview, CHUNK_PEAKS, PEAK_FINE_SPP};
 use super::waveform_peak_file::{
     read_peak_file, waveform_peak_relative_path_for_asset, write_peak_file, PeakFileError,
+    SourceFingerprint,
 };
 use crate::layout::StudioLayout;
 use crate::project::io::relative_path_in_project;
@@ -38,9 +39,11 @@ fn project_peak_path(project_root: &Path, asset_id: &str) -> PathBuf {
 fn try_load_project_peak_cache(
     project_root: &Path,
     asset_id: &str,
+    source_path: &Path,
 ) -> Option<Arc<WaveformPreview>> {
     let path = project_peak_path(project_root, asset_id);
-    match read_peak_file(&path, Some(asset_id)) {
+    let expected_source = SourceFingerprint::for_path(source_path);
+    match read_peak_file(&path, Some(asset_id), expected_source) {
         Ok(preview) => {
             let peak_count: usize = preview.lods.iter().map(|l| l.peaks.len()).sum();
             eprintln!(
@@ -51,6 +54,10 @@ fn try_load_project_peak_cache(
         }
         Err(PeakFileError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("[WaveformCache] disk miss asset_id={asset_id}");
+            None
+        }
+        Err(PeakFileError::SourceChanged { .. }) => {
+            eprintln!("[WaveformCache] source changed; regenerating asset_id={asset_id}");
             None
         }
         Err(err) => {
@@ -67,9 +74,10 @@ fn save_project_peak_cache(
     project_root: &Path,
     asset_id: &str,
     preview: &WaveformPreview,
+    source: Option<SourceFingerprint>,
 ) -> Option<PathBuf> {
     let path = project_peak_path(project_root, asset_id);
-    match write_peak_file(&path, asset_id, preview) {
+    match write_peak_file(&path, asset_id, preview, source) {
         Ok(bytes) => {
             eprintln!(
                 "[WaveformCache] written path={} bytes={bytes}",
@@ -202,7 +210,7 @@ fn run_peak_job(
     );
 
     if let Some(root) = project_root {
-        if let Some(preview) = try_load_project_peak_cache(root, asset_id) {
+        if let Some(preview) = try_load_project_peak_cache(root, asset_id, path) {
             eprintln!("[WaveformCache] memory hit asset_id={asset_id} (disk preload)");
             waveform_cache::ingest_preview_as_chunks(asset_id, Arc::clone(&preview));
             return Ok(preview);
@@ -224,7 +232,8 @@ fn run_peak_job(
             "[AudioImport] project cache path={}",
             project_peak_path(root, asset_id).display()
         );
-        save_project_peak_cache(root, asset_id, preview.as_ref());
+        let source = SourceFingerprint::for_path(path);
+        save_project_peak_cache(root, asset_id, preview.as_ref(), source);
         eprintln!("[AudioImport] project asset path={}", path.display());
         let _ = peak_relative;
     }
@@ -586,7 +595,13 @@ pub fn schedule_project_waveform_restore(
             peak_path.display()
         );
 
-        match read_peak_file(&peak_path, Some(&asset_id)) {
+        // Validate the cached peaks against the current source file's
+        // (size, mtime) when the source is reachable; a missing source stays
+        // lenient so we keep showing cached peaks for moved/offline media.
+        let expected_source = audio_path
+            .as_ref()
+            .and_then(|p| SourceFingerprint::for_path(p));
+        match read_peak_file(&peak_path, Some(&asset_id), expected_source) {
             Ok(preview) => {
                 let peak_count: usize = preview.lods.iter().map(|l| l.peaks.len()).sum();
                 eprintln!(
@@ -607,6 +622,12 @@ pub fn schedule_project_waveform_restore(
             }
             Err(PeakFileError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
                 eprintln!("[WaveformCache] disk miss asset_id={asset_id}");
+                if let Some(path) = audio_path.filter(|p| p.exists()) {
+                    jobs.push((asset_id, path));
+                }
+            }
+            Err(PeakFileError::SourceChanged { .. }) => {
+                eprintln!("[WaveformCache] source changed; regenerating asset_id={asset_id}");
                 if let Some(path) = audio_path.filter(|p| p.exists()) {
                     jobs.push((asset_id, path));
                 }

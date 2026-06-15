@@ -49,6 +49,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_REPEAT_PATH => Some(assets::icons::REPEAT.as_bytes()),
             assets::ICON_REPEAT2_PATH => Some(assets::icons::REPEAT2.as_bytes()),
             assets::ICON_TIMER_PATH => Some(assets::icons::TIMER.as_bytes()),
+            assets::ICON_METRONOME_PATH => Some(assets::icons::METRONOME.as_bytes()),
             assets::ICON_SAVE_PATH => Some(assets::icons::SAVE.as_bytes()),
             assets::ICON_FOLDER_PATH => Some(assets::icons::FOLDER.as_bytes()),
             assets::ICON_FOLDER_OPEN_PATH => Some(assets::icons::FOLDER_OPEN.as_bytes()),
@@ -97,6 +98,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_PLAYHEAD_HANDLE_PATH => Some(assets::icons::PLAYHEAD_HANDLE.as_bytes()),
             assets::ICON_PLUGIN_CLAP_PATH => Some(assets::icons::PLUGIN_CLAP.as_bytes()),
             assets::ICON_PLUGIN_VST3_PATH => Some(assets::icons::PLUGIN_VST3.as_bytes()),
+            assets::TIMELINE_SCROLL_PATH => Some(assets::icons::TIMELINE_SCROLL.as_bytes()),
 
             _ => None,
         };
@@ -117,6 +119,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_REPEAT_PATH,
             assets::ICON_REPEAT2_PATH,
             assets::ICON_TIMER_PATH,
+            assets::ICON_METRONOME_PATH,
             assets::ICON_SAVE_PATH,
             assets::ICON_FOLDER_PATH,
             assets::ICON_FOLDER_OPEN_PATH,
@@ -161,6 +164,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_PLAYHEAD_HANDLE_PATH,
             assets::ICON_PLUGIN_CLAP_PATH,
             assets::ICON_PLUGIN_VST3_PATH,
+            assets::TIMELINE_SCROLL_PATH,
         ];
         let mut list = Vec::new();
         for p in all_paths {

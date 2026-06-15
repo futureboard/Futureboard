@@ -24,6 +24,8 @@ pub mod icons {
     pub const REPEAT: &str = include_str!("../../../packages/shared/lucide/icons/repeat.svg");
     pub const REPEAT2: &str = include_str!("../../../packages/shared/lucide/icons/repeat-2.svg");
     pub const TIMER: &str = include_str!("../../../packages/shared/lucide/icons/timer.svg");
+    pub const METRONOME: &str =
+        include_str!("../../../packages/shared/lucide/icons/metronome.svg");
     pub const SAVE: &str = include_str!("../../../packages/shared/lucide/icons/save.svg");
     pub const FOLDER: &str = include_str!("../../../packages/shared/lucide/icons/folder.svg");
     pub const FOLDER_OPEN: &str =
@@ -37,6 +39,10 @@ pub mod icons {
     pub const MINUS: &str = include_str!("../../../packages/shared/lucide/icons/minus.svg");
     pub const MENU: &str = include_str!("../../../packages/shared/lucide/icons/menu.svg");
     pub const X: &str = include_str!("../../../packages/shared/lucide/icons/x.svg");
+
+    // App Icons
+    pub const TIMELINE_SCROLL: &str =
+        include_str!("../../../packages/shared/icons/timelinescroll.svg");
 
     // Window controls
     pub const GENERIC_MAXIMIZE: &str =
@@ -104,6 +110,7 @@ pub const ICON_SKIP_BACK_PATH: &str = "icons/skip-back.svg";
 pub const ICON_REPEAT_PATH: &str = "icons/repeat.svg";
 pub const ICON_REPEAT2_PATH: &str = "icons/repeat-2.svg";
 pub const ICON_TIMER_PATH: &str = "icons/timer.svg";
+pub const ICON_METRONOME_PATH: &str = "icons/metronome.svg";
 pub const ICON_SAVE_PATH: &str = "icons/save.svg";
 pub const ICON_FOLDER_PATH: &str = "icons/folder.svg";
 pub const ICON_FOLDER_OPEN_PATH: &str = "icons/folder-open.svg";
@@ -150,6 +157,7 @@ pub const ICON_NEWSPAPER_PATH: &str = "icons/newspaper.svg";
 pub const ICON_PLAYHEAD_HANDLE_PATH: &str = "icons/playhead_handle.svg";
 pub const ICON_PLUGIN_CLAP_PATH: &str = "icons/plugins/clap.svg";
 pub const ICON_PLUGIN_VST3_PATH: &str = "icons/plugins/vst3.svg";
+pub const TIMELINE_SCROLL_PATH: &str = "icons/timelinescroll.svg";
 
 #[cfg(target_os = "windows")]
 fn log_startup_dpi() {

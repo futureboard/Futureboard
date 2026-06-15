@@ -1027,6 +1027,14 @@ impl Render for StudioLayout {
         }
         let focus_holder = self.focus_handle.clone();
 
+        // Systemwide IME bridge: when a main-window text field owns focus, mount
+        // the OS composition handler against it (routed to the focused field by
+        // `impl EntityInputHandler for StudioLayout`). Coexists with the raw key
+        // path; absent when no field is focused, so it never touches shortcuts.
+        let ime_bridge = self
+            .focused_text_input_handle(window)
+            .map(|fh| crate::components::text_input::ime_input_bridge(cx.entity().clone(), fh));
+
         div()
             // NOTE: `track_focus` deliberately lives on the tiny invisible
             // `focus_holder` child below, NOT on this root. Putting it on
@@ -1154,6 +1162,8 @@ impl Render for StudioLayout {
             // `capture_key_down` still fires for any key while this
             // descendant is focused (capture phase: root → focused).
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&focus_holder))
+            // Non-visual, non-interactive OS-IME bridge for the focused field.
+            .children(ime_bridge)
             .child({
                 let _s = crate::perf::PerfScope::enter("AppChrome");
                 components::app_chrome(

@@ -20,6 +20,10 @@ impl Default for AutoScrollMode {
     }
 }
 
+/// Fraction of the viewport width at which `Continuous` mode pins the playhead.
+/// 0.5 keeps it centered so there is equal lookahead/look-behind context.
+const CONTINUOUS_PIN_FRACTION: f32 = 0.5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineTool {
     Pointer,
@@ -212,9 +216,8 @@ impl TimelineState {
         let playhead_content_x = playhead_beats.max(0.0) * self.seconds_per_beat() * pps;
         let scroll_x = self.viewport.scroll_x;
 
-        // Trigger thresholds: right 15% / left 5% of the viewport.
+        // Page mode pages forward once the playhead nears the right edge.
         let right_trigger = scroll_x + viewport_width * 0.85;
-        let left_trigger = scroll_x + viewport_width * 0.05;
 
         let new_scroll_x = match self.auto_scroll_mode {
             AutoScrollMode::Off => return false,
@@ -230,11 +233,13 @@ impl TimelineState {
                 }
             }
             AutoScrollMode::Continuous => {
-                if playhead_content_x > right_trigger || playhead_content_x < left_trigger {
-                    (playhead_content_x - viewport_width * 0.40).max(0.0)
-                } else {
-                    return false;
-                }
+                // Pin the playhead at a fixed fraction of the viewport and let
+                // the timeline flow underneath it. Recomputed every playback
+                // tick, so the playhead stays locked in place while the content
+                // scrolls smoothly. Before the playhead reaches the pin point
+                // (early in the project) `max(0.0)` holds scroll at 0 so it
+                // travels in from the left edge first.
+                (playhead_content_x - viewport_width * CONTINUOUS_PIN_FRACTION).max(0.0)
             }
         };
 
@@ -268,6 +273,22 @@ impl TimelineState {
 
     pub fn set_follow_playhead(&mut self, follow: bool) {
         self.follow_playhead = follow;
+    }
+
+    pub fn set_auto_scroll_mode(&mut self, mode: AutoScrollMode) {
+        self.auto_scroll_mode = mode;
+    }
+
+    /// Switch between paged and continuous auto-scroll, returning the new mode.
+    /// `Off` maps to `Continuous` so the toggle always lands on a visible mode.
+    /// The caller decides whether to also enable `follow_playhead` so the change
+    /// takes effect immediately.
+    pub fn toggle_auto_scroll_mode(&mut self) -> AutoScrollMode {
+        self.auto_scroll_mode = match self.auto_scroll_mode {
+            AutoScrollMode::Continuous => AutoScrollMode::Page,
+            _ => AutoScrollMode::Continuous,
+        };
+        self.auto_scroll_mode
     }
 
     pub fn smooth_scroll_towards_target(&mut self) -> bool {

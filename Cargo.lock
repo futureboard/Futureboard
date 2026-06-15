@@ -5938,6 +5938,7 @@ dependencies = [
  "sphere-encoder",
  "sphere-graphic-engine",
  "sphere-plugin-host",
+ "unicode-segmentation",
  "wgpu",
  "windows 0.61.3",
  "windows-core 0.61.2",

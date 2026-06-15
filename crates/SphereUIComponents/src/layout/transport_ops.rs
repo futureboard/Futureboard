@@ -150,6 +150,19 @@ impl StudioLayout {
                     eprintln!("[autoscroll] toggled follow_playhead -> {}", enabled);
                 }
             }
+            TransportCommand::ToggleAutoScrollMode => {
+                let mode = self.timeline.update(cx, |timeline, cx| {
+                    let mode = timeline.state.toggle_auto_scroll_mode();
+                    // Switching the mode is a request to auto-scroll that way, so
+                    // make sure following is on — otherwise nothing visibly changes.
+                    timeline.state.set_follow_playhead(true);
+                    cx.notify();
+                    mode
+                });
+                if std::env::var_os("FUTUREBOARD_AUTOSCROLL_DEBUG").is_some() {
+                    eprintln!("[autoscroll] toggled auto_scroll_mode -> {:?}", mode);
+                }
+            }
             TransportCommand::Record => {
                 if self.is_recording_active(cx) {
                     self.log_transport_debug("Record", "stop_recording_and_stop_transport", cx);
@@ -199,6 +212,7 @@ impl StudioLayout {
             loop_enabled,
             metronome_enabled,
             follow_playhead,
+            auto_scroll_continuous,
         ) = {
             let timeline = self.timeline.read(cx);
             // The transport always shows the *effective* BPM at the playhead so
@@ -231,6 +245,8 @@ impl StudioLayout {
                 timeline.state.transport.loop_enabled,
                 timeline.state.transport.metronome_enabled,
                 timeline.state.follow_playhead,
+                timeline.state.auto_scroll_mode
+                    == components::timeline::timeline_state::AutoScrollMode::Continuous,
             )
         };
         let playing = self
@@ -254,6 +270,7 @@ impl StudioLayout {
         let on_loop_toggle = make_command_handler("transport:toggle-loop");
         let on_metronome_toggle = make_command_handler("transport:toggle-metronome");
         let on_follow_toggle = make_command_handler("transport:toggle-follow-playhead");
+        let on_follow_mode_toggle = make_command_handler("transport:toggle-autoscroll-mode");
         let on_record = make_command_handler("transport:record");
 
         let on_set_bpm: components::BpmChangeCb = {
@@ -328,6 +345,7 @@ impl StudioLayout {
             loop_enabled,
             metronome_enabled,
             follow_playhead,
+            auto_scroll_continuous,
             position_label,
             bpm: bpm_value,
             bpm_label,
@@ -352,6 +370,7 @@ impl StudioLayout {
             on_loop_toggle,
             on_metronome_toggle,
             on_follow_toggle,
+            on_follow_mode_toggle,
             on_set_bpm,
             on_bpm_drag,
             on_bpm_menu,

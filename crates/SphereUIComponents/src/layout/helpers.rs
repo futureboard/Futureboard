@@ -31,6 +31,7 @@ pub(super) fn transport_command_from_id(command_id: &str) -> Option<TransportCom
         "transport:toggle-follow-playhead" | "transport:toggle-autoscroll" => {
             Some(TransportCommand::ToggleFollowPlayhead)
         }
+        "transport:toggle-autoscroll-mode" => Some(TransportCommand::ToggleAutoScrollMode),
         "transport:record" => Some(TransportCommand::Record),
         _ => None,
     }

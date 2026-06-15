@@ -91,6 +91,9 @@ pub struct TransportChromeState {
     pub loop_enabled: bool,
     pub metronome_enabled: bool,
     pub follow_playhead: bool,
+    /// True when auto-scroll is in continuous (smooth) mode rather than paged.
+    /// Drives the FOLLOW button accent and is toggled via right-click.
+    pub auto_scroll_continuous: bool,
     pub position_label: String,
     pub bpm: f32,
     pub bpm_label: String,
@@ -115,6 +118,8 @@ pub struct TransportChromeState {
     pub on_loop_toggle: ChromeActionCb,
     pub on_metronome_toggle: ChromeActionCb,
     pub on_follow_toggle: ChromeActionCb,
+    /// Right-click on FOLLOW: switch auto-scroll between paged and continuous.
+    pub on_follow_mode_toggle: ChromeActionCb,
     pub on_set_bpm: BpmChangeCb,
     pub on_bpm_drag: BpmDragCb,
     pub on_bpm_menu: BpmMenuCb,
@@ -305,8 +310,14 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     } else {
         Colors::text_muted()
     };
+    // Continuous mode reads as a distinct accent so the right-click toggle is
+    // visible at a glance; paged follow keeps the standard accent.
     let follow_color = if state.follow_playhead {
-        Colors::accent_primary()
+        if state.auto_scroll_continuous {
+            Colors::status_success()
+        } else {
+            Colors::accent_primary()
+        }
     } else {
         Colors::text_muted()
     };
@@ -317,6 +328,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let on_loop = state.on_loop_toggle.clone();
     let on_metronome = state.on_metronome_toggle.clone();
     let on_follow = state.on_follow_toggle.clone();
+    let on_follow_mode = state.on_follow_mode_toggle.clone();
     let on_bpm_drag = state.on_bpm_drag.clone();
     let on_bpm_menu = state.on_bpm_menu.clone();
     let on_bpm_edit_start = state.on_bpm_edit_start.clone();
@@ -407,7 +419,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         // Metronome
         .child(
             chrome_button(
-                Some(assets::ICON_TIMER_PATH),
+                Some(assets::ICON_METRONOME_PATH),
                 "MET",
                 state.metronome_enabled,
                 metronome_color,
@@ -420,9 +432,11 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         )
         // Follow playhead / Auto-scroll. Magnet icon reads as "snap to
         // playhead" — same metaphor most DAWs use for this button.
+        // Left-click toggles follow on/off; right-click switches the auto-scroll
+        // mode between paged (jump) and continuous (smooth) follow.
         .child(
             chrome_button(
-                Some(assets::ICON_MAGNET_PATH),
+                Some(assets::TIMELINE_SCROLL_PATH),
                 "FOLLOW",
                 state.follow_playhead,
                 follow_color,
@@ -430,6 +444,9 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
             .cursor(gpui::CursorStyle::PointingHand)
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                 on_follow(&(), window, cx);
+            })
+            .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+                on_follow_mode(&(), window, cx);
             })
             .occlude(),
         )

@@ -1,4 +1,8 @@
-use gpui::{Context, KeyDownEvent, Window};
+use gpui::{
+    Bounds, Context, EntityInputHandler, FocusHandle, KeyDownEvent, Pixels, Point, UTF16Selection,
+    Window,
+};
+use std::ops::Range;
 use std::path::PathBuf;
 
 use crate::components::context_menu::ContextMenuEntry;
@@ -1265,5 +1269,146 @@ impl StudioLayout {
             }) => Some(*beat),
             _ => None,
         }
+    }
+
+    /// The main-window text field that currently owns the keyboard, if any.
+    ///
+    /// OS IME composition is routed to exactly this field via the root-level
+    /// [`crate::components::text_input::ime_input_bridge`]. The numeric tempo /
+    /// time-signature inline editors are intentionally excluded — they accept
+    /// ASCII digits only and run through their own key handlers.
+    pub(super) fn focused_text_target(&self, window: &Window) -> Option<TextMenuTarget> {
+        const TARGETS: [TextMenuTarget; 6] = [
+            TextMenuTarget::CommandPalette,
+            TextMenuTarget::ProjectSwitcherSearch,
+            TextMenuTarget::PluginPickerSearch,
+            TextMenuTarget::BrowserSearch,
+            TextMenuTarget::InspectorName,
+            TextMenuTarget::InspectorClipName,
+        ];
+        TARGETS
+            .into_iter()
+            .find(|&target| self.text_input(target).is_focused(window))
+    }
+
+    /// Focus handle of the currently-focused main-window text field, so the
+    /// render pass can mount the IME bridge against it.
+    pub(super) fn focused_text_input_handle(&self, window: &Window) -> Option<FocusHandle> {
+        self.focused_text_target(window)
+            .map(|target| self.text_input(target).focus_handle.clone())
+    }
+
+    /// After an IME edit mutates a field, propagate the new value exactly like the
+    /// raw key path does: search fields refresh their filter/query; inspector name
+    /// fields live-commit to the bound track/clip.
+    fn after_ime_edit(&mut self, target: TextMenuTarget, cx: &mut Context<Self>) {
+        match target {
+            TextMenuTarget::InspectorName => self.commit_inspector_name(cx),
+            TextMenuTarget::InspectorClipName => self.commit_inspector_clip_name(cx),
+            other => self.sync_text_input_target(other),
+        }
+    }
+}
+
+/// Systemwide IME bridge for the main window. Every platform IME call is routed
+/// to whichever main-window text field currently holds focus, so CJK/Thai
+/// composition, dead keys, and pasted Unicode reach browser search, the command
+/// palette, the project switcher, plugin search, and inspector name fields — not
+/// just the bridged external dialogs. Mirrors `impl_single_input_window_ime!`,
+/// but resolves the target field by focus instead of naming one.
+impl EntityInputHandler for StudioLayout {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let target = self.focused_text_target(window)?;
+        self.text_input_mut(target)
+            .text_for_utf16_range(range, actual_range)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let target = self.focused_text_target(window)?;
+        self.text_input_mut(target)
+            .selected_text_range_utf16(ignore_disabled_input)
+    }
+
+    fn marked_text_range(
+        &self,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        let target = self.focused_text_target(window)?;
+        self.text_input(target).marked_text_range_utf16()
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.focused_text_target(window) {
+            self.text_input_mut(target).unmark_text();
+            cx.notify();
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = self.focused_text_target(window) {
+            self.text_input_mut(target)
+                .replace_text_in_utf16_range(range, text);
+            self.after_ime_edit(target, cx);
+            cx.notify();
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = self.focused_text_target(window) {
+            self.text_input_mut(target)
+                .replace_and_mark_text_in_utf16_range(range, new_text, new_selected_range);
+            self.after_ime_edit(target, cx);
+            cx.notify();
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // NOTE: `bounds` is the full-window IME layer rect, so the candidate
+        // window anchors approximately (the field's real rect lives behind a
+        // panel function). Composition/commit are unaffected; only the candidate
+        // popup placement is coarse for main-window fields.
+        let target = self.focused_text_target(window)?;
+        self.text_input_mut(target)
+            .bounds_for_utf16_range(range_utf16, bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
     }
 }

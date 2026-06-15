@@ -60,14 +60,12 @@
 
 ## Architectural Overview
 
-Futureboard Studio is a Digital Audio Workstation whose primary maintained surface is a **native Rust application built on [GPUI](https://www.gpui.rs)** (the rendering framework behind the Zed editor), driving an in-process Rust audio engine. Secondary **web** (WASM DSP) and **Electron** surfaces share layout and engine concepts, but the native app is the main development target.
+Futureboard Studio is a Digital Audio Workstation whose primary maintained surface is a **native Rust application built on [GPUI](https://www.gpui.rs)** (the rendering framework behind the Zed editor), driving an in-process Rust audio engine. Secondary **web** (WASM DSP) surfaces share layout and engine concepts, but the native app is the main development target.
 
 | Surface | Path | Stack | Status |
 | --- | --- | --- | --- |
 | **Native** (primary) | `apps/native` | Rust · GPUI · direct audio engine | Main dev target |
 | Web | `apps/web` | React · TypeScript · Vite · WASM DSP | Tracks native, may lag |
-| Electron | `apps/electron` | React · N-API bridge | Legacy / reference |
-| Server | `apps/server` | Collaboration · file hosting | Foundations |
 
 ### Core crates
 
@@ -124,7 +122,7 @@ Package distributables (scripts in `packaging/native/`):
 bun run bundle:native:mac       # macOS .app
 bun run bundle:native:mac:dmg   # macOS .dmg installer
 bun run bundle:native:win       # Windows portable / installer
-bun run build:all               # all surfaces (WASM + native + Electron)
+bun run build:all               # all surfaces (WASM + native)
 ```
 
 ### Platform notes
@@ -141,7 +139,7 @@ bun run build:all               # all surfaces (WASM + native + Electron)
 
 | Script | Description |
 | --- | --- |
-| `dev:web` · `dev:native` · `dev:server` · `dev:electron` | Run a surface in dev |
+| `dev:web` · `dev:native` · `dev:server`| Run a surface in dev |
 | `build:web` · `build:wasm` · `build:native[:debug]` | Production / debug builds |
 | `build:audio:plugins` | Check stock plugin crate + extension template |
 | `bundle:native:mac[:dmg]` · `bundle:native:win` | Package distributables |
@@ -175,7 +173,7 @@ $env:FUTUREBOARD_PLUGIN_VIEW_DEBUG=1; cargo run -p futureboard_native
 
 ```text
 Futureboard
-├─ apps/         native · web · electron · server
+├─ apps/         native · web 
 ├─ crates/       SphereDirectAudioEngine · SphereWebAudioCore · SphereUIComponents · SpherePluginHost · SphereAudioPlugins
 ├─ packages/     assets · shared
 ├─ plugins/      modules/      extensions/

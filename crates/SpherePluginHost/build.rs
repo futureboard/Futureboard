@@ -11,7 +11,7 @@ fn main() {
         println!(
             "cargo:rerun-if-changed={}",
             manifest_dir
-                .join("../../apps/shared/app.manifest")
+                .join("../../packages/shared/app/windows/app.manifest")
                 .display()
         );
         embed_resource::compile(

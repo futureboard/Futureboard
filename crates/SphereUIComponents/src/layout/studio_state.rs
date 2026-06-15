@@ -133,5 +133,7 @@ pub(super) enum TransportCommand {
     ToggleLoop,
     ToggleMetronome,
     ToggleFollowPlayhead,
+    /// Switch the timeline auto-scroll behavior between paged and continuous.
+    ToggleAutoScrollMode,
     Record,
 }

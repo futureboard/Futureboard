@@ -1,6 +1,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, point, px, relative, App, Bounds, ClipboardItem, Element, ElementId, ElementInputHandler,
@@ -148,19 +150,128 @@ pub enum TextInputAction {
     Pass,
 }
 
+/// A cursor position, expressed as a `char` index into the committed value.
+///
+/// Char indices (not byte offsets) are the canonical cursor space for
+/// [`TextInputState`]: they never split a UTF-8 byte sequence, and the UTF-16
+/// bridge / grapheme helpers convert in and out of this space. Movement always
+/// lands on a grapheme-cluster boundary, so a `TextCursor` is also always a safe
+/// slice point for rendering.
+pub type TextCursor = usize;
+
+/// Snapshot of the active selection in committed-`char`-index space.
+///
+/// `anchor == cursor` means an empty selection (just a caret). Use
+/// [`TextSelection::range`] for the normalized `start..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSelection {
+    pub anchor: TextCursor,
+    pub cursor: TextCursor,
+}
+
+impl TextSelection {
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.cursor
+    }
+
+    /// Normalized `start..end` range (always `start <= end`).
+    pub fn range(&self) -> Range<usize> {
+        self.anchor.min(self.cursor)..self.anchor.max(self.cursor)
+    }
+}
+
+/// Active IME composition (pre-edit) state, in committed-`char`-index space.
+///
+/// While composing, the pre-edit text is held inside the committed value but
+/// marked by `range`; it must not be treated as final until
+/// [`TextInputEvent::CompositionCommit`]. `cursor` is the caret within the
+/// pre-edit, used to anchor the candidate window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImeCompositionState {
+    pub text: String,
+    pub range: Range<usize>,
+    pub cursor: TextCursor,
+}
+
+/// Clipboard/selection edit commands that require an [`App`] (for the system
+/// clipboard) to apply. Routed through [`TextInputState::apply_command`].
+#[derive(Debug, Clone)]
+pub enum TextEditCommand {
+    Copy,
+    Cut,
+    Paste(String),
+    SelectAll,
+    ReplaceSelection(String),
+}
+
+/// The single, IME-safe vocabulary every editable text field speaks.
+///
+/// Platform key/IME events are translated into these; [`TextInputState`] applies
+/// them with Unicode- and grapheme-correct semantics. Insertion never comes from
+/// a raw `KeyDown`/`key_char`: real text arrives as [`TextInputEvent::InsertText`]
+/// (committed key text) or through the composition lifecycle
+/// (`CompositionStart` → `CompositionUpdate` → `CompositionCommit`/`Cancel`),
+/// which mirrors the OS [`gpui::EntityInputHandler`] path.
+#[derive(Debug, Clone)]
+pub enum TextInputEvent {
+    InsertText(String),
+    CompositionStart,
+    CompositionUpdate { text: String, cursor: usize },
+    CompositionCommit(String),
+    CompositionCancel,
+    DeleteBackward,
+    DeleteForward,
+    MoveLeft,
+    MoveRight,
+    MoveWordLeft,
+    MoveWordRight,
+    MoveToStart,
+    MoveToEnd,
+    SelectAll,
+    ReplaceSelection(String),
+    Copy,
+    Cut,
+    Paste(String),
+}
+
+/// Pure, focus-handle-free text editing model: the committed value, caret,
+/// selection, and IME composition, plus every Unicode-correct edit operation.
+///
+/// Holding no GPUI handle keeps the editing core unit-testable in isolation.
+/// [`TextInputState`] wraps it (adding focus, mouse, and rendering concerns) and
+/// derefs to it, so existing callers keep using `state.value`, `state.cursor`,
+/// `state.handle_key_with_clipboard(..)`, etc. unchanged.
+#[derive(Clone, Default)]
+pub struct TextEditBuffer {
+    pub value: String,
+    pub cursor: usize,
+    selection_anchor: Option<usize>,
+    pub disabled: bool,
+    pub read_only: bool,
+    pub is_password: bool,
+    marked_range: Option<Range<usize>>,
+}
+
 #[derive(Clone)]
 pub struct TextInputState {
     pub element_id: &'static str,
     pub focus_handle: FocusHandle,
-    pub value: String,
-    pub cursor: usize,
-    selection_anchor: Option<usize>,
     pub placeholder: Option<String>,
-    pub disabled: bool,
-    pub read_only: bool,
-    pub is_password: bool,
+    pub buffer: TextEditBuffer,
     mouse_selecting: bool,
-    marked_range: Option<Range<usize>>,
+}
+
+impl std::ops::Deref for TextInputState {
+    type Target = TextEditBuffer;
+    fn deref(&self) -> &TextEditBuffer {
+        &self.buffer
+    }
+}
+
+impl std::ops::DerefMut for TextInputState {
+    fn deref_mut(&mut self) -> &mut TextEditBuffer {
+        &mut self.buffer
+    }
 }
 
 impl TextInputState {
@@ -168,15 +279,9 @@ impl TextInputState {
         Self {
             element_id,
             focus_handle,
-            value: String::new(),
-            cursor: 0,
-            selection_anchor: None,
             placeholder: None,
-            disabled: false,
-            read_only: false,
-            is_password: false,
+            buffer: TextEditBuffer::default(),
             mouse_selecting: false,
-            marked_range: None,
         }
     }
 
@@ -185,6 +290,54 @@ impl TextInputState {
         self
     }
 
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
+    /// Begin mouse selection/cursor placement.
+    ///
+    /// Note: `x` is treated as local-x within the text field. Since GPUI does not
+    /// currently expose element-local coordinates here, we use a best-effort mapping
+    /// that is "good enough" for drag selection.
+    pub fn handle_mouse_down(&mut self, x: f32, extend: bool) {
+        if self.buffer.disabled {
+            return;
+        }
+        let idx = self.cursor_from_x(x);
+        if extend {
+            self.buffer.move_cursor_to(idx, true);
+        } else {
+            self.buffer.unmark_text();
+            self.buffer.cursor = idx;
+            self.buffer.selection_anchor = Some(idx);
+        }
+        self.mouse_selecting = true;
+    }
+
+    pub fn handle_mouse_drag(&mut self, x: f32) {
+        if self.buffer.disabled || !self.mouse_selecting {
+            return;
+        }
+        let idx = self.cursor_from_x(x);
+        self.buffer.move_cursor_to(idx, true);
+    }
+
+    pub fn handle_mouse_up(&mut self) {
+        self.mouse_selecting = false;
+        // Collapse empty selection created by click.
+        if self.buffer.selection_anchor == Some(self.buffer.cursor) {
+            self.buffer.clear_selection();
+        }
+    }
+
+    fn cursor_from_x(&self, x: f32) -> usize {
+        let local = (x - TEXT_INPUT_PAD_X).max(0.0);
+        let idx = (local / TEXT_INPUT_CHAR_W).round() as isize;
+        idx.clamp(0, self.buffer.char_count() as isize) as usize
+    }
+}
+
+impl TextEditBuffer {
     pub fn set_value(&mut self, v: impl Into<String>) {
         self.value = v.into();
         self.cursor = self.char_count();
@@ -240,52 +393,6 @@ impl TextInputState {
         !self.disabled && !self.value.is_empty()
     }
 
-    pub fn is_focused(&self, window: &Window) -> bool {
-        self.focus_handle.is_focused(window)
-    }
-
-    /// Begin mouse selection/cursor placement.
-    ///
-    /// Note: `x` is treated as local-x within the text field. Since GPUI does not
-    /// currently expose element-local coordinates here, we use a best-effort mapping
-    /// that is "good enough" for drag selection.
-    pub fn handle_mouse_down(&mut self, x: f32, extend: bool) {
-        if self.disabled {
-            return;
-        }
-        let idx = self.cursor_from_x(x);
-        if extend {
-            self.move_cursor_to(idx, true);
-        } else {
-            self.unmark_text();
-            self.cursor = idx;
-            self.selection_anchor = Some(idx);
-        }
-        self.mouse_selecting = true;
-    }
-
-    pub fn handle_mouse_drag(&mut self, x: f32) {
-        if self.disabled || !self.mouse_selecting {
-            return;
-        }
-        let idx = self.cursor_from_x(x);
-        self.move_cursor_to(idx, true);
-    }
-
-    pub fn handle_mouse_up(&mut self) {
-        self.mouse_selecting = false;
-        // Collapse empty selection created by click.
-        if self.selection_anchor == Some(self.cursor) {
-            self.clear_selection();
-        }
-    }
-
-    fn cursor_from_x(&self, x: f32) -> usize {
-        let local = (x - TEXT_INPUT_PAD_X).max(0.0);
-        let idx = (local / TEXT_INPUT_CHAR_W).round() as isize;
-        idx.clamp(0, self.char_count() as isize) as usize
-    }
-
     pub fn handle_key(&mut self, event: &KeyDownEvent) -> TextInputAction {
         self.handle_key_with_clipboard(event, None)
     }
@@ -302,6 +409,23 @@ impl TextInputState {
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
         let command = mods.control || mods.platform;
+
+        // Word-wise movement: Ctrl+Arrow (Windows/Linux) or Option/Alt+Arrow
+        // (macOS). Checked before the clipboard branch so Ctrl+Left/Right are
+        // not swallowed; letter shortcuts (Ctrl+A/C/X/V) still fall through.
+        if (mods.control || mods.alt) && !mods.platform && !mods.function {
+            match key {
+                "left" | "arrow_left" => {
+                    self.move_word_left(mods.shift);
+                    return TextInputAction::Consumed;
+                }
+                "right" | "arrow_right" => {
+                    self.move_word_right(mods.shift);
+                    return TextInputAction::Consumed;
+                }
+                _ => {}
+            }
+        }
 
         if command && !mods.alt && !mods.function {
             return match key {
@@ -383,6 +507,182 @@ impl TextInputState {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Apply one [`TextInputEvent`] with Unicode- and grapheme-correct semantics.
+    ///
+    /// This is the centralized, IME-safe edit entry point: every field can drive
+    /// editing through this single vocabulary instead of re-deriving cursor math.
+    /// Clipboard variants (`Copy`/`Cut`) need an [`App`]; pass it via `cx`. Returns
+    /// `true` if the state changed (or the command was actionable).
+    pub fn apply_event(&mut self, event: TextInputEvent, cx: Option<&mut App>) -> bool {
+        if self.disabled {
+            return false;
+        }
+        match event {
+            TextInputEvent::InsertText(text) => {
+                if self.read_only {
+                    return false;
+                }
+                self.insert_str(&text);
+                true
+            }
+            TextInputEvent::CompositionStart => true,
+            TextInputEvent::CompositionUpdate { text, cursor } => {
+                if self.read_only {
+                    return false;
+                }
+                self.set_composition(&text, cursor);
+                true
+            }
+            TextInputEvent::CompositionCommit(text) => {
+                if self.read_only {
+                    return false;
+                }
+                self.commit_composition(&text);
+                true
+            }
+            TextInputEvent::CompositionCancel => {
+                self.cancel_composition();
+                true
+            }
+            TextInputEvent::DeleteBackward => {
+                if self.read_only {
+                    return false;
+                }
+                self.delete_backward();
+                true
+            }
+            TextInputEvent::DeleteForward => {
+                if self.read_only {
+                    return false;
+                }
+                self.delete_forward();
+                true
+            }
+            TextInputEvent::MoveLeft => {
+                self.move_cursor_left(false);
+                true
+            }
+            TextInputEvent::MoveRight => {
+                self.move_cursor_right(false);
+                true
+            }
+            TextInputEvent::MoveWordLeft => {
+                self.move_word_left(false);
+                true
+            }
+            TextInputEvent::MoveWordRight => {
+                self.move_word_right(false);
+                true
+            }
+            TextInputEvent::MoveToStart => {
+                self.move_cursor_to(0, false);
+                true
+            }
+            TextInputEvent::MoveToEnd => {
+                self.move_cursor_to(self.char_count(), false);
+                true
+            }
+            TextInputEvent::SelectAll => {
+                self.select_all();
+                true
+            }
+            TextInputEvent::ReplaceSelection(text) => {
+                if self.read_only {
+                    return false;
+                }
+                self.insert_str(&text);
+                true
+            }
+            TextInputEvent::Copy => self.copy_to_clipboard(cx),
+            TextInputEvent::Cut => self.cut_to_clipboard(cx),
+            TextInputEvent::Paste(text) => {
+                if self.read_only {
+                    return false;
+                }
+                self.insert_str(&text);
+                true
+            }
+        }
+    }
+
+    /// Apply a [`TextEditCommand`]. The clipboard variants need an [`App`].
+    pub fn apply_command(&mut self, command: TextEditCommand, cx: Option<&mut App>) -> bool {
+        match command {
+            TextEditCommand::Copy => self.apply_event(TextInputEvent::Copy, cx),
+            TextEditCommand::Cut => self.apply_event(TextInputEvent::Cut, cx),
+            TextEditCommand::Paste(text) => self.apply_event(TextInputEvent::Paste(text), cx),
+            TextEditCommand::SelectAll => self.apply_event(TextInputEvent::SelectAll, cx),
+            TextEditCommand::ReplaceSelection(text) => {
+                self.apply_event(TextInputEvent::ReplaceSelection(text), cx)
+            }
+        }
+    }
+
+    /// Current selection (anchor + cursor) in committed-`char`-index space.
+    pub fn selection(&self) -> TextSelection {
+        TextSelection {
+            anchor: self.selection_anchor.unwrap_or(self.cursor),
+            cursor: self.cursor,
+        }
+    }
+
+    /// Active IME composition, if the field is currently composing pre-edit text.
+    pub fn composition(&self) -> Option<ImeCompositionState> {
+        self.marked_range.clone().map(|range| ImeCompositionState {
+            text: self.slice_chars(range.clone()),
+            range,
+            cursor: self.cursor,
+        })
+    }
+
+    /// Whether an IME composition is currently active.
+    pub fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
+    /// Replace the active composition range (or selection/caret) with pre-edit
+    /// `text`, re-mark it, and place the caret `cursor_in_text` graphemes in.
+    ///
+    /// Mirrors the OS `replace_and_mark_text_in_range` path so the in-app event
+    /// API and the platform IME bridge converge on identical behavior.
+    fn set_composition(&mut self, text: &str, cursor_in_text: usize) {
+        let range = self
+            .marked_range
+            .clone()
+            .or_else(|| self.selection_range())
+            .unwrap_or(self.cursor..self.cursor);
+        let start = range.start;
+        let text_chars = text.chars().count();
+        self.replace_char_range(range, text);
+        self.marked_range = (text_chars > 0).then_some(start..start + text_chars);
+        self.cursor = start + cursor_in_text.min(text_chars);
+        self.selection_anchor = None;
+    }
+
+    /// Commit the active composition (or selection/caret) to `text`, clearing the
+    /// pre-edit mark and leaving the caret after the inserted text.
+    fn commit_composition(&mut self, text: &str) {
+        let range = self
+            .marked_range
+            .take()
+            .or_else(|| self.selection_range())
+            .unwrap_or(self.cursor..self.cursor);
+        let start = range.start;
+        self.replace_char_range(range, text);
+        self.cursor = start + text.chars().count();
+        self.selection_anchor = None;
+    }
+
+    /// Cancel the active composition, removing the pre-edit text and restoring the
+    /// caret to where composition began.
+    fn cancel_composition(&mut self) {
+        if let Some(range) = self.marked_range.take() {
+            self.replace_char_range(range.clone(), "");
+            self.cursor = range.start;
+            self.selection_anchor = None;
         }
     }
 
@@ -570,6 +870,74 @@ impl TextInputState {
             .unwrap_or(self.value.len())
     }
 
+    /// Char index of the grapheme-cluster boundary immediately before `char_idx`.
+    ///
+    /// Moving/deleting by grapheme keeps emoji (incl. ZWJ sequences), Thai
+    /// base+vowel/tone stacks, and combining-mark sequences intact instead of
+    /// slicing a single user-perceived character in half.
+    fn prev_grapheme(&self, char_idx: usize) -> usize {
+        if char_idx == 0 {
+            return 0;
+        }
+        let byte = self.byte_at_char(char_idx);
+        let prev_byte = self.value[..byte]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        self.value[..prev_byte].chars().count()
+    }
+
+    /// Char index of the grapheme-cluster boundary immediately after `char_idx`.
+    fn next_grapheme(&self, char_idx: usize) -> usize {
+        let byte = self.byte_at_char(char_idx);
+        if byte >= self.value.len() {
+            return self.char_count();
+        }
+        let len = self.value[byte..]
+            .graphemes(true)
+            .next()
+            .map(str::len)
+            .unwrap_or(0);
+        self.value[..byte + len].chars().count()
+    }
+
+    /// Char index of the start of the word at/before `char_idx` (Ctrl/Alt+Left).
+    ///
+    /// Skips any whitespace immediately before the cursor, then lands on the
+    /// start of the preceding word using Unicode word boundaries.
+    fn prev_word_boundary(&self, char_idx: usize) -> usize {
+        let byte = self.byte_at_char(char_idx);
+        let head = &self.value[..byte];
+        let mut target = 0usize;
+        for (idx, piece) in head.split_word_bound_indices() {
+            if piece.chars().next().is_some_and(|c| !c.is_whitespace()) {
+                target = idx;
+            }
+        }
+        self.value[..target].chars().count()
+    }
+
+    /// Char index of the start of the next word after `char_idx` (Ctrl/Alt+Right).
+    ///
+    /// Consumes the segment under the cursor, then stops at the start of the next
+    /// non-whitespace word.
+    fn next_word_boundary(&self, char_idx: usize) -> usize {
+        let byte = self.byte_at_char(char_idx);
+        let tail = &self.value[byte..];
+        let mut consumed_first = false;
+        for (idx, piece) in tail.split_word_bound_indices() {
+            if !consumed_first {
+                consumed_first = true;
+                continue;
+            }
+            if piece.chars().next().is_some_and(|c| !c.is_whitespace()) {
+                return self.value[..byte + idx].chars().count();
+            }
+        }
+        self.char_count()
+    }
+
     fn selection_range(&self) -> Option<Range<usize>> {
         let anchor = self.selection_anchor?;
         if anchor == self.cursor {
@@ -617,10 +985,11 @@ impl TextInputState {
             return;
         }
         self.unmark_text();
-        let start = self.byte_at_char(self.cursor - 1);
+        let prev = self.prev_grapheme(self.cursor);
+        let start = self.byte_at_char(prev);
         let end = self.byte_at_char(self.cursor);
         self.value.replace_range(start..end, "");
-        self.cursor -= 1;
+        self.cursor = prev;
     }
 
     fn delete_forward(&mut self) {
@@ -628,8 +997,9 @@ impl TextInputState {
             return;
         }
         self.unmark_text();
+        let next = self.next_grapheme(self.cursor);
         let start = self.byte_at_char(self.cursor);
-        let end = self.byte_at_char(self.cursor + 1);
+        let end = self.byte_at_char(next);
         self.value.replace_range(start..end, "");
     }
 
@@ -657,7 +1027,8 @@ impl TextInputState {
                 return;
             }
         }
-        self.move_cursor_to(self.cursor.saturating_sub(1), extend);
+        let target = self.prev_grapheme(self.cursor);
+        self.move_cursor_to(target, extend);
     }
 
     fn move_cursor_right(&mut self, extend: bool) {
@@ -668,7 +1039,18 @@ impl TextInputState {
                 return;
             }
         }
-        self.move_cursor_to((self.cursor + 1).min(self.char_count()), extend);
+        let target = self.next_grapheme(self.cursor);
+        self.move_cursor_to(target, extend);
+    }
+
+    fn move_word_left(&mut self, extend: bool) {
+        let target = self.prev_word_boundary(self.cursor);
+        self.move_cursor_to(target, extend);
+    }
+
+    fn move_word_right(&mut self, extend: bool) {
+        let target = self.next_word_boundary(self.cursor);
+        self.move_cursor_to(target, extend);
     }
 }
 
@@ -814,6 +1196,34 @@ pub fn text_field_with_callbacks_and_ime<V: EntityInputHandler>(
                 .into_any_element(),
         ),
     )
+}
+
+/// Standalone OS-IME bridge for a *multi-field* window whose inputs are rendered
+/// behind panel functions (so the per-field [`text_field_with_callbacks_and_ime`]
+/// can't reach `cx.entity()`).
+///
+/// Drop this into the window root as a child whenever one of its fields owns
+/// focus, passing the window entity (which must `impl EntityInputHandler` and
+/// route every call to its currently-focused field) and that field's
+/// [`FocusHandle`]. It registers the platform input handler against the focused
+/// handle so CJK/Thai composition, dead keys, and pasted Unicode reach the field.
+/// Non-interactive and absolutely positioned, so it never blocks clicks or
+/// affects layout. Coexists with the raw `handle_key_with_clipboard` path — GPUI
+/// suppresses key dispatch for keystrokes the IME consumes, so text never doubles.
+pub fn ime_input_bridge<V: EntityInputHandler>(
+    ime_target: Entity<V>,
+    focus_handle: FocusHandle,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .child(TextInputImeLayer {
+            target: ime_target,
+            focus_handle,
+        })
 }
 
 fn text_field_inner(
@@ -1122,5 +1532,259 @@ impl<V: EntityInputHandler> Element for TextInputImeLayer<V> {
             ElementInputHandler::new(bounds, self.target.clone()),
             cx,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unicode- and IME-correctness tests for the shared editing core.
+    //!
+    //! These drive [`TextEditBuffer`] directly (no GPUI focus handle needed),
+    //! exercising the exact event vocabulary every migrated field speaks. The
+    //! grapheme/composition behavior proven here holds for every input in the app,
+    //! because they all share this one buffer.
+    use super::{TextEditBuffer, TextInputEvent as Ev};
+
+    fn buf(s: &str) -> TextEditBuffer {
+        let mut b = TextEditBuffer::default();
+        b.set_value(s); // caret lands at end
+        b
+    }
+
+    // Convenience: apply an event with no clipboard/App context.
+    fn ev(b: &mut TextEditBuffer, event: Ev) -> bool {
+        b.apply_event(event, None)
+    }
+
+    #[test]
+    fn ascii_insert() {
+        let mut b = TextEditBuffer::default();
+        ev(&mut b, Ev::InsertText("hello".into()));
+        assert_eq!(b.value, "hello");
+        assert_eq!(b.cursor, 5);
+    }
+
+    #[test]
+    fn thai_insert_and_backspace() {
+        // "กิน" = ก (base) + ิ (combining sara-i) + น. Graphemes: ["กิ", "น"].
+        let mut b = TextEditBuffer::default();
+        ev(&mut b, Ev::InsertText("กิน".into()));
+        assert_eq!(b.value, "กิน");
+        ev(&mut b, Ev::DeleteBackward);
+        assert_eq!(b.value, "กิ", "backspace removes the trailing น only");
+        ev(&mut b, Ev::DeleteBackward);
+        assert_eq!(b.value, "", "backspace removes the base+vowel cluster as one unit");
+    }
+
+    #[test]
+    fn japanese_composition_update_then_commit() {
+        let mut b = buf("a");
+        ev(&mut b, Ev::CompositionStart);
+        ev(
+            &mut b,
+            Ev::CompositionUpdate {
+                text: "か".into(),
+                cursor: 1,
+            },
+        );
+        assert_eq!(b.value, "aか");
+        assert!(b.is_composing());
+        assert_eq!(b.composition().unwrap().text, "か");
+        ev(
+            &mut b,
+            Ev::CompositionUpdate {
+                text: "かな".into(),
+                cursor: 2,
+            },
+        );
+        assert_eq!(b.value, "aかな");
+        ev(&mut b, Ev::CompositionCommit("仮名".into()));
+        assert_eq!(b.value, "a仮名");
+        assert!(!b.is_composing());
+        assert_eq!(b.cursor, 3);
+    }
+
+    #[test]
+    fn japanese_composition_cancel_restores_value() {
+        let mut b = buf("ab");
+        b.cursor = 1; // between a and b
+        ev(
+            &mut b,
+            Ev::CompositionUpdate {
+                text: "き".into(),
+                cursor: 1,
+            },
+        );
+        assert_eq!(b.value, "aきb");
+        ev(&mut b, Ev::CompositionCancel);
+        assert_eq!(b.value, "ab", "cancel removes the pre-edit text");
+        assert_eq!(b.cursor, 1, "caret returns to where composition began");
+        assert!(!b.is_composing());
+    }
+
+    #[test]
+    fn chinese_and_korean_composition_commit() {
+        let mut zh = TextEditBuffer::default();
+        ev(
+            &mut zh,
+            Ev::CompositionUpdate {
+                text: "ni".into(),
+                cursor: 2,
+            },
+        );
+        ev(&mut zh, Ev::CompositionCommit("你".into()));
+        assert_eq!(zh.value, "你");
+        assert!(!zh.is_composing());
+
+        let mut ko = TextEditBuffer::default();
+        ev(
+            &mut ko,
+            Ev::CompositionUpdate {
+                text: "ㅎ".into(),
+                cursor: 1,
+            },
+        );
+        ev(
+            &mut ko,
+            Ev::CompositionUpdate {
+                text: "한".into(),
+                cursor: 1,
+            },
+        );
+        ev(&mut ko, Ev::CompositionCommit("한".into()));
+        assert_eq!(ko.value, "한");
+    }
+
+    #[test]
+    fn emoji_insert() {
+        let mut b = TextEditBuffer::default();
+        ev(&mut b, Ev::InsertText("👍".into()));
+        assert_eq!(b.value, "👍");
+        assert_eq!(b.cursor, 1, "thumbs-up is a single scalar");
+    }
+
+    #[test]
+    fn emoji_backspace_removes_whole_zwj_cluster() {
+        // Family emoji: 👨‍👩‍👧 = 5 scalars joined by ZWJ, one grapheme cluster.
+        let family = "👨‍👩‍👧";
+        let mut b = buf(family);
+        ev(&mut b, Ev::DeleteBackward);
+        assert_eq!(b.value, "", "the entire ZWJ cluster is deleted as one unit");
+
+        let mut b2 = buf("a👍");
+        ev(&mut b2, Ev::DeleteBackward);
+        assert_eq!(b2.value, "a");
+    }
+
+    #[test]
+    fn combining_marks_delete_as_one() {
+        let e_acute = "e\u{0301}"; // e + combining acute accent (one grapheme)
+        let mut b = buf(e_acute);
+        ev(&mut b, Ev::DeleteBackward);
+        assert_eq!(b.value, "", "base + combining mark deleted together");
+    }
+
+    #[test]
+    fn selection_replace_with_unicode() {
+        let mut b = buf("ก👍ข");
+        ev(&mut b, Ev::SelectAll);
+        ev(&mut b, Ev::ReplaceSelection("世界".into()));
+        assert_eq!(b.value, "世界");
+        assert_eq!(b.cursor, 2);
+    }
+
+    #[test]
+    fn paste_unicode_text() {
+        let mut b = buf("a");
+        ev(&mut b, Ev::Paste("日本語".into()));
+        assert_eq!(b.value, "a日本語");
+        assert_eq!(b.cursor, 4);
+    }
+
+    #[test]
+    fn select_all_then_replace() {
+        let mut b = buf("hello");
+        ev(&mut b, Ev::SelectAll);
+        ev(&mut b, Ev::InsertText("X".into()));
+        assert_eq!(b.value, "X");
+    }
+
+    #[test]
+    fn delete_forward_with_unicode() {
+        let mut b = buf("👍a");
+        b.cursor = 0;
+        ev(&mut b, Ev::DeleteForward);
+        assert_eq!(b.value, "a", "forward-delete removes the leading emoji grapheme");
+
+        let mut b2 = buf("e\u{0301}x");
+        b2.cursor = 0;
+        ev(&mut b2, Ev::DeleteForward);
+        assert_eq!(b2.value, "x", "forward-delete removes base + combining together");
+    }
+
+    #[test]
+    fn cursor_movement_across_grapheme_clusters() {
+        // "a" + family(5 scalars) + "b" = 7 chars, 3 graphemes.
+        let mut b = buf("a👨‍👩‍👧b");
+        b.cursor = 0;
+        ev(&mut b, Ev::MoveRight);
+        assert_eq!(b.cursor, 1, "past 'a'");
+        ev(&mut b, Ev::MoveRight);
+        assert_eq!(b.cursor, 6, "jumps the whole 5-scalar family cluster");
+        ev(&mut b, Ev::MoveRight);
+        assert_eq!(b.cursor, 7, "past 'b'");
+        ev(&mut b, Ev::MoveLeft);
+        ev(&mut b, Ev::MoveLeft);
+        assert_eq!(b.cursor, 1, "left jumps back over the whole cluster");
+    }
+
+    #[test]
+    fn composition_commit_over_selected_text() {
+        let mut b = buf("hello");
+        ev(&mut b, Ev::SelectAll);
+        ev(
+            &mut b,
+            Ev::CompositionUpdate {
+                text: "あ".into(),
+                cursor: 1,
+            },
+        );
+        assert_eq!(b.value, "あ", "composition replaces the selection");
+        ev(&mut b, Ev::CompositionCommit("亜".into()));
+        assert_eq!(b.value, "亜");
+    }
+
+    #[test]
+    fn word_movement_skips_whole_words() {
+        let mut b = buf("foo bar baz");
+        ev(&mut b, Ev::MoveToStart);
+        ev(&mut b, Ev::MoveWordRight);
+        assert_eq!(b.cursor, 4, "to start of 'bar'");
+        ev(&mut b, Ev::MoveWordRight);
+        assert_eq!(b.cursor, 8, "to start of 'baz'");
+        ev(&mut b, Ev::MoveWordLeft);
+        assert_eq!(b.cursor, 4, "back to start of 'bar'");
+    }
+
+    #[test]
+    fn read_only_blocks_edits_but_not_movement() {
+        let mut b = buf("hi");
+        b.read_only = true;
+        assert!(!ev(&mut b, Ev::InsertText("x".into())));
+        assert_eq!(b.value, "hi");
+        assert!(!ev(&mut b, Ev::DeleteBackward));
+        assert_eq!(b.value, "hi");
+        // movement still allowed
+        assert!(ev(&mut b, Ev::MoveToStart));
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn disabled_rejects_all_events() {
+        let mut b = buf("hi");
+        b.disabled = true;
+        assert!(!ev(&mut b, Ev::InsertText("x".into())));
+        assert!(!ev(&mut b, Ev::MoveLeft));
+        assert_eq!(b.value, "hi");
     }
 }

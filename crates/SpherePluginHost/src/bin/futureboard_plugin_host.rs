@@ -99,6 +99,12 @@ fn main() {
     let _log_path = sphere_plugin_host::plugin_host_logging::init_host_logging();
     sphere_plugin_host::plugin_host_logging::log_startup_environment();
 
+    // Match the DAW's explicit AppUserModelID so plugin-editor windows this
+    // process creates never group as a separate taskbar app (spec: process
+    // identity). Owned WS_EX_TOOLWINDOW popups already stay off the taskbar /
+    // Alt-Tab; this is belt-and-braces against accidental app-visibility.
+    sphere_plugin_host::plugin_host_lifecycle::set_app_user_model_id();
+
     platform::com_init();
     platform::ensure_dpi_awareness();
     let pid = std::process::id();

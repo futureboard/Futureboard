@@ -20,6 +20,9 @@ fn main() {
     // default; legacy in-process VST3 requires FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1.
     sphere_ui_components::plugin_host_client::log_bridge_env();
     sphere_ui_components::plugin_host_lifecycle::init_plugin_host_job();
+    // Same explicit AppUserModelID as the plugin-host process: keeps any
+    // app-visible plugin window from spawning a stray taskbar identity.
+    sphere_ui_components::plugin_host_lifecycle::set_app_user_model_id();
 
     // Catch any panic that escapes the GPUI render loop so we see *why*
     // the window blanks out instead of getting a silent crash.

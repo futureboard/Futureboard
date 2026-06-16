@@ -278,7 +278,16 @@ impl Render for StudioLayout {
             std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
                 let path = path.clone();
                 this.update(cx, |this, cx| {
-                    this.file_browser.select(path);
+                    this.file_browser.select(path.clone());
+                    if crate::components::file_browser::is_audio_path(&path) {
+                        // Visual mini-waveform preview always decodes on select.
+                        this.ensure_browser_waveform(path.clone(), cx);
+                        // Audio audition only when the preview toggle is on
+                        // (engine voice is a stub for now — honest "coming soon").
+                        if this.file_browser.preview_enabled {
+                            this.audition_browser_file(&path);
+                        }
+                    }
                     cx.notify();
                 });
             })
@@ -356,6 +365,66 @@ impl Render for StudioLayout {
                         x,
                         y,
                     });
+                    cx.notify();
+                });
+            })
+        };
+
+        // Toolbar: collapse every expanded folder in one click.
+        let on_browser_collapse_all: std::sync::Arc<
+            dyn Fn(&mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.file_browser.collapse_all();
+                    cx.notify();
+                });
+            })
+        };
+        // Toolbar: drop cached listings for expanded folders and re-scan them.
+        let on_browser_rescan: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    let paths = this.file_browser.invalidate_expanded();
+                    for p in paths {
+                        this.file_browser.mark_loading(p.clone());
+                        this.spawn_directory_load(cx, p);
+                    }
+                    cx.notify();
+                });
+            })
+        };
+        // Toolbar: toggle auto-preview (audition on select). Turning it off
+        // stops any in-progress audition.
+        let on_browser_toggle_preview: std::sync::Arc<
+            dyn Fn(&mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    let now_on = this.file_browser.toggle_preview_enabled();
+                    if !now_on {
+                        if let Some(engine) = this.audio_bridge.engine.as_ref() {
+                            let _ = engine.stop_audition();
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+        };
+
+        // Mini waveform pane play button: audition the currently-selected file.
+        let on_browser_preview_play: std::sync::Arc<
+            dyn Fn(&mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(path) = this.file_browser.selected.clone() {
+                        this.audition_browser_file(&path);
+                    }
                     cx.notify();
                 });
             })
@@ -1199,6 +1268,11 @@ impl Render for StudioLayout {
                             on_browser_select,
                             on_browser_activate,
                             on_browser_context,
+                            on_browser_collapse_all,
+                            on_browser_rescan,
+                            file_browser.preview_enabled,
+                            on_browser_toggle_preview,
+                            on_browser_preview_play,
                         )
                     });
                 }

@@ -68,6 +68,36 @@ pub fn init_plugin_host_job() {
     let _ = BridgeHostManager::global();
 }
 
+/// Set the process-wide explicit AppUserModelID so the OS never groups a stray
+/// plugin-host or plugin-editor window under its own taskbar identity.
+///
+/// **Both** `FutureboardNative.exe` (the DAW) and `FutureboardPluginHostX64.exe`
+/// (the bridge) must call this early in startup with the *same* id. It is not the
+/// primary taskbar-hiding mechanism — owned `WS_EX_TOOLWINDOW` popups already stay
+/// out of the taskbar/Alt-Tab — but it prevents bad grouping if any window ever
+/// becomes app-visible, and keeps the bridge's editor windows associated with the
+/// DAW's shell identity. Failures are logged, never fatal.
+pub const APP_USER_MODEL_ID: &str = "com.futureboard.studio";
+
+#[cfg(windows)]
+pub fn set_app_user_model_id() {
+    use windows::core::w;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    // SAFETY: `w!` is a 'static NUL-terminated UTF-16 literal; the call only reads it.
+    let result = unsafe { SetCurrentProcessExplicitAppUserModelID(w!("com.futureboard.studio")) };
+    match result {
+        Ok(()) => eprintln!("[app-id] explicit_app_user_model_id={APP_USER_MODEL_ID} ok=true"),
+        Err(error) => {
+            eprintln!("[app-id] SetCurrentProcessExplicitAppUserModelID failed ok=false error={error}")
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_app_user_model_id() {
+    // AppUserModelID is a Windows shell concept; no-op elsewhere.
+}
+
 /// Gracefully shut down one live [`PluginHostClient`], waiting briefly before
 /// force-terminating stragglers. Idempotent.
 pub fn shutdown_host_client(client: &mut PluginHostClient) {
@@ -113,7 +143,11 @@ mod job {
     };
 
     pub struct PluginHostJob {
-        handle: HANDLE,
+        /// `None` when the job object could not be created (rare: low resources,
+        /// or a sandbox that forbids it). The bridge still works — assignment is
+        /// skipped and the per-host parent watchdog handles cleanup — so a job
+        /// failure must never crash the DAW.
+        handle: Option<HANDLE>,
     }
 
     // Job object handles are process-wide kernel objects; safe to share across
@@ -124,37 +158,68 @@ mod job {
     impl PluginHostJob {
         pub fn new() -> Self {
             unsafe {
-                let job = CreateJobObjectW(None, PCWSTR::null())
-                    .expect("CreateJobObjectW failed for plugin host job");
+                let job = match CreateJobObjectW(None, PCWSTR::null()) {
+                    Ok(job) => job,
+                    Err(error) => {
+                        eprintln!(
+                            "[plugin-bridge] job_object create failed ok=false error={error}; \
+                             bridge hosts fall back to parent-watchdog cleanup"
+                        );
+                        return Self { handle: None };
+                    }
+                };
                 let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                SetInformationJobObject(
+                if let Err(error) = SetInformationJobObject(
                     job,
                     JobObjectExtendedLimitInformation,
                     &info as *const _ as *const _,
                     size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                )
-                .expect("SetInformationJobObject failed for plugin host job");
+                ) {
+                    eprintln!(
+                        "[plugin-bridge] job_object set_information failed ok=false error={error}; \
+                         closing handle, bridge hosts fall back to parent-watchdog cleanup"
+                    );
+                    let _ = CloseHandle(job);
+                    return Self { handle: None };
+                }
                 eprintln!("[plugin-bridge] job_object created kill_on_close=true");
-                Self { handle: job }
+                Self { handle: Some(job) }
             }
         }
 
         pub fn assign_child(&self, child: &Child) {
             let pid = child.id();
+            let Some(handle) = self.handle else {
+                eprintln!("[plugin-bridge] assign host pid={pid} skipped reason=no_job_object");
+                return;
+            };
             unsafe {
                 let raw = child.as_raw_handle();
                 let process = HANDLE(raw as *mut _);
-                let ok = AssignProcessToJobObject(self.handle, process).is_ok();
-                eprintln!("[plugin-bridge] assigned host pid={pid} to job_object ok={ok}");
+                // A process already inside a non-nestable job (e.g. launched under
+                // some sandboxes / debuggers) makes this fail with
+                // ERROR_ACCESS_DENIED — log it and keep running; the parent
+                // watchdog still terminates the host on DAW exit.
+                match AssignProcessToJobObject(handle, process) {
+                    Ok(()) => {
+                        eprintln!("[plugin-bridge] assigned host pid={pid} to job_object ok=true")
+                    }
+                    Err(error) => eprintln!(
+                        "[plugin-bridge] assigned host pid={pid} to job_object ok=false \
+                         error={error} (process may already be in another job)"
+                    ),
+                }
             }
         }
     }
 
     impl Drop for PluginHostJob {
         fn drop(&mut self) {
-            unsafe {
-                let _ = CloseHandle(self.handle);
+            if let Some(handle) = self.handle {
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
             }
         }
     }

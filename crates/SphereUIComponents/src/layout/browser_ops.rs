@@ -1,11 +1,65 @@
 use gpui::Context;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::components::file_browser::read_directory;
 
 use super::StudioLayout;
 impl StudioLayout {
+    /// Ask the engine to audition (preview-play) a browser audio file.
+    ///
+    /// The engine audition voice is a stub today (no audio output yet), so this
+    /// is real wiring against a real call site — the browser surfaces an honest
+    /// "coming soon" hint rather than faking playback. Returns whether audio is
+    /// actually audible (currently always `false`).
+    pub(crate) fn audition_browser_file(&mut self, path: &Path) -> bool {
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
+            eprintln!("[browser-preview] no engine; cannot audition");
+            return false;
+        };
+        match engine.audition_file(path.to_string_lossy().into_owned()) {
+            Ok(audible) => audible,
+            Err(error) => {
+                eprintln!("[browser-preview] audition error: {error}");
+                false
+            }
+        }
+    }
+
+    /// Ensure the mini waveform peaks for `path` are decoded for the preview
+    /// pane. Decode runs on the background executor (never in render); the
+    /// result lands in the shared waveform cache the sidebar reads from. Cached
+    /// or already-in-flight files are skipped.
+    pub(crate) fn ensure_browser_waveform(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        use crate::components::timeline::waveform_cache;
+        let key = path.to_string_lossy().to_string();
+        if waveform_cache::get_preview_arc(&key).is_some() {
+            return; // already decoded
+        }
+        if !self.file_browser.begin_waveform_load(path.clone()) {
+            return; // decode already running
+        }
+        let decode_path = path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    waveform_cache::decode_and_cache_file(&decode_path).is_some()
+                })
+                .await;
+            let _ = this.update(cx, move |this, cx| {
+                this.file_browser.end_waveform_load(&path);
+                if !result {
+                    eprintln!(
+                        "[browser-preview] waveform decode failed path={}",
+                        path.display()
+                    );
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     /// Run a single-level directory scan on the GPUI background executor,
     /// then push the result back into `file_browser.index` on the UI
     /// thread. Never blocks render — this is the only place `read_dir`

@@ -27,10 +27,10 @@ use crate::components::file_browser::{
     BrowserIcon, BrowserNodeKind, BrowserVisibleNode, FileBrowserState,
 };
 use crate::components::icon_button::icon_button;
-use crate::components::timeline::waveform_cache;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputContextCb, TextInputState,
 };
+use crate::components::timeline::waveform_cache;
 use crate::theme::Colors;
 
 pub const SIDEBAR_WIDTH: f32 = 272.0;
@@ -461,7 +461,9 @@ fn browser_waveform_pane(path: &std::path::Path, on_play: BrowserActionCb) -> im
 /// Draw a peak-rendered waveform filling the canvas. Columns are computed from
 /// the real paint bounds (DPI-correct) using one min/max bar per pixel column —
 /// canvas + `paint_quad`, never DOM spam (DESIGN.md waveform rules).
-fn mini_waveform_canvas(preview: std::sync::Arc<waveform_cache::WaveformPreview>) -> impl IntoElement {
+fn mini_waveform_canvas(
+    preview: std::sync::Arc<waveform_cache::WaveformPreview>,
+) -> impl IntoElement {
     let mut color = Colors::accent_primary();
     color.a = 0.72;
     let element = canvas(
@@ -506,11 +508,19 @@ fn mini_waveform_canvas(preview: std::sync::Arc<waveform_cache::WaveformPreview>
     .absolute()
     .inset_0();
 
-    div().relative().size_full().overflow_hidden().child(element)
+    div()
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .child(element)
 }
 
 /// Subtle, collapsible section header (COLLECTIONS / LIBRARY / PLACES).
-fn group_header_row(index: usize, node: &BrowserVisibleNode, on_toggle: ToggleNodeCb) -> impl IntoElement {
+fn group_header_row(
+    index: usize,
+    node: &BrowserVisibleNode,
+    on_toggle: ToggleNodeCb,
+) -> impl IntoElement {
     let id = node.id.clone();
     let expanded = node.expanded;
     let chevron = if expanded {
@@ -806,9 +816,10 @@ fn browser_icon_color(icon: BrowserIcon, selected: bool) -> gpui::Rgba {
     }
     match icon {
         BrowserIcon::Favorites => Colors::accent_warning(),
-        BrowserIcon::AudioFiles | BrowserIcon::Music | BrowserIcon::AudioFile | BrowserIcon::Samples => {
-            Colors::status_success()
-        }
+        BrowserIcon::AudioFiles
+        | BrowserIcon::Music
+        | BrowserIcon::AudioFile
+        | BrowserIcon::Samples => Colors::status_success(),
         BrowserIcon::MidiFile => Colors::status_warning(),
         BrowserIcon::Plugins | BrowserIcon::PresetFile | BrowserIcon::Instruments => {
             Colors::status_warning()

@@ -9,11 +9,11 @@ use gpui::{
 };
 
 use crate::assets;
-use crate::components::title_bar::{
-    draggable_spacer, section_separator, window_control_button, CHROME_PAD_X, CHROME_TITLE_SIZE,
-};
 use crate::components::text_input::{
     is_repeatable_edit_key, text_field_with_callbacks_and_ime, TextInputCallbacks,
+};
+use crate::components::title_bar::{
+    draggable_spacer, section_separator, window_control_button, CHROME_PAD_X, CHROME_TITLE_SIZE,
 };
 use crate::components::{TextInputAction, TextInputState};
 use crate::embedded_assets::APP_LOGO_PATH;
@@ -169,9 +169,7 @@ impl WelcomeWindow {
             return;
         }
         if self.project_name_input.is_focused(window) {
-            let action = self
-                .project_name_input
-                .handle_key_ime(event, Some(cx));
+            let action = self.project_name_input.handle_key_ime(event, Some(cx));
             welcome_debug!("project name typed -> {}", self.project_name_input.value);
             match action {
                 TextInputAction::Submit => self.create_project_from_welcome(window, cx),

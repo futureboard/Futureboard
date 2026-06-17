@@ -196,7 +196,9 @@ impl Render for StudioLayout {
                 .and_then(|tid| tracks.iter().find(|t| t.id == tid))
             {
                 Some(t) => {
-                    self.inspector_name_edit.name_input.set_value(t.name.clone());
+                    self.inspector_name_edit
+                        .name_input
+                        .set_value(t.name.clone());
                     self.inspector_name_edit.name_bound = Some(t.id.clone());
                 }
                 None => {
@@ -213,7 +215,9 @@ impl Render for StudioLayout {
                     .find_map(|t| t.clips.iter().find(|c| c.id == cid))
             }) {
                 Some(c) => {
-                    self.inspector_name_edit.clip_name_input.set_value(c.name.clone());
+                    self.inspector_name_edit
+                        .clip_name_input
+                        .set_value(c.name.clone());
                     self.inspector_name_edit.clip_name_bound = Some(c.id.clone());
                 }
                 None => {
@@ -222,7 +226,8 @@ impl Render for StudioLayout {
                 }
             }
         }
-        let inspector_clip_name_focused = self.inspector_name_edit.clip_name_input.is_focused(window);
+        let inspector_clip_name_focused =
+            self.inspector_name_edit.clip_name_input.is_focused(window);
 
         crate::perf::count("tracks", tracks.len() as u64);
 
@@ -371,9 +376,7 @@ impl Render for StudioLayout {
         };
 
         // Toolbar: collapse every expanded folder in one click.
-        let on_browser_collapse_all: std::sync::Arc<
-            dyn Fn(&mut Window, &mut gpui::App) + 'static,
-        > = {
+        let on_browser_collapse_all: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |_w, cx| {
                 let _ = this.update(cx, |this, cx| {
@@ -416,9 +419,7 @@ impl Render for StudioLayout {
         };
 
         // Mini waveform pane play button: audition the currently-selected file.
-        let on_browser_preview_play: std::sync::Arc<
-            dyn Fn(&mut Window, &mut gpui::App) + 'static,
-        > = {
+        let on_browser_preview_play: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |_w, cx| {
                 let _ = this.update(cx, |this, cx| {
@@ -852,6 +853,39 @@ impl Render for StudioLayout {
             )
         });
         // Add Track moved to an external window.
+        let virtual_keyboard_overlay = {
+            let visible = self.virtual_keyboard.read(cx).state.visible;
+            if visible {
+                let window_active = window.is_window_active();
+                if self.virtual_keyboard_window_active && !window_active {
+                    self.release_virtual_keyboard_notes(cx);
+                }
+                self.virtual_keyboard_window_active = window_active;
+                let status = self.resolve_virtual_keyboard_target(cx);
+                let target_key = status.target.as_ref().map(|target| {
+                    format!(
+                        "{}:{}",
+                        target.track_id,
+                        target.plugin_instance_id.as_deref().unwrap_or("")
+                    )
+                });
+                if self.virtual_keyboard_last_target != target_key {
+                    self.release_virtual_keyboard_notes(cx);
+                    self.virtual_keyboard_last_target = target_key;
+                }
+                let label = status.label;
+                let hint = status.hint;
+                let _ = self.virtual_keyboard.update(cx, |panel, cx| {
+                    panel.set_target_status(label, hint);
+                    cx.notify();
+                });
+                Some(self.virtual_keyboard.clone().into_any_element())
+            } else {
+                self.virtual_keyboard_last_target = None;
+                self.virtual_keyboard_window_active = window.is_window_active();
+                None
+            }
+        };
 
         // Phase 2b insert plugin picker overlay.
         let plugin_picker_overlay_el: Option<gpui::AnyElement> = if self.plugin_picker.is_open
@@ -1077,6 +1111,15 @@ impl Render for StudioLayout {
         // Delete route to the piano roll (its own `on_key_down`) when it holds
         // focus, instead of the global timeline clip commands.
         let midi_editor = self.piano_roll.clone();
+        // Physical-keyboard musical typing updates the panel entity *directly*
+        // (mirroring the mouse path), never nested inside a `StudioLayout`
+        // update. The panel's key handler flushes through the event sink, which
+        // re-enters `StudioLayout::update` to route the MIDI; wrapping these in
+        // an outer `StudioLayout` lease double-leases and panics (the bug this
+        // fixes — mouse clicks worked precisely because they never took that
+        // outer lease). Separate clones because each closure is `move`.
+        let virtual_keyboard_keydown = self.virtual_keyboard.clone();
+        let virtual_keyboard_keyup = self.virtual_keyboard.clone();
 
         // Keep keyboard focus on our shortcut anchor so transport shortcuts
         // (Space, Enter, L, K, R, Home) reach `capture_key_down` below. GPUI
@@ -1108,6 +1151,7 @@ impl Render for StudioLayout {
         let ime_bridge = self
             .focused_text_input_handle(window)
             .map(|fh| crate::components::text_input::ime_input_bridge(cx.entity().clone(), fh));
+        let shortcut_keydown_target = shortcut_target.clone();
 
         div()
             // NOTE: `track_focus` deliberately lives on the tiny invisible
@@ -1129,7 +1173,7 @@ impl Render for StudioLayout {
             .bg(Colors::surface_base())
             .font(theme::ui_font())
             .capture_key_down(move |event, window, cx| {
-                let handled = shortcut_target.update(cx, |this, cx| {
+                let handled = shortcut_keydown_target.update(cx, |this, cx| {
                     let handled = this.handle_command_palette_key(event, window, cx)
                         || this.handle_bpm_edit_key(event, window, cx)
                         || this.handle_ts_edit_key(event, window, cx)
@@ -1148,7 +1192,9 @@ impl Render for StudioLayout {
                     return;
                 }
                 let focus = FocusContext {
-                    text_input_focused: shortcut_target.read(cx).text_input_has_focus(window),
+                    text_input_focused: shortcut_keydown_target
+                        .read(cx)
+                        .text_input_has_focus(window),
                 };
                 if key_debug() {
                     eprintln!(
@@ -1166,8 +1212,29 @@ impl Render for StudioLayout {
                     }
                     return;
                 }
+                // Update the panel entity directly — NOT through
+                // `shortcut_keydown_target.update` — so the panel's event sink
+                // can re-enter `StudioLayout::update` without a double-lease
+                // panic. A Ctrl/Cmd/Alt/Fn chord is a shortcut, not a note, so
+                // it is passed through to the dispatch path below.
+                let mods = event.keystroke.modifiers;
+                let command_modifier =
+                    mods.control || mods.alt || mods.platform || mods.function;
+                let virtual_keyboard_handled =
+                    virtual_keyboard_keydown.update(cx, |keyboard, cx| {
+                        keyboard.handle_key_down(
+                            event.keystroke.key.as_str(),
+                            command_modifier,
+                            event.is_held,
+                            focus.text_input_focused,
+                            cx,
+                        )
+                    });
+                if virtual_keyboard_handled {
+                    return;
+                }
                 if event.keystroke.key.as_str() == "escape" {
-                    let _ = shortcut_target.update(cx, |this, cx| {
+                    let _ = shortcut_keydown_target.update(cx, |this, cx| {
                         // Cancel an active BPM scrub first, restoring the value
                         // captured at drag start.
                         this.cancel_bpm_drag(cx);
@@ -1185,7 +1252,7 @@ impl Render for StudioLayout {
                     });
                     return;
                 }
-                let command_id = shortcut_target.read(cx).shortcut_command_id(event);
+                let command_id = shortcut_keydown_target.read(cx).shortcut_command_id(event);
                 if let Some(command_id) = command_id {
                     // MIDI editor focus gate: when the docked piano roll holds
                     // keyboard focus, the A/C/V/X/Delete family belongs to it.
@@ -1224,10 +1291,24 @@ impl Render for StudioLayout {
                     if key_debug() {
                         eprintln!("[key] dispatched command={command_id}");
                     }
-                    let _ = shortcut_target.update(cx, |this, cx| {
+                    let _ = shortcut_keydown_target.update(cx, |this, cx| {
                         this.dispatch_command_id_from_bounds(&command_id, Some(window.bounds()), cx);
                         cx.notify();
                     });
+                }
+            })
+            .capture_key_up({
+                // Update the panel entity directly (see the key-down note): the
+                // NoteOff flush re-enters `StudioLayout::update` via the sink, so
+                // an outer `StudioLayout` lease here would double-lease and panic.
+                let virtual_keyboard = virtual_keyboard_keyup.clone();
+                move |event, _window, cx| {
+                    let handled = virtual_keyboard.update(cx, |keyboard, cx| {
+                        keyboard.handle_key_up(event.keystroke.key.as_str(), cx)
+                    });
+                    if handled {
+                        return;
+                    }
                 }
             })
             // Invisible focus anchor. 0×0 means no visible footprint and
@@ -1339,5 +1420,6 @@ impl Render for StudioLayout {
             .children(settings_overlay)
             .children(plugin_picker_overlay_el)
             .children(text_context_overlay)
+            .children(virtual_keyboard_overlay)
     }
 }

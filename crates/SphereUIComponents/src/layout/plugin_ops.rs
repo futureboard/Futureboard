@@ -348,7 +348,8 @@ impl StudioLayout {
         // holding a `&mut` borrow of the matched session.
         let runtime = self.plugin_editors.bridge_runtime.as_ref().cloned();
         let Some((_, session)) = self
-            .plugin_editors.bridge
+            .plugin_editors
+            .bridge
             .iter_mut()
             .find(|((_, id), _)| id == plugin_instance_id)
         else {
@@ -625,7 +626,8 @@ impl StudioLayout {
         //     focused ANY existing session, so a stalled/failed open
         //     permanently blocked reopen.
         let existing = self
-            .plugin_editors.bridge
+            .plugin_editors
+            .bridge
             .get(&key)
             .map(|s| (s.state.clone(), s.requested_at));
         if let Some((state, requested_at)) = existing {
@@ -791,8 +793,7 @@ impl StudioLayout {
                 session
                     .shell
                     .set_status("Plugin editor timed out. Close and open it again.", true);
-                session.state =
-                    BridgeEditorState::Failed("Editor open timed out".to_string());
+                session.state = BridgeEditorState::Failed("Editor open timed out".to_string());
                 changed = true;
                 continue;
             }
@@ -869,7 +870,8 @@ impl StudioLayout {
             );
             self.log_editor_engine_state("close engine_state_after=", track_id, instance_id);
             let host_pid = self
-                .plugin_editors.bridge_runtime
+                .plugin_editors
+                .bridge_runtime
                 .as_ref()
                 .and_then(|rt| rt.lock().ok())
                 .and_then(|r| r.host_pid());
@@ -1029,7 +1031,8 @@ impl StudioLayout {
 
         if super::plugin_bridge_runtime::bridge_enabled() {
             let bridge_loaded = self
-                .plugin_editors.bridge_runtime
+                .plugin_editors
+                .bridge_runtime
                 .as_ref()
                 .and_then(|runtime| runtime.lock().ok())
                 .and_then(|runtime| runtime.loaded_descriptor(insert_id))
@@ -1257,12 +1260,14 @@ impl StudioLayout {
             (slot_present, instrument_ptr)
         };
         let editor_open = self
-            .plugin_editors.open
+            .plugin_editors
+            .open
             .keys()
             .chain(self.plugin_editors.bridge.keys())
             .any(|(_, id)| id == insert_id);
         let bridge_loaded = self
-            .plugin_editors.bridge_runtime
+            .plugin_editors
+            .bridge_runtime
             .as_ref()
             .and_then(|runtime| runtime.lock().ok().map(|r| r.is_loaded(insert_id)))
             .unwrap_or(false);
@@ -1304,7 +1309,8 @@ impl StudioLayout {
                 .collect();
             // Defensive: also catch any editor whose model slot already vanished.
             for key in self
-                .plugin_editors.open
+                .plugin_editors
+                .open
                 .keys()
                 .chain(self.plugin_editors.bridge.keys())
             {
@@ -1342,7 +1348,8 @@ impl StudioLayout {
             let is_stale = |(track_id, insert_id): &&(String, String)| {
                 state.find_insert_slot(track_id, insert_id).is_none()
             };
-            self.plugin_editors.open
+            self.plugin_editors
+                .open
                 .keys()
                 .filter(is_stale)
                 .chain(self.plugin_editors.bridge.keys().filter(is_stale))
@@ -1361,7 +1368,8 @@ impl StudioLayout {
     /// application exit (avoids HWND/VST3 teardown during TLS destruction).
     pub(super) fn shutdown_plugin_editors(&mut self, cx: &mut Context<Self>) {
         let keys: Vec<(String, String)> = self
-            .plugin_editors.open
+            .plugin_editors
+            .open
             .keys()
             .chain(self.plugin_editors.bridge.keys())
             .cloned()
@@ -1591,7 +1599,8 @@ impl StudioLayout {
         let descriptor = if plugin_id == STUB_PLUGIN_ID {
             None
         } else {
-            self.plugin_catalog.available
+            self.plugin_catalog
+                .available
                 .as_ref()
                 .and_then(|plugins| plugins.iter().find(|p| p.id == plugin_id))
                 .map(|reg| {
@@ -1680,7 +1689,8 @@ impl StudioLayout {
                     .unwrap_or_default();
                 let sample_rate = self.current_audio_sample_rate();
                 let max_block_size = self
-                    .audio_bridge.engine
+                    .audio_bridge
+                    .engine
                     .as_ref()
                     .map(|engine| engine.config().buffer_size)
                     .unwrap_or(256);
@@ -2081,7 +2091,8 @@ impl StudioLayout {
 
         let sample_rate = self.current_audio_sample_rate();
         let max_block_size = self
-            .audio_bridge.engine
+            .audio_bridge
+            .engine
             .as_ref()
             .map(|engine| engine.config().buffer_size)
             .unwrap_or(256);

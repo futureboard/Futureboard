@@ -133,6 +133,59 @@ impl StudioLayout {
         cx: &App,
     ) {
         let ui_start = Instant::now();
+        let track_id = command.track_id().to_string();
+        let plugin_instance_id = self.resolve_track_instrument_plugin(&track_id, cx);
+        let event = match command {
+            components::piano_roll::UiMidiPreviewCommand::NoteOn {
+                channel,
+                pitch,
+                velocity,
+                ..
+            } => crate::midi_input::MidiInputEvent::NoteOn {
+                note: pitch,
+                velocity,
+                channel,
+            },
+            components::piano_roll::UiMidiPreviewCommand::NoteOff { channel, pitch, .. } => {
+                crate::midi_input::MidiInputEvent::NoteOff {
+                    note: pitch,
+                    channel,
+                }
+            }
+            components::piano_roll::UiMidiPreviewCommand::AllNotesOff { .. } => {
+                crate::midi_input::MidiInputEvent::AllNotesOff
+            }
+            components::piano_roll::UiMidiPreviewCommand::MidiPanic { .. } => {
+                crate::midi_input::MidiInputEvent::Panic
+            }
+        };
+        let result = self.route_midi_input_event(
+            crate::midi_input::MidiInputSource::PianoRollPreview,
+            crate::midi_input::MidiInputTarget {
+                track_id,
+                plugin_instance_id,
+            },
+            event,
+            cx,
+        );
+        if let crate::midi_input::MidiInputRouteStatus::DispatchFailed(error) = result {
+            eprintln!("[EngineMidiPreview] dispatch failed: {error}");
+        }
+        if crate::forensic_trace::preview_perf_trace_enabled() {
+            eprintln!(
+                "[preview-perf] ui_handler_ms={:.3}",
+                ui_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    #[cfg(any())]
+    pub(super) fn dispatch_midi_preview_command_legacy(
+        &mut self,
+        command: components::piano_roll::UiMidiPreviewCommand,
+        cx: &App,
+    ) {
+        let ui_start = Instant::now();
         let track_id = match &command {
             components::piano_roll::UiMidiPreviewCommand::NoteOn { track_id, .. }
             | components::piano_roll::UiMidiPreviewCommand::NoteOff { track_id, .. }
@@ -148,7 +201,12 @@ impl StudioLayout {
         // it was held used to freeze the UI. Probe with `try_lock`; if it is busy
         // but this track has a bridged instrument, route through the lock-free
         // engine command bus anyway (the correct path once a bridge plugin exists).
-        let sink_ready = match self.plugin_editors.bridge_runtime.as_ref().map(|rt| rt.try_lock()) {
+        let sink_ready = match self
+            .plugin_editors
+            .bridge_runtime
+            .as_ref()
+            .map(|rt| rt.try_lock())
+        {
             Some(Ok(bridge)) => bridge
                 .loaded_instance_ids()
                 .into_iter()
@@ -338,13 +396,16 @@ impl StudioLayout {
             _ => None,
         }
         .or_else(|| {
-            self.plugin_editors.bridge_runtime.as_ref().and_then(|runtime| {
-                runtime
-                    .lock()
-                    .ok()
-                    .and_then(|bridge| bridge.loaded_for_track(track_id))
-                    .map(|loaded| loaded.descriptor.insert_id)
-            })
+            self.plugin_editors
+                .bridge_runtime
+                .as_ref()
+                .and_then(|runtime| {
+                    runtime
+                        .lock()
+                        .ok()
+                        .and_then(|bridge| bridge.loaded_for_track(track_id))
+                        .map(|loaded| loaded.descriptor.insert_id)
+                })
         })
     }
 
@@ -375,28 +436,28 @@ impl StudioLayout {
                     .filter(|n| *n > 0)
                     .unwrap_or(FALLBACK_INTERVAL_NANOS);
                 executor.timer(Duration::from_nanos(interval_nanos)).await;
-            if crate::shutdown::ShutdownState::global().is_shutting_down() {
-                break;
-            }
-            let Ok((changed, mixer_handle)) = this.update(cx, |this, cx| {
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
-                    return (false, None);
+                    break;
                 }
-                let changed = this.poll_native_audio(cx);
-                (changed, this.external_windows.mixer.clone())
-            }) else {
-                continue;
-            };
-            if changed && !crate::shutdown::ShutdownState::global().is_shutting_down() {
-                crate::perf::record_notify("transport");
-                let studio_id = this.entity_id();
-                let _ = cx.update(|app| app.notify(studio_id));
-                if mixer_handle.is_some() {
-                    let _ = this.update(cx, |layout, cx| {
-                        layout.push_mixer_snapshot_to_window(cx);
-                    });
+                let Ok((changed, mixer_handle)) = this.update(cx, |this, cx| {
+                    if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                        return (false, None);
+                    }
+                    let changed = this.poll_native_audio(cx);
+                    (changed, this.external_windows.mixer.clone())
+                }) else {
+                    continue;
+                };
+                if changed && !crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    crate::perf::record_notify("transport");
+                    let studio_id = this.entity_id();
+                    let _ = cx.update(|app| app.notify(studio_id));
+                    if mixer_handle.is_some() {
+                        let _ = this.update(cx, |layout, cx| {
+                            layout.push_mixer_snapshot_to_window(cx);
+                        });
+                    }
                 }
-            }
             }
         })
         .detach();
@@ -438,7 +499,8 @@ impl StudioLayout {
         // State-transition signal — used to notify the root layout even
         // when the transport is paused (e.g. error appears, stream opens).
         let state_changed = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|previous| {
                 previous.transport_playing != stats.transport_playing
@@ -452,7 +514,8 @@ impl StudioLayout {
         let engine_beat = stats.position_beats.max(0.0) as f32;
         let sync_changed = (engine_beat - self.engine_sync.playhead_beat).abs() > 0.0001
             || self
-                .audio_bridge.stats
+                .audio_bridge
+                .stats
                 .as_ref()
                 .map(|previous| previous.transport_playing != stats.transport_playing)
                 .unwrap_or(true);
@@ -565,7 +628,8 @@ impl StudioLayout {
 
     pub(super) fn interpolated_playhead_beat(&self, bpm: f32) -> f32 {
         let playing = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
@@ -721,7 +785,8 @@ impl StudioLayout {
             reason,
         );
         let signature = serde_json::to_string(&snapshot).unwrap_or_default();
-        if !force && self.audio_bridge.last_project_signature.as_deref() == Some(signature.as_str()) {
+        if !force && self.audio_bridge.last_project_signature.as_deref() == Some(signature.as_str())
+        {
             self.audio_bridge.project_dirty = false;
             self.audio_bridge.media_dirty = false;
             return;
@@ -867,7 +932,8 @@ impl StudioLayout {
     pub(super) fn ensure_audio_stream_warm(&mut self) -> bool {
         transport_freeze_debug::log("ensure_audio_stream_warm enter");
         let stream_ready = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|stats| stats.stream_open && stats.running)
             .unwrap_or(false)
@@ -904,12 +970,14 @@ impl StudioLayout {
     }
 
     pub(super) fn current_audio_sample_rate(&self) -> u32 {
-        self.audio_bridge.stats
+        self.audio_bridge
+            .stats
             .as_ref()
             .map(|stats| stats.sample_rate)
             .filter(|sample_rate| *sample_rate > 0)
             .or_else(|| {
-                self.audio_bridge.engine
+                self.audio_bridge
+                    .engine
                     .as_ref()
                     .map(|engine| engine.config().sample_rate)
                     .filter(|sample_rate| *sample_rate > 0)
@@ -933,7 +1001,8 @@ impl StudioLayout {
         }
 
         let already_playing = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
@@ -1112,7 +1181,8 @@ impl StudioLayout {
                     .await;
                 let _ = owner.update(cx, |this, _cx| {
                     let playing = this
-                        .audio_bridge.stats
+                        .audio_bridge
+                        .stats
                         .as_ref()
                         .map(|stats| stats.transport_playing)
                         .unwrap_or(false);
@@ -1920,8 +1990,20 @@ impl StudioLayout {
         if !self.tempo_edit.ts_editing {
             return;
         }
-        let num = self.tempo_edit.ts_num_input.value.trim().parse::<u16>().ok();
-        let den = self.tempo_edit.ts_den_input.value.trim().parse::<u16>().ok();
+        let num = self
+            .tempo_edit
+            .ts_num_input
+            .value
+            .trim()
+            .parse::<u16>()
+            .ok();
+        let den = self
+            .tempo_edit
+            .ts_den_input
+            .value
+            .trim()
+            .parse::<u16>()
+            .ok();
         self.tempo_edit.ts_editing = false;
         self.tempo_edit.ts_edit_focus_num = true;
         let Some(num) = num.filter(|n| (1..=64).contains(n)) else {

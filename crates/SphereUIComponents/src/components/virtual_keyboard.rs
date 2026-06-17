@@ -1,0 +1,1264 @@
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+
+use gpui::{
+    div, px, App, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    Styled, Window,
+};
+
+use crate::midi_input::VirtualKeyboardEvent;
+use crate::theme::Colors;
+
+pub type VirtualKeyboardEventSink =
+    Arc<dyn Fn(VirtualKeyboardEvent, &mut App) -> bool + Send + Sync + 'static>;
+
+const DEFAULT_OCTAVE: i8 = 4;
+const DEFAULT_VELOCITY: u8 = 96;
+const DEFAULT_CHANNEL: u8 = 0;
+const BASE_WHITE_NOTE: i16 = 60;
+const MIN_OCTAVE: i8 = 0;
+const MAX_OCTAVE: i8 = 8;
+const VELOCITY_STEP: u8 = 8;
+
+/// `FUTUREBOARD_VIRTUAL_KEYBOARD_DEBUG=1` traces every musical-typing key event
+/// (raw key, normalized key, mapped note, octave, velocity, ignored reason).
+/// Cached on first read; never logged in the audio path.
+fn vkbd_debug() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_VIRTUAL_KEYBOARD_DEBUG").is_some())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MusicalTypingKey {
+    pub key: &'static str,
+    pub semitone: i8,
+    pub is_black: bool,
+}
+
+pub const WHITE_KEYS: [MusicalTypingKey; 10] = [
+    MusicalTypingKey {
+        key: "a",
+        semitone: 0,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "s",
+        semitone: 2,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "d",
+        semitone: 4,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "f",
+        semitone: 5,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "g",
+        semitone: 7,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "h",
+        semitone: 9,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "j",
+        semitone: 11,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "k",
+        semitone: 12,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: "l",
+        semitone: 14,
+        is_black: false,
+    },
+    MusicalTypingKey {
+        key: ";",
+        semitone: 16,
+        is_black: false,
+    },
+];
+
+pub const BLACK_KEYS: [MusicalTypingKey; 7] = [
+    MusicalTypingKey {
+        key: "w",
+        semitone: 1,
+        is_black: true,
+    },
+    MusicalTypingKey {
+        key: "e",
+        semitone: 3,
+        is_black: true,
+    },
+    MusicalTypingKey {
+        key: "t",
+        semitone: 6,
+        is_black: true,
+    },
+    MusicalTypingKey {
+        key: "y",
+        semitone: 8,
+        is_black: true,
+    },
+    MusicalTypingKey {
+        key: "u",
+        semitone: 10,
+        is_black: true,
+    },
+    MusicalTypingKey {
+        key: "o",
+        semitone: 13,
+        is_black: true,
+    },
+    MusicalTypingKey {
+        key: "p",
+        semitone: 15,
+        is_black: true,
+    },
+];
+
+/// A physical key normalized into a stable internal action *before* any note
+/// math runs. Produced by [`classify_key`] so the rest of the controller never
+/// matches on raw platform key strings (which vary by layout / IME / shift).
+/// Unknown keys classify to `None` and are ignored, never panicked on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusicalKey {
+    /// A piano key. `semitone` is the offset above the base-octave C and is
+    /// unique per physical key, so it doubles as the `pressed_keys` identity
+    /// (octave-independent: the actual MIDI note is resolved at press time).
+    Note { semitone: i8, is_black: bool },
+    OctaveDown,
+    OctaveUp,
+    VelocityDown,
+    VelocityUp,
+    Sustain,
+}
+
+/// Normalize a raw platform key string into a [`MusicalKey`].
+///
+/// We classify from `Keystroke::key` (the layout-stable ASCII-equivalent of the
+/// physical key), not from the typed character — the typed glyph differs across
+/// keyboard layouts, IME, punctuation, and shifted keys. Spelling variants for
+/// the same physical key (`";"`/`"semicolon"`, `"space"`/`"Space"`/`" "`, and
+/// upper-case letters from a held Shift) collapse to one canonical token first.
+/// Returns `None` for any key not bound to musical typing.
+fn classify_key(raw: &str) -> Option<MusicalKey> {
+    let token: Cow<str> = match raw {
+        ";" | "semicolon" | "Semicolon" => Cow::Borrowed(";"),
+        " " | "space" | "Space" | "spacebar" | "Spacebar" => Cow::Borrowed("space"),
+        other => Cow::Owned(other.to_ascii_lowercase()),
+    };
+    match token.as_ref() {
+        "z" => Some(MusicalKey::OctaveDown),
+        "x" => Some(MusicalKey::OctaveUp),
+        "c" => Some(MusicalKey::VelocityDown),
+        "v" => Some(MusicalKey::VelocityUp),
+        "space" => Some(MusicalKey::Sustain),
+        token => WHITE_KEYS
+            .iter()
+            .chain(BLACK_KEYS.iter())
+            .find(|entry| entry.key == token)
+            .map(|entry| MusicalKey::Note {
+                semitone: entry.semitone,
+                is_black: entry.is_black,
+            }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualKeyboardKeyAction {
+    Consumed,
+    Pass,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct VirtualKeyboardOutput {
+    pub events: Vec<VirtualKeyboardEvent>,
+}
+
+impl VirtualKeyboardOutput {
+    fn push(&mut self, event: VirtualKeyboardEvent) {
+        self.events.push(event);
+    }
+
+    pub fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VirtualKeyboardController {
+    pub enabled: bool,
+    pub octave: i8,
+    pub velocity: u8,
+    pub channel: u8,
+    pub sustain: bool,
+    /// Physical note keys currently held: semitone identity -> the actual MIDI
+    /// note dispatched at press time. Keyed by semitone (unique per key) so OS
+    /// auto-repeat and re-press produce exactly one NoteOn, and key-up only
+    /// emits NoteOff for a key that was genuinely pressed.
+    pressed_keys: HashMap<i8, u8>,
+    active_notes: BTreeSet<(u8, u8)>,
+}
+
+impl Default for VirtualKeyboardController {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            octave: DEFAULT_OCTAVE,
+            velocity: DEFAULT_VELOCITY,
+            channel: DEFAULT_CHANNEL,
+            sustain: false,
+            pressed_keys: HashMap::new(),
+            active_notes: BTreeSet::new(),
+        }
+    }
+}
+
+impl VirtualKeyboardController {
+    /// Resolve a key's semitone to an in-range MIDI note for the current octave.
+    /// Returns `None` (ignored, never panics) when the octave shift pushes the
+    /// note outside 0..=127.
+    pub fn note_for_semitone(&self, semitone: i8) -> Option<u8> {
+        let note =
+            BASE_WHITE_NOTE + ((self.octave as i16 - DEFAULT_OCTAVE as i16) * 12) + semitone as i16;
+        (0..=127).contains(&note).then_some(note as u8)
+    }
+
+    /// Convenience wrapper: classify a raw key, then resolve its note (if it is
+    /// a note key at all). Retained for callers/tests that work from raw keys.
+    pub fn note_for_key(&self, key: &str) -> Option<u8> {
+        match classify_key(key)? {
+            MusicalKey::Note { semitone, .. } => self.note_for_semitone(semitone),
+            _ => None,
+        }
+    }
+
+    pub fn is_note_active(&self, note: u8) -> bool {
+        self.active_notes
+            .iter()
+            .any(|&(_, active_note)| active_note == note)
+    }
+
+    pub fn active_note_values(&self) -> HashSet<u8> {
+        self.active_notes
+            .iter()
+            .map(|&(_, note)| note)
+            .collect::<HashSet<_>>()
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.active_notes.len()
+    }
+
+    /// Handle a physical key-down for musical typing.
+    ///
+    /// `command_modifier` is true when Ctrl/Cmd/Alt/Fn is held — such a chord is
+    /// a shortcut, not a musical note, so it is passed through untouched. The
+    /// method never panics: unknown/unmapped keys, text-input focus, and
+    /// out-of-range notes all return `Pass` with no events.
+    pub fn handle_key_down(
+        &mut self,
+        key: &str,
+        command_modifier: bool,
+        is_repeat: bool,
+        text_input_focused: bool,
+    ) -> (VirtualKeyboardKeyAction, VirtualKeyboardOutput) {
+        let mut output = VirtualKeyboardOutput::default();
+        if !self.enabled {
+            self.log_ignored(key, "disabled");
+            return (VirtualKeyboardKeyAction::Pass, output);
+        }
+        if text_input_focused {
+            self.log_ignored(key, "text-input-focused");
+            return (VirtualKeyboardKeyAction::Pass, output);
+        }
+        if command_modifier {
+            self.log_ignored(key, "command-modifier");
+            return (VirtualKeyboardKeyAction::Pass, output);
+        }
+        let Some(musical) = classify_key(key) else {
+            self.log_ignored(key, "unmapped");
+            return (VirtualKeyboardKeyAction::Pass, output);
+        };
+        match musical {
+            MusicalKey::OctaveDown => {
+                if !is_repeat {
+                    output.events.extend(self.release_all_notes());
+                    self.octave = (self.octave - 1).clamp(MIN_OCTAVE, MAX_OCTAVE);
+                }
+                self.log_control(key, musical);
+                (VirtualKeyboardKeyAction::Consumed, output)
+            }
+            MusicalKey::OctaveUp => {
+                if !is_repeat {
+                    output.events.extend(self.release_all_notes());
+                    self.octave = (self.octave + 1).clamp(MIN_OCTAVE, MAX_OCTAVE);
+                }
+                self.log_control(key, musical);
+                (VirtualKeyboardKeyAction::Consumed, output)
+            }
+            MusicalKey::VelocityDown => {
+                if !is_repeat {
+                    self.velocity = self.velocity.saturating_sub(VELOCITY_STEP).max(1);
+                }
+                self.log_control(key, musical);
+                (VirtualKeyboardKeyAction::Consumed, output)
+            }
+            MusicalKey::VelocityUp => {
+                if !is_repeat {
+                    self.velocity = self.velocity.saturating_add(VELOCITY_STEP).min(127);
+                }
+                self.log_control(key, musical);
+                (VirtualKeyboardKeyAction::Consumed, output)
+            }
+            MusicalKey::Sustain => {
+                if !is_repeat {
+                    self.sustain = !self.sustain;
+                    output.push(VirtualKeyboardEvent::Sustain {
+                        down: self.sustain,
+                        channel: self.channel,
+                    });
+                }
+                self.log_control(key, musical);
+                (VirtualKeyboardKeyAction::Consumed, output)
+            }
+            MusicalKey::Note { semitone, .. } => {
+                let Some(note) = self.note_for_semitone(semitone) else {
+                    self.log_ignored(key, "note-out-of-range");
+                    return (VirtualKeyboardKeyAction::Pass, output);
+                };
+                // One NoteOn per physical press: drop OS auto-repeat and any
+                // duplicate down event for a key we already hold.
+                if is_repeat || self.pressed_keys.contains_key(&semitone) {
+                    return (VirtualKeyboardKeyAction::Consumed, output);
+                }
+                self.pressed_keys.insert(semitone, note);
+                self.active_notes.insert((self.channel, note));
+                output.push(VirtualKeyboardEvent::NoteOn {
+                    note,
+                    velocity: self.velocity,
+                    channel: self.channel,
+                });
+                self.log_note_on(key, musical, note);
+                (VirtualKeyboardKeyAction::Consumed, output)
+            }
+        }
+    }
+
+    /// Handle a physical key-up. Only note keys that were genuinely pressed emit
+    /// a NoteOff; control keys, unmapped keys, and never-pressed keys are no-ops.
+    pub fn handle_key_up(&mut self, key: &str) -> VirtualKeyboardOutput {
+        let mut output = VirtualKeyboardOutput::default();
+        let Some(MusicalKey::Note { semitone, .. }) = classify_key(key) else {
+            return output;
+        };
+        let Some(note) = self.pressed_keys.remove(&semitone) else {
+            return output;
+        };
+        if self.active_notes.remove(&(self.channel, note)) {
+            output.push(VirtualKeyboardEvent::NoteOff {
+                note,
+                channel: self.channel,
+            });
+        }
+        self.log_note_off(key, note);
+        output
+    }
+
+    fn log_ignored(&self, raw: &str, reason: &str) {
+        if vkbd_debug() {
+            eprintln!(
+                "[vkbd] key-down raw={raw:?} normalized={:?} octave={} velocity={} \
+                 ignored reason={reason}",
+                classify_key(raw),
+                self.octave,
+                self.velocity,
+            );
+        }
+    }
+
+    fn log_control(&self, raw: &str, musical: MusicalKey) {
+        if vkbd_debug() {
+            eprintln!(
+                "[vkbd] key-down raw={raw:?} normalized={musical:?} octave={} velocity={} \
+                 sustain={}",
+                self.octave, self.velocity, self.sustain,
+            );
+        }
+    }
+
+    fn log_note_on(&self, raw: &str, musical: MusicalKey, note: u8) {
+        if vkbd_debug() {
+            eprintln!(
+                "[vkbd] key-down raw={raw:?} normalized={musical:?} note={note} octave={} \
+                 velocity={} channel={}",
+                self.octave, self.velocity, self.channel,
+            );
+        }
+    }
+
+    fn log_note_off(&self, raw: &str, note: u8) {
+        if vkbd_debug() {
+            eprintln!(
+                "[vkbd] key-up raw={raw:?} note={note} octave={} channel={}",
+                self.octave, self.channel,
+            );
+        }
+    }
+
+    pub fn mouse_note_on(&mut self, note: u8) -> VirtualKeyboardOutput {
+        let mut output = VirtualKeyboardOutput::default();
+        let note = note.min(127);
+        if self.active_notes.insert((self.channel, note)) {
+            output.push(VirtualKeyboardEvent::NoteOn {
+                note,
+                velocity: self.velocity,
+                channel: self.channel,
+            });
+        }
+        output
+    }
+
+    pub fn mouse_note_off(&mut self, note: u8) -> VirtualKeyboardOutput {
+        let mut output = VirtualKeyboardOutput::default();
+        let note = note.min(127);
+        if self.active_notes.remove(&(self.channel, note)) {
+            output.push(VirtualKeyboardEvent::NoteOff {
+                note,
+                channel: self.channel,
+            });
+        }
+        output
+    }
+
+    pub fn set_octave(&mut self, octave: i8) -> VirtualKeyboardOutput {
+        let mut output = VirtualKeyboardOutput::default();
+        output.events.extend(self.release_all_notes());
+        self.octave = octave.clamp(MIN_OCTAVE, MAX_OCTAVE);
+        output
+    }
+
+    pub fn set_velocity(&mut self, velocity: u8) {
+        self.velocity = velocity.clamp(1, 127);
+    }
+
+    pub fn set_channel(&mut self, channel: u8) -> VirtualKeyboardOutput {
+        let mut output = VirtualKeyboardOutput::default();
+        output.events.extend(self.release_all_notes());
+        self.channel = channel.min(15);
+        output
+    }
+
+    pub fn toggle_sustain(&mut self) -> VirtualKeyboardOutput {
+        self.sustain = !self.sustain;
+        let mut output = VirtualKeyboardOutput::default();
+        output.push(VirtualKeyboardEvent::Sustain {
+            down: self.sustain,
+            channel: self.channel,
+        });
+        output
+    }
+
+    pub fn panic(&mut self) -> VirtualKeyboardOutput {
+        self.pressed_keys.clear();
+        self.active_notes.clear();
+        self.sustain = false;
+        let mut output = VirtualKeyboardOutput::default();
+        output.push(VirtualKeyboardEvent::Panic);
+        output
+    }
+
+    pub fn release_all_notes(&mut self) -> Vec<VirtualKeyboardEvent> {
+        let notes = self.active_notes.iter().copied().collect::<Vec<_>>();
+        self.pressed_keys.clear();
+        self.active_notes.clear();
+        notes
+            .into_iter()
+            .map(|(channel, note)| VirtualKeyboardEvent::NoteOff { note, channel })
+            .collect()
+    }
+
+    pub fn release_mouse_notes(&mut self) -> Vec<VirtualKeyboardEvent> {
+        let held_notes = self
+            .pressed_keys
+            .values()
+            .map(|note| (self.channel, *note))
+            .collect::<HashSet<_>>();
+        let notes = self
+            .active_notes
+            .iter()
+            .copied()
+            .filter(|note| !held_notes.contains(note))
+            .collect::<Vec<_>>();
+        for note in &notes {
+            self.active_notes.remove(note);
+        }
+        notes
+            .into_iter()
+            .map(|(channel, note)| VirtualKeyboardEvent::NoteOff { note, channel })
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+pub struct VirtualKeyboardPanelState {
+    pub controller: VirtualKeyboardController,
+    pub visible: bool,
+    pub hint: Option<String>,
+    pub target_label: Option<String>,
+}
+
+impl Default for VirtualKeyboardPanelState {
+    fn default() -> Self {
+        Self {
+            controller: VirtualKeyboardController::default(),
+            visible: false,
+            hint: None,
+            target_label: None,
+        }
+    }
+}
+
+impl VirtualKeyboardPanelState {
+    pub fn close(&mut self) -> VirtualKeyboardOutput {
+        self.visible = false;
+        let mut output = VirtualKeyboardOutput::default();
+        output.events.extend(self.controller.release_all_notes());
+        output
+    }
+}
+
+pub struct VirtualKeyboardPanel {
+    pub state: VirtualKeyboardPanelState,
+    pub event_sink: Option<VirtualKeyboardEventSink>,
+}
+
+impl VirtualKeyboardPanel {
+    pub fn new() -> Self {
+        Self {
+            state: VirtualKeyboardPanelState::default(),
+            event_sink: None,
+        }
+    }
+
+    pub fn set_event_sink(&mut self, sink: Option<VirtualKeyboardEventSink>) {
+        self.event_sink = sink;
+    }
+
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.state.visible = visible;
+        if !visible {
+            let output = self.state.close();
+            self.flush_output(output, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        let visible = !self.state.visible;
+        self.set_visible(visible, cx);
+    }
+
+    pub fn set_target_status(&mut self, label: Option<String>, hint: Option<String>) {
+        self.state.target_label = label;
+        self.state.hint = hint;
+    }
+
+    pub fn release_all(&mut self, cx: &mut Context<Self>) {
+        let mut output = VirtualKeyboardOutput::default();
+        output
+            .events
+            .extend(self.state.controller.release_all_notes());
+        self.flush_output(output, cx);
+        cx.notify();
+    }
+
+    pub fn handle_key_down(
+        &mut self,
+        key: &str,
+        command_modifier: bool,
+        is_repeat: bool,
+        text_input_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // Physical keyboard input is captured only while the panel is visible;
+        // otherwise the key falls through to the normal shortcut path.
+        if !self.state.visible {
+            return false;
+        }
+        let (action, output) = self.state.controller.handle_key_down(
+            key,
+            command_modifier,
+            is_repeat,
+            text_input_focused,
+        );
+        self.flush_output(output, cx);
+        if matches!(action, VirtualKeyboardKeyAction::Consumed) {
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn handle_key_up(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if !self.state.visible {
+            return false;
+        }
+        let output = self.state.controller.handle_key_up(key);
+        let handled = output.has_events();
+        self.flush_output(output, cx);
+        if handled {
+            cx.notify();
+        }
+        handled
+    }
+
+    fn flush_output(&self, output: VirtualKeyboardOutput, cx: &mut App) {
+        if let Some(sink) = self.event_sink.as_ref() {
+            for event in output.events {
+                sink(event, cx);
+            }
+        }
+    }
+}
+
+impl Render for VirtualKeyboardPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.state.visible {
+            return div().into_any_element();
+        }
+
+        let octave = self.state.controller.octave;
+        let velocity = self.state.controller.velocity;
+        let channel_label = self.state.controller.channel + 1;
+        let sustain = self.state.controller.sustain;
+        let active_notes = self.state.controller.active_note_values();
+        let target = cx.entity().clone();
+        let mouse_up_target = target.clone();
+
+        div()
+            .absolute()
+            .right(px(14.0))
+            .bottom(px(42.0))
+            .w(px(476.0))
+            .rounded_lg()
+            .border(px(1.0))
+            .border_color(Colors::border_strong())
+            .bg(Colors::surface_panel())
+            .shadow_lg()
+            .text_color(Colors::text_secondary())
+            .capture_any_mouse_up(move |_event, _window, cx| {
+                let _ = mouse_up_target.update(cx, |this, cx| {
+                    let mut output = VirtualKeyboardOutput::default();
+                    output
+                        .events
+                        .extend(this.state.controller.release_mouse_notes());
+                    this.flush_output(output, cx);
+                    cx.notify();
+                });
+            })
+            .child(
+                div()
+                    .h(px(30.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .border_b(px(1.0))
+                    .border_color(Colors::border_subtle())
+                    .child(toolbar_label("Musical Typing"))
+                    .child(status_pill(
+                        self.state
+                            .target_label
+                            .clone()
+                            .unwrap_or_else(|| "No target".to_string()),
+                        self.state.hint.is_none(),
+                    ))
+                    .child(div().flex_1())
+                    .child(stepper("Oct", octave.to_string(), {
+                        let target = target.clone();
+                        move |delta, _w, cx| {
+                            let _ = target.update(cx, |this, cx| {
+                                let next = this.state.controller.octave + delta;
+                                let output = this.state.controller.set_octave(next);
+                                this.flush_output(output, cx);
+                                cx.notify();
+                            });
+                        }
+                    }))
+                    .child(stepper("Vel", velocity.to_string(), {
+                        let target = target.clone();
+                        move |delta, _w, cx| {
+                            let _ = target.update(cx, |this, cx| {
+                                let next = if delta < 0 {
+                                    this.state.controller.velocity.saturating_sub(8)
+                                } else {
+                                    this.state.controller.velocity.saturating_add(8)
+                                };
+                                this.state.controller.set_velocity(next);
+                                cx.notify();
+                            });
+                        }
+                    }))
+                    .child(stepper("Ch", channel_label.to_string(), {
+                        let target = target.clone();
+                        move |delta, _w, cx| {
+                            let _ = target.update(cx, |this, cx| {
+                                let next = this.state.controller.channel as i8 + delta;
+                                let output =
+                                    this.state.controller.set_channel(next.clamp(0, 15) as u8);
+                                this.flush_output(output, cx);
+                                cx.notify();
+                            });
+                        }
+                    }))
+                    .child(toggle_button("SUS", sustain, {
+                        let target = target.clone();
+                        move |_event, _w, cx| {
+                            let _ = target.update(cx, |this, cx| {
+                                let output = this.state.controller.toggle_sustain();
+                                this.flush_output(output, cx);
+                                cx.notify();
+                            });
+                        }
+                    }))
+                    .child(action_button("Panic", {
+                        let target = target.clone();
+                        move |_event, _w, cx| {
+                            let _ = target.update(cx, |this, cx| {
+                                let output = this.state.controller.panic();
+                                this.flush_output(output, cx);
+                                cx.notify();
+                            });
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .p(px(8.0))
+                    .child(
+                        self.state
+                            .hint
+                            .as_ref()
+                            .map(|hint| {
+                                div()
+                                    .h(px(20.0))
+                                    .flex()
+                                    .items_center()
+                                    .px(px(7.0))
+                                    .rounded_md()
+                                    .bg(Colors::surface_input())
+                                    .text_size(px(10.5))
+                                    .text_color(Colors::text_muted())
+                                    .child(hint.clone())
+                            })
+                            .unwrap_or_else(|| div().h(px(0.0))),
+                    )
+                    .child(piano_keyboard_view(octave, active_notes, target.clone()))
+                    .child(
+                        div()
+                            .h(px(20.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px(px(2.0))
+                            .text_size(px(10.0))
+                            .text_color(Colors::text_faint())
+                            .child("A S D F G H J K L ;  /  W E T Y U O P")
+                            .child("Z/X octave  C/V velocity  Space sustain"),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn toolbar_label(label: &'static str) -> impl IntoElement {
+    div()
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_primary())
+        .child(label)
+}
+
+fn status_pill(label: String, ok: bool) -> impl IntoElement {
+    div()
+        .max_w(px(118.0))
+        .h(px(20.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(if ok {
+            Colors::border_subtle()
+        } else {
+            Colors::status_warning()
+        })
+        .bg(Colors::surface_input())
+        .text_size(px(10.0))
+        .text_color(if ok {
+            Colors::text_muted()
+        } else {
+            Colors::status_warning()
+        })
+        .truncate()
+        .child(label)
+}
+
+fn stepper(
+    label: &'static str,
+    value: String,
+    on_step: impl Fn(i8, &mut Window, &mut App) + Clone + 'static,
+) -> impl IntoElement {
+    let minus = on_step.clone();
+    let plus = on_step;
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(3.0))
+        .child(mini_value(label, value))
+        .child(tiny_button("-", move |_e, w, cx| minus(-1, w, cx)))
+        .child(tiny_button("+", move |_e, w, cx| plus(1, w, cx)))
+}
+
+fn mini_value(label: &'static str, value: String) -> impl IntoElement {
+    div()
+        .h(px(20.0))
+        .min_w(px(42.0))
+        .px(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .bg(Colors::surface_input())
+        .text_size(px(10.0))
+        .text_color(Colors::text_muted())
+        .child(format!("{label} {value}"))
+}
+
+fn tiny_button(
+    label: &'static str,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .w(px(18.0))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .text_size(px(11.0))
+        .text_color(Colors::text_secondary())
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label)
+}
+
+fn toggle_button(
+    label: &'static str,
+    active: bool,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .h(px(20.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(if active {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if active {
+            Colors::accent_muted()
+        } else {
+            Colors::surface_input()
+        })
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(if active {
+            Colors::accent_primary()
+        } else {
+            Colors::text_secondary()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label)
+}
+
+fn action_button(
+    label: &'static str,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .h(px(20.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_secondary())
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label)
+}
+
+fn piano_keyboard_view(
+    octave: i8,
+    active_notes: HashSet<u8>,
+    target: gpui::Entity<VirtualKeyboardPanel>,
+) -> impl IntoElement {
+    let white_width = 44.0;
+    let keyboard_width = white_width * WHITE_KEYS.len() as f32;
+    div()
+        .relative()
+        .w(px(keyboard_width))
+        .h(px(98.0))
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_canvas())
+        .child(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .flex()
+                .flex_row()
+                .children(WHITE_KEYS.iter().map(|entry| {
+                    let note = note_for_entry(*entry, octave);
+                    piano_key(
+                        entry.key,
+                        note,
+                        false,
+                        active_notes.contains(&note),
+                        target.clone(),
+                    )
+                })),
+        )
+        .children(BLACK_KEYS.iter().map(move |entry| {
+            let note = note_for_entry(*entry, octave);
+            let x = match entry.key {
+                "w" => 29.0,
+                "e" => 73.0,
+                "t" => 161.0,
+                "y" => 205.0,
+                "u" => 249.0,
+                "o" => 337.0,
+                "p" => 381.0,
+                _ => 0.0,
+            };
+            piano_key(
+                entry.key,
+                note,
+                true,
+                active_notes.contains(&note),
+                target.clone(),
+            )
+            .absolute()
+            .left(px(x))
+            .top(px(0.0))
+        }))
+}
+
+fn note_for_entry(entry: MusicalTypingKey, octave: i8) -> u8 {
+    let note =
+        BASE_WHITE_NOTE + ((octave as i16 - DEFAULT_OCTAVE as i16) * 12) + entry.semitone as i16;
+    note.clamp(0, 127) as u8
+}
+
+fn piano_key(
+    label: &'static str,
+    note: u8,
+    black: bool,
+    active: bool,
+    target: gpui::Entity<VirtualKeyboardPanel>,
+) -> gpui::Div {
+    let down_target = target.clone();
+    let up_target = target;
+    let width = if black { 28.0 } else { 44.0 };
+    let height = if black { 58.0 } else { 96.0 };
+    div()
+        .w(px(width))
+        .h(px(height))
+        .flex()
+        .items_end()
+        .justify_center()
+        .pb(px(if black { 5.0 } else { 7.0 }))
+        .border(px(1.0))
+        .border_color(if active {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if active {
+            Colors::accent_muted()
+        } else if black {
+            Colors::surface_canvas()
+        } else {
+            Colors::surface_input()
+        })
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(if active {
+            Colors::accent_primary()
+        } else if black {
+            Colors::text_secondary()
+        } else {
+            Colors::text_muted()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            let _ = down_target.update(cx, |this, cx| {
+                let output = this.state.controller.mouse_note_on(note);
+                this.flush_output(output, cx);
+                cx.notify();
+            });
+        })
+        .on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
+            let _ = up_target.update(cx, |this, cx| {
+                let output = this.state.controller.mouse_note_off(note);
+                this.flush_output(output, cx);
+                cx.notify();
+            });
+        })
+        .child(label.to_ascii_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note_on_count(output: &VirtualKeyboardOutput) -> usize {
+        output
+            .events
+            .iter()
+            .filter(|event| matches!(event, VirtualKeyboardEvent::NoteOn { .. }))
+            .count()
+    }
+
+    /// `(command_modifier, is_repeat, text_input_focused)` all false: a plain
+    /// key press with the panel enabled and focused.
+    fn down(
+        controller: &mut VirtualKeyboardController,
+        key: &str,
+    ) -> (VirtualKeyboardKeyAction, VirtualKeyboardOutput) {
+        controller.handle_key_down(key, false, false, false)
+    }
+
+    #[test]
+    fn key_down_sends_one_note_on_only() {
+        let mut controller = VirtualKeyboardController::default();
+        let (_, first) = down(&mut controller, "a");
+        let (_, second) = down(&mut controller, "a");
+        assert_eq!(note_on_count(&first), 1);
+        assert_eq!(note_on_count(&second), 0);
+    }
+
+    #[test]
+    fn key_repeat_does_not_duplicate_note_on() {
+        let mut controller = VirtualKeyboardController::default();
+        let _ = down(&mut controller, "a");
+        // OS auto-repeat (is_repeat = true) must not retrigger.
+        let (_, repeat) = controller.handle_key_down("a", false, true, false);
+        assert_eq!(note_on_count(&repeat), 0);
+        assert_eq!(controller.active_count(), 1);
+    }
+
+    #[test]
+    fn key_up_sends_note_off_for_active_key() {
+        let mut controller = VirtualKeyboardController::default();
+        let _ = down(&mut controller, "a");
+        let output = controller.handle_key_up("a");
+        assert_eq!(
+            output.events,
+            vec![VirtualKeyboardEvent::NoteOff {
+                note: 60,
+                channel: 0
+            }]
+        );
+        assert_eq!(controller.active_count(), 0);
+    }
+
+    #[test]
+    fn key_up_for_never_pressed_key_is_a_no_op() {
+        let mut controller = VirtualKeyboardController::default();
+        // Release without a prior press must not emit a NoteOff or panic.
+        let output = controller.handle_key_up("a");
+        assert!(output.events.is_empty());
+        assert_eq!(controller.active_count(), 0);
+    }
+
+    #[test]
+    fn blur_or_close_releases_all_active_notes() {
+        let mut state = VirtualKeyboardPanelState::default();
+        state.visible = true;
+        let _ = state.controller.handle_key_down("a", false, false, false);
+        let _ = state.controller.handle_key_down("s", false, false, false);
+        let output = state.close();
+        assert_eq!(output.events.len(), 2);
+        assert_eq!(state.controller.active_count(), 0);
+    }
+
+    #[test]
+    fn octave_change_does_not_leave_stale_notes() {
+        let mut controller = VirtualKeyboardController::default();
+        let _ = down(&mut controller, "a");
+        let output = controller.set_octave(5);
+        assert_eq!(
+            output.events,
+            vec![VirtualKeyboardEvent::NoteOff {
+                note: 60,
+                channel: 0
+            }]
+        );
+        assert_eq!(controller.active_count(), 0);
+        assert_eq!(controller.octave, 5);
+    }
+
+    #[test]
+    fn octave_keys_change_octave_without_stuck_notes() {
+        let mut controller = VirtualKeyboardController::default();
+        // Hold A, then bump the octave down with Z: the held note is released,
+        // nothing is left stuck, and a stale key-up afterwards is harmless.
+        let _ = down(&mut controller, "a");
+        let (action, output) = down(&mut controller, "z");
+        assert_eq!(action, VirtualKeyboardKeyAction::Consumed);
+        assert_eq!(
+            output.events,
+            vec![VirtualKeyboardEvent::NoteOff {
+                note: 60,
+                channel: 0
+            }]
+        );
+        assert_eq!(controller.octave, 3);
+        assert_eq!(controller.active_count(), 0);
+
+        // X bumps the octave back up.
+        let (action, _) = down(&mut controller, "x");
+        assert_eq!(action, VirtualKeyboardKeyAction::Consumed);
+        assert_eq!(controller.octave, 4);
+
+        // The orphaned key-up for A (note already released) is a clean no-op.
+        let trailing = controller.handle_key_up("a");
+        assert!(trailing.events.is_empty());
+        assert_eq!(controller.active_count(), 0);
+    }
+
+    #[test]
+    fn semicolon_key_does_not_panic_and_maps_to_a_note() {
+        let mut controller = VirtualKeyboardController::default();
+        // Both the glyph and the platform name for the key must classify.
+        for key in [";", "semicolon"] {
+            let mut c = controller.clone();
+            let (action, output) = down(&mut c, key);
+            assert_eq!(action, VirtualKeyboardKeyAction::Consumed);
+            assert_eq!(note_on_count(&output), 1);
+        }
+        // Sanity: the shared controller is untouched by the clones above.
+        assert_eq!(controller.active_count(), 0);
+        let _ = down(&mut controller, ";");
+        assert_eq!(controller.active_count(), 1);
+    }
+
+    #[test]
+    fn space_toggles_sustain_without_panic() {
+        let mut controller = VirtualKeyboardController::default();
+        let (action, output) = down(&mut controller, "space");
+        assert_eq!(action, VirtualKeyboardKeyAction::Consumed);
+        assert!(controller.sustain);
+        assert_eq!(
+            output.events,
+            vec![VirtualKeyboardEvent::Sustain {
+                down: true,
+                channel: 0
+            }]
+        );
+        // Auto-repeat must not flip sustain back off.
+        let (_, repeat) = controller.handle_key_down("space", false, true, false);
+        assert!(controller.sustain);
+        assert!(repeat.events.is_empty());
+        // A fresh press toggles it off again.
+        let (_, second) = down(&mut controller, "space");
+        assert!(!controller.sustain);
+        assert_eq!(
+            second.events,
+            vec![VirtualKeyboardEvent::Sustain {
+                down: false,
+                channel: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn unmapped_key_is_ignored_without_panic() {
+        let mut controller = VirtualKeyboardController::default();
+        for key in ["q", "1", "enter", "f1", "arrow_left", "`", "/", ""] {
+            let (action, output) = down(&mut controller, key);
+            assert_eq!(action, VirtualKeyboardKeyAction::Pass, "key {key:?}");
+            assert!(output.events.is_empty(), "key {key:?}");
+            // A key-up for the same unmapped key is equally harmless.
+            assert!(controller.handle_key_up(key).events.is_empty());
+        }
+        assert_eq!(controller.active_count(), 0);
+    }
+
+    #[test]
+    fn command_modifier_passes_through_for_shortcuts() {
+        let mut controller = VirtualKeyboardController::default();
+        // Ctrl+A (command_modifier = true) is a shortcut, not a note.
+        let (action, output) = controller.handle_key_down("a", true, false, false);
+        assert_eq!(action, VirtualKeyboardKeyAction::Pass);
+        assert!(output.events.is_empty());
+        assert_eq!(controller.active_count(), 0);
+    }
+
+    #[test]
+    fn text_input_focus_prevents_musical_typing_capture() {
+        let mut controller = VirtualKeyboardController::default();
+        let (action, output) = controller.handle_key_down("a", false, false, true);
+        assert_eq!(action, VirtualKeyboardKeyAction::Pass);
+        assert!(output.events.is_empty());
+        assert_eq!(controller.active_count(), 0);
+    }
+
+    #[test]
+    fn no_selected_or_armed_target_can_show_hint_without_panic() {
+        let mut state = VirtualKeyboardPanelState::default();
+        state.target_label = None;
+        state.hint = Some("Select or arm an instrument track to play.".to_string());
+        assert!(state.hint.is_some());
+        assert_eq!(state.controller.active_count(), 0);
+    }
+}

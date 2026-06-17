@@ -57,7 +57,9 @@ impl StudioLayout {
             master: timeline.state.master.clone(),
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
             mixer_scroll_x: self.mixer_view.scroll_x,
-            mixer_insert_section_px: clamp_mixer_section_height_px(self.mixer_view.insert_section_px),
+            mixer_insert_section_px: clamp_mixer_section_height_px(
+                self.mixer_view.insert_section_px,
+            ),
             mixer_send_section_px: clamp_mixer_section_height_px(self.mixer_view.send_section_px),
             mixer_split_active_target: self.mixer_view.split_active_target,
         }

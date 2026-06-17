@@ -48,6 +48,7 @@ mod status_bar;
 pub mod text_input;
 pub mod timeline;
 pub mod title_bar;
+pub mod virtual_keyboard;
 
 pub use add_track_dialog::{
     open_add_track_window, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
@@ -126,3 +127,7 @@ pub use sidebar::sidebar;
 pub use slider::slider;
 pub use status_bar::{status_bar, status_bar_with_background_tasks};
 pub use text_input::{text_field, TextInputAction, TextInputState};
+pub use virtual_keyboard::{
+    VirtualKeyboardController, VirtualKeyboardEventSink, VirtualKeyboardPanel,
+    VirtualKeyboardPanelState,
+};

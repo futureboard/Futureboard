@@ -105,6 +105,12 @@ pub enum HostCommand {
         channel: u8,
         pitch: u8,
     },
+    PreviewControlChange {
+        plugin_instance_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    },
     PreviewAllNotesOff {
         plugin_instance_id: String,
     },

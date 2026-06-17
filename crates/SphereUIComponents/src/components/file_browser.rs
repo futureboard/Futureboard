@@ -120,7 +120,10 @@ impl BrowserVisibleNode {
     /// Rows the user can land on with click / arrow keys. Group headers and
     /// info/empty-state rows are skipped by selection and keyboard navigation.
     pub fn is_selectable(&self) -> bool {
-        !matches!(self.kind, BrowserNodeKind::GroupHeader | BrowserNodeKind::Info)
+        !matches!(
+            self.kind,
+            BrowserNodeKind::GroupHeader | BrowserNodeKind::Info
+        )
     }
 }
 
@@ -393,7 +396,13 @@ impl FileBrowserState {
         // ── Library ───────────────────────────────────────────────────
         if self.push_group_header("group:library", "Library", &mut nodes) {
             if let Some(p) = dirs.get("samples") {
-                self.push_root("lib:samples", "Samples", p, BrowserIcon::Samples, &mut nodes);
+                self.push_root(
+                    "lib:samples",
+                    "Samples",
+                    p,
+                    BrowserIcon::Samples,
+                    &mut nodes,
+                );
             }
             if let Some(p) = dirs.get("plugins") {
                 let instruments = p.join("Instruments");
@@ -404,7 +413,13 @@ impl FileBrowserState {
                     BrowserIcon::Instruments,
                     &mut nodes,
                 );
-                self.push_root("lib:plugins", "Plug-ins", p, BrowserIcon::Plugins, &mut nodes);
+                self.push_root(
+                    "lib:plugins",
+                    "Plug-ins",
+                    p,
+                    BrowserIcon::Plugins,
+                    &mut nodes,
+                );
             }
             if let Some(p) = dirs.get("audio_files") {
                 self.push_root(
@@ -416,7 +431,13 @@ impl FileBrowserState {
                 );
             }
             if let Some(p) = dirs.get("projects") {
-                self.push_root("lib:projects", "Projects", p, BrowserIcon::Projects, &mut nodes);
+                self.push_root(
+                    "lib:projects",
+                    "Projects",
+                    p,
+                    BrowserIcon::Projects,
+                    &mut nodes,
+                );
             }
             self.push_root(
                 "lib:templates",
@@ -471,7 +492,12 @@ impl FileBrowserState {
                     dirs::document_dir(),
                     BrowserIcon::Documents,
                 ),
-                ("places:music", "Music", dirs::audio_dir(), BrowserIcon::Music),
+                (
+                    "places:music",
+                    "Music",
+                    dirs::audio_dir(),
+                    BrowserIcon::Music,
+                ),
                 (
                     "places:videos",
                     "Videos",
@@ -510,7 +536,12 @@ impl FileBrowserState {
 
     /// Push a collapsible group header. Returns `true` when the group is open
     /// (caller should emit its items).
-    fn push_group_header(&self, id: &str, label: &str, nodes: &mut Vec<BrowserVisibleNode>) -> bool {
+    fn push_group_header(
+        &self,
+        id: &str,
+        label: &str,
+        nodes: &mut Vec<BrowserVisibleNode>,
+    ) -> bool {
         // While searching, keep every group open so matches in collapsed groups
         // can still surface; the header chevron still reflects the saved state.
         let open = !self.filter.is_empty() || !self.collapsed_groups.contains(id);
@@ -1140,7 +1171,9 @@ mod tests {
     fn favorites_expands_to_an_honest_empty_state() {
         let mut state = FileBrowserState::default();
         // No fabricated children before expansion.
-        assert!(!ids(&state).iter().any(|id| id == "collections:favorites:empty"));
+        assert!(!ids(&state)
+            .iter()
+            .any(|id| id == "collections:favorites:empty"));
         let expanded = state.toggle_node("collections:favorites", None);
         assert!(expanded);
         let empty = state

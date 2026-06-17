@@ -42,6 +42,7 @@ mod frame_diagnostics;
 mod helpers;
 mod input_ops;
 mod inspector_ops;
+mod midi_input_router;
 mod mixer_ops;
 pub(crate) mod plugin_bridge_runtime;
 mod plugin_ops;
@@ -299,6 +300,12 @@ pub struct StudioLayout {
     audio_editor: Entity<components::AudioEditorHost>,
     /// Routes bottom Editor tab between audio / MIDI / empty state.
     clip_editor_panel: Entity<components::ClipEditorPanel>,
+    /// Compact Logic-style musical typing / virtual MIDI keyboard.
+    virtual_keyboard: Entity<components::VirtualKeyboardPanel>,
+    /// Last routed virtual-keyboard target. A change releases active notes.
+    virtual_keyboard_last_target: Option<String>,
+    /// Last observed main-window active state for virtual-keyboard cleanup.
+    virtual_keyboard_window_active: bool,
     /// Second piano-roll instance for the floating MIDI editor (same timeline).
     piano_roll_floating: Entity<components::piano_roll::PianoRoll>,
     /// Floating MIDI editor window (one instance; switches clip on open) + the
@@ -498,6 +505,7 @@ impl StudioLayout {
                 audio_editor.clone(),
             )
         });
+        let virtual_keyboard = cx.new(|_| components::VirtualKeyboardPanel::new());
         let piano_roll_floating = {
             let timeline = timeline.clone();
             cx.new(|cx| {
@@ -506,6 +514,22 @@ impl StudioLayout {
                 pr
             })
         };
+        {
+            let target = cx.entity().clone();
+            let sink = Arc::new(
+                move |event: crate::midi_input::VirtualKeyboardEvent, cx: &mut gpui::App| {
+                    target.update(cx, |layout, cx| {
+                        matches!(
+                            layout.route_virtual_keyboard_event(event, cx),
+                            crate::midi_input::MidiInputRouteStatus::Routed
+                        )
+                    })
+                },
+            );
+            let _ = virtual_keyboard.update(cx, |keyboard, _cx| {
+                keyboard.set_event_sink(Some(sink));
+            });
+        }
         {
             let target = cx.entity().clone();
             let preview_handler = Arc::new(
@@ -645,6 +669,9 @@ impl StudioLayout {
             piano_roll,
             audio_editor,
             clip_editor_panel,
+            virtual_keyboard,
+            virtual_keyboard_last_target: None,
+            virtual_keyboard_window_active: true,
             piano_roll_floating,
             midi_editor: window_ops::MidiEditorWindowState::default(),
             file_browser: FileBrowserState::default(),
@@ -890,7 +917,8 @@ impl StudioLayout {
 
     /// Main workspace window bounds — preferred owner for dialogs on Windows.
     pub(super) fn studio_window_bounds(&self, _cx: &mut gpui::App) -> Option<Bounds<gpui::Pixels>> {
-        self.window_hooks.cached_bounds
+        self.window_hooks
+            .cached_bounds
             .filter(|bounds| crate::window_position::is_valid_owner_bounds(*bounds))
     }
 
@@ -1210,6 +1238,13 @@ impl StudioLayout {
             "view:zoom-in" => self.zoom_timeline_by(cx, 1.25),
             "view:zoom-out" => self.zoom_timeline_by(cx, 0.8),
             "view:reset-zoom" => self.reset_timeline_zoom(cx),
+            "view:toggle-virtual-keyboard" | "midi:toggle-virtual-keyboard" => {
+                let _ = self.virtual_keyboard.update(cx, |keyboard, cx| {
+                    keyboard.toggle(cx);
+                });
+                self.update_virtual_keyboard_target_status(cx);
+                cx.notify();
+            }
 
             // ── Project / track / edit commands available in native shell ─
             // New Project no longer opens a modal wizard — it drops straight

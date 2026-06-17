@@ -2,7 +2,10 @@
 
 use super::*;
 
-pub(crate) fn combo_menu_position(anchor: OverlayAnchor, window: &Window) -> crate::overlay::OverlayPosition {
+pub(crate) fn combo_menu_position(
+    anchor: OverlayAnchor,
+    window: &Window,
+) -> crate::overlay::OverlayPosition {
     let layout = settings_form_column(window);
     let refreshed = refresh_form_anchor(anchor, layout);
     let content_bounds = external_dialog_overlay_bounds(window);
@@ -355,8 +358,9 @@ pub(crate) fn hardware_combo_overlay(
                 &selected,
                 &options,
                 Arc::new(move |value, window, cx| {
-                    if let Some(mode) =
-                        FrameRateMode::all().into_iter().find(|m| m.label() == value)
+                    if let Some(mode) = FrameRateMode::all()
+                        .into_iter()
+                        .find(|m| m.label() == value)
                     {
                         up(
                             Arc::new(move |s| s.performance.frame_rate = mode),

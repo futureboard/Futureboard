@@ -189,7 +189,11 @@ impl StudioLayout {
 
     fn perform_pending_after_guard(&mut self, cx: &mut Context<Self>) {
         if self.lifecycle_guard.pending_lifecycle_action.is_some() {
-            let action = self.lifecycle_guard.pending_lifecycle_action.take().expect("checked");
+            let action = self
+                .lifecycle_guard
+                .pending_lifecycle_action
+                .take()
+                .expect("checked");
             self.run_lifecycle_action(action, cx);
             return;
         }
@@ -229,7 +233,9 @@ impl StudioLayout {
         self.shutdown_plugin_editors(cx);
 
         shutdown::log("phase: plugin bridge hosts");
-        super::plugin_bridge_runtime::shutdown_plugin_bridge(&mut self.plugin_editors.bridge_runtime);
+        super::plugin_bridge_runtime::shutdown_plugin_bridge(
+            &mut self.plugin_editors.bridge_runtime,
+        );
 
         shutdown::log("shutdown_studio end");
     }

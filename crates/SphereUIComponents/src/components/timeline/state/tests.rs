@@ -1056,7 +1056,10 @@ mod fx_reorder_tests {
 
         // A,B,C -> B,A,C
         assert!(state.set_insert_order(&track, &[b.clone(), a.clone(), c.clone()]));
-        assert_eq!(state.insert_order(&track), vec![b.clone(), a.clone(), c.clone()]);
+        assert_eq!(
+            state.insert_order(&track),
+            vec![b.clone(), a.clone(), c.clone()]
+        );
         // Idempotent: re-applying the same order is a no-op (no undo churn).
         assert!(!state.set_insert_order(&track, &[b.clone(), a.clone(), c.clone()]));
     }
@@ -1144,7 +1147,11 @@ mod fx_reorder_tests {
         };
         cmd.execute(&mut state);
         history.push(cmd);
-        assert_eq!(state.insert_order(&track), after, "execute applies new order");
+        assert_eq!(
+            state.insert_order(&track),
+            after,
+            "execute applies new order"
+        );
 
         assert!(history.undo(&mut state));
         assert_eq!(state.insert_order(&track), before, "undo restores order");

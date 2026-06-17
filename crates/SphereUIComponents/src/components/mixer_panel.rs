@@ -887,7 +887,11 @@ fn master_inserts_section(
         chips = chips.child(insert_chip(MASTER_TRACK_ID, insert_index, slot, callbacks));
     }
     if !master.inserts.is_empty() {
-        chips = chips.child(insert_drop_end(MASTER_TRACK_ID, master.inserts.len(), callbacks));
+        chips = chips.child(insert_drop_end(
+            MASTER_TRACK_ID,
+            master.inserts.len(),
+            callbacks,
+        ));
     }
     if !at_max {
         chips = chips.child(add_insert_button(MASTER_TRACK_ID, used, callbacks));

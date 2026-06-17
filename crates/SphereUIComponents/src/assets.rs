@@ -24,8 +24,7 @@ pub mod icons {
     pub const REPEAT: &str = include_str!("../../../packages/shared/lucide/icons/repeat.svg");
     pub const REPEAT2: &str = include_str!("../../../packages/shared/lucide/icons/repeat-2.svg");
     pub const TIMER: &str = include_str!("../../../packages/shared/lucide/icons/timer.svg");
-    pub const METRONOME: &str =
-        include_str!("../../../packages/shared/lucide/icons/metronome.svg");
+    pub const METRONOME: &str = include_str!("../../../packages/shared/lucide/icons/metronome.svg");
     pub const SAVE: &str = include_str!("../../../packages/shared/lucide/icons/save.svg");
     pub const FOLDER: &str = include_str!("../../../packages/shared/lucide/icons/folder.svg");
     pub const FOLDER_OPEN: &str =

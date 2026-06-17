@@ -335,6 +335,17 @@ impl AudioEngine {
         self.inner.midi_preview_note_off(track_id, channel, pitch)
     }
 
+    pub fn midi_preview_control_change(
+        &self,
+        track_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .midi_preview_control_change(track_id, channel, controller, value)
+    }
+
     pub fn midi_preview_all_notes_off(&self, track_id: String) -> Result<(), SphereAudioError> {
         self.inner.midi_preview_all_notes_off(track_id)
     }
@@ -360,6 +371,23 @@ impl AudioEngine {
     ) -> Result<(), SphereAudioError> {
         self.inner
             .plugin_preview_note_off(track_id, plugin_instance_id, channel, pitch)
+    }
+
+    pub fn plugin_preview_control_change(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.plugin_preview_control_change(
+            track_id,
+            plugin_instance_id,
+            channel,
+            controller,
+            value,
+        )
     }
 
     pub fn plugin_preview_all_notes_off(

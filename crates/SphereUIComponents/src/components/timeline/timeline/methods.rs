@@ -488,7 +488,12 @@ impl Timeline {
         cx.notify();
     }
 
-    pub(super) fn begin_erase_at(&mut self, beat: f32, clip_id: Option<String>, cx: &mut gpui::Context<Self>) {
+    pub(super) fn begin_erase_at(
+        &mut self,
+        beat: f32,
+        clip_id: Option<String>,
+        cx: &mut gpui::Context<Self>,
+    ) {
         self.erase_clip_drag = Some(HashSet::new());
         if let Some(id) = clip_id {
             self.erase_clip_drag.as_mut().unwrap().insert(id);
@@ -667,7 +672,10 @@ impl Timeline {
         }
     }
 
-    pub(super) fn add_time_signature_marker_at_playhead_from_header(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn add_time_signature_marker_at_playhead_from_header(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
         let beat = self.state.transport.playhead_beats as f64;
         let pt = self.state.time_signature_map.time_signature_at_beat(beat);
         if let Some(id) = self
@@ -680,7 +688,10 @@ impl Timeline {
         }
     }
 
-    pub(super) fn finish_time_signature_track_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn finish_time_signature_track_interaction(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(drag) = self.ts_drag.take() {
             if drag.moved {
                 self.mark_time_signature_map_changed(cx);

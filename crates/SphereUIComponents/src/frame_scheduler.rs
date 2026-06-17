@@ -174,9 +174,7 @@ pub fn detect_refresh_hz() -> u32 {
 #[cfg(windows)]
 fn query_refresh_hz_os() -> Option<u32> {
     use windows::core::PCWSTR;
-    use windows::Win32::Graphics::Gdi::{
-        EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS,
-    };
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
     let mut devmode = DEVMODEW {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
@@ -354,17 +352,29 @@ mod tests {
     fn meter_is_capped_at_60_but_respects_slower_continuous() {
         // 144 Hz DisplaySync: continuous ~6.9ms, meter capped to 60 Hz (~16.6ms).
         let meter = frame_interval(FrameRateMode::DisplaySync, 144, FrameClass::Meter);
-        assert!((ms(meter) - 1000.0 / 60.0).abs() < 0.2, "meter was {}ms", ms(meter));
+        assert!(
+            (ms(meter) - 1000.0 / 60.0).abs() < 0.2,
+            "meter was {}ms",
+            ms(meter)
+        );
         // Battery saver continuous (~33ms) is slower than 60 Hz → meter follows it.
         let bs_meter = frame_interval(FrameRateMode::BatterySaver, 144, FrameClass::Meter);
-        assert!((ms(bs_meter) - 1000.0 / 30.0).abs() < 0.2, "bs meter was {}ms", ms(bs_meter));
+        assert!(
+            (ms(bs_meter) - 1000.0 / 30.0).abs() < 0.2,
+            "bs meter was {}ms",
+            ms(bs_meter)
+        );
     }
 
     #[test]
     fn background_capped_at_30() {
         for mode in FrameRateMode::all() {
             let bg = frame_interval(mode, 144, FrameClass::Background);
-            assert!(ms(bg) >= 1000.0 / 30.0 - 0.2, "{mode:?} background {}ms too fast", ms(bg));
+            assert!(
+                ms(bg) >= 1000.0 / 30.0 - 0.2,
+                "{mode:?} background {}ms too fast",
+                ms(bg)
+            );
         }
     }
 
@@ -375,7 +385,11 @@ mod tests {
         assert!((ms(at_144) - 1000.0 / 30.0).abs() < 0.2);
         // 50 Hz: refresh/2 = 25 FPS dominates (40ms > 33ms).
         let at_50 = frame_interval(FrameRateMode::BatterySaver, 50, FrameClass::Continuous);
-        assert!((ms(at_50) - 1000.0 / 25.0).abs() < 0.5, "bs@50 was {}ms", ms(at_50));
+        assert!(
+            (ms(at_50) - 1000.0 / 25.0).abs() < 0.5,
+            "bs@50 was {}ms",
+            ms(at_50)
+        );
     }
 
     #[test]

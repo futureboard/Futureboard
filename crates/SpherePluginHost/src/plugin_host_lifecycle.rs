@@ -88,7 +88,9 @@ pub fn set_app_user_model_id() {
     match result {
         Ok(()) => eprintln!("[app-id] explicit_app_user_model_id={APP_USER_MODEL_ID} ok=true"),
         Err(error) => {
-            eprintln!("[app-id] SetCurrentProcessExplicitAppUserModelID failed ok=false error={error}")
+            eprintln!(
+                "[app-id] SetCurrentProcessExplicitAppUserModelID failed ok=false error={error}"
+            )
         }
     }
 }

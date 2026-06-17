@@ -1169,6 +1169,16 @@ fn dispatch(
                 .lock()
                 .preview_note_off(&plugin_instance_id, channel, pitch);
         }
+        HostCommand::PreviewControlChange {
+            plugin_instance_id,
+            channel,
+            controller,
+            value,
+        } => {
+            preview
+                .lock()
+                .preview_control_change(&plugin_instance_id, channel, controller, value);
+        }
         HostCommand::PreviewAllNotesOff { plugin_instance_id } => {
             preview.lock().preview_all_notes_off(&plugin_instance_id);
         }

@@ -242,8 +242,6 @@ impl Render for ClipResizeDrag {
     }
 }
 
-
-
 // ── Timeline scrollbars ─────────────────────────────────────────────────
 //
 // Both scrollbars are rendered as absolute overlays on top of the

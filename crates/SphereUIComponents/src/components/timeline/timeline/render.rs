@@ -1564,7 +1564,11 @@ pub(crate) fn horizontal_scrollbar(
 /// `(clip_start, length_beats)` that will be committed — snapping the length to
 /// the MIDI grid when snap is on and clamping to the minimum clip length. Shared
 /// by the live ghost preview and the commit so they can never disagree.
-pub(crate) fn compute_pen_clip_span(state: &TimelineState, start_beat: f32, end_beat: f32) -> (f32, f32) {
+pub(crate) fn compute_pen_clip_span(
+    state: &TimelineState,
+    start_beat: f32,
+    end_beat: f32,
+) -> (f32, f32) {
     use crate::components::timeline::timeline_state::{
         DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS,
     };

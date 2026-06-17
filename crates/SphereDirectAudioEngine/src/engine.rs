@@ -874,6 +874,21 @@ impl EngineInner {
         })
     }
 
+    pub fn midi_preview_control_change(
+        &self,
+        track_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::MidiPreviewControlChange {
+            track_id,
+            channel,
+            controller,
+            value,
+        })
+    }
+
     pub fn midi_preview_all_notes_off(&self, track_id: String) -> Result<(), SphereAudioError> {
         self.send_command(EngineCommand::MidiPreviewAllNotesOff { track_id })
     }
@@ -913,6 +928,23 @@ impl EngineInner {
             plugin_instance_id,
             channel,
             pitch,
+        })
+    }
+
+    pub fn plugin_preview_control_change(
+        &self,
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::PluginPreviewControlChange {
+            track_id,
+            plugin_instance_id,
+            channel,
+            controller,
+            value,
         })
     }
 
@@ -2478,9 +2510,11 @@ impl EngineInner {
                 EngineCommand::SetInsertParam { .. } => "SetInsertParam",
                 EngineCommand::MidiPreviewNoteOn { .. } => "MidiPreviewNoteOn",
                 EngineCommand::MidiPreviewNoteOff { .. } => "MidiPreviewNoteOff",
+                EngineCommand::MidiPreviewControlChange { .. } => "MidiPreviewControlChange",
                 EngineCommand::MidiPreviewAllNotesOff { .. } => "MidiPreviewAllNotesOff",
                 EngineCommand::PluginPreviewNoteOn { .. } => "PluginPreviewNoteOn",
                 EngineCommand::PluginPreviewNoteOff { .. } => "PluginPreviewNoteOff",
+                EngineCommand::PluginPreviewControlChange { .. } => "PluginPreviewControlChange",
                 EngineCommand::PluginPreviewAllNotesOff { .. } => "PluginPreviewAllNotesOff",
                 EngineCommand::StartTransport => "StartTransport",
                 EngineCommand::StopTransport => "StopTransport",
@@ -2560,7 +2594,6 @@ fn reported_buffer_size(config: &cpal::StreamConfig) -> u32 {
 // sites and the in-file controller keep resolving unchanged.
 mod render;
 pub use render::*;
-
 
 fn build_output_stream(
     device: &cpal::Device,
@@ -2868,6 +2901,19 @@ where
                         } => {
                             runtime.midi_preview_note_off(&track_id, channel, pitch);
                         }
+                        EngineCommand::MidiPreviewControlChange {
+                            track_id,
+                            channel,
+                            controller,
+                            value,
+                        } => {
+                            runtime.midi_preview_control_change(
+                                &track_id,
+                                channel,
+                                controller,
+                                value,
+                            );
+                        }
                         EngineCommand::MidiPreviewAllNotesOff { track_id } => {
                             runtime.midi_preview_all_notes_off(&track_id);
                         }
@@ -2897,6 +2943,21 @@ where
                                 &plugin_instance_id,
                                 channel,
                                 pitch,
+                            );
+                        }
+                        EngineCommand::PluginPreviewControlChange {
+                            track_id,
+                            plugin_instance_id,
+                            channel,
+                            controller,
+                            value,
+                        } => {
+                            runtime.bridge_preview_control_change(
+                                &track_id,
+                                &plugin_instance_id,
+                                channel,
+                                controller,
+                                value,
                             );
                         }
                         EngineCommand::PluginPreviewAllNotesOff {

@@ -55,11 +55,19 @@ impl SourceFingerprint {
 #[derive(Debug)]
 pub enum PeakFileError {
     Io(std::io::Error),
-    Truncated { field: &'static str },
+    Truncated {
+        field: &'static str,
+    },
     BadMagic,
     UnsupportedVersion(u32),
-    AlgorithmMismatch { expected: u32, found: u32 },
-    AssetMismatch { expected: String, found: String },
+    AlgorithmMismatch {
+        expected: u32,
+        found: u32,
+    },
+    AssetMismatch {
+        expected: String,
+        found: String,
+    },
     /// Source media changed since the peaks were generated (size/mtime differ).
     SourceChanged {
         expected: SourceFingerprint,

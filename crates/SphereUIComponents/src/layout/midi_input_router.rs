@@ -1,0 +1,282 @@
+use gpui::{App, Context};
+
+use crate::components;
+use crate::components::timeline::timeline_state::TrackType;
+use crate::midi_input::{
+    MidiInputEvent, MidiInputRouteStatus, MidiInputRouter, MidiInputSource, MidiInputTarget,
+    VirtualKeyboardEvent,
+};
+
+use super::StudioLayout;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VirtualKeyboardTargetStatus {
+    pub target: Option<MidiInputTarget>,
+    pub label: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl StudioLayout {
+    pub(super) fn update_virtual_keyboard_target_status(&mut self, cx: &mut Context<Self>) {
+        let status = self.resolve_virtual_keyboard_target(cx);
+        let label = status.label.clone();
+        let hint = status.hint.clone();
+        let _ = self.virtual_keyboard.update(cx, |panel, cx| {
+            panel.set_target_status(label, hint);
+            cx.notify();
+        });
+    }
+
+    pub(super) fn release_virtual_keyboard_notes(&mut self, cx: &mut Context<Self>) {
+        let _ = self.virtual_keyboard.update(cx, |panel, cx| {
+            panel.release_all(cx);
+        });
+    }
+
+    pub(super) fn route_virtual_keyboard_event(
+        &mut self,
+        event: VirtualKeyboardEvent,
+        cx: &App,
+    ) -> MidiInputRouteStatus {
+        let status = self.resolve_virtual_keyboard_target(cx);
+        let Some(target) = status.target else {
+            if virtual_keyboard_debug() {
+                eprintln!("[vkbd] route event={event:?} target=none -> NoTarget");
+            }
+            return MidiInputRouteStatus::NoTarget;
+        };
+        if virtual_keyboard_debug() {
+            eprintln!(
+                "[vkbd] route event={event:?} target_track={} instance={:?}",
+                target.track_id, target.plugin_instance_id
+            );
+        }
+        self.route_midi_input_event(
+            MidiInputSource::VirtualKeyboard,
+            target,
+            MidiInputEvent::from(event),
+            cx,
+        )
+    }
+
+    pub(super) fn route_midi_input_event(
+        &mut self,
+        source: MidiInputSource,
+        target: MidiInputTarget,
+        event: MidiInputEvent,
+        _cx: &App,
+    ) -> MidiInputRouteStatus {
+        let _source = source;
+        let bridge_instance = target.plugin_instance_id.clone();
+        let sink_ready = match self
+            .plugin_editors
+            .bridge_runtime
+            .as_ref()
+            .map(|rt| rt.try_lock())
+        {
+            Some(Ok(bridge)) => bridge_instance
+                .as_ref()
+                .is_some_and(|id| bridge.audio_sink_for(id).is_some()),
+            Some(Err(_)) => bridge_instance.is_some(),
+            None => false,
+        };
+
+        if sink_ready {
+            let Some(engine) = self.audio_bridge.engine.as_ref() else {
+                return MidiInputRouteStatus::EngineUnavailable;
+            };
+            let instance_id = bridge_instance.unwrap_or_default();
+            let result = match event {
+                MidiInputEvent::NoteOn {
+                    note,
+                    velocity,
+                    channel,
+                } => engine.plugin_preview_note_on(
+                    target.track_id.clone(),
+                    instance_id,
+                    MidiInputRouter::sanitize_channel(channel),
+                    MidiInputRouter::sanitize_note(note),
+                    MidiInputRouter::sanitize_velocity(velocity),
+                ),
+                MidiInputEvent::NoteOff { note, channel } => engine.plugin_preview_note_off(
+                    target.track_id.clone(),
+                    instance_id,
+                    MidiInputRouter::sanitize_channel(channel),
+                    MidiInputRouter::sanitize_note(note),
+                ),
+                MidiInputEvent::ControlChange {
+                    controller,
+                    value,
+                    channel,
+                } => engine.plugin_preview_control_change(
+                    target.track_id.clone(),
+                    instance_id,
+                    MidiInputRouter::sanitize_channel(channel),
+                    controller.min(127),
+                    value.min(127),
+                ),
+                MidiInputEvent::AllNotesOff | MidiInputEvent::Panic => {
+                    engine.plugin_preview_all_notes_off(target.track_id.clone(), instance_id)
+                }
+            };
+            return route_result(result);
+        }
+
+        if let Some(instance_id) = bridge_instance.clone() {
+            if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
+                if let Ok(mut bridge) = runtime.try_lock() {
+                    let result = match event {
+                        MidiInputEvent::NoteOn {
+                            note,
+                            velocity,
+                            channel,
+                        } => bridge.preview_note_on(
+                            instance_id,
+                            MidiInputRouter::sanitize_channel(channel),
+                            MidiInputRouter::sanitize_note(note),
+                            MidiInputRouter::sanitize_velocity(velocity),
+                        ),
+                        MidiInputEvent::NoteOff { note, channel } => bridge.preview_note_off(
+                            instance_id,
+                            MidiInputRouter::sanitize_channel(channel),
+                            MidiInputRouter::sanitize_note(note),
+                        ),
+                        MidiInputEvent::ControlChange {
+                            controller,
+                            value,
+                            channel,
+                        } => bridge.preview_control_change(
+                            instance_id,
+                            MidiInputRouter::sanitize_channel(channel),
+                            controller.min(127),
+                            value.min(127),
+                        ),
+                        MidiInputEvent::AllNotesOff => bridge.preview_all_notes_off(instance_id),
+                        MidiInputEvent::Panic => bridge.midi_panic(instance_id),
+                    };
+                    return route_result(result);
+                }
+            }
+        }
+
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
+            return MidiInputRouteStatus::EngineUnavailable;
+        };
+        let result = match event {
+            MidiInputEvent::NoteOn {
+                note,
+                velocity,
+                channel,
+            } => engine.midi_preview_note_on(
+                target.track_id.clone(),
+                MidiInputRouter::sanitize_channel(channel),
+                MidiInputRouter::sanitize_note(note),
+                MidiInputRouter::sanitize_velocity(velocity),
+            ),
+            MidiInputEvent::NoteOff { note, channel } => engine.midi_preview_note_off(
+                target.track_id.clone(),
+                MidiInputRouter::sanitize_channel(channel),
+                MidiInputRouter::sanitize_note(note),
+            ),
+            MidiInputEvent::ControlChange {
+                controller,
+                value,
+                channel,
+            } => engine.midi_preview_control_change(
+                target.track_id.clone(),
+                MidiInputRouter::sanitize_channel(channel),
+                controller.min(127),
+                value.min(127),
+            ),
+            MidiInputEvent::AllNotesOff | MidiInputEvent::Panic => {
+                engine.midi_preview_all_notes_off(target.track_id.clone())
+            }
+        };
+        route_result(result)
+    }
+
+    pub(super) fn resolve_virtual_keyboard_target(&self, cx: &App) -> VirtualKeyboardTargetStatus {
+        let timeline = self.timeline.read(cx);
+        let state = &timeline.state;
+
+        let selected = state
+            .selection
+            .selected_track_id
+            .as_deref()
+            .and_then(|track_id| state.find_track(track_id))
+            .filter(|track| is_keyboard_target_candidate(track));
+
+        let track = selected.or_else(|| {
+            state
+                .tracks
+                .iter()
+                .find(|track| track.armed && is_keyboard_target_candidate(track))
+        });
+
+        let Some(track) = track else {
+            return VirtualKeyboardTargetStatus {
+                target: None,
+                label: None,
+                hint: Some("Select or arm an instrument track to play.".to_string()),
+            };
+        };
+
+        let plugin_instance_id = track
+            .instrument_plugin_instance_id
+            .clone()
+            .or_else(|| first_instrument_insert_id(track));
+
+        let Some(plugin_instance_id) = plugin_instance_id else {
+            return VirtualKeyboardTargetStatus {
+                target: None,
+                label: Some(track.name.clone()),
+                hint: Some("Load an instrument on the selected track.".to_string()),
+            };
+        };
+
+        VirtualKeyboardTargetStatus {
+            target: Some(MidiInputTarget {
+                track_id: track.id.clone(),
+                plugin_instance_id: Some(plugin_instance_id),
+            }),
+            label: Some(track.name.clone()),
+            hint: None,
+        }
+    }
+}
+
+/// `FUTUREBOARD_VIRTUAL_KEYBOARD_DEBUG=1` also traces routed virtual-keyboard
+/// events here (event + resolved target track), complementing the per-key
+/// classification trace in `virtual_keyboard.rs`. Cached on first read.
+fn virtual_keyboard_debug() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_VIRTUAL_KEYBOARD_DEBUG").is_some())
+}
+
+fn route_result<E: std::fmt::Display>(result: Result<(), E>) -> MidiInputRouteStatus {
+    match result {
+        Ok(()) => MidiInputRouteStatus::Routed,
+        Err(error) => MidiInputRouteStatus::DispatchFailed(error.to_string()),
+    }
+}
+
+fn is_keyboard_target_candidate(track: &components::timeline::timeline_state::TrackState) -> bool {
+    matches!(track.track_type, TrackType::Instrument | TrackType::Midi)
+}
+
+fn first_instrument_insert_id(
+    track: &components::timeline::timeline_state::TrackState,
+) -> Option<String> {
+    match track.track_type {
+        TrackType::Instrument => track
+            .instrument_insert()
+            .filter(|insert| insert.plugin_id.is_some())
+            .map(|insert| insert.id.clone()),
+        TrackType::Midi => track
+            .inserts
+            .first()
+            .filter(|insert| insert.plugin_id.is_some())
+            .map(|insert| insert.id.clone()),
+        _ => None,
+    }
+}

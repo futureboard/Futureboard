@@ -480,7 +480,11 @@ impl PianoRoll {
             })
     }
 
-    pub(super) fn render_toolbar(&self, cx: &mut Context<Self>, clip_id: Option<&str>) -> impl IntoElement {
+    pub(super) fn render_toolbar(
+        &self,
+        cx: &mut Context<Self>,
+        clip_id: Option<&str>,
+    ) -> impl IntoElement {
         let note_count = clip_id
             .and_then(|cid| {
                 self.timeline
@@ -693,7 +697,11 @@ impl PianoRoll {
             })
     }
 
-    pub(super) fn render_body(&mut self, cx: &mut Context<Self>, clip_id: &str) -> impl IntoElement {
+    pub(super) fn render_body(
+        &mut self,
+        cx: &mut Context<Self>,
+        clip_id: &str,
+    ) -> impl IntoElement {
         let (view_w, view_h) = self.grid_view_size();
         let track_color = self.track_color_for_clip(cx, clip_id);
         let (bpb, clip_len, show_playhead, playing, playhead_rel, loop_region) = {
@@ -1057,7 +1065,11 @@ impl PianoRoll {
             .child(note_inspector)
     }
 
-    pub(super) fn render_note_inspector(&self, cx: &mut Context<Self>, clip_id: &str) -> impl IntoElement {
+    pub(super) fn render_note_inspector(
+        &self,
+        cx: &mut Context<Self>,
+        clip_id: &str,
+    ) -> impl IntoElement {
         let snapshot = self.note_inspector_snapshot(cx, clip_id);
         let count = snapshot.count();
         let step = self.grid_res.beats().max(MIN_NOTE_BEATS);
@@ -1430,7 +1442,10 @@ impl PianoRoll {
     }
 
     /// Loop region band in the ruler header (clip-local beats).
-    pub(super) fn build_loop_ruler_markers(&self, loop_region: Option<(f32, f32)>) -> Vec<gpui::AnyElement> {
+    pub(super) fn build_loop_ruler_markers(
+        &self,
+        loop_region: Option<(f32, f32)>,
+    ) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
         let Some((lo, hi)) = loop_region else {
             return out;
@@ -1558,7 +1573,12 @@ impl PianoRoll {
     }
 
     /// Bar/beat ruler header labels, aligned to the note grid via `beat_to_x`.
-    pub(super) fn build_ruler(&self, start_beat: f32, end_beat: f32, bpb: f32) -> Vec<gpui::AnyElement> {
+    pub(super) fn build_ruler(
+        &self,
+        start_beat: f32,
+        end_beat: f32,
+        bpb: f32,
+    ) -> Vec<gpui::AnyElement> {
         let ppb = self.ppb.max(0.0001);
         let bpb = bpb.max(1.0);
         // Label each beat when zoomed in; otherwise label only bar starts.
@@ -1649,7 +1669,11 @@ impl PianoRoll {
     /// quantize. Empty unless the Quantize button is hovered. Mirrors
     /// [`Self::quantize_selection`]'s target set: the selection, or every note
     /// when nothing is selected. Notes already on the grid are skipped.
-    pub(super) fn build_quantize_preview(&self, cx: &Context<Self>, clip_id: &str) -> Vec<gpui::AnyElement> {
+    pub(super) fn build_quantize_preview(
+        &self,
+        cx: &Context<Self>,
+        clip_id: &str,
+    ) -> Vec<gpui::AnyElement> {
         if !self.quantize_preview {
             return Vec::new();
         }

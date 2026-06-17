@@ -2814,9 +2814,6 @@ impl NoteInspectorSnapshot {
     }
 }
 
-
-
-
 // ── CC controller lane ───────────────────────────────────────────────────────
 fn cc_kind_label(kind: MidiControllerKind) -> String {
     match kind {
@@ -2831,7 +2828,6 @@ fn cc_kind_label(kind: MidiControllerKind) -> String {
         MidiControllerKind::PolyPressure => "Poly Pressure".to_string(),
     }
 }
-
 
 // ── Small toolbar helpers ───────────────────────────────────────────────────
 fn plural(count: usize) -> &'static str {

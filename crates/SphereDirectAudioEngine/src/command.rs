@@ -42,6 +42,13 @@ pub enum EngineCommand {
         channel: u8,
         pitch: u8,
     },
+    /// Immediate MIDI CC preview from the UI/control MIDI input router.
+    MidiPreviewControlChange {
+        track_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    },
     /// Panic/cleanup for preview notes on one track.
     MidiPreviewAllNotesOff { track_id: String },
     /// Sample-synchronous bridged-plugin preview note-on (audio callback writes
@@ -58,6 +65,13 @@ pub enum EngineCommand {
         plugin_instance_id: String,
         channel: u8,
         pitch: u8,
+    },
+    PluginPreviewControlChange {
+        track_id: String,
+        plugin_instance_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
     },
     PluginPreviewAllNotesOff {
         track_id: String,

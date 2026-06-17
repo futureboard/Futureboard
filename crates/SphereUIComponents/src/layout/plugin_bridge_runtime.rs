@@ -399,6 +399,17 @@ impl PluginBridgeRuntime {
             .preview_note_off(plugin_instance_id, channel, pitch)
     }
 
+    pub fn preview_control_change(
+        &mut self,
+        plugin_instance_id: String,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Result<(), PluginHostClientError> {
+        self.client
+            .preview_control_change(plugin_instance_id, channel, controller, value)
+    }
+
     pub fn preview_all_notes_off(
         &mut self,
         plugin_instance_id: String,

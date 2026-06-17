@@ -382,6 +382,21 @@
           "children": []
         },
         {
+          "id": "midi.virtual_keyboard",
+          "kind": "normal",
+          "label": "Virtual Keyboard",
+          "icon": "keyboard-music",
+          "shortcut": "Alt+K",
+          "command": "view:toggle-virtual-keyboard",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": null,
+          "children": []
+        },
+        {
           "id": "midi.sep.editor",
           "kind": "separator",
           "enabled": true,

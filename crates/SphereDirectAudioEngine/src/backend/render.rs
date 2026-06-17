@@ -499,6 +499,14 @@ pub fn drain_commands(
             } => {
                 runtime.midi_preview_note_off(&track_id, channel, pitch);
             }
+            EngineCommand::MidiPreviewControlChange {
+                track_id,
+                channel,
+                controller,
+                value,
+            } => {
+                runtime.midi_preview_control_change(&track_id, channel, controller, value);
+            }
             EngineCommand::MidiPreviewAllNotesOff { track_id } => {
                 runtime.midi_preview_all_notes_off(&track_id);
             }
@@ -534,6 +542,21 @@ pub fn drain_commands(
                     );
                 }
                 runtime.bridge_preview_note_off(&track_id, &plugin_instance_id, channel, pitch);
+            }
+            EngineCommand::PluginPreviewControlChange {
+                track_id,
+                plugin_instance_id,
+                channel,
+                controller,
+                value,
+            } => {
+                runtime.bridge_preview_control_change(
+                    &track_id,
+                    &plugin_instance_id,
+                    channel,
+                    controller,
+                    value,
+                );
             }
             EngineCommand::PluginPreviewAllNotesOff {
                 track_id,

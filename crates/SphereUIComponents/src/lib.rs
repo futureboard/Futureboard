@@ -49,6 +49,7 @@ pub mod keymap;
 pub mod layout;
 pub mod menu;
 pub mod midi_devices;
+pub mod midi_input;
 pub mod native_macos_menu;
 pub mod overlay;
 pub mod paths;

@@ -38,8 +38,7 @@ pub(crate) struct StudioWindowHooks {
 #[derive(Default)]
 pub(crate) struct MidiEditorWindowState {
     /// Global floating MIDI editor window; `None` when closed.
-    pub window:
-        Option<gpui::WindowHandle<crate::components::midi_editor_window::MidiEditorWindow>>,
+    pub window: Option<gpui::WindowHandle<crate::components::midi_editor_window::MidiEditorWindow>>,
     /// Owner bounds for a deferred editor open.
     pub pending_open: Option<Bounds<gpui::Pixels>>,
 }
@@ -142,7 +141,8 @@ impl StudioLayout {
             self.arm_catalog_load(cx);
         }
         let instrument_plugins: Vec<sphere_plugin_host::RegistryPlugin> = self
-            .plugin_catalog.available
+            .plugin_catalog
+            .available
             .as_ref()
             .map(|plugins| {
                 plugins
@@ -348,7 +348,8 @@ impl StudioLayout {
 
         // (device name, channel count) for the read-only channel lists (Phase C).
         let available_input_channels: Vec<(String, u32)> = self
-            .audio_bridge.engine
+            .audio_bridge
+            .engine
             .as_ref()
             .map(|engine| {
                 engine
@@ -359,7 +360,8 @@ impl StudioLayout {
             })
             .unwrap_or_default();
         let available_output_channels: Vec<(String, u32)> = self
-            .audio_bridge.engine
+            .audio_bridge
+            .engine
             .as_ref()
             .map(|engine| {
                 engine

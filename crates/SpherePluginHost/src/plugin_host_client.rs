@@ -450,6 +450,21 @@ impl PluginHostClient {
         })
     }
 
+    pub fn preview_control_change(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::PreviewControlChange {
+            plugin_instance_id: plugin_instance_id.into(),
+            channel,
+            controller,
+            value,
+        })
+    }
+
     pub fn preview_all_notes_off(
         &mut self,
         plugin_instance_id: impl Into<String>,

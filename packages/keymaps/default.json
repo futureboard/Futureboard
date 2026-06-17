@@ -41,6 +41,7 @@
     "midi:transpose-down": "ArrowDown",
     "midi:transpose-octave-up": "Shift+ArrowUp",
     "midi:transpose-octave-down": "Shift+ArrowDown",
+    "view:toggle-virtual-keyboard": "Alt+K",
     "project:settings": "Ctrl+.",
     "track:show-add-dialog": "Ctrl+T",
     "track:add": "T",

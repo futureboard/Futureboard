@@ -125,9 +125,7 @@ impl StudioLayout {
             _ => {
                 let focused = self.command_palette_input.is_focused(window);
                 if focused || is_text_input_key(event) {
-                    let action = self
-                        .command_palette_input
-                        .handle_key_ime(event, Some(cx));
+                    let action = self.command_palette_input.handle_key_ime(event, Some(cx));
                     self.sync_text_input_target(TextMenuTarget::CommandPalette);
                     return !matches!(action, TextInputAction::Pass);
                 }
@@ -242,7 +240,10 @@ impl StudioLayout {
         if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
-        let action = self.tempo_edit.bpm_input.handle_key_with_clipboard(event, Some(cx));
+        let action = self
+            .tempo_edit
+            .bpm_input
+            .handle_key_with_clipboard(event, Some(cx));
         match action {
             TextInputAction::Submit => self.commit_bpm_edit(cx),
             TextInputAction::Cancel => self.cancel_bpm_edit(cx),
@@ -399,9 +400,7 @@ impl StudioLayout {
             }
             _ => {
                 if search_focused || is_text_input_key(event) {
-                    let action = self
-                        .browser_search_input
-                        .handle_key_ime(event, Some(cx));
+                    let action = self.browser_search_input.handle_key_ime(event, Some(cx));
                     self.sync_text_input_target(TextMenuTarget::BrowserSearch);
                     return !matches!(action, TextInputAction::Pass);
                 }
@@ -668,10 +667,12 @@ impl StudioLayout {
             return true;
         }
         let action = if clip_name_focused {
-            self.inspector_name_edit.clip_name_input
+            self.inspector_name_edit
+                .clip_name_input
                 .handle_key_ime(event, Some(cx))
         } else {
-            self.inspector_name_edit.name_input
+            self.inspector_name_edit
+                .name_input
                 .handle_key_ime(event, Some(cx))
         };
         match action {

@@ -76,6 +76,16 @@ impl VoiceMidiState {
         self.tail_blocks = PREVIEW_TAIL_BLOCKS;
     }
 
+    fn preview_control_change(&mut self, channel: u8, controller: u8, value: u8) {
+        self.pending_events.push(Vst3MidiEvent::control_change(
+            0,
+            channel.min(15),
+            controller.min(127) as u16,
+            value.min(127) as f32 / 127.0,
+        ));
+        self.tail_blocks = PREVIEW_TAIL_BLOCKS;
+    }
+
     fn panic(&mut self) {
         let drained: Vec<PreviewNoteKey> = self.active_notes.drain(..).collect();
         for key in drained {
@@ -792,6 +802,22 @@ impl PluginHostPreviewEngine {
             return;
         };
         instance.midi.lock().preview_note_off(channel, pitch);
+    }
+
+    pub fn preview_control_change(
+        &mut self,
+        plugin_instance_id: &str,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) {
+        let Some(instance) = self.instances.get(plugin_instance_id) else {
+            return;
+        };
+        instance
+            .midi
+            .lock()
+            .preview_control_change(channel, controller, value);
     }
 
     pub fn preview_all_notes_off(&mut self, plugin_instance_id: &str) {

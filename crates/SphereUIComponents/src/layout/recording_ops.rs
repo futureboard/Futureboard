@@ -224,7 +224,8 @@ impl StudioLayout {
         });
 
         let playing = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|s| s.transport_playing)
             .unwrap_or(false);
@@ -399,7 +400,8 @@ impl StudioLayout {
 
         // (Re)initialize the preview clip for a new take.
         let need_init = self
-            .recording.preview
+            .recording
+            .preview
             .as_ref()
             .map(|p| p.recording_id != rec_id)
             .unwrap_or(true);

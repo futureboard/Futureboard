@@ -1,8 +1,8 @@
-mod sections;
 mod combo;
+mod sections;
 mod window;
-pub use sections::*;
 pub use combo::*;
+pub use sections::*;
 pub use window::*;
 
 use std::sync::Arc;
@@ -234,7 +234,6 @@ pub struct SettingsDialogCallbacks {
     pub on_toggle_hardware_combo:
         Arc<dyn Fn(HardwareCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>,
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn build_settings_content(
@@ -2111,7 +2110,6 @@ const AUTOSAVE_MAX_BACKUPS_OPTIONS: &[u32] = &[1, 2, 3, 5, 10, 20, 50, 99];
 const SAMPLE_RATE_OPTIONS: &[u32] = &[44100, 48000, 88200, 96000];
 const BUFFER_SIZE_OPTIONS: &[u32] = &[64, 128, 256, 512, 1024];
 
-
 pub type OnSettingUpdate = Arc<dyn Fn(UpdateSettingFn, &mut App) + 'static>;
 
 pub struct SettingsWindow {
@@ -2139,5 +2137,3 @@ pub struct SettingsWindow {
     on_update: OnSettingUpdate,
     focus_handle: FocusHandle,
 }
-
-

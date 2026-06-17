@@ -97,7 +97,8 @@ impl StudioLayout {
                     return;
                 }
                 let playing = self
-                    .audio_bridge.stats
+                    .audio_bridge
+                    .stats
                     .as_ref()
                     .map(|stats| stats.transport_playing)
                     .unwrap_or(false);
@@ -176,7 +177,8 @@ impl StudioLayout {
         self.timeline.read(cx).state.transport.recording
             || self.recording.preview.is_some()
             || self
-                .audio_bridge.engine
+                .audio_bridge
+                .engine
                 .as_ref()
                 .map(|engine| engine.recording_status().active)
                 .unwrap_or(false)
@@ -238,7 +240,8 @@ impl StudioLayout {
                 timeline.state.time_signature_has_markers(),
                 timeline.state.transport.recording
                     || self
-                        .audio_bridge.engine
+                        .audio_bridge
+                        .engine
                         .as_ref()
                         .map(|engine| engine.recording_status().active)
                         .unwrap_or(false),
@@ -250,7 +253,8 @@ impl StudioLayout {
             )
         };
         let playing = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
@@ -391,7 +395,8 @@ impl StudioLayout {
             (None, _, _) => "Ready".to_string(),
         };
         let audio = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|stats| {
                 format!(
@@ -419,7 +424,8 @@ impl StudioLayout {
 
     pub(super) fn frame_reason(&self) -> &'static str {
         let playing = self
-            .audio_bridge.stats
+            .audio_bridge
+            .stats
             .as_ref()
             .map(|s| s.transport_playing)
             .unwrap_or(false);

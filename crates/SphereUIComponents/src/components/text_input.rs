@@ -60,7 +60,11 @@ macro_rules! impl_single_input_window_ime {
                 self.$field.marked_text_range_utf16()
             }
 
-            fn unmark_text(&mut self, _window: &mut ::gpui::Window, cx: &mut ::gpui::Context<Self>) {
+            fn unmark_text(
+                &mut self,
+                _window: &mut ::gpui::Window,
+                cx: &mut ::gpui::Context<Self>,
+            ) {
                 self.$field.unmark_text();
                 cx.notify();
             }
@@ -1541,12 +1545,10 @@ fn text_field_inner(
                 .min_w_0()
                 .overflow_hidden()
                 .child(content)
-                .child(
-                    div().absolute().inset_0().child(TextHitProbe {
-                        text: value.clone(),
-                        hit: hit.clone(),
-                    }),
-                ),
+                .child(div().absolute().inset_0().child(TextHitProbe {
+                    text: value.clone(),
+                    hit: hit.clone(),
+                })),
         )
         .children(ime_layer)
 }
@@ -1819,7 +1821,10 @@ mod tests {
         ev(&mut b, Ev::DeleteBackward);
         assert_eq!(b.value, "กิ", "backspace removes the trailing น only");
         ev(&mut b, Ev::DeleteBackward);
-        assert_eq!(b.value, "", "backspace removes the base+vowel cluster as one unit");
+        assert_eq!(
+            b.value, "",
+            "backspace removes the base+vowel cluster as one unit"
+        );
     }
 
     #[test]
@@ -1960,12 +1965,18 @@ mod tests {
         let mut b = buf("👍a");
         b.cursor = 0;
         ev(&mut b, Ev::DeleteForward);
-        assert_eq!(b.value, "a", "forward-delete removes the leading emoji grapheme");
+        assert_eq!(
+            b.value, "a",
+            "forward-delete removes the leading emoji grapheme"
+        );
 
         let mut b2 = buf("e\u{0301}x");
         b2.cursor = 0;
         ev(&mut b2, Ev::DeleteForward);
-        assert_eq!(b2.value, "x", "forward-delete removes base + combining together");
+        assert_eq!(
+            b2.value, "x",
+            "forward-delete removes base + combining together"
+        );
     }
 
     #[test]
@@ -2116,11 +2127,22 @@ mod tests {
     #[test]
     fn repeatable_edit_keys_are_classified() {
         use super::is_repeatable_edit_key;
-        for k in ["backspace", "delete", "left", "arrow_left", "right", "home", "end"] {
+        for k in [
+            "backspace",
+            "delete",
+            "left",
+            "arrow_left",
+            "right",
+            "home",
+            "end",
+        ] {
             assert!(is_repeatable_edit_key(&key_event(k)), "{k} should repeat");
         }
         for k in ["enter", "escape", "a", "tab"] {
-            assert!(!is_repeatable_edit_key(&key_event(k)), "{k} should not repeat");
+            assert!(
+                !is_repeatable_edit_key(&key_event(k)),
+                "{k} should not repeat"
+            );
         }
     }
 }

@@ -43,9 +43,7 @@ impl StudioLayout {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    waveform_cache::decode_and_cache_file(&decode_path).is_some()
-                })
+                .spawn(async move { waveform_cache::decode_and_cache_file(&decode_path).is_some() })
                 .await;
             let _ = this.update(cx, move |this, cx| {
                 this.file_browser.end_waveform_load(&path);

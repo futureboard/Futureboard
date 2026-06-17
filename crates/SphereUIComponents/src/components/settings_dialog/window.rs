@@ -111,7 +111,12 @@ impl SettingsWindow {
         .detach();
     }
 
-    pub(super) fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn handle_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if event.keystroke.key.as_str() == "escape" && self.open_hardware_combo.take().is_some() {
             self.hardware_combo_anchor = None;
             cx.notify();
@@ -474,4 +479,3 @@ pub fn open_settings_window(
     })
     .map_err(|error| error.to_string())
 }
-

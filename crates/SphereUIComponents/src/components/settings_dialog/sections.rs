@@ -128,7 +128,11 @@ pub(crate) fn settings_header(title: &'static str, _icon_path: &'static str) -> 
     settings_section_title(title)
 }
 
-pub(crate) fn settings_i18n_header(i18n: I18n, key: &str, _icon_path: &'static str) -> impl IntoElement {
+pub(crate) fn settings_i18n_header(
+    i18n: I18n,
+    key: &str,
+    _icon_path: &'static str,
+) -> impl IntoElement {
     settings_section_title(i18n.tr(key))
 }
 
@@ -426,7 +430,10 @@ pub(crate) fn tab_matches_search(
         SettingsTab::Performance => {
             is_match("Renderer", &["renderer", "gpu", "cpu", "wgpu"])
                 || is_match("GPU Device", &["gpu", "device", "adapter"])
-                || is_match("Frame Rate", &["frame", "fps", "refresh", "vsync", "display sync"])
+                || is_match(
+                    "Frame Rate",
+                    &["frame", "fps", "refresh", "vsync", "display sync"],
+                )
                 || is_match("Performance", &["cpu", "engine"])
         }
         SettingsTab::Advanced => is_match("Advanced", &["experimental"]),
@@ -535,7 +542,10 @@ pub(crate) fn midi_direction_label(i18n: &I18n, direction: MidiDeviceDirection) 
     }
 }
 
-pub(crate) fn midi_device_status_label(i18n: &I18n, device: &MidiDeviceSetting) -> (String, BoxListBadgeTone) {
+pub(crate) fn midi_device_status_label(
+    i18n: &I18n,
+    device: &MidiDeviceSetting,
+) -> (String, BoxListBadgeTone) {
     if !device.connected {
         (
             i18n.tr("settings.midi.status.missing"),

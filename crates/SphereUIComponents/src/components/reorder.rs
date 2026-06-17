@@ -59,5 +59,7 @@ pub fn drag_handle() -> Div {
 /// a 1px accent line on the row's top edge marking "drop above this slot".
 /// Shared so every reorderable list shows the same indicator.
 pub fn drop_over_highlight(style: StyleRefinement) -> StyleRefinement {
-    style.border_t(px(1.0)).border_color(Colors::accent_primary())
+    style
+        .border_t(px(1.0))
+        .border_color(Colors::accent_primary())
 }

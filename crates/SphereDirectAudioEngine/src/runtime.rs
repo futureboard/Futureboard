@@ -1488,6 +1488,16 @@ impl RuntimeProject {
         self.bridge_preview_note_off(track_id, "", channel, pitch);
     }
 
+    pub fn midi_preview_control_change(
+        &mut self,
+        track_id: &str,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) {
+        self.bridge_preview_control_change(track_id, "", channel, controller, value);
+    }
+
     pub fn midi_preview_all_notes_off(&mut self, track_id: &str) {
         self.bridge_preview_all_notes_off(track_id, "");
     }
@@ -1560,6 +1570,36 @@ impl RuntimeProject {
         ) {
             self.set_preview_active(track_id, channel, pitch, false);
         }
+    }
+
+    pub fn bridge_preview_control_change(
+        &mut self,
+        track_id: &str,
+        plugin_instance_id: &str,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) {
+        let channel = channel.min(15);
+        let controller = controller.min(127);
+        let value = value.min(127);
+        if self.plugin_bridge_sinks.contains_key(plugin_instance_id) {
+            self.push_bridge_preview_midi(
+                plugin_instance_id,
+                0xB0 | channel,
+                controller,
+                value,
+                "control_change",
+            );
+            return;
+        }
+        let _ = self.queue_preview_event(
+            track_id,
+            Vst3MidiEvent::control_change(0, channel, controller as u16, value as f32 / 127.0),
+            "control_change",
+            channel,
+            controller,
+        );
     }
 
     pub fn bridge_preview_all_notes_off(&mut self, track_id: &str, plugin_instance_id: &str) {

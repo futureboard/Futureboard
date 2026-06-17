@@ -82,7 +82,13 @@ impl PianoRoll {
 
     /// Hit-test the active lane's points; return the id of one within ~6 px of
     /// the local strip coordinate.
-    pub(super) fn cc_point_at(&self, cx: &Context<Self>, clip_id: &str, lx: f32, ly: f32) -> Option<u64> {
+    pub(super) fn cc_point_at(
+        &self,
+        cx: &Context<Self>,
+        clip_id: &str,
+        lx: f32,
+        ly: f32,
+    ) -> Option<u64> {
         let (_, cc_h) = self.cc_view_size();
         let kind = self.active_cc;
         let tl = self.timeline.read(cx);
@@ -135,7 +141,13 @@ impl PianoRoll {
 
     /// Begin a Shift+drag ramp: snapshot the lane for undo and anchor the line
     /// at the cursor. The line is rebuilt on every move from the pre-drag points.
-    pub(super) fn begin_cc_line(&mut self, lx: f32, ly: f32, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn begin_cc_line(
+        &mut self,
+        lx: f32,
+        ly: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&self.focus, cx);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
@@ -305,7 +317,11 @@ impl PianoRoll {
         .into_any_element()
     }
 
-    pub(super) fn build_cc_points(&self, cx: &Context<Self>, clip_id: &str) -> Vec<gpui::AnyElement> {
+    pub(super) fn build_cc_points(
+        &self,
+        cx: &Context<Self>,
+        clip_id: &str,
+    ) -> Vec<gpui::AnyElement> {
         let (view_w, cc_h) = self.cc_view_size();
         let kind = self.active_cc;
         let pts: Vec<(u64, f32, f32)> = self

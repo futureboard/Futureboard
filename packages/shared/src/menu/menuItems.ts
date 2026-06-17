@@ -229,6 +229,13 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "midi:open-editor",
       },
       {
+        id: "midi.virtual_keyboard",
+        label: "Virtual Keyboard",
+        accelerator: "Alt+K",
+        icon: "keyboard-music",
+        action: "view:toggle-virtual-keyboard",
+      },
+      {
         type: "separator",
         id: "midi.sep.editor",
       },

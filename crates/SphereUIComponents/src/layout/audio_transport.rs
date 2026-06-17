@@ -997,6 +997,10 @@ impl StudioLayout {
     }
 
     pub(super) fn start_native_playback(&mut self, cx: &mut Context<Self>) {
+        if !self.session_install_status.is_ready() {
+            eprintln!("[SessionLoad] play blocked during session install");
+            return;
+        }
         transport_freeze_debug::reset_sequence();
         transport_freeze_debug::log("Play requested");
         eprintln!("[transport] Play requested");

@@ -49,23 +49,8 @@ if (typeof version !== "string" || version.length < 1) {
 
 const targets = [
   {
-    name: "apps/electron/package.json",
-    path: path.join(repoRoot, "apps", "electron", "package.json"),
-    apply: (target) => {
-      const pkg = readJson(target.path);
-      const current = pkg.version;
-      if (current !== version) {
-        if (checkOnly) return { changed: true, from: current, to: version };
-        pkg.version = version;
-        writeJson(target.path, pkg);
-        return { changed: true, from: current, to: version };
-      }
-      return { changed: false };
-    },
-  },
-  {
-    name: "apps/native/Cargo.toml",
-    path: path.join(repoRoot, "apps", "native", "Cargo.toml"),
+    name: "apps/native/studio/Cargo.toml",
+    path: path.join(repoRoot, "apps", "native", "studio", "Cargo.toml"),
     apply: (target) => {
       const currentText = fs.readFileSync(target.path, "utf8");
       const nextText = replaceTomlVersion(currentText, version);
@@ -89,7 +74,7 @@ for (const target of targets) {
         ? ` (${result.from} -> ${result.to})`
         : "";
     console.log(
-      `[sync-version] ${checkOnly ? "out of sync" : "updated"}: ${target.name}${details}`
+      `[sync-version] ${checkOnly ? "out of sync" : "updated"}: ${target.name}${details}`,
     );
   } else {
     console.log(`[sync-version] ok: ${target.name}`);
@@ -97,7 +82,8 @@ for (const target of targets) {
 }
 
 if (checkOnly && dirty) {
-  console.error(`[sync-version] ERROR: version mismatch. Run: node scripts/sync-version.mjs`);
+  console.error(
+    `[sync-version] ERROR: version mismatch. Run: node scripts/sync-version.mjs`,
+  );
   process.exit(1);
 }
-

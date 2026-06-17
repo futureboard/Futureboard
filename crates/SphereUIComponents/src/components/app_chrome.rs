@@ -833,16 +833,6 @@ pub fn app_chrome(
         .child(transport_controls(transport))
         .child(section_separator())
         .child(panel_toggles(panels))
-        .child(section_separator())
-        .child(utility_buttons())
-        .child(section_separator())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .px(px(CHROME_PAD_X))
-                .child(report_bug_button()),
-        )
         .child(section_separator());
 
     if policy.show_window_controls {

@@ -161,7 +161,7 @@ impl StudioLayout {
         );
     }
 
-    pub(super) fn show_project_open_failed_dialog(
+    pub fn show_project_open_failed_dialog(
         &mut self,
         title: &str,
         message: &str,
@@ -516,24 +516,29 @@ impl StudioLayout {
         if crate::shutdown::ShutdownState::global().is_shutting_down() {
             return;
         }
-        // Release any held musical-typing notes and clear the keyboard service's
-        // pressed/active state so the next project starts clean. Deferred +
-        // panel-only to avoid re-entering this (leased) StudioLayout via the sink.
-        self.defer_release_virtual_keyboard_notes(cx);
-        self.stop_native_playback(cx);
+        self.prepare_immediate_session_shutdown(cx);
+        let snapshot = self.capture_session_shutdown_snapshot(
+            crate::session_shutdown::SessionShutdownReason::ProjectClose,
+            cx,
+        );
+        let owner_bounds = self.studio_window_bounds(cx);
+        let self_window = self.window_hooks.self_window.take();
 
-        self.unload_all_bridge_plugins_for_project_close(cx);
+        if let Some(request_shutdown) = self.window_hooks.on_request_session_shutdown.clone() {
+            request_shutdown(snapshot, owner_bounds, self_window, cx);
+            return;
+        }
+
+        crate::session_shutdown::run_session_shutdown(snapshot, |_| {});
         self.reset_project(cx);
         if !crate::shutdown::ShutdownState::global().is_shutting_down() {
             self.mark_engine_media_dirty();
             self.schedule_audio_project_sync(cx, true, "close_project");
         }
-
         if let Some(request_welcome) = self.window_hooks.on_request_welcome.clone() {
             request_welcome(cx);
         }
-
-        if let Some(handle) = self.window_hooks.self_window.take() {
+        if let Some(handle) = self_window {
             cx.spawn(async move |_this, cx| {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(0))

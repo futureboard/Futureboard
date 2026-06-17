@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use crate::components::progress_dialog::ProgressBarValue;
 use sphere_plugin_host::ipc::{HostCommand, HostEvent};
 use sphere_plugin_host::plugin_host_client::{
     plugin_host_bridge_enabled, ClientEvent, PluginHostClient, PluginHostClientError,
@@ -47,7 +48,7 @@ pub(crate) struct PluginBridgeRuntime {
 
 pub(crate) type SharedPluginBridgeRuntime = Arc<Mutex<PluginBridgeRuntime>>;
 
-pub(super) fn bridge_enabled() -> bool {
+pub(crate) fn bridge_enabled() -> bool {
     plugin_host_bridge_enabled()
 }
 
@@ -582,24 +583,67 @@ impl PluginBridgeRuntime {
     /// Graceful shutdown of the shared bridge host. Drains the runtime slot so
     /// the [`PluginHostClient`] is dropped and process handles are released.
     pub fn shutdown_shared(slot: &mut Option<SharedPluginBridgeRuntime>) {
-        let host_count = BridgeHostManager::global().host_count();
-        eprintln!("[plugin-bridge] shutdown begin hosts={host_count}");
-        let Some(runtime) = slot.take() else {
-            eprintln!("[plugin-bridge] shutdown complete");
-            return;
-        };
-        if let Ok(mut bridge) = runtime.lock() {
-            plugin_host_lifecycle::shutdown_host_client(&mut bridge.client);
-            bridge.client.join_reader();
-            bridge.loaded.clear();
-            bridge.shared_audio.clear();
-            bridge.queued_events.clear();
-            bridge.host_pid = None;
-        }
-        drop(runtime);
-        BridgeHostManager::global().clear_hosts();
-        eprintln!("[plugin-bridge] shutdown complete");
+        let _ = shutdown_bridge_runtime(
+            slot.take(),
+            plugin_host_lifecycle::HOST_SHUTDOWN_TIMEOUT,
+            |_, _| {},
+        );
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BridgeShutdownReport {
+    pub hosts_shutdown: usize,
+    pub hosts_killed: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Shut down a bridge runtime, waiting for the host process to exit.
+pub(crate) fn shutdown_bridge_runtime(
+    runtime: Option<SharedPluginBridgeRuntime>,
+    timeout: std::time::Duration,
+    mut progress: impl FnMut(String, ProgressBarValue),
+) -> BridgeShutdownReport {
+    let mut report = BridgeShutdownReport::default();
+    let host_count = BridgeHostManager::global().host_count();
+    eprintln!("[plugin-bridge] shutdown begin hosts={host_count}");
+
+    let Some(runtime) = runtime else {
+        eprintln!("[plugin-bridge] shutdown complete");
+        return report;
+    };
+
+    let host_pid = runtime.lock().ok().and_then(|bridge| bridge.host_pid());
+    if let Some(pid) = host_pid {
+        progress(
+            format!("Waiting for plugin host pid={pid}"),
+            ProgressBarValue::value(0.7),
+        );
+    }
+
+    if let Ok(mut bridge) = runtime.lock() {
+        let instance_ids = bridge.loaded_instance_ids();
+        if let Some(pid) = bridge.host_pid() {
+            BridgeHostManager::global().set_host_instances(pid, instance_ids);
+        }
+        plugin_host_lifecycle::shutdown_host_client_with_timeout(
+            &mut bridge.client,
+            timeout,
+        );
+        bridge.client.join_reader();
+        bridge.loaded.clear();
+        bridge.shared_audio.clear();
+        bridge.queued_events.clear();
+        bridge.host_pid = None;
+        if host_pid.is_some() {
+            report.hosts_shutdown += 1;
+        }
+    }
+    drop(runtime);
+
+    BridgeHostManager::global().clear_hosts();
+    eprintln!("[plugin-bridge] shutdown complete");
+    report
 }
 
 /// Shut down every plugin-host child owned by the studio layout.

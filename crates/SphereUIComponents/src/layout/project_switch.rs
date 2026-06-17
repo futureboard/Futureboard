@@ -148,7 +148,11 @@ impl StudioLayout {
             return;
         }
 
-        eprintln!("[ProjectSwitch] starting session load transaction");
+        eprintln!(
+            "[ProjectSwitch] begin target={}",
+            request.target_path.display()
+        );
+        eprintln!("[ProjectSwitch] source={:?}", request.source);
         let path = request.target_path.clone();
         let from_recent = matches!(
             request.source,

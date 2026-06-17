@@ -224,24 +224,24 @@ impl StudioLayout {
         shutdown::log("phase: stop transport");
         self.stop_native_playback(cx);
 
+        self.prepare_immediate_session_shutdown(cx);
+        let snapshot = self.capture_session_shutdown_snapshot(
+            crate::session_shutdown::SessionShutdownReason::AppExit,
+            cx,
+        );
+        crate::session_shutdown::run_session_shutdown(snapshot, |_| {});
+
         shutdown::log("phase: audio engine shutdown");
         if let Some(engine) = self.audio_bridge.engine.as_mut() {
             engine.shutdown();
         }
-
-        shutdown::log("phase: plugin editors");
-        self.shutdown_plugin_editors(cx);
-
-        shutdown::log("phase: plugin bridge hosts");
-        super::plugin_bridge_runtime::shutdown_plugin_bridge(
-            &mut self.plugin_editors.bridge_runtime,
-        );
 
         shutdown::log("shutdown_studio end");
     }
 
     pub(super) fn do_quit(&mut self, cx: &mut Context<Self>) {
         shutdown::log("do_quit");
+        crate::window_lifecycle::log_cx_quit("do_quit");
         self.shutdown_studio(cx);
         shutdown::log("phase: cx.quit");
         cx.quit();

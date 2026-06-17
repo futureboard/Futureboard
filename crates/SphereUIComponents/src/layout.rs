@@ -41,7 +41,7 @@ mod audio_transport;
 mod browser_ops;
 mod close_ops;
 mod context_menu_ops;
-mod engine_snapshot;
+pub(crate) mod engine_snapshot;
 mod export_ops;
 mod frame_diagnostics;
 mod helpers;
@@ -52,6 +52,7 @@ mod mixer_ops;
 pub(crate) mod plugin_bridge_runtime;
 mod plugin_ops;
 mod plugin_picker_window;
+mod plugin_restore;
 mod project_ops;
 mod project_switch;
 mod recording_ops;
@@ -227,7 +228,7 @@ pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &
     }
 }
 
-fn build_and_warm_audio_engine(
+pub(crate) fn build_and_warm_audio_engine(
     schema: crate::settings::SettingsSchema,
 ) -> Result<(DAUx::AudioEngine, DAUx::EngineStats), String> {
     let backend = match schema.hardware.audio.driver_type.as_str() {
@@ -441,6 +442,11 @@ pub struct StudioLayout {
     last_window_title: Option<String>,
     /// Whether this workspace session is safe for arrangement/mixer/inspector UI.
     session_install_status: crate::app_state::SessionInstallStatus,
+    /// In-window loading gate detail while [`session_install_status`] is Loading.
+    session_install_detail: String,
+    session_install_progress: crate::components::progress_dialog::ProgressBarValue,
+    /// Non-fatal plugin restore warnings collected during session install.
+    session_install_warnings: Vec<String>,
 }
 
 impl StudioLayout {
@@ -747,6 +753,9 @@ impl StudioLayout {
             project_state: crate::app_state::ProjectState::NoProject,
             last_window_title: None,
             session_install_status: crate::app_state::SessionInstallStatus::Ready,
+            session_install_detail: String::new(),
+            session_install_progress: crate::components::progress_dialog::ProgressBarValue::Indeterminate,
+            session_install_warnings: Vec::new(),
         };
 
         layout.spawn_audio_engine_warmup(cx);
@@ -877,12 +886,30 @@ impl StudioLayout {
         self.window_hooks.self_window = Some(handle);
     }
 
+    pub fn has_self_window(&self) -> bool {
+        self.window_hooks.self_window.is_some()
+    }
+
     /// Wire the app-level "return to Welcome" hook used by `close_project`.
     pub fn set_request_welcome_callback(
         &mut self,
         callback: Arc<dyn Fn(&mut gpui::App) + 'static>,
     ) {
         self.window_hooks.on_request_welcome = Some(callback);
+    }
+
+    pub fn set_request_session_shutdown_callback(
+        &mut self,
+        callback: Arc<
+            dyn Fn(
+                    crate::session_shutdown::SessionShutdownSnapshot,
+                    Option<gpui::Bounds<gpui::Pixels>>,
+                    Option<gpui::WindowHandle<Self>>,
+                    &mut gpui::App,
+                ) + 'static,
+        >,
+    ) {
+        self.window_hooks.on_request_session_shutdown = Some(callback);
     }
 
     /// Wire the app-level project-load hook used for in-studio open/replace.

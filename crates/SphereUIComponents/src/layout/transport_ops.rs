@@ -90,6 +90,10 @@ impl StudioLayout {
         command: TransportCommand,
         cx: &mut Context<Self>,
     ) {
+        if !self.session_install_status.is_ready() {
+            eprintln!("[SessionLoad] transport blocked during session install");
+            return;
+        }
         match command {
             TransportCommand::PlayPause => {
                 if self.is_recording_active(cx) {

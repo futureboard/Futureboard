@@ -3,28 +3,8 @@ use super::*;
 impl Render for StudioLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.session_install_status.is_ready() {
-            let heading = self.project_session.display_name();
-            return div()
-                .size_full()
-                .bg(Colors::surface_base())
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_primary())
-                        .child(format!("Loading {heading}…")),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(Colors::text_muted())
-                        .child("Preparing session"),
-                );
+            eprintln!("[StudioMount] blocked because session not ready");
+            return div().size_full().bg(Colors::surface_base());
         }
 
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");

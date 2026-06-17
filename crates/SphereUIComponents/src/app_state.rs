@@ -55,6 +55,10 @@ impl SessionInstallStatus {
     pub fn is_ready(self) -> bool {
         matches!(self, SessionInstallStatus::Ready)
     }
+
+    pub fn is_failed(self) -> bool {
+        matches!(self, SessionInstallStatus::Failed)
+    }
 }
 
 /// Process-wide app session gate — updated by the native shell when switching

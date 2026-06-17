@@ -8,6 +8,7 @@ use crate::components::add_track_dialog::{
 };
 use crate::components::combo_box::dedupe_preserve_order;
 use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
+use crate::session_shutdown::SessionShutdownSnapshot;
 use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate};
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackType,
@@ -35,6 +36,17 @@ pub(crate) struct StudioWindowHooks {
     /// window alive and swaps the session in place.
     pub on_request_project_load:
         Option<Arc<dyn Fn(PathBuf, super::project_ops::ProjectOpenOptions, &mut gpui::App) + 'static>>,
+    /// App-level hook for visible session shutdown (close project).
+    pub on_request_session_shutdown: Option<
+        Arc<
+            dyn Fn(
+                    SessionShutdownSnapshot,
+                    Option<Bounds<gpui::Pixels>>,
+                    Option<gpui::WindowHandle<StudioLayout>>,
+                    &mut gpui::App,
+                ) + 'static,
+        >,
+    >,
 }
 
 /// Floating MIDI editor window state — the single editor window handle (switches

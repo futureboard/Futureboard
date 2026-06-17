@@ -56,9 +56,12 @@ pub mod overlay;
 pub mod paths;
 pub mod perf;
 pub mod platform_chrome;
+pub mod pre_studio_install;
 pub mod project;
+pub mod session_shutdown;
 pub mod settings;
 pub mod shutdown;
+pub mod window_lifecycle;
 pub mod window_position;
 pub use shutdown::ShutdownState;
 /// Re-export of the separated plugin-host bridge client so the native app can

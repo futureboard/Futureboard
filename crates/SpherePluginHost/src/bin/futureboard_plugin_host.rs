@@ -1121,18 +1121,21 @@ fn dispatch(
             );
         }
         HostCommand::CloseEditor { plugin_instance_id } => {
-            eprintln!("[PluginHost] editor close requested id={plugin_instance_id}");
-            preview.lock().preview_all_notes_off(&plugin_instance_id);
+            eprintln!("[PluginEditor] close requested plugin_id={plugin_instance_id}");
             registry.remove(&plugin_instance_id);
             pending_resizes.remove(&plugin_instance_id);
-            if let Some(processor) = preview.lock().clone_processor_for(&plugin_instance_id) {
-                processor.embed_detach();
-            }
+            preview
+                .lock()
+                .editor_detach_for_instance(&plugin_instance_id);
             delayed_redraws.retain(|entry| entry.instance_id != plugin_instance_id);
             let still_active = preview.lock().has_instance(&plugin_instance_id);
+            eprintln!("[PluginEditor] detached editor only plugin_id={plugin_instance_id}");
             eprintln!(
-                "[PluginHost] editor closed id={plugin_instance_id} instance_still_active={still_active}"
+                "[PluginRuntime] instance remains alive plugin_id={plugin_instance_id} active={still_active}"
             );
+            eprintln!("[AudioGraph] node remains active plugin_id={plugin_instance_id}");
+            eprintln!("[VSTi] midi route alive plugin_id={plugin_instance_id}");
+            eprintln!("[VSTi] process active after editor close plugin_id={plugin_instance_id}");
             let _ = ipc::write_frame(out, &HostEvent::EditorClosed { plugin_instance_id });
         }
         HostCommand::PreviewNoteOn {

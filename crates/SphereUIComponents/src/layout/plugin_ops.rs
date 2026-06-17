@@ -855,6 +855,7 @@ impl StudioLayout {
         instance_id: &str,
     ) {
         let key = (track_id.to_string(), instance_id.to_string());
+        eprintln!("[PluginEditor] close requested plugin_id={instance_id}");
         self.log_editor_engine_state("close engine_state_before=", track_id, instance_id);
         if let Some(session) = self.plugin_editors.bridge.remove(&key) {
             if let Some(engine) = self.audio_bridge.engine.as_ref() {
@@ -865,6 +866,11 @@ impl StudioLayout {
                     r.close_editor(session.instance_id.clone());
                 }
             }
+            eprintln!("[PluginEditor] detached editor only plugin_id={instance_id}");
+            eprintln!("[PluginRuntime] instance remains alive plugin_id={instance_id}");
+            eprintln!("[AudioGraph] node remains active plugin_id={instance_id}");
+            eprintln!("[VSTi] midi route alive plugin_id={instance_id}");
+            eprintln!("[VSTi] process active after editor close plugin_id={instance_id}");
             eprintln!(
                 "[plugin-editor-window] close native editor instance={instance_id} (CloseEditor sent, shell destroyed, DSP remains active)"
             );
@@ -2206,6 +2212,37 @@ impl StudioLayout {
                 }
             }
         }
+    }
+
+    /// After a project document is applied to the timeline, drop stale bridge
+    /// instances before the awaitable restore batch runs.
+    pub(super) fn prepare_bridge_plugin_restore_batch(&mut self, cx: &mut Context<Self>) {
+        if !super::plugin_bridge_runtime::bridge_enabled() {
+            eprintln!(
+                "[PluginRestore] in-process path — engine sync will instantiate native inserts"
+            );
+            return;
+        }
+
+        let inserts = self.bridge_vst3_insert_slots(cx);
+        let wanted: std::collections::HashSet<String> =
+            inserts.iter().map(|(_, slot_id)| slot_id.clone()).collect();
+        if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
+            if let Ok(mut runtime) = runtime.lock() {
+                let stale: Vec<String> = runtime
+                    .loaded_instance_ids()
+                    .into_iter()
+                    .filter(|id| !wanted.contains(id))
+                    .collect();
+                for id in stale {
+                    runtime.unload_plugin(id);
+                }
+            }
+        }
+        eprintln!(
+            "[PluginRestore] prepared restore batch for {} insert(s)",
+            inserts.len()
+        );
     }
 
     /// After a project document is applied to the timeline, recreate runtime

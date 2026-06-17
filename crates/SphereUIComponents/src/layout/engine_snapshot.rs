@@ -318,7 +318,7 @@ fn build_engine_automation_lanes(track: &TrackState) -> Vec<EngineAutomationLane
 
 /// Live-path snapshot: plugin inserts follow the configured backend (bridged by
 /// default). Used by every realtime engine sync.
-pub(super) fn build_engine_project_snapshot(
+pub(crate) fn build_engine_project_snapshot(
     state: &TimelineState,
     sample_rate: u32,
     project_root: Option<&str>,

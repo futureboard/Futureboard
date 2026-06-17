@@ -7,6 +7,8 @@ impl Render for StudioLayout {
             return div().size_full().bg(Colors::surface_base());
         }
 
+        publish_studio_main_hwnd(window);
+
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
         // Frame pacing tick. See FrameDiagnostics docs — only counts
         // real repaints, not display refreshes.
@@ -1542,3 +1544,16 @@ impl Render for StudioLayout {
             })
     }
 }
+
+#[cfg(target_os = "windows")]
+fn publish_studio_main_hwnd(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::Win32(w) = handle.as_raw() {
+            sphere_plugin_host::plugin_host_main_window::set_main_window_hwnd(w.hwnd.get() as isize);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn publish_studio_main_hwnd(_window: &Window) {}

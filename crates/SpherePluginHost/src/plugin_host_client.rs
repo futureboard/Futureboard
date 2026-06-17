@@ -18,7 +18,9 @@ use std::thread::JoinHandle;
 use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
-use crate::plugin_host_lifecycle::{self, BridgeHostManager};
+use crate::plugin_host_lifecycle;
+use crate::plugin_host_spawn_config::PluginHostSpawnConfig;
+use crate::process_manager::PluginHostProcessManager;
 use crate::plugin_host_logging;
 
 /// What the UI thread receives from [`PluginHostClient::try_recv_event`].
@@ -216,10 +218,15 @@ impl PluginHostClient {
         Self::spawn_from(&binary)
     }
 
-    /// Resolve + spawn the bridge host with full `[plugin-bridge]` diagnostics
-    /// (spec: current_exe / resolved_host_exe / exists / spawning / spawned).
-    /// Does NOT fall back silently — the caller decides what to do on `Err`.
+    /// Resolve + spawn the bridge host with full `[plugin-bridge]` diagnostics.
     pub fn spawn_bridge() -> Result<Self, PluginHostClientError> {
+        Self::spawn_bridge_with_config(&PluginHostSpawnConfig::default())
+    }
+
+    /// Spawn the bridge host with explicit session / main-window configuration.
+    pub fn spawn_bridge_with_config(
+        config: &PluginHostSpawnConfig,
+    ) -> Result<Self, PluginHostClientError> {
         let current_exe = std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".into());
@@ -234,7 +241,7 @@ impl PluginHostClient {
             return Err(err);
         }
         eprintln!("[plugin-bridge] spawning {}", exe.display());
-        match Self::spawn_from(&exe) {
+        match Self::spawn_from_config(&exe, config) {
             Ok(client) => {
                 eprintln!("[plugin-bridge] spawned pid={}", client.pid());
                 Ok(client)
@@ -248,6 +255,13 @@ impl PluginHostClient {
 
     /// Spawn a specific host binary (used by tests).
     pub fn spawn_from(binary: &Path) -> Result<Self, PluginHostClientError> {
+        Self::spawn_from_config(binary, &PluginHostSpawnConfig::default())
+    }
+
+    fn spawn_from_config(
+        binary: &Path,
+        config: &PluginHostSpawnConfig,
+    ) -> Result<Self, PluginHostClientError> {
         eprintln!("[plugin-bridge] ipc=stdio");
         let parent_pid = std::process::id();
         let hidden = !plugin_host_logging::host_console_enabled();
@@ -274,7 +288,7 @@ impl PluginHostClient {
         }
         sanitize_child_env(&mut command);
         let mut child = command.spawn().map_err(PluginHostClientError::Spawn)?;
-        BridgeHostManager::global().on_host_spawned(&child);
+        PluginHostProcessManager::global().on_host_spawned(&child, config);
 
         let stdin = child
             .stdin
@@ -318,7 +332,12 @@ impl PluginHostClient {
         };
         client.send(&HostCommand::Hello {
             protocol_version: PROTOCOL_VERSION,
+            main_hwnd: config.main_hwnd.map(|h| h as u64),
+            session_id: Some(config.project_id.clone()),
         })?;
+        if let Some(hwnd) = config.main_hwnd {
+            eprintln!("[PluginHost] ipc hello main_hwnd=0x{hwnd:x} session={}", config.project_id);
+        }
         Ok(client)
     }
 

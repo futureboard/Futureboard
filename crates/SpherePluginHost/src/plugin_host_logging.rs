@@ -13,6 +13,14 @@ pub fn host_console_enabled() -> bool {
         || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
 }
 
+/// Default directory for plugin-host log files.
+pub fn default_log_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("logs").join("plugin-host")))
+        .unwrap_or_else(|| PathBuf::from("logs").join("plugin-host"))
+}
+
 /// Open `logs/plugin-host/<pid>.log` and redirect stderr when console is hidden.
 pub fn init_host_logging() -> Option<PathBuf> {
     if host_console_enabled() {
@@ -21,10 +29,7 @@ pub fn init_host_logging() -> Option<PathBuf> {
     }
 
     let pid = std::process::id();
-    let log_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("logs").join("plugin-host")))
-        .unwrap_or_else(|| PathBuf::from("logs").join("plugin-host"));
+    let log_dir = default_log_dir();
 
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!("[PluginHost] log_dir_create_failed path={log_dir:?} err={e}");

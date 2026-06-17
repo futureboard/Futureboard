@@ -82,6 +82,22 @@ macro_rules! hlog {
     }};
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static MAIN_DAW_HWND: AtomicU64 = AtomicU64::new(0);
+
+fn store_main_hwnd(hwnd: Option<u64>) {
+    let value = hwnd.unwrap_or(0);
+    MAIN_DAW_HWND.store(value, Ordering::SeqCst);
+    if value != 0 {
+        eprintln!("[PluginHost] main_hwnd received hwnd=0x{value:x}");
+    }
+}
+
+fn main_hwnd() -> u64 {
+    MAIN_DAW_HWND.load(Ordering::SeqCst)
+}
+
 fn parse_parent_pid() -> Option<u32> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -103,7 +119,7 @@ fn main() {
     // process creates never group as a separate taskbar app (spec: process
     // identity). Owned WS_EX_TOOLWINDOW popups already stay off the taskbar /
     // Alt-Tab; this is belt-and-braces against accidental app-visibility.
-    sphere_plugin_host::plugin_host_lifecycle::set_app_user_model_id();
+    sphere_plugin_host::plugin_host_lifecycle::set_futureboard_app_user_model_id();
 
     platform::com_init();
     platform::ensure_dpi_awareness();
@@ -915,13 +931,19 @@ fn dispatch(
     out: &mut io::Stdout,
 ) {
     match cmd {
-        HostCommand::Hello { protocol_version } => {
-            // The startup `Ready` is the handshake response; `Hello` only carries
-            // the client's version for a compatibility check.
+        HostCommand::Hello {
+            protocol_version,
+            main_hwnd,
+            session_id,
+        } => {
             if protocol_version != PROTOCOL_VERSION {
                 hlog!(
                     "[PluginHostEditor] protocol mismatch client={protocol_version} host={PROTOCOL_VERSION}"
                 );
+            }
+            store_main_hwnd(main_hwnd);
+            if let Some(session) = session_id.as_deref() {
+                eprintln!("[PluginHost] ipc hello session_id={session}");
             }
         }
         HostCommand::Ping => {

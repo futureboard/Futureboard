@@ -68,6 +68,8 @@ pub use shutdown::ShutdownState;
 /// log bridge env / drive the bridge without a direct `sphere-plugin-host` dep.
 pub use sphere_plugin_host::plugin_host_client;
 pub use sphere_plugin_host::plugin_host_lifecycle;
+pub use sphere_plugin_host::plugin_host_main_window;
+pub use sphere_plugin_host::process_manager::PluginHostProcessManager;
 pub mod splash;
 pub mod theme;
 pub mod welcome;

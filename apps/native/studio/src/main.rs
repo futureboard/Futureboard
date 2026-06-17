@@ -22,7 +22,7 @@ fn main() {
     sphere_ui_components::plugin_host_lifecycle::init_plugin_host_job();
     // Same explicit AppUserModelID as the plugin-host process: keeps any
     // app-visible plugin window from spawning a stray taskbar identity.
-    sphere_ui_components::plugin_host_lifecycle::set_app_user_model_id();
+    sphere_ui_components::plugin_host_lifecycle::set_futureboard_app_user_model_id();
 
     // Catch any panic that escapes the GPUI render loop so we see *why*
     // the window blanks out instead of getting a silent crash.
@@ -30,7 +30,9 @@ fn main() {
         eprintln!("[panic] {info}");
         let bt = std::backtrace::Backtrace::force_capture();
         eprintln!("[panic] backtrace:\n{bt}");
-        sphere_ui_components::plugin_host_lifecycle::BridgeHostManager::global().shutdown_all();
+        sphere_ui_components::plugin_host_lifecycle::PluginHostProcessManager::global()
+            .shutdown_all(sphere_ui_components::plugin_host_lifecycle::HOST_SHUTDOWN_TIMEOUT)
+            .ok();
     }));
 
     // GPUI's default DirectComposition target is created with topmost=true, which

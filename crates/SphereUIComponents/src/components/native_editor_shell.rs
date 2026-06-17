@@ -91,7 +91,7 @@ mod imp {
     use windows::Win32::UI::WindowsAndMessaging::{
         ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
         GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW,
-        IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow,
+        IsWindow, IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow,
         SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWLP_USERDATA, GWL_EXSTYLE,
         GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
         HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG,
@@ -101,8 +101,8 @@ mod imp {
         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE,
         WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT, WM_PAINT, WM_SIZE, WNDCLASSW,
         WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME,
-        WS_EX_APPWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
-        WS_VISIBLE,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME, WS_VISIBLE, GWLP_HWNDPARENT,
     };
 
     const SHELL_CLASS: PCWSTR = w!("SpherePluginEditorShell");
@@ -568,7 +568,7 @@ mod imp {
     }
 
     /// Strip classic OS frame styles and keep only borderless popup chrome.
-    unsafe fn apply_borderless_styles(hwnd: HWND) {
+    unsafe fn apply_borderless_styles(hwnd: HWND, owner: Option<HWND>) {
         let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
         let frame_bits = WS_CAPTION
             | WS_THICKFRAME
@@ -581,8 +581,19 @@ mod imp {
         let new_style = WINDOW_STYLE((style.0 & !frame_bits.0) | borderless.0);
         SetWindowLongPtrW(hwnd, GWL_STYLE, new_style.0 as isize);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let new_ex = ex | WS_EX_APPWINDOW.0;
+        let new_ex = if owner.is_some() {
+            (ex & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0
+        } else {
+            ex | WS_EX_APPWINDOW.0
+        };
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex as isize);
+        if let Some(owner) = owner {
+            SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+            eprintln!(
+                "[plugin-editor-window] owner_applied owner_hwnd=0x{:x}",
+                owner.0 as u64
+            );
+        }
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -593,8 +604,25 @@ mod imp {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
         eprintln!(
-            "[plugin-editor-window] shell_styles=borderless WS_POPUP|WS_CLIPCHILDREN|WS_CLIPSIBLINGS|WS_EX_APPWINDOW"
+            "[plugin-editor-window] shell_styles=borderless owner={}",
+            owner.is_some()
         );
+    }
+
+    fn validated_owner(owner_hwnd: Option<u64>) -> Option<HWND> {
+        let hwnd = owner_hwnd.map(hwnd_from)?;
+        if hwnd.0.is_null() {
+            return None;
+        }
+        if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            Some(hwnd)
+        } else {
+            eprintln!(
+                "[plugin-editor-window] owner_hwnd invalid hwnd=0x{:x}",
+                hwnd.0 as u64
+            );
+            None
+        }
     }
 
     unsafe fn paint_shell_border(hdc: HDC, cw: i32, ch: i32, bw: i32, color: COLORREF) {
@@ -1671,24 +1699,30 @@ mod imp {
             let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
 
             unsafe {
-                let top = CreateWindowExW(
-                    WS_EX_APPWINDOW,
-                    SHELL_CLASS,
-                    PCWSTR(title_w.as_ptr()),
-                    // Borderless custom chrome — no WS_CAPTION/WS_THICKFRAME/WS_BORDER.
-                    // Resize via WM_NCHITTEST; min/max/close via drawn buttons.
-                    WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                    pos_x,
-                    pos_y,
-                    win_w,
-                    win_h,
-                    None,
-                    None::<HMENU>,
-                    None,
-                    None,
-                )
-                .ok()?;
-                apply_borderless_styles(top);
+            let owner = validated_owner(owner_hwnd);
+            let ex_style = if owner.is_some() {
+                WS_EX_TOOLWINDOW
+            } else {
+                WS_EX_APPWINDOW
+            };
+            let top = CreateWindowExW(
+                ex_style,
+                SHELL_CLASS,
+                PCWSTR(title_w.as_ptr()),
+                // Borderless custom chrome — no WS_CAPTION/WS_THICKFRAME/WS_BORDER.
+                // Resize via WM_NCHITTEST; min/max/close via drawn buttons.
+                WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                pos_x,
+                pos_y,
+                win_w,
+                win_h,
+                owner,
+                None::<HMENU>,
+                None,
+                None,
+            )
+            .ok()?;
+            apply_borderless_styles(top, owner);
                 let (outer_w, outer_h) = outer_size_for_client(top, client_w, client_h);
                 if outer_w != win_w || outer_h != win_h {
                     let _ = SetWindowPos(

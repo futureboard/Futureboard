@@ -28,6 +28,11 @@ pub mod plugin_db;
 pub mod plugin_host_client;
 /// Windows job object + coordinated plugin-host shutdown for the main app.
 pub mod plugin_host_lifecycle;
+pub mod platform;
+/// Central plugin-host process manager for the DAW session.
+pub mod process_manager;
+pub mod plugin_host_main_window;
+pub mod plugin_host_spawn_config;
 /// File logging for the separated plugin host process (hidden console builds).
 pub mod plugin_host_logging;
 #[cfg(feature = "plugin-host-bin")]

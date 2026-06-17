@@ -31,9 +31,13 @@ pub const PROTOCOL_VERSION: u32 = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd")]
 pub enum HostCommand {
-    /// Handshake; carries the client's protocol version.
+    /// Handshake; carries the client's protocol version and main-window HWND.
     Hello {
         protocol_version: u32,
+        #[serde(default)]
+        main_hwnd: Option<u64>,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     /// Liveness handshake — the host replies with [`HostEvent::Pong`]. Sent by
     /// the bridge client right after spawn to confirm the process is alive and

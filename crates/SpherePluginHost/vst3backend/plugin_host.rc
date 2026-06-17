@@ -1,1 +1,2 @@
 1 RT_MANIFEST "../../packages/shared/app/windows/app.manifest"
+#include "plugin_host_version.rc"

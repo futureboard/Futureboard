@@ -756,6 +756,10 @@ impl EngineInner {
         self.send_command(EngineCommand::Seek { position_seconds })
     }
 
+    pub fn set_metronome_suspended(&self, suspended: bool) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetMetronomeSuspended(suspended))
+    }
+
     pub fn set_metronome_enabled(&self, enabled: bool) -> Result<(), SphereAudioError> {
         self.shared
             .metronome_enabled
@@ -2520,6 +2524,7 @@ impl EngineInner {
                 EngineCommand::StopTransport => "StopTransport",
                 EngineCommand::Seek { .. } => "Seek",
                 EngineCommand::SetMetronomeEnabled(_) => "SetMetronomeEnabled",
+                EngineCommand::SetMetronomeSuspended(_) => "SetMetronomeSuspended",
                 EngineCommand::SetBpm(_) => "SetBpm",
                 EngineCommand::SetTempoMap(_) => "SetTempoMap",
                 EngineCommand::SetTimeSignature(_, _) => "SetTimeSignature",
@@ -2796,6 +2801,9 @@ where
                                 .metronome_enabled
                                 .store(enabled, Ordering::Relaxed);
                             metronome.set_metronome_enabled(enabled, pos, output_sample_rate);
+                        }
+                        EngineCommand::SetMetronomeSuspended(suspended) => {
+                            metronome.set_metronome_suspended(suspended);
                         }
                         EngineCommand::SetBpm(bpm) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -3143,8 +3151,11 @@ where
                         for i in 0..segment_frames as usize {
                             let frame = &mut scratch[(callback_offset + i) * ch
                                 ..(callback_offset + i) * ch + ch];
-                            let click = metronome
-                                .metronome_sample(segment_sample + i as u64, output_sample_rate);
+                            let click = metronome.metronome_sample(
+                                segment_sample + i as u64,
+                                output_sample_rate,
+                                playing_local,
+                            );
                             if click != 0.0 {
                                 frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
                                 frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
@@ -3196,12 +3207,11 @@ where
                         } else {
                             (0.0, 0.0)
                         };
-                        let click = if playing_local {
-                            metronome.metronome_sample(base_sample + frames, output_sample_rate)
-                                * master_vol
-                        } else {
-                            0.0
-                        };
+                        let click = metronome.metronome_sample(
+                            base_sample + frames,
+                            output_sample_rate,
+                            playing_local,
+                        ) * master_vol;
                         let l = (tone_l + project_l + click).clamp(-1.0, 1.0);
                         let r = (tone_r + project_r + click).clamp(-1.0, 1.0);
                         frame[0] = T::from_sample(l);
@@ -3228,12 +3238,11 @@ where
                         } else {
                             (0.0, 0.0)
                         };
-                        let click = if playing_local {
-                            metronome.metronome_sample(base_sample + frames, output_sample_rate)
-                                * master_vol
-                        } else {
-                            0.0
-                        };
+                        let click = metronome.metronome_sample(
+                            base_sample + frames,
+                            output_sample_rate,
+                            playing_local,
+                        ) * master_vol;
                         let value =
                             (tone + (project_l + project_r) * 0.5 + click).clamp(-1.0, 1.0);
                         *sample = T::from_sample(value);

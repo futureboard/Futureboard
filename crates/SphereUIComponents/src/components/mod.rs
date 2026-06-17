@@ -128,6 +128,6 @@ pub use slider::slider;
 pub use status_bar::{status_bar, status_bar_with_background_tasks};
 pub use text_input::{text_field, TextInputAction, TextInputState};
 pub use virtual_keyboard::{
-    VirtualKeyboardController, VirtualKeyboardEventSink, VirtualKeyboardPanel,
-    VirtualKeyboardPanelState,
+    VirtualKeyboardEventSink, VirtualKeyboardPanel, VirtualKeyboardPanelState,
+    VirtualKeyboardService,
 };

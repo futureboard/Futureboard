@@ -14,12 +14,12 @@ pub struct MenuBarUiState {
     pub submenu_path: Vec<String>,
 }
 
+use super::context_menu_ops::ContextMenuRequest;
+
 #[derive(Debug, Clone)]
 pub enum OpenPopover {
     Context {
-        target: ContextTarget,
-        x: f32,
-        y: f32,
+        request: ContextMenuRequest,
     },
 }
 

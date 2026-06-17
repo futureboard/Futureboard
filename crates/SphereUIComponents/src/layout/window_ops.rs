@@ -1,5 +1,6 @@
 use gpui::{Bounds, Context, Window};
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::components::add_track_dialog::{
@@ -16,7 +17,7 @@ use crate::window_position::resolve_owner_bounds_with_preferred;
 use sphere_plugin_host::{PluginFormat as RegistryPluginFormat, PluginKind};
 
 use super::helpers::{cleaned_track_name, numbered_name_stem};
-use super::{ContextTarget, OpenPopover, StudioLayout};
+use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout};
 
 /// Studio-window / app-integration hooks — this workspace's own window handle,
 /// the last known window bounds (used to position child windows without
@@ -30,6 +31,10 @@ pub(crate) struct StudioWindowHooks {
     pub cached_bounds: Option<Bounds<gpui::Pixels>>,
     /// App-level hook that re-opens the Welcome window (invoked by close_project).
     pub on_request_welcome: Option<Arc<dyn Fn(&mut gpui::App) + 'static>>,
+    /// App-level hook for project open/replace — closes studio, runs the loading
+    /// gate, then remounts studio with the decoded session.
+    pub on_request_project_load:
+        Option<Arc<dyn Fn(PathBuf, super::project_ops::ProjectOpenOptions, &mut gpui::App) + 'static>>,
 }
 
 /// Floating MIDI editor window state — the single editor window handle (switches
@@ -610,20 +615,18 @@ impl StudioLayout {
             return;
         };
 
-        if let Some(OpenPopover::Context {
-            target: ContextTarget::Clip(clip_id),
-            ..
-        }) = self.overlay.open_popover.as_ref()
-        {
-            let clip_id = clip_id.clone();
-            if self
-                .timeline
-                .read(cx)
-                .state
-                .find_clip(&clip_id)
-                .is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }))
-            {
-                self.select_midi_clip(&clip_id, cx);
+        if let Some(OpenPopover::Context { request }) = self.overlay.open_popover.as_ref() {
+            if let ContextMenuTarget::Clip(clip_id) = &request.target {
+                let clip_id = clip_id.clone();
+                if self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .find_clip(&clip_id)
+                    .is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }))
+                {
+                    self.select_midi_clip(&clip_id, cx);
+                }
             }
         }
 
@@ -663,6 +666,7 @@ impl StudioLayout {
 
         let timeline = self.timeline.clone();
         let piano_roll = self.piano_roll_floating.clone();
+        let virtual_keyboard = self.virtual_keyboard.clone();
         let owner = cx.entity().clone();
         let on_close: Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
             Arc::new(move |_window, cx| {
@@ -683,11 +687,23 @@ impl StudioLayout {
             Some(owner_bounds),
             timeline,
             piano_roll,
+            virtual_keyboard,
             on_close,
             dispatch_command,
             cx,
         ) {
             Ok(handle) => {
+                // Register the popout as a musical-typing source so its held
+                // notes are released if it closes (register doesn't flush, so it
+                // is safe to call directly here).
+                let window_id = handle.window_id();
+                let _ = self
+                    .virtual_keyboard
+                    .update(cx, |keyboard, _cx| keyboard.register_window(window_id));
+                midi_editor_debug(&format!(
+                    "register virtual-keyboard window id={}",
+                    window_id.as_u64()
+                ));
                 self.midi_editor.window = Some(handle);
                 cx.notify();
             }
@@ -700,6 +716,9 @@ impl StudioLayout {
             roll.preview_all_notes_off("editor_close", cx);
         });
         if let Some(handle) = self.midi_editor.window.take() {
+            // Drop any musical-typing notes the popout still held, and never
+            // touch the window handle after it is removed.
+            self.unregister_virtual_keyboard_window(handle.window_id(), cx);
             let _ = handle.update(cx, |_w, window, _cx| window.remove_window());
         }
         cx.notify();
@@ -709,6 +728,16 @@ impl StudioLayout {
         let _ = self.piano_roll_floating.update(cx, |roll, cx| {
             roll.preview_all_notes_off("editor_close", cx);
         });
+        if let Some(handle) = self.midi_editor.window.as_ref() {
+            // The popout closed itself (titlebar X). Reading the stored id never
+            // touches the dead window; unregister releases its notes safely.
+            let window_id = handle.window_id();
+            midi_editor_debug(&format!(
+                "unregister virtual-keyboard window id={}",
+                window_id.as_u64()
+            ));
+            self.unregister_virtual_keyboard_window(window_id, cx);
+        }
         self.midi_editor.window = None;
         cx.notify();
     }

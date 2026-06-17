@@ -9,7 +9,7 @@ use crate::components::timeline::timeline_state::{self, TrackState};
 use crate::components::{external_mixer_debug, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
-use super::{ContextTarget, MixerWindow, OpenPopover, StudioLayout};
+use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, OpenPopover, StudioLayout};
 
 /// Mixer-panel view state — horizontal scroll, the shared insert/send section
 /// heights, and the transient splitter-drag anchors. `StudioLayout` decomposition
@@ -380,24 +380,25 @@ impl StudioLayout {
             dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = owner.clone();
-            std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), _w, cx| {
+            std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), window, cx| {
                 let track_id = track_id.clone();
                 let x = *x;
                 let y = *y;
+                let window_id = window.window_handle().window_id();
                 StudioLayout::defer_update(&this, cx, move |this, cx| {
                     let _ = this.timeline.update(cx, |timeline, cx| {
                         timeline.state.select_track(&track_id);
                         cx.notify();
                     });
-                    this.menu_bar.open_menu_id = None;
-                    this.menu_bar.submenu_path.clear();
-                    this.project_switcher.is_open = false;
-                    this.overlay.open_popover = Some(OpenPopover::Context {
-                        target: ContextTarget::Mixer(track_id),
-                        x,
-                        y,
-                    });
-                    cx.notify();
+                    this.try_open_context_menu(
+                        ContextMenuRequest::new(
+                            window_id,
+                            x,
+                            y,
+                            ContextMenuTarget::MixerStrip(track_id),
+                        ),
+                        cx,
+                    );
                 });
             })
         };
@@ -527,17 +528,21 @@ impl StudioLayout {
             dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = owner.clone();
-            std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), _w, cx| {
+            std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), window, cx| {
                 let track_id = track_id.clone();
                 let x = *x;
                 let y = *y;
+                let window_id = window.window_handle().window_id();
                 StudioLayout::defer_update(&this, cx, move |this, cx| {
-                    this.overlay.open_popover = Some(OpenPopover::Context {
-                        target: ContextTarget::SendPicker { track_id },
-                        x,
-                        y,
-                    });
-                    cx.notify();
+                    this.try_open_context_menu(
+                        ContextMenuRequest::new(
+                            window_id,
+                            x,
+                            y,
+                            ContextMenuTarget::Extended(ContextTarget::SendPicker { track_id }),
+                        ),
+                        cx,
+                    );
                 });
             })
         };

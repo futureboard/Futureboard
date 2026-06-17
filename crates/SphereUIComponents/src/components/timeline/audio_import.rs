@@ -274,29 +274,37 @@ fn rebind_cached_asset(
     );
     let path_key = key.to_string();
     let layout_weak = layout.clone();
-    let _ = timeline.update(cx, move |timeline, cx| {
-        let changed = timeline.state.update_audio_clip_metadata(
-            &path_key,
-            "cached",
-            preview.sample_rate,
-            preview.channels,
-            preview.total_frames,
-            preview.duration_seconds,
-        );
-        timeline
-            .state
-            .set_audio_import_for_asset(&path_key, AudioImportState::Ready);
-        if changed {
-            eprintln!("[AudioImport] cache hit clip metadata rebound path={path_key}");
-            if let Some(owner) = layout_weak.as_ref() {
-                let _ = owner.update(cx, |this, cx| {
-                    this.mark_engine_media_dirty();
-                    this.schedule_audio_project_sync(cx, false, "audio_import_cache_hit");
-                });
+    let changed = timeline
+        .update(cx, move |timeline, cx| {
+            let changed = timeline.state.update_audio_clip_metadata(
+                &path_key,
+                "cached",
+                preview.sample_rate,
+                preview.channels,
+                preview.total_frames,
+                preview.duration_seconds,
+            );
+            timeline
+                .state
+                .set_audio_import_for_asset(&path_key, AudioImportState::Ready);
+            if changed {
+                eprintln!("[AudioImport] cache hit clip metadata rebound path={path_key}");
             }
+            cx.notify();
+            changed
+        })
+        .unwrap_or(false);
+    // Re-sync the engine OUTSIDE the timeline lease: `schedule_audio_project_sync`
+    // reads `self.timeline`, so calling it inside `timeline.update` double-leases
+    // the Timeline entity and panics.
+    if changed {
+        if let Some(owner) = layout_weak.as_ref() {
+            let _ = owner.update(cx, |this, cx| {
+                this.mark_engine_media_dirty();
+                this.schedule_audio_project_sync(cx, false, "audio_import_cache_hit");
+            });
         }
-        cx.notify();
-    });
+    }
     throttled_timeline_notify(timeline, cx, true);
 }
 
@@ -435,30 +443,37 @@ pub async fn run_import_pipeline(
                 );
             let format = info.format.as_str().to_string();
             let path_key = key.clone();
-            let layout_for_meta = layout_weak.clone();
-            let _ = timeline_probe.update(cx, move |timeline, cx| {
-                let changed = timeline.state.update_audio_clip_metadata(
-                    &path_key,
-                    &format,
-                    info.sample_rate,
-                    info.channels,
-                    info.total_frames,
-                    info.duration_seconds,
-                );
-                timeline.state.set_audio_import_for_asset(
-                    &path_key,
-                    AudioImportState::Decoding { progress: 0.0 },
-                );
-                if changed {
-                    eprintln!("[audio-import] clip metadata updated path={path_key}");
-                    if let Some(owner) = layout_for_meta.as_ref() {
-                        let _ = owner.update(cx, |this, cx| {
-                            this.mark_engine_media_dirty();
-                            this.schedule_audio_project_sync(cx, false, "audio_import_probe");
-                        });
+            let changed = timeline_probe
+                .update(cx, move |timeline, cx| {
+                    let changed = timeline.state.update_audio_clip_metadata(
+                        &path_key,
+                        &format,
+                        info.sample_rate,
+                        info.channels,
+                        info.total_frames,
+                        info.duration_seconds,
+                    );
+                    timeline.state.set_audio_import_for_asset(
+                        &path_key,
+                        AudioImportState::Decoding { progress: 0.0 },
+                    );
+                    if changed {
+                        eprintln!("[audio-import] clip metadata updated path={path_key}");
                     }
+                    changed
+                })
+                .unwrap_or(false);
+            // Engine re-sync OUTSIDE the timeline lease: `schedule_audio_project_sync`
+            // reads `self.timeline`, so calling it inside `timeline.update`
+            // double-leases the Timeline entity and panics.
+            if changed {
+                if let Some(owner) = layout_weak.as_ref() {
+                    let _ = owner.update(cx, |this, cx| {
+                        this.mark_engine_media_dirty();
+                        this.schedule_audio_project_sync(cx, false, "audio_import_probe");
+                    });
                 }
-            });
+            }
             throttled_timeline_notify(&timeline_probe, cx, true);
         }
         Err(error) => {

@@ -83,6 +83,8 @@ pub enum EngineCommand {
     StopTransport,
     /// Seek transport to an absolute position in seconds.
     Seek { position_seconds: f64 },
+    /// Suspend metronome click scheduling during playhead scrubbing.
+    SetMetronomeSuspended(bool),
     /// Enable or disable generated metronome clicks.
     SetMetronomeEnabled(bool),
     /// Set project tempo for metronome scheduling (static tempo shortcut).

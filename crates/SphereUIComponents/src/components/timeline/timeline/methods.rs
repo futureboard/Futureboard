@@ -177,6 +177,8 @@ impl Timeline {
             ts_drag: None,
             pan_last_position: None,
             on_context_menu: None,
+            on_playhead_scrub_begin: None,
+            on_playhead_scrub_end: None,
             on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
             project_root: None,
@@ -212,6 +214,8 @@ impl Timeline {
             ts_drag: None,
             pan_last_position: None,
             on_context_menu: None,
+            on_playhead_scrub_begin: None,
+            on_playhead_scrub_end: None,
             on_open_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
             project_root: None,
@@ -870,7 +874,9 @@ impl Timeline {
 
     pub fn set_native_audio_callbacks(
         &mut self,
-        on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32) + Send + Sync + 'static>>,
+        on_seek_beats: Option<
+            std::sync::Arc<dyn Fn(f32, f32, crate::layout::SeekReason) + Send + Sync + 'static>,
+        >,
         on_track_param_change: Option<
             std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>,
         >,
@@ -879,7 +885,29 @@ impl Timeline {
         self.on_track_param_change = on_track_param_change;
     }
 
+    pub fn set_playhead_scrub_callbacks(
+        &mut self,
+        on_begin: Option<
+            std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>,
+        >,
+        on_end: Option<
+            std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>,
+        >,
+    ) {
+        self.on_playhead_scrub_begin = on_begin;
+        self.on_playhead_scrub_end = on_end;
+    }
+
     pub fn seek_to_beat(&mut self, beat: f32, cx: &mut Context<Self>) {
+        self.seek_to_beat_with_reason(beat, crate::layout::SeekReason::TimelineClick, cx);
+    }
+
+    pub fn seek_to_beat_with_reason(
+        &mut self,
+        beat: f32,
+        reason: crate::layout::SeekReason,
+        cx: &mut Context<Self>,
+    ) {
         let snapped_sec = self
             .state
             .snap_time(beat.max(0.0) * self.state.seconds_per_beat());
@@ -887,7 +915,7 @@ impl Timeline {
         let beat = self.state.transport.playhead_beats;
         self.state.recompute_effective_volumes(beat, "seek");
         if let Some(cb) = self.on_seek_beats.as_ref() {
-            cb(beat, self.state.bpm);
+            cb(beat, self.state.bpm, reason);
         }
         cx.notify();
     }

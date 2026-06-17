@@ -101,7 +101,7 @@ use std::collections::HashSet;
 pub struct Timeline {
     pub state: TimelineState,
     edit_history: EditHistory,
-    on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32) + Send + Sync + 'static>>,
+    on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32, crate::layout::SeekReason) + Send + Sync + 'static>>,
     on_track_param_change:
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
     on_project_changed: Option<TimelineProjectChangedCb>,
@@ -140,6 +140,10 @@ pub struct Timeline {
     ts_drag: Option<TimeSignaturePointDrag>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     on_context_menu: Option<TimelineContextMenuCb>,
+    on_playhead_scrub_begin:
+        Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>>,
+    on_playhead_scrub_end:
+        Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>>,
     /// Invoked when the user double-clicks a MIDI clip — `StudioLayout` uses it
     /// to switch the bottom panel to the piano-roll Editor tab.
     on_open_editor: Option<TimelineOpenEditorCb>,

@@ -27,9 +27,45 @@ impl StudioLayout {
         });
     }
 
-    pub(super) fn release_virtual_keyboard_notes(&mut self, cx: &mut Context<Self>) {
-        let _ = self.virtual_keyboard.update(cx, |panel, cx| {
-            panel.release_all(cx);
+    /// Release virtual-keyboard notes on a later turn, with **only** the panel
+    /// entity leased.
+    ///
+    /// The panel's event sink re-enters `StudioLayout::update` to route the
+    /// NoteOffs. Calling [`Self::release_virtual_keyboard_notes`] directly from
+    /// `render` or a command dispatch — where `StudioLayout` is already leased —
+    /// double-leases and panics (the multi-window crash). Deferring runs the
+    /// flush after the current lease is released, so the sink re-entry is safe.
+    pub(super) fn defer_release_virtual_keyboard_notes(&self, cx: &mut Context<Self>) {
+        let panel = self.virtual_keyboard.clone();
+        cx.defer(move |cx| {
+            let _ = panel.update(cx, |panel, cx| panel.release_all(cx));
+        });
+    }
+
+    /// Panic the virtual-keyboard service (all-notes-off + clear pressed/active)
+    /// on a later turn, panel-only. Used when quiescing a session for project
+    /// load. Deferred for the same re-entrancy reason as
+    /// [`Self::defer_release_virtual_keyboard_notes`].
+    pub(super) fn defer_panic_virtual_keyboard(&self, cx: &mut Context<Self>) {
+        let panel = self.virtual_keyboard.clone();
+        cx.defer(move |cx| {
+            let _ = panel.update(cx, |panel, cx| panel.panic(cx));
+        });
+    }
+
+    /// Unregister a window from the virtual-keyboard service and release any
+    /// notes it still held, deferred and panel-only (see
+    /// [`Self::defer_release_virtual_keyboard_notes`] for why). Safe for a window
+    /// that was never registered. Called on MIDI-editor-popout / project close so
+    /// a destroyed window never leaves stuck notes or a stale registration.
+    pub(super) fn unregister_virtual_keyboard_window(
+        &self,
+        window_id: gpui::WindowId,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = self.virtual_keyboard.clone();
+        cx.defer(move |cx| {
+            let _ = panel.update(cx, |panel, cx| panel.unregister_window(window_id, cx));
         });
     }
 

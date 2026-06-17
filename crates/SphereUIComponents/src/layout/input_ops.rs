@@ -15,7 +15,7 @@ use crate::components::timeline::timeline_state::{ClipType, TrackType};
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
 use super::project_ops::ProjectOpenOptions;
-use super::{ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
+use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
 
 /// Inspector inline name-edit fields — the focus-handle-backed track-name and
 /// clip-name text inputs plus the ids they are currently bound to. `StudioLayout`
@@ -1272,10 +1272,10 @@ impl StudioLayout {
     /// Beat under the cursor for the active timeline-ruler context menu, if any.
     pub(super) fn ruler_context_beat(&self) -> Option<f64> {
         match &self.overlay.open_popover {
-            Some(OpenPopover::Context {
-                target: ContextTarget::TimelineRuler { beat },
-                ..
-            }) => Some(*beat),
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::TimelineRuler { beat }) => Some(*beat),
+                _ => None,
+            },
             _ => None,
         }
     }

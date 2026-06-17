@@ -1,4 +1,4 @@
-use gpui::{App, Context};
+use gpui::{App, Context, Window};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -9,7 +9,18 @@ use crate::components;
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
 use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
 use super::transport_freeze_debug::{self, PlayWatchdog};
-use super::{ContextTarget, OpenPopover, StudioLayout};
+use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout};
+
+/// Why the transport playhead is being repositioned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekReason {
+    UserDragStart,
+    UserDragging,
+    UserDragEnd,
+    TimelineClick,
+    RewindForward,
+    Programmatic,
+}
 
 /// Transient state for the vertical BPM scrub gesture (FL Studio–style infinite
 /// drag). Extracted from `StudioLayout` as the first god-struct decomposition
@@ -1469,13 +1480,22 @@ impl StudioLayout {
 
     /// Open the compact tempo menu (anchored at screen `x`,`y`) from the
     /// transport BPM display. Reuses the shared context-menu overlay.
-    pub(super) fn open_tempo_menu(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        self.overlay.open_popover = Some(OpenPopover::Context {
-            target: ContextTarget::Tempo,
-            x,
-            y,
-        });
-        cx.notify();
+    pub(super) fn open_tempo_menu(
+        &mut self,
+        window: &Window,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.try_open_context_menu(
+            ContextMenuRequest::from_window(
+                window,
+                x,
+                y,
+                ContextMenuTarget::Extended(ContextTarget::Tempo),
+            ),
+            cx,
+        );
     }
 
     /// Add a tempo marker at the current playhead using the effective BPM there.
@@ -1549,20 +1569,24 @@ impl StudioLayout {
 
     pub(super) fn tempo_track_context_position(&self) -> Option<(f64, f64)> {
         match &self.overlay.open_popover {
-            Some(OpenPopover::Context {
-                target: ContextTarget::TempoTrack { beat, bpm, .. },
-                ..
-            }) => Some((*beat, *bpm)),
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::TempoTrack { beat, bpm, .. }) => {
+                    Some((*beat, *bpm))
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
 
     pub(super) fn tempo_track_context_point_id(&self) -> Option<String> {
         match &self.overlay.open_popover {
-            Some(OpenPopover::Context {
-                target: ContextTarget::TempoTrack { point_id, .. },
-                ..
-            }) => point_id.clone(),
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::TempoTrack { point_id, .. }) => {
+                    point_id.clone()
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1807,13 +1831,22 @@ impl StudioLayout {
         }
     }
 
-    pub(super) fn open_time_signature_menu(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        self.overlay.open_popover = Some(OpenPopover::Context {
-            target: ContextTarget::TimeSignature,
-            x,
-            y,
-        });
-        cx.notify();
+    pub(super) fn open_time_signature_menu(
+        &mut self,
+        window: &Window,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.try_open_context_menu(
+            ContextMenuRequest::from_window(
+                window,
+                x,
+                y,
+                ContextMenuTarget::Extended(ContextTarget::TimeSignature),
+            ),
+            cx,
+        );
     }
 
     pub(super) fn show_time_signature_track(&mut self, cx: &mut Context<Self>) {
@@ -1925,30 +1958,29 @@ impl StudioLayout {
 
     pub(super) fn ts_track_context_position(&self) -> Option<f64> {
         match &self.overlay.open_popover {
-            Some(OpenPopover::Context {
-                target:
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(
                     ContextTarget::TimeSignatureTrack { beat, .. }
                     | ContextTarget::TimeSignaturePoint { beat, .. },
-                ..
-            }) => Some(*beat),
-            Some(OpenPopover::Context {
-                target: ContextTarget::TimelineRuler { beat },
-                ..
-            }) => Some(*beat),
+                ) => Some(*beat),
+                ContextMenuTarget::Extended(ContextTarget::TimelineRuler { beat }) => Some(*beat),
+                _ => None,
+            },
             _ => None,
         }
     }
 
     pub(super) fn ts_track_context_point_id(&self) -> Option<String> {
         match &self.overlay.open_popover {
-            Some(OpenPopover::Context {
-                target: ContextTarget::TimeSignatureTrack { point_id, .. },
-                ..
-            }) => point_id.clone(),
-            Some(OpenPopover::Context {
-                target: ContextTarget::TimeSignaturePoint { point_id, .. },
-                ..
-            }) => Some(point_id.clone()),
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::TimeSignatureTrack { point_id, .. }) => {
+                    point_id.clone()
+                }
+                ContextMenuTarget::Extended(ContextTarget::TimeSignaturePoint { point_id, .. }) => {
+                    Some(point_id.clone())
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -2068,13 +2100,39 @@ impl StudioLayout {
         });
     }
 
+    pub(super) fn set_playhead_scrub_active(&mut self, active: bool, _cx: &mut Context<Self>) {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            let _ = engine.set_metronome_suspended(active);
+        }
+    }
+
     pub(super) fn seek_native_playhead(&mut self, cx: &mut Context<Self>, beat: f32) {
+        self.seek_native_playhead_with_reason(cx, beat, SeekReason::Programmatic);
+    }
+
+    pub(super) fn seek_native_playhead_with_reason(
+        &mut self,
+        cx: &mut Context<Self>,
+        beat: f32,
+        reason: SeekReason,
+    ) {
         let beat = beat.max(0.0);
         let bpm = {
             let timeline = self.timeline.read(cx);
             timeline.state.bpm
         };
         if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            match reason {
+                SeekReason::UserDragStart | SeekReason::UserDragging => {
+                    let _ = engine.set_metronome_suspended(true);
+                }
+                SeekReason::UserDragEnd
+                | SeekReason::TimelineClick
+                | SeekReason::RewindForward
+                | SeekReason::Programmatic => {
+                    let _ = engine.set_metronome_suspended(false);
+                }
+            }
             let seconds = beat as f64 * 60.0 / bpm.max(1.0) as f64;
             if let Err(error) = engine.seek(seconds) {
                 self.audio_bridge.last_error = Some(error.to_string());

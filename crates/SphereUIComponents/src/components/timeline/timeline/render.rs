@@ -456,9 +456,19 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_seek = cx.listener(|this, click_x: &f32, _window, cx| {
-            let beats = this.state.x_to_beats(*click_x);
-            this.seek_to_beat(beats, cx);
+        let timeline_seek = cx.entity().clone();
+        let on_seek: std::sync::Arc<
+            dyn Fn(
+                &f32,
+                crate::layout::SeekReason,
+                &mut gpui::Window,
+                &mut gpui::App,
+            ) + 'static,
+        > = std::sync::Arc::new(move |click_x, reason, _window, cx| {
+            let _ = timeline_seek.update(cx, |timeline, cx| {
+                let beats = timeline.state.x_to_beats(*click_x);
+                timeline.seek_to_beat_with_reason(beats, reason, cx);
+            });
         });
 
         let on_select_tool = cx.listener(|this, tool: &TimelineTool, _window, cx| {
@@ -528,8 +538,9 @@ impl Render for Timeline {
         let on_cycle_grid: std::sync::Arc<
             dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_cycle_grid);
-        let on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static> =
-            std::sync::Arc::new(on_seek);
+        let on_seek = on_seek.clone();
+        let on_playhead_scrub_begin = self.on_playhead_scrub_begin.clone();
+        let on_playhead_scrub_end = self.on_playhead_scrub_end.clone();
 
         // Right-click on the ruler → position-aware tempo menu. Converts the
         // markings-area-local x to a beat and forwards the screen position so
@@ -1161,6 +1172,8 @@ impl Render for Timeline {
                 on_region_drag.clone(),
                 on_loop_drag.clone(),
                 on_ruler_context.clone(),
+                on_playhead_scrub_begin,
+                on_playhead_scrub_end,
             ))
             // 1b. Global Tempo Track lane (below ruler, above tracks)
             .when(state.show_tempo_track, |this| {

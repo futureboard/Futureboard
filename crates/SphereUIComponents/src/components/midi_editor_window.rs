@@ -13,6 +13,7 @@ use crate::components::piano_roll::PianoRoll;
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::ClipType;
 use crate::components::title_bar::external_window_titlebar;
+use crate::components::virtual_keyboard::VirtualKeyboardPanel;
 use crate::theme::Colors;
 
 pub const MIDI_EDITOR_WINDOW_WIDTH: f32 = 960.0;
@@ -45,6 +46,10 @@ pub(crate) fn midi_editor_debug(message: &str) {
 pub struct MidiEditorWindow {
     timeline: Entity<Timeline>,
     piano_roll: Entity<PianoRoll>,
+    /// Shared session-level virtual-keyboard service. This window only forwards
+    /// key events into it; it never owns musical-typing state. Musical typing
+    /// works here exactly when the keyboard panel is shown in the main window.
+    virtual_keyboard: Entity<VirtualKeyboardPanel>,
     /// Last clip we successfully rendered — used for the "clip deleted" empty state.
     last_clip_id: Option<String>,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
@@ -56,6 +61,7 @@ impl MidiEditorWindow {
     pub fn new(
         timeline: Entity<Timeline>,
         piano_roll: Entity<PianoRoll>,
+        virtual_keyboard: Entity<VirtualKeyboardPanel>,
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
         cx: &mut Context<Self>,
@@ -63,6 +69,7 @@ impl MidiEditorWindow {
         Self {
             timeline,
             piano_roll,
+            virtual_keyboard,
             last_clip_id: None,
             on_close,
             dispatch_command,
@@ -135,11 +142,36 @@ impl MidiEditorWindow {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Forward to the shared virtual-keyboard service FIRST so musical typing
+        // (including Space = sustain) behaves the same here as in the main window
+        // when the keyboard panel is shown. The service decides whether to handle
+        // or ignore; if it consumes the key, nothing else in this window acts on
+        // it. Held repeats are forwarded too so the service can drop them without
+        // them leaking to transport. Updating the (separate) keyboard entity from
+        // inside this window's lease is safe — the service's sink re-enters
+        // StudioLayout, never this window.
+        let window_id = window.window_handle().window_id();
+        let mods = event.keystroke.modifiers;
+        let command_modifier = mods.control || mods.alt || mods.platform || mods.function;
+        let vkbd_consumed = self.virtual_keyboard.update(cx, |keyboard, cx| {
+            keyboard.handle_key_down(
+                window_id,
+                event.keystroke.key.as_str(),
+                command_modifier,
+                event.is_held,
+                false,
+                cx,
+            )
+        });
+        if vkbd_consumed {
+            cx.stop_propagation();
+            return;
+        }
+
         if event.is_held {
             return;
         }
         let key = event.keystroke.key.as_str();
-        let mods = event.keystroke.modifiers;
         if key == "space" && !mods.control && !mods.alt && !mods.platform && !mods.function {
             cx.stop_propagation();
             midi_editor_debug("command dispatch transport:play-pause");
@@ -208,6 +240,18 @@ impl Render for MidiEditorWindow {
             // (see layout.rs main window comment).
             .capture_key_down(move |event, window, cx| {
                 let _ = target.update(cx, |this, cx| this.on_key(event, window, cx));
+            })
+            // Forward key-up to the shared keyboard service so notes started by
+            // musical typing in this window release. Updates the keyboard entity
+            // directly (not this window), mirroring the main window's key path.
+            .capture_key_up({
+                let virtual_keyboard = self.virtual_keyboard.clone();
+                move |event, window: &mut Window, cx| {
+                    let window_id = window.window_handle().window_id();
+                    let _ = virtual_keyboard.update(cx, |keyboard, cx| {
+                        keyboard.handle_key_up(window_id, event.keystroke.key.as_str(), cx)
+                    });
+                }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar(
@@ -285,10 +329,12 @@ fn empty_state(title: &str, hint: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn open_midi_editor_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     timeline: Entity<Timeline>,
     piano_roll: Entity<PianoRoll>,
+    virtual_keyboard: Entity<VirtualKeyboardPanel>,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
     cx: &mut App,
@@ -312,7 +358,16 @@ pub fn open_midi_editor_window(
     crate::window_position::apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| MidiEditorWindow::new(timeline, piano_roll, on_close, dispatch_command, cx))
+        cx.new(|cx| {
+            MidiEditorWindow::new(
+                timeline,
+                piano_roll,
+                virtual_keyboard,
+                on_close,
+                dispatch_command,
+                cx,
+            )
+        })
     })
     .map_err(|e| e.to_string())
 }

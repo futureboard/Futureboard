@@ -47,6 +47,7 @@ pub mod frame_scheduler;
 pub mod i18n;
 pub mod keymap;
 pub mod layout;
+pub mod loading_session;
 pub mod menu;
 pub mod midi_devices;
 pub mod midi_input;

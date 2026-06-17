@@ -304,10 +304,10 @@ impl StudioLayout {
         let on_bpm_menu: components::BpmMenuCb = {
             let this = cx.entity().clone();
             Arc::new(
-                move |pos: &(f32, f32), _window: &mut Window, cx: &mut gpui::App| {
+                move |pos: &(f32, f32), window: &mut Window, cx: &mut gpui::App| {
                     let (x, y) = *pos;
                     let _ = this.update(cx, |this, cx| {
-                        this.open_tempo_menu(x, y, cx);
+                        this.open_tempo_menu(window, x, y, cx);
                     });
                 },
             )
@@ -325,10 +325,10 @@ impl StudioLayout {
         let on_ts_menu: components::BpmMenuCb = {
             let this = cx.entity().clone();
             Arc::new(
-                move |pos: &(f32, f32), _window: &mut Window, cx: &mut gpui::App| {
+                move |pos: &(f32, f32), window: &mut Window, cx: &mut gpui::App| {
                     let (x, y) = *pos;
                     let _ = this.update(cx, |this, cx| {
-                        this.open_time_signature_menu(x, y, cx);
+                        this.open_time_signature_menu(window, x, y, cx);
                     });
                 },
             )

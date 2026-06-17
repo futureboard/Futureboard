@@ -5,6 +5,7 @@ use gpui::{
 
 pub use crate::shutdown::ShutdownState;
 pub use close_ops::PendingCloseAction;
+pub use project_ops::ProjectOpenOptions;
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
@@ -36,6 +37,7 @@ use sphere_plugin_host::load_au_cache_state;
 mod audio_transport;
 mod browser_ops;
 mod close_ops;
+mod context_menu_ops;
 mod engine_snapshot;
 mod export_ops;
 mod frame_diagnostics;
@@ -49,6 +51,7 @@ mod plugin_ops;
 mod plugin_picker_window;
 mod project_ops;
 mod recording_ops;
+mod session_load;
 mod studio_render;
 mod studio_state;
 mod track_clip_ops;
@@ -64,6 +67,8 @@ use helpers::{
     should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
 };
 use project_ops::LifecycleAction;
+pub use audio_transport::SeekReason;
+pub use context_menu_ops::{ContextMenuRequest, ContextMenuTarget};
 pub use studio_state::{ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility};
 use studio_state::{TextContextMenu, TextMenuTarget, TransportCommand};
 
@@ -429,6 +434,8 @@ pub struct StudioLayout {
     project_state: crate::app_state::ProjectState,
     /// Last OS window title applied in render, to avoid redundant set calls.
     last_window_title: Option<String>,
+    /// Whether this workspace session is safe for arrangement/mixer/inspector UI.
+    session_install_status: crate::app_state::SessionInstallStatus,
 }
 
 impl StudioLayout {
@@ -505,7 +512,7 @@ impl StudioLayout {
                 audio_editor.clone(),
             )
         });
-        let virtual_keyboard = cx.new(|_| components::VirtualKeyboardPanel::new());
+        let virtual_keyboard = cx.new(components::VirtualKeyboardPanel::new);
         let piano_roll_floating = {
             let timeline = timeline.clone();
             cx.new(|cx| {
@@ -733,6 +740,7 @@ impl StudioLayout {
             active_keymap: crate::keymap::Keymap::bundled_default(),
             project_state: crate::app_state::ProjectState::NoProject,
             last_window_title: None,
+            session_install_status: crate::app_state::SessionInstallStatus::Ready,
         };
 
         layout.spawn_audio_engine_warmup(cx);
@@ -777,9 +785,19 @@ impl StudioLayout {
     fn install_audio_callbacks(&mut self, engine: &DAUx::AudioEngine, cx: &mut Context<Self>) {
         let seek_engine = engine.clone();
         let param_engine = engine.clone();
+        let owner = cx.entity().clone();
         let _ = self.timeline.update(cx, |timeline, _cx| {
             timeline.set_native_audio_callbacks(
-                Some(Arc::new(move |beats, bpm| {
+                Some(Arc::new(move |beats, bpm, reason| {
+                    match reason {
+                        SeekReason::UserDragging => {
+                            let _ = seek_engine.set_metronome_suspended(true);
+                        }
+                        SeekReason::TimelineClick | SeekReason::Programmatic => {
+                            let _ = seek_engine.set_metronome_suspended(false);
+                        }
+                        _ => {}
+                    }
                     let seconds = beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
                     if let Err(error) = seek_engine.seek(seconds) {
                         eprintln!("[audio] seek failed: {error}");
@@ -807,6 +825,20 @@ impl StudioLayout {
                             );
                         }
                     }
+                })),
+            );
+            let owner_begin = owner.clone();
+            let owner_end = owner;
+            timeline.set_playhead_scrub_callbacks(
+                Some(Arc::new(move |_, cx| {
+                    StudioLayout::defer_update(&owner_begin, cx, |this, cx| {
+                        this.set_playhead_scrub_active(true, cx);
+                    });
+                })),
+                Some(Arc::new(move |_, cx| {
+                    StudioLayout::defer_update(&owner_end, cx, |this, cx| {
+                        this.set_playhead_scrub_active(false, cx);
+                    });
                 })),
             );
         });
@@ -845,6 +877,19 @@ impl StudioLayout {
         callback: Arc<dyn Fn(&mut gpui::App) + 'static>,
     ) {
         self.window_hooks.on_request_welcome = Some(callback);
+    }
+
+    /// Wire the app-level project-load hook used for in-studio open/replace.
+    pub fn set_request_project_load_callback(
+        &mut self,
+        callback: Arc<dyn Fn(PathBuf, project_ops::ProjectOpenOptions, &mut gpui::App) + 'static>,
+    ) {
+        self.window_hooks.on_request_project_load = Some(callback);
+    }
+
+    /// Whether the session is fully installed and safe for UI components.
+    pub fn session_install_status(&self) -> crate::app_state::SessionInstallStatus {
+        self.session_install_status
     }
 }
 
@@ -930,6 +975,12 @@ impl StudioLayout {
     ) {
         let normalized = normalize_command_id(command_id);
         let command_id = normalized.as_str();
+        // While the session is not fully installed, block every command so the
+        // UI cannot mutate a half-loaded workspace.
+        if !self.session_install_status.is_ready() {
+            eprintln!("[SessionLoad] command blocked during install: {command_id}");
+            return;
+        }
         if edit_command_debug() && is_midi_routable_edit_command(command_id) {
             eprintln!("[edit-command] command={command_id} target=Timeline");
         }
@@ -1103,10 +1154,10 @@ impl StudioLayout {
 
             "browser:import" => {
                 let path = match &self.overlay.open_popover {
-                    Some(OpenPopover::Context {
-                        target: ContextTarget::Browser(path),
-                        ..
-                    }) => path.clone(),
+                    Some(OpenPopover::Context { request }) => match &request.target {
+                        ContextMenuTarget::Extended(ContextTarget::Browser(path)) => path.clone(),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1150,25 +1201,22 @@ impl StudioLayout {
             }
             "browser:reveal" => {
                 let path = match &self.overlay.open_popover {
-                    Some(OpenPopover::Context {
-                        target: ContextTarget::Browser(path),
-                        ..
-                    }) => path.clone(),
-                    Some(OpenPopover::Context {
-                        target: ContextTarget::Clip(clip_id),
-                        ..
-                    }) => self
-                        .timeline
-                        .read(cx)
-                        .state
-                        .find_clip(clip_id)
-                        .and_then(|(_, clip)| match &clip.clip_type {
-                            ClipType::Audio {
-                                source_path: Some(path),
-                                ..
-                            } if !path.is_empty() => Some(PathBuf::from(path)),
-                            _ => None,
-                        }),
+                    Some(OpenPopover::Context { request }) => match &request.target {
+                        ContextMenuTarget::Extended(ContextTarget::Browser(path)) => path.clone(),
+                        ContextMenuTarget::Clip(clip_id) => self
+                            .timeline
+                            .read(cx)
+                            .state
+                            .find_clip(clip_id)
+                            .and_then(|(_, clip)| match &clip.clip_type {
+                                ClipType::Audio {
+                                    source_path: Some(path),
+                                    ..
+                                } if !path.is_empty() => Some(PathBuf::from(path)),
+                                _ => None,
+                            }),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1177,10 +1225,10 @@ impl StudioLayout {
             }
             "browser:refresh" => {
                 let path = match &self.overlay.open_popover {
-                    Some(OpenPopover::Context {
-                        target: ContextTarget::Browser(path),
-                        ..
-                    }) => path.clone(),
+                    Some(OpenPopover::Context { request }) => match &request.target {
+                        ContextMenuTarget::Extended(ContextTarget::Browser(path)) => path.clone(),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1196,10 +1244,10 @@ impl StudioLayout {
             }
             "browser:copy-path" => {
                 let path = match &self.overlay.open_popover {
-                    Some(OpenPopover::Context {
-                        target: ContextTarget::Browser(path),
-                        ..
-                    }) => path.clone(),
+                    Some(OpenPopover::Context { request }) => match &request.target {
+                        ContextMenuTarget::Extended(ContextTarget::Browser(path)) => path.clone(),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1209,10 +1257,10 @@ impl StudioLayout {
             }
             "browser:open" => {
                 let path = match &self.overlay.open_popover {
-                    Some(OpenPopover::Context {
-                        target: ContextTarget::Browser(path),
-                        ..
-                    }) => path.clone(),
+                    Some(OpenPopover::Context { request }) => match &request.target {
+                        ContextMenuTarget::Extended(ContextTarget::Browser(path)) => path.clone(),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(path) = path {
@@ -1239,11 +1287,19 @@ impl StudioLayout {
             "view:zoom-out" => self.zoom_timeline_by(cx, 0.8),
             "view:reset-zoom" => self.reset_timeline_zoom(cx),
             "view:toggle-virtual-keyboard" | "midi:toggle-virtual-keyboard" => {
-                let _ = self.virtual_keyboard.update(cx, |keyboard, cx| {
-                    keyboard.toggle(cx);
+                // Deferred + panel-only: toggling off releases active notes
+                // through the sink, which re-enters StudioLayout::update. We are
+                // inside a StudioLayout lease here (command dispatch), so flushing
+                // synchronously would double-lease and panic.
+                let panel = self.virtual_keyboard.clone();
+                let owner = cx.entity();
+                cx.defer(move |cx| {
+                    let _ = panel.update(cx, |keyboard, cx| keyboard.toggle(cx));
+                    let _ = owner.update(cx, |this, cx| {
+                        this.update_virtual_keyboard_target_status(cx);
+                        cx.notify();
+                    });
                 });
-                self.update_virtual_keyboard_target_status(cx);
-                cx.notify();
             }
 
             // ── Project / track / edit commands available in native shell ─
@@ -1584,10 +1640,21 @@ impl StudioLayout {
                             // Re-bind timeline callbacks
                             let seek_engine = engine.clone();
                             let param_engine = engine.clone();
+                            let owner = cx.entity().clone();
                             let _ = self.timeline.update(cx, |timeline, _cx| {
                                 timeline.set_native_audio_callbacks(
-                                    Some(Arc::new(move |beats, bpm| {
-                                        let seconds = beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
+                                    Some(Arc::new(move |beats, bpm, reason| {
+                                        match reason {
+                                            SeekReason::UserDragging => {
+                                                let _ = seek_engine.set_metronome_suspended(true);
+                                            }
+                                            SeekReason::TimelineClick | SeekReason::Programmatic => {
+                                                let _ = seek_engine.set_metronome_suspended(false);
+                                            }
+                                            _ => {}
+                                        }
+                                        let seconds =
+                                            beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
                                         if let Err(error) = seek_engine.seek(seconds) {
                                             eprintln!("[audio] seek failed: {error}");
                                         }
@@ -1604,16 +1671,33 @@ impl StudioLayout {
                                             }
                                             _ => value as f64,
                                         };
-                                        if let Err(error) =
-                                            param_engine.update_track_param(&track_id, &param_id, engine_value)
-                                        {
-                                            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                                        if let Err(error) = param_engine.update_track_param(
+                                            &track_id,
+                                            &param_id,
+                                            engine_value,
+                                        ) {
+                                            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen)
+                                            {
                                                 eprintln!(
                                                     "[audio] track param update failed: track={} param={} error={}",
                                                     track_id, param_id, error
                                                 );
                                             }
                                         }
+                                    })),
+                                );
+                                let owner_begin = owner.clone();
+                                let owner_end = owner;
+                                timeline.set_playhead_scrub_callbacks(
+                                    Some(Arc::new(move |_, cx| {
+                                        StudioLayout::defer_update(&owner_begin, cx, |this, cx| {
+                                            this.set_playhead_scrub_active(true, cx);
+                                        });
+                                    })),
+                                    Some(Arc::new(move |_, cx| {
+                                        StudioLayout::defer_update(&owner_end, cx, |this, cx| {
+                                            this.set_playhead_scrub_active(false, cx);
+                                        });
                                     })),
                                 );
                             });

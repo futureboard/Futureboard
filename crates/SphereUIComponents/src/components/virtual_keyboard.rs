@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gpui::{
     div, px, App, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    Styled, Window,
+    Styled, Window, WindowId,
 };
 
 use crate::midi_input::VirtualKeyboardEvent;
@@ -24,6 +24,10 @@ const VELOCITY_STEP: u8 = 8;
 /// `FUTUREBOARD_VIRTUAL_KEYBOARD_DEBUG=1` traces every musical-typing key event
 /// (raw key, normalized key, mapped note, octave, velocity, ignored reason).
 /// Cached on first read; never logged in the audio path.
+fn vkbd_log(message: &str) {
+    eprintln!("[VirtualKeyboard] {message}");
+}
+
 fn vkbd_debug() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_VIRTUAL_KEYBOARD_DEBUG").is_some())
@@ -163,7 +167,7 @@ fn classify_key(raw: &str) -> Option<MusicalKey> {
         "x" => Some(MusicalKey::OctaveUp),
         "c" => Some(MusicalKey::VelocityDown),
         "v" => Some(MusicalKey::VelocityUp),
-        "space" => Some(MusicalKey::Sustain),
+        "q" => Some(MusicalKey::Sustain),
         token => WHITE_KEYS
             .iter()
             .chain(BLACK_KEYS.iter())
@@ -196,22 +200,38 @@ impl VirtualKeyboardOutput {
     }
 }
 
+/// Session-level virtual-keyboard / musical-typing state.
+///
+/// This is the single source of truth shared by every Futureboard window. It is
+/// owned by the app-lifetime [`VirtualKeyboardPanel`] entity (not by any window),
+/// so settings (octave/velocity/channel/sustain) survive window open/close and
+/// notes can be released safely when a window goes away. Windows do not own any
+/// of this state — they register/unregister and forward key events in.
 #[derive(Debug, Clone)]
-pub struct VirtualKeyboardController {
+pub struct VirtualKeyboardService {
     pub enabled: bool,
     pub octave: i8,
     pub velocity: u8,
     pub channel: u8,
     pub sustain: bool,
-    /// Physical note keys currently held: semitone identity -> the actual MIDI
-    /// note dispatched at press time. Keyed by semitone (unique per key) so OS
-    /// auto-repeat and re-press produce exactly one NoteOn, and key-up only
-    /// emits NoteOff for a key that was genuinely pressed.
-    pressed_keys: HashMap<i8, u8>,
+    /// Physical note keys currently held, keyed by `(window, semitone)`.
+    ///
+    /// The semitone is unique per physical key, so the `(window, semitone)`
+    /// identity makes OS auto-repeat and re-press produce exactly one NoteOn per
+    /// window, lets the same key be held independently in two windows, and lets
+    /// key-up / window-close release only the notes a window genuinely holds.
+    /// The value is the actual MIDI note dispatched at press time.
+    pressed_keys: HashMap<(WindowId, i8), u8>,
+    /// Sounding notes (the union across all windows + mouse), used for rendering
+    /// and to decide when the *last* holder of a note releases it.
     active_notes: BTreeSet<(u8, u8)>,
+    /// Windows that have registered for musical typing. Tracked purely for
+    /// lifecycle: a window is unregistered (and its notes released) on close, and
+    /// stale window handles are never touched.
+    registered_windows: HashSet<WindowId>,
 }
 
-impl Default for VirtualKeyboardController {
+impl Default for VirtualKeyboardService {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -221,11 +241,73 @@ impl Default for VirtualKeyboardController {
             sustain: false,
             pressed_keys: HashMap::new(),
             active_notes: BTreeSet::new(),
+            registered_windows: HashSet::new(),
         }
     }
 }
 
-impl VirtualKeyboardController {
+impl VirtualKeyboardService {
+    /// Register a window as a musical-typing source. Idempotent.
+    pub fn register_window(&mut self, window_id: WindowId) {
+        if self.registered_windows.insert(window_id) {
+            self.log_window("register", window_id);
+        }
+    }
+
+    /// Unregister a window and release any notes it was still holding. Safe to
+    /// call for a window that was never registered (returns no events).
+    pub fn unregister_window(&mut self, window_id: WindowId) -> VirtualKeyboardOutput {
+        self.registered_windows.remove(&window_id);
+        let output = self.release_notes_for_window(window_id);
+        self.log_window("unregister", window_id);
+        output
+    }
+
+    /// Release every note still held by `window_id` (e.g. on window close). A
+    /// note only emits NoteOff when no other window still holds it; mouse-held
+    /// notes are left untouched.
+    pub fn release_notes_for_window(&mut self, window_id: WindowId) -> VirtualKeyboardOutput {
+        let mut output = VirtualKeyboardOutput::default();
+        let removed: Vec<u8> = self
+            .pressed_keys
+            .iter()
+            .filter(|((win, _), _)| *win == window_id)
+            .map(|(_, note)| *note)
+            .collect();
+        if removed.is_empty() {
+            return output;
+        }
+        self.pressed_keys.retain(|(win, _), _| *win != window_id);
+        for note in removed {
+            let still_held = self.pressed_keys.values().any(|&held| held == note);
+            if !still_held && self.active_notes.remove(&(self.channel, note)) {
+                output.push(VirtualKeyboardEvent::NoteOff {
+                    note,
+                    channel: self.channel,
+                });
+            }
+        }
+        if vkbd_debug() {
+            eprintln!(
+                "[vkbd] release-notes-for-window window={} released={} active_remaining={}",
+                window_id.as_u64(),
+                output.events.len(),
+                self.active_notes.len(),
+            );
+        }
+        output
+    }
+
+    fn log_window(&self, action: &str, window_id: WindowId) {
+        if vkbd_debug() {
+            eprintln!(
+                "[vkbd] {action} window={} registered_total={}",
+                window_id.as_u64(),
+                self.registered_windows.len(),
+            );
+        }
+    }
+
     /// Resolve a key's semitone to an in-range MIDI note for the current octave.
     /// Returns `None` (ignored, never panics) when the octave shift pushes the
     /// note outside 0..=127.
@@ -265,10 +347,15 @@ impl VirtualKeyboardController {
     ///
     /// `command_modifier` is true when Ctrl/Cmd/Alt/Fn is held — such a chord is
     /// a shortcut, not a musical note, so it is passed through untouched. The
-    /// method never panics: unknown/unmapped keys, text-input focus, and
-    /// out-of-range notes all return `Pass` with no events.
+    /// method never panics: unknown/unmapped keys, text-input focus (which also
+    /// covers active IME composition, since IME composes into a focused field),
+    /// and out-of-range notes all return `Pass` with no events.
+    ///
+    /// `window_id` identifies the source window so the press can be released
+    /// precisely when that key lifts or that window closes.
     pub fn handle_key_down(
         &mut self,
+        window_id: WindowId,
         key: &str,
         command_modifier: bool,
         is_repeat: bool,
@@ -338,35 +425,41 @@ impl VirtualKeyboardController {
                     self.log_ignored(key, "note-out-of-range");
                     return (VirtualKeyboardKeyAction::Pass, output);
                 };
-                // One NoteOn per physical press: drop OS auto-repeat and any
-                // duplicate down event for a key we already hold.
-                if is_repeat || self.pressed_keys.contains_key(&semitone) {
+                // One NoteOn per physical press *per window*: drop OS auto-repeat
+                // and any duplicate down event for a key this window already holds.
+                if is_repeat || self.pressed_keys.contains_key(&(window_id, semitone)) {
                     return (VirtualKeyboardKeyAction::Consumed, output);
                 }
-                self.pressed_keys.insert(semitone, note);
-                self.active_notes.insert((self.channel, note));
-                output.push(VirtualKeyboardEvent::NoteOn {
-                    note,
-                    velocity: self.velocity,
-                    channel: self.channel,
-                });
-                self.log_note_on(key, musical, note);
+                self.pressed_keys.insert((window_id, semitone), note);
+                // Only the first holder of a given note sounds it; a second window
+                // pressing the same note records the hold but does not retrigger.
+                if self.active_notes.insert((self.channel, note)) {
+                    output.push(VirtualKeyboardEvent::NoteOn {
+                        note,
+                        velocity: self.velocity,
+                        channel: self.channel,
+                    });
+                    self.log_note_on(key, musical, note);
+                }
                 (VirtualKeyboardKeyAction::Consumed, output)
             }
         }
     }
 
-    /// Handle a physical key-up. Only note keys that were genuinely pressed emit
-    /// a NoteOff; control keys, unmapped keys, and never-pressed keys are no-ops.
-    pub fn handle_key_up(&mut self, key: &str) -> VirtualKeyboardOutput {
+    /// Handle a physical key-up from `window_id`. Only note keys this window
+    /// genuinely pressed emit a NoteOff, and only when no other window still
+    /// holds the same note; control keys, unmapped keys, and never-pressed keys
+    /// are no-ops.
+    pub fn handle_key_up(&mut self, window_id: WindowId, key: &str) -> VirtualKeyboardOutput {
         let mut output = VirtualKeyboardOutput::default();
         let Some(MusicalKey::Note { semitone, .. }) = classify_key(key) else {
             return output;
         };
-        let Some(note) = self.pressed_keys.remove(&semitone) else {
+        let Some(note) = self.pressed_keys.remove(&(window_id, semitone)) else {
             return output;
         };
-        if self.active_notes.remove(&(self.channel, note)) {
+        let still_held = self.pressed_keys.values().any(|&held| held == note);
+        if !still_held && self.active_notes.remove(&(self.channel, note)) {
             output.push(VirtualKeyboardEvent::NoteOff {
                 note,
                 channel: self.channel,
@@ -513,19 +606,21 @@ impl VirtualKeyboardController {
 
 #[derive(Clone)]
 pub struct VirtualKeyboardPanelState {
-    pub controller: VirtualKeyboardController,
+    pub controller: VirtualKeyboardService,
     pub visible: bool,
     pub hint: Option<String>,
     pub target_label: Option<String>,
+    pub keyboard_focus_claimed: bool,
 }
 
 impl Default for VirtualKeyboardPanelState {
     fn default() -> Self {
         Self {
-            controller: VirtualKeyboardController::default(),
+            controller: VirtualKeyboardService::default(),
             visible: false,
             hint: None,
             target_label: None,
+            keyboard_focus_claimed: false,
         }
     }
 }
@@ -542,13 +637,15 @@ impl VirtualKeyboardPanelState {
 pub struct VirtualKeyboardPanel {
     pub state: VirtualKeyboardPanelState,
     pub event_sink: Option<VirtualKeyboardEventSink>,
+    focus_handle: gpui::FocusHandle,
 }
 
 impl VirtualKeyboardPanel {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             state: VirtualKeyboardPanelState::default(),
             event_sink: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -557,8 +654,14 @@ impl VirtualKeyboardPanel {
     }
 
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let was_visible = self.state.visible;
         self.state.visible = visible;
-        if !visible {
+        if visible && !was_visible {
+            vkbd_log("open");
+            self.state.keyboard_focus_claimed = false;
+        } else if !visible && was_visible {
+            vkbd_log("close");
+            self.state.keyboard_focus_claimed = false;
             let output = self.state.close();
             self.flush_output(output, cx);
         }
@@ -584,8 +687,39 @@ impl VirtualKeyboardPanel {
         cx.notify();
     }
 
+    /// Hard reset: all-notes-off + clear pressed/active/sustain. Used on project
+    /// load so no note or sustain survives into the next session. Window
+    /// registrations and user settings (octave/velocity/channel) are preserved.
+    pub fn panic(&mut self, cx: &mut Context<Self>) {
+        let output = self.state.controller.panic();
+        self.flush_output(output, cx);
+        cx.notify();
+    }
+
+    /// Register a musical-typing source window with the service. Idempotent.
+    pub fn register_window(&mut self, window_id: WindowId) {
+        self.state.controller.register_window(window_id);
+    }
+
+    /// Unregister a window and release any notes it still held. Used on window
+    /// close so a destroyed window never leaves stuck notes behind. The service
+    /// (and its octave/velocity/channel/sustain settings) is left intact.
+    pub fn unregister_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        let output = self.state.controller.unregister_window(window_id);
+        let handled = output.has_events();
+        self.flush_output(output, cx);
+        if handled {
+            cx.notify();
+        }
+    }
+
+    pub fn is_musical_key(key: &str) -> bool {
+        classify_key(key).is_some()
+    }
+
     pub fn handle_key_down(
         &mut self,
+        window_id: WindowId,
         key: &str,
         command_modifier: bool,
         is_repeat: bool,
@@ -593,11 +727,16 @@ impl VirtualKeyboardPanel {
         cx: &mut Context<Self>,
     ) -> bool {
         // Physical keyboard input is captured only while the panel is visible;
-        // otherwise the key falls through to the normal shortcut path.
+        // otherwise the key falls through to the normal shortcut path. The
+        // service decides per-event whether to handle or ignore.
         if !self.state.visible {
             return false;
         }
+        // Track the source window so its notes can be released on close even if
+        // the window never called `register_window` explicitly.
+        self.state.controller.register_window(window_id);
         let (action, output) = self.state.controller.handle_key_down(
+            window_id,
             key,
             command_modifier,
             is_repeat,
@@ -605,24 +744,36 @@ impl VirtualKeyboardPanel {
         );
         self.flush_output(output, cx);
         if matches!(action, VirtualKeyboardKeyAction::Consumed) {
+            vkbd_log(&format!("key handled key={key}"));
             cx.notify();
             true
+        } else if classify_key(key).is_some() {
+            vkbd_log(&format!(
+                "key ignored reason=text-input-or-modifier key={key}"
+            ));
+            false
         } else {
             false
         }
     }
 
-    pub fn handle_key_up(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+    pub fn handle_key_up(&mut self, window_id: WindowId, key: &str, cx: &mut Context<Self>) -> bool {
         if !self.state.visible {
             return false;
         }
-        let output = self.state.controller.handle_key_up(key);
-        let handled = output.has_events();
+        let output = self.state.controller.handle_key_up(window_id, key);
+        let is_musical = Self::is_musical_key(key);
+        let handled = output.has_events() || is_musical;
         self.flush_output(output, cx);
         if handled {
+            vkbd_log(&format!("key handled key={key}"));
             cx.notify();
         }
         handled
+    }
+
+    pub fn should_prevent_default_key(key: &str) -> bool {
+        Self::is_musical_key(key)
     }
 
     fn flush_output(&self, output: VirtualKeyboardOutput, cx: &mut App) {
@@ -640,6 +791,11 @@ impl Render for VirtualKeyboardPanel {
             return div().into_any_element();
         }
 
+        if !self.state.keyboard_focus_claimed {
+            self.focus_handle.focus(_window, cx);
+            self.state.keyboard_focus_claimed = true;
+        }
+
         let octave = self.state.controller.octave;
         let velocity = self.state.controller.velocity;
         let channel_label = self.state.controller.channel + 1;
@@ -653,6 +809,8 @@ impl Render for VirtualKeyboardPanel {
             .right(px(14.0))
             .bottom(px(42.0))
             .w(px(476.0))
+            .track_focus(&self.focus_handle)
+            .tab_index(0)
             .rounded_lg()
             .border(px(1.0))
             .border_color(Colors::border_strong())
@@ -781,7 +939,7 @@ impl Render for VirtualKeyboardPanel {
                             .text_size(px(10.0))
                             .text_color(Colors::text_faint())
                             .child("A S D F G H J K L ;  /  W E T Y U O P")
-                            .child("Z/X octave  C/V velocity  Space sustain"),
+                            .child("Z/X octave  C/V velocity  Q sustain"),
                     ),
             )
             .into_any_element()
@@ -1068,18 +1226,28 @@ mod tests {
             .count()
     }
 
+    /// A stable test window id; [`win2`] is a distinct second window used by
+    /// the multi-window tests.
+    fn win() -> WindowId {
+        WindowId::from(1)
+    }
+
+    fn win2() -> WindowId {
+        WindowId::from(2)
+    }
+
     /// `(command_modifier, is_repeat, text_input_focused)` all false: a plain
-    /// key press with the panel enabled and focused.
+    /// key press from the default test window with the panel enabled/focused.
     fn down(
-        controller: &mut VirtualKeyboardController,
+        controller: &mut VirtualKeyboardService,
         key: &str,
     ) -> (VirtualKeyboardKeyAction, VirtualKeyboardOutput) {
-        controller.handle_key_down(key, false, false, false)
+        controller.handle_key_down(win(), key, false, false, false)
     }
 
     #[test]
     fn key_down_sends_one_note_on_only() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         let (_, first) = down(&mut controller, "a");
         let (_, second) = down(&mut controller, "a");
         assert_eq!(note_on_count(&first), 1);
@@ -1088,19 +1256,19 @@ mod tests {
 
     #[test]
     fn key_repeat_does_not_duplicate_note_on() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         let _ = down(&mut controller, "a");
         // OS auto-repeat (is_repeat = true) must not retrigger.
-        let (_, repeat) = controller.handle_key_down("a", false, true, false);
+        let (_, repeat) = controller.handle_key_down(win(), "a", false, true, false);
         assert_eq!(note_on_count(&repeat), 0);
         assert_eq!(controller.active_count(), 1);
     }
 
     #[test]
     fn key_up_sends_note_off_for_active_key() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         let _ = down(&mut controller, "a");
-        let output = controller.handle_key_up("a");
+        let output = controller.handle_key_up(win(), "a");
         assert_eq!(
             output.events,
             vec![VirtualKeyboardEvent::NoteOff {
@@ -1113,9 +1281,9 @@ mod tests {
 
     #[test]
     fn key_up_for_never_pressed_key_is_a_no_op() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         // Release without a prior press must not emit a NoteOff or panic.
-        let output = controller.handle_key_up("a");
+        let output = controller.handle_key_up(win(), "a");
         assert!(output.events.is_empty());
         assert_eq!(controller.active_count(), 0);
     }
@@ -1124,8 +1292,8 @@ mod tests {
     fn blur_or_close_releases_all_active_notes() {
         let mut state = VirtualKeyboardPanelState::default();
         state.visible = true;
-        let _ = state.controller.handle_key_down("a", false, false, false);
-        let _ = state.controller.handle_key_down("s", false, false, false);
+        let _ = state.controller.handle_key_down(win(), "a", false, false, false);
+        let _ = state.controller.handle_key_down(win(), "s", false, false, false);
         let output = state.close();
         assert_eq!(output.events.len(), 2);
         assert_eq!(state.controller.active_count(), 0);
@@ -1133,7 +1301,7 @@ mod tests {
 
     #[test]
     fn octave_change_does_not_leave_stale_notes() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         let _ = down(&mut controller, "a");
         let output = controller.set_octave(5);
         assert_eq!(
@@ -1149,7 +1317,7 @@ mod tests {
 
     #[test]
     fn octave_keys_change_octave_without_stuck_notes() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         // Hold A, then bump the octave down with Z: the held note is released,
         // nothing is left stuck, and a stale key-up afterwards is harmless.
         let _ = down(&mut controller, "a");
@@ -1171,14 +1339,14 @@ mod tests {
         assert_eq!(controller.octave, 4);
 
         // The orphaned key-up for A (note already released) is a clean no-op.
-        let trailing = controller.handle_key_up("a");
+        let trailing = controller.handle_key_up(win(), "a");
         assert!(trailing.events.is_empty());
         assert_eq!(controller.active_count(), 0);
     }
 
     #[test]
     fn semicolon_key_does_not_panic_and_maps_to_a_note() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         // Both the glyph and the platform name for the key must classify.
         for key in [";", "semicolon"] {
             let mut c = controller.clone();
@@ -1193,9 +1361,9 @@ mod tests {
     }
 
     #[test]
-    fn space_toggles_sustain_without_panic() {
-        let mut controller = VirtualKeyboardController::default();
-        let (action, output) = down(&mut controller, "space");
+    fn q_toggles_sustain_without_panic() {
+        let mut controller = VirtualKeyboardService::default();
+        let (action, output) = down(&mut controller, "q");
         assert_eq!(action, VirtualKeyboardKeyAction::Consumed);
         assert!(controller.sustain);
         assert_eq!(
@@ -1206,11 +1374,11 @@ mod tests {
             }]
         );
         // Auto-repeat must not flip sustain back off.
-        let (_, repeat) = controller.handle_key_down("space", false, true, false);
+        let (_, repeat_out) = controller.handle_key_down(win(), "q", false, true, false);
         assert!(controller.sustain);
-        assert!(repeat.events.is_empty());
+        assert!(repeat_out.events.is_empty());
         // A fresh press toggles it off again.
-        let (_, second) = down(&mut controller, "space");
+        let (_, second) = down(&mut controller, "q");
         assert!(!controller.sustain);
         assert_eq!(
             second.events,
@@ -1222,23 +1390,32 @@ mod tests {
     }
 
     #[test]
+    fn space_is_not_sustain() {
+        let mut controller = VirtualKeyboardService::default();
+        let (action, output) = controller.handle_key_down(win(), "space", false, false, false);
+        assert_eq!(action, VirtualKeyboardKeyAction::Pass);
+        assert!(!controller.sustain);
+        assert!(output.events.is_empty());
+    }
+
+    #[test]
     fn unmapped_key_is_ignored_without_panic() {
-        let mut controller = VirtualKeyboardController::default();
-        for key in ["q", "1", "enter", "f1", "arrow_left", "`", "/", ""] {
+        let mut controller = VirtualKeyboardService::default();
+        for key in ["1", "enter", "f1", "arrow_left", "`", "/", ""] {
             let (action, output) = down(&mut controller, key);
             assert_eq!(action, VirtualKeyboardKeyAction::Pass, "key {key:?}");
             assert!(output.events.is_empty(), "key {key:?}");
             // A key-up for the same unmapped key is equally harmless.
-            assert!(controller.handle_key_up(key).events.is_empty());
+            assert!(controller.handle_key_up(win(), key).events.is_empty());
         }
         assert_eq!(controller.active_count(), 0);
     }
 
     #[test]
     fn command_modifier_passes_through_for_shortcuts() {
-        let mut controller = VirtualKeyboardController::default();
+        let mut controller = VirtualKeyboardService::default();
         // Ctrl+A (command_modifier = true) is a shortcut, not a note.
-        let (action, output) = controller.handle_key_down("a", true, false, false);
+        let (action, output) = controller.handle_key_down(win(), "a", true, false, false);
         assert_eq!(action, VirtualKeyboardKeyAction::Pass);
         assert!(output.events.is_empty());
         assert_eq!(controller.active_count(), 0);
@@ -1246,8 +1423,8 @@ mod tests {
 
     #[test]
     fn text_input_focus_prevents_musical_typing_capture() {
-        let mut controller = VirtualKeyboardController::default();
-        let (action, output) = controller.handle_key_down("a", false, false, true);
+        let mut controller = VirtualKeyboardService::default();
+        let (action, output) = controller.handle_key_down(win(), "a", false, false, true);
         assert_eq!(action, VirtualKeyboardKeyAction::Pass);
         assert!(output.events.is_empty());
         assert_eq!(controller.active_count(), 0);
@@ -1260,5 +1437,79 @@ mod tests {
         state.hint = Some("Select or arm an instrument track to play.".to_string());
         assert!(state.hint.is_some());
         assert_eq!(state.controller.active_count(), 0);
+    }
+
+    #[test]
+    fn keys_from_two_windows_are_tracked_independently() {
+        let mut service = VirtualKeyboardService::default();
+        // Same physical key held in two different windows: one sounding note,
+        // and each window can re-press without retriggering its own hold.
+        let (_, w1) = service.handle_key_down(win(), "a", false, false, false);
+        let (_, w2) = service.handle_key_down(win2(), "a", false, false, false);
+        assert_eq!(note_on_count(&w1), 1);
+        assert_eq!(note_on_count(&w2), 0, "second window must not retrigger note");
+        assert_eq!(service.active_count(), 1);
+
+        // Releasing in window 1 keeps the note alive (window 2 still holds it).
+        let up1 = service.handle_key_up(win(), "a");
+        assert!(up1.events.is_empty(), "note still held by the other window");
+        assert_eq!(service.active_count(), 1);
+
+        // Releasing the last holder emits the NoteOff.
+        let up2 = service.handle_key_up(win2(), "a");
+        assert_eq!(
+            up2.events,
+            vec![VirtualKeyboardEvent::NoteOff {
+                note: 60,
+                channel: 0
+            }]
+        );
+        assert_eq!(service.active_count(), 0);
+    }
+
+    #[test]
+    fn closing_a_window_releases_only_its_notes_without_crash() {
+        let mut service = VirtualKeyboardService::default();
+        service.register_window(win());
+        service.register_window(win2());
+        // Window 1 holds A (60), window 2 holds S (62).
+        let _ = service.handle_key_down(win(), "a", false, false, false);
+        let _ = service.handle_key_down(win2(), "s", false, false, false);
+        assert_eq!(service.active_count(), 2);
+
+        // Closing window 2 releases only S; A stays held by window 1.
+        let released = service.unregister_window(win2());
+        assert_eq!(
+            released.events,
+            vec![VirtualKeyboardEvent::NoteOff {
+                note: 62,
+                channel: 0
+            }]
+        );
+        assert_eq!(service.active_count(), 1);
+        assert!(service.is_note_active(60));
+
+        // Unregistering a window that holds nothing (or was never registered) is
+        // a clean no-op — never panics, emits nothing.
+        assert!(service.unregister_window(win2()).events.is_empty());
+        assert!(service
+            .release_notes_for_window(WindowId::from(99))
+            .events
+            .is_empty());
+    }
+
+    #[test]
+    fn shared_note_survives_one_window_close() {
+        let mut service = VirtualKeyboardService::default();
+        // Both windows hold the same note; closing one must not silence it.
+        let _ = service.handle_key_down(win(), "a", false, false, false);
+        let _ = service.handle_key_down(win2(), "a", false, false, false);
+        let released = service.unregister_window(win2());
+        assert!(
+            released.events.is_empty(),
+            "note still held by the surviving window"
+        );
+        assert!(service.is_note_active(60));
+        assert_eq!(service.active_count(), 1);
     }
 }

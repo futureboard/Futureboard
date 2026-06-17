@@ -2,6 +2,21 @@ use super::*;
 
 impl Render for StudioLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.session_install_status.is_ready() {
+            return div()
+                .size_full()
+                .bg(Colors::surface_base())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(Colors::text_secondary())
+                        .child("Loading Session…"),
+                );
+        }
+
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
         // Frame pacing tick. See FrameDiagnostics docs — only counts
         // real repaints, not display refreshes.
@@ -357,20 +372,21 @@ impl Render for StudioLayout {
             dyn Fn(&(Option<PathBuf>, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |(path, x, y): &(Option<PathBuf>, f32, f32), _w, cx| {
+            std::sync::Arc::new(move |(path, x, y): &(Option<PathBuf>, f32, f32), window, cx| {
                 let path = path.clone();
                 let x = *x;
                 let y = *y;
-                let _ = this.update(cx, |this, cx| {
-                    this.menu_bar.open_menu_id = None;
-                    this.menu_bar.submenu_path.clear();
-                    this.project_switcher.is_open = false;
-                    this.overlay.open_popover = Some(OpenPopover::Context {
-                        target: ContextTarget::Browser(path),
-                        x,
-                        y,
-                    });
-                    cx.notify();
+                let window_id = window.window_handle().window_id();
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
+                    this.try_open_context_menu(
+                        ContextMenuRequest::new(
+                            window_id,
+                            x,
+                            y,
+                            ContextMenuTarget::Extended(ContextTarget::Browser(path)),
+                        ),
+                        cx,
+                    );
                 });
             })
         };
@@ -437,25 +453,26 @@ impl Render for StudioLayout {
         let on_timeline_context: components::timeline::timeline::TimelineContextMenuCb = {
             let this = cx.entity().clone();
             std::sync::Arc::new(
-                move |(target, x, y): &(TimelineContextTarget, f32, f32), _w, cx| {
+                move |(target, x, y): &(TimelineContextTarget, f32, f32), window, cx| {
                     let target = target.clone();
                     let x = *x;
                     let y = *y;
-                    let _ = this.update(cx, |this, cx| {
+                    let window_id = window.window_handle().window_id();
+                    StudioLayout::defer_update(&this, cx, move |this, cx| {
                         let context_target = match target {
                             TimelineContextTarget::TimelineEmpty => ContextTarget::TimelineEmpty,
                             TimelineContextTarget::TrackLane { track_id, beat } => {
                                 ContextTarget::TrackLane { track_id, beat }
                             }
                             TimelineContextTarget::TrackHeader(id) => {
-                                let _ = this.timeline.update(cx, |timeline, cx| {
+                                this.timeline.update(cx, |timeline, cx| {
                                     timeline.state.select_track(&id);
                                     cx.notify();
                                 });
                                 ContextTarget::Track(id)
                             }
                             TimelineContextTarget::Clip(id) => {
-                                let _ = this.timeline.update(cx, |timeline, cx| {
+                                this.timeline.update(cx, |timeline, cx| {
                                     timeline.state.select_clip(&id);
                                     cx.notify();
                                 });
@@ -463,10 +480,7 @@ impl Render for StudioLayout {
                             }
                             TimelineContextTarget::AudioClip { clip_id, .. }
                             | TimelineContextTarget::MidiClip { clip_id, .. } => {
-                                let _ = this.timeline.update(cx, |timeline, cx| {
-                                    // Context-click convention for arrangement clips:
-                                    // unselected clip becomes the sole context target;
-                                    // selected clip preserves the current multi-selection.
+                                this.timeline.update(cx, |timeline, cx| {
                                     if !timeline
                                         .state
                                         .selection
@@ -512,15 +526,15 @@ impl Render for StudioLayout {
                                 ContextTarget::TimeSignature
                             }
                         };
-                        this.menu_bar.open_menu_id = None;
-                        this.menu_bar.submenu_path.clear();
-                        this.project_switcher.is_open = false;
-                        this.overlay.open_popover = Some(OpenPopover::Context {
-                            target: context_target,
-                            x,
-                            y,
-                        });
-                        cx.notify();
+                        this.try_open_context_menu(
+                            ContextMenuRequest::new(
+                                window_id,
+                                x,
+                                y,
+                                ContextMenuTarget::from_context_target(context_target),
+                            ),
+                            cx,
+                        );
                     });
                 },
             )
@@ -700,6 +714,13 @@ impl Render for StudioLayout {
             std::sync::Arc::new(move |command: &String, w, cx| {
                 let command = command.clone();
                 let _ = this.update(cx, |this, cx| {
+                    if this.overlay.open_popover.is_some()
+                        && !this.validate_open_context_menu_action(cx)
+                    {
+                        eprintln!("[ContextMenu] action target stale, ignored");
+                        this.close_context_menu(cx);
+                        return;
+                    }
                     if let Some(path) =
                         command.strip_prefix(components::project_switcher::OPEN_RECENT_PATH_PREFIX)
                     {
@@ -711,7 +732,7 @@ impl Render for StudioLayout {
                     } else {
                         this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
                     }
-                    this.overlay.open_popover = None;
+                    this.close_context_menu(cx);
                     this.project_switcher.is_open = false;
                     this.command_palette.close();
                     cx.notify();
@@ -800,18 +821,21 @@ impl Render for StudioLayout {
             )
         } else {
             match self.overlay.open_popover.clone() {
-                Some(OpenPopover::Context { target, x, y }) => Some(
-                    components::context_menu::context_menu_overlay(
-                        self.context_entries(&target, cx),
-                        x,
-                        y,
-                        viewport_width,
-                        viewport_height,
-                        on_popover_command.clone(),
-                        on_close_popover.clone(),
+                Some(OpenPopover::Context { request }) => {
+                    let target = request.target.to_context_target();
+                    Some(
+                        components::context_menu::context_menu_overlay(
+                            self.context_entries(&target, cx),
+                            request.x,
+                            request.y,
+                            viewport_width,
+                            viewport_height,
+                            on_popover_command.clone(),
+                            on_close_popover.clone(),
+                        )
+                        .into_any_element(),
                     )
-                    .into_any_element(),
-                ),
+                }
                 None => None,
             }
         };
@@ -858,7 +882,11 @@ impl Render for StudioLayout {
             if visible {
                 let window_active = window.is_window_active();
                 if self.virtual_keyboard_window_active && !window_active {
-                    self.release_virtual_keyboard_notes(cx);
+                    // Deferred + panel-only: releasing through the sink here (we
+                    // are inside StudioLayout::render's lease) would re-enter
+                    // StudioLayout::update and panic. This is the multi-window
+                    // crash path (focus leaving for / closing the popout editor).
+                    self.defer_release_virtual_keyboard_notes(cx);
                 }
                 self.virtual_keyboard_window_active = window_active;
                 let status = self.resolve_virtual_keyboard_target(cx);
@@ -870,7 +898,7 @@ impl Render for StudioLayout {
                     )
                 });
                 if self.virtual_keyboard_last_target != target_key {
-                    self.release_virtual_keyboard_notes(cx);
+                    self.defer_release_virtual_keyboard_notes(cx);
                     self.virtual_keyboard_last_target = target_key;
                 }
                 let label = status.label;
@@ -1220,9 +1248,11 @@ impl Render for StudioLayout {
                 let mods = event.keystroke.modifiers;
                 let command_modifier =
                     mods.control || mods.alt || mods.platform || mods.function;
+                let window_id = window.window_handle().window_id();
                 let virtual_keyboard_handled =
                     virtual_keyboard_keydown.update(cx, |keyboard, cx| {
                         keyboard.handle_key_down(
+                            window_id,
                             event.keystroke.key.as_str(),
                             command_modifier,
                             event.is_held,
@@ -1231,6 +1261,18 @@ impl Render for StudioLayout {
                         )
                     });
                 if virtual_keyboard_handled {
+                    if components::VirtualKeyboardPanel::should_prevent_default_key(
+                        event.keystroke.key.as_str(),
+                    ) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        if key_debug() {
+                            eprintln!(
+                                "[VirtualKeyboard] prevented default system key behavior key={}",
+                                event.keystroke.key
+                            );
+                        }
+                    }
                     return;
                 }
                 if event.keystroke.key.as_str() == "escape" {
@@ -1302,11 +1344,18 @@ impl Render for StudioLayout {
                 // NoteOff flush re-enters `StudioLayout::update` via the sink, so
                 // an outer `StudioLayout` lease here would double-lease and panic.
                 let virtual_keyboard = virtual_keyboard_keyup.clone();
-                move |event, _window, cx| {
+                move |event, window: &mut Window, cx| {
+                    let window_id = window.window_handle().window_id();
                     let handled = virtual_keyboard.update(cx, |keyboard, cx| {
-                        keyboard.handle_key_up(event.keystroke.key.as_str(), cx)
+                        keyboard.handle_key_up(window_id, event.keystroke.key.as_str(), cx)
                     });
                     if handled {
+                        if components::VirtualKeyboardPanel::should_prevent_default_key(
+                            event.keystroke.key.as_str(),
+                        ) {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }
                         return;
                     }
                 }

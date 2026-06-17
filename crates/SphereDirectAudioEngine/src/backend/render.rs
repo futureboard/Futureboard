@@ -101,6 +101,8 @@ pub struct LocalAudioState {
     pub metronome_click_phase: f64,
     pub metronome_click_phase_inc: f64,
     pub metronome_click_gain: f32,
+    /// When true, metronome scheduling and output are suppressed (playhead scrub).
+    pub metronome_suspended: bool,
 }
 
 impl LocalAudioState {
@@ -133,6 +135,7 @@ impl LocalAudioState {
             metronome_click_phase: 0.0,
             metronome_click_phase_inc: 0.0,
             metronome_click_gain: 0.0,
+            metronome_suspended: false,
         }
     }
 
@@ -188,17 +191,60 @@ impl LocalAudioState {
         self.reset_metronome_schedule(position_sample, sample_rate);
     }
 
+    pub fn clear_metronome_clicks(&mut self, reason: &str) {
+        self.metronome_click_remaining = 0;
+        self.metronome_click_gain = 0.0;
+        self.metronome_click_phase = 0.0;
+        if callback_debug_enabled() {
+            eprintln!("[Metronome] clear scheduled clicks reason={reason}");
+        }
+    }
+
+    pub fn set_metronome_suspended(&mut self, suspended: bool) {
+        if self.metronome_suspended == suspended {
+            return;
+        }
+        self.metronome_suspended = suspended;
+        self.clear_metronome_clicks(if suspended {
+            "suspend"
+        } else {
+            "resume"
+        });
+        if callback_debug_enabled() {
+            if suspended {
+                eprintln!("[Metronome] suspend during drag");
+            } else {
+                eprintln!("[Metronome] resume after drag");
+            }
+        }
+    }
+
     pub fn reset_metronome_schedule(&mut self, position_sample: u64, sample_rate: u32) {
+        self.clear_metronome_clicks("seek");
         let sr = sample_rate.max(1) as f64;
         let current_beat = self.tempo_map.beat_at_samples(position_sample, sr);
         self.metronome_next_beat = self
             .time_signature_map
             .next_metronome_click_at_or_after(current_beat);
+        if callback_debug_enabled() {
+            eprintln!(
+                "[Metronome] reset phase position={position_sample} next_beat={:.3}",
+                self.metronome_next_beat
+            );
+        }
     }
 
     #[inline]
-    pub fn metronome_sample(&mut self, project_sample: u64, sample_rate: u32) -> f32 {
-        if !self.metronome_enabled {
+    pub fn metronome_sample(
+        &mut self,
+        project_sample: u64,
+        sample_rate: u32,
+        transport_playing: bool,
+    ) -> f32 {
+        if !self.metronome_enabled || self.metronome_suspended || !transport_playing {
+            if !transport_playing {
+                self.metronome_click_remaining = 0;
+            }
             return 0.0;
         }
 
@@ -391,6 +437,9 @@ pub fn drain_commands(
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 shared.metronome_enabled.store(enabled, Ordering::Relaxed);
                 local.set_metronome_enabled(enabled, pos, output_sample_rate);
+            }
+            EngineCommand::SetMetronomeSuspended(suspended) => {
+                local.set_metronome_suspended(suspended);
             }
             EngineCommand::SetBpm(bpm) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -856,7 +905,11 @@ fn fill_output_f32_inner(
             for i in 0..segment_frames as usize {
                 let frame = &mut data
                     [(callback_offset + i) * channels..(callback_offset + i) * channels + channels];
-                let click = local.metronome_sample(segment_sample + i as u64, runtime.sample_rate);
+                let click = local.metronome_sample(
+                    segment_sample + i as u64,
+                    runtime.sample_rate,
+                    transport_playing,
+                );
                 if click != 0.0 {
                     frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
                     frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
@@ -900,11 +953,11 @@ fn fill_output_f32_inner(
             } else {
                 (0.0, 0.0)
             };
-            let click = if transport_playing {
-                local.metronome_sample(base_sample + frames, runtime.sample_rate) * master_vol
-            } else {
-                0.0
-            };
+            let click = local.metronome_sample(
+                base_sample + frames,
+                runtime.sample_rate,
+                transport_playing,
+            ) * master_vol;
             let l = (tone_l + proj_l + click).clamp(-1.0, 1.0);
             let r = (tone_r + proj_r + click).clamp(-1.0, 1.0);
             // Live monitor is added afterwards from the input ring (see below).
@@ -931,11 +984,11 @@ fn fill_output_f32_inner(
             } else {
                 (0.0, 0.0)
             };
-            let click = if transport_playing {
-                local.metronome_sample(base_sample + frames, runtime.sample_rate) * master_vol
-            } else {
-                0.0
-            };
+            let click = local.metronome_sample(
+                base_sample + frames,
+                runtime.sample_rate,
+                transport_playing,
+            ) * master_vol;
             let v = (tone + (proj_l + proj_r) * 0.5 + click).clamp(-1.0, 1.0);
             *sample = v;
             peak_l = peak_l.max(v.abs());

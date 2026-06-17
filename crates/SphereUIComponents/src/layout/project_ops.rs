@@ -11,9 +11,8 @@ use crate::components::timeline::timeline_state::{
     self, CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
 };
 use crate::project::{
-    apply_to_timeline, io::create_project_folder, io::load_project, io::project_backup_path,
-    io::save_project, io::verify_project_file, now_secs, ClipSource, FutureboardProject,
-    ProjectCreateOptions, ProjectSession, ProjectTemplate,
+    io::create_project_folder, io::project_backup_path, io::save_project, io::verify_project_file,
+    now_secs, ClipSource, FutureboardProject, ProjectCreateOptions, ProjectSession, ProjectTemplate,
 };
 
 use super::StudioLayout;
@@ -161,7 +160,7 @@ impl StudioLayout {
         );
     }
 
-    fn show_project_open_failed_dialog(
+    pub(super) fn show_project_open_failed_dialog(
         &mut self,
         title: &str,
         message: &str,
@@ -503,6 +502,10 @@ impl StudioLayout {
         if crate::shutdown::ShutdownState::global().is_shutting_down() {
             return;
         }
+        // Release any held musical-typing notes and clear the keyboard service's
+        // pressed/active state so the next project starts clean. Deferred +
+        // panel-only to avoid re-entering this (leased) StudioLayout via the sink.
+        self.defer_release_virtual_keyboard_notes(cx);
         self.stop_native_playback(cx);
 
         self.unload_all_bridge_plugins_for_project_close(cx);
@@ -846,96 +849,7 @@ impl StudioLayout {
         .detach();
     }
 
-    pub fn load_project_from_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.load_project_from_path_with_options(path, ProjectOpenOptions::default(), cx);
-    }
-
-    pub fn load_project_from_path_with_options(
-        &mut self,
-        path: PathBuf,
-        open_options: ProjectOpenOptions,
-        cx: &mut Context<Self>,
-    ) {
-        project_lifecycle_log!("open requested: {}", path.display());
-        if !path.exists() {
-            self.show_project_open_failed_dialog(
-                "Open Project Failed",
-                "The project file could not be found at the saved location.",
-                Some(format!("Details: {}", path.display())),
-                Some(path),
-                open_options,
-                cx,
-            );
-            return;
-        }
-
-        let previous_session = self.project_session.clone();
-        self.project_state = crate::app_state::ProjectState::Loading;
-        self.clip_clipboard.clear();
-        match load_project(&path) {
-            Ok(project) => {
-                project_lifecycle_log!("loaded project file: {}", path.display());
-                let project_for_restore = project.clone();
-                // CloseProject flow: fully unload every plugin instance from the
-                // OUTGOING project before its model is replaced. The engine keeps
-                // its bridge-sink map across LoadProject, so without this each old
-                // instance's sink + bridge-host process + editor leaks into the
-                // freshly loaded project.
-                self.teardown_all_plugin_instances(cx, "project_load_replace");
-                let _ = self.timeline.update(cx, |timeline, cx| {
-                    timeline.reset_input_state();
-                    apply_to_timeline(&project, &mut timeline.state);
-                    cx.notify();
-                });
-                let folder = path.parent().map(PathBuf::from);
-                self.project_session.bind_saved(
-                    project.id,
-                    project.name.clone(),
-                    folder,
-                    path.clone(),
-                    project.created_at,
-                    project.modified_at,
-                );
-                project_lifecycle_log!(
-                    "current session updated: name={} path={}",
-                    self.project_session.name,
-                    path.display()
-                );
-                self.sync_project_session_to_workspace(cx);
-                self.recent_projects
-                    .push(&project.name, path.clone(), now_secs());
-                self.sync_recent_to_switcher();
-                self.mark_engine_media_dirty();
-                self.restore_plugin_inserts_after_project_load(cx);
-                self.schedule_audio_project_sync(cx, true, "project_loaded");
-                if let Some(root) = path.parent().map(PathBuf::from) {
-                    let timeline = self.timeline.clone();
-                    let layout = cx.entity().clone();
-                    crate::components::timeline::audio_import::schedule_project_waveform_restore(
-                        &project_for_restore,
-                        root,
-                        timeline,
-                        layout,
-                        cx,
-                    );
-                }
-                cx.notify();
-            }
-            Err(e) => {
-                project_lifecycle_log!("load failed: {}", e.technical_detail());
-                self.project_session = previous_session;
-                self.sync_project_session_to_workspace(cx);
-                self.show_project_open_failed_dialog(
-                    "Open Project Failed",
-                    e.user_message(),
-                    Some(format!("Details: {}", e.technical_detail())),
-                    Some(path),
-                    open_options,
-                    cx,
-                );
-            }
-        }
-    }
+    // `load_project_from_path_with_options` lives in `super::session_load`.
 
     pub(super) fn cmd_open_recent_project(&mut self, cx: &mut Context<Self>) {
         // Note: no synchronous refresh_missing() here — that blocks the UI

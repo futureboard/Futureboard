@@ -72,7 +72,9 @@ pub fn timeline_ruler(
     on_add_track: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_toggle_snap: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_cycle_grid: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_seek: std::sync::Arc<
+        dyn Fn(&f32, crate::layout::SeekReason, &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     on_region_drag: std::sync::Arc<
         dyn Fn(&TimelineRegionDragUpdate, &mut gpui::Window, &mut gpui::App) + 'static,
     >,
@@ -81,6 +83,12 @@ pub fn timeline_ruler(
     >,
     on_ruler_context: std::sync::Arc<
         dyn Fn(&(f32, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
+    on_playhead_scrub_begin: Option<
+        std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>,
+    >,
+    on_playhead_scrub_end: Option<
+        std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>,
     >,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TimelineRuler");
@@ -93,6 +101,11 @@ pub fn timeline_ruler(
 
     let on_seek_clone = on_seek.clone();
     let on_seek_drag = on_seek.clone();
+    let scrub_begin = on_playhead_scrub_begin.clone();
+    let scrub_end = on_playhead_scrub_end.clone();
+    let scrub_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let scrub_active_drag = scrub_active.clone();
+    let scrub_active_up = scrub_active.clone();
     let on_region_drag_move = on_region_drag.clone();
     let state_for_region_drag = state.clone();
     let on_loop_drag_move = on_loop_drag.clone();
@@ -242,10 +255,14 @@ pub fn timeline_ruler(
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     move |event: &gpui::MouseDownEvent, window, cx| {
-                        // event.position.x is absolute screen position.
                         let x: f32 = event.position.x.into();
                         let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
-                        on_seek_clone(&click_x, window, cx);
+                        on_seek_clone(
+                            &click_x,
+                            crate::layout::SeekReason::TimelineClick,
+                            window,
+                            cx,
+                        );
                     },
                 )
                 // Right-click → position-aware tempo menu.
@@ -258,17 +275,41 @@ pub fn timeline_ruler(
                         on_ruler_context(&(click_x, x, y), window, cx);
                     },
                 )
-                .on_drag(RulerSeekDrag, |_, _offset, _window, cx| {
-                    cx.new(|_| RulerSeekDrag)
+                .on_drag(RulerSeekDrag, {
+                    let scrub_active = scrub_active.clone();
+                    move |_, _offset, _window, cx| {
+                        scrub_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                        cx.new(|_| RulerSeekDrag)
+                    }
                 })
                 .on_drag_move::<RulerSeekDrag>(
                     move |event: &gpui::DragMoveEvent<RulerSeekDrag>, window, cx| {
                         let x: f32 = event.event.position.x.into();
                         let ox: f32 = event.bounds.origin.x.into();
                         let click_x = (x - ox).max(0.0);
-                        on_seek_drag(&click_x, window, cx);
+                        if !scrub_active_drag.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(cb) = scrub_begin.as_ref() {
+                                cb(window, cx);
+                            }
+                        }
+                        on_seek_drag(
+                            &click_x,
+                            crate::layout::SeekReason::UserDragging,
+                            window,
+                            cx,
+                        );
                         window.prevent_default();
                         cx.stop_propagation();
+                    },
+                )
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    move |_: &gpui::MouseUpEvent, window, cx| {
+                        if scrub_active_up.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(cb) = scrub_end.as_ref() {
+                                cb(window, cx);
+                            }
+                        }
                     },
                 )
                 .on_drag_move::<TimelineRegionDrag>(

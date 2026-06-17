@@ -256,6 +256,10 @@ impl AudioEngine {
         self.inner.seek(position_seconds.max(0.0))
     }
 
+    pub fn set_metronome_suspended(&self, suspended: bool) -> Result<(), SphereAudioError> {
+        self.inner.set_metronome_suspended(suspended)
+    }
+
     pub fn set_metronome_enabled(&self, enabled: bool) -> Result<(), SphereAudioError> {
         self.inner.set_metronome_enabled(enabled)
     }

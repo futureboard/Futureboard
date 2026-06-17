@@ -230,28 +230,19 @@ fn begin_load_project_from_welcome(
     begin_project_session_load(path, open_options, None, None, on_success, on_failure, cx);
 }
 
-fn begin_load_project_from_studio(
+fn request_project_switch_in_studio(
+    studio: gpui::WindowHandle<StudioLayout>,
     path: PathBuf,
     open_options: ProjectOpenOptions,
-    rollback: SessionRollbackSnapshot,
-    owner_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     cx: &mut App,
 ) {
-    let on_success = Arc::new(|package: LoadedSessionPackage, cx: &mut App| {
-        transition_loaded_package_to_studio(package, cx);
+    // Never call `studio.update` synchronously here — this hook is invoked from
+    // inside an active `StudioLayout` update (e.g. File → Open Project).
+    cx.defer(move |cx| {
+        let _ = studio.update(cx, |layout, _window, cx| {
+            layout.begin_in_studio_project_switch(path, open_options, cx);
+        });
     });
-    let on_failure = Arc::new(|ctx: LoadFailedContext, cx: &mut App| {
-        handle_load_failed(ctx, cx);
-    });
-    begin_project_session_load(
-        path,
-        open_options,
-        Some(rollback),
-        owner_bounds,
-        on_success,
-        on_failure,
-        cx,
-    );
 }
 
 fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
@@ -369,7 +360,12 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
             layout.set_request_project_load_callback(Arc::new({
                 let studio_handle = studio_handle.clone();
                 move |path, open_options, cx| {
-                    request_project_load_from_studio(studio_handle.clone(), path, open_options, cx);
+                    request_project_switch_in_studio(
+                        studio_handle.clone(),
+                        path,
+                        open_options,
+                        cx,
+                    );
                 }
             }));
 
@@ -390,34 +386,4 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
 
     boot::log("workspace entered");
     Ok(())
-}
-
-fn request_project_load_from_studio(
-    studio: gpui::WindowHandle<StudioLayout>,
-    path: PathBuf,
-    open_options: ProjectOpenOptions,
-    cx: &mut App,
-) {
-    cx.update_global::<NativeShellWindows, _>(|shell, _| shell.studio = None);
-    let _ = studio.update(cx, |layout, _window, cx| {
-        let (rollback, owner_bounds, self_window) =
-            layout.prepare_for_app_level_project_reload(cx);
-        cx.spawn(async move |_this, cx| {
-            if let Some(handle) = self_window {
-                cx.background_executor()
-                    .timer(Duration::from_millis(0))
-                    .await;
-                let _ = handle.update(cx, |_studio, window, cx| {
-                    sphere_ui_components::window_position::persist_studio_window_from_window(
-                        window, cx,
-                    );
-                    window.remove_window();
-                });
-            }
-            let _ = cx.update(|app| {
-                begin_load_project_from_studio(path, open_options, rollback, owner_bounds, app);
-            });
-        })
-        .detach();
-    });
 }

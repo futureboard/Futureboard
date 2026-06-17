@@ -19,6 +19,18 @@ pub const OPEN_RECENT_PATH_PREFIX: &str = "project:open-recent-path:";
 
 pub type ProjectSwitcherCommandCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 pub type ProjectSwitcherCloseCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
+pub type ProjectSwitcherRowCb =
+    Arc<dyn Fn(ProjectSwitcherRowEvent, &mut Window, &mut App) + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub enum ProjectSwitcherRowEvent {
+    CurrentProject,
+    SwitchProject {
+        path: PathBuf,
+        name: String,
+        is_missing: bool,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct ProjectSummary {
@@ -72,6 +84,7 @@ pub fn project_switcher_popover(
     search_callbacks: TextInputCallbacks,
     viewport_width: f32,
     viewport_height: f32,
+    on_row_action: ProjectSwitcherRowCb,
     on_command: ProjectSwitcherCommandCb,
     on_close: ProjectSwitcherCloseCb,
 ) -> impl IntoElement {
@@ -115,6 +128,7 @@ pub fn project_switcher_popover(
             search_callbacks,
             left,
             top,
+            on_row_action,
             on_command,
         ))
 }
@@ -136,6 +150,7 @@ fn panel(
     search_callbacks: TextInputCallbacks,
     left: f32,
     top: f32,
+    on_row_action: ProjectSwitcherRowCb,
     on_command: ProjectSwitcherCommandCb,
 ) -> impl IntoElement {
     let filtered = filtered_recent(state);
@@ -170,8 +185,7 @@ fn panel(
                     &state.current_project,
                     true,
                     selected_index == 0,
-                    on_command.clone(),
-                    RowAction::Command("project:switch-current".to_string()),
+                    on_row_action.clone(),
                 ))
                 .child(divider())
                 .child(section_label("Recent Projects"))
@@ -187,8 +201,7 @@ fn panel(
                                 project,
                                 false,
                                 selected_index == index + 1,
-                                on_command.clone(),
-                                RowAction::OpenRecentPath,
+                                on_row_action.clone(),
                             )
                             .into_any_element()
                         })
@@ -271,28 +284,26 @@ fn divider() -> impl IntoElement {
     div().my(px(3.0)).h(px(1.0)).bg(Colors::border_subtle())
 }
 
-enum RowAction {
-    Command(String),
-    OpenRecentPath,
-}
-
 fn project_row(
     index: usize,
     project: &ProjectSummary,
     active: bool,
     selected: bool,
-    on_command: ProjectSwitcherCommandCb,
-    action: RowAction,
+    on_row_action: ProjectSwitcherRowCb,
 ) -> impl IntoElement {
-    let command = match action {
-        RowAction::Command(command) => command,
-        RowAction::OpenRecentPath => project
-            .path
-            .as_ref()
-            .map(|path| format!("{OPEN_RECENT_PATH_PREFIX}{}", path.to_string_lossy()))
-            .unwrap_or_else(|| "project:open-recent".to_string()),
+    let is_missing = project.subtitle == "Missing";
+    let path = project.path.clone().unwrap_or_default();
+    let name = project.name.clone();
+    let row_action = if active {
+        ProjectSwitcherRowEvent::CurrentProject
+    } else {
+        ProjectSwitcherRowEvent::SwitchProject {
+            path,
+            name,
+            is_missing,
+        }
     };
-    let disabled = active || command == "project:open-recent";
+    let on_row_action = on_row_action.clone();
     let mut row = div()
         .id(("project-switcher-row", index))
         .h(px(ROW_HEIGHT))
@@ -343,8 +354,8 @@ fn project_row(
                         .truncate()
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if disabled && !active {
-                            Colors::text_disabled()
+                        .text_color(if is_missing && !active {
+                            Colors::text_secondary()
                         } else {
                             Colors::text_primary()
                         })
@@ -373,12 +384,10 @@ fn project_row(
                 ),
         );
 
-    if !disabled {
-        row = row
-            .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(Colors::surface_control_hover()))
-            .on_click(move |_, w, cx| on_command(&command, w, cx));
-    }
+    row = row
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_click(move |_, w, cx| on_row_action(row_action.clone(), w, cx));
 
     row
 }

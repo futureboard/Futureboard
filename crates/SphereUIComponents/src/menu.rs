@@ -86,6 +86,21 @@ fn default_true() -> bool {
 
 static MANIFEST: OnceLock<MenuManifest> = OnceLock::new();
 
+/// Apply runtime checkbox state to a cloned menu tree (panel visibility,
+/// developer toggles, etc.). Static manifest defaults stay in JSON.
+pub fn patch_checkbox_states(items: &mut [MenuItem], checks: &[(&str, bool)]) {
+    for item in items {
+        if let Some((_, checked)) = checks.iter().find(|(id, _)| id == &item.id.as_str()) {
+            if item.kind == MenuItemKind::Checkbox {
+                item.checked = *checked;
+            }
+        }
+        if !item.children.is_empty() {
+            patch_checkbox_states(&mut item.children, checks);
+        }
+    }
+}
+
 impl MenuManifest {
     /// Parse the embedded JSON once, falling back to [`MenuManifest::fallback`]
     /// on any error. Logs the failure to stderr so the issue is visible in

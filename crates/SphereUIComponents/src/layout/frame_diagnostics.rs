@@ -103,4 +103,42 @@ impl FrameDiagnostics {
             self.displayed_fps, self.displayed_avg_ms, self.displayed_peak_ms
         )
     }
+
+    /// Compact status-bar pill label when developer metrics are enabled.
+    pub(super) fn compact_pill_label(&self) -> String {
+        if !self.has_sample {
+            return "Perf —".to_string();
+        }
+        format!(
+            "Perf {:.0} fps / {:.0} ms",
+            self.displayed_fps, self.displayed_avg_ms
+        )
+    }
+
+    pub(super) fn displayed_fps(&self) -> f32 {
+        self.displayed_fps
+    }
+
+    pub(super) fn displayed_avg_ms(&self) -> f32 {
+        self.displayed_avg_ms
+    }
+
+    pub(super) fn displayed_peak_ms(&self) -> f32 {
+        self.displayed_peak_ms
+    }
+
+    pub(super) fn has_sample(&self) -> bool {
+        self.has_sample
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_pill_without_sample() {
+        let diag = FrameDiagnostics::new();
+        assert_eq!(diag.compact_pill_label(), "Perf —");
+    }
 }

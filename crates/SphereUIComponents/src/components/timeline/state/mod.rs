@@ -28,6 +28,7 @@ mod stretch;
 mod tempo;
 mod time_signature;
 mod track;
+mod track_row_layout;
 mod viewport;
 
 #[cfg(test)]
@@ -54,6 +55,7 @@ pub use stretch::*;
 pub use tempo::*;
 pub use time_signature::*;
 pub use track::*;
+pub use track_row_layout::*;
 pub use viewport::*;
 
 // `audio`, `recording`, and `demo` only contribute `impl TimelineState`

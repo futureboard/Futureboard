@@ -3,17 +3,27 @@ use super::*;
 impl Render for StudioLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.session_install_status.is_ready() {
+            let heading = self.project_session.display_name();
             return div()
                 .size_full()
                 .bg(Colors::surface_base())
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap(px(8.0))
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(Colors::text_secondary())
-                        .child("Loading Session…"),
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_primary())
+                        .child(format!("Loading {heading}…")),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(Colors::text_muted())
+                        .child("Preparing session"),
                 );
         }
 
@@ -678,8 +688,26 @@ impl Render for StudioLayout {
                 } else {
                     let manifest = crate::menu::MenuManifest::load();
                     manifest.menus.iter().find(|m| &m.id == id).map(|menu| {
+                        let mut runtime_menu = menu.clone();
+                        let perf = self.settings.read(cx).current.performance.clone();
+                        crate::menu::patch_checkbox_states(
+                            &mut runtime_menu.items,
+                            &[
+                                ("window.show_browser", self.panels.browser),
+                                ("window.show_inspector", self.panels.inspector),
+                                ("window.show_mixer", self.panels.mixer_docked),
+                                (
+                                    "view.developer.perf_metrics",
+                                    perf.show_status_performance_metrics,
+                                ),
+                                (
+                                    "view.developer.perf_overlay",
+                                    perf.show_performance_overlay,
+                                ),
+                            ],
+                        );
                         components::menu_dropdown::menu_dropdown(
-                            menu,
+                            &runtime_menu,
                             menu_anchor,
                             viewport_width,
                             viewport_height,
@@ -721,23 +749,53 @@ impl Render for StudioLayout {
                         this.close_context_menu(cx);
                         return;
                     }
-                    if let Some(path) =
-                        command.strip_prefix(components::project_switcher::OPEN_RECENT_PATH_PREFIX)
-                    {
-                        this.load_project_from_path_with_options(
-                            std::path::PathBuf::from(path),
-                            project_ops::ProjectOpenOptions { from_recent: true },
-                            cx,
-                        );
-                    } else {
-                        this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
-                    }
+                    this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
                     this.close_context_menu(cx);
                     this.project_switcher.is_open = false;
                     this.command_palette.close();
                     cx.notify();
                 });
             })
+        };
+        let on_switcher_row_action: std::sync::Arc<
+            dyn Fn(
+                    components::project_switcher::ProjectSwitcherRowEvent,
+                    &mut Window,
+                    &mut gpui::App,
+                ) + Send
+                + Sync,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(
+                move |event: components::project_switcher::ProjectSwitcherRowEvent,
+                      w,
+                      cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let owner_bounds = Some(w.bounds());
+                        match event {
+                            components::project_switcher::ProjectSwitcherRowEvent::CurrentProject => {
+                                this.handle_project_switch_current_row(cx);
+                            }
+                            components::project_switcher::ProjectSwitcherRowEvent::SwitchProject {
+                                path,
+                                name,
+                                is_missing: _,
+                            } => {
+                                this.request_switch_project(
+                                    crate::layout::project_switch::ProjectSwitchRequest {
+                                        target_path: path,
+                                        target_name: Some(name),
+                                        source:
+                                            crate::layout::project_switch::ProjectSwitchSource::ProjectSwitcher,
+                                    },
+                                    owner_bounds,
+                                    cx,
+                                );
+                            }
+                        }
+                    });
+                },
+            )
         };
         let popover_overlay = if self.command_palette.is_open {
             let search_mouse_callbacks = crate::components::text_input::bind_mouse_selection(
@@ -814,6 +872,7 @@ impl Render for StudioLayout {
                     search_context_callbacks,
                     viewport_width,
                     viewport_height,
+                    on_switcher_row_action.clone(),
                     on_popover_command.clone(),
                     on_close_popover.clone(),
                 )
@@ -1110,7 +1169,27 @@ impl Render for StudioLayout {
             is_dirty: self.project_session.is_dirty,
             on_open_project_menu: on_project_open,
         };
-        let (status_left, status_right) = self.status_text();
+        let show_perf_metrics = self
+            .settings
+            .read(cx)
+            .current
+            .performance
+            .show_status_performance_metrics;
+        let status_content = self.status_bar_content(show_perf_metrics);
+        let perf_popover_open = self.overlay.perf_metrics_popover_open;
+        let on_toggle_perf_popover: Option<components::PerfMetricsToggleCb> =
+            if show_perf_metrics {
+                let this = cx.entity().clone();
+                Some(std::sync::Arc::new(move |_: &(), _w, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.overlay.perf_metrics_popover_open =
+                            !this.overlay.perf_metrics_popover_open;
+                        cx.notify();
+                    });
+                }))
+            } else {
+                None
+            };
         let on_toggle_background_tasks: std::sync::Arc<
             dyn Fn(&(), &mut Window, &mut gpui::App) + 'static,
         > = {
@@ -1453,11 +1532,12 @@ impl Render for StudioLayout {
             .child({
                 let _s = crate::perf::PerfScope::enter("StatusBar");
                 components::status_bar_with_background_tasks(
-                    status_left,
-                    status_right,
+                    status_content,
                     &self.background_tasks,
                     on_toggle_background_tasks,
                     on_cancel_background_task,
+                    perf_popover_open,
+                    on_toggle_perf_popover,
                 )
             })
             // Dropdown overlay — rendered last so it sits above every other
@@ -1470,5 +1550,15 @@ impl Render for StudioLayout {
             .children(plugin_picker_overlay_el)
             .children(text_context_overlay)
             .children(virtual_keyboard_overlay)
+            .children({
+                let show_perf_overlay = self.settings.read(cx).current.performance.show_performance_overlay
+                    || crate::perf::perf_hud_enabled();
+                if show_perf_overlay {
+                    let snapshot = self.performance_overlay_snapshot(reason_static);
+                    Some(components::performance_overlay(&snapshot).into_any_element())
+                } else {
+                    None
+                }
+            })
     }
 }

@@ -537,6 +537,12 @@ pub struct PerformanceSettings {
     /// at runtime via `FUTUREBOARD_FRAME_RATE_MODE`.
     #[serde(default)]
     pub frame_rate: FrameRateMode,
+    /// Compact FPS / frame-time pill in the status bar (View → Developer).
+    #[serde(default)]
+    pub show_status_performance_metrics: bool,
+    /// Floating verbose performance overlay (View → Developer).
+    #[serde(default)]
+    pub show_performance_overlay: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

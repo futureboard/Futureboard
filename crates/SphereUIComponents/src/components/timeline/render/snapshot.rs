@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::viewport::TimelineViewport;
 use crate::components::timeline::timeline_state::{
     clip_output_local_to_source_sample, ClipState, ClipType, GridLineLevel, TimelineState,
-    TrackState, TRACK_HEIGHT,
+    TrackRowLayoutEntry, TrackState, DEFAULT_TRACK_HEIGHT,
 };
 use crate::components::timeline::waveform_cache::{
     self, WaveformDisplayStatus, CHUNK_PEAKS, PEAK_FINE_SPP,
@@ -145,7 +145,7 @@ impl Default for SnapshotBuildOptions {
 impl TimelineRenderSnapshot {
     pub fn from_state(state: &TimelineState, options: SnapshotBuildOptions) -> Self {
         let grid_width = state.viewport.viewport_width.max(1.0);
-        let grid_height = state.viewport.viewport_height.max(TRACK_HEIGHT);
+        let grid_height = state.viewport.viewport_height.max(DEFAULT_TRACK_HEIGHT);
         let seconds_per_beat = state.seconds_per_beat();
         let pixels_per_beat = state.viewport.pixels_per_second * seconds_per_beat;
 
@@ -189,9 +189,14 @@ impl TimelineRenderSnapshot {
             selected_clip_ids: state.selection.selected_clip_ids.clone(),
         };
 
-        let track_insert_y = state.drag_target_index.map(|index| {
-            (index as f32 * TRACK_HEIGHT - state.viewport.scroll_y)
-                .clamp(0.0, grid_height.max(TRACK_HEIGHT))
+        let track_insert_y = state.drag_target_index.and_then(|index| {
+            state
+                .track_row_layout()
+                .row_for_index(index)
+                .map(|row| {
+                    (row.y - state.viewport.scroll_y)
+                        .clamp(0.0, grid_height.max(DEFAULT_TRACK_HEIGHT))
+                })
         });
 
         Self {
@@ -213,7 +218,8 @@ impl TimelineRenderSnapshot {
 }
 
 fn visible_track_range(state: &TimelineState, overscan: usize) -> VisibleTrackRange {
-    let track_count = state.tracks.len();
+    let row_layout = state.track_row_layout();
+    let track_count = row_layout.rows.len();
     if track_count == 0 {
         return VisibleTrackRange {
             start_index: 0,
@@ -222,10 +228,13 @@ fn visible_track_range(state: &TimelineState, overscan: usize) -> VisibleTrackRa
     }
     let scroll_y = state.viewport.scroll_y;
     let viewport_height = state.viewport.viewport_height;
-    let first_visible = (scroll_y / TRACK_HEIGHT).floor() as usize;
-    let visible_start = first_visible.saturating_sub(overscan);
-    let last_visible = ((scroll_y + viewport_height) / TRACK_HEIGHT).ceil() as usize;
-    let visible_end = (last_visible + overscan).min(track_count);
+    let (visible_start, visible_end, _, _) =
+        crate::components::timeline::track_resize::visible_track_row_range(
+            &row_layout,
+            scroll_y,
+            viewport_height,
+            overscan,
+        );
     VisibleTrackRange {
         start_index: visible_start,
         end_index: visible_end,
@@ -233,17 +242,27 @@ fn visible_track_range(state: &TimelineState, overscan: usize) -> VisibleTrackRa
 }
 
 fn build_lanes(state: &TimelineState, range: &VisibleTrackRange) -> Vec<RenderLaneSnapshot> {
+    let row_layout = state.track_row_layout();
     state.tracks[range.start_index..range.end_index]
         .iter()
         .enumerate()
         .map(|(rel, track)| {
             let index = range.start_index + rel;
-            let y = index as f32 * TRACK_HEIGHT - state.viewport.scroll_y;
+            let row = row_layout
+                .row_for_track(&track.id)
+                .cloned()
+                .unwrap_or_else(|| TrackRowLayoutEntry {
+                    track_id: track.id.clone(),
+                    index,
+                    y: index as f32 * DEFAULT_TRACK_HEIGHT,
+                    height: DEFAULT_TRACK_HEIGHT,
+                });
+            let y = row.y - state.viewport.scroll_y;
             RenderLaneSnapshot {
                 track_index: index,
                 track_id: track.id.clone(),
                 y,
-                height: TRACK_HEIGHT,
+                height: row.height,
                 even_row: index % 2 == 0,
                 selected: state.selection.selected_track_id.as_deref() == Some(track.id.as_str()),
                 color: rgba_to_array(track.color),
@@ -259,13 +278,23 @@ fn build_clips(
 ) -> Vec<RenderClipSnapshot> {
     let mut clips = Vec::new();
     let pad = 7.0_f32;
-    let clip_h = TRACK_HEIGHT - pad * 2.0;
+    let row_layout = state.track_row_layout();
 
     for (rel, track) in state.tracks[range.start_index..range.end_index]
         .iter()
         .enumerate()
     {
         let track_index = range.start_index + rel;
+        let row = row_layout
+            .row_for_track(&track.id)
+            .cloned()
+            .unwrap_or_else(|| TrackRowLayoutEntry {
+                track_id: track.id.clone(),
+                index: track_index,
+                y: track_index as f32 * DEFAULT_TRACK_HEIGHT,
+                height: DEFAULT_TRACK_HEIGHT,
+            });
+        let clip_h = row.height - pad * 2.0;
         for clip in &track.clips {
             let clip_left = viewport.beat_to_x(clip.start_beat);
             let clip_width =
@@ -274,7 +303,7 @@ fn build_clips(
             if clip_left + clip_width < 0.0 || clip_left > viewport.width {
                 continue;
             }
-            let clip_y = track_index as f32 * TRACK_HEIGHT - state.viewport.scroll_y + pad;
+            let clip_y = row.y - state.viewport.scroll_y + pad;
             clips.push(build_clip_snapshot(
                 clip,
                 track,

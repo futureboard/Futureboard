@@ -477,6 +477,103 @@ impl StudioLayout {
             }
         });
     }
+
+    pub(super) fn set_context_track_height_preset(
+        &mut self,
+        preset: timeline_state::TrackHeightPreset,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(super::ContextTarget::Track(track_id)) = self.context_target_for_open_menu()
+        else {
+            return;
+        };
+        let height = timeline_state::preset_track_row_height(preset);
+        self.set_track_heights_with_undo(vec![(track_id, height)], cx);
+    }
+
+    pub(super) fn reset_context_track_height(&mut self, cx: &mut Context<Self>) {
+        let Some(super::ContextTarget::Track(track_id)) = self.context_target_for_open_menu()
+        else {
+            return;
+        };
+        let prev = self
+            .timeline
+            .read(cx)
+            .state
+            .track_row_height_for_id(&track_id);
+        if (prev - timeline_state::DEFAULT_TRACK_HEIGHT).abs() < 0.01 {
+            return;
+        }
+        self.set_track_heights_with_undo(
+            vec![(track_id, timeline_state::DEFAULT_TRACK_HEIGHT)],
+            cx,
+        );
+    }
+
+    pub(super) fn reset_all_track_heights(&mut self, cx: &mut Context<Self>) {
+        let state = &self.timeline.read(cx).state;
+        let prev = state
+            .tracks
+            .iter()
+            .filter_map(|track| {
+                state
+                    .track_view_layout
+                    .height_for(&track.id)
+                    .map(|h| (track.id.clone(), h))
+            })
+            .collect::<Vec<_>>();
+        if prev.is_empty() {
+            return;
+        }
+        let next = prev
+            .iter()
+            .map(|(id, _)| (id.clone(), timeline_state::DEFAULT_TRACK_HEIGHT))
+            .collect();
+        self.set_track_heights_with_undo_pairs(prev, next, cx);
+    }
+
+    fn set_track_heights_with_undo(&mut self, heights: Vec<(String, f32)>, cx: &mut Context<Self>) {
+        let state = &self.timeline.read(cx).state;
+        let prev = heights
+            .iter()
+            .filter_map(|(id, _)| {
+                state
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == *id)
+                    .map(|t| (id.clone(), state.track_row_height(t)))
+            })
+            .collect::<Vec<_>>();
+        let next = heights;
+        self.set_track_heights_with_undo_pairs(prev, next, cx);
+    }
+
+    fn set_track_heights_with_undo_pairs(
+        &mut self,
+        prev: Vec<(String, f32)>,
+        next: Vec<(String, f32)>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = prev.iter().zip(next.iter()).any(|((id_a, h_a), (id_b, h_b))| {
+            id_a == id_b && (h_a - h_b).abs() >= 0.01
+        });
+        if !changed {
+            return;
+        }
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.record_executed_command(
+                EditCommand::SetTrackHeights {
+                    prev: prev.clone(),
+                    next: next.clone(),
+                },
+                cx,
+            );
+            timeline.state.apply_track_row_heights(&next);
+            cx.notify();
+        });
+        self.mark_dirty();
+        self.close_context_menu(cx);
+    }
 }
 
 fn next_clip_id_after(id: &str) -> String {

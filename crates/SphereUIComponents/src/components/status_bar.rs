@@ -1,40 +1,77 @@
+use std::sync::Arc;
+
 use crate::components::title_bar::{status_item, STATUSBAR_HEIGHT};
 use crate::components::{
     background_task_button, background_task_panel, BackgroundTaskCancelCb, BackgroundTaskStore,
     BackgroundTaskToggleCb,
 };
 use crate::theme::Colors;
-use gpui::{div, px, IntoElement, ParentElement, Styled};
+use gpui::{
+    div, px, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, Window,
+};
+
+#[derive(Debug, Clone)]
+pub struct StatusBarPerfMetrics {
+    pub pill_label: String,
+    pub renderer: String,
+    pub display_sync: String,
+    pub fps: f32,
+    pub frame_ms: f32,
+    pub peak_ms: f32,
+    pub has_sample: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusBarContent {
+    pub left: String,
+    pub audio: String,
+    pub perf: Option<StatusBarPerfMetrics>,
+}
+
+pub type PerfMetricsToggleCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 
 pub fn status_bar(left: impl Into<String>, right: impl Into<String>) -> impl IntoElement {
-    status_bar_inner(left, right, None, None, None)
+    status_bar_inner(
+        StatusBarContent {
+            left: left.into(),
+            audio: right.into(),
+            perf: None,
+        },
+        None,
+        None,
+        None,
+        None,
+        false,
+    )
 }
 
 pub fn status_bar_with_background_tasks(
-    left: impl Into<String>,
-    right: impl Into<String>,
+    content: StatusBarContent,
     tasks: &BackgroundTaskStore,
     on_toggle_tasks: BackgroundTaskToggleCb,
     on_cancel_task: BackgroundTaskCancelCb,
+    perf_popover_open: bool,
+    on_toggle_perf_popover: Option<PerfMetricsToggleCb>,
 ) -> impl IntoElement {
     status_bar_inner(
-        left,
-        right,
+        content,
         Some(tasks),
         Some(on_toggle_tasks),
         Some(on_cancel_task),
+        on_toggle_perf_popover,
+        perf_popover_open,
     )
 }
 
 fn status_bar_inner(
-    left: impl Into<String>,
-    right: impl Into<String>,
+    content: StatusBarContent,
     tasks: Option<&BackgroundTaskStore>,
     on_toggle_tasks: Option<BackgroundTaskToggleCb>,
     on_cancel_task: Option<BackgroundTaskCancelCb>,
+    on_toggle_perf_popover: Option<PerfMetricsToggleCb>,
+    perf_popover_open: bool,
 ) -> impl IntoElement {
-    let left = left.into();
-    let right = right.into();
     let task_button = match (tasks, on_toggle_tasks.clone()) {
         (Some(tasks), Some(on_toggle)) => {
             Some(background_task_button(tasks, on_toggle).into_any_element())
@@ -47,6 +84,17 @@ fn status_bar_inner(
         }
         _ => None,
     };
+    let perf_pill = content
+        .perf
+        .as_ref()
+        .and_then(|metrics| on_toggle_perf_popover.clone().map(|on_toggle| {
+            perf_metrics_pill(metrics, perf_popover_open, on_toggle).into_any_element()
+        }));
+    let perf_panel = match (content.perf.as_ref(), perf_popover_open) {
+        (Some(metrics), true) => Some(perf_metrics_panel(metrics).into_any_element()),
+        _ => None,
+    };
+
     div()
         .relative()
         .flex()
@@ -64,18 +112,154 @@ fn status_bar_inner(
                 .flex_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
-                .child(status_item(left, true)),
+                .child(status_item(content.left, true)),
         )
         .child(
             div()
                 .flex_none()
+                .min_w(px(0.0))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
                 .overflow_hidden()
                 .children(task_button)
-                .child(status_item(right, false)),
+                .children(perf_pill)
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(status_item(content.audio, false)),
+                ),
         )
         .children(task_panel)
+        .children(perf_panel)
+}
+
+fn perf_metrics_pill(
+    metrics: &StatusBarPerfMetrics,
+    open: bool,
+    on_toggle: PerfMetricsToggleCb,
+) -> impl IntoElement {
+    div()
+        .id("status-perf-metrics")
+        .h(px(18.0))
+        .max_w(px(160.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .px(px(7.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(if open {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if open {
+            Colors::accent_muted()
+        } else {
+            Colors::surface_input()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_hover()))
+        .on_click(move |_, w, cx| on_toggle(&(), w, cx))
+        .child(
+            div()
+                .truncate()
+                .text_size(px(10.0))
+                .text_color(Colors::text_secondary())
+                .child(metrics.pill_label.clone()),
+        )
+}
+
+fn perf_metrics_panel(metrics: &StatusBarPerfMetrics) -> impl IntoElement {
+    let fps = if metrics.has_sample {
+        format!("{:.0}", metrics.fps)
+    } else {
+        "—".to_string()
+    };
+    let frame = if metrics.has_sample {
+        format!("{:.1} ms", metrics.frame_ms)
+    } else {
+        "—".to_string()
+    };
+    let peak = if metrics.has_sample {
+        format!("{:.1} ms", metrics.peak_ms)
+    } else {
+        "—".to_string()
+    };
+
+    div()
+        .absolute()
+        .right(px(12.0))
+        .bottom(px(26.0))
+        .w(px(220.0))
+        .flex()
+        .flex_col()
+        .rounded_lg()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_panel())
+        .shadow(vec![gpui::BoxShadow {
+            color: Colors::surface_overlay().into(),
+            offset: gpui::point(px(0.0), px(16.0)),
+            blur_radius: px(34.0),
+            spread_radius: px(0.0),
+            inset: false,
+        }])
+        .occlude()
+        .child(
+            div()
+                .h(px(32.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(10.0))
+                .border_b(px(1.0))
+                .border_color(Colors::border_subtle())
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_primary())
+                        .child("Performance"),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .p(px(10.0))
+                .children([
+                    perf_detail_row("Renderer", &metrics.renderer),
+                    perf_detail_row("Display Sync", &metrics.display_sync),
+                    perf_detail_row("FPS", &fps),
+                    perf_detail_row("Frame", &frame),
+                    perf_detail_row("Peak", &peak),
+                ]),
+        )
+}
+
+fn perf_detail_row(label: &'static str, value: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(Colors::text_muted())
+                .child(label),
+        )
+        .child(
+            div()
+                .truncate()
+                .text_size(px(10.0))
+                .text_color(Colors::text_secondary())
+                .child(value.to_string()),
+        )
 }

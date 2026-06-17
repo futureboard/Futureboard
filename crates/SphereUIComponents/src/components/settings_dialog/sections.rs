@@ -276,6 +276,7 @@ pub(crate) fn performance_section(
     schema: &SettingsSchema,
     open_combo: Option<HardwareCombo>,
     on_toggle: Arc<dyn Fn(HardwareCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>,
+    on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let render_mode = schema.performance.render_mode;
     let gpu_pref = schema.performance.gpu_device.clone();
@@ -364,7 +365,45 @@ pub(crate) fn performance_section(
         );
     }
 
-    card.child(settings_restart_footer())
+    let show_status_perf = schema.performance.show_status_performance_metrics;
+    let show_perf_overlay = schema.performance.show_performance_overlay;
+
+    card
+        .child(settings_restart_footer())
+        .child(settings_section("Developer"))
+        .child(settings_section_hint(
+            "Optional diagnostics for profiling. Hidden by default in the status bar.",
+        ))
+        .child(settings_row(
+            "Status Performance Metrics",
+            settings_toggle("settings-show-status-perf", show_status_perf, {
+                let on_update = on_update.clone();
+                move |_, w, cx| {
+                    on_update(
+                        Arc::new(move |s| {
+                            s.performance.show_status_performance_metrics = !show_status_perf
+                        }),
+                        w,
+                        cx,
+                    );
+                }
+            }),
+        ))
+        .child(settings_row(
+            "Performance Overlay",
+            settings_toggle("settings-show-perf-overlay", show_perf_overlay, {
+                let on_update = on_update.clone();
+                move |_, w, cx| {
+                    on_update(
+                        Arc::new(move |s| {
+                            s.performance.show_performance_overlay = !show_perf_overlay
+                        }),
+                        w,
+                        cx,
+                    );
+                }
+            }),
+        ))
 }
 
 pub(crate) fn tab_matches_search(

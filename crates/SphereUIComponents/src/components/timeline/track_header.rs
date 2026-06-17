@@ -10,7 +10,6 @@ use crate::components::knob::format_pan_label;
 use crate::components::slider::slider_with_reset;
 use crate::components::timeline::timeline_state::{
     volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
-    TRACK_HEIGHT,
 };
 use crate::components::timeline::vu_meter::vu_meter_with_levels;
 use crate::theme::Colors;
@@ -146,6 +145,7 @@ pub fn track_header(
     track: &TrackState,
     index: usize,
     state: &TimelineState,
+    row_height: f32,
     callbacks: TrackHeaderCallbacks,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackHeader");
@@ -274,7 +274,7 @@ pub fn track_header(
         .flex()
         .flex_row()
         .w(px(HEADER_WIDTH))
-        .h(px(TRACK_HEIGHT))
+        .h(px(row_height))
         .bg(header_bg)
         .opacity(if is_dragging { 0.62 } else { 1.0 })
         // Stronger right border so the header column reads as a distinct

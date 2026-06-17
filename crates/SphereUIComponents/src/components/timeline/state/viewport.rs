@@ -51,17 +51,50 @@ pub struct TimelineViewport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackLayout {
     pub track_ids: Vec<TrackId>,
+    /// Uniform fallback height for legacy callers.
     pub track_height: f32,
     pub scroll_y: f32,
+    pub rows: Vec<TrackRowLayoutEntry>,
+    pub total_height: f32,
 }
 
 impl TrackLayout {
+    pub fn from_state(state: &TimelineState) -> Self {
+        let layout = state.track_row_layout();
+        Self {
+            track_ids: layout.rows.iter().map(|r| r.track_id.clone()).collect(),
+            track_height: DEFAULT_TRACK_HEIGHT,
+            scroll_y: state.viewport.scroll_y,
+            rows: layout.rows,
+            total_height: layout.total_height,
+        }
+    }
+
     pub fn from_tracks(tracks: &[TrackState], scroll_y: f32) -> Self {
         Self {
             track_ids: tracks.iter().map(|track| track.id.clone()).collect(),
-            track_height: TRACK_HEIGHT,
+            track_height: DEFAULT_TRACK_HEIGHT,
             scroll_y,
+            rows: tracks
+                .iter()
+                .enumerate()
+                .scan(0.0_f32, |y, (index, track)| {
+                    let entry = TrackRowLayoutEntry {
+                        track_id: track.id.clone(),
+                        index,
+                        y: *y,
+                        height: DEFAULT_TRACK_HEIGHT,
+                    };
+                    *y += DEFAULT_TRACK_HEIGHT;
+                    Some(entry)
+                })
+                .collect(),
+            total_height: tracks.len() as f32 * DEFAULT_TRACK_HEIGHT,
         }
+    }
+
+    pub fn row_for_track(&self, track_id: &str) -> Option<&TrackRowLayoutEntry> {
+        self.rows.iter().find(|row| row.track_id == track_id)
     }
 }
 

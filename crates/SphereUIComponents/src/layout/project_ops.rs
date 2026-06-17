@@ -33,10 +33,11 @@ pub(super) enum LifecycleAction {
     OpenProject,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum SaveThenAction {
     PendingClose,
     Lifecycle(LifecycleAction),
+    ProjectSwitch(crate::layout::project_switch::ProjectSwitchRequest),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -438,6 +439,15 @@ impl StudioLayout {
         self.save_then(SaveThenAction::Lifecycle(action), cx);
     }
 
+    /// Save, then switch to the requested project if save succeeds.
+    pub(super) fn save_project_switch_then(
+        &mut self,
+        request: crate::layout::project_switch::ProjectSwitchRequest,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_then(SaveThenAction::ProjectSwitch(request), cx);
+    }
+
     fn save_then(&mut self, after_save: SaveThenAction, cx: &mut Context<Self>) {
         if !self.project_session.needs_save_as() {
             if let Some(path) = self.project_session.project_file_path.clone() {
@@ -479,6 +489,7 @@ impl StudioLayout {
                 let _ = entity.update(cx, |this, _cx| {
                     this.lifecycle_guard.pending_close_action = None;
                     this.lifecycle_guard.pending_lifecycle_action = None;
+                    this.clear_project_switch_pending();
                 });
             }
         })
@@ -489,6 +500,9 @@ impl StudioLayout {
         match after_save {
             SaveThenAction::PendingClose => self.perform_pending_close(cx),
             SaveThenAction::Lifecycle(action) => self.run_lifecycle_action(action, cx),
+            SaveThenAction::ProjectSwitch(request) => {
+                self.execute_confirmed_project_switch(request, cx)
+            }
         }
     }
 
@@ -748,6 +762,7 @@ impl StudioLayout {
     fn handle_project_save_error(&mut self, error: String, cx: &mut Context<Self>) {
         eprintln!("[Project] save failed: {error}");
         self.project_switcher.current_project.subtitle = format!("Save failed: {error}");
+        self.clear_project_switch_pending();
         cx.notify();
     }
 
@@ -851,26 +866,31 @@ impl StudioLayout {
 
     // `load_project_from_path_with_options` lives in `super::session_load`.
 
-    pub(super) fn cmd_open_recent_project(&mut self, cx: &mut Context<Self>) {
-        // Note: no synchronous refresh_missing() here — that blocks the UI
-        // thread on per-entry filesystem stats (hundreds of ms on OneDrive).
-        // `load_project_from_path_with_options` already validates existence of
-        // the single chosen path and shows a friendly dialog if it's gone.
+    pub(super) fn cmd_open_recent_project(
+        &mut self,
+        owner_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let idx = self.project_switcher.selected_index;
         if idx == 0 {
             return;
         }
-        let path = self
-            .recent_projects
-            .entries()
+        let entry = self
+            .project_switcher_visible_entries()
             .get(idx.saturating_sub(1))
-            .map(|e| e.path.clone());
-        if let Some(path) = path {
-            self.load_project_from_path_with_options(
-                path,
-                ProjectOpenOptions { from_recent: true },
-                cx,
-            );
+            .cloned();
+        if let Some(project) = entry {
+            if let Some(path) = project.path {
+                self.request_switch_project(
+                    crate::layout::project_switch::ProjectSwitchRequest {
+                        target_path: path,
+                        target_name: Some(project.name),
+                        source: crate::layout::project_switch::ProjectSwitchSource::RecentProject,
+                    },
+                    owner_bounds,
+                    cx,
+                );
+            }
         }
     }
 

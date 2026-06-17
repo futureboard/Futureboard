@@ -10,11 +10,6 @@ use gpui::{
     canvas, div, fill, point, px, size, Bounds, IntoElement, ParentElement, Pixels, Styled,
 };
 
-/// Waveform bar height in clip-local pixels (the canvas fills the clip body and
-/// these bars are drawn centered). Folded into the geometry-cache key so a
-/// future height change can't reuse stale bars.
-const WAVEFORM_BAR_AREA_H: f32 = 48.0;
-
 /// One bar per visible CSS pixel column. No hard cap on number of bars —
 /// the visible-range clamp naturally bounds it by viewport width.
 pub fn waveform_canvas(
@@ -157,8 +152,9 @@ fn import_status_canvas(
 /// The per-column aggregation is the expensive part and is cached: a signature
 /// over `(asset, peak revision, LOD, visible window, clip size, stretch)` keys
 /// an immutable `Arc<WaveformBars>` so repeated repaints with unchanged geometry
-/// (playback playhead, meters, hover, selection) reuse the bars instead of
-/// re-aggregating and re-allocating on the UI thread.
+/// (playback playhead, meters, hover, selection, track height) reuse the bars
+/// instead of re-aggregating on the UI thread. Vertical scale comes from the
+/// canvas bounds at paint time so track-height resize does not invalidate peaks.
 #[allow(clippy::too_many_arguments)]
 fn draw_chunk_waveform_locked(
     asset_key: &str,
@@ -206,13 +202,10 @@ fn draw_chunk_waveform_locked(
     let output_len =
         (source_end.saturating_sub(source_start) as f64 * effective_time_ratio).max(1.0);
 
-    let h = WAVEFORM_BAR_AREA_H;
-    let center = h / 2.0;
     let clip_w = clip_width.max(1.0) as f64;
 
-    // Geometry signature: everything the bar list depends on. Peak *values* are
-    // covered by the cache entry's revision; peak→pixel mapping by the stretch
-    // window + clip width + visible span; vertical scale by `h`.
+    // Geometry signature: horizontal mapping only — peak values are normalized
+    // and scaled vertically from the canvas bounds at paint time.
     let key = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         asset_key.hash(&mut hasher);
@@ -225,7 +218,6 @@ fn draw_chunk_waveform_locked(
         source_end.hash(&mut hasher);
         effective_time_ratio.to_bits().hash(&mut hasher);
         (clip.stretch.reverse as u8).hash(&mut hasher);
-        h.to_bits().hash(&mut hasher);
         hasher.finish()
     };
 
@@ -264,10 +256,7 @@ fn draw_chunk_waveform_locked(
             }
             let mn = min.max(-1.0);
             let mx = max.min(1.0);
-            let top = center - mx * center;
-            let bottom = center - mn * center;
-            let bar_h = (bottom - top).max(1.0);
-            bars.push((x0, top, bar_h));
+            bars.push((x0, mn, mx));
         }
         let bars = Arc::new(bars);
         waveform_cache::geometry_cache_put(key, Arc::clone(&bars));
@@ -280,13 +269,7 @@ fn draw_chunk_waveform_locked(
     let element = canvas(
         |_bounds, _window, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
-            for (x, top, bh) in bars.iter() {
-                let r = Bounds::new(
-                    bounds.origin + point(px(*x), px(*top)),
-                    size(px(1.0), px(bh.max(1.0))),
-                );
-                window.paint_quad(fill(r, waveform_color));
-            }
+            paint_waveform_bars(bounds, &bars, waveform_color, window);
         },
     )
     .absolute()
@@ -329,8 +312,6 @@ fn draw_preview_waveform(
     };
 
     let num_cols = (visible_w.ceil() as usize).max(1);
-    let h = WAVEFORM_BAR_AREA_H;
-    let center = h / 2.0;
     let total_peaks = lod.peaks.len().max(1);
     let clip_w = clip_width.max(1.0);
 
@@ -342,7 +323,6 @@ fn draw_preview_waveform(
         (num_cols as u64).hash(&mut hasher);
         visible_start.to_bits().hash(&mut hasher);
         clip_width.to_bits().hash(&mut hasher);
-        h.to_bits().hash(&mut hasher);
         hasher.finish()
     });
 
@@ -359,9 +339,9 @@ fn draw_preview_waveform(
                 let p1 = (frac1 * total_peaks as f32).ceil() as usize;
                 let end = p1.min(total_peaks).max(p0 + 1);
                 let agg = aggregate_slice(&lod.peaks[p0..end]);
-                let top = center - agg.max.min(1.0) * center;
-                let bottom = center - agg.min.max(-1.0) * center;
-                bars.push((x0, top, (bottom - top).max(1.0)));
+                let mn = agg.min.max(-1.0);
+                let mx = agg.max.min(1.0);
+                bars.push((x0, mn, mx));
             }
             let bars = Arc::new(bars);
             if let Some(key) = key {
@@ -377,13 +357,7 @@ fn draw_preview_waveform(
     let element = canvas(
         |_b, _w, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
-            for (x, top, bh) in bars.iter() {
-                let r = Bounds::new(
-                    bounds.origin + point(px(*x), px(*top)),
-                    size(px(1.0), px(bh.max(1.0))),
-                );
-                window.paint_quad(fill(r, waveform_color));
-            }
+            paint_waveform_bars(bounds, &bars, waveform_color, window);
         },
     )
     .absolute()
@@ -394,6 +368,29 @@ fn draw_preview_waveform(
         .size_full()
         .overflow_hidden()
         .child(element)
+}
+
+fn paint_waveform_bars(
+    bounds: Bounds<Pixels>,
+    bars: &WaveformBars,
+    color: gpui::Rgba,
+    window: &mut gpui::Window,
+) {
+    let h: f32 = bounds.size.height.into();
+    if h < 1.0 {
+        return;
+    }
+    let center = h / 2.0;
+    for (x, mn, mx) in bars {
+        let top = center - mx * center;
+        let bottom = center - mn * center;
+        let bar_h = (bottom - top).max(1.0);
+        let r = Bounds::new(
+            bounds.origin + point(px(*x), px(top)),
+            size(px(1.0), px(bar_h)),
+        );
+        window.paint_quad(fill(r, color));
+    }
 }
 
 fn aggregate_slice(peaks: &[waveform_cache::WaveformPeak]) -> waveform_cache::WaveformPeak {

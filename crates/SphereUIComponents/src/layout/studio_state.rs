@@ -55,6 +55,8 @@ pub(super) struct OverlayState {
     pub(super) inspector_routing_combo: Option<crate::components::panel::InspectorRoutingCombo>,
     /// Screen anchor for the open inspector routing combo.
     pub(super) inspector_routing_combo_anchor: Option<crate::overlay::OverlayAnchor>,
+    /// Status-bar performance metrics detail popover.
+    pub(super) perf_metrics_popover_open: bool,
 }
 
 #[derive(Debug, Clone)]

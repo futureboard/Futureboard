@@ -73,6 +73,13 @@ pub struct TimelineState {
     pub show_time_signature_track: bool,
     pub time_signature_track_collapsed: bool,
     pub selected_time_signature_point_id: Option<String>,
+    /// Per-track arrangement row heights (layout/view state, persisted in project).
+    pub track_view_layout: TrackViewLayout,
+    /// Active track-height resize gesture, if any.
+    pub track_height_resize: Option<TrackHeightResizeSession>,
+    /// Armed at pointer-down on a resize handle; promoted to
+    /// [`Self::track_height_resize`] on the first drag-move delta.
+    pub track_height_resize_arm: Option<(String, f32, bool, bool)>,
 }
 
 impl Default for TimelineState {
@@ -139,6 +146,9 @@ impl Default for TimelineState {
             show_time_signature_track: false,
             time_signature_track_collapsed: false,
             selected_time_signature_point_id: None,
+            track_view_layout: TrackViewLayout::default(),
+            track_height_resize: None,
+            track_height_resize_arm: None,
         }
     }
 }
@@ -146,8 +156,6 @@ impl Default for TimelineState {
 // ── Time conversions and coordinate helpers ───────────────────────────────────────
 
 pub const HEADER_WIDTH: f32 = 320.0; // Keep it slightly wider for native controls
-
-pub const TRACK_HEIGHT: f32 = 76.0;
 
 pub const RULER_HEIGHT: f32 = 30.0;
 

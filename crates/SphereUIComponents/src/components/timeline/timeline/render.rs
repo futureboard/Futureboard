@@ -311,18 +311,14 @@ impl Render for Timeline {
                     let dx = this.state.beats_to_x(beat) - this.state.beats_to_x(drag.start_beat);
                     let dy_tracks = current_track_id
                         .as_ref()
-                        .and_then(|id| {
-                            let start_idx = this
-                                .state
-                                .tracks
-                                .iter()
-                                .position(|track| track.id == drag.start_track_id)?;
-                            let current_idx = this
-                                .state
-                                .tracks
-                                .iter()
-                                .position(|track| track.id == *id)?;
-                            Some(((current_idx as isize - start_idx as isize).abs() as f32) * TRACK_HEIGHT)
+                        .map(|id| {
+                            let row_layout = this.state.track_row_layout();
+                            let start_row = row_layout.row_for_track(&drag.start_track_id);
+                            let current_row = row_layout.row_for_track(id);
+                            match (start_row, current_row) {
+                                (Some(a), Some(b)) => (b.y - a.y).abs(),
+                                _ => 0.0,
+                            }
                         })
                         .unwrap_or(0.0);
                     if !drag.dragging && (dx * dx + dy_tracks * dy_tracks).sqrt() >= MARQUEE_DRAG_THRESHOLD {
@@ -821,8 +817,8 @@ impl Render for Timeline {
         // position to that point — gives a functional scrollbar without
         // needing a stateful drag.
         let content_w = self.timeline_content_width();
-        let content_h = (self.state.tracks.len() as f32 * TRACK_HEIGHT).max(1.0);
-        let lane_view_h = viewport_h.max(TRACK_HEIGHT);
+        let content_h = self.state.total_track_rows_height().max(1.0);
+        let lane_view_h = viewport_h.max(DEFAULT_TRACK_HEIGHT);
         let lane_view_w = viewport_w.max(1.0);
 
         // ── Drag/drop import wiring ─────────────────────────────────────
@@ -969,6 +965,56 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        let on_track_height_resize_move = cx.listener(
+            |this, event: &gpui::DragMoveEvent<TrackHeightResizeDrag>, _window, cx| {
+                let y: f32 = event.event.position.y.into();
+                if this.state.ensure_track_height_resize_from_arm(y) {
+                    this.state.update_track_height_resize(y);
+                    cx.notify();
+                }
+            },
+        );
+        let on_track_height_resize_drop =
+            cx.listener(|this, _drag: &TrackHeightResizeDrag, _window, cx| {
+                this.state.clear_track_height_resize_arm();
+                if let Some((prev, next)) = this.state.finish_track_height_resize() {
+                    this.record_executed_command(
+                        EditCommand::SetTrackHeights { prev, next },
+                        cx,
+                    );
+                    this.mark_project_changed(cx);
+                }
+                cx.notify();
+            });
+
+        let on_track_height_resize_arm: std::sync::Arc<
+            dyn Fn(&(String, f32, bool, bool), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(
+                move |(track_id, y, shift, alt): &(String, f32, bool, bool), _window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.state
+                            .arm_track_height_resize(track_id, *y, *shift, *alt);
+                        cx.notify();
+                    });
+                },
+            )
+        };
+        let on_track_height_resize_reset: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |track_id: &String, _window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.state.reset_track_row_height(track_id) {
+                        this.mark_project_changed(cx);
+                        cx.notify();
+                    }
+                });
+            })
+        };
+
         let on_track_drag_move = cx.listener(
             |this, event: &gpui::DragMoveEvent<TrackDragItem>, _window, cx| {
                 let drag = event.drag(cx).clone();
@@ -1112,7 +1158,9 @@ impl Render for Timeline {
                             || this.erase_clip_drag.is_some()
                             || this.automation_drag.is_some()
                             || this.automation_marquee.is_some()
-                            || this.pan_last_position.is_some())
+                            || this.pan_last_position.is_some()
+                            || this.state.track_height_resize.is_some()
+                            || this.state.track_height_resize_arm.is_some())
                     {
                         cx.stop_propagation();
                         this.cancel_active_gesture(cx);
@@ -1127,6 +1175,8 @@ impl Render for Timeline {
             .on_drop::<ClipDragItem>(on_clip_dropped)
             .on_drag_move::<ClipResizeDrag>(on_clip_resize_move)
             .on_drop::<ClipResizeDrag>(on_clip_resize_drop)
+            .on_drag_move::<TrackHeightResizeDrag>(on_track_height_resize_move)
+            .on_drop::<TrackHeightResizeDrag>(on_track_height_resize_drop)
             .on_drag_move::<TrackDragItem>(on_track_drag_move)
             .on_drop::<TrackDragItem>(on_track_dropped)
             .on_mouse_down(gpui::MouseButton::Middle, on_middle_pan_start)
@@ -1204,6 +1254,8 @@ impl Render for Timeline {
             .child(div().flex_1().min_h_0().relative().child(track_list(
                 state,
                 header_callbacks.clone(),
+                on_track_height_resize_arm.clone(),
+                on_track_height_resize_reset.clone(),
                 on_select_track.clone(),
                 on_select_clip.clone(),
                 on_add_clip.clone(),
@@ -1666,9 +1718,11 @@ pub(crate) fn pen_clip_draw_overlay(
 
     let x_lo = state.beats_to_x(clip_start);
     let width = (state.beats_to_x(clip_end) - x_lo).max(2.0);
+    let row_layout = state.track_row_layout();
+    let row = row_layout.row_for_index(track_index)?;
     let pad = 7.0;
-    let top = track_index as f32 * TRACK_HEIGHT - state.viewport.scroll_y + pad;
-    let height = (TRACK_HEIGHT - pad * 2.0).max(1.0);
+    let top = row.y - state.viewport.scroll_y + pad;
+    let height = (row.height - pad * 2.0).max(1.0);
 
     let bpb = state.beats_per_bar();
     let length_label = format_clip_length(length, bpb);
@@ -1809,9 +1863,18 @@ pub(crate) fn arrangement_range_overlay(state: &TimelineState) -> Option<gpui::A
         if min_idx == usize::MAX {
             (0.0_f32, state.viewport.track_area_height.max(0.0))
         } else {
-            let top = min_idx as f32 * TRACK_HEIGHT - state.viewport.scroll_y;
-            let h = ((max_idx - min_idx + 1) as f32) * TRACK_HEIGHT;
-            (top, h)
+            let row_layout = state.track_row_layout();
+            let top = row_layout
+                .row_for_index(min_idx)
+                .map(|row| row.y)
+                .unwrap_or(0.0);
+            let bottom = row_layout
+                .row_for_index(max_idx)
+                .map(|row| row.y + row.height)
+                .unwrap_or(top);
+            let y_top = top - state.viewport.scroll_y;
+            let h = (bottom - top).max(0.0);
+            (y_top, h)
         }
     };
 

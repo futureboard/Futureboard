@@ -4,7 +4,7 @@ use crate::components::timeline::automation_lane::automation_overlay;
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
     automation_y_to_value, AutomationMarquee, ClipType, TimelineState, TimelineTool, TrackLaneMode,
-    TrackState, HEADER_WIDTH, TRACK_HEIGHT,
+    TrackState, HEADER_WIDTH,
 };
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
@@ -26,6 +26,8 @@ pub fn track_lane(
     track: &TrackState,
     track_index: usize,
     state: &TimelineState,
+    row_height: f32,
+    row_y: f32,
     on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     on_select_clip: std::sync::Arc<
         dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
@@ -102,6 +104,7 @@ pub fn track_lane(
                     &track.id,
                     track_color,
                     state,
+                    row_height,
                     on_sel_clip,
                     on_open,
                     on_clip_context,
@@ -114,6 +117,7 @@ pub fn track_lane(
                     &track.id,
                     track_color,
                     state,
+                    row_height,
                     on_sel_clip,
                     on_clip_context,
                     on_open,
@@ -145,7 +149,7 @@ pub fn track_lane(
     // full-lane interaction layer captures point edits so clip handlers never
     // fire. The automation line/points overlay is drawn on top.
     let automation_layers = is_automation.then(|| {
-        let overlay = automation_overlay(track, state, TRACK_HEIGHT, automation_marquee);
+        let overlay = automation_overlay(track, state, row_height, automation_marquee);
         let interaction = on_automation_down.clone().map(|cb| {
             let state_auto = state.clone();
             let track_id_auto = track.id.clone();
@@ -164,11 +168,10 @@ pub fn track_lane(
                         let snapped_sec =
                             state_auto.snap_time(raw_beat * state_auto.seconds_per_beat());
                         let beat = (snapped_sec / state_auto.seconds_per_beat()).max(0.0);
-                        let local_y =
-                            (wy - APP_CHROME_HEIGHT - state_auto.arrangement_content_top()
-                                + state_auto.viewport.scroll_y)
-                                - track_index as f32 * TRACK_HEIGHT;
-                        let value = automation_y_to_value(local_y, TRACK_HEIGHT);
+                        let content_y = wy - APP_CHROME_HEIGHT - state_auto.arrangement_content_top()
+                            + state_auto.viewport.scroll_y;
+                        let local_y = content_y - row_y;
+                        let value = automation_y_to_value(local_y, row_height);
                         let additive = event.modifiers.shift || event.modifiers.control;
                         cb(&(track_id_auto.clone(), beat, value, additive), window, cx);
                     },
@@ -214,7 +217,7 @@ pub fn track_lane(
 
     div()
         .flex_1()
-        .h(px(TRACK_HEIGHT))
+        .h(px(row_height))
         .bg(bg)
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())

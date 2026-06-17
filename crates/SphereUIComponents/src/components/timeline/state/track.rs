@@ -186,26 +186,6 @@ impl TimelineState {
         format!("track-{}", n + 1)
     }
 
-    pub fn track_index_at_y(&self, y: f32) -> Option<usize> {
-        if y < 0.0 {
-            return None;
-        }
-        let idx = ((y + self.viewport.scroll_y) / TRACK_HEIGHT).floor() as usize;
-        if idx < self.tracks.len() {
-            Some(idx)
-        } else {
-            None
-        }
-    }
-
-    pub fn track_insert_index_at_y(&self, y: f32) -> usize {
-        if self.tracks.is_empty() {
-            return 0;
-        }
-        let content_y = (y + self.viewport.scroll_y).max(0.0);
-        ((content_y / TRACK_HEIGHT).round() as usize).clamp(0, self.tracks.len())
-    }
-
     pub fn begin_track_drag(&mut self, track_id: &str, origin_index: usize, y: f32) {
         self.dragging_track_id = Some(track_id.to_string());
         self.drag_origin_index = Some(origin_index);
@@ -364,6 +344,7 @@ impl TimelineState {
     pub fn delete_track(&mut self, track_id: &str) {
         if let Some(index) = self.tracks.iter().position(|track| track.id == track_id) {
             self.tracks.remove(index);
+            self.track_view_layout.remove_track(track_id);
             if self.selection.selected_track_id.as_deref() == Some(track_id) {
                 self.selection.selected_track_id = self
                     .tracks

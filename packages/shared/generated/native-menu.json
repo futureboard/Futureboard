@@ -363,6 +363,58 @@
       ]
     },
     {
+      "id": "view",
+      "label": "View",
+      "items": [
+        {
+          "id": "view.developer",
+          "kind": "submenu",
+          "label": "Developer",
+          "icon": null,
+          "shortcut": null,
+          "command": null,
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": null,
+          "children": [
+            {
+              "id": "view.developer.perf_metrics",
+              "kind": "checkbox",
+              "label": "Show Performance Metrics",
+              "icon": null,
+              "shortcut": null,
+              "command": "view:toggle-perf-metrics",
+              "role": null,
+              "enabled": true,
+              "visible": true,
+              "checked": false,
+              "danger": false,
+              "description": "Compact FPS and frame time in the status bar",
+              "children": []
+            },
+            {
+              "id": "view.developer.perf_overlay",
+              "kind": "checkbox",
+              "label": "Toggle Performance Overlay",
+              "icon": null,
+              "shortcut": null,
+              "command": "view:toggle-perf-overlay",
+              "role": null,
+              "enabled": true,
+              "visible": true,
+              "checked": false,
+              "danger": false,
+              "description": "Verbose real-time performance overlay",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "midi",
       "label": "MIDI",
       "items": [

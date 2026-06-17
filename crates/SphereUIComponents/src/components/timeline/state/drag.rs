@@ -25,3 +25,11 @@ pub struct TrackDragItem {
     pub name: String,
     pub color: gpui::Rgba,
 }
+
+/// In-flight track row height resize. Heights are resolved live from
+/// [`TimelineState::update_track_height_resize`]; this payload only
+/// carries identity + the gesture anchor.
+#[derive(Debug, Clone)]
+pub struct TrackHeightResizeDrag {
+    pub anchor_track_id: String,
+}

@@ -14,8 +14,9 @@ use crate::components::timeline::timeline_ruler::{
 use crate::components::timeline::timeline_state::{
     hit_test_arrangement, ArrangementCoordinateContext, ArrangementHitTarget, ClipDragItem,
     ClipResizeDrag, ClipState, ClipType, SnapDivision, TempoPointDrag, TimeSignaturePointDrag,
-    TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem, TrackType, HEADER_WIDTH,
-    RULER_HEIGHT, TEMPO_LANE_PAD, TRACK_HEIGHT,
+    TrackHeightResizeDrag, TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem,
+    TrackType, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
+    RULER_HEIGHT, TEMPO_LANE_PAD,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -241,6 +242,12 @@ impl Render for ScrollbarDrag {
 // Clip edge-resize uses GPUI's drag system with no visible drag image, so the
 // payload renders as `Empty` (same as the scrollbar thumb drag).
 impl Render for ClipResizeDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+impl Render for TrackHeightResizeDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         Empty
     }

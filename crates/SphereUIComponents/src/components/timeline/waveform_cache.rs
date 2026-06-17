@@ -895,6 +895,8 @@ fn synth_sample(kind: SynthKind, t: f32, duration: f32) -> f32 {
 // two clips with identical geometry share one entry.
 
 /// `(x_in_canvas, top, height)` per drawn column.
+/// Cached per-column waveform geometry: `(x, min_peak, max_peak)` in `[-1, 1]`.
+/// Vertical pixel placement is derived from the paint bounds at draw time.
 pub type WaveformBars = Vec<(f32, f32, f32)>;
 
 /// FIFO-bounded so memory stays flat (clips × zoom states cycle through). Not

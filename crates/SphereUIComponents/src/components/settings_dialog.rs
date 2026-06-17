@@ -1859,6 +1859,7 @@ fn build_settings_content(
                 schema,
                 callbacks.open_hardware_combo,
                 callbacks.on_toggle_hardware_combo.clone(),
+                callbacks.on_update_setting.clone(),
             )
             .into_any_element(),
         );

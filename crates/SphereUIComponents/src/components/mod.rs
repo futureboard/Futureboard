@@ -44,6 +44,7 @@ pub mod settings_dialog;
 pub mod settings_layout;
 mod sidebar;
 pub mod slider;
+mod performance_overlay;
 mod status_bar;
 pub mod text_input;
 pub mod timeline;
@@ -125,7 +126,11 @@ pub use settings_dialog::{
 };
 pub use sidebar::sidebar;
 pub use slider::slider;
-pub use status_bar::{status_bar, status_bar_with_background_tasks};
+pub use performance_overlay::{performance_overlay, PerformanceOverlaySnapshot};
+pub use status_bar::{
+    status_bar, status_bar_with_background_tasks, PerfMetricsToggleCb, StatusBarContent,
+    StatusBarPerfMetrics,
+};
 pub use text_input::{text_field, TextInputAction, TextInputState};
 pub use virtual_keyboard::{
     VirtualKeyboardEventSink, VirtualKeyboardPanel, VirtualKeyboardPanelState,

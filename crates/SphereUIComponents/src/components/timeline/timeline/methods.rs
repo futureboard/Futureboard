@@ -139,6 +139,7 @@ impl Timeline {
         self.ts_drag = None;
         self.pan_last_position = None;
         self.state.clear_track_drag();
+        self.state.cancel_track_height_resize();
         self.log_input_state("reset-after");
     }
 
@@ -511,17 +512,19 @@ impl Timeline {
 
     /// Map a window-space y to a lane-local automation value for `track_id`.
     pub(super) fn automation_value_from_window_y(&self, track_id: &str, window_y: f32) -> f32 {
-        use crate::components::timeline::timeline_state::automation_y_to_value;
-        let index = self
-            .state
-            .tracks
-            .iter()
-            .position(|t| t.id == track_id)
-            .unwrap_or(0);
+        use crate::components::timeline::timeline_state::{
+            automation_y_to_value, DEFAULT_TRACK_HEIGHT,
+        };
+        let row_layout = self.state.track_row_layout();
+        let row = row_layout.row_for_track(track_id);
+        let row_y = row.map(|r| r.y).unwrap_or(0.0);
+        let row_h = row
+            .map(|r| r.height)
+            .unwrap_or(DEFAULT_TRACK_HEIGHT);
         let local_y = (window_y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()
             + self.state.viewport.scroll_y)
-            - index as f32 * TRACK_HEIGHT;
-        automation_y_to_value(local_y, TRACK_HEIGHT)
+            - row_y;
+        automation_y_to_value(local_y, row_h)
     }
 
     pub(super) fn tempo_bpm_from_window_y(&self, window_y: f32) -> f64 {
@@ -730,7 +733,8 @@ impl Timeline {
         };
 
         let ppb = self.state.viewport.pixels_per_beat.max(1.0);
-        let usable = (TRACK_HEIGHT - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
+        let row_h = self.state.track_row_height_for_id(track_id);
+        let usable = (row_h - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
         let beat_tol = 8.0 / ppb;
         let value_tol = 8.0 / usable;
 
@@ -942,9 +946,9 @@ impl Timeline {
             + self.state.arrangement_content_top()
             + m.bottom_panel_height
             + m.status_bar_height;
-        let track_view_h = (window_h - used_v).max(TRACK_HEIGHT);
+        let track_view_h = (window_h - used_v).max(DEFAULT_TRACK_HEIGHT);
         let content_w = self.timeline_content_width();
-        let content_h = self.state.tracks.len() as f32 * TRACK_HEIGHT;
+        let content_h = self.state.total_track_rows_height();
 
         if std::env::var_os("FUTUREBOARD_TIMELINE_VIEWPORT_DEBUG").is_some() {
             eprintln!(
@@ -1075,9 +1079,11 @@ impl Timeline {
             .iter()
             .position(|track| track.id == drag.source_track_id)
             .unwrap_or(0);
-        let slot = (dy / TRACK_HEIGHT).round() as isize;
-        let max_index = self.state.tracks.len().saturating_sub(1) as isize;
-        let target_index = (source_index as isize + slot).clamp(0, max_index) as usize;
+        let viewport_y = self.track_area_y_from_window(position);
+        let target_index = self
+            .state
+            .track_index_at_y(viewport_y)
+            .unwrap_or(source_index);
         (target_index, snapped)
     }
 

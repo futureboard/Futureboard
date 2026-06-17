@@ -24,25 +24,31 @@ pub fn snap_beat(beat: f64, snap: SnapSettings) -> f64 {
 }
 
 pub fn track_at_y(y: f32, layout: &TrackLayout) -> Option<TrackId> {
-    if layout.track_height <= 0.0 {
-        return None;
-    }
-    let index = ((y + layout.scroll_y).max(0.0) / layout.track_height).floor() as usize;
-    layout.track_ids.get(index).cloned()
+    let content_y = y + layout.scroll_y;
+    layout
+        .rows
+        .iter()
+        .find(|row| content_y >= row.y && content_y < row.y + row.height)
+        .map(|row| row.track_id.clone())
 }
 
 pub fn clip_rect(
     clip: &ClipState,
     viewport: &TimelineViewport,
     layout: &TrackLayout,
+    track_id: &str,
 ) -> gpui::Bounds<gpui::Pixels> {
     let x = beat_to_x(clip.start_beat as f64, viewport);
     let w =
         ((clip.duration_beats.max(0.0) as f64 * viewport.pixels_per_beat as f64) as f32).max(1.0);
-    let y = -layout.scroll_y;
+    let row = layout
+        .row_for_track(track_id)
+        .map(|row| (row.y, row.height))
+        .unwrap_or((0.0, layout.track_height));
+    let y = row.0 - layout.scroll_y;
     gpui::bounds(
         gpui::point(gpui::px(x), gpui::px(y)),
-        gpui::size(gpui::px(w), gpui::px(layout.track_height)),
+        gpui::size(gpui::px(w), gpui::px(row.1)),
     )
 }
 
@@ -71,11 +77,8 @@ impl TimelineState {
         x_to_beat(x, &self.viewport)
     }
 
-    pub fn lane_y_to_track_id(&self, y: f32) -> Option<TrackId> {
-        track_at_y(
-            y,
-            &TrackLayout::from_tracks(&self.tracks, self.viewport.scroll_y),
-        )
+    pub fn arrangement_track_layout(&self) -> TrackLayout {
+        TrackLayout::from_state(self)
     }
 
     pub fn snap_time(&self, seconds: f32) -> f32 {

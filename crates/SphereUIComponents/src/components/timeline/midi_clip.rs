@@ -1,6 +1,6 @@
 use crate::components::timeline::timeline_state::{
     midi_debug_enabled, ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType,
-    MidiControllerKind, MidiControllerPoint, TimelineState, TRACK_HEIGHT,
+    MidiControllerKind, MidiControllerPoint, TimelineState,
 };
 use crate::theme::Colors;
 use gpui::{
@@ -13,6 +13,7 @@ pub fn midi_clip(
     track_id: &str,
     track_color: gpui::Rgba,
     state: &TimelineState,
+    row_height: f32,
     on_select_clip: std::sync::Arc<
         dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
@@ -38,7 +39,7 @@ pub fn midi_clip(
     let width = (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
 
     let pad = 7.0;
-    let clip_h = TRACK_HEIGHT - pad * 2.0;
+    let clip_h = row_height - pad * 2.0;
     let note_h = clip_h - 14.0; // height for notes preview
 
     // Draw notes inside notes preview area (clip-relative beats, clip bounds).

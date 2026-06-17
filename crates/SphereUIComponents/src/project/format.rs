@@ -28,7 +28,7 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v16 adds a per-clip non-destructive stretch/pitch block (mode, algorithm,
 /// ratio, BPM pair, pitch/formant/transient/fade/gain/pan, warp markers). Pre-v16
 /// clips load with [`AudioClipStretchState::default`] (mode Off, ratio 1.0).
-pub const PROJECT_VERSION: u32 = 16;
+pub const PROJECT_VERSION: u32 = 17;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -218,6 +218,16 @@ impl FbWriter {
         }
     }
 
+    fn write_opt_f32(&mut self, v: &Option<f32>) {
+        match v {
+            None => self.write_u8(0),
+            Some(x) => {
+                self.write_u8(1);
+                self.write_f32(*x);
+            }
+        }
+    }
+
     fn write_opt_u64(&mut self, v: &Option<u64>) {
         match v {
             None => self.write_u8(0),
@@ -353,6 +363,14 @@ impl<'a> FbReader<'a> {
         match self.read_u8()? {
             0 => Ok(None),
             1 => Ok(Some(self.read_f64()?)),
+            t => Err(ProjectError::Corrupted(format!("bad option tag {t}"))),
+        }
+    }
+
+    fn read_opt_f32(&mut self) -> Result<Option<f32>, ProjectError> {
+        match self.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_f32()?)),
             t => Err(ProjectError::Corrupted(format!("bad option tag {t}"))),
         }
     }
@@ -702,6 +720,7 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     for c in &t.clips {
         encode_clip(w, c);
     }
+    w.write_opt_f32(&t.row_height_px);
 }
 
 fn encode_asset(w: &mut FbWriter, a: &ProjectAsset) {
@@ -1278,6 +1297,8 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         clips.push(decode_clip(r, version)?);
     }
 
+    let row_height_px = if version >= 17 { r.read_opt_f32()? } else { None };
+
     Ok(ProjectTrack {
         id,
         name,
@@ -1293,6 +1314,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         inserts,
         automation_lanes,
         clips,
+        row_height_px,
     })
 }
 
@@ -1933,6 +1955,7 @@ mod tests {
             inserts: Vec::new(),
             automation_lanes: Vec::new(),
             clips: vec![clip],
+            row_height_px: None,
         }
     }
 

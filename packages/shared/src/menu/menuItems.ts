@@ -218,6 +218,34 @@ export const APP_MENUS: AppMenuGroup[] = [
   },
 
   {
+    id: "view",
+    label: "View",
+    children: [
+      {
+        id: "view.developer",
+        type: "submenu",
+        label: "Developer",
+        children: [
+          {
+            id: "view.developer.perf_metrics",
+            label: "Show Performance Metrics",
+            checked: false,
+            action: "view:toggle-perf-metrics",
+            description: "Compact FPS and frame time in the status bar",
+          },
+          {
+            id: "view.developer.perf_overlay",
+            label: "Toggle Performance Overlay",
+            checked: false,
+            action: "view:toggle-perf-overlay",
+            description: "Verbose real-time performance overlay",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
     id: "midi",
     label: "MIDI",
     children: [

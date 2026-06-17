@@ -18,6 +18,7 @@ pub mod timeline_surface;
 pub mod track_header;
 pub mod track_lane;
 pub mod track_list;
+pub mod track_resize;
 pub mod vu_meter;
 pub mod waveform_cache;
 pub mod waveform_canvas;

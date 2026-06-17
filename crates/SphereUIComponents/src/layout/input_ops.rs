@@ -14,7 +14,6 @@ use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, Tex
 use crate::components::timeline::timeline_state::{ClipType, TrackType};
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
-use super::project_ops::ProjectOpenOptions;
 use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
 
 /// Inspector inline name-edit fields — the focus-handle-backed track-name and
@@ -134,7 +133,9 @@ impl StudioLayout {
         }
     }
 
-    pub(super) fn project_switcher_visible_recent_paths(&self) -> Vec<PathBuf> {
+    pub(super) fn project_switcher_visible_entries(
+        &self,
+    ) -> Vec<crate::components::project_switcher::ProjectSummary> {
         let query = self.project_switcher.query.trim().to_lowercase();
         self.project_switcher
             .recent_projects
@@ -151,7 +152,14 @@ impl StudioLayout {
                     .unwrap_or_default();
                 project.name.to_lowercase().contains(&query) || path.contains(&query)
             })
-            .filter_map(|project| project.path.clone())
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn project_switcher_visible_recent_paths(&self) -> Vec<PathBuf> {
+        self.project_switcher_visible_entries()
+            .into_iter()
+            .filter_map(|project| project.path)
             .collect()
     }
 
@@ -196,19 +204,25 @@ impl StudioLayout {
                 true
             }
             "enter" | "numpad_enter" => {
-                if self.project_switcher.selected_index > 0 {
-                    if let Some(path) = self
-                        .project_switcher_visible_recent_paths()
-                        .get(self.project_switcher.selected_index - 1)
-                        .cloned()
-                    {
-                        self.load_project_from_path_with_options(
-                            path,
-                            ProjectOpenOptions { from_recent: true },
+                let idx = self.project_switcher.selected_index;
+                let owner_bounds = Some(window.bounds());
+                if idx == 0 {
+                    self.handle_project_switch_current_row(cx);
+                } else if let Some(project) =
+                    self.project_switcher_visible_entries().get(idx.saturating_sub(1))
+                {
+                    if let Some(path) = project.path.clone() {
+                        self.request_switch_project(
+                            crate::layout::project_switch::ProjectSwitchRequest {
+                                target_path: path,
+                                target_name: Some(project.name.clone()),
+                                source:
+                                    crate::layout::project_switch::ProjectSwitchSource::ProjectSwitcher,
+                            },
+                            owner_bounds,
                             cx,
                         );
                     }
-                    self.project_switcher.is_open = false;
                 }
                 true
             }
@@ -889,17 +903,26 @@ impl StudioLayout {
             ContextTarget::Track(track_id) => {
                 let track = self.timeline.read(cx).state.find_track(track_id).cloned();
                 let exists = track.is_some();
-                vec![
+                let mut entries = vec![
                     menu_item_enabled("Rename Track", "track:rename", exists),
                     menu_item_enabled("Duplicate Track", "track:duplicate", false),
                     danger_menu_item_enabled("Delete Track", "track:delete", exists),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
-                    ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
-                    ContextMenuEntry::Separator,
                     menu_item_enabled("Track Color", "track:color", exists),
                     menu_item_enabled("Track Settings", "track:settings", exists),
-                ]
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::Header("Track Height".to_string()),
+                    menu_item_enabled("Small", "track:height-small", exists),
+                    menu_item_enabled("Normal", "track:height-normal", exists),
+                    menu_item_enabled("Large", "track:height-large", exists),
+                    menu_item_enabled("Huge", "track:height-huge", exists),
+                    menu_item_enabled("Reset Track Height", "track:height-reset", exists),
+                    menu_item_enabled("Reset All Track Heights", "track:height-reset-all", exists),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
+                    ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
+                ];
+                entries
             }
             ContextTarget::TimelineMarker { beat, .. } => {
                 let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);

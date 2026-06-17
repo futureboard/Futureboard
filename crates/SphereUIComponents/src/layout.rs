@@ -6,6 +6,9 @@ use gpui::{
 pub use crate::shutdown::ShutdownState;
 pub use close_ops::PendingCloseAction;
 pub use project_ops::ProjectOpenOptions;
+pub use project_switch::{
+    ProjectSwitchConfirmDecision, ProjectSwitchRequest, ProjectSwitchSource,
+};
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
@@ -50,6 +53,7 @@ pub(crate) mod plugin_bridge_runtime;
 mod plugin_ops;
 mod plugin_picker_window;
 mod project_ops;
+mod project_switch;
 mod recording_ops;
 mod session_load;
 mod studio_render;
@@ -426,6 +430,7 @@ pub struct StudioLayout {
     /// close/new/open action + last failed open path). Grouped into
     /// [`close_ops::LifecycleGuardState`] (decomposition slice).
     lifecycle_guard: close_ops::LifecycleGuardState,
+    project_switch: project_switch::ProjectSwitchGuardState,
     /// Active keyboard shortcut profile. The default profile is bundled; other
     /// profiles load from `<app dir>/Keymaps/<id>.json`. Drives `shortcut_command_id`.
     active_keymap: crate::keymap::Keymap,
@@ -737,6 +742,7 @@ impl StudioLayout {
             recent_projects: RecentProjectsStore::load(),
             window_hooks: window_ops::StudioWindowHooks::default(),
             lifecycle_guard: close_ops::LifecycleGuardState::default(),
+            project_switch: project_switch::ProjectSwitchGuardState::default(),
             active_keymap: crate::keymap::Keymap::bundled_default(),
             project_state: crate::app_state::ProjectState::NoProject,
             last_window_title: None,
@@ -1326,13 +1332,13 @@ impl StudioLayout {
             "project:save" => self.cmd_save_project(cx),
             "project:save-as" => self.cmd_save_project_as(cx),
             "project:save-copy" => self.cmd_save_project_copy(cx),
-            "project:open-recent" => self.cmd_open_recent_project(cx),
+            "project:open-recent" => self.cmd_open_recent_project(owner_bounds, cx),
             "project:recent-clear" => {
                 self.recent_projects.clear();
                 self.sync_recent_to_switcher();
             }
             "project:reveal-folder" => self.cmd_reveal_project_folder(cx),
-            "project:switch-current" => {}
+            "project:switch-current" => self.handle_project_switch_current_row(cx),
 
             // ── Dev stress-test commands (not in release menus) ──────────────
             "dev:tracks-32" => self.stress_add_tracks(32, cx),
@@ -1351,6 +1357,8 @@ impl StudioLayout {
             "panel:toggle-mixer" | "view:toggle-mixer" | "window.show_mixer" => {
                 self.toggle_mixer_panel(cx)
             }
+            "view:toggle-perf-metrics" => self.toggle_status_performance_metrics(cx),
+            "view:toggle-perf-overlay" => self.toggle_performance_overlay(cx),
             "panel:mixer-float" | "floatingwindow:mixer" => {
                 self.open_mixer_external_window(owner_bounds, cx);
             }
@@ -1387,6 +1395,24 @@ impl StudioLayout {
                 self.open_export_arrangement_external_window(owner_bounds, cx)
             }
             "track:delete" => self.delete_selected_track(cx),
+            "track:height-small" => self.set_context_track_height_preset(
+                crate::components::timeline::timeline_state::TrackHeightPreset::Small,
+                cx,
+            ),
+            "track:height-normal" => self.set_context_track_height_preset(
+                crate::components::timeline::timeline_state::TrackHeightPreset::Normal,
+                cx,
+            ),
+            "track:height-large" => self.set_context_track_height_preset(
+                crate::components::timeline::timeline_state::TrackHeightPreset::Large,
+                cx,
+            ),
+            "track:height-huge" => self.set_context_track_height_preset(
+                crate::components::timeline::timeline_state::TrackHeightPreset::Huge,
+                cx,
+            ),
+            "track:height-reset" => self.reset_context_track_height(cx),
+            "track:height-reset-all" => self.reset_all_track_heights(cx),
             "track:mute" => self.toggle_selected_track_mute(cx),
             "track:solo" => self.toggle_selected_track_solo(cx),
             "track:arm" => self.toggle_selected_track_arm(cx),
@@ -1504,6 +1530,35 @@ impl StudioLayout {
         } else {
             self.panels.mixer_docked = !self.panels.mixer_docked;
         }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_status_performance_metrics(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |settings, cx| {
+            settings.update_setting(
+                |schema| {
+                    schema.performance.show_status_performance_metrics =
+                        !schema.performance.show_status_performance_metrics;
+                },
+                cx,
+            );
+        });
+        if !self.settings.read(cx).current.performance.show_status_performance_metrics {
+            self.overlay.perf_metrics_popover_open = false;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_performance_overlay(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |settings, cx| {
+            settings.update_setting(
+                |schema| {
+                    schema.performance.show_performance_overlay =
+                        !schema.performance.show_performance_overlay;
+                },
+                cx,
+            );
+        });
         cx.notify();
     }
 

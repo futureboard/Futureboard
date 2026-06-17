@@ -1,5 +1,5 @@
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, TimelineState, TRACK_HEIGHT,
+    ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, TimelineState,
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
 use crate::theme::Colors;
@@ -49,6 +49,7 @@ pub fn audio_clip(
     track_id: &str,
     track_color: gpui::Rgba,
     state: &TimelineState,
+    row_height: f32,
     on_select_clip: std::sync::Arc<
         dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
@@ -76,7 +77,7 @@ pub fn audio_clip(
 
     // Geometry offsets matching layout
     let pad = 7.0;
-    let clip_h = TRACK_HEIGHT - pad * 2.0;
+    let clip_h = row_height - pad * 2.0;
 
     let id_num = {
         use std::hash::{Hash, Hasher};

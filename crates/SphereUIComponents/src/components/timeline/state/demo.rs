@@ -230,6 +230,9 @@ impl TimelineState {
             show_time_signature_track: false,
             time_signature_track_collapsed: false,
             selected_time_signature_point_id: None,
+            track_view_layout: TrackViewLayout::default(),
+            track_height_resize: None,
+            track_height_resize_arm: None,
         }
     }
 

@@ -3,6 +3,7 @@ use gpui::{Context, Window};
 use std::sync::Arc;
 
 use crate::components;
+use crate::components::{PerformanceOverlaySnapshot, StatusBarContent, StatusBarPerfMetrics};
 use crate::components::text_input::TextInputState;
 
 use super::{StudioLayout, TransportCommand};
@@ -383,6 +384,11 @@ impl StudioLayout {
     }
 
     pub(super) fn status_text(&self) -> (String, String) {
+        let content = self.status_bar_content(false);
+        (content.left, content.audio)
+    }
+
+    pub(super) fn status_bar_content(&self, show_perf_metrics: bool) -> StatusBarContent {
         let left = match (
             self.recording.ui_state.status_text(),
             &self.audio_bridge.last_error,
@@ -394,32 +400,57 @@ impl StudioLayout {
             (None, _, Some(stats)) if stats.running => "Audio ready".to_string(),
             (None, _, _) => "Ready".to_string(),
         };
-        let audio = self
-            .audio_bridge
-            .stats
-            .as_ref()
-            .map(|stats| {
-                format!(
-                    "{} Hz  {}  Latency: {:.1} ms",
-                    stats.sample_rate.max(1),
-                    stats.backend_name,
-                    stats.estimated_latency_ms
-                )
-            })
-            .unwrap_or_else(|| "Audio offline".to_string());
-        let renderer =
-            crate::components::timeline::timeline_surface::active_timeline_renderer_backend();
-        // UI repaint cadence. Idle scenes stop updating when nothing is dirty.
-        // The scheduler label shows the target pacing (e.g. "Display Sync 144Hz");
-        // `frame_diag.hud()` shows the *actual* measured repaint rate.
-        let right = format!(
-            "{}  •  UI {}  •  {}  •  {}",
-            audio,
-            renderer,
-            self.frame_scheduler.describe(),
-            self.frame_diag.hud()
-        );
-        (left, right)
+        StatusBarContent {
+            left,
+            audio: self.status_audio_label(),
+            perf: if show_perf_metrics {
+                Some(self.status_perf_metrics())
+            } else {
+                None
+            },
+        }
+    }
+
+    fn status_audio_label(&self) -> String {
+        let Some(stats) = self.audio_bridge.stats.as_ref() else {
+            return "Audio offline".to_string();
+        };
+        let mut parts = vec![format!("{} Hz", stats.sample_rate.max(1))];
+        if !stats.backend_name.is_empty() {
+            parts.push(stats.backend_name.clone());
+        }
+        parts.push(format!("Latency {:.1} ms", stats.estimated_latency_ms));
+        if stats.buffer_size > 0 {
+            parts.push(format!("Buffer {}", stats.buffer_size));
+        }
+        parts.join("  ")
+    }
+
+    fn status_perf_metrics(&self) -> StatusBarPerfMetrics {
+        StatusBarPerfMetrics {
+            pill_label: self.frame_diag.compact_pill_label(),
+            renderer: crate::components::timeline::timeline_surface::active_timeline_renderer_backend()
+                .to_string(),
+            display_sync: self.frame_scheduler.describe(),
+            fps: self.frame_diag.displayed_fps(),
+            frame_ms: self.frame_diag.displayed_avg_ms(),
+            peak_ms: self.frame_diag.displayed_peak_ms(),
+            has_sample: self.frame_diag.has_sample(),
+        }
+    }
+
+    pub(super) fn performance_overlay_snapshot(&self, repaint_reason: &str) -> PerformanceOverlaySnapshot {
+        PerformanceOverlaySnapshot {
+            renderer: crate::components::timeline::timeline_surface::active_timeline_renderer_backend()
+                .to_string(),
+            display_sync: self.frame_scheduler.describe(),
+            fps: self.frame_diag.displayed_fps(),
+            frame_ms: self.frame_diag.displayed_avg_ms(),
+            peak_ms: self.frame_diag.displayed_peak_ms(),
+            has_sample: self.frame_diag.has_sample(),
+            repaint_reason: repaint_reason.to_string(),
+            audio: self.status_audio_label(),
+        }
     }
 
     pub(super) fn frame_reason(&self) -> &'static str {

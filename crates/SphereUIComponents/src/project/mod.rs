@@ -374,6 +374,8 @@ pub struct ProjectTrack {
     pub inserts: Vec<ProjectInsert>,
     pub automation_lanes: Vec<AutomationLane>,
     pub clips: Vec<ProjectClip>,
+    /// Arrangement row height in px (v17+). `None` uses the default height.
+    pub row_height_px: Option<f32>,
 }
 
 // ── Mixer ─────────────────────────────────────────────────────────────────────
@@ -801,6 +803,14 @@ impl From<&TimelineState> for FutureboardProject {
                         .collect(),
                     automation_lanes,
                     clips,
+                    row_height_px: tl
+                        .track_view_layout
+                        .height_for(&t.id)
+                        .filter(|h| {
+                            (*h - crate::components::timeline::timeline_state::DEFAULT_TRACK_HEIGHT)
+                                .abs()
+                                >= 0.01
+                        }),
                 }
             })
             .collect();
@@ -1136,6 +1146,23 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
             }
         })
         .collect();
+
+    tl.track_view_layout.clear();
+    tl.track_height_resize = None;
+    tl.track_height_resize_arm = None;
+    for pt in &project.tracks {
+        let Some(height) = pt.row_height_px else {
+            continue;
+        };
+        let Some(track) = tl.tracks.iter().find(|t| t.id == pt.id) else {
+            continue;
+        };
+        let clamped = crate::components::timeline::timeline_state::clamp_track_row_height(
+            track.track_type,
+            height,
+        );
+        tl.track_view_layout.set_height(pt.id.clone(), clamped);
+    }
 }
 
 fn timeline_input_to_project(

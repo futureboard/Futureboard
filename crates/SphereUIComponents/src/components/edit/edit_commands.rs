@@ -136,6 +136,11 @@ pub enum EditCommand {
         before_order: Vec<String>,
         after_order: Vec<String>,
     },
+    /// Batch per-track row height changes (layout/view — one undo entry per gesture).
+    SetTrackHeights {
+        prev: Vec<(String, f32)>,
+        next: Vec<(String, f32)>,
+    },
 }
 
 impl EditCommand {
@@ -162,6 +167,7 @@ impl EditCommand {
             EditCommand::SplitMidiNote { .. } => "Split MIDI Note",
             EditCommand::SetClipStretch { .. } => "Edit Stretch",
             EditCommand::ReorderFxSlot { .. } => "Reorder FX",
+            EditCommand::SetTrackHeights { .. } => "Resize Track Height",
         }
     }
 
@@ -287,6 +293,9 @@ impl EditCommand {
             } => {
                 state.set_insert_order(track_id, after_order);
             }
+            EditCommand::SetTrackHeights { next, .. } => {
+                apply_track_heights_snapshot(state, next);
+            }
         }
     }
 
@@ -385,6 +394,21 @@ impl EditCommand {
             } => {
                 state.set_insert_order(track_id, before_order);
             }
+            EditCommand::SetTrackHeights { prev, .. } => {
+                apply_track_heights_snapshot(state, prev);
+            }
+        }
+    }
+}
+
+fn apply_track_heights_snapshot(state: &mut TimelineState, heights: &[(String, f32)]) {
+    for (track_id, height) in heights {
+        if (*height - crate::components::timeline::timeline_state::DEFAULT_TRACK_HEIGHT).abs()
+            < 0.01
+        {
+            state.track_view_layout.remove_track(track_id);
+        } else if state.tracks.iter().any(|t| t.id == *track_id) {
+            state.track_view_layout.set_height(track_id.clone(), *height);
         }
     }
 }

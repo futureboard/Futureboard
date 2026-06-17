@@ -2,12 +2,16 @@ use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::timeline::automation_lane::automation_lane;
 use crate::components::timeline::timeline_state::{
-    AutomationMarquee, TimelineState, HEADER_WIDTH, TRACK_HEIGHT,
+    AutomationMarquee, TimelineState, HEADER_WIDTH, DEFAULT_TRACK_HEIGHT,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
 use crate::components::timeline::track_lane::{
     track_lane, AutomationCycleCallback, AutomationDownCallback,
+};
+use crate::components::timeline::track_resize::{
+    track_row_resize_handle, visible_track_row_range, TrackHeightResizeArmCb,
+    TrackHeightResizeResetCb,
 };
 use crate::theme::Colors;
 
@@ -18,6 +22,8 @@ const OVERSCAN: usize = 2;
 pub fn track_list(
     state: &TimelineState,
     header_callbacks: TrackHeaderCallbacks,
+    on_resize_arm: TrackHeightResizeArmCb,
+    on_resize_reset: TrackHeightResizeResetCb,
     on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     on_select_clip: std::sync::Arc<
         dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
@@ -48,44 +54,31 @@ pub fn track_list(
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackList");
     let grid_width = state.viewport.viewport_width.max(1.0);
-    let grid_height = state.viewport.viewport_height.max(TRACK_HEIGHT);
-    let track_count = state.tracks.len();
-    let total_tracks_height = track_count as f32 * TRACK_HEIGHT;
-    // Where the "tail" (below the last actual track) begins in viewport coords.
-    // Rows are shifted by `-scroll_y`, so we need to subtract scroll to find the
-    // last track's bottom edge relative to the visible viewport.
+    let grid_height = state.viewport.viewport_height.max(DEFAULT_TRACK_HEIGHT);
+    let row_layout = state.track_row_layout();
+    let total_tracks_height = row_layout.total_height;
     let tail_start_y = (total_tracks_height - state.viewport.scroll_y).max(0.0);
 
     if std::env::var_os("FUTUREBOARD_TIMELINE_BG_DEBUG").is_some() {
         eprintln!(
             "[timeline bg] tracks={} total_h={:.1} scroll_y={:.1} viewport_h={:.1} tail_start_y={:.1}",
-            track_count,
+            row_layout.rows.len(),
             total_tracks_height,
             state.viewport.scroll_y,
             grid_height,
             tail_start_y
         );
     }
-    let insert_y = state.drag_target_index.map(|index| {
-        (index as f32 * TRACK_HEIGHT - state.viewport.scroll_y)
-            .clamp(0.0, grid_height.max(TRACK_HEIGHT))
+    let insert_y = state.drag_target_index.and_then(|index| {
+        row_layout.row_for_index(index).map(|row| {
+            (row.y - state.viewport.scroll_y).clamp(0.0, grid_height.max(DEFAULT_TRACK_HEIGHT))
+        })
     });
 
-    // ── Virtual row window ──────────────────────────────────────────────────
-    // Only rows whose screen-space Y overlaps [0, viewport_height] are built.
-    // The remainder is represented by opaque spacer divs at the top/bottom of
-    // the flex column so the scroll geometry (total height, scrollbar thumb
-    // size, drop-indicator positions) stays correct.
     let scroll_y = state.viewport.scroll_y;
     let viewport_height = state.viewport.viewport_height;
-
-    let first_visible = (scroll_y / TRACK_HEIGHT).floor() as usize;
-    let visible_start = first_visible.saturating_sub(OVERSCAN);
-    let last_visible = ((scroll_y + viewport_height) / TRACK_HEIGHT).ceil() as usize;
-    let visible_end = (last_visible + OVERSCAN).min(track_count);
-
-    let top_spacer_h = visible_start as f32 * TRACK_HEIGHT;
-    let bottom_spacer_h = track_count.saturating_sub(visible_end) as f32 * TRACK_HEIGHT;
+    let (visible_start, visible_end, top_spacer_h, bottom_spacer_h) =
+        visible_track_row_range(&row_layout, scroll_y, viewport_height, OVERSCAN);
 
     crate::perf::count(
         "visible_track_rows",
@@ -105,22 +98,46 @@ pub fn track_list(
         );
     }
 
-    for (rel_idx, track) in state.tracks[visible_start..visible_end].iter().enumerate() {
-        let index = visible_start + rel_idx;
+    for track in state.tracks[visible_start..visible_end].iter() {
+        let index = row_layout
+            .row_for_track(&track.id)
+            .map(|row| row.index)
+            .unwrap_or(visible_start);
+        let row_entry = row_layout
+            .row_for_track(&track.id)
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::components::timeline::timeline_state::TrackRowLayoutEntry {
+                    track_id: track.id.clone(),
+                    index,
+                    y: 0.0,
+                    height: DEFAULT_TRACK_HEIGHT,
+                }
+            });
+        let row_height = row_entry.height;
+        let row_y = row_entry.y;
         let row = div()
-            .flex()
-            .flex_col()
+            .relative()
             .w_full()
+            .h(px(row_height))
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .h(px(TRACK_HEIGHT))
-                    .child(track_header(track, index, state, header_callbacks.clone()))
+                    .size_full()
+                    .child(track_header(
+                        track,
+                        index,
+                        state,
+                        row_height,
+                        header_callbacks.clone(),
+                    ))
                     .child(track_lane(
                         track,
                         index,
                         state,
+                        row_height,
+                        row_y,
                         on_select_track.clone(),
                         on_select_clip.clone(),
                         on_add_clip.clone(),
@@ -136,6 +153,11 @@ pub fn track_list(
                         automation_marquee,
                     )),
             )
+            .child(track_row_resize_handle(
+                &row_entry,
+                on_resize_arm.clone(),
+                on_resize_reset.clone(),
+            ))
             .children(
                 track
                     .automation_lanes
@@ -156,20 +178,11 @@ pub fn track_list(
         );
     }
 
-    // Use `size_full()` (not `flex_1()`) so the track list fills the
-    // surrounding wrapper. The parent in `timeline.rs` is a plain
-    // (non-flex) sized block — `flex_1` there is a no-op and would
-    // collapse this container to its content height. Since the rows and
-    // grid below are absolutely positioned, that collapse hides every
-    // TrackHeader / TrackLane row even though `state.tracks` is populated.
     div()
         .relative()
         .size_full()
         .bg(Colors::surface_base())
         .overflow_hidden()
-        // Full-height left pane background. Individual TrackHeader rows scroll
-        // over this, while the empty area below the final row still reads as
-        // the same fixed header column and never receives grid/playhead paint.
         .child(
             div()
                 .absolute()
@@ -190,9 +203,6 @@ pub fn track_list(
                         .bg(Colors::border_strong()),
                 ),
         )
-        // Back layer: timeline body grid, clipped to the right content area.
-        // This must stay before the row stack so lane row backgrounds and clips
-        // are always painted above the base arrangement surface.
         .child(
             div()
                 .absolute()
@@ -200,16 +210,12 @@ pub fn track_list(
                 .right_0()
                 .top_0()
                 .bottom_0()
-                // Base body background: always fill the full content viewport,
-                // even when there are 0 tracks or the track list doesn't fill
-                // the visible height.
                 .child(
                     div()
                         .absolute()
                         .inset_0()
                         .bg(Colors::timeline_content_background()),
                 )
-                // Empty tail background below the last track, if any.
                 .children((tail_start_y < grid_height).then(|| {
                     div()
                         .absolute()
@@ -221,7 +227,6 @@ pub fn track_list(
                 }))
                 .child(timeline_surface(state, grid_width, grid_height)),
         )
-        // Foreground layer: scrolling TrackHeader/TrackLane rows.
         .child(
             div()
                 .absolute()

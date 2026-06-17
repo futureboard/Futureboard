@@ -31,8 +31,8 @@ pub(crate) struct StudioWindowHooks {
     pub cached_bounds: Option<Bounds<gpui::Pixels>>,
     /// App-level hook that re-opens the Welcome window (invoked by close_project).
     pub on_request_welcome: Option<Arc<dyn Fn(&mut gpui::App) + 'static>>,
-    /// App-level hook for project open/replace — closes studio, runs the loading
-    /// gate, then remounts studio with the decoded session.
+    /// App-level hook for in-studio project open/replace — keeps the root studio
+    /// window alive and swaps the session in place.
     pub on_request_project_load:
         Option<Arc<dyn Fn(PathBuf, super::project_ops::ProjectOpenOptions, &mut gpui::App) + 'static>>,
 }

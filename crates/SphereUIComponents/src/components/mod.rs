@@ -41,6 +41,7 @@ pub mod plugin_shell_text;
 pub mod progress_dialog;
 pub mod project_switcher;
 pub mod reorder;
+pub mod scroll_thumb;
 pub mod settings_components;
 pub mod settings_dialog;
 pub mod settings_layout;

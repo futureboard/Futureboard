@@ -19,7 +19,7 @@ use crate::components::file_browser::FileBrowserState;
 use crate::components::plugin_picker::{
     compute_filter_result, ensure_default_highlight, plugin_picker_overlay,
     CatalogStatus as PluginCatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
-    PluginPickerState, PluginSearchIndex,
+    PluginPickerScrollHandles, PluginPickerState, PluginSearchIndex,
 };
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::text_input::{
@@ -346,6 +346,7 @@ pub struct StudioLayout {
     plugin_picker: PluginPickerState,
     plugin_picker_search_input: TextInputState,
     plugin_picker_prefs: PluginPickerPrefs,
+    plugin_picker_scroll: PluginPickerScrollHandles,
     plugin_search_index: Option<PluginSearchIndex>,
     plugin_picker_au_error: Option<String>,
     plugin_picker_window: Option<WindowHandle<plugin_picker_window::InsertPickerWindow>>,
@@ -723,6 +724,7 @@ impl StudioLayout {
             )
             .with_placeholder("Search plugins by name, vendor, category, or format…"),
             plugin_picker_prefs: PluginPickerPrefs::load(),
+            plugin_picker_scroll: PluginPickerScrollHandles::default(),
             plugin_search_index: None,
             plugin_picker_au_error: load_au_cache_state().last_error,
             plugin_picker_window: None,
@@ -1435,6 +1437,18 @@ impl StudioLayout {
                 self.open_add_track_external_window(AddTrackKind::Master, owner_bounds, cx)
             }
             "plugins:manager" => self.open_plugin_manager_external_window(owner_bounds, cx),
+            "plugins:insert" => {
+                let track_id = self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .selection
+                    .selected_track_id
+                    .clone();
+                if let Some(track_id) = track_id {
+                    self.open_insert_picker(&track_id, None, cx);
+                }
+            }
             "file:export-arrangement" => {
                 self.open_export_arrangement_external_window(owner_bounds, cx)
             }

@@ -84,6 +84,8 @@
     "tools:developer-tools": "Ctrl+Shift+I",
     "app:force-reload": "Ctrl+Shift+R",
     "help:documentation": "F1",
-    "help:keyboard-shortcuts": "Ctrl+/"
+    "help:keyboard-shortcuts": "Ctrl+/",
+    "plugins:insert": "Ctrl+Shift+U",
+    "plugins:manager": "Ctrl+Alt+M"
   }
 }

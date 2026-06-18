@@ -1103,6 +1103,7 @@ impl Render for StudioLayout {
                     search_context_callbacks,
                     picker_callbacks,
                     self.plugin_picker_au_error.as_deref(),
+                    &self.plugin_picker_scroll,
                 )
                 .into_any_element(),
             )

@@ -8,7 +8,8 @@ use gpui::{
 
 use crate::components::plugin_picker::{
     compute_filter_result, ensure_default_highlight, plugin_picker_panel, CatalogStatus,
-    PickerFilter, PluginPickerCallbacks, PluginPickerPrefs, PluginPickerState, PluginSearchIndex,
+    PickerFilter, PluginPickerCallbacks, PluginPickerPrefs, PluginPickerScrollHandles,
+    PluginPickerState, PluginSearchIndex,
 };
 use crate::components::text_input::TextInputCallbacks;
 use crate::components::title_bar::external_window_titlebar;
@@ -27,6 +28,7 @@ pub(crate) struct InsertPickerWindow {
     owner: Entity<StudioLayout>,
     snapshot: InsertPickerSnapshot,
     focus_handle: FocusHandle,
+    scroll: PluginPickerScrollHandles,
 }
 
 #[derive(Clone)]
@@ -49,6 +51,7 @@ impl InsertPickerWindow {
             owner,
             snapshot,
             focus_handle: cx.focus_handle(),
+            scroll: PluginPickerScrollHandles::default(),
         }
     }
 
@@ -275,6 +278,7 @@ impl Render for InsertPickerWindow {
                 search_callbacks,
                 picker_callbacks,
                 snapshot.au_error.as_deref(),
+                &self.scroll,
             )))
     }
 }

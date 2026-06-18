@@ -605,7 +605,7 @@ impl StudioLayout {
                             &track_id,
                             Some(slot_index),
                             desired_kind,
-                            window,
+                            Some(window),
                             cx,
                         );
                     },

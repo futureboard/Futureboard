@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, svg, uniform_list, App, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window,
+    StatefulInteractiveElement, Styled, UniformListScrollHandle, Window,
 };
 
 use crate::assets;
@@ -19,8 +19,9 @@ use crate::components::plugin_picker::list_view::{
 use crate::components::plugin_picker::prefs::PluginPickerPrefs;
 use crate::components::plugin_picker::search_index::PluginSearchIndex;
 use crate::components::plugin_picker::sidebar::plugin_filter_sidebar;
-use crate::components::plugin_picker::state::{CatalogStatus, PluginPickerState};
+use crate::components::plugin_picker::state::{CatalogStatus, PluginPickerScrollHandles, PluginPickerState};
 use crate::components::plugin_picker::PluginPickerCallbacks;
+use crate::components::scroll_thumb::vertical_scrollbar_thumb;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
@@ -39,6 +40,7 @@ pub fn plugin_picker_overlay(
     search_callbacks: TextInputCallbacks,
     callbacks: PluginPickerCallbacks,
     au_scan_error: Option<&str>,
+    scroll: &PluginPickerScrollHandles,
 ) -> impl IntoElement {
     let close_backdrop = callbacks.on_close.clone();
     let close_button = callbacks.on_close.clone();
@@ -83,6 +85,7 @@ pub fn plugin_picker_overlay(
         &callbacks,
         prefs,
         au_scan_error,
+        &scroll.list,
     );
 
     let sidebar = plugin_filter_sidebar(
@@ -93,6 +96,7 @@ pub fn plugin_picker_overlay(
         debug,
         cfg!(target_os = "macos") || filter_result.counts.au > 0,
         callbacks.on_select_filter.clone(),
+        &scroll.sidebar,
     );
 
     let list_section = div()
@@ -212,7 +216,7 @@ pub fn plugin_picker_overlay(
                         .flex_1()
                         .min_h(px(0.0))
                         .w_full()
-                        .child(div().flex_shrink_0().child(sidebar))
+                        .child(div().flex_shrink_0().h_full().child(sidebar))
                         .child(list_section)
                         .when(state.show_details, |panel| {
                             panel.when_some(selected_plugin, |panel, plugin| {
@@ -238,6 +242,7 @@ pub fn plugin_picker_panel(
     search_callbacks: TextInputCallbacks,
     callbacks: PluginPickerCallbacks,
     au_scan_error: Option<&str>,
+    scroll: &PluginPickerScrollHandles,
 ) -> impl IntoElement {
     let on_pick_add = callbacks.on_pick.clone();
     let on_pick_stub = callbacks.on_pick.clone();
@@ -277,6 +282,7 @@ pub fn plugin_picker_panel(
         &callbacks,
         prefs,
         au_scan_error,
+        &scroll.list,
     );
 
     let sidebar = plugin_filter_sidebar(
@@ -287,6 +293,7 @@ pub fn plugin_picker_panel(
         debug,
         cfg!(target_os = "macos") || filter_result.counts.au > 0,
         callbacks.on_select_filter.clone(),
+        &scroll.sidebar,
     );
 
     let list_section = div()
@@ -376,7 +383,7 @@ pub fn plugin_picker_panel(
                 .flex_1()
                 .min_h(px(0.0))
                 .w_full()
-                .child(div().flex_shrink_0().child(sidebar))
+                .child(div().flex_shrink_0().h_full().child(sidebar))
                 .child(list_section)
                 .when(state.show_details, |panel| {
                     panel.when_some(selected_plugin, |panel, plugin| {
@@ -443,6 +450,7 @@ fn build_list_body(
     callbacks: &PluginPickerCallbacks,
     prefs: &PluginPickerPrefs,
     au_scan_error: Option<&str>,
+    list_scroll: &UniformListScrollHandle,
 ) -> gpui::AnyElement {
     if matches!(catalog_status, CatalogStatus::Loading) {
         return skeleton_body().into_any_element();
@@ -454,7 +462,8 @@ fn build_list_body(
         let rows = visible_plugins.clone();
         let favorites = std::sync::Arc::new(prefs.favorites.clone());
         let highlighted_row = highlighted;
-        return uniform_list(
+        let scroll_for_thumb = list_scroll.0.borrow().base_handle.clone();
+        let list = uniform_list(
             "plugin-picker-list",
             visible_count,
             move |range, _window, _cx| {
@@ -480,8 +489,14 @@ fn build_list_body(
                     .collect::<Vec<_>>()
             },
         )
-        .size_full()
-        .into_any_element();
+        .track_scroll(list_scroll)
+        .size_full();
+        return div()
+            .relative()
+            .size_full()
+            .child(list)
+            .child(vertical_scrollbar_thumb(scroll_for_thumb))
+            .into_any_element();
     }
 
     empty_state_body(catalog_status, total, state, au_scan_error, callbacks).into_any_element()

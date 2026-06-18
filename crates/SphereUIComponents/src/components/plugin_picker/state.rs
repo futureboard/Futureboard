@@ -1,8 +1,17 @@
 //! Plugin picker state, filters, and catalog load status.
 
+use gpui::{ScrollHandle, UniformListScrollHandle};
+
 use crate::components::plugin_picker::insert::{PluginInsertKind, PluginInsertTarget};
 use crate::components::timeline::timeline_state::TrackType;
 use sphere_plugin_host::PluginFormat;
+
+/// Stable scroll handles for the insert picker sidebar and plug-in list.
+#[derive(Clone, Default)]
+pub struct PluginPickerScrollHandles {
+    pub sidebar: ScrollHandle,
+    pub list: UniformListScrollHandle,
+}
 
 /// Sidebar filter rail — composes with search query and optional secondary filters.
 #[derive(Debug, Clone, PartialEq, Eq)]

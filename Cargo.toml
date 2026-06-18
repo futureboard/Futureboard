@@ -15,7 +15,7 @@ members = [
     "crates/SpherePluginHost",
     "crates/SphereSoundfontPlayer",
     "crates/SphereUIComponents",
-    "crates/SphereWebAudioCore",
+    "crates/SphereWebAudioCore", "crates/SpherePackageInstaller", "apps/native/apakinstaller",
 ]
 
 exclude = [

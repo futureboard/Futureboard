@@ -6,9 +6,9 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, size, uniform_list, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, StatefulInteractiveElement,
-    Styled, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, ScrollHandle,
+    StatefulInteractiveElement, Styled, UniformListScrollHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::components::controls::{fb_button, fb_field_label, FbButtonKind};
@@ -514,6 +514,7 @@ impl Render for KeymapWindow {
 
         let rows_for_list = rows.clone();
         let list_entity = entity.clone();
+        let scroll_for_thumb = self.scroll.0.borrow().base_handle.clone();
         let table_body = uniform_list("keymap-rows", row_count, move |range, _window, _cx| {
             range
                 .map(|index| {
@@ -567,8 +568,10 @@ impl Render for KeymapWindow {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .overflow_hidden()
                     .child(table_body)
+                    .child(keymap_scrollbar_thumb(scroll_for_thumb))
                     .children(empty_state),
             );
 
@@ -788,6 +791,34 @@ fn body_cell(label: &str, width: f32) -> gpui::Div {
         .overflow_hidden()
         .truncate()
         .child(label.to_string())
+}
+
+fn keymap_scrollbar_thumb(scroll: ScrollHandle) -> gpui::AnyElement {
+    let viewport_h: f32 = scroll.bounds().size.height.into();
+    let max_y: f32 = scroll.max_offset().y.into();
+    let raw_y: f32 = scroll.offset().y.into();
+    let offset_y: f32 = -raw_y;
+
+    if viewport_h <= 0.0 || max_y <= 0.5 {
+        return div().w(px(0.0)).h(px(0.0)).into_any_element();
+    }
+
+    let content_h = viewport_h + max_y;
+    let min_thumb = 24.0_f32;
+    let thumb_h = ((viewport_h / content_h) * viewport_h).max(min_thumb);
+    let track_room = (viewport_h - thumb_h).max(0.0);
+    let progress = (offset_y / max_y).clamp(0.0, 1.0);
+    let thumb_top = progress * track_room;
+
+    div()
+        .absolute()
+        .top(px(thumb_top))
+        .right(px(2.0))
+        .w(px(4.0))
+        .h(px(thumb_h))
+        .rounded_full()
+        .bg(Colors::with_alpha(Colors::text_primary(), 0.22))
+        .into_any_element()
 }
 
 fn edit_dialog_overlay(

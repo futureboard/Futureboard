@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    div, px, App, InteractiveElement, IntoElement, ParentElement, ScrollHandle,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::components::plugin_picker::filter::FilterCounts;
 use crate::components::plugin_picker::state::PickerFilter;
+use crate::components::scroll_thumb::vertical_scrollbar_thumb;
 use crate::theme::Colors;
 use sphere_plugin_host::PluginFormat;
 
@@ -25,6 +26,7 @@ pub fn plugin_filter_sidebar(
     debug_mode: bool,
     au_available: bool,
     filter_cb: FilterCb,
+    sidebar_scroll: &ScrollHandle,
 ) -> impl IntoElement {
     let mut col = div().flex().flex_col().w(px(SIDEBAR_WIDTH)).py(px(4.0));
 
@@ -148,22 +150,32 @@ pub fn plugin_filter_sidebar(
         }
     }
 
+    let thumb_scroll = sidebar_scroll.clone();
+
     div()
         .flex()
         .flex_col()
         .w(px(SIDEBAR_WIDTH))
         .min_w(px(SIDEBAR_WIDTH))
+        .h_full()
         .flex_shrink_0()
         .border_r(px(1.0))
         .border_color(Colors::divider())
         .bg(Colors::surface_panel_alt())
         .child(
             div()
-                .id("plugin-picker-sidebar-scroll")
                 .flex_1()
                 .min_h(px(0.0))
-                .overflow_y_scroll()
-                .child(col),
+                .relative()
+                .child(
+                    div()
+                        .id("plugin-picker-sidebar-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(sidebar_scroll)
+                        .child(col),
+                )
+                .child(vertical_scrollbar_thumb(thumb_scroll)),
         )
 }
 

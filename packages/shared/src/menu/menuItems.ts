@@ -474,8 +474,16 @@ export const APP_MENUS: AppMenuGroup[] = [
         id: "audio.sep.plugins",
       },
       {
+        id: "audio.insert_plugin",
+        label: "Insert Plug-in...",
+        accelerator: "Ctrl+Shift+U",
+        icon: "plug",
+        action: "plugins:insert",
+      },
+      {
         id: "audio.plugin_manager",
         label: "Audio Plug-in Manager...",
+        accelerator: "Ctrl+Alt+M",
         icon: "blocks",
         action: "plugins:manager",
       },

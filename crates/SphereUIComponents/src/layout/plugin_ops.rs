@@ -1481,7 +1481,7 @@ impl StudioLayout {
     pub(super) fn open_insert_picker(
         &mut self,
         track_id: &str,
-        window: &mut Window,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         self.open_insert_picker_for(track_id, None, PluginInsertKind::Effect, window, cx);
@@ -1492,7 +1492,7 @@ impl StudioLayout {
         track_id: &str,
         slot_index: Option<usize>,
         desired_kind: PluginInsertKind,
-        window: &mut Window,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         use crate::components::timeline::timeline_state::{TrackType, MASTER_TRACK_ID};
@@ -1538,9 +1538,12 @@ impl StudioLayout {
         );
         self.plugin_picker_search_input.set_value("");
         self.plugin_picker.query = String::new();
-        self.plugin_picker_search_input
-            .focus_handle
-            .focus(window, cx);
+        let owner_bounds = window.as_ref().map(|w| w.bounds());
+        if let Some(window) = window {
+            self.plugin_picker_search_input
+                .focus_handle
+                .focus(window, cx);
+        }
         if let Some(index) = self.plugin_search_index.as_ref() {
             ensure_default_highlight(&mut self.plugin_picker, index, &self.plugin_picker_prefs);
         }
@@ -1563,7 +1566,7 @@ impl StudioLayout {
                 started.elapsed().as_millis()
             );
         }
-        self.open_insert_picker_external_window(Some(window.bounds()), cx);
+        self.open_insert_picker_external_window(owner_bounds, cx);
         cx.notify();
     }
 

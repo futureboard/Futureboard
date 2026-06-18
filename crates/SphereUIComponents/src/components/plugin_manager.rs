@@ -6,8 +6,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, size, svg, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle, StatefulInteractiveElement,
+    Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 use sphere_plugin_host::load_au_cache_state;
 use sphere_plugin_host::preset::register_plugin;
@@ -19,6 +19,7 @@ use sphere_plugin_host::registry::{
 use crate::assets;
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::plugin_format_badge::plugin_format_badge;
+use crate::components::scroll_thumb::vertical_scrollbar_thumb;
 use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks_and_ime, TextInputAction, TextInputCallbacks,
     TextInputState,
@@ -816,6 +817,8 @@ pub fn plugin_manager_panel(
     search_callbacks: TextInputCallbacks,
     search_ime_target: Entity<PluginManagerWindow>,
     callbacks: PluginManagerCallbacks,
+    sidebar_scroll: &ScrollHandle,
+    list_scroll: &ScrollHandle,
 ) -> impl IntoElement {
     let rescan = callbacks.on_rescan.clone();
     let rescan_all = callbacks.on_rescan_all.clone();
@@ -835,6 +838,9 @@ pub fn plugin_manager_panel(
     let sidebar_vst3 = filter_cb.clone();
     let sidebar_clap = filter_cb.clone();
     let sidebar_au = filter_cb.clone();
+
+    let sidebar_thumb_scroll = sidebar_scroll.clone();
+    let list_thumb_scroll = list_scroll.clone();
 
     let mut list_rows: Vec<gpui::AnyElement> = Vec::new();
     if visible.is_empty() {
@@ -1083,20 +1089,27 @@ pub fn plugin_manager_panel(
                             div()
                                 .flex()
                                 .flex_col()
+                                .flex_1()
+                                .min_h(px(0.0))
                                 .w(px(SIDEBAR_WIDTH))
                                 .border_r(px(1.0))
                                 .border_color(Colors::divider())
                                 .bg(Colors::surface_panel_alt())
                                 .child(
                                     div()
-                                        .id("plugin-manager-sidebar-scroll")
                                         .flex_1()
                                         .min_h(px(0.0))
-                                        .overflow_y_scroll()
+                                        .relative()
                                         .child(
                                             div()
-                                                .py(px(4.0))
-                                                .child(sidebar_section(
+                                                .id("plugin-manager-sidebar-scroll")
+                                                .size_full()
+                                                .overflow_y_scroll()
+                                                .track_scroll(sidebar_scroll)
+                                                .child(
+                                                    div()
+                                                        .py(px(4.0))
+                                                        .child(sidebar_section(
                                                     "Library",
                                                     vec![
                                                         sidebar_item(
@@ -1208,70 +1221,72 @@ pub fn plugin_manager_panel(
                                                         )
                                                         .into_any_element(),
                                                     ],
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .border_t(px(1.0))
-                                        .border_color(Colors::divider())
-                                        .child(
-                                            sidebar_section(
-                                                "Scan Locations",
-                                                if state.scan_paths.is_empty() {
-                                                    vec![div()
-                                                        .px(px(10.0))
-                                                        .py(px(4.0))
-                                                        .text_size(px(10.0))
-                                                        .text_color(Colors::text_faint())
-                                                        .child("No scan paths detected")
-                                                        .into_any_element()]
-                                                } else {
-                                                    state
-                                                        .scan_paths
-                                                        .iter()
-                                                        .enumerate()
-                                                        .map(|(i, path)| {
-                                                            div()
-                                                                .flex()
-                                                                .flex_row()
-                                                                .items_center()
-                                                                .gap(px(6.0))
-                                                                .px(px(10.0))
-                                                                .py(px(4.0))
-                                                                .id(("scan-path", i))
-                                                                .child(icon(
-                                                                    assets::ICON_FOLDER_PATH,
-                                                                    11.0,
-                                                                    Colors::text_faint(),
-                                                                ))
-                                                                .child(
-                                                                    div()
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .border_t(px(1.0))
+                                                        .border_color(Colors::divider())
+                                                        .child(
+                                                            sidebar_section(
+                                                                "Scan Locations",
+                                                                if state.scan_paths.is_empty() {
+                                                                    vec![div()
+                                                                        .px(px(10.0))
+                                                                        .py(px(4.0))
                                                                         .text_size(px(10.0))
                                                                         .text_color(Colors::text_faint())
-                                                                        .truncate()
-                                                                        .child(path.display().to_string()),
-                                                                )
-                                                                .into_any_element()
-                                                        })
-                                                        .collect()
-                                                },
+                                                                        .child("No scan paths detected")
+                                                                        .into_any_element()]
+                                                                } else {
+                                                                    state
+                                                                        .scan_paths
+                                                                        .iter()
+                                                                        .enumerate()
+                                                                        .map(|(i, path)| {
+                                                                            div()
+                                                                                .flex()
+                                                                                .flex_row()
+                                                                                .items_center()
+                                                                                .gap(px(6.0))
+                                                                                .px(px(10.0))
+                                                                                .py(px(4.0))
+                                                                                .id(("scan-path", i))
+                                                                                .child(icon(
+                                                                                    assets::ICON_FOLDER_PATH,
+                                                                                    11.0,
+                                                                                    Colors::text_faint(),
+                                                                                ))
+                                                                                .child(
+                                                                                    div()
+                                                                                        .text_size(px(10.0))
+                                                                                        .text_color(Colors::text_faint())
+                                                                                        .truncate()
+                                                                                        .child(path.display().to_string()),
+                                                                                )
+                                                                                .into_any_element()
+                                                                        })
+                                                                        .collect()
+                                                                },
+                                                            ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .px(px(8.0))
+                                                                .pb(px(8.0))
+                                                                .child(
+                                                                    fb_button(
+                                                                        "pm-add-location",
+                                                                        "+ Add Location",
+                                                                        FbButtonKind::Default,
+                                                                        false,
+                                                                        |_, _, _| {},
+                                                                    ),
+                                                                ),
+                                                        ),
+                                                ),
                                             ),
                                         )
-                                        .child(
-                                            div()
-                                                .px(px(8.0))
-                                                .pb(px(8.0))
-                                                .child(
-                                                    fb_button(
-                                                        "pm-add-location",
-                                                        "+ Add Location",
-                                                        FbButtonKind::Default,
-                                                        false,
-                                                        |_, _, _| {},
-                                                    ),
-                                                ),
-                                        ),
+                                        .child(vertical_scrollbar_thumb(sidebar_thumb_scroll)),
                                 ),
                         )
                         .child(
@@ -1337,11 +1352,18 @@ pub fn plugin_manager_panel(
                                 )
                                 .child(
                                     div()
-                                        .id("plugin-manager-list-scroll")
                                         .flex_1()
                                         .min_h(px(0.0))
-                                        .overflow_y_scroll()
-                                        .children(list_rows),
+                                        .relative()
+                                        .child(
+                                            div()
+                                                .id("plugin-manager-list-scroll")
+                                                .size_full()
+                                                .overflow_y_scroll()
+                                                .track_scroll(list_scroll)
+                                                .children(list_rows),
+                                        )
+                                        .child(vertical_scrollbar_thumb(list_thumb_scroll)),
                                 ),
                         )
                         .when_some(selected, |panel, plugin| {
@@ -1425,6 +1447,8 @@ pub struct PluginManagerWindow {
     search_input: TextInputState,
     focus_handle: FocusHandle,
     initial_cache_loaded: bool,
+    sidebar_scroll: ScrollHandle,
+    list_scroll: ScrollHandle,
 }
 
 impl PluginManagerWindow {
@@ -1435,6 +1459,8 @@ impl PluginManagerWindow {
                 .with_placeholder("Search plug-ins..."),
             focus_handle: cx.focus_handle(),
             initial_cache_loaded: false,
+            sidebar_scroll: ScrollHandle::new(),
+            list_scroll: ScrollHandle::new(),
         }
     }
 
@@ -1764,6 +1790,8 @@ impl Render for PluginManagerWindow {
                 bind_mouse_selection(cx.entity().clone(), |this| &mut this.search_input),
                 target.clone(),
                 callbacks,
+                &self.sidebar_scroll,
+                &self.list_scroll,
             ))
     }
 }

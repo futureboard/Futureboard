@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-06-18T04:55:49.356Z",
+  "generatedAt": "2026-06-18T07:10:54.863Z",
   "menus": [
     {
       "id": "file",
@@ -865,11 +865,26 @@
           "visible": true
         },
         {
+          "id": "audio.insert_plugin",
+          "kind": "normal",
+          "label": "Insert Plug-in...",
+          "icon": "plug",
+          "shortcut": "Ctrl+Shift+U",
+          "command": "plugins:insert",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": null,
+          "children": []
+        },
+        {
           "id": "audio.plugin_manager",
           "kind": "normal",
           "label": "Audio Plug-in Manager...",
           "icon": "blocks",
-          "shortcut": null,
+          "shortcut": "Ctrl+Alt+M",
           "command": "plugins:manager",
           "role": null,
           "enabled": true,

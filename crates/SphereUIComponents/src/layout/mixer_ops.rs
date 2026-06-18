@@ -419,7 +419,7 @@ impl StudioLayout {
             std::sync::Arc::new(move |track_id: &String, window, cx| {
                 let track_id = track_id.clone();
                 StudioLayout::defer_update_in_window(&this, window, cx, move |this, window, cx| {
-                    this.open_insert_picker(&track_id, window, cx);
+                    this.open_insert_picker(&track_id, Some(window), cx);
                 });
             })
         };

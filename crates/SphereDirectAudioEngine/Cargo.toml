@@ -19,6 +19,8 @@ description = "SphereDirectAudioEngine — native Rust audio backend for Futureb
 #   #[cfg(feature = "napi")]
 #
 # so normal native workspace builds do not link against Node/N-API symbols.
+license.workspace = true
+
 [lib]
 name = "DAUx"
 crate-type = ["rlib", "cdylib"]

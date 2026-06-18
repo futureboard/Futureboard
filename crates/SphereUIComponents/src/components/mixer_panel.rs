@@ -34,6 +34,7 @@ use crate::components::fader::{db_scale_column, db_value_pill, fader as render_f
 use crate::components::knob::knob_bipolar;
 use crate::components::panel::FxSlotDrag;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
+use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
     volume, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState, TrackState,
     TrackType, MASTER_TRACK_ID,
@@ -210,6 +211,11 @@ pub struct MixerCallbacks {
     pub on_reorder_insert: std::sync::Arc<
         dyn Fn(&(String, String, usize), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
+    /// Drop a `.pst` plug-in preset from the browser into a concrete insert slot.
+    /// `(preset_path, track_id, insert_index)` uses the full insert-chain index.
+    pub on_drop_plugin_preset: std::sync::Arc<
+        dyn Fn(&(std::path::PathBuf, String, usize), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
     /// User clicked the slot chip — Phase 4 will open the native plugin
     /// editor; Phase 1 logs the request.
     pub on_open_insert_editor: std::sync::Arc<
@@ -235,6 +241,8 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_insert_open = Arc::new(|_: &(String, usize, String), _: &mut Window, _: &mut App| {});
     let noop_insert_reorder =
         Arc::new(|_: &(String, String, usize), _: &mut Window, _: &mut App| {});
+    let noop_preset_drop =
+        Arc::new(|_: &(std::path::PathBuf, String, usize), _: &mut Window, _: &mut App| {});
     let noop_add_send = Arc::new(|_: &(String, f32, f32), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
@@ -250,6 +258,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_remove_insert: noop_insert_pair.clone(),
         on_toggle_insert_bypass: noop_insert_pair.clone(),
         on_reorder_insert: noop_insert_reorder,
+        on_drop_plugin_preset: noop_preset_drop,
         on_open_insert_editor: noop_insert_open.clone(),
         on_add_send: noop_add_send,
         on_remove_send: noop_insert_pair,
@@ -630,7 +639,10 @@ fn insert_chip(
     let drop_track = track_id_owned.clone();
     let can_drop_track = track_id_owned.clone();
     let reorder = callbacks.on_reorder_insert.clone();
+    let drop_plugin_preset = callbacks.on_drop_plugin_preset.clone();
     let drop_gap = insert_index;
+    let preset_track = track_id_owned.clone();
+    let preset_slot = insert_index;
 
     let open_target = (track_id_owned, insert_index, slot_id);
 
@@ -640,15 +652,31 @@ fn insert_chip(
             id_owned
         )))
         .can_drop(move |dragged, _window, _cx| {
-            dragged
+            if dragged
                 .downcast_ref::<FxSlotDrag>()
                 .is_some_and(|d| d.track_id == can_drop_track)
+            {
+                return true;
+            }
+            dragged
+                .downcast_ref::<BrowserDragItem>()
+                .is_some_and(|item| is_plugin_preset_path(&item.path))
         })
         .drag_over::<FxSlotDrag>(|style, _drag, _window, _cx| drop_over_highlight(style))
+        .drag_over::<BrowserDragItem>(|style, _drag, _window, _cx| drop_over_highlight(style))
         .on_drop::<FxSlotDrag>(move |drag, window, cx| {
             if drag.track_id == drop_track {
                 reorder(
                     &(drop_track.clone(), drag.insert_id.clone(), drop_gap),
+                    window,
+                    cx,
+                );
+            }
+        })
+        .on_drop::<BrowserDragItem>(move |item, window, cx| {
+            if is_plugin_preset_path(&item.path) {
+                drop_plugin_preset(
+                    &(item.path.clone(), preset_track.clone(), preset_slot),
                     window,
                     cx,
                 );
@@ -760,6 +788,8 @@ fn add_insert_button(
 ) -> impl IntoElement {
     let track_id_owned = track_id.to_string();
     let on_add = callbacks.on_add_insert.clone();
+    let drop_plugin_preset = callbacks.on_drop_plugin_preset.clone();
+    let drop_track = track_id_owned.clone();
     div()
         .id(gpui::SharedString::from(format!(
             "insert-add-{}",
@@ -786,6 +816,21 @@ fn add_insert_button(
                 .border_color(Colors::slot_border())
                 .text_color(Colors::text_muted())
         })
+        .can_drop(|dragged, _window, _cx| {
+            dragged
+                .downcast_ref::<BrowserDragItem>()
+                .is_some_and(|item| is_plugin_preset_path(&item.path))
+        })
+        .drag_over::<BrowserDragItem>(|style, _drag, _window, _cx| drop_over_highlight(style))
+        .on_drop::<BrowserDragItem>(move |item, window, cx| {
+            if is_plugin_preset_path(&item.path) {
+                drop_plugin_preset(
+                    &(item.path.clone(), drop_track.clone(), next_slot),
+                    window,
+                    cx,
+                );
+            }
+        })
         .child(
             svg()
                 .path(assets::ICON_PLUS_PATH)
@@ -801,6 +846,12 @@ fn add_insert_button(
             on_add(&track_id_owned, w, cx);
         })
         .occlude()
+}
+
+fn is_plugin_preset_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pst"))
 }
 
 fn inserts_section(

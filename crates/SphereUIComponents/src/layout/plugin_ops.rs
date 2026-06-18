@@ -1820,6 +1820,238 @@ impl StudioLayout {
         opened_slot
     }
 
+    pub(super) fn apply_dropped_plugin_preset(
+        &mut self,
+        track_id: &str,
+        preset_path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, usize, String)> {
+        use sphere_plugin_host::PluginKind;
+
+        let reg = self.read_dropped_plugin_preset(preset_path)?;
+        if reg.kind == PluginKind::Instrument {
+            return self.create_instrument_track_from_preset(&reg, cx);
+        }
+        let slot_index = self
+            .timeline
+            .read(cx)
+            .state
+            .insert_slots(track_id)
+            .map(|slots| slots.len())
+            .unwrap_or(0);
+        self.bind_preset_to_insert_slot(track_id, slot_index, &reg, cx, "plugin_preset_drop")
+    }
+
+    pub(super) fn apply_dropped_plugin_preset_to_slot(
+        &mut self,
+        track_id: &str,
+        slot_index: usize,
+        preset_path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, usize, String)> {
+        use sphere_plugin_host::PluginKind;
+
+        let reg = self.read_dropped_plugin_preset(preset_path)?;
+        if reg.kind == PluginKind::Instrument {
+            eprintln!(
+                "[PluginDrop] ignored instrument preset on effect slot preset={} plugin={}",
+                preset_path.display(),
+                reg.name
+            );
+            return None;
+        }
+        self.bind_preset_to_insert_slot(track_id, slot_index, &reg, cx, "mixer_preset_drop")
+    }
+
+    fn read_dropped_plugin_preset(
+        &self,
+        preset_path: &std::path::Path,
+    ) -> Option<sphere_plugin_host::RegistryPlugin> {
+        let reg = match sphere_plugin_host::preset::read_preset_file(preset_path) {
+            Ok(reg) => reg,
+            Err(error) => {
+                eprintln!(
+                    "[PluginDrop] failed to read preset path={} error={error}",
+                    preset_path.display()
+                );
+                return None;
+            }
+        };
+        if !reg.supports_insert() {
+            eprintln!(
+                "[PluginDrop] unsupported preset name={} format={:?} status={:?}",
+                reg.name, reg.format, reg.status
+            );
+            return None;
+        }
+        Some(reg)
+    }
+
+    fn bind_preset_to_insert_slot(
+        &mut self,
+        track_id: &str,
+        slot_index: usize,
+        reg: &sphere_plugin_host::RegistryPlugin,
+        cx: &mut Context<Self>,
+        source: &'static str,
+    ) -> Option<(String, usize, String)> {
+        use crate::components::timeline::timeline_state::TrackType;
+
+        let can_host_effect = {
+            let timeline = self.timeline.read(cx);
+            if track_id
+                == crate::components::timeline::timeline_state::MASTER_TRACK_ID
+            {
+                true
+            } else {
+                timeline
+                    .state
+                    .tracks
+                    .iter()
+                    .find(|track| track.id == track_id)
+                    .is_some_and(|track| track.track_type != TrackType::Midi)
+            }
+        };
+        if !can_host_effect {
+            eprintln!("[PluginDrop] effect preset cannot be inserted on track={track_id}");
+            return None;
+        }
+
+        let (plugin_id, plugin_path, plugin_format, display_name) =
+            Self::registry_insert_descriptor(reg);
+        let existing_slot_id = self
+            .timeline
+            .read(cx)
+            .state
+            .insert_slot_at(track_id, slot_index)
+            .filter(|slot| !slot.is_empty())
+            .map(|slot| slot.id.clone());
+        let slot_id = if let Some(old_slot_id) = existing_slot_id {
+            self.teardown_insert_instance(track_id, &old_slot_id, cx, source);
+            self.timeline.update(cx, |timeline, _cx| {
+                timeline
+                    .state
+                    .replace_insert_with_fresh_slot(track_id, &old_slot_id)
+            })
+        } else {
+            self.timeline.update(cx, |timeline, _cx| {
+                timeline.state.ensure_insert_slot_at(track_id, slot_index)
+            })
+        }?;
+
+        self.close_insert_editor(track_id, &slot_id, cx);
+        self.timeline.update(cx, |timeline, _cx| {
+            timeline.state.set_insert_plugin(
+                track_id,
+                &slot_id,
+                plugin_id,
+                Some(plugin_path),
+                plugin_format,
+                display_name.clone(),
+            );
+        });
+
+        eprintln!(
+            "[PluginDrop] track={track_id} slot={slot_id} index={slot_index} plugin={}",
+            display_name
+        );
+        self.after_preset_insert_bound(track_id, &slot_id, plugin_format, cx, source);
+        cx.notify();
+        Some((track_id.to_string(), slot_index, slot_id))
+    }
+
+    fn create_instrument_track_from_preset(
+        &mut self,
+        reg: &sphere_plugin_host::RegistryPlugin,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, usize, String)> {
+        use crate::components::timeline::timeline_state::{
+            self, CreateTrackOptions, InputMonitorMode, TrackType,
+        };
+
+        let (plugin_id, plugin_path, plugin_format, display_name) =
+            Self::registry_insert_descriptor(reg);
+        let created = self.timeline.update(cx, |timeline, _cx| {
+            let color = timeline
+                .state
+                .track_color_for_index(timeline.state.tracks.len());
+            let track_id = timeline.state.create_track(CreateTrackOptions {
+                track_type: TrackType::Instrument,
+                name: display_name.clone(),
+                color,
+                volume: timeline_state::volume::db_to_norm(0.0),
+                pan: 0.0,
+                armed: false,
+                input_monitor: InputMonitorMode::Off,
+            });
+            let slot_id = timeline.state.add_insert(&track_id)?;
+            timeline.state.set_insert_plugin(
+                &track_id,
+                &slot_id,
+                plugin_id,
+                Some(plugin_path),
+                plugin_format,
+                display_name.clone(),
+            );
+            timeline.state.select_track(&track_id);
+            Some((track_id, 0usize, slot_id))
+        })?;
+
+        eprintln!(
+            "[PluginDrop] instrument track created track={} slot={} plugin={}",
+            created.0, created.2, display_name
+        );
+        self.after_preset_insert_bound(&created.0, &created.2, plugin_format, cx, "instrument_preset_drop");
+        cx.notify();
+        Some(created)
+    }
+
+    fn after_preset_insert_bound(
+        &mut self,
+        track_id: &str,
+        slot_id: &str,
+        plugin_format: crate::components::timeline::timeline_state::InsertPluginFormat,
+        cx: &mut Context<Self>,
+        source: &'static str,
+    ) {
+        if plugin_format
+            == crate::components::timeline::timeline_state::InsertPluginFormat::Vst3
+            && super::plugin_bridge_runtime::bridge_enabled()
+            && self.load_bridge_insert_for_slot(track_id, slot_id, cx)
+        {
+            return;
+        }
+        self.mark_dirty();
+        self.audio_bridge.project_dirty = true;
+        self.schedule_audio_project_sync(cx, true, source);
+    }
+
+    fn registry_insert_descriptor(
+        reg: &sphere_plugin_host::RegistryPlugin,
+    ) -> (
+        String,
+        std::path::PathBuf,
+        crate::components::timeline::timeline_state::InsertPluginFormat,
+        String,
+    ) {
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+        use sphere_plugin_host::PluginFormat as RegFmt;
+
+        let plugin_format = match reg.format {
+            RegFmt::Vst3 => InsertPluginFormat::Vst3,
+            RegFmt::Clap => InsertPluginFormat::Clap,
+            RegFmt::Au => InsertPluginFormat::Au,
+            RegFmt::Lv2 => InsertPluginFormat::Lv2,
+            _ => InsertPluginFormat::Unknown,
+        };
+        (
+            reg.class_id.clone().unwrap_or_else(|| reg.id.clone()),
+            reg.path.clone(),
+            plugin_format,
+            reg.name.clone(),
+        )
+    }
+
     pub(super) fn flush_deferred_insert_editor_opens(
         &mut self,
         window: &mut Window,

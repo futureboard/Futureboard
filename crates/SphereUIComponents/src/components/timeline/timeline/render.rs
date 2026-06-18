@@ -454,12 +454,7 @@ impl Render for Timeline {
 
         let timeline_seek = cx.entity().clone();
         let on_seek: std::sync::Arc<
-            dyn Fn(
-                &f32,
-                crate::layout::SeekReason,
-                &mut gpui::Window,
-                &mut gpui::App,
-            ) + 'static,
+            dyn Fn(&f32, crate::layout::SeekReason, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |click_x, reason, _window, cx| {
             let _ = timeline_seek.update(cx, |timeline, cx| {
                 let beats = timeline.state.x_to_beats(*click_x);
@@ -857,6 +852,7 @@ impl Render for Timeline {
         let on_browser_file_dropped = cx.listener(|this, item: &BrowserDragItem, window, cx| {
             if this.import_midi_path_at_last_drag(&item.path, false, window, cx)
                 || this.import_audio_path_at_last_drag(&item.path, false, window, cx)
+                || this.drop_plugin_preset_at_last_drag(&item.path, window, cx)
             {
                 this.last_drag_position = None;
                 cx.notify();
@@ -978,10 +974,7 @@ impl Render for Timeline {
             cx.listener(|this, _drag: &TrackHeightResizeDrag, _window, cx| {
                 this.state.clear_track_height_resize_arm();
                 if let Some((prev, next)) = this.state.finish_track_height_resize() {
-                    this.record_executed_command(
-                        EditCommand::SetTrackHeights { prev, next },
-                        cx,
-                    );
+                    this.record_executed_command(EditCommand::SetTrackHeights { prev, next }, cx);
                     this.mark_project_changed(cx);
                 }
                 cx.notify();
@@ -1103,8 +1096,11 @@ impl Render for Timeline {
                 } else {
                     (delta.0, delta.1)
                 };
-                this.state.scroll_by(scroll_x, scroll_y, max_x, max_y);
-                if scroll_x.abs() > 0.5 {
+                let next_x = this.state.viewport.scroll_x + scroll_x;
+                let next_y = this.state.viewport.scroll_y + scroll_y;
+                this.state
+                    .set_scroll_immediate(next_x, next_y, max_x, max_y);
+                if scroll_x.abs() > 0.5 || scroll_y.abs() > 0.5 {
                     this.state.note_user_scrolled();
                 }
                 window.prevent_default();

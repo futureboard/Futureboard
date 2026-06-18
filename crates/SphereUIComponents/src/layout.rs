@@ -6,9 +6,7 @@ use gpui::{
 pub use crate::shutdown::ShutdownState;
 pub use close_ops::PendingCloseAction;
 pub use project_ops::ProjectOpenOptions;
-pub use project_switch::{
-    ProjectSwitchConfirmDecision, ProjectSwitchRequest, ProjectSwitchSource,
-};
+pub use project_switch::{ProjectSwitchConfirmDecision, ProjectSwitchRequest, ProjectSwitchSource};
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
@@ -64,6 +62,8 @@ mod transport_freeze_debug;
 mod transport_ops;
 mod window_ops;
 
+pub use audio_transport::SeekReason;
+pub use context_menu_ops::{ContextMenuRequest, ContextMenuTarget};
 use engine_snapshot::volume_norm_to_linear;
 use frame_diagnostics::FrameDiagnostics;
 use helpers::{
@@ -72,8 +72,6 @@ use helpers::{
     should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
 };
 use project_ops::LifecycleAction;
-pub use audio_transport::SeekReason;
-pub use context_menu_ops::{ContextMenuRequest, ContextMenuTarget};
 pub use studio_state::{ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility};
 use studio_state::{TextContextMenu, TextMenuTarget, TransportCommand};
 
@@ -450,6 +448,10 @@ pub struct StudioLayout {
     session_install_progress: crate::components::progress_dialog::ProgressBarValue,
     /// Non-fatal plugin restore warnings collected during session install.
     session_install_warnings: Vec<String>,
+    /// Last time an autosave was attempted for the current workspace.
+    last_autosave_at: std::time::Instant,
+    /// Guards the background autosave job so render/poll frames cannot enqueue duplicates.
+    autosave_in_flight: bool,
 }
 
 impl StudioLayout {
@@ -659,6 +661,20 @@ impl StudioLayout {
                 })));
             });
         }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_plugin_preset_drop_callback(Some(Arc::new(
+                    move |(preset_path, track_id), _window, cx| {
+                        let preset_path = preset_path.clone();
+                        let track_id = track_id.clone();
+                        let _ = target.update(cx, |this, cx| {
+                            this.apply_dropped_plugin_preset(&track_id, &preset_path, cx);
+                        });
+                    },
+                )));
+            });
+        }
 
         Self::spawn_audio_poll(cx);
 
@@ -760,8 +776,11 @@ impl StudioLayout {
             last_window_title: None,
             session_install_status: crate::app_state::SessionInstallStatus::Ready,
             session_install_detail: String::new(),
-            session_install_progress: crate::components::progress_dialog::ProgressBarValue::Indeterminate,
+            session_install_progress:
+                crate::components::progress_dialog::ProgressBarValue::Indeterminate,
             session_install_warnings: Vec::new(),
+            last_autosave_at: std::time::Instant::now(),
+            autosave_in_flight: false,
         };
 
         layout.spawn_audio_engine_warmup(cx);
@@ -1001,6 +1020,79 @@ impl StudioLayout {
         self.window_hooks
             .cached_bounds
             .filter(|bounds| crate::window_position::is_valid_owner_bounds(*bounds))
+    }
+
+    fn context_track_id_or_selected(&self, cx: &Context<Self>) -> Option<String> {
+        match &self.overlay.open_popover {
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::TrackHeader(track_id) => Some(track_id.clone()),
+                ContextMenuTarget::MixerStrip(track_id) => Some(track_id.clone()),
+                ContextMenuTarget::Extended(ContextTarget::Track(track_id))
+                | ContextMenuTarget::Extended(ContextTarget::TrackLane { track_id, .. })
+                | ContextMenuTarget::Extended(ContextTarget::Mixer(track_id)) => {
+                    Some(track_id.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+        .or_else(|| {
+            self.timeline
+                .read(cx)
+                .state
+                .selection
+                .selected_track_id
+                .clone()
+        })
+    }
+
+    fn context_clip_id_or_selected(&self, cx: &Context<Self>) -> Option<String> {
+        match &self.overlay.open_popover {
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Clip(clip_id) => Some(clip_id.clone()),
+                ContextMenuTarget::Extended(ContextTarget::Clip(clip_id)) => Some(clip_id.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+        .or_else(|| {
+            self.timeline
+                .read(cx)
+                .state
+                .selection
+                .selected_clip_ids
+                .iter()
+                .next()
+                .cloned()
+        })
+    }
+
+    fn resolved_audio_clip_source_path(
+        &self,
+        clip_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<PathBuf> {
+        let source = self
+            .timeline
+            .read(cx)
+            .state
+            .find_clip(clip_id)
+            .and_then(|(_, clip)| match &clip.clip_type {
+                ClipType::Audio {
+                    source_path: Some(path),
+                    ..
+                } if !path.is_empty() => Some(PathBuf::from(path)),
+                _ => None,
+            })?;
+
+        if source.is_absolute() {
+            Some(source)
+        } else {
+            self.project_folder
+                .as_ref()
+                .map(|folder| folder.join(&source))
+                .or(Some(source))
+        }
     }
 
     pub(super) fn dispatch_command_id_from_bounds(
@@ -1249,17 +1341,8 @@ impl StudioLayout {
                     Some(OpenPopover::Context { request }) => match &request.target {
                         ContextMenuTarget::Extended(ContextTarget::Browser(path)) => path.clone(),
                         ContextMenuTarget::Clip(clip_id) => self
-                            .timeline
-                            .read(cx)
-                            .state
-                            .find_clip(clip_id)
-                            .and_then(|(_, clip)| match &clip.clip_type {
-                                ClipType::Audio {
-                                    source_path: Some(path),
-                                    ..
-                                } if !path.is_empty() => Some(PathBuf::from(path)),
-                                _ => None,
-                            }),
+                            .resolved_audio_clip_source_path(clip_id, cx)
+                            .and_then(|path| path.parent().map(PathBuf::from).or(Some(path))),
                         _ => None,
                     },
                     _ => None,
@@ -1452,6 +1535,27 @@ impl StudioLayout {
             "file:export-arrangement" => {
                 self.open_export_arrangement_external_window(owner_bounds, cx)
             }
+            "track:rename" => {
+                if let Some(track_id) = self.context_track_id_or_selected(cx) {
+                    self.panels.inspector = true;
+                    self.timeline.update(cx, |timeline, cx| {
+                        timeline.state.select_track(&track_id);
+                        cx.notify();
+                    });
+                    self.overlay.pending_text_focus = Some(TextMenuTarget::InspectorName);
+                    cx.notify();
+                }
+            }
+            "track:settings" | "track:color" => {
+                if let Some(track_id) = self.context_track_id_or_selected(cx) {
+                    self.panels.inspector = true;
+                    self.timeline.update(cx, |timeline, cx| {
+                        timeline.state.select_track(&track_id);
+                        cx.notify();
+                    });
+                    cx.notify();
+                }
+            }
             "track:delete" => self.delete_selected_track(cx),
             "track:height-small" => self.set_context_track_height_preset(
                 crate::components::timeline::timeline_state::TrackHeightPreset::Small,
@@ -1479,6 +1583,7 @@ impl StudioLayout {
             "edit:delete"
             | "edit:delete-backspace"
             | "clip:delete"
+            | "clip:erase"
             | "automation:delete-selected-points" => self.delete_selected_clip_or_track(cx),
             // Automation editor commands are automation-aware. General edit
             // shortcuts fall back to arrangement clip selection/clipboard.
@@ -1517,6 +1622,27 @@ impl StudioLayout {
                 }
             }
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
+            "clip:rename" => {
+                if let Some(clip_id) = self.context_clip_id_or_selected(cx) {
+                    self.panels.inspector = true;
+                    self.timeline.update(cx, |timeline, cx| {
+                        timeline.state.select_clip(&clip_id);
+                        cx.notify();
+                    });
+                    self.overlay.pending_text_focus = Some(TextMenuTarget::InspectorClipName);
+                    cx.notify();
+                }
+            }
+            "clip:properties" => {
+                if let Some(clip_id) = self.context_clip_id_or_selected(cx) {
+                    self.panels.inspector = true;
+                    self.timeline.update(cx, |timeline, cx| {
+                        timeline.state.select_clip(&clip_id);
+                        cx.notify();
+                    });
+                    cx.notify();
+                }
+            }
             "clip:split-at-playhead" => self.split_selected_audio_clip_at_playhead(cx),
 
             // ── Tools — switch the active timeline tool. UI-only; never dirties
@@ -1601,7 +1727,13 @@ impl StudioLayout {
                 cx,
             );
         });
-        if !self.settings.read(cx).current.performance.show_status_performance_metrics {
+        if !self
+            .settings
+            .read(cx)
+            .current
+            .performance
+            .show_status_performance_metrics
+        {
             self.overlay.perf_metrics_popover_open = false;
         }
         cx.notify();
@@ -1701,23 +1833,50 @@ impl StudioLayout {
 
     fn sync_audio_engine_settings(&mut self, cx: &mut Context<Self>) {
         let schema = self.settings.read(cx).current.clone();
-
-        let mut rebuild = false;
-        if let Some(ref engine) = self.audio_bridge.engine {
-            let config = engine.config();
-            let desired_backend = match schema.hardware.audio.driver_type.as_str() {
+        let desired_config = DAUx::EngineConfig {
+            sample_rate: schema.general.project_defaults.sample_rate,
+            buffer_size: schema.general.project_defaults.buffer_size,
+            channels: 2,
+            backend: match schema.hardware.audio.driver_type.as_str() {
                 "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
                 _ => DAUx::AudioBackend::Auto,
-            };
-            if config.backend != desired_backend
-                || config.sample_rate != schema.general.project_defaults.sample_rate
-                || config.buffer_size != schema.general.project_defaults.buffer_size
-            {
-                rebuild = true;
+            },
+        };
+
+        if let Some(engine) = self.audio_bridge.engine.as_mut() {
+            let stats_before = engine.stats();
+            let needs_reopen = engine.requires_restart(&desired_config)
+                || stats_before.device_state.eq_ignore_ascii_case("DeviceLost");
+            if needs_reopen {
+                eprintln!(
+                    "[audio] settings changed, reopening DAUx stream backend={:?} sr={} buf={}",
+                    desired_config.backend, desired_config.sample_rate, desired_config.buffer_size
+                );
+                match engine.reopen_with_config(desired_config) {
+                    Ok(()) => {
+                        let stats = engine.stats();
+                        self.audio_bridge.stats = Some(stats.clone());
+                        self.audio_bridge.running = true;
+                        self.audio_bridge.last_error = None;
+                        eprintln!(
+                            "[audio] settings sync: stream reopened. backend={} sr={} buf={}",
+                            stats.backend_name, stats.sample_rate, stats.buffer_size
+                        );
+                        self.audio_bridge.project_dirty = true;
+                        self.schedule_audio_project_sync(cx, true, "audio_settings_reopen");
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        eprintln!("[audio] settings sync: reopen failed: {message}");
+                        self.audio_bridge.stats = Some(engine.stats());
+                        self.audio_bridge.last_error = Some(message);
+                    }
+                }
             }
-        } else {
-            rebuild = true;
+            return;
         }
+
+        let rebuild = true;
 
         if rebuild {
             eprintln!("[audio] settings changed, rebuilding audio engine stream...");

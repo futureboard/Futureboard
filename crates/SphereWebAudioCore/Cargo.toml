@@ -3,6 +3,7 @@ name = "futureboard-core"
 version = "0.1.0"
 edition = "2024"
 description = "Futureboard Studio DSP Core — WebAudioCore Framework"
+license.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]

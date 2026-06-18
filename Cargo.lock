@@ -5874,6 +5874,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sphere-audio-processor"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "sphere-direct-audio-engine"
 version = "0.1.0"
 dependencies = [

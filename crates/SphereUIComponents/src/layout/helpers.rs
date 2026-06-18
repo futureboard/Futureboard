@@ -217,12 +217,10 @@ pub(super) fn reveal_path(path: &std::path::Path) {
     {
         if path.is_file() {
             let _ = std::process::Command::new("explorer")
-                .arg(format!("/select,\"{}\"", path.display()))
+                .arg(format!("/select,{}", path.display()))
                 .spawn();
         } else {
-            let _ = std::process::Command::new("explorer")
-                .arg(format!("\"{}\"", path.display()))
-                .spawn();
+            let _ = std::process::Command::new("explorer").arg(path).spawn();
         }
     }
     #[cfg(target_os = "macos")]

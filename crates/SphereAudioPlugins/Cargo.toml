@@ -3,6 +3,7 @@ name = "sphere-audio-plugins"
 version = "0.1.0"
 edition = "2021"
 description = "SphereAudioPlugins — built-in and extension audio plugin DSP framework for Futureboard Studio"
+license.workspace = true
 
 [lib]
 name = "sphere_audio_plugins"

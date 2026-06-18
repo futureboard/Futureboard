@@ -867,9 +867,11 @@ impl StudioLayout {
                     menu_item_enabled("Duplicate", "clip:duplicate", exists || selected_count > 0)
                         .with_shortcut("Ctrl+D"),
                 );
+                let erase_label = if is_audio { "Erase" } else { "Delete" };
+                let erase_command = if is_audio { "clip:erase" } else { "clip:delete" };
                 entries.push(danger_menu_item_enabled(
-                    "Delete",
-                    "clip:delete",
+                    erase_label,
+                    erase_command,
                     exists || selected_count > 0,
                 ));
                 entries.push(ContextMenuEntry::Separator);

@@ -619,6 +619,7 @@ fn tree_row(
     let is_folder = node.kind == BrowserNodeKind::Folder;
     let is_file = node.kind == BrowserNodeKind::File;
     let is_audio = node.is_audio();
+    let is_plugin_preset = node.is_plugin_preset();
     let is_root_item = node.depth == 1;
     let depth = node.depth as f32;
 
@@ -634,7 +635,7 @@ fn tree_row(
         Colors::text_primary()
     } else if is_folder {
         Colors::text_secondary()
-    } else if is_audio || node.is_midi() {
+    } else if is_audio || node.is_midi() || is_plugin_preset {
         Colors::text_muted()
     } else {
         Colors::text_faint()
@@ -756,7 +757,12 @@ fn tree_row(
         },
     );
 
-    if is_audio {
+    let draggable_plugin_preset = path
+        .as_ref()
+        .and_then(|path| path.extension())
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pst"));
+    if is_audio || draggable_plugin_preset {
         let drag_label = label.clone();
         if let Some(path) = path {
             row = row.on_drag(

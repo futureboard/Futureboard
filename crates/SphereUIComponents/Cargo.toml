@@ -3,6 +3,7 @@ name = "sphere_ui_components"
 version = "0.1.0"
 edition = "2021"
 autobins = false
+license.workspace = true
 
 [lib]
 name = "sphere_ui_components"

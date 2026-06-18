@@ -223,6 +223,23 @@ impl AudioEngine {
         self.inner.start()
     }
 
+    /// Re-open the active stream with a new native config while keeping the
+    /// same engine/runtime handle alive. This is a control-thread operation for
+    /// Settings changes; it never runs on the realtime callback.
+    pub fn reopen_with_config(&mut self, config: EngineConfig) -> Result<(), SphereAudioError> {
+        let daux = JsDauxConfig {
+            backend_id: config.backend.backend_id().to_string(),
+            output_device_id: None,
+            sample_rate: (config.sample_rate > 0).then_some(config.sample_rate),
+            buffer_size: (config.buffer_size > 0).then_some(config.buffer_size),
+            mmcss_priority: false,
+            safe_mode: false,
+        };
+        self.inner.open_daux_safe(daux)?;
+        self.config = config;
+        self.inner.start()
+    }
+
     /// Stop the audio stream (closes the device, frees realtime resources).
     pub fn stop(&mut self) -> Result<(), SphereAudioError> {
         self.inner.stop();

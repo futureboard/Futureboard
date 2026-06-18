@@ -3,6 +3,7 @@ name = "sphere-audio-editor"
 version.workspace = true
 edition.workspace = true
 description = "Audio clip editor panel for Futureboard Studio"
+license.workspace = true
 
 [dependencies]
 gpui.workspace = true

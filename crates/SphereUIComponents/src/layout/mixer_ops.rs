@@ -1,4 +1,5 @@
 use gpui::{Context, Entity, Window, WindowHandle};
+use std::path::PathBuf;
 
 use crate::components::edit::EditCommand;
 use crate::components::mixer_panel::{
@@ -506,6 +507,34 @@ impl StudioLayout {
                 },
             )
         };
+        let on_drop_plugin_preset: std::sync::Arc<
+            dyn Fn(&(PathBuf, String, usize), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(
+                move |(preset_path, track_id, insert_index): &(PathBuf, String, usize),
+                      _w,
+                      cx| {
+                    let preset_path = preset_path.clone();
+                    let track_id = track_id.clone();
+                    let insert_index = *insert_index;
+                    StudioLayout::defer_update(&this, cx, move |this, cx| {
+                        if this
+                            .apply_dropped_plugin_preset_to_slot(
+                                &track_id,
+                                insert_index,
+                                &preset_path,
+                                cx,
+                            )
+                            .is_some()
+                        {
+                            this.push_mixer_snapshot_to_window(cx);
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+        };
         // Phase 4: open the GPUI-hosted native plugin editor window.
         let on_open_insert_editor: std::sync::Arc<
             dyn Fn(&(String, usize, String), &mut Window, &mut gpui::App) + 'static,
@@ -578,6 +607,7 @@ impl StudioLayout {
             on_remove_insert,
             on_toggle_insert_bypass,
             on_reorder_insert,
+            on_drop_plugin_preset,
             on_open_insert_editor,
             on_add_send,
             on_remove_send,

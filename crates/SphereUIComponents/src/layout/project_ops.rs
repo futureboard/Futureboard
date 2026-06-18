@@ -771,6 +771,72 @@ impl StudioLayout {
         cx.notify();
     }
 
+    pub(super) fn maybe_autosave_project(&mut self, cx: &mut Context<Self>) {
+        let autosave = self.settings.read(cx).current.general.autosave.clone();
+        if !autosave.enabled || !self.project_session.is_dirty {
+            return;
+        }
+        if self.autosave_in_flight {
+            return;
+        }
+        let interval_minutes = autosave.interval_minutes.clamp(1, 240) as u64;
+        if self.last_autosave_at.elapsed() < std::time::Duration::from_secs(interval_minutes * 60) {
+            return;
+        }
+
+        let path = self.autosave_project_path();
+        self.autosave_in_flight = true;
+        self.last_autosave_at = std::time::Instant::now();
+        self.refresh_bridge_plugin_states(cx);
+        let mut project = self.project_snapshot(cx);
+        self.start_background_task(
+            "project-autosave",
+            crate::components::BackgroundTaskKind::ProjectSave,
+            "Autosave project",
+            Some(path.to_string_lossy().to_string()),
+            None,
+            false,
+        );
+        cx.spawn(async move |this, cx| {
+            let path_for_job = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { save_project(&mut project, &path_for_job) })
+                .await;
+            let _ = this.update(cx, move |this, cx| {
+                this.autosave_in_flight = false;
+                match result {
+                    Ok(()) => {
+                        this.complete_background_task(
+                            "project-autosave",
+                            Some("Autosave written".to_string()),
+                        );
+                        eprintln!("[Project] autosave written: {}", path.display());
+                    }
+                    Err(e) => {
+                        let error = e.to_string();
+                        this.fail_background_task("project-autosave", error.clone());
+                        eprintln!("[Project] autosave failed: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn autosave_project_path(&self) -> PathBuf {
+        if let Some(path) = self.project_session.project_file_path.as_ref() {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("project");
+            return path.with_file_name(format!("{stem}.autosave.fbproj"));
+        }
+        let dir = self.paths.app_data.join("Autosaves");
+        dir.join(format!("{}.autosave.fbproj", self.project_session.id))
+    }
+
     fn sync_timeline_audio_paths_after_save(
         &mut self,
         project: &FutureboardProject,

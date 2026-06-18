@@ -18,9 +18,7 @@ use super::context_menu_ops::ContextMenuRequest;
 
 #[derive(Debug, Clone)]
 pub enum OpenPopover {
-    Context {
-        request: ContextMenuRequest,
-    },
+    Context { request: ContextMenuRequest },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +55,8 @@ pub(super) struct OverlayState {
     pub(super) inspector_routing_combo_anchor: Option<crate::overlay::OverlayAnchor>,
     /// Status-bar performance metrics detail popover.
     pub(super) perf_metrics_popover_open: bool,
+    /// Text field to focus after the next render pass mounts the Inspector.
+    pub(super) pending_text_focus: Option<TextMenuTarget>,
 }
 
 #[derive(Debug, Clone)]

@@ -15,7 +15,7 @@ members = [
     "crates/SpherePluginHost",
     "crates/SphereSoundfontPlayer",
     "crates/SphereUIComponents",
-    "crates/SphereWebAudioCore", "crates/SpherePackageInstaller", "apps/native/apakinstaller",
+    "crates/SphereWebAudioCore", "crates/SpherePackageInstaller", "apps/native/apakinstaller", "crates/SphereAudioProcessor",
 ]
 
 exclude = [
@@ -42,6 +42,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 publish = false
 
 
@@ -52,6 +53,7 @@ publish = false
 [workspace.dependencies]
 sphere_ui_components = { path = "crates/SphereUIComponents" }
 sphere-direct-audio-engine = { path = "crates/SphereDirectAudioEngine", default-features = false }
+sphere-audio-processor = { path = "crates/SphereAudioProcessor" }
 sphere-audio-editor = { path = "crates/SphereAudioEditor" }
 sphere-audio-plugins = { path = "crates/SphereAudioPlugins" }
 sphere-encoder = { path = "crates/SphereEncoder" }

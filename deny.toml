@@ -1,0 +1,95 @@
+# deny.toml
+# Futureboard / Sphere public-build policy
+#
+# Public build policy:
+# - Allow permissive licenses + MPL-2.0
+# - Do not allow GPL / LGPL / AGPL because they are not listed in [licenses.allow]
+# - Keep unknown git dependencies visible
+
+[graph]
+all-features = false
+no-default-features = false
+targets = []
+
+[licenses]
+confidence-threshold = 0.8
+
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "NCSA",
+    "bzip2-1.0.6",
+
+    "Unicode-3.0",
+
+    "MPL-2.0",
+]
+private = { ignore = true }
+
+exceptions = [
+    # { name = "example-crate", allow = ["MIT"] },
+]
+
+# If cargo-deny asks for a clarification, add entries like this:
+#
+# [[licenses.clarify]]
+# name = "some-crate"
+# expression = "MIT"
+# license-files = [
+#     { path = "LICENSE", hash = 0x00000000 },
+# ]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+allow-wildcard-paths = true
+
+skip = [
+    # { name = "windows", version = "=0.60.0" },
+]
+
+skip-tree = [
+    # { name = "some-legacy-root-crate" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+
+allow-registry = [
+    "https://github.com/rust-lang/crates.io-index",
+]
+
+allow-git = [
+    "https://github.com/zed-industries/reqwest.git",
+    "https://github.com/zed-industries/scap",
+    "https://github.com/smol-rs/async-task.git",
+    "https://github.com/zed-industries/calloop",
+    "https://github.com/zed-industries/notify.git",
+    "https://github.com/zed-industries/windows-capture.git",
+    "https://github.com/zed-industries/livekit-rust-sdks",
+    "https://github.com/proptest-rs/proptest",
+]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+
+# cargo-deny newer schema:
+# vulnerabilities/notices are denied/reported by default now.
+# Use ignore only for reviewed advisory IDs.
+unmaintained = "workspace"
+unsound = "workspace"
+
+ignore = [
+    # "RUSTSEC-0000-0000",
+]

@@ -164,6 +164,7 @@ impl Timeline {
             on_time_signature_map_changed: None,
             on_media_changed: None,
             on_add_track: None,
+            on_plugin_preset_drop: None,
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
@@ -201,6 +202,7 @@ impl Timeline {
             on_time_signature_map_changed: None,
             on_media_changed: None,
             on_add_track: None,
+            on_plugin_preset_drop: None,
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
@@ -301,6 +303,10 @@ impl Timeline {
 
     pub fn set_add_track_callback(&mut self, callback: Option<TimelineAddTrackCb>) {
         self.on_add_track = callback;
+    }
+
+    pub fn set_plugin_preset_drop_callback(&mut self, callback: Option<TimelinePluginPresetDropCb>) {
+        self.on_plugin_preset_drop = callback;
     }
 
     pub fn set_project_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
@@ -1216,6 +1222,37 @@ impl Timeline {
             );
         }
         self.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+        true
+    }
+
+    pub(super) fn drop_plugin_preset_at_last_drag(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pst"))
+        {
+            return false;
+        }
+        let Some(position) = self.last_drag_position else {
+            return false;
+        };
+        let target = self.resolve_context_target_from_window_point(position);
+        let track_id = match target {
+            TimelineContextTarget::TrackLane { track_id, .. }
+            | TimelineContextTarget::AudioClip { track_id, .. }
+            | TimelineContextTarget::MidiClip { track_id, .. }
+            | TimelineContextTarget::TrackHeader(track_id) => track_id,
+            _ => return false,
+        };
+        let Some(callback) = self.on_plugin_preset_drop.as_ref() else {
+            return false;
+        };
+        callback(&(path.to_path_buf(), track_id), window, cx);
         true
     }
 

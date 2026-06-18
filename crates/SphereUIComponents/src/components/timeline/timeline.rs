@@ -111,6 +111,7 @@ pub struct Timeline {
     on_time_signature_map_changed: Option<TimelineProjectChangedCb>,
     on_media_changed: Option<TimelineProjectChangedCb>,
     on_add_track: Option<TimelineAddTrackCb>,
+    on_plugin_preset_drop: Option<TimelinePluginPresetDropCb>,
     /// Window-space position of the last drag-move event while files are
     /// being dragged. We need this because `on_drop::<ExternalPaths>` does
     /// not carry the drop position itself — gpui translates the submit into
@@ -219,6 +220,10 @@ pub struct TimelineAddTrackRequest {
 
 pub type TimelineAddTrackCb =
     std::sync::Arc<dyn Fn(&TimelineAddTrackRequest, &mut gpui::Window, &mut gpui::App) + 'static>;
+
+pub type TimelinePluginPresetDropCb = std::sync::Arc<
+    dyn Fn(&(std::path::PathBuf, String), &mut gpui::Window, &mut gpui::App) + 'static,
+>;
 
 pub type TimelineProjectChangedCb = std::sync::Arc<dyn Fn(&mut gpui::App) + 'static>;
 

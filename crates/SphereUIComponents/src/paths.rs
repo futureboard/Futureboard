@@ -213,6 +213,7 @@ impl FutureboardPaths {
         map.insert("audio_files".to_string(), self.audio_files.clone());
         map.insert("projects".to_string(), self.projects.clone());
         map.insert("samples".to_string(), self.samples.clone());
+        map.insert("user_data".to_string(), self.user_root.clone());
         map.insert("user_library".to_string(), self.user_library.clone());
 
         // Show registered plug-ins (.pst presets) in the browser.

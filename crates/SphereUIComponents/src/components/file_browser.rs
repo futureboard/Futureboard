@@ -46,6 +46,10 @@ impl FileBrowserEntry {
     pub fn is_midi(&self) -> bool {
         matches!(self.extension.as_str(), "mid" | "midi")
     }
+
+    pub fn is_plugin_preset(&self) -> bool {
+        self.extension == "pst"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +141,10 @@ impl BrowserVisibleNode {
 
     pub fn is_midi(&self) -> bool {
         matches!(self.extension.as_str(), "mid" | "midi")
+    }
+
+    pub fn is_plugin_preset(&self) -> bool {
+        self.extension == "pst"
     }
 }
 
@@ -463,53 +471,14 @@ impl FileBrowserState {
                     &mut nodes,
                 );
             }
-            if let Some(p) = dirs.get("user_library") {
+            if let Some(p) = dirs.get("user_data") {
                 self.push_root(
-                    "places:user_library",
-                    "User Library",
+                    "places:user_data",
+                    "User Data",
                     p,
                     BrowserIcon::UserLibrary,
                     &mut nodes,
                 );
-            }
-            // Real OS user directories — only shown when they actually exist.
-            for (id, label, dir_opt, icon) in [
-                (
-                    "places:downloads",
-                    "Downloads",
-                    dirs::download_dir(),
-                    BrowserIcon::Downloads,
-                ),
-                (
-                    "places:desktop",
-                    "Desktop",
-                    dirs::desktop_dir(),
-                    BrowserIcon::Desktop,
-                ),
-                (
-                    "places:documents",
-                    "Documents",
-                    dirs::document_dir(),
-                    BrowserIcon::Documents,
-                ),
-                (
-                    "places:music",
-                    "Music",
-                    dirs::audio_dir(),
-                    BrowserIcon::Music,
-                ),
-                (
-                    "places:videos",
-                    "Videos",
-                    dirs::video_dir(),
-                    BrowserIcon::Videos,
-                ),
-            ] {
-                if let Some(p) = dir_opt {
-                    if p.is_dir() {
-                        self.push_root(id, label, &p, icon, &mut nodes);
-                    }
-                }
             }
             // Local drives / mounted volumes.
             let drives = self.root_drives.clone();

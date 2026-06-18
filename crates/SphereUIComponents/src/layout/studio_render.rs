@@ -26,6 +26,7 @@ impl Render for StudioLayout {
         // on the next frame without a dedicated observer.
         let frame_rate_mode = self.settings.read(cx).current.performance.frame_rate;
         self.frame_scheduler.refresh_from_settings(frame_rate_mode);
+        self.maybe_autosave_project(cx);
         self.window_hooks.cached_bounds = Some(window.bounds());
         self.flush_deferred_insert_editor_opens(window, cx);
 
@@ -233,6 +234,27 @@ impl Render for StudioLayout {
                 }
             }
         }
+        if self.panels.inspector {
+            if let Some(target) = self.overlay.pending_text_focus.take() {
+                match target {
+                    TextMenuTarget::InspectorName => {
+                        self.inspector_name_edit.name_input.select_all();
+                        self.inspector_name_edit
+                            .name_input
+                            .focus_handle
+                            .focus(window, cx);
+                    }
+                    TextMenuTarget::InspectorClipName => {
+                        self.inspector_name_edit.clip_name_input.select_all();
+                        self.inspector_name_edit
+                            .clip_name_input
+                            .focus_handle
+                            .focus(window, cx);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let inspector_clip_name_focused =
             self.inspector_name_edit.clip_name_input.is_focused(window);
 
@@ -364,23 +386,25 @@ impl Render for StudioLayout {
             dyn Fn(&(Option<PathBuf>, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |(path, x, y): &(Option<PathBuf>, f32, f32), window, cx| {
-                let path = path.clone();
-                let x = *x;
-                let y = *y;
-                let window_id = window.window_handle().window_id();
-                StudioLayout::defer_update(&this, cx, move |this, cx| {
-                    this.try_open_context_menu(
-                        ContextMenuRequest::new(
-                            window_id,
-                            x,
-                            y,
-                            ContextMenuTarget::Extended(ContextTarget::Browser(path)),
-                        ),
-                        cx,
-                    );
-                });
-            })
+            std::sync::Arc::new(
+                move |(path, x, y): &(Option<PathBuf>, f32, f32), window, cx| {
+                    let path = path.clone();
+                    let x = *x;
+                    let y = *y;
+                    let window_id = window.window_handle().window_id();
+                    StudioLayout::defer_update(&this, cx, move |this, cx| {
+                        this.try_open_context_menu(
+                            ContextMenuRequest::new(
+                                window_id,
+                                x,
+                                y,
+                                ContextMenuTarget::Extended(ContextTarget::Browser(path)),
+                            ),
+                            cx,
+                        );
+                    });
+                },
+            )
         };
 
         // Toolbar: collapse every expanded folder in one click.
@@ -682,10 +706,7 @@ impl Render for StudioLayout {
                                     "view.developer.perf_metrics",
                                     perf.show_status_performance_metrics,
                                 ),
-                                (
-                                    "view.developer.perf_overlay",
-                                    perf.show_performance_overlay,
-                                ),
+                                ("view.developer.perf_overlay", perf.show_performance_overlay),
                             ],
                         );
                         components::menu_dropdown::menu_dropdown(
@@ -749,9 +770,7 @@ impl Render for StudioLayout {
         > = {
             let this = cx.entity().clone();
             std::sync::Arc::new(
-                move |event: components::project_switcher::ProjectSwitcherRowEvent,
-                      w,
-                      cx| {
+                move |event: components::project_switcher::ProjectSwitcherRowEvent, w, cx| {
                     let _ = this.update(cx, |this, cx| {
                         let owner_bounds = Some(w.bounds());
                         match event {
@@ -1160,19 +1179,18 @@ impl Render for StudioLayout {
             .show_status_performance_metrics;
         let status_content = self.status_bar_content(show_perf_metrics);
         let perf_popover_open = self.overlay.perf_metrics_popover_open;
-        let on_toggle_perf_popover: Option<components::PerfMetricsToggleCb> =
-            if show_perf_metrics {
-                let this = cx.entity().clone();
-                Some(std::sync::Arc::new(move |_: &(), _w, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.overlay.perf_metrics_popover_open =
-                            !this.overlay.perf_metrics_popover_open;
-                        cx.notify();
-                    });
-                }))
-            } else {
-                None
-            };
+        let on_toggle_perf_popover: Option<components::PerfMetricsToggleCb> = if show_perf_metrics {
+            let this = cx.entity().clone();
+            Some(std::sync::Arc::new(move |_: &(), _w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.overlay.perf_metrics_popover_open =
+                        !this.overlay.perf_metrics_popover_open;
+                    cx.notify();
+                });
+            }))
+        } else {
+            None
+        };
         let on_toggle_background_tasks: std::sync::Arc<
             dyn Fn(&(), &mut Window, &mut gpui::App) + 'static,
         > = {

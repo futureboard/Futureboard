@@ -3,6 +3,7 @@ name = "sphere-plugin-host"
 version = "0.1.0"
 edition = "2021"
 description = "SpherePluginHost — N-API control bridge and native plugin host shell for Futureboard Studio"
+license.workspace = true
 
 [lib]
 name = "sphere_plugin_host"

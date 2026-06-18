@@ -4,22 +4,73 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::components::add_track_dialog::{
-    open_add_track_window, AddTrackDialogState, AddTrackKind,
+    open_add_track_window, AddTrackDialogState, AddTrackKind, AudioFormat,
 };
 use crate::components::combo_box::dedupe_preserve_order;
-use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
-use crate::session_shutdown::SessionShutdownSnapshot;
 use crate::components::keymap_window::{open_keymap_window, KeymapChangedCb};
+use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
 use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate};
 use crate::components::timeline::timeline_state::{
-    self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackType,
+    self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackAudioFormat, TrackInputRouting,
+    TrackOutputRouting, TrackType,
 };
 use crate::components::{external_mixer_debug, open_mixer_window};
+use crate::session_shutdown::SessionShutdownSnapshot;
 use crate::window_position::resolve_owner_bounds_with_preferred;
 use sphere_plugin_host::{PluginFormat as RegistryPluginFormat, PluginKind};
 
 use super::helpers::{cleaned_track_name, numbered_name_stem};
 use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout};
+
+fn dialog_audio_format(format: AudioFormat) -> TrackAudioFormat {
+    match format {
+        AudioFormat::Mono => TrackAudioFormat::Mono,
+        AudioFormat::Stereo => TrackAudioFormat::Stereo,
+    }
+}
+
+fn dialog_audio_input_routing(
+    label: &str,
+    format: AudioFormat,
+    input_device: Option<&(String, u32)>,
+) -> TrackInputRouting {
+    match label {
+        "None" => TrackInputRouting::None,
+        "Input 1" | "Input 2" => {
+            let Some((device_id, channels)) = input_device else {
+                return TrackInputRouting::AllInputs;
+            };
+            let channel = if label == "Input 2" { 1 } else { 0 };
+            if channel >= *channels {
+                return TrackInputRouting::AllInputs;
+            }
+            match format {
+                AudioFormat::Mono => TrackInputRouting::AudioDeviceChannel {
+                    device_id: device_id.clone(),
+                    channel,
+                },
+                AudioFormat::Stereo => {
+                    if channel + 1 < *channels {
+                        TrackInputRouting::AudioDeviceChannels {
+                            device_id: device_id.clone(),
+                            channels: vec![channel, channel + 1],
+                        }
+                    } else {
+                        TrackInputRouting::AllInputs
+                    }
+                }
+            }
+        }
+        _ => TrackInputRouting::AllInputs,
+    }
+}
+
+fn dialog_audio_output_routing(label: &str) -> TrackOutputRouting {
+    match label {
+        "None" => TrackOutputRouting::None,
+        _ => TrackOutputRouting::Main,
+    }
+}
 
 /// Studio-window / app-integration hooks — this workspace's own window handle,
 /// the last known window bounds (used to position child windows without
@@ -35,8 +86,9 @@ pub(crate) struct StudioWindowHooks {
     pub on_request_welcome: Option<Arc<dyn Fn(&mut gpui::App) + 'static>>,
     /// App-level hook for in-studio project open/replace — keeps the root studio
     /// window alive and swaps the session in place.
-    pub on_request_project_load:
-        Option<Arc<dyn Fn(PathBuf, super::project_ops::ProjectOpenOptions, &mut gpui::App) + 'static>>,
+    pub on_request_project_load: Option<
+        Arc<dyn Fn(PathBuf, super::project_ops::ProjectOpenOptions, &mut gpui::App) + 'static>,
+    >,
     /// App-level hook for visible session shutdown (close project).
     pub on_request_session_shutdown: Option<
         Arc<
@@ -187,6 +239,7 @@ impl StudioLayout {
                 };
                 let _ = layout.update(cx, |this, cx| {
                     this.mark_dirty();
+                    let selected_input_device = this.selected_input_device_channels(cx);
                     let _ = this.timeline.update(cx, |timeline, cx| {
                         let count = dialog.count.clamp(1, 128) as usize;
                         let base_name =
@@ -229,6 +282,18 @@ impl StudioLayout {
                                     _ => timeline_state::InputMonitorMode::Off,
                                 },
                             });
+                            if dialog.selected_kind == AddTrackKind::Audio {
+                                let audio_format = dialog_audio_format(dialog.audio_format);
+                                let input = dialog_audio_input_routing(
+                                    &dialog.input_label,
+                                    dialog.audio_format,
+                                    selected_input_device.as_ref(),
+                                );
+                                let output = dialog_audio_output_routing(&dialog.output_label);
+                                timeline.state.set_track_audio_format(&id, audio_format);
+                                timeline.state.set_track_input_routing(&id, input);
+                                timeline.state.set_track_output_routing(&id, output);
+                            }
                             if dialog.selected_kind == AddTrackKind::Instrument {
                                 if let Some(plugin_id) = dialog.instrument_plugin_id.as_deref() {
                                     if let Some(reg) =

@@ -9,7 +9,7 @@ use crate::components::plugin_picker::insert::{
 };
 use crate::components::plugin_picker::list_view::{format_badge, scan_status_label};
 use crate::theme::Colors;
-use sphere_plugin_host::{PluginKind, RegistryPlugin};
+use SpherePluginHost::{PluginKind, RegistryPlugin};
 
 pub const DETAILS_WIDTH: f32 = 228.0;
 

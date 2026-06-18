@@ -4,7 +4,7 @@
 //! VST3 editor hosting follows public.sdk/samples/vst-hosting/editorhost
 //! lifecycle: the host owns the COM STA thread and the editor message pump, and
 //! drives `createView`/`attached`/`onSize`/`removed` via the proven C++ backend
-//! (`sphere_plugin_host::native_editor`). What is new here is *where* it runs:
+//! (`SpherePluginHost::native_editor`). What is new here is *where* it runs:
 //! out-of-process, so a crashing plugin editor cannot take down the GPUI main
 //! app.
 //!
@@ -15,7 +15,7 @@
 //!
 //! Protocol: [`HostCommand`] frames arrive on **stdin**, [`HostEvent`] frames
 //! are written to **stdout**, human logs go to **stderr** behind
-//! `FUTUREBOARD_PLUGIN_VIEW_DEBUG`. See [`sphere_plugin_host::ipc`].
+//! `FUTUREBOARD_PLUGIN_VIEW_DEBUG`. See [`SpherePluginHost::ipc`].
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -25,12 +25,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sphere_plugin_host::audio_bridge::{
+use SpherePluginHost::audio_bridge::{
     bridge_kick_event_name, BridgeKickEvent, SharedAudioRegion, AUDIO_BUF_LEN, MAX_BLOCK_FRAMES,
 };
-use sphere_plugin_host::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
-use sphere_plugin_host::native_editor::{self, EmbedRegion};
-use sphere_plugin_host::plugin_host_preview::{
+use SpherePluginHost::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
+use SpherePluginHost::native_editor::{self, EmbedRegion};
+use SpherePluginHost::plugin_host_preview::{
     try_start_preview_output, BridgeAudioShared, PluginHostPreviewEngine, SharedPluginHostPreview,
 };
 
@@ -110,14 +110,14 @@ fn main() {
     let selftest = std::env::args().any(|a| a == "--selftest");
     let parent_pid = parse_parent_pid();
 
-    let _log_path = sphere_plugin_host::plugin_host_logging::init_host_logging();
-    sphere_plugin_host::plugin_host_logging::log_startup_environment();
+    let _log_path = SpherePluginHost::plugin_host_logging::init_host_logging();
+    SpherePluginHost::plugin_host_logging::log_startup_environment();
 
     // Match the DAW's explicit AppUserModelID so plugin-editor windows this
     // process creates never group as a separate taskbar app (spec: process
     // identity). Owned WS_EX_TOOLWINDOW popups already stay off the taskbar /
     // Alt-Tab; this is belt-and-braces against accidental app-visibility.
-    sphere_plugin_host::plugin_host_lifecycle::set_futureboard_app_user_model_id();
+    SpherePluginHost::plugin_host_lifecycle::set_futureboard_app_user_model_id();
 
     platform::com_init();
     platform::ensure_dpi_awareness();
@@ -1082,7 +1082,7 @@ fn dispatch(
                 return;
             }
             eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
-            sphere_plugin_host::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
+            SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
                 &plugin_instance_id,
                 &plugin_instance_id,
                 &plugin_instance_id,
@@ -1528,7 +1528,7 @@ fn attach_unified_editor(
     eprintln!(
         "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={plugin_instance_id}"
     );
-    sphere_plugin_host::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
+    SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
         plugin_instance_id,
         plugin_instance_id,
         plugin_instance_id,

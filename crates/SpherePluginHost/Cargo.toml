@@ -6,7 +6,7 @@ description = "SpherePluginHost — N-API control bridge and native plugin host 
 license.workspace = true
 
 [lib]
-name = "sphere_plugin_host"
+name = "SpherePluginHost"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]

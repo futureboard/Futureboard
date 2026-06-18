@@ -4,7 +4,7 @@ use gpui::{div, px, svg, AnyElement, IntoElement, ParentElement, Styled};
 
 use crate::assets;
 use crate::theme::Colors;
-use sphere_plugin_host::PluginFormat;
+use SpherePluginHost::PluginFormat;
 
 const FORMAT_ICON_SIZE: f32 = 22.0;
 

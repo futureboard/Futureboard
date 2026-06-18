@@ -3,9 +3,9 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
-use sphere_plugin_host::au_scanner;
-use sphere_plugin_host::scan::isolation::run_direct_format_scan_for_cli;
-use sphere_plugin_host::scan::types::PluginScanFormat;
+use SpherePluginHost::au_scanner;
+use SpherePluginHost::scan::isolation::run_direct_format_scan_for_cli;
+use SpherePluginHost::scan::types::PluginScanFormat;
 
 fn main() {
     let mut format: Option<PluginScanFormat> = None;

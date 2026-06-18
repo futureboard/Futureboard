@@ -17,7 +17,7 @@ use crate::components::timeline::timeline_state::{
 use crate::components::{external_mixer_debug, open_mixer_window};
 use crate::session_shutdown::SessionShutdownSnapshot;
 use crate::window_position::resolve_owner_bounds_with_preferred;
-use sphere_plugin_host::{PluginFormat as RegistryPluginFormat, PluginKind};
+use SpherePluginHost::{PluginFormat as RegistryPluginFormat, PluginKind};
 
 use super::helpers::{cleaned_track_name, numbered_name_stem};
 use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout};
@@ -212,7 +212,7 @@ impl StudioLayout {
         {
             self.arm_catalog_load(cx);
         }
-        let instrument_plugins: Vec<sphere_plugin_host::RegistryPlugin> = self
+        let instrument_plugins: Vec<SpherePluginHost::RegistryPlugin> = self
             .plugin_catalog
             .available
             .as_ref()

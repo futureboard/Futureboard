@@ -1,6 +1,6 @@
 //! Cached search documents for fast picker filtering.
 
-use sphere_plugin_host::RegistryPlugin;
+use SpherePluginHost::RegistryPlugin;
 
 use crate::components::plugin_picker::category::normalized_category_label;
 

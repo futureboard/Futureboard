@@ -9,9 +9,9 @@ use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle, StatefulInteractiveElement,
     Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
-use sphere_plugin_host::load_au_cache_state;
-use sphere_plugin_host::preset::register_plugin;
-use sphere_plugin_host::registry::{
+use SpherePluginHost::load_au_cache_state;
+use SpherePluginHost::preset::register_plugin;
+use SpherePluginHost::registry::{
     NativeHostStatus, PluginFormat, PluginKind, PluginRegistry, PluginStatus, RegistryPlugin,
     RegistryScanResult, ScanOptions, ScanProgress,
 };
@@ -1420,7 +1420,7 @@ pub fn plugin_manager_panel(
                                     div()
                                         .truncate()
                                         .max_w(px(360.0))
-                                        .child(sphere_plugin_host::database_path()
+                                        .child(SpherePluginHost::database_path()
                                             .display()
                                             .to_string()),
                                 )
@@ -1695,7 +1695,7 @@ impl Render for PluginManagerWindow {
             }),
             on_open_db_folder: Arc::new({
                 move |_: &(), _w, _cx| {
-                    let dir = sphere_plugin_host::database_dir();
+                    let dir = SpherePluginHost::database_dir();
                     let _ = std::fs::create_dir_all(&dir);
                     reveal_in_os(&dir);
                 }

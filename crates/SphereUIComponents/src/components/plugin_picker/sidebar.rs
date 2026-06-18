@@ -12,7 +12,7 @@ use crate::components::plugin_picker::filter::FilterCounts;
 use crate::components::plugin_picker::state::PickerFilter;
 use crate::components::scroll_thumb::vertical_scrollbar_thumb;
 use crate::theme::Colors;
-use sphere_plugin_host::PluginFormat;
+use SpherePluginHost::PluginFormat;
 
 pub const SIDEBAR_WIDTH: f32 = 184.0;
 

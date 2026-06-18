@@ -599,7 +599,7 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
                 PluginFormat::Lv2 => InsertPluginFormat::Lv2,
                 PluginFormat::Unknown => InsertPluginFormat::Unknown,
             };
-            let bridge = sphere_plugin_host::plugin_host_client::plugin_host_bridge_enabled()
+            let bridge = SpherePluginHost::plugin_host_client::plugin_host_bridge_enabled()
                 && plugin_format == InsertPluginFormat::Vst3;
             let path_missing = plugin
                 .plugin_path

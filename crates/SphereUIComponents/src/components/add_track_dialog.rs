@@ -26,7 +26,7 @@ use crate::components::title_bar::external_window_titlebar_with_icon;
 use crate::i18n::I18n;
 use crate::theme::{self, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
-use sphere_plugin_host::{PluginFormat, RegistryPlugin};
+use SpherePluginHost::{PluginFormat, RegistryPlugin};
 
 const MAX_TRACK_COUNT: u32 = 128;
 const FORM_LABEL_WIDTH: f32 = 86.0;

@@ -67,10 +67,10 @@ pub mod window_position;
 pub use shutdown::ShutdownState;
 /// Re-export of the separated plugin-host bridge client so the native app can
 /// log bridge env / drive the bridge without a direct `sphere-plugin-host` dep.
-pub use sphere_plugin_host::plugin_host_client;
-pub use sphere_plugin_host::plugin_host_lifecycle;
-pub use sphere_plugin_host::plugin_host_main_window;
-pub use sphere_plugin_host::process_manager::PluginHostProcessManager;
+pub use SpherePluginHost::plugin_host_client;
+pub use SpherePluginHost::plugin_host_lifecycle;
+pub use SpherePluginHost::plugin_host_main_window;
+pub use SpherePluginHost::process_manager::PluginHostProcessManager;
 pub mod splash;
 pub mod startup;
 pub mod theme;

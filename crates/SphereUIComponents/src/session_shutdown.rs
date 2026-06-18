@@ -235,7 +235,7 @@ pub fn run_session_shutdown(
         report.warnings.extend(host_report.warnings);
     }
 
-    let remaining = sphere_plugin_host::plugin_host_lifecycle::BridgeHostManager::global()
+    let remaining = SpherePluginHost::plugin_host_lifecycle::BridgeHostManager::global()
         .host_count();
     eprintln!("[SessionShutdown] complete remaining_hosts={remaining}");
 

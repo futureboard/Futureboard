@@ -2,11 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::components::progress_dialog::ProgressBarValue;
-use sphere_plugin_host::ipc::{HostCommand, HostEvent};
-use sphere_plugin_host::plugin_host_client::{
+use SpherePluginHost::ipc::{HostCommand, HostEvent};
+use SpherePluginHost::plugin_host_client::{
     plugin_host_bridge_enabled, ClientEvent, PluginHostClient, PluginHostClientError,
 };
-use sphere_plugin_host::plugin_host_lifecycle::{self, BridgeHostManager};
+use SpherePluginHost::plugin_host_lifecycle::{self, BridgeHostManager};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BridgePluginDescriptor {
@@ -36,14 +36,14 @@ pub(crate) struct PluginBridgeRuntime {
     /// Stage 2: one shared-memory audio region per insert instance. Each region
     /// carries its own `request_seq` / `done_seq` so serial FX chains on one
     /// track do not clobber each other's handshake.
-    shared_audio: HashMap<String, Arc<sphere_plugin_host::audio_bridge::SharedAudioRegion>>,
+    shared_audio: HashMap<String, Arc<SpherePluginHost::audio_bridge::SharedAudioRegion>>,
     /// Producer wake event shared with the host process: the audio-callback
     /// sink signals it after every `request_seq` bump so the host renders on
     /// demand instead of polling on a timer tick. One event per engine/host
     /// pid pair (all insert regions share it — the producer sweeps every
     /// region per wake). `None` when creation failed; the host then falls
     /// back to its poll loop.
-    kick: Option<Arc<sphere_plugin_host::audio_bridge::BridgeKickEvent>>,
+    kick: Option<Arc<SpherePluginHost::audio_bridge::BridgeKickEvent>>,
 }
 
 pub(crate) type SharedPluginBridgeRuntime = Arc<Mutex<PluginBridgeRuntime>>;
@@ -53,7 +53,7 @@ pub(crate) fn bridge_enabled() -> bool {
 }
 
 pub(super) fn legacy_in_process_enabled() -> bool {
-    sphere_plugin_host::plugin_host_client::legacy_in_process_enabled()
+    SpherePluginHost::plugin_host_client::legacy_in_process_enabled()
 }
 
 /// Named shared-memory region for one insert instance.
@@ -98,11 +98,11 @@ impl PluginBridgeRuntime {
         // Producer wake event for this engine/host pair (the host derives the
         // same name from `--parent-pid` + its own pid). CreateEventW opens the
         // existing event if the host won the race, so order does not matter.
-        let kick_name = sphere_plugin_host::audio_bridge::bridge_kick_event_name(
+        let kick_name = SpherePluginHost::audio_bridge::bridge_kick_event_name(
             std::process::id(),
             client.pid(),
         );
-        let kick = match sphere_plugin_host::audio_bridge::BridgeKickEvent::create_named(&kick_name)
+        let kick = match SpherePluginHost::audio_bridge::BridgeKickEvent::create_named(&kick_name)
         {
             Ok(event) => {
                 eprintln!("[plugin-bridge] kick event ready name={kick_name}");
@@ -139,7 +139,7 @@ impl PluginBridgeRuntime {
     ) -> Option<DAUx::plugin_bridge::SharedPluginBridgeSink> {
         let region = self.shared_audio.get(instance_id)?;
         Some(
-            sphere_plugin_host::plugin_bridge_sink::SharedRegionSink::into_shared(
+            SpherePluginHost::plugin_bridge_sink::SharedRegionSink::into_shared(
                 region.clone(),
                 self.kick.clone(),
             ),
@@ -215,7 +215,7 @@ impl PluginBridgeRuntime {
         }
         #[cfg(windows)]
         {
-            use sphere_plugin_host::audio_bridge::SharedAudioRegion;
+            use SpherePluginHost::audio_bridge::SharedAudioRegion;
             let name = bridge_region_name(instance_id);
             match SharedAudioRegion::create_named(&name, sample_rate, max_block_size, 2) {
                 Ok(region) => {

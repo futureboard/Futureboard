@@ -19,8 +19,8 @@
 
 use std::time::{Duration, Instant};
 
-use sphere_plugin_host::ipc::HostEvent;
-use sphere_plugin_host::plugin_host_client::{ClientEvent, PluginHostClient};
+use SpherePluginHost::ipc::HostEvent;
+use SpherePluginHost::plugin_host_client::{ClientEvent, PluginHostClient};
 
 mod win {
     use windows::core::w;

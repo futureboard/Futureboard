@@ -70,5 +70,5 @@ impl PluginPickerPrefs {
 }
 
 fn prefs_path() -> PathBuf {
-    sphere_plugin_host::database_dir().join(PREFS_FILE)
+    SpherePluginHost::database_dir().join(PREFS_FILE)
 }

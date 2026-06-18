@@ -26,7 +26,7 @@ use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
 use crate::theme::Colors;
-use sphere_plugin_host::RegistryPlugin;
+use SpherePluginHost::RegistryPlugin;
 
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 

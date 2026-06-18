@@ -4,7 +4,7 @@ use gpui::{ScrollHandle, UniformListScrollHandle};
 
 use crate::components::plugin_picker::insert::{PluginInsertKind, PluginInsertTarget};
 use crate::components::timeline::timeline_state::TrackType;
-use sphere_plugin_host::PluginFormat;
+use SpherePluginHost::PluginFormat;
 
 /// Stable scroll handles for the insert picker sidebar and plug-in list.
 #[derive(Clone, Default)]

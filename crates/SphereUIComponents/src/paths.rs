@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use sphere_plugin_host::registry::default_preset_root;
+use SpherePluginHost::registry::default_preset_root;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

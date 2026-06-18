@@ -11,8 +11,8 @@
 
 use std::time::{Duration, Instant};
 
-use sphere_plugin_host::ipc::HostEvent;
-use sphere_plugin_host::plugin_host_client::{ClientEvent, PluginHostClient};
+use SpherePluginHost::ipc::HostEvent;
+use SpherePluginHost::plugin_host_client::{ClientEvent, PluginHostClient};
 
 fn wait_event(client: &PluginHostClient, timeout: Duration) -> Option<ClientEvent> {
     let deadline = Instant::now() + timeout;
@@ -34,7 +34,7 @@ fn ready_then_attach_failed_for_invalid_hwnd() {
         Some(ClientEvent::Host(HostEvent::Ready {
             protocol_version, ..
         })) => {
-            assert_eq!(protocol_version, sphere_plugin_host::ipc::PROTOCOL_VERSION);
+            assert_eq!(protocol_version, SpherePluginHost::ipc::PROTOCOL_VERSION);
         }
         other => panic!("expected Ready, got {other:?}"),
     }

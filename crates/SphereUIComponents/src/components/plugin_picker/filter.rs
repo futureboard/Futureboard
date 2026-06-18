@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use sphere_plugin_host::{PluginFormat, PluginKind, PluginScanStatus, RegistryPlugin};
+use SpherePluginHost::{PluginFormat, PluginKind, PluginScanStatus, RegistryPlugin};
 
 use crate::components::plugin_picker::category::normalized_category_label;
 use crate::components::plugin_picker::prefs::PluginPickerPrefs;

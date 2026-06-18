@@ -33,7 +33,7 @@ use crate::paths::FutureboardPaths;
 use crate::project::recent::RecentProjectsStore;
 use crate::settings::{GlobalSettingsModel, SettingsModel};
 use crate::theme::{self, Colors};
-use sphere_plugin_host::load_au_cache_state;
+use SpherePluginHost::load_au_cache_state;
 
 mod audio_transport;
 mod browser_ops;

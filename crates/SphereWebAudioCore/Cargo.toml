@@ -6,6 +6,7 @@ description = "Futureboard Studio DSP Core — WebAudioCore Framework"
 license.workspace = true
 
 [lib]
+name = "FutureboardCore"
 crate-type = ["cdylib", "rlib"]
 
 [features]

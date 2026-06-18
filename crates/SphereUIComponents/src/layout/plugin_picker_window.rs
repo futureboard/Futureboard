@@ -227,7 +227,7 @@ impl Render for InsertPickerWindow {
                 let target = target.clone();
                 move |_: &(), _w, cx| {
                     let snapshot = owner.update(cx, |layout, cx| {
-                        let _ = sphere_plugin_host::plugin_db::delete_database_file();
+                        let _ = SpherePluginHost::plugin_db::delete_database_file();
                         layout.plugin_catalog.available = None;
                         layout.plugin_search_index = None;
                         layout.plugin_catalog.status = CatalogStatus::Loading;

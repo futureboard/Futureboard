@@ -8,7 +8,7 @@ use crate::components::plugin_picker::{
     ensure_default_highlight, PickerFilter, PluginInsertKind, PluginPickerState, STUB_PLUGIN_ID,
 };
 use crate::components::timeline::timeline_state::{PluginRuntimeBackend, PluginRuntimeState};
-use sphere_plugin_host::{load_au_cache_state, CatalogLoad};
+use SpherePluginHost::{load_au_cache_state, CatalogLoad};
 
 use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
 
@@ -17,7 +17,7 @@ use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
 /// phase. `StudioLayout` decomposition slice (manual `Default`: status=Loading).
 pub(crate) struct PluginCatalogState {
     /// Cached plugin registry scan result; `None` until the first scan.
-    pub available: Option<Vec<sphere_plugin_host::RegistryPlugin>>,
+    pub available: Option<Vec<SpherePluginHost::RegistryPlugin>>,
     /// `true` if the cached preset directory exists on disk.
     pub cache_present: bool,
     /// Catalog load phase (Loading / Ready / …) driving the picker skeleton/error UI.
@@ -127,8 +127,8 @@ impl StudioLayout {
         use crate::components::timeline::timeline_state::{
             PluginRuntimeBackend, PluginRuntimeState,
         };
-        use sphere_plugin_host::ipc::HostEvent;
-        use sphere_plugin_host::plugin_host_client::ClientEvent;
+        use SpherePluginHost::ipc::HostEvent;
+        use SpherePluginHost::plugin_host_client::ClientEvent;
 
         let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() else {
             return;
@@ -338,11 +338,11 @@ impl StudioLayout {
     fn dispatch_editor_event(
         &mut self,
         plugin_instance_id: &str,
-        event: sphere_plugin_host::plugin_host_client::ClientEvent,
+        event: SpherePluginHost::plugin_host_client::ClientEvent,
         cx: &mut Context<Self>,
     ) {
-        use sphere_plugin_host::ipc::HostEvent;
-        use sphere_plugin_host::plugin_host_client::ClientEvent;
+        use SpherePluginHost::ipc::HostEvent;
+        use SpherePluginHost::plugin_host_client::ClientEvent;
 
         // Clone the shared-runtime Arc up front so we can send ResizeEditor while
         // holding a `&mut` borrow of the matched session.
@@ -1383,7 +1383,7 @@ impl StudioLayout {
         for (track_id, insert_id) in keys {
             self.close_insert_editor(&track_id, &insert_id, cx);
         }
-        sphere_plugin_host::native_editor::detach_all_embedded_editors();
+        SpherePluginHost::native_editor::detach_all_embedded_editors();
     }
 
     /// Kick off a background SQLite load of the plug-in catalog. The picker
@@ -1415,7 +1415,7 @@ impl StudioLayout {
         cx.spawn(async move |this, cx| {
             let load = cx
                 .background_executor()
-                .spawn(async { sphere_plugin_host::PluginRegistry::load_catalog() })
+                .spawn(async { SpherePluginHost::PluginRegistry::load_catalog() })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
@@ -1424,7 +1424,7 @@ impl StudioLayout {
                 match load {
                     CatalogLoad::Loaded { catalog, sqlite_ms } => {
                         let count = catalog.plugins.len();
-                        let plugins: Vec<sphere_plugin_host::RegistryPlugin> = catalog
+                        let plugins: Vec<SpherePluginHost::RegistryPlugin> = catalog
                             .plugins
                             .iter()
                             .map(|e| e.to_registry_plugin())
@@ -1581,7 +1581,7 @@ impl StudioLayout {
     ) -> Option<(String, usize, String)> {
         use crate::components::plugin_picker::validate_insert;
         use crate::components::timeline::timeline_state::InsertPluginFormat;
-        use sphere_plugin_host::PluginFormat as RegFmt;
+        use SpherePluginHost::PluginFormat as RegFmt;
 
         let track_id = self.plugin_picker.insert_target.track_id.clone();
         let target_slot_index = self.plugin_picker.insert_target.next_slot_index;
@@ -1758,7 +1758,7 @@ impl StudioLayout {
                         let timeline_state = self.timeline.read(cx).state.clone();
                         crate::forensic_trace::log_plugin_main_registry(&timeline_state);
                         #[cfg(feature = "plugin-host-bin")]
-                        sphere_plugin_host::plugin_host_preview::PluginHostPreviewEngine::log_unified_runtime(
+                        SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::log_unified_runtime(
                             &track_id,
                             &slot_id,
                             &slot_id,
@@ -1826,7 +1826,7 @@ impl StudioLayout {
         preset_path: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Option<(String, usize, String)> {
-        use sphere_plugin_host::PluginKind;
+        use SpherePluginHost::PluginKind;
 
         let reg = self.read_dropped_plugin_preset(preset_path)?;
         if reg.kind == PluginKind::Instrument {
@@ -1849,7 +1849,7 @@ impl StudioLayout {
         preset_path: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Option<(String, usize, String)> {
-        use sphere_plugin_host::PluginKind;
+        use SpherePluginHost::PluginKind;
 
         let reg = self.read_dropped_plugin_preset(preset_path)?;
         if reg.kind == PluginKind::Instrument {
@@ -1866,8 +1866,8 @@ impl StudioLayout {
     fn read_dropped_plugin_preset(
         &self,
         preset_path: &std::path::Path,
-    ) -> Option<sphere_plugin_host::RegistryPlugin> {
-        let reg = match sphere_plugin_host::preset::read_preset_file(preset_path) {
+    ) -> Option<SpherePluginHost::RegistryPlugin> {
+        let reg = match SpherePluginHost::preset::read_preset_file(preset_path) {
             Ok(reg) => reg,
             Err(error) => {
                 eprintln!(
@@ -1891,7 +1891,7 @@ impl StudioLayout {
         &mut self,
         track_id: &str,
         slot_index: usize,
-        reg: &sphere_plugin_host::RegistryPlugin,
+        reg: &SpherePluginHost::RegistryPlugin,
         cx: &mut Context<Self>,
         source: &'static str,
     ) -> Option<(String, usize, String)> {
@@ -1962,7 +1962,7 @@ impl StudioLayout {
 
     fn create_instrument_track_from_preset(
         &mut self,
-        reg: &sphere_plugin_host::RegistryPlugin,
+        reg: &SpherePluginHost::RegistryPlugin,
         cx: &mut Context<Self>,
     ) -> Option<(String, usize, String)> {
         use crate::components::timeline::timeline_state::{
@@ -2027,7 +2027,7 @@ impl StudioLayout {
     }
 
     fn registry_insert_descriptor(
-        reg: &sphere_plugin_host::RegistryPlugin,
+        reg: &SpherePluginHost::RegistryPlugin,
     ) -> (
         String,
         std::path::PathBuf,
@@ -2035,7 +2035,7 @@ impl StudioLayout {
         String,
     ) {
         use crate::components::timeline::timeline_state::InsertPluginFormat;
-        use sphere_plugin_host::PluginFormat as RegFmt;
+        use SpherePluginHost::PluginFormat as RegFmt;
 
         let plugin_format = match reg.format {
             RegFmt::Vst3 => InsertPluginFormat::Vst3,

@@ -1,7 +1,7 @@
 //! Insert target metadata and validation for the plugin picker.
 
 use crate::components::timeline::timeline_state::TrackType;
-use sphere_plugin_host::{PluginKind, PluginStatus, RegistryPlugin};
+use SpherePluginHost::{PluginKind, PluginStatus, RegistryPlugin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginInsertKind {

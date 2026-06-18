@@ -1,6 +1,6 @@
 //! DAW-friendly category normalization for the plugin picker.
 
-use sphere_plugin_host::{PluginKind, RegistryPlugin};
+use SpherePluginHost::{PluginKind, RegistryPlugin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NormalizedCategory {

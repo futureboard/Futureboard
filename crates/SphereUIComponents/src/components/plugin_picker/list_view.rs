@@ -13,7 +13,7 @@ use crate::components::plugin_format_badge::plugin_format_badge;
 use crate::components::plugin_picker::category::normalized_category_label;
 use crate::components::plugin_picker::insert::is_insertable;
 use crate::theme::Colors;
-use sphere_plugin_host::{
+use SpherePluginHost::{
     PluginFormat, PluginKind, PluginScanStatus, PluginStatus, RegistryPlugin,
 };
 

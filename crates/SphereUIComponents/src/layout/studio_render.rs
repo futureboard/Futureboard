@@ -1100,7 +1100,7 @@ impl Render for StudioLayout {
                         let _ = this.update(cx, |this, cx| {
                             // Drop the SQLite file outright; next picker open
                             // reports MissingDatabase, prompting Scan Now.
-                            let _ = sphere_plugin_host::plugin_db::delete_database_file();
+                            let _ = SpherePluginHost::plugin_db::delete_database_file();
                             this.plugin_catalog.available = None;
                             this.plugin_search_index = None;
                             this.plugin_catalog.status = PluginCatalogStatus::Loading;
@@ -1581,7 +1581,7 @@ fn publish_studio_main_hwnd(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     if let Ok(handle) = HasWindowHandle::window_handle(window) {
         if let RawWindowHandle::Win32(w) = handle.as_raw() {
-            sphere_plugin_host::plugin_host_main_window::set_main_window_hwnd(w.hwnd.get() as isize);
+            SpherePluginHost::plugin_host_main_window::set_main_window_hwnd(w.hwnd.get() as isize);
         }
     }
 }

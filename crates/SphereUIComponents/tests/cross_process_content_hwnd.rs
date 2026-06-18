@@ -18,8 +18,8 @@
 
 use std::time::{Duration, Instant};
 
-use sphere_plugin_host::ipc::HostEvent;
-use sphere_plugin_host::plugin_host_client::{
+use SpherePluginHost::ipc::HostEvent;
+use SpherePluginHost::plugin_host_client::{
     locate_plugin_host_binary, ClientEvent, PluginHostClient,
 };
 use sphere_ui_components::components::plugin_content_host::{ContentChildHwnd, ContentRect};

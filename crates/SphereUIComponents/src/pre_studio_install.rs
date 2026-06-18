@@ -313,8 +313,8 @@ fn wait_for_bridge_target(
 }
 
 fn poll_bridge_events(runtime: &SharedPluginBridgeRuntime, timeline_state: &mut TimelineState) {
-    use sphere_plugin_host::ipc::HostEvent;
-    use sphere_plugin_host::plugin_host_client::ClientEvent;
+    use SpherePluginHost::ipc::HostEvent;
+    use SpherePluginHost::plugin_host_client::ClientEvent;
 
     let Ok(mut bridge) = runtime.lock() else {
         return;

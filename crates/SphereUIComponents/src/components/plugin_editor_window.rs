@@ -28,10 +28,10 @@ use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
 use crate::theme::{self, Colors};
-use sphere_plugin_host::editor_quirk::{match_quirk, PluginEditorQuirk};
-use sphere_plugin_host::ipc::HostEvent;
-use sphere_plugin_host::native_editor::PluginEditorPresentationMode;
-use sphere_plugin_host::plugin_host_client::{
+use SpherePluginHost::editor_quirk::{match_quirk, PluginEditorQuirk};
+use SpherePluginHost::ipc::HostEvent;
+use SpherePluginHost::native_editor::PluginEditorPresentationMode;
+use SpherePluginHost::plugin_host_client::{
     plugin_host_bridge_enabled, ClientEvent, PluginHostClient,
 };
 

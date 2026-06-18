@@ -12,7 +12,8 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::project::{
     io::create_project_folder, io::project_backup_path, io::save_project, io::verify_project_file,
-    now_secs, ClipSource, FutureboardProject, ProjectCreateOptions, ProjectSession, ProjectTemplate,
+    now_secs, ClipSource, FutureboardProject, ProjectCreateOptions, ProjectSession,
+    ProjectTemplate,
 };
 
 use super::StudioLayout;

@@ -10,9 +10,8 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::theme::Colors;
 
-pub type TrackHeightResizeArmCb = Arc<
-    dyn Fn(&(String, f32, bool, bool), &mut Window, &mut App) + 'static,
->;
+pub type TrackHeightResizeArmCb =
+    Arc<dyn Fn(&(String, f32, bool, bool), &mut Window, &mut App) + 'static>;
 pub type TrackHeightResizeResetCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 
 pub fn track_row_resize_handle(

@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, px, App, AppContext, BorrowAppContext, Bounds, Context, FocusHandle, Global, InteractiveElement,
-    IntoElement, ParentElement, Pixels, Render, SharedString, Styled, Window, WindowHandle,
+    div, px, App, AppContext, BorrowAppContext, Bounds, Context, FocusHandle, Global,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString, Styled, Window,
+    WindowHandle,
 };
 
 use crate::app_state::{AppMode, AppSessionGate};
@@ -162,13 +163,7 @@ impl LoadingSessionWindow {
                 .unwrap_or_else(|| "Loading Session…".to_string())
         };
         let stage = transaction.stage;
-        Self::new(
-            heading,
-            stage.label(),
-            stage.progress(),
-            transaction,
-            cx,
-        )
+        Self::new(heading, stage.label(), stage.progress(), transaction, cx)
     }
 
     fn set_stage(&mut self, stage: LoadStage, cx: &mut Context<Self>) {
@@ -384,7 +379,6 @@ impl LoadingSessionWindow {
         cx.notify();
     }
 
-
     fn begin_session_shutdown(
         &mut self,
         snapshot: SessionShutdownSnapshot,
@@ -414,15 +408,16 @@ impl LoadingSessionWindow {
                     cx.background_executor()
                         .timer(Duration::from_millis(50))
                         .await;
-                    let (detail, bar) = progress_for_ui
-                        .lock()
-                        .map(|g| g.clone())
-                        .unwrap_or_else(|_| {
-                            (
-                                "Closing current session".to_string(),
-                                ProgressBarValue::Indeterminate,
-                            )
-                        });
+                    let (detail, bar) =
+                        progress_for_ui
+                            .lock()
+                            .map(|g| g.clone())
+                            .unwrap_or_else(|_| {
+                                (
+                                    "Closing current session".to_string(),
+                                    ProgressBarValue::Indeterminate,
+                                )
+                            });
                     let _ = progress_ui.update(cx, |window, cx| {
                         window.set_progress(detail, bar, cx);
                     });
@@ -432,14 +427,11 @@ impl LoadingSessionWindow {
             let shutdown_result = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::session_shutdown::run_session_shutdown(
-                        snapshot,
-                        |progress| {
-                            if let Ok(mut slot) = progress_for_shutdown.lock() {
-                                *slot = (progress.stage.clone(), progress.bar);
-                            }
-                        },
-                    )
+                    crate::session_shutdown::run_session_shutdown(snapshot, |progress| {
+                        if let Ok(mut slot) = progress_for_shutdown.lock() {
+                            *slot = (progress.stage.clone(), progress.bar);
+                        }
+                    })
                 })
                 .await;
 
@@ -503,15 +495,16 @@ impl LoadingSessionWindow {
                     cx.background_executor()
                         .timer(Duration::from_millis(50))
                         .await;
-                    let (detail, bar) = progress_for_ui
-                        .lock()
-                        .map(|g| g.clone())
-                        .unwrap_or_else(|_| {
-                            (
-                                "Preparing session".to_string(),
-                                ProgressBarValue::Indeterminate,
-                            )
-                        });
+                    let (detail, bar) =
+                        progress_for_ui
+                            .lock()
+                            .map(|g| g.clone())
+                            .unwrap_or_else(|_| {
+                                (
+                                    "Preparing session".to_string(),
+                                    ProgressBarValue::Indeterminate,
+                                )
+                            });
                     let _ = progress_ui.update(cx, |window, cx| {
                         window.set_progress(detail, bar, cx);
                     });
@@ -599,11 +592,7 @@ pub(crate) fn touch_loading_session_progress<C: BorrowAppContext + AppContext>(
 }
 
 /// Update the pre-studio loading window with session-install progress.
-pub fn update_loading_session_progress(
-    cx: &mut App,
-    detail: &str,
-    progress: ProgressBarValue,
-) {
+pub fn update_loading_session_progress(cx: &mut App, detail: &str, progress: ProgressBarValue) {
     touch_loading_session_progress(cx, detail, progress);
 }
 
@@ -933,11 +922,8 @@ fn open_loading_session_window(
     use gpui::{size, WindowBackgroundAppearance, WindowBounds, WindowKind};
 
     let height = LOAD_WINDOW_HEIGHT + TITLEBAR_HEIGHT;
-    let window_bounds = centered_window_bounds(
-        owner_bounds,
-        size(px(LOAD_WINDOW_WIDTH), px(height)),
-        cx,
-    );
+    let window_bounds =
+        centered_window_bounds(owner_bounds, size(px(LOAD_WINDOW_WIDTH), px(height)), cx);
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
     window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));

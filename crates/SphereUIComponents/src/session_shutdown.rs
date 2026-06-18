@@ -129,10 +129,7 @@ pub fn run_session_shutdown(
         _ => "Closing Session…",
     };
 
-    eprintln!(
-        "[SessionShutdown] begin reason={}",
-        snapshot.reason.label()
-    );
+    eprintln!("[SessionShutdown] begin reason={}", snapshot.reason.label());
 
     let mut report = SessionShutdownReport::default();
 
@@ -186,10 +183,7 @@ pub fn run_session_shutdown(
             match unload_bridge_plugin(runtime, &target.insert_id) {
                 Ok(()) => {
                     report.plugins_unloaded += 1;
-                    eprintln!(
-                        "[PluginUnload] unloaded instance_id={}",
-                        target.insert_id
-                    );
+                    eprintln!("[PluginUnload] unloaded instance_id={}", target.insert_id);
                 }
                 Err(warning) => {
                     report.plugins_failed += 1;
@@ -202,10 +196,7 @@ pub fn run_session_shutdown(
     }
 
     if let Some(runtime) = snapshot.bridge_runtime.take() {
-        let host_pid = runtime
-            .lock()
-            .ok()
-            .and_then(|bridge| bridge.host_pid());
+        let host_pid = runtime.lock().ok().and_then(|bridge| bridge.host_pid());
         progress(SessionTransitionProgress::indeterminate(
             phase,
             title,
@@ -235,8 +226,8 @@ pub fn run_session_shutdown(
         report.warnings.extend(host_report.warnings);
     }
 
-    let remaining = SpherePluginHost::plugin_host_lifecycle::BridgeHostManager::global()
-        .host_count();
+    let remaining =
+        SpherePluginHost::plugin_host_lifecycle::BridgeHostManager::global().host_count();
     eprintln!("[SessionShutdown] complete remaining_hosts={remaining}");
 
     progress(SessionTransitionProgress::indeterminate(
@@ -274,9 +265,7 @@ fn unload_bridge_plugin(
         std::thread::sleep(Duration::from_millis(25));
     }
     if bridge.is_loaded(insert_id) {
-        return Err(format!(
-            "plugin unload timed out instance_id={insert_id}"
-        ));
+        return Err(format!("plugin unload timed out instance_id={insert_id}"));
     }
     Ok(())
 }

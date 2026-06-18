@@ -2,12 +2,12 @@
 //!
 //! Implementation lives in [`crate::process_manager`] and [`crate::platform`].
 
-pub use crate::process_manager::{
-    shutdown_host_client, shutdown_host_client_with_timeout, BridgeHostManager,
-    BridgeHostRecord, HostLifecycleState, PluginHostHandle, PluginHostId,
-    PluginHostProcessManager, HOST_SHUTDOWN_TIMEOUT, init_plugin_host_job,
-};
 pub use crate::plugin_host_spawn_config::PluginHostSpawnConfig;
+pub use crate::process_manager::{
+    init_plugin_host_job, shutdown_host_client, shutdown_host_client_with_timeout,
+    BridgeHostManager, BridgeHostRecord, HostLifecycleState, PluginHostHandle, PluginHostId,
+    PluginHostProcessManager, HOST_SHUTDOWN_TIMEOUT,
+};
 
 /// Shared Windows shell identity for FutureboardNative and PluginHost.
 pub const APP_USER_MODEL_ID: &str = "studio.futureboard.Futureboard";

@@ -3,6 +3,19 @@ use super::params::{StretchMode, StretchParams};
 const MIN_RATIO: f32 = 0.01;
 const MAX_RATIO: f32 = 100.0;
 
+/// Pitch multiplier from semitones and fine cents: `2^((semi + cents/100) / 12)`.
+pub fn semitone_to_pitch_ratio(semitones: f32, cents: f32) -> f32 {
+    2.0_f32.powf((semitones + cents / 100.0) / 12.0)
+}
+
+/// Split a pitch multiplier into whole semitones and residual cents.
+pub fn pitch_ratio_to_semitone_cents(pitch_ratio: f32) -> (f32, f32) {
+    let total_semitones = 12.0 * pitch_ratio.max(0.001).log2();
+    let semi = total_semitones.trunc();
+    let cents = (total_semitones - semi) * 100.0;
+    (semi, cents)
+}
+
 pub fn effective_time_ratio(params: &StretchParams, project_bpm: Option<f32>) -> f32 {
     if params.mode == StretchMode::Off {
         return 1.0;
@@ -31,7 +44,7 @@ pub fn effective_pitch_ratio(params: &StretchParams) -> f32 {
 
 pub fn source_read_rate_for_repitch(params: &StretchParams, project_bpm: Option<f32>) -> f32 {
     let time_ratio = effective_time_ratio(params, project_bpm);
-    sanitize_ratio(1.0 / time_ratio)
+    sanitize_ratio(effective_pitch_ratio(params) / time_ratio)
 }
 
 pub fn stretched_duration_samples(

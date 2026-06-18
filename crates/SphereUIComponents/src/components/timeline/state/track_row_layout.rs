@@ -222,8 +222,7 @@ impl TimelineState {
     }
 
     pub fn track_insert_index_at_content_y(&self, content_y: f32) -> usize {
-        self.track_row_layout()
-            .insert_index_at_content_y(content_y)
+        self.track_row_layout().insert_index_at_content_y(content_y)
     }
 
     pub fn track_index_at_y(&self, viewport_y: f32) -> Option<usize> {
@@ -278,12 +277,8 @@ impl TimelineState {
         shift: bool,
         alt: bool,
     ) {
-        self.track_height_resize_arm = Some((
-            anchor_track_id.to_string(),
-            start_mouse_y,
-            shift,
-            alt,
-        ));
+        self.track_height_resize_arm =
+            Some((anchor_track_id.to_string(), start_mouse_y, shift, alt));
     }
 
     pub fn clear_track_height_resize_arm(&mut self) {
@@ -363,7 +358,9 @@ impl TimelineState {
         true
     }
 
-    pub fn finish_track_height_resize(&mut self) -> Option<(Vec<(String, f32)>, Vec<(String, f32)>)> {
+    pub fn finish_track_height_resize(
+        &mut self,
+    ) -> Option<(Vec<(String, f32)>, Vec<(String, f32)>)> {
         let session = self.track_height_resize.take()?;
         let prev = session.start_heights;
         let next = session
@@ -376,9 +373,10 @@ impl TimelineState {
                     .map(|t| (id.clone(), self.track_row_height(t)))
             })
             .collect::<Vec<_>>();
-        let changed = prev.iter().zip(next.iter()).any(|((id_a, h_a), (id_b, h_b))| {
-            id_a == id_b && (h_a - h_b).abs() >= 0.01
-        });
+        let changed = prev
+            .iter()
+            .zip(next.iter())
+            .any(|((id_a, h_a), (id_b, h_b))| id_a == id_b && (h_a - h_b).abs() >= 0.01);
         if changed {
             Some((prev, next))
         } else {
@@ -443,7 +441,10 @@ mod tests {
             clamp_track_row_height(TrackType::Midi, 10.0),
             MIN_MIDI_TRACK_HEIGHT
         );
-        assert_eq!(clamp_track_row_height(TrackType::Audio, 500.0), MAX_TRACK_HEIGHT);
+        assert_eq!(
+            clamp_track_row_height(TrackType::Audio, 500.0),
+            MAX_TRACK_HEIGHT
+        );
     }
 
     #[test]
@@ -454,7 +455,10 @@ mod tests {
         state.update_track_height_resize(130.0);
         assert!(state.track_row_height(&state.tracks[0]) > DEFAULT_TRACK_HEIGHT);
         state.cancel_track_height_resize();
-        assert_eq!(state.track_row_height(&state.tracks[0]), DEFAULT_TRACK_HEIGHT);
+        assert_eq!(
+            state.track_row_height(&state.tracks[0]),
+            DEFAULT_TRACK_HEIGHT
+        );
     }
 
     #[test]

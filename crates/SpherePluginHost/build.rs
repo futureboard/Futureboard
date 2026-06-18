@@ -6,7 +6,9 @@ fn main() {
     if target_os == "windows" {
         println!(
             "cargo:rerun-if-changed={}",
-            manifest_dir.join("vst3backend/plugin_host_version.rc").display()
+            manifest_dir
+                .join("vst3backend/plugin_host_version.rc")
+                .display()
         );
         println!(
             "cargo:rerun-if-changed={}",

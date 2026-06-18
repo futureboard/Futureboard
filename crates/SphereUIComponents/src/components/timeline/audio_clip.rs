@@ -1,5 +1,5 @@
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, TimelineState,
+    ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, StretchMode, TimelineState,
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
 use crate::theme::Colors;
@@ -44,6 +44,21 @@ impl Render for ClipDragPreview {
     }
 }
 
+fn stretch_badge_label(clip: &ClipState, state: &TimelineState) -> Option<String> {
+    if clip.stretch.mode == StretchMode::Off {
+        return None;
+    }
+    if let Some(source_bpm) = clip.stretch.bpm_source {
+        return Some(format!("{source_bpm:.0}->{:.0}", state.bpm));
+    }
+    let ratio = clip.stretch.effective_time_ratio(state.bpm as f64);
+    if (ratio - 1.0).abs() > 0.001 {
+        Some(format!("x{ratio:.2}"))
+    } else {
+        Some("Stretch".to_string())
+    }
+}
+
 pub fn audio_clip(
     clip: &ClipState,
     track_id: &str,
@@ -71,6 +86,7 @@ pub fn audio_clip(
     let selected = state.selection.selected_clip_ids.contains(&clip.id);
     let pixels_per_second = state.viewport.pixels_per_second;
     let seconds_per_beat = state.seconds_per_beat();
+    let stretch_badge = stretch_badge_label(clip, state);
 
     let left = state.beats_to_x(clip.start_beat);
     let width = (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
@@ -209,6 +225,17 @@ pub fn audio_clip(
                         })
                         .child(clip.name.clone()),
                 )
+                .children(stretch_badge.map(|label| {
+                    div()
+                        .ml(px(5.0))
+                        .px(px(4.0))
+                        .rounded_sm()
+                        .bg(Colors::with_alpha(Colors::accent_primary(), 0.14))
+                        .text_size(px(8.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(Colors::accent_primary())
+                        .child(label)
+                }))
                 .child(
                     div()
                         .text_size(px(8.0))

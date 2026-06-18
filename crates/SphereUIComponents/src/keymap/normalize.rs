@@ -129,7 +129,10 @@ mod tests {
             canonical_accel("Ctrl+Shift+S"),
             Some("ctrl+shift+s".to_string())
         );
-        assert_eq!(canonical_accel("Shift+Space"), Some("shift+space".to_string()));
+        assert_eq!(
+            canonical_accel("Shift+Space"),
+            Some("shift+space".to_string())
+        );
     }
 
     #[test]

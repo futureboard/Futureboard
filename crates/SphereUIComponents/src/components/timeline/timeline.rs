@@ -14,9 +14,8 @@ use crate::components::timeline::timeline_ruler::{
 use crate::components::timeline::timeline_state::{
     hit_test_arrangement, ArrangementCoordinateContext, ArrangementHitTarget, ClipDragItem,
     ClipResizeDrag, ClipState, ClipType, SnapDivision, TempoPointDrag, TimeSignaturePointDrag,
-    TrackHeightResizeDrag, TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem,
-    TrackType, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
-    RULER_HEIGHT, TEMPO_LANE_PAD,
+    TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem, TrackHeightResizeDrag,
+    TrackType, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH, RULER_HEIGHT, TEMPO_LANE_PAD,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -102,7 +101,8 @@ use std::collections::HashSet;
 pub struct Timeline {
     pub state: TimelineState,
     edit_history: EditHistory,
-    on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32, crate::layout::SeekReason) + Send + Sync + 'static>>,
+    on_seek_beats:
+        Option<std::sync::Arc<dyn Fn(f32, f32, crate::layout::SeekReason) + Send + Sync + 'static>>,
     on_track_param_change:
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
     on_project_changed: Option<TimelineProjectChangedCb>,

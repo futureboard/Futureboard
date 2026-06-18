@@ -352,8 +352,8 @@ pub struct ProjectClip {
     pub muted: bool,
     pub source: ClipSource,
     /// Non-destructive clip-level stretch / pitch state (persisted v16+). Loads
-    /// as [`AudioClipStretchState::default`] (mode Off, ratio 1.0) for older
-    /// projects.
+    /// as [`AudioClipStretchState::default`] (mode Off, ratio 1.0,
+    /// preserve_pitch false) for older projects.
     pub stretch: AudioClipStretchState,
 }
 
@@ -803,14 +803,11 @@ impl From<&TimelineState> for FutureboardProject {
                         .collect(),
                     automation_lanes,
                     clips,
-                    row_height_px: tl
-                        .track_view_layout
-                        .height_for(&t.id)
-                        .filter(|h| {
-                            (*h - crate::components::timeline::timeline_state::DEFAULT_TRACK_HEIGHT)
-                                .abs()
-                                >= 0.01
-                        }),
+                    row_height_px: tl.track_view_layout.height_for(&t.id).filter(|h| {
+                        (*h - crate::components::timeline::timeline_state::DEFAULT_TRACK_HEIGHT)
+                            .abs()
+                            >= 0.01
+                    }),
                 }
             })
             .collect();

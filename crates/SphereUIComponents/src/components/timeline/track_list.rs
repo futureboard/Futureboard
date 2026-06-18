@@ -2,7 +2,7 @@ use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::timeline::automation_lane::automation_lane;
 use crate::components::timeline::timeline_state::{
-    AutomationMarquee, TimelineState, HEADER_WIDTH, DEFAULT_TRACK_HEIGHT,
+    AutomationMarquee, TimelineState, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
@@ -106,14 +106,14 @@ pub fn track_list(
         let row_entry = row_layout
             .row_for_track(&track.id)
             .cloned()
-            .unwrap_or_else(|| {
-                crate::components::timeline::timeline_state::TrackRowLayoutEntry {
+            .unwrap_or_else(
+                || crate::components::timeline::timeline_state::TrackRowLayoutEntry {
                     track_id: track.id.clone(),
                     index,
                     y: 0.0,
                     height: DEFAULT_TRACK_HEIGHT,
-                }
-            });
+                },
+            );
         let row_height = row_entry.height;
         let row_y = row_entry.y;
         let row = div()

@@ -168,8 +168,9 @@ pub fn track_lane(
                         let snapped_sec =
                             state_auto.snap_time(raw_beat * state_auto.seconds_per_beat());
                         let beat = (snapped_sec / state_auto.seconds_per_beat()).max(0.0);
-                        let content_y = wy - APP_CHROME_HEIGHT - state_auto.arrangement_content_top()
-                            + state_auto.viewport.scroll_y;
+                        let content_y =
+                            wy - APP_CHROME_HEIGHT - state_auto.arrangement_content_top()
+                                + state_auto.viewport.scroll_y;
                         let local_y = content_y - row_y;
                         let value = automation_y_to_value(local_y, row_height);
                         let additive = event.modifiers.shift || event.modifiers.control;

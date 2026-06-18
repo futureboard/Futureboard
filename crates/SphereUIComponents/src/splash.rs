@@ -71,11 +71,7 @@ impl Render for SplashWindow {
 /// Borderless centered splash shell. `PopUp` uses `WS_EX_TOOLWINDOW` on Windows
 /// so the splash does not claim a separate taskbar button.
 pub fn splash_window_options(cx: &mut App) -> WindowOptions {
-    let bounds = centered_window_bounds(
-        None,
-        gpui::size(px(SPLASH_WIDTH), px(SPLASH_HEIGHT)),
-        cx,
-    );
+    let bounds = centered_window_bounds(None, gpui::size(px(SPLASH_WIDTH), px(SPLASH_HEIGHT)), cx);
     WindowOptions {
         titlebar: None,
         focus: true,
@@ -99,9 +95,7 @@ impl SplashWindowHandle {
     pub fn open(cx: &mut App) -> Result<Self, String> {
         let options = splash_window_options(cx);
         let handle = cx
-            .open_window(options, |_window, cx| {
-                cx.new(|_| SplashWindow::new())
-            })
+            .open_window(options, |_window, cx| cx.new(|_| SplashWindow::new()))
             .map_err(|e| e.to_string())?;
         crate::boot::log("splash window shown");
         Ok(Self { window: handle })

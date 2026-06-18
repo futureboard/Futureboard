@@ -92,17 +92,17 @@ mod imp {
         ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
         GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW,
         IsWindow, IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWLP_USERDATA, GWL_EXSTYLE,
-        GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
-        HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG,
-        PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE,
-        WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_GETMINMAXINFO,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE,
-        WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT, WM_PAINT, WM_SIZE, WNDCLASSW,
-        WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME,
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-        WS_THICKFRAME, WS_VISIBLE, GWLP_HWNDPARENT,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWLP_HWNDPARENT,
+        GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW,
+        MA_ACTIVATE, MINMAXINFO, MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+        WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+        WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT,
+        WM_PAINT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+        WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
     };
 
     const SHELL_CLASS: PCWSTR = w!("SpherePluginEditorShell");
@@ -1699,30 +1699,30 @@ mod imp {
             let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
 
             unsafe {
-            let owner = validated_owner(owner_hwnd);
-            let ex_style = if owner.is_some() {
-                WS_EX_TOOLWINDOW
-            } else {
-                WS_EX_APPWINDOW
-            };
-            let top = CreateWindowExW(
-                ex_style,
-                SHELL_CLASS,
-                PCWSTR(title_w.as_ptr()),
-                // Borderless custom chrome — no WS_CAPTION/WS_THICKFRAME/WS_BORDER.
-                // Resize via WM_NCHITTEST; min/max/close via drawn buttons.
-                WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                pos_x,
-                pos_y,
-                win_w,
-                win_h,
-                owner,
-                None::<HMENU>,
-                None,
-                None,
-            )
-            .ok()?;
-            apply_borderless_styles(top, owner);
+                let owner = validated_owner(owner_hwnd);
+                let ex_style = if owner.is_some() {
+                    WS_EX_TOOLWINDOW
+                } else {
+                    WS_EX_APPWINDOW
+                };
+                let top = CreateWindowExW(
+                    ex_style,
+                    SHELL_CLASS,
+                    PCWSTR(title_w.as_ptr()),
+                    // Borderless custom chrome — no WS_CAPTION/WS_THICKFRAME/WS_BORDER.
+                    // Resize via WM_NCHITTEST; min/max/close via drawn buttons.
+                    WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    pos_x,
+                    pos_y,
+                    win_w,
+                    win_h,
+                    owner,
+                    None::<HMENU>,
+                    None,
+                    None,
+                )
+                .ok()?;
+                apply_borderless_styles(top, owner);
                 let (outer_w, outer_h) = outer_size_for_client(top, client_w, client_h);
                 if outer_w != win_w || outer_h != win_h {
                     let _ = SetWindowPos(

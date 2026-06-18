@@ -3,7 +3,10 @@ use super::normalize::canonical_accel;
 use std::collections::HashMap;
 
 pub fn contexts_overlap(a: Option<&str>, b: Option<&str>) -> bool {
-    match (a.map(str::trim).filter(|s| !s.is_empty()), b.map(str::trim).filter(|s| !s.is_empty())) {
+    match (
+        a.map(str::trim).filter(|s| !s.is_empty()),
+        b.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
         (None, _) | (_, None) => true,
         (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
     }
@@ -23,7 +26,11 @@ pub fn find_conflicts_for_binding(
             if exclude_action.is_some_and(|action| action == existing.action) {
                 continue;
             }
-            if !existing.keys.iter().any(|k| canonical_accel(k).as_deref() == Some(token.as_str())) {
+            if !existing
+                .keys
+                .iter()
+                .any(|k| canonical_accel(k).as_deref() == Some(token.as_str()))
+            {
                 continue;
             }
             if !contexts_overlap(candidate.context.as_deref(), existing.context.as_deref()) {
@@ -41,7 +48,10 @@ pub fn find_conflicts_for_binding(
     out
 }
 
-pub fn annotate_row_conflicts(rows: &mut [super::model::KeymapRow], bindings: &[ResolvedKeyBinding]) {
+pub fn annotate_row_conflicts(
+    rows: &mut [super::model::KeymapRow],
+    bindings: &[ResolvedKeyBinding],
+) {
     let mut by_token: HashMap<String, Vec<&ResolvedKeyBinding>> = HashMap::new();
     for binding in bindings {
         for key in &binding.keys {

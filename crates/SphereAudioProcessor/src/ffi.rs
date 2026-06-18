@@ -35,7 +35,10 @@ pub extern "C" fn sphere_audio_processor_version() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sphere_stretch_create(sample_rate: f32, channels: u32) -> *mut SphereStretchHandle {
+pub extern "C" fn sphere_stretch_create(
+    sample_rate: f32,
+    channels: u32,
+) -> *mut SphereStretchHandle {
     let result = catch_unwind(AssertUnwindSafe(|| {
         if !sample_rate.is_finite() || sample_rate <= 0.0 || channels == 0 || channels > 2 {
             return ptr::null_mut();
@@ -43,15 +46,12 @@ pub extern "C" fn sphere_stretch_create(sample_rate: f32, channels: u32) -> *mut
 
         let params = StretchParams::default();
         let backend = resolve_backend(&params);
-        let processor = match create_stretch_processor(
-            backend,
-            sample_rate,
-            channels as usize,
-            params.clone(),
-        ) {
-            Ok(processor) => processor,
-            Err(_) => return ptr::null_mut(),
-        };
+        let processor =
+            match create_stretch_processor(backend, sample_rate, channels as usize, params.clone())
+            {
+                Ok(processor) => processor,
+                Err(_) => return ptr::null_mut(),
+            };
 
         let state = StretchHandleState {
             sample_rate,
@@ -171,7 +171,10 @@ pub extern "C" fn sphere_stretch_process_stereo(
         let output_l = unsafe { std::slice::from_raw_parts_mut(output_l, frames) };
         let output_r = unsafe { std::slice::from_raw_parts_mut(output_r, frames) };
 
-        match state.processor.process_stereo(input_l, input_r, output_l, output_r) {
+        match state
+            .processor
+            .process_stereo(input_l, input_r, output_l, output_r)
+        {
             Ok(()) => 0,
             Err(StretchError::BufferLengthMismatch) => -2,
             Err(_) => -3,
@@ -239,17 +242,7 @@ mod tests {
         assert!(!handle.is_null());
 
         assert_eq!(
-            sphere_stretch_set_params(
-                handle,
-                1,
-                1,
-                2.0,
-                1.0,
-                f32::NAN,
-                f32::NAN,
-                false,
-                0.75
-            ),
+            sphere_stretch_set_params(handle, 1, 1, 2.0, 1.0, f32::NAN, f32::NAN, false, 0.75),
             0
         );
 

@@ -159,11 +159,7 @@ impl StudioLayout {
             ProjectSwitchSource::ProjectSwitcher | ProjectSwitchSource::RecentProject
         );
         self.project_switch.pending_request = None;
-        self.begin_in_studio_project_switch(
-            path,
-            ProjectOpenOptions { from_recent },
-            cx,
-        );
+        self.begin_in_studio_project_switch(path, ProjectOpenOptions { from_recent }, cx);
     }
 
     pub(super) fn close_project_switcher_and_overlays(&mut self, _cx: &mut Context<Self>) {

@@ -29,6 +29,7 @@ gpui.workspace = true
 # IMPORTANT: UI components are used by the standalone `futureboard_native` app.
 # Disable Node/N-API surfaces so native builds don't try to link against `napi_*`.
 sphere-direct-audio-engine.workspace = true
+sphere-audio-processor.workspace = true
 sphere-audio-editor.workspace = true
 sphere-plugin-host.workspace = true
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).

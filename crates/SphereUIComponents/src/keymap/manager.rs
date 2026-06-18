@@ -8,8 +8,8 @@ use crate::menu::{MenuItem, MenuManifest};
 
 use super::conflicts::{annotate_row_conflicts, find_conflicts_for_binding};
 use super::model::{
-    KeyBinding, KeymapConflict, KeymapProfile, KeymapRow, KeymapSource, ResolvedKeyBinding,
-    ProfileDescriptor, PROFILE_DESCRIPTORS, USER_OVERRIDES_FILE,
+    KeyBinding, KeymapConflict, KeymapProfile, KeymapRow, KeymapSource, ProfileDescriptor,
+    ResolvedKeyBinding, PROFILE_DESCRIPTORS, USER_OVERRIDES_FILE,
 };
 use super::normalize::{canonical_accel, format_accel_display, global_priority};
 use super::storage::{
@@ -169,12 +169,7 @@ impl KeymapManager {
             .unwrap_or_else(|_| KeymapProfile::default());
         profile.name = self.active_profile_label().to_string();
         profile.extends = Some(self.active_profile_id.clone());
-        profile.bindings = self
-            .user_overrides
-            .bindings
-            .iter()
-            .cloned()
-            .collect();
+        profile.bindings = self.user_overrides.bindings.iter().cloned().collect();
         profile
     }
 
@@ -224,11 +219,7 @@ impl KeymapManager {
             &self.user_overrides,
             self.imported_profile.as_ref(),
         );
-        self.rows = build_rows(
-            &self.action_labels,
-            &self.resolved,
-            &self.active_profile_id,
-        );
+        self.rows = build_rows(&self.action_labels, &self.resolved, &self.active_profile_id);
         annotate_row_conflicts(&mut self.rows, &self.resolved);
         self.reverse = build_reverse_index(&self.resolved);
     }
@@ -291,10 +282,7 @@ fn resolve_effective_bindings(
         if let Some(imported) = imported {
             imported.clone()
         } else {
-            let extends = user_overrides
-                .extends
-                .as_deref()
-                .unwrap_or("default");
+            let extends = user_overrides.extends.as_deref().unwrap_or("default");
             let mut merged = load_builtin_profile(extends).unwrap_or_default();
             merged.bindings.extend(user_overrides.bindings.clone());
             merged
@@ -354,15 +342,17 @@ fn build_rows(
         actions.insert(binding.action.clone(), binding.clone());
     }
     for action in labels.keys() {
-        actions.entry(action.clone()).or_insert_with(|| ResolvedKeyBinding {
-            action: action.clone(),
-            keys: Vec::new(),
-            context: Some("Studio".to_string()),
-            args: None,
-            source: KeymapSource::Default,
-            profile: profile_id.to_string(),
-            is_user_override: false,
-        });
+        actions
+            .entry(action.clone())
+            .or_insert_with(|| ResolvedKeyBinding {
+                action: action.clone(),
+                keys: Vec::new(),
+                context: Some("Studio".to_string()),
+                args: None,
+                source: KeymapSource::Default,
+                profile: profile_id.to_string(),
+                is_user_override: false,
+            });
     }
 
     let mut rows: Vec<KeymapRow> = actions
@@ -406,7 +396,8 @@ fn build_reverse_index(resolved: &[ResolvedKeyBinding]) -> HashMap<String, Strin
                 continue;
             };
             match reverse.get(&token) {
-                Some(existing) if global_priority(existing) <= global_priority(&binding.action) => {}
+                Some(existing) if global_priority(existing) <= global_priority(&binding.action) => {
+                }
                 _ => {
                     reverse.insert(token, binding.action.clone());
                 }

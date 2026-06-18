@@ -69,6 +69,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Plugin/audio graph integration.
+sphere-audio-processor.workspace = true
 sphere-audio-plugins.workspace = true
 sphere-encoder.workspace = true
 

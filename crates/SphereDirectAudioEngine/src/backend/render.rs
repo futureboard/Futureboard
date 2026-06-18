@@ -205,11 +205,7 @@ impl LocalAudioState {
             return;
         }
         self.metronome_suspended = suspended;
-        self.clear_metronome_clicks(if suspended {
-            "suspend"
-        } else {
-            "resume"
-        });
+        self.clear_metronome_clicks(if suspended { "suspend" } else { "resume" });
         if callback_debug_enabled() {
             if suspended {
                 eprintln!("[Metronome] suspend during drag");

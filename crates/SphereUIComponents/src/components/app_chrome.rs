@@ -184,10 +184,13 @@ fn tap_tempo_chip(
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             on_tap(&(), window, cx);
         })
-        .on_mouse_down(MouseButton::Right, move |event: &gpui::MouseDownEvent, window, cx| {
-            let pos = event.position;
-            on_menu(&(pos.x.into(), pos.y.into()), window, cx);
-        })
+        .on_mouse_down(
+            MouseButton::Right,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                let pos = event.position;
+                on_menu(&(pos.x.into(), pos.y.into()), window, cx);
+            },
+        )
         .into_any_element()
 }
 

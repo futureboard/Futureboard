@@ -50,9 +50,7 @@ impl PluginHostJob {
                 return Self { handle: None };
             }
             eprintln!("[PluginHost] job_object created kill_on_job_close=true");
-            Self {
-                handle: Some(job),
-            }
+            Self { handle: Some(job) }
         }
     }
 
@@ -91,9 +89,7 @@ impl Drop for PluginHostJob {
 #[cfg(windows)]
 pub fn terminate_process_pid(pid: u32) -> bool {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-    };
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     unsafe {
         let Ok(process) = OpenProcess(PROCESS_TERMINATE, false, pid) else {

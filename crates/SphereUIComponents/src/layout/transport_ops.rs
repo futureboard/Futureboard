@@ -3,8 +3,8 @@ use gpui::{Context, Window};
 use std::sync::Arc;
 
 use crate::components;
-use crate::components::{PerformanceOverlaySnapshot, StatusBarContent, StatusBarPerfMetrics};
 use crate::components::text_input::TextInputState;
+use crate::components::{PerformanceOverlaySnapshot, StatusBarContent, StatusBarPerfMetrics};
 
 use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, StudioLayout, TransportCommand};
 
@@ -546,8 +546,9 @@ impl StudioLayout {
     fn status_perf_metrics(&self) -> StatusBarPerfMetrics {
         StatusBarPerfMetrics {
             pill_label: self.frame_diag.compact_pill_label(),
-            renderer: crate::components::timeline::timeline_surface::active_timeline_renderer_backend()
-                .to_string(),
+            renderer:
+                crate::components::timeline::timeline_surface::active_timeline_renderer_backend()
+                    .to_string(),
             display_sync: self.frame_scheduler.describe(),
             fps: self.frame_diag.displayed_fps(),
             frame_ms: self.frame_diag.displayed_avg_ms(),
@@ -556,10 +557,14 @@ impl StudioLayout {
         }
     }
 
-    pub(super) fn performance_overlay_snapshot(&self, repaint_reason: &str) -> PerformanceOverlaySnapshot {
+    pub(super) fn performance_overlay_snapshot(
+        &self,
+        repaint_reason: &str,
+    ) -> PerformanceOverlaySnapshot {
         PerformanceOverlaySnapshot {
-            renderer: crate::components::timeline::timeline_surface::active_timeline_renderer_backend()
-                .to_string(),
+            renderer:
+                crate::components::timeline::timeline_surface::active_timeline_renderer_backend()
+                    .to_string(),
             display_sync: self.frame_scheduler.describe(),
             fps: self.frame_diag.displayed_fps(),
             frame_ms: self.frame_diag.displayed_avg_ms(),

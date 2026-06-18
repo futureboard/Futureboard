@@ -34,6 +34,7 @@ mod tests {
                 gain: 1.0,
                 muted: false,
                 fades: None,
+                stretch: SphereAudioProcessor::StretchParams::default(),
                 audio_process: None,
             }]
         } else {

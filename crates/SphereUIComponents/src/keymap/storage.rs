@@ -82,7 +82,8 @@ pub fn load_profile_json(text: &str) -> Result<KeymapProfile, String> {
 
 pub fn save_profile_json(profile: &KeymapProfile, path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("Failed to create keymap folder: {error}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create keymap folder: {error}"))?;
     }
     let text = serde_json::to_string_pretty(profile)
         .map_err(|error| format!("Failed to serialize keymap: {error}"))?;
@@ -116,7 +117,9 @@ pub fn save_user_overrides(app_data: &Path, profile: &KeymapProfile) -> Result<(
 pub fn builtin_profile_json(profile_id: &str) -> Option<&'static str> {
     match profile_id {
         "default" => Some(include_str!("../../../../packages/keymaps/default.json")),
-        "futureboard" => Some(include_str!("../../../../packages/keymaps/futureboard.json")),
+        "futureboard" => Some(include_str!(
+            "../../../../packages/keymaps/futureboard.json"
+        )),
         "fl-studio" => Some(include_str!("../../../../packages/keymaps/fl_studio.json")),
         "ableton-live" => Some(include_str!("../../../../packages/keymaps/ableton.json")),
         "cubase" => Some(include_str!("../../../../packages/keymaps/cubase.json")),

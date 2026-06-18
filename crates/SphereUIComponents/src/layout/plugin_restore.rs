@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, BorrowAppContext, Context};
 
+use super::StudioLayout;
 use crate::components::progress_dialog::ProgressBarValue;
 use crate::components::timeline::timeline_state::{
     InsertPluginFormat, PluginRuntimeBackend, PluginRuntimeState, TrackType, MASTER_TRACK_ID,
 };
-use super::StudioLayout;
 
 const PLUGIN_RESTORE_TIMEOUT: Duration = Duration::from_secs(120);
 const AUDIO_ENGINE_WAIT: Duration = Duration::from_secs(30);
@@ -62,7 +62,8 @@ impl StudioLayout {
 
         for track in &state.tracks {
             let track_name = track.name.clone();
-            let is_instrument_track = matches!(track.track_type, TrackType::Instrument | TrackType::Midi);
+            let is_instrument_track =
+                matches!(track.track_type, TrackType::Instrument | TrackType::Midi);
             for (index, slot) in track.inserts.iter().enumerate() {
                 if slot.plugin_id.as_deref() == Some(STUB_PLUGIN_ID) {
                     continue;
@@ -70,7 +71,8 @@ impl StudioLayout {
                 let is_instrument = is_instrument_track
                     && (track.instrument_plugin_instance_id.as_deref() == Some(slot.id.as_str())
                         || index == 0);
-                if let Some(target) = target_from_slot(&track.id, &track_name, slot, is_instrument) {
+                if let Some(target) = target_from_slot(&track.id, &track_name, slot, is_instrument)
+                {
                     targets.push(target);
                 }
             }
@@ -81,9 +83,7 @@ impl StudioLayout {
             if slot.plugin_id.as_deref() == Some(STUB_PLUGIN_ID) {
                 continue;
             }
-            if let Some(target) =
-                target_from_slot(MASTER_TRACK_ID, &master_name, slot, false)
-            {
+            if let Some(target) = target_from_slot(MASTER_TRACK_ID, &master_name, slot, false) {
                 targets.push(target);
             }
         }
@@ -100,11 +100,7 @@ impl StudioLayout {
         self.update_virtual_keyboard_target_status(cx);
         self.schedule_loaded_project_waveforms(&package, cx);
         self.mark_engine_media_dirty();
-        self.set_session_install_progress(
-            "Preparing session",
-            ProgressBarValue::value(0.15),
-            cx,
-        );
+        self.set_session_install_progress("Preparing session", ProgressBarValue::value(0.15), cx);
 
         let package = package;
         let entity = cx.entity().clone();
@@ -385,9 +381,7 @@ impl StudioLayout {
         self.session_install_warnings = report.warnings.clone();
         self.session_install_status = crate::app_state::SessionInstallStatus::Ready;
         self.project_state = if self.project_session.project_file_path.is_some() {
-            crate::app_state::ProjectState::SavedProject {
-                path: package.path,
-            }
+            crate::app_state::ProjectState::SavedProject { path: package.path }
         } else {
             crate::app_state::ProjectState::UnsavedWorkspace
         };

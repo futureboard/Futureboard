@@ -1502,11 +1502,25 @@ impl Render for StudioLayout {
                 if show_inspector {
                     main_row = main_row.child({
                         let _s = crate::perf::PerfScope::enter("Inspector");
+                        let selection_duration_beats = self.timeline.read(cx).state.arrangement_range.as_ref().and_then(|range| {
+                            let (start, end) = range.as_f32_range();
+                            let duration = (end - start).abs();
+                            (duration > 0.0001).then_some(duration)
+                        });
+                        let stretch_tempo = selected_clip_id.as_deref().map(|clip_id| {
+                            self.stretch_tempo_snapshot(clip_id)
+                        });
                         crate::components::panel::inspector_panel(
                             &tracks,
                             selected_track_id.as_deref(),
                             selected_clip_id.as_deref(),
-                            find_clip_summary(&tracks, selected_clip_id.as_deref(), project_bpm),
+                            find_clip_summary(
+                                &tracks,
+                                selected_clip_id.as_deref(),
+                                project_bpm,
+                                selection_duration_beats,
+                            ),
+                            stretch_tempo,
                             &self.inspector_name_edit.name_input,
                             inspector_name_focused,
                             &self.inspector_name_edit.clip_name_input,

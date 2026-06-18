@@ -305,7 +305,10 @@ impl Timeline {
         self.on_add_track = callback;
     }
 
-    pub fn set_plugin_preset_drop_callback(&mut self, callback: Option<TimelinePluginPresetDropCb>) {
+    pub fn set_plugin_preset_drop_callback(
+        &mut self,
+        callback: Option<TimelinePluginPresetDropCb>,
+    ) {
         self.on_plugin_preset_drop = callback;
     }
 
@@ -524,9 +527,7 @@ impl Timeline {
         let row_layout = self.state.track_row_layout();
         let row = row_layout.row_for_track(track_id);
         let row_y = row.map(|r| r.y).unwrap_or(0.0);
-        let row_h = row
-            .map(|r| r.height)
-            .unwrap_or(DEFAULT_TRACK_HEIGHT);
+        let row_h = row.map(|r| r.height).unwrap_or(DEFAULT_TRACK_HEIGHT);
         let local_y = (window_y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()
             + self.state.viewport.scroll_y)
             - row_y;

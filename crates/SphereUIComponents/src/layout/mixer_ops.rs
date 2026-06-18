@@ -10,7 +10,9 @@ use crate::components::timeline::timeline_state::{self, TrackState};
 use crate::components::{external_mixer_debug, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
-use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, OpenPopover, StudioLayout};
+use super::{
+    ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, OpenPopover, StudioLayout,
+};
 
 /// Mixer-panel view state — horizontal scroll, the shared insert/send section
 /// heights, and the transient splitter-drag anchors. `StudioLayout` decomposition
@@ -512,9 +514,7 @@ impl StudioLayout {
         > = {
             let this = owner.clone();
             std::sync::Arc::new(
-                move |(preset_path, track_id, insert_index): &(PathBuf, String, usize),
-                      _w,
-                      cx| {
+                move |(preset_path, track_id, insert_index): &(PathBuf, String, usize), _w, cx| {
                     let preset_path = preset_path.clone();
                     let track_id = track_id.clone();
                     let insert_index = *insert_index;

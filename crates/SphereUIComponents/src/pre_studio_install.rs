@@ -145,16 +145,8 @@ pub fn run_pre_studio_session_install(
     progress("Rebuilding audio graph", ProgressBarValue::value(0.82));
 
     let sample_rate = engine.config().sample_rate;
-    let project_root = package
-        .path
-        .parent()
-        .and_then(|path| path.to_str());
-    let snapshot = build_engine_project_snapshot(
-        &timeline_state,
-        sample_rate,
-        project_root,
-        None,
-    );
+    let project_root = package.path.parent().and_then(|path| path.to_str());
+    let snapshot = build_engine_project_snapshot(&timeline_state, sample_rate, project_root, None);
     engine
         .load_project(snapshot)
         .map_err(|error| format!("engine load_project failed: {error}"))?;
@@ -174,7 +166,8 @@ pub fn run_pre_studio_session_install(
 fn collect_restore_targets(state: &TimelineState) -> Vec<RestoreTarget> {
     let mut targets = Vec::new();
     for track in &state.tracks {
-        let is_instrument_track = matches!(track.track_type, TrackType::Instrument | TrackType::Midi);
+        let is_instrument_track =
+            matches!(track.track_type, TrackType::Instrument | TrackType::Midi);
         for (index, slot) in track.inserts.iter().enumerate() {
             if slot.plugin_id.as_deref() == Some(STUB_PLUGIN_ID) {
                 continue;
@@ -254,7 +247,12 @@ fn restore_bridge_target(
         return RestoreOutcome::Missing;
     }
 
-    let path_string = slot.plugin_path.as_ref().unwrap().to_string_lossy().into_owned();
+    let path_string = slot
+        .plugin_path
+        .as_ref()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let descriptor = BridgePluginDescriptor {
         track_id: target.track_id.clone(),
         insert_id: target.slot_id.clone(),
@@ -325,12 +323,10 @@ fn poll_bridge_events(runtime: &SharedPluginBridgeRuntime, timeline_state: &mut 
     for event in events {
         match event {
             ClientEvent::Host(HostEvent::PluginLoaded {
-                plugin_instance_id,
-                ..
+                plugin_instance_id, ..
             })
             | ClientEvent::Host(HostEvent::PluginAlreadyLoaded {
-                plugin_instance_id,
-                ..
+                plugin_instance_id, ..
             }) => {
                 if let Ok(mut bridge) = runtime.lock() {
                     bridge.mark_plugin_loaded(&plugin_instance_id);
@@ -364,7 +360,9 @@ fn poll_bridge_events(runtime: &SharedPluginBridgeRuntime, timeline_state: &mut 
                     );
                 }
             }
-            ClientEvent::Host(HostEvent::ProcessingPrepared { plugin_instance_id, .. }) => {
+            ClientEvent::Host(HostEvent::ProcessingPrepared {
+                plugin_instance_id, ..
+            }) => {
                 for track_id in timeline_state.insert_owner_ids_containing(&plugin_instance_id) {
                     let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
                     timeline_state.set_insert_runtime(
@@ -381,11 +379,7 @@ fn poll_bridge_events(runtime: &SharedPluginBridgeRuntime, timeline_state: &mut 
     }
 }
 
-fn terminal_state(
-    timeline_state: &TimelineState,
-    track_id: &str,
-    slot_id: &str,
-) -> RestoreOutcome {
+fn terminal_state(timeline_state: &TimelineState, track_id: &str, slot_id: &str) -> RestoreOutcome {
     let Some(slot) = timeline_state.find_insert_slot(track_id, slot_id) else {
         return RestoreOutcome::Failed;
     };
@@ -416,7 +410,10 @@ fn sync_bridge_sinks(
         let Some(sink) = runtime.audio_sink_for(&insert_id) else {
             continue;
         };
-        if engine.set_plugin_bridge_sink(insert_id.clone(), Some(sink)).is_ok() {
+        if engine
+            .set_plugin_bridge_sink(insert_id.clone(), Some(sink))
+            .is_ok()
+        {
             eprintln!(
                 "[PluginRestore] bridge registered instance={insert_id} track={track_id} source={reason}"
             );

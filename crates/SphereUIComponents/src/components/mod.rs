@@ -31,6 +31,7 @@ pub(crate) use mixer_window::external_mixer_debug;
 pub mod gpu_editor_diagnostics;
 pub mod native_editor_shell;
 pub mod panel;
+mod performance_overlay;
 pub mod piano_roll;
 pub mod plugin_content_host;
 pub mod plugin_editor_window;
@@ -47,7 +48,6 @@ pub mod settings_dialog;
 pub mod settings_layout;
 mod sidebar;
 pub mod slider;
-mod performance_overlay;
 mod status_bar;
 pub mod text_input;
 pub mod timeline;
@@ -107,6 +107,7 @@ pub use midi_editor_window::{open_midi_editor_window, MidiEditorTarget, MidiEdit
 pub use mixer_panel::mixer_panel;
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::{inspector_debug, inspector_debug_enabled, right_panel};
+pub use performance_overlay::{performance_overlay, PerformanceOverlaySnapshot};
 pub use piano_roll::PianoRoll;
 pub use plugin_manager::{
     open_plugin_manager_window, FilterCounts, PluginManagerDialogState, PluginManagerWindow,
@@ -131,7 +132,6 @@ pub use settings_dialog::{
 };
 pub use sidebar::sidebar;
 pub use slider::slider;
-pub use performance_overlay::{performance_overlay, PerformanceOverlaySnapshot};
 pub use status_bar::{
     status_bar, status_bar_with_background_tasks, PerfMetricsToggleCb, StatusBarContent,
     StatusBarPerfMetrics,

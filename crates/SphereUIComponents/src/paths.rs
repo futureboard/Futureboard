@@ -196,7 +196,13 @@ impl FutureboardPaths {
             fs::create_dir_all(dir)?;
         }
 
-        let app_dirs = [&self.app_data, &self.logs, &self.app_cache, &self.plugin_db, &self.keymaps];
+        let app_dirs = [
+            &self.app_data,
+            &self.logs,
+            &self.app_cache,
+            &self.plugin_db,
+            &self.keymaps,
+        ];
         for dir in &app_dirs {
             fs::create_dir_all(dir)?;
         }

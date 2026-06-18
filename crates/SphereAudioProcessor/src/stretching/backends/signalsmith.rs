@@ -3,7 +3,7 @@ use std::ptr::NonNull;
 use crate::stretching::error::StretchError;
 use crate::stretching::params::StretchParams;
 use crate::stretching::processor::StretchProcessor;
-use crate::stretching::ratios::{effective_pitch_ratio, effective_time_ratio};
+use crate::stretching::ratios::effective_pitch_ratio;
 
 #[link(name = "sphere_signalsmith_bridge", kind = "static")]
 unsafe extern "C" {
@@ -16,8 +16,8 @@ unsafe extern "C" {
         input_r: *const f32,
         output_l: *mut f32,
         output_r: *mut f32,
-        frames: i32,
-        time_ratio: f32,
+        input_frames: i32,
+        output_frames: i32,
         pitch_ratio: f32,
         quality: f32,
     ) -> i32;
@@ -28,7 +28,6 @@ pub struct SignalsmithProcessor {
     handle: NonNull<std::ffi::c_void>,
     _channels: usize,
     params: StretchParams,
-    project_bpm: Option<f32>,
 }
 
 impl SignalsmithProcessor {
@@ -42,12 +41,7 @@ impl SignalsmithProcessor {
             handle,
             _channels: channels,
             params: StretchParams::default(),
-            project_bpm: None,
         })
-    }
-
-    fn time_ratio(&self) -> f32 {
-        effective_time_ratio(&self.params, self.project_bpm)
     }
 
     fn pitch_ratio(&self) -> f32 {
@@ -79,6 +73,9 @@ impl StretchProcessor for SignalsmithProcessor {
         latency.max(0) as usize
     }
 
+    /// Time-stretch by `output.len() / input.len()` and pitch-shift by the
+    /// param transpose factor. Input and output lengths may differ; the caller
+    /// supplies exactly the source samples to consume (see [`StretchProcessor`]).
     fn process_stereo(
         &mut self,
         input_l: &[f32],
@@ -86,16 +83,17 @@ impl StretchProcessor for SignalsmithProcessor {
         output_l: &mut [f32],
         output_r: &mut [f32],
     ) -> Result<(), StretchError> {
-        if input_l.len() != input_r.len()
-            || input_l.len() != output_l.len()
-            || input_l.len() != output_r.len()
-        {
+        if input_l.len() != input_r.len() || output_l.len() != output_r.len() {
+            return Err(StretchError::BufferLengthMismatch);
+        }
+        if input_l.is_empty() || output_l.is_empty() {
             return Err(StretchError::BufferLengthMismatch);
         }
 
-        let frames = i32::try_from(output_l.len()).map_err(|_| {
-            StretchError::InvalidParams("frame count exceeds i32::MAX".to_string())
-        })?;
+        let input_frames = i32::try_from(input_l.len())
+            .map_err(|_| StretchError::InvalidParams("frame count exceeds i32::MAX".to_string()))?;
+        let output_frames = i32::try_from(output_l.len())
+            .map_err(|_| StretchError::InvalidParams("frame count exceeds i32::MAX".to_string()))?;
 
         let status = unsafe {
             fb_signalsmith_process_stereo(
@@ -104,8 +102,8 @@ impl StretchProcessor for SignalsmithProcessor {
                 input_r.as_ptr(),
                 output_l.as_mut_ptr(),
                 output_r.as_mut_ptr(),
-                frames,
-                self.time_ratio(),
+                input_frames,
+                output_frames,
                 self.pitch_ratio(),
                 self.params.quality,
             )

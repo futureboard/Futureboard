@@ -3,7 +3,7 @@
 use sphere_audio_editor::{WaveformColumn, WaveformViewModel};
 
 use crate::components::timeline::timeline_state::{
-    AudioImportState, ClipState, ClipType, TimelineState,
+    clip_output_local_to_source_sample, AudioImportState, ClipState, ClipType, TimelineState,
 };
 use crate::components::timeline::waveform_cache::{self, WaveformDisplayStatus, WaveformPeak};
 use crate::theme::Colors;
@@ -100,8 +100,25 @@ fn build_peak_columns(
     let num_cols = (visible_w.ceil() as usize).clamp(16, MAX_EDITOR_COLUMNS);
 
     let seconds_per_beat = state.seconds_per_beat();
-    let src_start = clip.offset_beats.max(0.0) as f64 * seconds_per_beat as f64;
-    let clip_dur = (clip.duration_beats as f64 * seconds_per_beat as f64).max(1e-6);
+    let effective_time_ratio = clip.stretch.effective_time_ratio(state.bpm as f64);
+    let source_start = clip.stretch.source_start_samples;
+    let source_end = if clip.stretch.source_end_samples > source_start {
+        clip.stretch.source_end_samples
+    } else {
+        let source_duration_beats =
+            clip.duration_beats.max(0.0) as f64 / effective_time_ratio.max(1e-6);
+        ((clip.offset_beats.max(0.0) as f64 + source_duration_beats)
+            * seconds_per_beat as f64
+            * meta.sample_rate as f64)
+            .round()
+            .max(source_start as f64) as u64
+    };
+    let output_len = SphereAudioProcessor::stretched_duration_samples(
+        source_end.saturating_sub(source_start),
+        &clip.stretch.to_sphere_stretch_params(state.bpm as f64),
+        Some(state.bpm),
+    )
+    .max(1) as f64;
 
     let pixels_per_second = pixels_per_beat / seconds_per_beat.max(1e-6);
     let desired_spp =
@@ -114,10 +131,24 @@ fn build_peak_columns(
             let x1 = visible_start + ((col + 1) as f32 / num_cols as f32) * visible_w;
             let frac0 = (x0 / clip_width_px).clamp(0.0, 1.0) as f64;
             let frac1 = (x1 / clip_width_px).clamp(0.0, 1.0) as f64;
-            let t0 = src_start + frac0 * clip_dur;
-            let t1 = src_start + frac1 * clip_dur;
-            let p0 = time_to_peak_index(t0, meta.sample_rate, spp);
-            let p1 = time_to_peak_index(t1, meta.sample_rate, spp).max(p0);
+            let out0 = frac0 * output_len;
+            let out1 = frac1 * output_len;
+            let s0 = clip_output_local_to_source_sample(
+                out0,
+                source_start,
+                source_end,
+                effective_time_ratio,
+                clip.stretch.reverse,
+            );
+            let s1 = clip_output_local_to_source_sample(
+                out1,
+                source_start,
+                source_end,
+                effective_time_ratio,
+                clip.stretch.reverse,
+            );
+            let p0 = sample_to_peak_index(s0.min(s1), spp);
+            let p1 = sample_to_peak_index(s0.max(s1), spp).max(p0);
             let WaveformPeak { min, max } =
                 waveform_cache::aggregate_peak_range_in_entry(entry, spp, p0, p1 + 1);
             if min == 0.0 && max == 0.0 {
@@ -132,9 +163,8 @@ fn build_peak_columns(
         .collect()
 }
 
-fn time_to_peak_index(time_sec: f64, sample_rate: u32, samples_per_peak: usize) -> usize {
-    let frame = (time_sec * sample_rate as f64).max(0.0) as usize;
-    frame / samples_per_peak.max(1)
+fn sample_to_peak_index(sample: f64, samples_per_peak: usize) -> usize {
+    sample.max(0.0) as usize / samples_per_peak.max(1)
 }
 
 pub fn audio_editor_theme() -> sphere_audio_editor::AudioEditorTheme {

@@ -23,8 +23,8 @@ pub use overlay::{
 pub use prefs::PluginPickerPrefs;
 pub use search_index::PluginSearchIndex;
 pub use state::{
-    CatalogStatus, PickerFilter, PluginFilterState, PluginPickerLoadState, PluginPickerScrollHandles,
-    PluginPickerState,
+    CatalogStatus, PickerFilter, PluginFilterState, PluginPickerLoadState,
+    PluginPickerScrollHandles, PluginPickerState,
 };
 
 use std::sync::Arc;

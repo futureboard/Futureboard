@@ -1899,9 +1899,7 @@ impl StudioLayout {
 
         let can_host_effect = {
             let timeline = self.timeline.read(cx);
-            if track_id
-                == crate::components::timeline::timeline_state::MASTER_TRACK_ID
-            {
+            if track_id == crate::components::timeline::timeline_state::MASTER_TRACK_ID {
                 true
             } else {
                 timeline
@@ -2001,7 +1999,13 @@ impl StudioLayout {
             "[PluginDrop] instrument track created track={} slot={} plugin={}",
             created.0, created.2, display_name
         );
-        self.after_preset_insert_bound(&created.0, &created.2, plugin_format, cx, "instrument_preset_drop");
+        self.after_preset_insert_bound(
+            &created.0,
+            &created.2,
+            plugin_format,
+            cx,
+            "instrument_preset_drop",
+        );
         cx.notify();
         Some(created)
     }
@@ -2014,8 +2018,7 @@ impl StudioLayout {
         cx: &mut Context<Self>,
         source: &'static str,
     ) {
-        if plugin_format
-            == crate::components::timeline::timeline_state::InsertPluginFormat::Vst3
+        if plugin_format == crate::components::timeline::timeline_state::InsertPluginFormat::Vst3
             && super::plugin_bridge_runtime::bridge_enabled()
             && self.load_bridge_insert_for_slot(track_id, slot_id, cx)
         {

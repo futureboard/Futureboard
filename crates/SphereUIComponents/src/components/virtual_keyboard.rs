@@ -140,7 +140,10 @@ pub enum MusicalKey {
     /// A piano key. `semitone` is the offset above the base-octave C and is
     /// unique per physical key, so it doubles as the `pressed_keys` identity
     /// (octave-independent: the actual MIDI note is resolved at press time).
-    Note { semitone: i8, is_black: bool },
+    Note {
+        semitone: i8,
+        is_black: bool,
+    },
     OctaveDown,
     OctaveUp,
     VelocityDown,
@@ -757,7 +760,12 @@ impl VirtualKeyboardPanel {
         }
     }
 
-    pub fn handle_key_up(&mut self, window_id: WindowId, key: &str, cx: &mut Context<Self>) -> bool {
+    pub fn handle_key_up(
+        &mut self,
+        window_id: WindowId,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.state.visible {
             return false;
         }
@@ -1292,8 +1300,12 @@ mod tests {
     fn blur_or_close_releases_all_active_notes() {
         let mut state = VirtualKeyboardPanelState::default();
         state.visible = true;
-        let _ = state.controller.handle_key_down(win(), "a", false, false, false);
-        let _ = state.controller.handle_key_down(win(), "s", false, false, false);
+        let _ = state
+            .controller
+            .handle_key_down(win(), "a", false, false, false);
+        let _ = state
+            .controller
+            .handle_key_down(win(), "s", false, false, false);
         let output = state.close();
         assert_eq!(output.events.len(), 2);
         assert_eq!(state.controller.active_count(), 0);
@@ -1447,7 +1459,11 @@ mod tests {
         let (_, w1) = service.handle_key_down(win(), "a", false, false, false);
         let (_, w2) = service.handle_key_down(win2(), "a", false, false, false);
         assert_eq!(note_on_count(&w1), 1);
-        assert_eq!(note_on_count(&w2), 0, "second window must not retrigger note");
+        assert_eq!(
+            note_on_count(&w2),
+            0,
+            "second window must not retrigger note"
+        );
         assert_eq!(service.active_count(), 1);
 
         // Releasing in window 1 keeps the note alive (window 2 still holds it).

@@ -9,12 +9,14 @@ use sphere_ui_components::boot;
 use sphere_ui_components::layout::{PendingCloseAction, ProjectOpenOptions, StudioLayout};
 use sphere_ui_components::loading_session::{
     begin_project_session_load, begin_session_shutdown, close_loading_session_window,
-    show_loading_session_error, LoadedSessionPackage, LoadFailedContext, SessionRollbackSnapshot,
+    show_loading_session_error, LoadFailedContext, LoadedSessionPackage, SessionRollbackSnapshot,
     SessionShutdownSnapshot,
 };
 use sphere_ui_components::project::{ProjectCreateOptions, ProjectTemplate};
 use sphere_ui_components::splash::SplashWindowHandle;
-use sphere_ui_components::startup::{log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute};
+use sphere_ui_components::startup::{
+    log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute,
+};
 use sphere_ui_components::welcome::{WelcomeAction, WelcomeCallbacks, WelcomeWindow};
 
 /// Retains the studio window handle at app scope so GPUI never drops the last
@@ -78,9 +80,7 @@ pub fn setup(cx: &mut App) {
                 cx.update(|app| {
                     begin_load_project_from_welcome(
                         path,
-                        ProjectOpenOptions {
-                            from_recent: true,
-                        },
+                        ProjectOpenOptions { from_recent: true },
                         app,
                     );
                 });
@@ -146,9 +146,7 @@ fn finish_loading_to_studio(cx: &mut App) {
     // inside a LoadingSessionWindow update (GPUI double-lease).
     cx.defer(|cx| {
         if !studio_shell_alive(cx) {
-            eprintln!(
-                "[WindowLifecycle] refused to close loader — studio shell not alive"
-            );
+            eprintln!("[WindowLifecycle] refused to close loader — studio shell not alive");
             return;
         }
         close_loading_session_window(cx);
@@ -192,26 +190,18 @@ fn transition_loaded_package_to_existing_studio(
 fn open_welcome_window(cx: &mut App) {
     set_app_mode(cx, AppMode::Welcome);
     let callbacks = WelcomeCallbacks {
-        on_action: Arc::new(|action, welcome_window, cx| {
-            match action {
-                WelcomeAction::OpenProjectFile(path) => {
-                    welcome_window.remove_window();
-                    begin_load_project_from_welcome(path, ProjectOpenOptions::default(), cx);
-                }
-                WelcomeAction::OpenRecent(path) => {
-                    welcome_window.remove_window();
-                    begin_load_project_from_welcome(
-                        path,
-                        ProjectOpenOptions {
-                            from_recent: true,
-                        },
-                        cx,
-                    );
-                }
-                other => {
-                    open_studio_for_action(other, cx);
-                    welcome_window.remove_window();
-                }
+        on_action: Arc::new(|action, welcome_window, cx| match action {
+            WelcomeAction::OpenProjectFile(path) => {
+                welcome_window.remove_window();
+                begin_load_project_from_welcome(path, ProjectOpenOptions::default(), cx);
+            }
+            WelcomeAction::OpenRecent(path) => {
+                welcome_window.remove_window();
+                begin_load_project_from_welcome(path, ProjectOpenOptions { from_recent: true }, cx);
+            }
+            other => {
+                open_studio_for_action(other, cx);
+                welcome_window.remove_window();
             }
         }),
     };
@@ -268,18 +258,23 @@ fn begin_close_project_session(
     begin_session_shutdown(snapshot, owner_bounds, on_complete, cx);
 }
 
-fn begin_load_project_from_welcome(
-    path: PathBuf,
-    open_options: ProjectOpenOptions,
-    cx: &mut App,
-) {
+fn begin_load_project_from_welcome(path: PathBuf, open_options: ProjectOpenOptions, cx: &mut App) {
     let on_success = Arc::new(|package: LoadedSessionPackage, cx: &mut App| {
         transition_loaded_package_to_studio(package, cx);
     });
     let on_failure = Arc::new(|ctx: LoadFailedContext, cx: &mut App| {
         handle_load_failed(ctx, cx);
     });
-    begin_project_session_load(path, open_options, None, None, None, on_success, on_failure, cx);
+    begin_project_session_load(
+        path,
+        open_options,
+        None,
+        None,
+        None,
+        on_success,
+        on_failure,
+        cx,
+    );
 }
 
 fn handle_project_switch_load_failed(
@@ -323,10 +318,7 @@ fn request_project_switch_in_studio(
     // inside an active `StudioLayout` update (e.g. File → Open Project).
     cx.defer(move |cx| {
         log_window_registry(cx, "before switch");
-        eprintln!(
-            "[ProjectSwitch] begin target={}",
-            path.display()
-        );
+        eprintln!("[ProjectSwitch] begin target={}", path.display());
         eprintln!(
             "[ProjectSwitch] AppMode before={}",
             cx.try_global::<AppSessionGate>()
@@ -372,10 +364,7 @@ fn request_project_switch_in_studio(
 }
 
 fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
-    eprintln!(
-        "[SessionLoad] open failed: {} — {}",
-        ctx.title, ctx.message
-    );
+    eprintln!("[SessionLoad] open failed: {} — {}", ctx.title, ctx.message);
     if let Some(snapshot) = ctx.rollback {
         set_app_mode(cx, AppMode::Studio);
         if let Some(studio) = cx
@@ -504,12 +493,7 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
             layout.set_request_project_load_callback(Arc::new({
                 let studio_handle = studio_handle.clone();
                 move |path, open_options, cx| {
-                    request_project_switch_in_studio(
-                        studio_handle.clone(),
-                        path,
-                        open_options,
-                        cx,
-                    );
+                    request_project_switch_in_studio(studio_handle.clone(), path, open_options, cx);
                 }
             }));
 

@@ -84,12 +84,11 @@ fn status_bar_inner(
         }
         _ => None,
     };
-    let perf_pill = content
-        .perf
-        .as_ref()
-        .and_then(|metrics| on_toggle_perf_popover.clone().map(|on_toggle| {
+    let perf_pill = content.perf.as_ref().and_then(|metrics| {
+        on_toggle_perf_popover.clone().map(|on_toggle| {
             perf_metrics_pill(metrics, perf_popover_open, on_toggle).into_any_element()
-        }));
+        })
+    });
     let perf_panel = match (content.perf.as_ref(), perf_popover_open) {
         (Some(metrics), true) => Some(perf_metrics_panel(metrics).into_any_element()),
         _ => None,
@@ -226,20 +225,13 @@ fn perf_metrics_panel(metrics: &StatusBarPerfMetrics) -> impl IntoElement {
                         .child("Performance"),
                 ),
         )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .p(px(10.0))
-                .children([
-                    perf_detail_row("Renderer", &metrics.renderer),
-                    perf_detail_row("Display Sync", &metrics.display_sync),
-                    perf_detail_row("FPS", &fps),
-                    perf_detail_row("Frame", &frame),
-                    perf_detail_row("Peak", &peak),
-                ]),
-        )
+        .child(div().flex().flex_col().gap(px(4.0)).p(px(10.0)).children([
+            perf_detail_row("Renderer", &metrics.renderer),
+            perf_detail_row("Display Sync", &metrics.display_sync),
+            perf_detail_row("FPS", &fps),
+            perf_detail_row("Frame", &frame),
+            perf_detail_row("Peak", &peak),
+        ]))
 }
 
 fn perf_detail_row(label: &'static str, value: &str) -> impl IntoElement {

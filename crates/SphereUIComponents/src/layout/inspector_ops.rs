@@ -173,6 +173,8 @@ impl StudioLayout {
         let on_set_clip_gain = self.set_clip_gain_cb(owner.clone());
         let on_set_clip_muted = self.set_clip_muted_cb(owner.clone());
         let on_set_clip_stretch = self.set_clip_stretch_cb(owner.clone());
+        let on_clip_stretch_auto_find_bpm = self.clip_stretch_auto_find_cb(owner.clone());
+        let on_clip_stretch_fit_project = self.clip_stretch_fit_project_cb(owner.clone());
         let on_clip_warp_add_at_playhead = self.clip_warp_add_at_playhead_cb(owner.clone());
         let on_clip_warp_clear = self.clip_warp_clear_cb(owner.clone());
         let on_open_clip_bottom_editor = self.open_clip_bottom_editor_cb(owner.clone());
@@ -245,6 +247,8 @@ impl StudioLayout {
             on_set_clip_gain,
             on_set_clip_muted,
             on_set_clip_stretch,
+            on_clip_stretch_auto_find_bpm,
+            on_clip_stretch_fit_project,
             on_clip_warp_add_at_playhead,
             on_clip_warp_clear,
             on_open_clip_bottom_editor,
@@ -389,7 +393,10 @@ impl StudioLayout {
                     // like reverse/fade leave it unchanged.
                     let old_ratio = prev.effective_time_ratio(project_bpm);
                     let new_ratio = next.effective_time_ratio(project_bpm);
-                    let next_len = if old_ratio > 1e-6 && (old_ratio - new_ratio).abs() > 1e-9 {
+                    let explicit_next_len = next.clip_timeline_duration_beats;
+                    let next_len = if explicit_next_len > 0.0 {
+                        explicit_next_len as f32
+                    } else if old_ratio > 1e-6 && (old_ratio - new_ratio).abs() > 1e-9 {
                         (prev_len as f64 * (new_ratio / old_ratio)) as f32
                     } else {
                         prev_len
@@ -441,6 +448,78 @@ impl StudioLayout {
                 }
             },
         )
+    }
+
+    fn clip_stretch_auto_find_cb(&self, owner: Entity<Self>) -> StrCb {
+        Arc::new(move |clip_id: &String, _w, cx| {
+            let clip_id = clip_id.clone();
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                this.stretch_tempo.clear_error(&clip_id);
+                this.spawn_clip_tempo_detection(&clip_id, false, cx);
+            });
+        })
+    }
+
+    fn clip_stretch_fit_project_cb(&self, owner: Entity<Self>) -> StrCb {
+        let timeline = self.timeline.clone();
+        Arc::new(move |clip_id: &String, _w, cx| {
+            let clip_id = clip_id.clone();
+            let needs_auto_find = timeline
+                .read(cx)
+                .state
+                .clip_stretch(&clip_id)
+                .and_then(|s| s.bpm_source)
+                .is_none();
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                if needs_auto_find {
+                    this.stretch_tempo.clear_error(&clip_id);
+                    this.spawn_clip_tempo_detection(&clip_id, true, cx);
+                    return;
+                }
+                let project_bpm = this.timeline.read(cx).state.bpm as f64;
+                let changed = this.timeline.update(cx, |t, cx| {
+                    let Some(prev) = t.state.clip_stretch(&clip_id).cloned() else {
+                        return false;
+                    };
+                    let mut next = prev.clone();
+                    if !next.fit_to_project_tempo(project_bpm) {
+                        return false;
+                    }
+                    if prev == next {
+                        return false;
+                    }
+                    let prev_len = t.state.clip_duration_beats(&clip_id).unwrap_or(0.0);
+                    let old_ratio = prev.effective_time_ratio(project_bpm);
+                    let new_ratio = next.effective_time_ratio(project_bpm);
+                    let next_len = if old_ratio > 1e-6 && (old_ratio - new_ratio).abs() > 1e-9 {
+                        (prev_len as f64 * (new_ratio / old_ratio)) as f32
+                    } else {
+                        prev_len
+                    };
+                    t.state.set_clip_stretch(&clip_id, next.clone());
+                    if (next_len - prev_len).abs() > 1e-4 {
+                        t.state.set_clip_length(&clip_id, next_len);
+                    }
+                    t.record_executed_command(
+                        EditCommand::SetClipStretch {
+                            clip_id: clip_id.clone(),
+                            prev,
+                            next,
+                            prev_duration_beats: prev_len,
+                            next_duration_beats: next_len,
+                        },
+                        cx,
+                    );
+                    true
+                });
+                if changed {
+                    this.mark_dirty();
+                    this.mark_engine_media_dirty();
+                    this.schedule_audio_project_sync(cx, false, "inspector_fit_project");
+                    cx.notify();
+                }
+            });
+        })
     }
 
     /// Append a warp marker at the current playhead (clamped within the clip),

@@ -53,8 +53,8 @@ pub fn key_recorder_field(
     placeholder: &str,
     armed: bool,
 ) -> gpui::AnyElement {
-    use gpui::{div, px, IntoElement, ParentElement, Styled};
     use crate::theme::Colors;
+    use gpui::{div, px, IntoElement, ParentElement, Styled};
 
     let label = state
         .captured

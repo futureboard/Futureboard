@@ -408,7 +408,9 @@ fn apply_track_heights_snapshot(state: &mut TimelineState, heights: &[(String, f
         {
             state.track_view_layout.remove_track(track_id);
         } else if state.tracks.iter().any(|t| t.id == *track_id) {
-            state.track_view_layout.set_height(track_id.clone(), *height);
+            state
+                .track_view_layout
+                .set_height(track_id.clone(), *height);
         }
     }
 }

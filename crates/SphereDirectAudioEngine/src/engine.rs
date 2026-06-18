@@ -86,6 +86,20 @@ fn bridge_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_BRIDGE_DEBUG").is_some())
 }
 
+fn log_sphere_audio_processor_diagnostics_once() {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    LOGGED.get_or_init(|| {
+        eprintln!(
+            "SphereAudioProcessor:\n- InternalRePitch: available\n- Signalsmith Stretch: {}",
+            if SphereAudioProcessor::signalsmith_stretch_available() {
+                "available"
+            } else {
+                "unavailable"
+            }
+        );
+    });
+}
+
 // ── Realtime constants shared with render.rs ──────────────────────────────────
 
 pub const TEST_TONE_AMPLITUDE: f32 = 0.125; // −18 dBFS  (safe default test level)
@@ -488,6 +502,7 @@ impl Default for EngineInner {
 
 impl EngineInner {
     pub fn new() -> Self {
+        log_sphere_audio_processor_diagnostics_once();
         Self {
             shared: Arc::new(SharedState::default()),
             active_stream: Mutex::new(None),
@@ -3352,7 +3367,7 @@ mod clip_fade_tests {
 
 #[cfg(test)]
 mod clip_stretch_dsp_tests {
-    use super::{clip_source_pos_seconds, sample_clip_processor_stereo};
+    use super::{clip_source_pos_seconds, sample_clip_processor_stereo, signalsmith_input_span};
     use crate::audio_file::AudioFileBuffer;
     use crate::audio_source::ClipAudioSource;
     use crate::runtime::{resolve_clip_processor, ClipDspProcessor};
@@ -3416,6 +3431,40 @@ mod clip_stretch_dsp_tests {
             resolve_clip_processor("warp", false),
             ClipDspProcessor::PhaseVocoderBasic
         );
+    }
+
+    #[test]
+    fn signalsmith_feed_tiles_source_without_gap_or_overlap() {
+        // Across the whole clip, consecutive block input spans must tile the
+        // source contiguously and total to floor(duration / ratio) — i.e. the
+        // source length — so the stretcher never over-reads or backs up.
+        for &(duration, ratio) in &[
+            (96_000u64, 2.0_f64), // slow down 2× (source 48k)
+            (24_000u64, 0.5_f64), // speed up 2× (source 48k)
+            (50_000u64, 1.37_f64),
+            (50_000u64, 0.73_f64),
+        ] {
+            let frames = 512usize;
+            let mut rel = 0u64;
+            let mut prev_end: Option<i64> = None;
+            let mut total: i64 = 0;
+            while rel < duration {
+                let block = frames.min((duration - rel) as usize);
+                let (in_start, input_frames) = signalsmith_input_span(rel, block, ratio);
+                if let Some(end) = prev_end {
+                    assert_eq!(in_start, end, "blocks must tile with no gap/overlap");
+                }
+                prev_end = Some(in_start + input_frames as i64);
+                total += input_frames as i64;
+                rel += block as u64;
+            }
+            let expected = (duration as f64 / ratio).floor() as i64;
+            // Allow the final partial block ±1 rounding, but never over-read.
+            assert!(
+                (total - expected).abs() <= 1,
+                "consumed {total} source frames, expected ~{expected} (ratio {ratio})"
+            );
+        }
     }
 
     #[test]
@@ -3954,9 +4003,12 @@ mod routing_tests {
                 duration_samples: 8,
                 offset_seconds: 0.0,
                 gain: 1.0,
+                stretch: SphereAudioProcessor::StretchParams::default(),
                 speed_ratio: 1.0,
+                source_read_rate: 1.0,
                 effective_time_ratio: 1.0,
                 pitch_ratio: 1.0,
+                stretch_backend: SphereAudioProcessor::StretchBackend::InternalRePitch,
                 source_start_samples: 0,
                 source_end_samples: 8,
                 warp_markers: Vec::new(),
@@ -3966,6 +4018,12 @@ mod routing_tests {
                 fade_in_samples: 0,
                 fade_out_samples: 0,
                 source,
+                stretch_processor: None,
+                stretch_input_l: Vec::new(),
+                stretch_input_r: Vec::new(),
+                stretch_output_l: Vec::new(),
+                stretch_output_r: Vec::new(),
+                stretch_next_project_sample: None,
             }],
             audio_graph,
             ..Default::default()
@@ -4027,9 +4085,12 @@ mod routing_tests {
                     duration_samples: 8,
                     offset_seconds: 0.0,
                     gain: 1.0,
+                    stretch: SphereAudioProcessor::StretchParams::default(),
                     speed_ratio: speed,
+                    source_read_rate: speed,
                     effective_time_ratio: if speed > 0.0 { 1.0 / speed } else { 1.0 },
                     pitch_ratio: 1.0,
+                    stretch_backend: SphereAudioProcessor::StretchBackend::InternalRePitch,
                     source_start_samples: 0,
                     source_end_samples: 8,
                     warp_markers: Vec::new(),
@@ -4039,6 +4100,12 @@ mod routing_tests {
                     fade_in_samples: 0,
                     fade_out_samples: 0,
                     source,
+                    stretch_processor: None,
+                    stretch_input_l: Vec::new(),
+                    stretch_input_r: Vec::new(),
+                    stretch_output_l: Vec::new(),
+                    stretch_output_r: Vec::new(),
+                    stretch_next_project_sample: None,
                 }],
                 audio_graph,
                 ..Default::default()

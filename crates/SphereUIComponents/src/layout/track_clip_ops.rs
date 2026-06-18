@@ -554,9 +554,10 @@ impl StudioLayout {
         next: Vec<(String, f32)>,
         cx: &mut Context<Self>,
     ) {
-        let changed = prev.iter().zip(next.iter()).any(|((id_a, h_a), (id_b, h_b))| {
-            id_a == id_b && (h_a - h_b).abs() >= 0.01
-        });
+        let changed = prev
+            .iter()
+            .zip(next.iter())
+            .any(|((id_a, h_a), (id_b, h_b))| id_a == id_b && (h_a - h_b).abs() >= 0.01);
         if !changed {
             return;
         }

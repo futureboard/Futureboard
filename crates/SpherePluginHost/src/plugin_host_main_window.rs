@@ -19,7 +19,11 @@ pub fn set_main_window_hwnd(hwnd: isize) {
 /// Latest published main-window HWND, if any.
 pub fn main_window_hwnd() -> Option<isize> {
     let hwnd = MAIN_WINDOW_HWND.load(Ordering::SeqCst);
-    if hwnd == 0 { None } else { Some(hwnd) }
+    if hwnd == 0 {
+        None
+    } else {
+        Some(hwnd)
+    }
 }
 
 /// Clear the published HWND when the studio window closes.

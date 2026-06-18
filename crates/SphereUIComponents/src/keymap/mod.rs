@@ -11,7 +11,9 @@ pub use model::{
     KeyBinding, KeymapConflict, KeymapProfile, KeymapRow, KeymapSource, ProfileDescriptor,
     ResolvedKeyBinding, PROFILE_DESCRIPTORS, USER_OVERRIDES_FILE,
 };
-pub use normalize::{canonical_accel, canonical_event, event_to_accel_string, format_accel_display};
+pub use normalize::{
+    canonical_accel, canonical_event, event_to_accel_string, format_accel_display,
+};
 pub use storage::{ensure_user_keymaps_dir, user_keymaps_dir};
 
 /// Legacy compatibility wrapper used by older call sites.

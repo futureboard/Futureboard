@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use SphereAudioProcessor::StretchParams;
 
 // ── DAUx backend selection types ──────────────────────────────────────────────
 
@@ -414,6 +415,11 @@ pub struct EngineClipSnapshot {
     pub muted: bool,
     #[serde(default)]
     pub fades: Option<EngineFadeSnapshot>,
+    /// Authoritative audio stretch parameters for this clip. Defaults to Off for
+    /// older snapshots; legacy `audio_process` is migrated at runtime only when
+    /// this field is absent/default.
+    #[serde(default)]
+    pub stretch: StretchParams,
     #[serde(default)]
     pub audio_process: Option<EngineClipAudioProcess>,
 }

@@ -10,6 +10,7 @@
 //! steady state. `use super::*;` pulls in the shared engine vocabulary
 //! (`SharedState`, runtime types, consts, debug-flag helpers).
 use super::*;
+use SphereAudioProcessor::StretchBackend;
 
 #[inline]
 pub fn render_project_sample(
@@ -38,7 +39,7 @@ pub fn render_project_sample(
         }
 
         let clip_offset_seconds = clip.offset_seconds;
-        let clip_speed_ratio = clip.speed_ratio;
+        let clip_source_read_rate = clip.source_read_rate;
         let clip_reverse = clip.reverse;
         let clip_gain = clip.gain;
         let clip_fade_in = clip.fade_in_samples;
@@ -67,7 +68,7 @@ pub fn render_project_sample(
             if matches!(clip.processor, ClipDspProcessor::PhaseVocoderBasic) {
                 1.0 / clip.effective_time_ratio.max(0.01)
             } else {
-                clip_speed_ratio
+                clip_source_read_rate
             },
             clip_reverse,
         );
@@ -77,7 +78,7 @@ pub fn render_project_sample(
             rel,
             clip_duration_samples,
             runtime.sample_rate,
-            clip_speed_ratio,
+            clip_source_read_rate,
             clip_reverse,
         );
         let dry_source_pos = dry_pos_seconds * source.sample_rate() as f64;
@@ -494,6 +495,127 @@ pub(crate) fn accumulate_sends(
     }
 }
 
+/// Source-stream span consumed to render the output segment
+/// `[rel_start, rel_start + frames)` at `time_ratio`. Successive segments tile
+/// the source contiguously — block N's `in_start + input_frames` equals block
+/// N+1's `in_start` — so the source is read exactly once with no gap or overlap,
+/// and the total consumed over the clip is `floor(duration / time_ratio)`
+/// (= the source length), never more. This is what keeps the streaming stretcher
+/// from over-reading the source or growing an internal backlog.
+pub(crate) fn signalsmith_input_span(
+    rel_start: u64,
+    frames: usize,
+    time_ratio: f64,
+) -> (i64, usize) {
+    let ratio = time_ratio.clamp(0.05, 20.0);
+    let in_start = (rel_start as f64 / ratio).floor() as i64;
+    let in_end = ((rel_start + frames as u64) as f64 / ratio).floor() as i64;
+    (in_start, (in_end - in_start).max(1) as usize)
+}
+
+fn render_signalsmith_clip_segment(
+    runtime: &mut RuntimeProject,
+    clip_index: usize,
+    track_index: usize,
+    project_start_sample: u64,
+    rel_start: u64,
+    frame_idx_start: usize,
+    frames: usize,
+) -> bool {
+    let (
+        source,
+        offset_seconds,
+        duration_samples,
+        output_sample_rate,
+        reverse,
+        gain,
+        fade_in_samples,
+        fade_out_samples,
+        time_ratio,
+    ) = {
+        let clip = &runtime.clips[clip_index];
+        (
+            Arc::clone(&clip.source),
+            clip.offset_seconds,
+            clip.duration_samples,
+            runtime.sample_rate,
+            clip.reverse,
+            clip.gain,
+            clip.fade_in_samples,
+            clip.fade_out_samples,
+            clip.effective_time_ratio.clamp(0.05, 20.0) as f64,
+        )
+    };
+
+    let clip = &mut runtime.clips[clip_index];
+    let Some(processor) = clip.stretch_processor.as_mut() else {
+        return false;
+    };
+    if clip.stretch_next_project_sample != Some(project_start_sample) {
+        processor.reset();
+    }
+
+    // Map this output segment [rel_start, rel_start + frames) onto a *contiguous*
+    // span of the source stream so successive blocks tile the source with no gap
+    // or overlap, and the source is never over-read. The stretcher consumes
+    // exactly these `input_frames` samples to produce `frames` output (time ratio
+    // = frames / input_frames), so it never has to buffer/grow across calls.
+    let (in_start, input_frames) = signalsmith_input_span(rel_start, frames, time_ratio);
+    let total_input = (duration_samples as f64 / time_ratio).floor() as i64;
+    let output_sr = output_sample_rate.max(1) as f64;
+    let source_sr = source.sample_rate() as f64;
+
+    if clip.stretch_input_l.len() < input_frames {
+        clip.stretch_input_l.resize(input_frames, 0.0);
+        clip.stretch_input_r.resize(input_frames, 0.0);
+    }
+    if clip.stretch_output_l.len() < frames {
+        clip.stretch_output_l.resize(frames, 0.0);
+        clip.stretch_output_r.resize(frames, 0.0);
+    }
+
+    for k in 0..input_frames {
+        let stream_index = in_start + k as i64;
+        let effective = if reverse {
+            (total_input - 1 - stream_index).max(0)
+        } else {
+            stream_index
+        };
+        // Read the source at the output sample rate (seconds map handles the
+        // source↔output rate conversion), matching the per-sample resample path.
+        let source_pos = (offset_seconds + effective as f64 / output_sr) * source_sr;
+        let (l, r) = sample_source_stereo(&source, source_pos);
+        clip.stretch_input_l[k] = l;
+        clip.stretch_input_r[k] = r;
+    }
+
+    if processor
+        .process_stereo(
+            &clip.stretch_input_l[..input_frames],
+            &clip.stretch_input_r[..input_frames],
+            &mut clip.stretch_output_l[..frames],
+            &mut clip.stretch_output_r[..frames],
+        )
+        .is_err()
+    {
+        clip.stretch_next_project_sample = None;
+        return false;
+    }
+    clip.stretch_next_project_sample = Some(project_start_sample + frames as u64);
+
+    let track = &mut runtime.tracks[track_index];
+    for i in 0..frames {
+        let rel = rel_start + i as u64;
+        let fade = clip_fade_gain(rel, duration_samples, fade_in_samples, fade_out_samples);
+        let g = gain * fade;
+        let frame_idx = frame_idx_start + i;
+        track.block_l[frame_idx] += clip.stretch_output_l[i] * g;
+        track.block_r[frame_idx] += clip.stretch_output_r[i] * g;
+    }
+
+    true
+}
+
 /// `transport_active` — false when this block is rendered while the transport
 /// is stopped (MIDI preview, post-panic bridge flush, open plugin editor). In
 /// that mode the track/insert graph still runs (so bridged VSTi previews are
@@ -570,13 +692,46 @@ pub fn render_project_block_interleaved(
         if !transport_active {
             break; // stopped-transport preview block — no timeline material
         }
-        let clip = &runtime.clips[clip_index];
-        if clip.muted {
+        let (
+            clip_muted,
+            clip_track_index,
+            source,
+            clip_start,
+            clip_duration,
+            clip_offset_seconds,
+            clip_source_read_rate,
+            clip_effective_time_ratio,
+            clip_processor,
+            clip_reverse,
+            clip_gain,
+            clip_fade_in,
+            clip_fade_out,
+            clip_stretch_backend,
+        ) = {
+            let clip = &runtime.clips[clip_index];
+            (
+                clip.muted,
+                clip.track_index,
+                Arc::clone(&clip.source),
+                clip.start_sample,
+                clip.duration_samples,
+                clip.offset_seconds,
+                clip.source_read_rate,
+                clip.effective_time_ratio,
+                clip.processor,
+                clip.reverse,
+                clip.gain,
+                clip.fade_in_samples,
+                clip.fade_out_samples,
+                clip.stretch_backend,
+            )
+        };
+        if clip_muted {
             continue;
         }
         // Resolved at build time (RuntimeProject::resolve_indices) — no id
         // lookup on the audio thread.
-        let Some(track_index) = clip.track_index.filter(|&ti| ti < runtime.tracks.len()) else {
+        let Some(track_index) = clip_track_index.filter(|&ti| ti < runtime.tracks.len()) else {
             continue;
         };
         if effective_track_muted(&runtime.tracks[track_index], block_beat)
@@ -585,9 +740,7 @@ pub fn render_project_block_interleaved(
             continue;
         }
 
-        let source = Arc::clone(&clip.source);
-        let clip_start = clip.start_sample;
-        let clip_end = clip.start_sample.saturating_add(clip.duration_samples);
+        let clip_end = clip_start.saturating_add(clip_duration);
         let mut segment_sample =
             crate::transport::normalize_loop_position(base_sample, loop_bounds);
         let mut callback_offset = 0usize;
@@ -603,50 +756,63 @@ pub fn render_project_block_interleaved(
             if block_end > clip_start && block_start < clip_end {
                 let render_start = clip_start.saturating_sub(block_start) as usize;
                 let render_end = (clip_end.min(block_end) - block_start) as usize;
-                for frame_in_segment in render_start..render_end {
-                    let frame_idx = callback_offset + frame_in_segment;
-                    let project_sample = segment_sample + frame_in_segment as u64;
-                    let rel = project_sample - clip_start;
-                    let source_pos_seconds = clip_source_pos_seconds(
-                        clip.offset_seconds,
-                        rel,
-                        clip.duration_samples,
-                        runtime.sample_rate,
-                        if matches!(clip.processor, ClipDspProcessor::PhaseVocoderBasic) {
-                            1.0 / clip.effective_time_ratio.max(0.01)
-                        } else {
-                            clip.speed_ratio
-                        },
-                        clip.reverse,
-                    );
-                    let source_pos = source_pos_seconds * source.sample_rate() as f64;
-                    let dry_pos_seconds = clip_source_pos_seconds(
-                        clip.offset_seconds,
-                        rel,
-                        clip.duration_samples,
-                        runtime.sample_rate,
-                        clip.speed_ratio,
-                        clip.reverse,
-                    );
-                    let dry_source_pos = dry_pos_seconds * source.sample_rate() as f64;
-                    let (mut l, mut r) = sample_clip_processor_stereo(
-                        &source,
-                        source_pos,
-                        dry_source_pos,
-                        clip.effective_time_ratio,
-                        clip.processor,
-                    );
-                    let fade = clip_fade_gain(
-                        rel,
-                        clip.duration_samples,
-                        clip.fade_in_samples,
-                        clip.fade_out_samples,
-                    );
-                    let g = clip.gain * fade;
-                    l *= g;
-                    r *= g;
-                    runtime.tracks[track_index].block_l[frame_idx] += l;
-                    runtime.tracks[track_index].block_r[frame_idx] += r;
+                let segment_render_frames = render_end.saturating_sub(render_start);
+                let project_render_start = segment_sample + render_start as u64;
+                let rel_start = project_render_start - clip_start;
+                if clip_stretch_backend == StretchBackend::Signalsmith
+                    && render_signalsmith_clip_segment(
+                        runtime,
+                        clip_index,
+                        track_index,
+                        project_render_start,
+                        rel_start,
+                        callback_offset + render_start,
+                        segment_render_frames,
+                    )
+                {
+                    // Rendered through the cached SphereAudioProcessor/Signalsmith
+                    // path. Export uses this same render kernel.
+                } else {
+                    for frame_in_segment in render_start..render_end {
+                        let frame_idx = callback_offset + frame_in_segment;
+                        let project_sample = segment_sample + frame_in_segment as u64;
+                        let rel = project_sample - clip_start;
+                        let source_pos_seconds = clip_source_pos_seconds(
+                            clip_offset_seconds,
+                            rel,
+                            clip_duration,
+                            runtime.sample_rate,
+                            if matches!(clip_processor, ClipDspProcessor::PhaseVocoderBasic) {
+                                1.0 / clip_effective_time_ratio.max(0.01)
+                            } else {
+                                clip_source_read_rate
+                            },
+                            clip_reverse,
+                        );
+                        let source_pos = source_pos_seconds * source.sample_rate() as f64;
+                        let dry_pos_seconds = clip_source_pos_seconds(
+                            clip_offset_seconds,
+                            rel,
+                            clip_duration,
+                            runtime.sample_rate,
+                            clip_source_read_rate,
+                            clip_reverse,
+                        );
+                        let dry_source_pos = dry_pos_seconds * source.sample_rate() as f64;
+                        let (mut l, mut r) = sample_clip_processor_stereo(
+                            &source,
+                            source_pos,
+                            dry_source_pos,
+                            clip_effective_time_ratio,
+                            clip_processor,
+                        );
+                        let fade = clip_fade_gain(rel, clip_duration, clip_fade_in, clip_fade_out);
+                        let g = clip_gain * fade;
+                        l *= g;
+                        r *= g;
+                        runtime.tracks[track_index].block_l[frame_idx] += l;
+                        runtime.tracks[track_index].block_r[frame_idx] += r;
+                    }
                 }
             }
             callback_offset += segment_frames as usize;
@@ -704,13 +870,15 @@ pub fn render_project_block_interleaved(
                 let overlaps = block_end > clip_start && block_start < clip_end;
                 if clip_count == 0 {
                     first_clip = format!(
-                        "{} range={}..{} offset={:.3}s gain={:.3} speed={:.3} overlaps={}",
+                        "{} range={}..{} offset={:.3}s gain={:.3} read_rate={:.3} stretch={:.3} backend={:?} overlaps={}",
                         clip.id,
                         clip_start,
                         clip_end,
                         clip.offset_seconds,
                         clip.gain,
-                        clip.speed_ratio,
+                        clip.source_read_rate,
+                        clip.effective_time_ratio,
+                        clip.stretch_backend,
                         overlaps
                     );
                 }

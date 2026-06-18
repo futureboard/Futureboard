@@ -43,12 +43,13 @@ struct FbSignalsmithHandle {
     Stretch stretch;
     int channels = 2;
     float sample_rate = 48'000.0f;
-    float time_ratio = 1.0f;
     float pitch_ratio = 1.0f;
     float quality = 0.75f;
     bool configured = false;
-    std::vector<float> pending_l;
-    std::vector<float> pending_r;
+    // Reused mono down-mix scratch (grows only; no per-block allocation in the
+    // steady state, so the realtime callback stays allocation-free).
+    std::vector<float> mono_in;
+    std::vector<float> mono_out;
 
     void apply_preset() {
         if (channels <= 0 || !std::isfinite(sample_rate) || sample_rate <= 0.0f) {
@@ -103,8 +104,6 @@ void fb_signalsmith_reset(void *handle) {
     }
     auto *state = static_cast<FbSignalsmithHandle *>(handle);
     state->stretch.reset();
-    state->pending_l.clear();
-    state->pending_r.clear();
 }
 
 int fb_signalsmith_process_stereo(
@@ -113,20 +112,17 @@ int fb_signalsmith_process_stereo(
     const float *input_r,
     float *output_l,
     float *output_r,
-    int frames,
-    float time_ratio,
+    int input_frames,
+    int output_frames,
     float pitch_ratio,
     float quality
 ) {
     if (handle == nullptr || input_l == nullptr || input_r == nullptr || output_l == nullptr
-        || output_r == nullptr || frames <= 0) {
+        || output_r == nullptr || input_frames <= 0 || output_frames <= 0) {
         return kErrorNull;
     }
 
     auto *state = static_cast<FbSignalsmithHandle *>(handle);
-    if (!valid_ratio(time_ratio)) {
-        time_ratio = 1.0f;
-    }
     if (!valid_ratio(pitch_ratio)) {
         pitch_ratio = 1.0f;
     }
@@ -135,7 +131,6 @@ int fb_signalsmith_process_stereo(
     }
 
     const bool reconfigure = !state->configured || state->quality != quality;
-    state->time_ratio = time_ratio;
     state->pitch_ratio = pitch_ratio;
     state->quality = quality;
 
@@ -144,47 +139,37 @@ int fb_signalsmith_process_stereo(
     }
     state->apply_ratios();
 
-    state->pending_l.insert(state->pending_l.end(), input_l, input_l + frames);
-    state->pending_r.insert(state->pending_r.end(), input_r, input_r + frames);
-
-    const int input_frames =
-        std::max(1, static_cast<int>(std::lround(static_cast<double>(frames) / time_ratio)));
-
-    if (static_cast<int>(state->pending_l.size()) < input_frames
-        || static_cast<int>(state->pending_r.size()) < input_frames) {
-        std::fill(output_l, output_l + frames, 0.0f);
-        std::fill(output_r, output_r + frames, 0.0f);
-        return 0;
-    }
-
-    ChannelInput<float> inputs{ { state->pending_l.data(), state->pending_r.data() }, input_frames };
-    ChannelOutput<float> outputs{ { output_l, output_r }, frames };
-
+    // Direct, allocation-free pass-through: the caller supplies exactly the
+    // input samples the stretcher should consume to produce `output_frames`.
+    // The time-stretch ratio is `output_frames / input_frames`.
     try {
         if (state->channels == 1) {
-            std::vector<float> mono_in(static_cast<size_t>(input_frames));
-            std::vector<float> mono_out(static_cast<size_t>(frames));
+            if (static_cast<int>(state->mono_in.size()) < input_frames) {
+                state->mono_in.resize(static_cast<size_t>(input_frames));
+            }
+            if (static_cast<int>(state->mono_out.size()) < output_frames) {
+                state->mono_out.resize(static_cast<size_t>(output_frames));
+            }
             for (int i = 0; i < input_frames; ++i) {
-                mono_in[static_cast<size_t>(i)] =
-                    0.5f * (state->pending_l[static_cast<size_t>(i)]
-                        + state->pending_r[static_cast<size_t>(i)]);
+                state->mono_in[static_cast<size_t>(i)] = 0.5f * (input_l[i] + input_r[i]);
             }
 
-            ChannelInput<float> mono_in_io{ { mono_in.data(), mono_in.data() }, input_frames };
-            ChannelOutput<float> mono_out_io{ { mono_out.data(), mono_out.data() }, frames };
-            state->stretch.process(mono_in_io, input_frames, mono_out_io, frames);
+            ChannelInput<float> mono_in_io{ { state->mono_in.data(), state->mono_in.data() },
+                                            input_frames };
+            ChannelOutput<float> mono_out_io{ { state->mono_out.data(), state->mono_out.data() },
+                                              output_frames };
+            state->stretch.process(mono_in_io, input_frames, mono_out_io, output_frames);
 
-            for (int i = 0; i < frames; ++i) {
-                const float sample = mono_out[static_cast<size_t>(i)];
+            for (int i = 0; i < output_frames; ++i) {
+                const float sample = state->mono_out[static_cast<size_t>(i)];
                 output_l[i] = sample;
                 output_r[i] = sample;
             }
         } else {
-            state->stretch.process(inputs, input_frames, outputs, frames);
+            ChannelInput<float> inputs{ { input_l, input_r }, input_frames };
+            ChannelOutput<float> outputs{ { output_l, output_r }, output_frames };
+            state->stretch.process(inputs, input_frames, outputs, output_frames);
         }
-
-        state->pending_l.erase(state->pending_l.begin(), state->pending_l.begin() + input_frames);
-        state->pending_r.erase(state->pending_r.begin(), state->pending_r.begin() + input_frames);
         return 0;
     } catch (...) {
         return kErrorProcess;

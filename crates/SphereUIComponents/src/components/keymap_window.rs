@@ -116,7 +116,9 @@ impl KeymapWindow {
         self.filter_pending = self.search_input.value.clone();
         let entity = cx.entity().clone();
         cx.spawn(async move |_, cx| {
-            cx.background_executor().timer(Duration::from_millis(80)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(80))
+                .await;
             let _ = entity.update(cx, |this, cx| {
                 if this.filter_pending == this.search_input.value {
                     this.filter_query = this.search_input.value.clone();
@@ -176,13 +178,10 @@ impl KeymapWindow {
             cx.notify();
             return;
         }
-        match self.manager.tap_binding(
-            &action_id,
-            keys,
-            Some(dialog.context.clone()),
-            None,
-            force,
-        ) {
+        match self
+            .manager
+            .tap_binding(&action_id, keys, Some(dialog.context.clone()), None, force)
+        {
             Ok(conflicts) if !conflicts.is_empty() && !force => {
                 let mut restored = dialog;
                 restored.conflicts = conflicts;
@@ -246,7 +245,9 @@ impl KeymapWindow {
                 let path = handle.path().to_path_buf();
                 let _ = entity.update(cx, |this, cx| {
                     match this.manager.export_active_profile(&path) {
-                        Ok(()) => this.status_message = Some(format!("Exported to {}", path.display())),
+                        Ok(()) => {
+                            this.status_message = Some(format!("Exported to {}", path.display()))
+                        }
                         Err(error) => this.status_message = Some(error),
                     }
                     cx.notify();
@@ -416,11 +417,10 @@ impl Render for KeymapWindow {
             .px(px(12.0))
             .border_b(px(1.0))
             .border_color(Colors::border_subtle())
-            .child(
-                div()
-                    .w(px(320.0))
-                    .child(text_field(&self.search_input, self.search_input.is_focused(window))),
-            )
+            .child(div().w(px(320.0)).child(text_field(
+                &self.search_input,
+                self.search_input.is_focused(window),
+            )))
             .child(div().flex_1())
             .child(fb_button(
                 "keymap-edit-json",
@@ -495,20 +495,16 @@ impl Render for KeymapWindow {
             .h(px(30.0))
             .px(px(12.0))
             .child(fb_field_label("Profile"))
-            .child(
-                div()
-                    .w(px(200.0))
-                    .child(select(
-                        "keymap-profile",
-                        Some(self.manager.active_profile_id()),
-                        "Profile",
-                        profile_options,
-                        self.profile_select_open,
-                        false,
-                        on_profile_toggle,
-                        on_profile_change,
-                    )),
-            );
+            .child(div().w(px(200.0)).child(select(
+                "keymap-profile",
+                Some(self.manager.active_profile_id()),
+                "Profile",
+                profile_options,
+                self.profile_select_open,
+                false,
+                on_profile_toggle,
+                on_profile_change,
+            )));
 
         let header = keymap_table_header();
 
@@ -616,12 +612,10 @@ impl Render for KeymapWindow {
                         },
                     )),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(text_field(&self.json_input, self.json_input.is_focused(window))),
-            )
+            .child(div().flex_1().min_h_0().child(text_field(
+                &self.json_input,
+                self.json_input.is_focused(window),
+            )))
             .children(self.json_error.as_ref().map(|error| {
                 div()
                     .text_color(Colors::status_error())
@@ -653,9 +647,10 @@ impl Render for KeymapWindow {
                     .child(msg.clone())
             }));
 
-        let edit_overlay = self.edit_dialog.as_ref().map(|dialog| {
-            edit_dialog_overlay(dialog, entity.clone())
-        });
+        let edit_overlay = self
+            .edit_dialog
+            .as_ref()
+            .map(|dialog| edit_dialog_overlay(dialog, entity.clone()));
 
         let close_target = entity.clone();
         div()
@@ -669,17 +664,13 @@ impl Render for KeymapWindow {
             .on_key_down(cx.listener(|this, event, window, cx| {
                 this.handle_key(event, window, cx);
             }))
-            .child(external_window_titlebar(
-                "Keymap",
-                "keymap-window-close",
-                {
-                    let target = close_target.clone();
-                    move |window, cx| {
-                        let _ = target.update(cx, |_, cx| cx.notify());
-                        window.remove_window();
-                    }
-                },
-            ))
+            .child(external_window_titlebar("Keymap", "keymap-window-close", {
+                let target = close_target.clone();
+                move |window, cx| {
+                    let _ = target.update(cx, |_, cx| cx.notify());
+                    window.remove_window();
+                }
+            }))
             .child(top_bar)
             .child(profile_row)
             .child(if self.view == ViewMode::Table {
@@ -724,10 +715,7 @@ fn header_cell(label: &'static str, width: f32) -> impl IntoElement {
 }
 
 fn vsep() -> impl IntoElement {
-    div()
-        .w(px(1.0))
-        .h_full()
-        .bg(Colors::border_subtle())
+    div().w(px(1.0)).h_full().bg(Colors::border_subtle())
 }
 
 fn keymap_row_element(row: &KeymapRow, selected: bool) -> gpui::Div {
@@ -738,7 +726,10 @@ fn keymap_row_element(row: &KeymapRow, selected: bool) -> gpui::Div {
         Colors::text_muted()
     };
     let keystrokes = format_keystroke_list(&row.keystrokes);
-    let args = row.arguments_json.clone().unwrap_or_else(|| "—".to_string());
+    let args = row
+        .arguments_json
+        .clone()
+        .unwrap_or_else(|| "—".to_string());
     let context = row.context.clone().unwrap_or_else(|| "Studio".to_string());
     let source = if row.is_conflict {
         "Conflict"
@@ -773,13 +764,11 @@ fn keymap_row_element(row: &KeymapRow, selected: bool) -> gpui::Div {
         .child(vsep())
         .child(body_cell(&context, 200.0))
         .child(vsep())
-        .child(
-            body_cell(source, 120.0).text_color(if row.is_conflict {
-                Colors::status_warning()
-            } else {
-                Colors::text_muted()
-            }),
-        )
+        .child(body_cell(source, 120.0).text_color(if row.is_conflict {
+            Colors::status_warning()
+        } else {
+            Colors::text_muted()
+        }))
 }
 
 fn body_cell(label: &str, width: f32) -> gpui::Div {
@@ -930,18 +919,19 @@ fn edit_dialog_overlay(
                     None
                 })
                 .child({
-                    let mut actions = div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(fb_button(
-                            "keymap-edit-cancel",
-                            "Cancel",
-                            FbButtonKind::Default,
-                            true,
-                            on_cancel,
-                        ));
+                    let mut actions =
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(fb_button(
+                                "keymap-edit-cancel",
+                                "Cancel",
+                                FbButtonKind::Default,
+                                true,
+                                on_cancel,
+                            ));
                     if dialog.show_conflict {
                         actions = actions.child(fb_button(
                             "keymap-edit-replace",

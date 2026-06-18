@@ -27,7 +27,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v15 adds persisted master-bus inserts.
 /// v16 adds a per-clip non-destructive stretch/pitch block (mode, algorithm,
 /// ratio, BPM pair, pitch/formant/transient/fade/gain/pan, warp markers). Pre-v16
-/// clips load with [`AudioClipStretchState::default`] (mode Off, ratio 1.0).
+/// clips load with [`AudioClipStretchState::default`] (mode Off, ratio 1.0,
+/// preserve_pitch false).
 pub const PROJECT_VERSION: u32 = 17;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
@@ -1297,7 +1298,11 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         clips.push(decode_clip(r, version)?);
     }
 
-    let row_height_px = if version >= 17 { r.read_opt_f32()? } else { None };
+    let row_height_px = if version >= 17 {
+        r.read_opt_f32()?
+    } else {
+        None
+    };
 
     Ok(ProjectTrack {
         id,
@@ -1936,7 +1941,7 @@ mod tests {
         assert_eq!(decoded.stretch, AudioClipStretchState::default());
         assert_eq!(decoded.stretch.mode, StretchMode::Off);
         assert_eq!(decoded.stretch.stretch_ratio, 1.0);
-        assert!(decoded.stretch.preserve_pitch);
+        assert!(!decoded.stretch.preserve_pitch);
     }
 
     fn track_with_clip(clip: ProjectClip) -> ProjectTrack {

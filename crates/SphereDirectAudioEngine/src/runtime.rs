@@ -5,7 +5,7 @@
 //! the graph and can render without touching locks or parsing JSON.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::audio_graph::{plan_runtime_audio_graph, GraphValidationError, RuntimeAudioGraph};
@@ -13,6 +13,11 @@ use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
 use crate::latency_graph::{plan_runtime_latency_graph, RuntimeLatencyGraph};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
+use SphereAudioProcessor::{
+    create_stretch_processor, effective_pitch_ratio, effective_time_ratio, resolve_backend,
+    source_read_rate_for_repitch, stretched_duration_samples, StretchAlgorithm, StretchBackend,
+    StretchMode, StretchParams, StretchProcessor,
+};
 
 use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint};
 use crate::types::{
@@ -419,7 +424,6 @@ pub struct RuntimeSend {
     pub pre_fader: bool,
 }
 
-#[derive(Debug, Clone)]
 pub struct RuntimeClip {
     pub id: String,
     pub track_id: String,
@@ -430,9 +434,15 @@ pub struct RuntimeClip {
     pub duration_samples: u64,
     pub offset_seconds: f64,
     pub gain: f32,
+    /// Immutable stretch parameters copied from the project snapshot for the
+    /// audio thread. SphereAudioProcessor is the source of truth for all derived
+    /// ratios/backend decisions.
+    pub stretch: StretchParams,
     pub speed_ratio: f32,
+    pub source_read_rate: f32,
     pub effective_time_ratio: f32,
     pub pitch_ratio: f32,
+    pub stretch_backend: StretchBackend,
     pub source_start_samples: u64,
     pub source_end_samples: u64,
     pub warp_markers: Vec<RuntimeWarpMarker>,
@@ -450,6 +460,77 @@ pub struct RuntimeClip {
     pub fade_in_samples: u64,
     pub fade_out_samples: u64,
     pub source: Arc<ClipAudioSource>,
+    /// Cached preserve-pitch processor for this runtime clip/voice. Created on
+    /// the control thread while building/cloning the runtime graph; the audio
+    /// thread only calls `reset`/`process_stereo` on it.
+    pub stretch_processor: Option<Box<dyn StretchProcessor + Send>>,
+    pub stretch_input_l: Vec<f32>,
+    pub stretch_input_r: Vec<f32>,
+    pub stretch_output_l: Vec<f32>,
+    pub stretch_output_r: Vec<f32>,
+    pub stretch_next_project_sample: Option<u64>,
+}
+
+impl std::fmt::Debug for RuntimeClip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeClip")
+            .field("id", &self.id)
+            .field("track_id", &self.track_id)
+            .field("track_index", &self.track_index)
+            .field("start_sample", &self.start_sample)
+            .field("duration_samples", &self.duration_samples)
+            .field("offset_seconds", &self.offset_seconds)
+            .field("gain", &self.gain)
+            .field("stretch", &self.stretch)
+            .field("source_read_rate", &self.source_read_rate)
+            .field("effective_time_ratio", &self.effective_time_ratio)
+            .field("pitch_ratio", &self.pitch_ratio)
+            .field("stretch_backend", &self.stretch_backend)
+            .field("processor", &self.processor)
+            .field("reverse", &self.reverse)
+            .field("muted", &self.muted)
+            .field("has_stretch_processor", &self.stretch_processor.is_some())
+            .finish()
+    }
+}
+
+impl Clone for RuntimeClip {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            track_id: self.track_id.clone(),
+            track_index: self.track_index,
+            start_sample: self.start_sample,
+            duration_samples: self.duration_samples,
+            offset_seconds: self.offset_seconds,
+            gain: self.gain,
+            stretch: self.stretch.clone(),
+            speed_ratio: self.speed_ratio,
+            source_read_rate: self.source_read_rate,
+            effective_time_ratio: self.effective_time_ratio,
+            pitch_ratio: self.pitch_ratio,
+            stretch_backend: self.stretch_backend,
+            source_start_samples: self.source_start_samples,
+            source_end_samples: self.source_end_samples,
+            warp_markers: self.warp_markers.clone(),
+            processor: self.processor,
+            reverse: self.reverse,
+            muted: self.muted,
+            fade_in_samples: self.fade_in_samples,
+            fade_out_samples: self.fade_out_samples,
+            source: Arc::clone(&self.source),
+            stretch_processor: create_runtime_stretch_processor(
+                self.stretch_backend,
+                self.source.sample_rate(),
+                &self.stretch,
+            ),
+            stretch_input_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+            stretch_input_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+            stretch_output_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+            stretch_output_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+            stretch_next_project_sample: None,
+        }
+    }
 }
 
 pub type AudioClip = EngineClipSnapshot;
@@ -2408,12 +2489,224 @@ pub fn resolve_clip_processor(mode: &str, preserve_pitch: bool) -> ClipDspProces
     }
 }
 
+fn resolved_clip_stretch_params(clip: &EngineClipSnapshot) -> StretchParams {
+    if clip.stretch != StretchParams::default() {
+        return clip.stretch.clone();
+    }
+
+    clip.audio_process
+        .as_ref()
+        .map(legacy_process_stretch_params)
+        .unwrap_or_default()
+}
+
+fn legacy_process_stretch_params(process: &EngineClipAudioProcess) -> StretchParams {
+    legacy_audio_process_to_stretch(
+        &process.mode,
+        process.preserve_pitch,
+        process.speed_ratio,
+        process.effective_time_ratio,
+        process.pitch_semitones,
+        &process.quality,
+    )
+}
+
+fn legacy_audio_process_to_stretch(
+    mode: &str,
+    preserve_pitch: bool,
+    speed_ratio: f64,
+    effective_time_ratio: f64,
+    pitch_semitones: f64,
+    quality: &str,
+) -> StretchParams {
+    let mut params = StretchParams::default();
+    let legacy_time_ratio = if effective_time_ratio.is_finite() && effective_time_ratio > 0.0 {
+        effective_time_ratio as f32
+    } else if speed_ratio.is_finite() && speed_ratio > 0.0 {
+        (1.0 / speed_ratio) as f32
+    } else {
+        1.0
+    };
+
+    let mode_key = mode.to_ascii_lowercase();
+    let force_repitch = mode_key == "resample";
+    params.mode = match mode_key.as_str() {
+        "off" | "none" => StretchMode::Off,
+        "temposync" | "tempo_sync" | "tempo-sync" => StretchMode::TempoSync,
+        "warp" => StretchMode::Warp,
+        "manual" | "resample" => {
+            if (legacy_time_ratio - 1.0).abs() > f32::EPSILON || preserve_pitch || force_repitch {
+                StretchMode::Manual
+            } else {
+                StretchMode::Off
+            }
+        }
+        _ => {
+            if (legacy_time_ratio - 1.0).abs() > f32::EPSILON || preserve_pitch {
+                StretchMode::Manual
+            } else {
+                StretchMode::Off
+            }
+        }
+    };
+    params.algorithm = if params.mode == StretchMode::Off {
+        StretchAlgorithm::Off
+    } else if preserve_pitch && !force_repitch {
+        StretchAlgorithm::PreservePitch
+    } else {
+        StretchAlgorithm::RePitch
+    };
+    params.time_ratio = legacy_time_ratio;
+    params.pitch_ratio = if pitch_semitones.is_finite() {
+        2.0_f32.powf(pitch_semitones as f32 / 12.0)
+    } else {
+        1.0
+    };
+    params.preserve_pitch = preserve_pitch && !force_repitch && params.mode != StretchMode::Off;
+    params.quality = match quality {
+        "draft" => 0.35,
+        "high" => 1.0,
+        _ => 0.75,
+    };
+    params
+}
+
+pub fn resolve_clip_processor_from_stretch(params: &StretchParams) -> ClipDspProcessor {
+    if params.mode == StretchMode::Off || params.algorithm == StretchAlgorithm::Off {
+        return ClipDspProcessor::NoStretch;
+    }
+    match resolve_backend(params) {
+        StretchBackend::InternalRePitch => ClipDspProcessor::Resample,
+        StretchBackend::Signalsmith => ClipDspProcessor::PhaseVocoderBasic,
+    }
+}
+
+#[cfg(test)]
+mod stretch_runtime_tests {
+    use super::*;
+    use crate::audio_file::AudioFileBuffer;
+    use crate::types::EngineFadeSnapshot;
+
+    fn test_source(frames: u64) -> Arc<ClipAudioSource> {
+        Arc::new(ClipAudioSource::InMemory(Arc::new(AudioFileBuffer {
+            sample_rate: 48_000,
+            channels: 2,
+            frames: frames as usize,
+            samples: vec![0.0; frames as usize * 2],
+        })))
+    }
+
+    fn test_clip(stretch: StretchParams) -> EngineClipSnapshot {
+        EngineClipSnapshot {
+            id: "clip".to_string(),
+            track_id: "track".to_string(),
+            asset_id: "asset".to_string(),
+            media_path: Some("test.wav".to_string()),
+            start_beat: 0.0,
+            duration_beats: 1.0,
+            offset_seconds: 0.0,
+            gain: 1.0,
+            muted: false,
+            fades: Some(EngineFadeSnapshot {
+                in_duration: 0.0,
+                out_duration: 0.0,
+                in_curve: "linear".to_string(),
+                out_curve: "linear".to_string(),
+            }),
+            stretch,
+            audio_process: None,
+        }
+    }
+
+    #[test]
+    fn engine_clip_stretch_serializes_roundtrip() {
+        let stretch = StretchParams {
+            mode: StretchMode::Manual,
+            algorithm: StretchAlgorithm::PreservePitch,
+            time_ratio: 2.0,
+            pitch_ratio: 1.25,
+            preserve_pitch: true,
+            ..StretchParams::default()
+        };
+        let clip = test_clip(stretch.clone());
+        let json = serde_json::to_string(&clip).expect("serialize clip");
+        let loaded: EngineClipSnapshot = serde_json::from_str(&json).expect("deserialize clip");
+        assert_eq!(loaded.stretch, stretch);
+    }
+
+    #[test]
+    fn missing_stretch_defaults_to_off() {
+        let json = r#"{
+            "id":"clip","trackId":"track","assetId":"asset","mediaPath":"test.wav",
+            "startBeat":0.0,"durationBeats":1.0,"offsetSeconds":0.0,"gain":1.0
+        }"#;
+        let loaded: EngineClipSnapshot =
+            serde_json::from_str(json).expect("deserialize legacy clip");
+        assert_eq!(loaded.stretch, StretchParams::default());
+        assert_eq!(
+            resolved_clip_stretch_params(&loaded),
+            StretchParams::default()
+        );
+    }
+
+    #[test]
+    fn legacy_audio_process_migrates_to_stretch_params() {
+        let mut clip = test_clip(StretchParams::default());
+        clip.audio_process = Some(EngineClipAudioProcess {
+            speed_ratio: 0.5,
+            effective_time_ratio: 2.0,
+            pitch_ratio: 1.0,
+            pitch_semitones: 0.0,
+            preserve_pitch: true,
+            mode: "manual".to_string(),
+            quality: "balanced".to_string(),
+            source_start_samples: 0,
+            source_end_samples: 48_000,
+            warp_markers: Vec::new(),
+            reverse: false,
+        });
+        let migrated = resolved_clip_stretch_params(&clip);
+        assert_eq!(migrated.mode, StretchMode::Manual);
+        assert_eq!(migrated.algorithm, StretchAlgorithm::PreservePitch);
+        assert!(migrated.preserve_pitch);
+        assert!((migrated.time_ratio - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn build_runtime_uses_stretched_duration_samples() {
+        let stretch = StretchParams {
+            mode: StretchMode::Manual,
+            algorithm: StretchAlgorithm::RePitch,
+            time_ratio: 2.0,
+            preserve_pitch: false,
+            ..StretchParams::default()
+        };
+        let clip = test_clip(stretch.clone());
+        let runtime_clip =
+            build_clip_runtime(&clip, test_source(48_000), 2.0, 48_000).expect("runtime clip");
+        assert_eq!(runtime_clip.duration_samples, 96_000);
+        assert_eq!(runtime_clip.stretch, stretch);
+        assert!((runtime_clip.source_read_rate - 0.5).abs() < f32::EPSILON);
+
+        let stretch = StretchParams {
+            time_ratio: 0.5,
+            ..stretch
+        };
+        let clip = test_clip(stretch);
+        let runtime_clip =
+            build_clip_runtime(&clip, test_source(48_000), 2.0, 48_000).expect("runtime clip");
+        assert_eq!(runtime_clip.duration_samples, 24_000);
+        assert!((runtime_clip.source_read_rate - 2.0).abs() < f32::EPSILON);
+    }
+}
+
 pub fn describe_clip_dsp_state(
     clip: &AudioClip,
     process: &EngineClipAudioProcess,
     project_bpm: f64,
 ) -> String {
-    let processor = resolve_clip_processor(&process.mode, process.preserve_pitch);
+    let stretch = legacy_process_stretch_params(process);
+    let processor = resolve_clip_processor_from_stretch(&stretch);
     let pending = if matches!(processor, ClipDspProcessor::PhaseVocoderBasic)
         && process.pitch_semitones.abs() > f64::EPSILON
     {
@@ -2430,12 +2723,12 @@ pub fn describe_clip_dsp_state(
         clip.id,
         clip.asset_id,
         process.mode,
-        process.effective_time_ratio,
-        process.effective_time_ratio * 100.0,
+        effective_time_ratio(&stretch, Some(project_bpm as f32)),
+        effective_time_ratio(&stretch, Some(project_bpm as f32)) * 100.0,
         process.quality,
-        process.effective_time_ratio,
-        process.pitch_ratio,
-        process.speed_ratio,
+        effective_time_ratio(&stretch, Some(project_bpm as f32)),
+        effective_pitch_ratio(&stretch),
+        source_read_rate_for_repitch(&stretch, Some(project_bpm as f32)),
         process.preserve_pitch,
         process.reverse,
         duration_samples.round() as u64,
@@ -2446,6 +2739,55 @@ pub fn describe_clip_dsp_state(
         process.warp_markers.len(),
         project_bpm,
     )
+}
+
+/// Opt-in switch for routing preserve-pitch clips through the real Signalsmith
+/// backend in the realtime render. Default-off because the Signalsmith default
+/// preset reports ~5760 samples (≈120 ms @ 48 kHz) of algorithmic latency, which
+/// is not yet compensated against the mix bus — until that lands (hooking the
+/// stretch latency into the Phase W PDC graph), preserve-pitch clips stay on the
+/// zero-latency `PhaseVocoderBasic` fallback so they don't drift behind other
+/// tracks. Set `FUTUREBOARD_STRETCH_SIGNALSMITH=1` to enable + audition it.
+fn signalsmith_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_STRETCH_SIGNALSMITH").is_some())
+}
+
+/// Build the per-clip preserve-pitch stretch processor for the realtime render.
+///
+/// Only the Signalsmith backend uses a cached `StretchProcessor`; resample /
+/// no-stretch clips are sampled inline. The bridge is now an allocation-free
+/// pass-through (`render_signalsmith_clip_segment` feeds it exactly the source
+/// samples it consumes per block), so it is safe for the audio callback. Created
+/// on the control thread; the audio thread only calls `reset`/`process_stereo`.
+fn create_runtime_stretch_processor(
+    backend: StretchBackend,
+    sample_rate: u32,
+    stretch: &StretchParams,
+) -> Option<Box<dyn StretchProcessor + Send>> {
+    if backend != StretchBackend::Signalsmith || !signalsmith_enabled() {
+        return None;
+    }
+    match create_stretch_processor(backend, sample_rate as f32, 2, stretch.clone()) {
+        Ok(processor) => {
+            if std::env::var_os("FUTUREBOARD_AUDIO_DEBUG").is_some() {
+                eprintln!(
+                    "[clip-stretch] signalsmith processor created sample_rate={sample_rate} latency_samples={} time_ratio={:.4} pitch_ratio={:.4}",
+                    processor.latency_samples(),
+                    effective_time_ratio(stretch, None),
+                    effective_pitch_ratio(stretch),
+                );
+            }
+            Some(processor)
+        }
+        Err(err) => {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("[clip-stretch] signalsmith processor unavailable, using fallback: {err}");
+            }
+            None
+        }
+    }
 }
 
 fn build_clip_runtime(
@@ -2464,29 +2806,35 @@ fn build_clip_runtime(
         return None;
     }
 
-    let speed_ratio = clip
-        .audio_process
-        .as_ref()
-        .map(|p| p.speed_ratio as f32)
-        .unwrap_or(1.0)
-        .clamp(0.01, 16.0);
-    let effective_time_ratio = clip
-        .audio_process
-        .as_ref()
-        .map(|p| p.effective_time_ratio as f32)
-        .unwrap_or(1.0)
-        .clamp(0.01, 20.0);
-    let pitch_ratio = clip
-        .audio_process
-        .as_ref()
-        .map(|p| p.pitch_ratio as f32)
-        .unwrap_or(1.0)
-        .clamp(0.01, 16.0);
-    let processor = clip
-        .audio_process
-        .as_ref()
-        .map(|p| resolve_clip_processor(&p.mode, p.preserve_pitch))
-        .unwrap_or(ClipDspProcessor::NoStretch);
+    let project_bpm = Some((beats_per_second * 60.0) as f32);
+    let stretch = resolved_clip_stretch_params(clip);
+    let speed_ratio = source_read_rate_for_repitch(&stretch, project_bpm).clamp(0.01, 16.0);
+    let source_read_rate = speed_ratio;
+    let effective_time_ratio = effective_time_ratio(&stretch, project_bpm).clamp(0.01, 20.0);
+    let pitch_ratio = effective_pitch_ratio(&stretch).clamp(0.01, 16.0);
+    let mut stretch_backend = resolve_backend(&stretch);
+    if stretch_backend == StretchBackend::Signalsmith
+        && !SphereAudioProcessor::signalsmith_stretch_available()
+    {
+        static WARNED_SIGNALS_MISSING: AtomicBool = AtomicBool::new(false);
+        if !WARNED_SIGNALS_MISSING.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "Signalsmith Stretch unavailable; falling back to InternalRePitch for clip {}",
+                clip.id
+            );
+        }
+        stretch_backend = StretchBackend::InternalRePitch;
+    }
+    let processor = match stretch_backend {
+        StretchBackend::InternalRePitch => {
+            if stretch.mode == StretchMode::Off || stretch.algorithm == StretchAlgorithm::Off {
+                ClipDspProcessor::NoStretch
+            } else {
+                ClipDspProcessor::Resample
+            }
+        }
+        StretchBackend::Signalsmith => ClipDspProcessor::PhaseVocoderBasic,
+    };
     let reverse = clip
         .audio_process
         .as_ref()
@@ -2530,7 +2878,26 @@ fn build_clip_runtime(
         }
     }
 
-    let duration_samples = seconds_to_samples(duration_seconds, output_sample_rate).max(1);
+    let base_duration_samples = seconds_to_samples(duration_seconds, output_sample_rate).max(1);
+    let stretch_is_authoritative =
+        clip.audio_process.is_some() || clip.stretch != StretchParams::default();
+    let duration_samples = if stretch_is_authoritative {
+        let trim_start = source_start_samples.min(source.frames() as u64);
+        let trim_end = if source_end_samples > trim_start {
+            source_end_samples.min(source.frames() as u64)
+        } else {
+            source.frames() as u64
+        };
+        let trimmed_source_frames = trim_end.saturating_sub(trim_start).max(1);
+        let source_frames_at_output_rate = ((trimmed_source_frames as f64
+            / source.sample_rate().max(1) as f64)
+            * output_sample_rate.max(1) as f64)
+            .round()
+            .max(1.0) as u64;
+        stretched_duration_samples(source_frames_at_output_rate, &stretch, project_bpm).max(1)
+    } else {
+        base_duration_samples
+    };
 
     // Resolve fade durations (seconds) → output samples. Clamp so the two
     // fades never overlap or exceed the clip length.
@@ -2546,6 +2913,9 @@ fn build_clip_runtime(
     let fade_in_samples = fade_in_samples.min(duration_samples);
     let fade_out_samples = fade_out_samples.min(duration_samples.saturating_sub(fade_in_samples));
 
+    let stretch_processor =
+        create_runtime_stretch_processor(stretch_backend, source.sample_rate(), &stretch);
+
     Some(RuntimeClip {
         id: clip.id.clone(),
         track_id: clip.track_id.clone(),
@@ -2554,9 +2924,12 @@ fn build_clip_runtime(
         duration_samples,
         offset_seconds: clip.offset_seconds.max(0.0),
         gain: clip.gain.clamp(0.0, 4.0),
+        stretch,
         speed_ratio,
+        source_read_rate,
         effective_time_ratio,
         pitch_ratio,
+        stretch_backend,
         source_start_samples,
         source_end_samples,
         warp_markers,
@@ -2566,6 +2939,12 @@ fn build_clip_runtime(
         fade_in_samples,
         fade_out_samples,
         source,
+        stretch_processor,
+        stretch_input_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+        stretch_input_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+        stretch_output_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+        stretch_output_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+        stretch_next_project_sample: None,
     })
 }
 

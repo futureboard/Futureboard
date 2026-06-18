@@ -208,8 +208,9 @@ impl StudioLayout {
                 let owner_bounds = Some(window.bounds());
                 if idx == 0 {
                     self.handle_project_switch_current_row(cx);
-                } else if let Some(project) =
-                    self.project_switcher_visible_entries().get(idx.saturating_sub(1))
+                } else if let Some(project) = self
+                    .project_switcher_visible_entries()
+                    .get(idx.saturating_sub(1))
                 {
                     if let Some(path) = project.path.clone() {
                         self.request_switch_project(
@@ -868,7 +869,11 @@ impl StudioLayout {
                         .with_shortcut("Ctrl+D"),
                 );
                 let erase_label = if is_audio { "Erase" } else { "Delete" };
-                let erase_command = if is_audio { "clip:erase" } else { "clip:delete" };
+                let erase_command = if is_audio {
+                    "clip:erase"
+                } else {
+                    "clip:delete"
+                };
                 entries.push(danger_menu_item_enabled(
                     erase_label,
                     erase_command,
@@ -1183,10 +1188,7 @@ impl StudioLayout {
                     ContextMenuEntry::disabled_item(format!("Tempo: {bpm:.1} BPM"), "noop"),
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item("Tap Tempo", "tempo:tap"),
-                    ContextMenuEntry::item(
-                        "Add Current Tempo at Playhead",
-                        "tempo:add-tap-marker",
-                    ),
+                    ContextMenuEntry::item("Add Current Tempo at Playhead", "tempo:add-tap-marker"),
                     menu_item_enabled("Reset Tap Session", "tempo:reset-tap", has_tap_session),
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item("Add Tempo Point at Playhead", "tempo:add-marker"),

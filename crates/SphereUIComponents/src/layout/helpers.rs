@@ -178,6 +178,7 @@ pub(super) fn find_clip_summary<'a>(
     tracks: &'a [TrackState],
     clip_id: Option<&str>,
     project_bpm: f64,
+    selection_duration_beats: Option<f32>,
 ) -> Option<crate::components::panel::SelectedClipSummary<'a>> {
     let id = clip_id?;
     for t in tracks {
@@ -206,6 +207,7 @@ pub(super) fn find_clip_summary<'a>(
                 track_name: &t.name,
                 stretch: &c.stretch,
                 project_bpm,
+                selection_duration_beats,
             });
         }
     }

@@ -1977,12 +1977,12 @@ impl StudioLayout {
     pub(super) fn ts_track_context_point_id(&self) -> Option<String> {
         match &self.overlay.open_popover {
             Some(OpenPopover::Context { request }) => match &request.target {
-                ContextMenuTarget::Extended(ContextTarget::TimeSignatureTrack { point_id, .. }) => {
-                    point_id.clone()
-                }
-                ContextMenuTarget::Extended(ContextTarget::TimeSignaturePoint { point_id, .. }) => {
-                    Some(point_id.clone())
-                }
+                ContextMenuTarget::Extended(ContextTarget::TimeSignatureTrack {
+                    point_id, ..
+                }) => point_id.clone(),
+                ContextMenuTarget::Extended(ContextTarget::TimeSignaturePoint {
+                    point_id, ..
+                }) => Some(point_id.clone()),
                 _ => None,
             },
             _ => None,

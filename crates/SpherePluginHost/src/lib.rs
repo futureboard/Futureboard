@@ -20,6 +20,7 @@ pub mod ipc;
 /// Plain-Rust facade over the editor C ABI — always built so the native
 /// binary can drive the IPlugView lifecycle without N-API.
 pub mod native_editor;
+pub mod platform;
 /// Stage 3b engine-facing realtime sink: implements DAUx's `PluginBridgeSink`
 /// over the shared-memory audio region.
 pub mod plugin_bridge_sink;
@@ -28,16 +29,15 @@ pub mod plugin_db;
 pub mod plugin_host_client;
 /// Windows job object + coordinated plugin-host shutdown for the main app.
 pub mod plugin_host_lifecycle;
-pub mod platform;
-/// Central plugin-host process manager for the DAW session.
-pub mod process_manager;
-pub mod plugin_host_main_window;
-pub mod plugin_host_spawn_config;
 /// File logging for the separated plugin host process (hidden console builds).
 pub mod plugin_host_logging;
+pub mod plugin_host_main_window;
 #[cfg(feature = "plugin-host-bin")]
 pub mod plugin_host_preview;
+pub mod plugin_host_spawn_config;
 pub mod preset;
+/// Central plugin-host process manager for the DAW session.
+pub mod process_manager;
 pub mod registry;
 pub mod scan;
 mod scanner;

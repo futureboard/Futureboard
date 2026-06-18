@@ -25,6 +25,13 @@ fn stretch_mode_key(mode: StretchMode) -> &'static str {
     }
 }
 
+fn sphere_stretch_params_from_clip_stretch(
+    stretch: &timeline_state::AudioClipStretchState,
+    project_bpm: f64,
+) -> SphereAudioProcessor::StretchParams {
+    stretch.to_sphere_stretch_params(project_bpm)
+}
+
 /// Map a controller lane kind to its VST3 controller number, or `None` for
 /// kinds with no global controller mapping (poly pressure is per-note and not
 /// yet routed to the engine).
@@ -452,7 +459,11 @@ fn build_engine_project_snapshot_inner(
                 // state.
                 let stretch = &clip.stretch;
                 let project_bpm = state.bpm.max(1.0) as f64;
-                let effective_time_ratio = stretch.effective_time_ratio(project_bpm);
+                let sphere_stretch = sphere_stretch_params_from_clip_stretch(stretch, project_bpm);
+                let effective_time_ratio = SphereAudioProcessor::effective_time_ratio(
+                    &sphere_stretch,
+                    Some(project_bpm as f32),
+                ) as f64;
                 let pitch_ratio = timeline_state::AudioClipStretchState::pitch_ratio_from_semitones(
                     stretch.pitch_shift_semitones,
                 );
@@ -481,8 +492,12 @@ fn build_engine_project_snapshot_inner(
                     gain: clip.gain.clamp(0.0, 4.0),
                     muted: clip.muted,
                     fades,
+                    stretch: sphere_stretch.clone(),
                     audio_process: Some(EngineClipAudioProcess {
-                        speed_ratio: stretch.resample_speed_ratio(project_bpm),
+                        speed_ratio: SphereAudioProcessor::source_read_rate_for_repitch(
+                            &sphere_stretch,
+                            Some(project_bpm as f32),
+                        ) as f64,
                         effective_time_ratio,
                         pitch_ratio,
                         pitch_semitones: stretch.pitch_shift_semitones as f64,

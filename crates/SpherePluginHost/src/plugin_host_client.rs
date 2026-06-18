@@ -19,9 +19,9 @@ use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
 use crate::plugin_host_lifecycle;
+use crate::plugin_host_logging;
 use crate::plugin_host_spawn_config::PluginHostSpawnConfig;
 use crate::process_manager::PluginHostProcessManager;
-use crate::plugin_host_logging;
 
 /// What the UI thread receives from [`PluginHostClient::try_recv_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,7 +336,10 @@ impl PluginHostClient {
             session_id: Some(config.project_id.clone()),
         })?;
         if let Some(hwnd) = config.main_hwnd {
-            eprintln!("[PluginHost] ipc hello main_hwnd=0x{hwnd:x} session={}", config.project_id);
+            eprintln!(
+                "[PluginHost] ipc hello main_hwnd=0x{hwnd:x} session={}",
+                config.project_id
+            );
         }
         Ok(client)
     }

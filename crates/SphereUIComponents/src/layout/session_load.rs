@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use gpui::{BorrowAppContext, Context};
 
 use crate::app_state::{AppMode, AppSessionGate, ProjectState, SessionInstallStatus};
-use crate::loading_session::{LoadedSessionPackage, SessionInstallHandoff, SessionRollbackSnapshot};
-use crate::session_shutdown::{
-    PluginUnloadTarget, SessionShutdownReason, SessionShutdownSnapshot,
+use crate::loading_session::{
+    LoadedSessionPackage, SessionInstallHandoff, SessionRollbackSnapshot,
 };
 use crate::project::io::{load_project, validate_project_file};
 use crate::project::{apply_to_timeline, now_secs};
+use crate::session_shutdown::{PluginUnloadTarget, SessionShutdownReason, SessionShutdownSnapshot};
 
 use super::project_ops::ProjectOpenOptions;
 use super::{RecordingUiState, StudioLayout};
@@ -33,7 +33,10 @@ macro_rules! session_log {
 
 impl StudioLayout {
     /// Capture the live session for rollback before an in-studio project swap.
-    pub fn capture_session_rollback_snapshot(&self, cx: &mut Context<Self>) -> SessionRollbackSnapshot {
+    pub fn capture_session_rollback_snapshot(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> SessionRollbackSnapshot {
         SessionRollbackSnapshot {
             timeline_state: self.timeline.read(cx).state.clone(),
             session: self.project_session.clone(),
@@ -124,9 +127,7 @@ impl StudioLayout {
 
         self.session_install_warnings = package.restore_warnings.clone();
         self.session_install_status = crate::app_state::SessionInstallStatus::Ready;
-        self.project_state = crate::app_state::ProjectState::SavedProject {
-            path: package.path,
-        };
+        self.project_state = crate::app_state::ProjectState::SavedProject { path: package.path };
         self.session_install_detail.clear();
         self.session_install_progress =
             crate::components::progress_dialog::ProgressBarValue::value(1.0);
@@ -244,7 +245,9 @@ impl StudioLayout {
 
         if matches!(
             self.recording.ui_state,
-            RecordingUiState::Recording | RecordingUiState::Preparing | RecordingUiState::Finalizing
+            RecordingUiState::Recording
+                | RecordingUiState::Preparing
+                | RecordingUiState::Finalizing
         ) {
             self.stop_native_recording(cx);
         }
@@ -275,9 +278,7 @@ impl StudioLayout {
         eprintln!("[ProjectSwitch] begin switch");
         let rollback = self.capture_session_rollback_snapshot(cx);
         let transient_count = self.prepare_for_in_studio_project_switch(cx);
-        eprintln!(
-            "[ProjectSwitch] closing transient windows count={transient_count}"
-        );
+        eprintln!("[ProjectSwitch] closing transient windows count={transient_count}");
         eprintln!("[ProjectSwitch] old session quiesced");
 
         self.session_install_status = SessionInstallStatus::Loading;
@@ -322,7 +323,9 @@ impl StudioLayout {
                     if this.session_install_status.is_failed() {
                         eprintln!("[ProjectSwitch] install failed — restoring rollback");
                         this.restore_session_rollback_snapshot(rollback, cx);
-                        cx.update_global::<AppSessionGate, _>(|gate, _| gate.mode = AppMode::Studio);
+                        cx.update_global::<AppSessionGate, _>(|gate, _| {
+                            gate.mode = AppMode::Studio
+                        });
                         this.show_project_open_failed_dialog(
                             "Open Project Failed",
                             "The project file could not be restored into the session.",
@@ -407,14 +410,10 @@ impl StudioLayout {
         session_log!("prepare for in-studio project switch transaction");
         eprintln!("[ProjectSwitch] close project switcher popover");
         let transient_count = self.prepare_for_in_studio_project_switch(cx);
-        eprintln!(
-            "[SessionShutdown] closing transient windows count={transient_count}"
-        );
+        eprintln!("[SessionShutdown] closing transient windows count={transient_count}");
         let rollback = self.capture_session_rollback_snapshot(cx);
-        let shutdown = self.capture_session_shutdown_snapshot(
-            SessionShutdownReason::ProjectSwitch,
-            cx,
-        );
+        let shutdown =
+            self.capture_session_shutdown_snapshot(SessionShutdownReason::ProjectSwitch, cx);
         let owner_bounds = self.studio_window_bounds(cx);
         (rollback, shutdown, owner_bounds)
     }

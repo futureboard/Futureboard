@@ -19,7 +19,9 @@ use crate::components::plugin_picker::list_view::{
 use crate::components::plugin_picker::prefs::PluginPickerPrefs;
 use crate::components::plugin_picker::search_index::PluginSearchIndex;
 use crate::components::plugin_picker::sidebar::plugin_filter_sidebar;
-use crate::components::plugin_picker::state::{CatalogStatus, PluginPickerScrollHandles, PluginPickerState};
+use crate::components::plugin_picker::state::{
+    CatalogStatus, PluginPickerScrollHandles, PluginPickerState,
+};
 use crate::components::plugin_picker::PluginPickerCallbacks;
 use crate::components::scroll_thumb::vertical_scrollbar_thumb;
 use crate::components::text_input::{

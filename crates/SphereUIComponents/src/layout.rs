@@ -56,6 +56,7 @@ mod project_switch;
 mod recording_ops;
 mod session_load;
 mod studio_render;
+mod stretch_tempo_ops;
 mod studio_state;
 mod track_clip_ops;
 mod transport_freeze_debug;
@@ -376,6 +377,8 @@ pub struct StudioLayout {
     /// growing-waveform preview). Grouped into
     /// [`recording_ops::RecordingSessionState`] (decomposition slice).
     recording: recording_ops::RecordingSessionState,
+    /// Async tempo-detection jobs for the Audio Stretch inspector.
+    stretch_tempo: stretch_tempo_ops::StretchTempoState,
     /// Throttle / sync timestamps for engine ↔ UI bridging (playhead, snapshot
     /// sync, meter push, tempo commit). Grouped into
     /// [`audio_transport::EngineSyncState`] (decomposition slice).
@@ -722,6 +725,7 @@ impl StudioLayout {
             )
             .with_placeholder("Run command..."),
             background_tasks: BackgroundTaskStore::default(),
+            stretch_tempo: stretch_tempo_ops::StretchTempoState::default(),
             project_switcher: ProjectSwitcherState::default(),
             project_switcher_search_input: TextInputState::new(
                 "project-switcher-search-input",

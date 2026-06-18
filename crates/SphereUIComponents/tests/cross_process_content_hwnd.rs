@@ -18,11 +18,11 @@
 
 use std::time::{Duration, Instant};
 
+use sphere_ui_components::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use SpherePluginHost::ipc::HostEvent;
 use SpherePluginHost::plugin_host_client::{
     locate_plugin_host_binary, ClientEvent, PluginHostClient,
 };
-use sphere_ui_components::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 
 use windows::core::w;
 use windows::Win32::Foundation::HWND;

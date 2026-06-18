@@ -217,11 +217,7 @@ fn hint_chip(key: &'static str, action: &'static str) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap(px(4.0))
-        .child(
-            div()
-                .text_color(Colors::text_muted())
-                .child(key),
-        )
+        .child(div().text_color(Colors::text_muted()).child(key))
         .child(action)
 }
 

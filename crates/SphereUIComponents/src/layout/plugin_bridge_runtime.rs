@@ -102,8 +102,7 @@ impl PluginBridgeRuntime {
             std::process::id(),
             client.pid(),
         );
-        let kick = match SpherePluginHost::audio_bridge::BridgeKickEvent::create_named(&kick_name)
-        {
+        let kick = match SpherePluginHost::audio_bridge::BridgeKickEvent::create_named(&kick_name) {
             Ok(event) => {
                 eprintln!("[plugin-bridge] kick event ready name={kick_name}");
                 Some(Arc::new(event))
@@ -626,10 +625,7 @@ pub(crate) fn shutdown_bridge_runtime(
         if let Some(pid) = bridge.host_pid() {
             BridgeHostManager::global().set_host_instances(pid, instance_ids);
         }
-        plugin_host_lifecycle::shutdown_host_client_with_timeout(
-            &mut bridge.client,
-            timeout,
-        );
+        plugin_host_lifecycle::shutdown_host_client_with_timeout(&mut bridge.client, timeout);
         bridge.client.join_reader();
         bridge.loaded.clear();
         bridge.shared_audio.clear();

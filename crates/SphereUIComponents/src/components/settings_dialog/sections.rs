@@ -368,8 +368,7 @@ pub(crate) fn performance_section(
     let show_status_perf = schema.performance.show_status_performance_metrics;
     let show_perf_overlay = schema.performance.show_performance_overlay;
 
-    card
-        .child(settings_restart_footer())
+    card.child(settings_restart_footer())
         .child(settings_section("Developer"))
         .child(settings_section_hint(
             "Optional diagnostics for profiling. Hidden by default in the status bar.",

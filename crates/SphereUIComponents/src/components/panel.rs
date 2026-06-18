@@ -60,6 +60,17 @@ type ClipBoolCb = Arc<dyn Fn(&(String, bool), &mut Window, &mut App) + 'static>;
 /// every stretch control; the inspector builds the mutated state and the layout
 /// records it as a single undo entry (see `set_clip_stretch_cb`).
 type ClipStretchCb = Arc<dyn Fn(&(String, AudioClipStretchState), &mut Window, &mut App) + 'static>;
+
+/// Transient UI state for async clip tempo analysis (not persisted).
+#[derive(Debug, Clone, Default)]
+pub struct StretchTempoUiSnapshot {
+    pub finding: bool,
+    pub error: Option<String>,
+    pub alternatives: Vec<f32>,
+    pub confidence: Option<f32>,
+    pub low_confidence: bool,
+    pub suggested_bpm: Option<f32>,
+}
 /// Reorder an FX/insert slot via drag. `(track_id, dragged_insert_id,
 /// insertion_index)` where `insertion_index` is the gap (0..=len) the dragged
 /// slot should move into. Identity is the stable `plugin_instance_id`, never
@@ -138,6 +149,10 @@ pub struct InspectorCallbacks {
     pub on_set_clip_muted: ClipBoolCb,
     /// Apply a new stretch/pitch state to an audio clip (one undo entry).
     pub on_set_clip_stretch: ClipStretchCb,
+    /// Analyze source audio and set `bpm_source` asynchronously.
+    pub on_clip_stretch_auto_find_bpm: StrCb,
+    /// Fit clip tempo to project BPM (auto-finds source BPM first if needed).
+    pub on_clip_stretch_fit_project: StrCb,
     /// Append a warp marker at the current playhead on the given clip.
     pub on_clip_warp_add_at_playhead: StrCb,
     /// Remove all warp markers from the given clip.
@@ -188,6 +203,8 @@ pub struct SelectedClipSummary<'a> {
     pub stretch: &'a AudioClipStretchState,
     /// Current project tempo, shown as the read-only Tempo-Sync target.
     pub project_bpm: f64,
+    /// Active arrangement time-selection duration in beats, when available.
+    pub selection_duration_beats: Option<f32>,
 }
 
 /// What the Inspector is currently editing. Resolved fresh from the live
@@ -269,6 +286,7 @@ pub fn inspector_panel<'a>(
     selected_track_id: Option<&str>,
     selected_clip_id: Option<&str>,
     clip_summary: Option<SelectedClipSummary<'a>>,
+    stretch_tempo: Option<StretchTempoUiSnapshot>,
     name_input: &TextInputState,
     name_focused: bool,
     clip_name_input: &TextInputState,
@@ -276,7 +294,8 @@ pub fn inspector_panel<'a>(
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
     let body: gpui::AnyElement = if let Some(clip) = clip_summary {
-        clip_inspector(clip, clip_name_input, clip_name_focused, callbacks).into_any_element()
+        let tempo = stretch_tempo.unwrap_or_default();
+        clip_inspector(clip, clip_name_input, clip_name_focused, tempo, callbacks).into_any_element()
     } else if let Some(tid) = selected_track_id {
         match tracks.iter().find(|t| t.id == tid) {
             Some(t) => track_inspector(t, name_input, name_focused, callbacks).into_any_element(),
@@ -1780,72 +1799,79 @@ fn truncate_value(text: impl Into<String>) -> impl IntoElement {
 // undo entry. The controls edit real persisted state; the audio engine wires it
 // to playback/export in a later slice (the Stretch section says so honestly).
 
-const STRETCH_MODE_OPTIONS: &[InspectorSelectOption<StretchMode>] = &[
-    InspectorSelectOption {
-        label: "Off",
-        value: StretchMode::Off,
-    },
-    InspectorSelectOption {
-        label: "Resample",
-        value: StretchMode::Resample,
-    },
-    InspectorSelectOption {
-        label: "Tempo Sync",
-        value: StretchMode::TempoSync,
-    },
-    InspectorSelectOption {
-        label: "Manual",
-        value: StretchMode::Manual,
-    },
-    InspectorSelectOption {
-        label: "Warp",
-        value: StretchMode::Warp,
-    },
-];
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StretchBasicMode {
+    Off,
+    RePitch,
+    PreservePitch,
+}
 
-const STRETCH_ALGORITHM_OPTIONS: &[InspectorSelectOption<StretchAlgorithm>] = &[
+const STRETCH_ACTIVE_MODE_OPTIONS: &[InspectorSelectOption<StretchBasicMode>] = &[
     InspectorSelectOption {
-        label: "Auto",
-        value: StretchAlgorithm::Auto,
+        label: "RePitch",
+        value: StretchBasicMode::RePitch,
     },
     InspectorSelectOption {
-        label: "Phase Vocoder",
-        value: StretchAlgorithm::PhaseVocoder,
-    },
-    InspectorSelectOption {
-        label: "Transient",
-        value: StretchAlgorithm::Transient,
-    },
-    InspectorSelectOption {
-        label: "Solo",
-        value: StretchAlgorithm::Solo,
-    },
-    InspectorSelectOption {
-        label: "Texture",
-        value: StretchAlgorithm::Texture,
-    },
-    InspectorSelectOption {
-        label: "Elastique",
-        value: StretchAlgorithm::ElastiqueLike,
-    },
-    InspectorSelectOption {
-        label: "Resample Only",
-        value: StretchAlgorithm::ResampleOnly,
+        label: "Preserve Pitch",
+        value: StretchBasicMode::PreservePitch,
     },
 ];
 
 fn mode_supports_preserve_pitch(mode: StretchMode) -> bool {
-    matches!(mode, StretchMode::Manual | StretchMode::TempoSync)
+    matches!(
+        mode,
+        StretchMode::Manual | StretchMode::TempoSync | StretchMode::Warp
+    )
 }
 
 fn with_mode(s: &AudioClipStretchState, mode: StretchMode) -> AudioClipStretchState {
     let mut n = s.clone();
     n.mode = mode;
-    if !mode_supports_preserve_pitch(mode) {
+    if mode == StretchMode::Off {
         n.preserve_pitch = false;
+        n.algorithm = StretchAlgorithm::Auto;
+    } else if !mode_supports_preserve_pitch(mode) {
+        n.preserve_pitch = false;
+        n.algorithm = StretchAlgorithm::ResampleOnly;
+    } else if matches!(n.algorithm, StretchAlgorithm::Auto) {
+        n.algorithm = StretchAlgorithm::ResampleOnly;
     }
     n.dirty = true;
     n
+}
+
+fn stretch_basic_mode(s: &AudioClipStretchState) -> StretchBasicMode {
+    if s.mode == StretchMode::Off {
+        StretchBasicMode::Off
+    } else if s.preserve_pitch && !matches!(s.algorithm, StretchAlgorithm::ResampleOnly) {
+        StretchBasicMode::PreservePitch
+    } else {
+        StretchBasicMode::RePitch
+    }
+}
+
+fn with_basic_mode(s: &AudioClipStretchState, mode: StretchBasicMode) -> AudioClipStretchState {
+    let mut next = s.clone();
+    match mode {
+        StretchBasicMode::Off => {
+            next.mode = StretchMode::Off;
+            next.algorithm = StretchAlgorithm::Auto;
+            next.preserve_pitch = false;
+        }
+        StretchBasicMode::RePitch => {
+            next.mode = StretchMode::Manual;
+            next.algorithm = StretchAlgorithm::ResampleOnly;
+            next.preserve_pitch = false;
+        }
+        StretchBasicMode::PreservePitch => {
+            next.mode = StretchMode::Manual;
+            next.algorithm = StretchAlgorithm::PhaseVocoder;
+            next.preserve_pitch = true;
+        }
+    }
+    next.clip_timeline_duration_beats = 0.0;
+    next.dirty = true;
+    next
 }
 
 #[cfg(test)]
@@ -1857,7 +1883,7 @@ mod stretch_inspector_tests {
         assert!(!mode_supports_preserve_pitch(StretchMode::Resample));
         assert!(mode_supports_preserve_pitch(StretchMode::Manual));
         assert!(mode_supports_preserve_pitch(StretchMode::TempoSync));
-        assert!(!mode_supports_preserve_pitch(StretchMode::Warp));
+        assert!(mode_supports_preserve_pitch(StretchMode::Warp));
     }
 
     #[test]
@@ -1869,163 +1895,538 @@ mod stretch_inspector_tests {
         let next = with_mode(&state, StretchMode::Resample);
         assert!(!next.preserve_pitch);
     }
+
+    #[test]
+    fn basic_mode_maps_to_real_stretch_params() {
+        let state = AudioClipStretchState::default();
+        let repitch = with_basic_mode(&state, StretchBasicMode::RePitch);
+        assert_eq!(repitch.mode, StretchMode::Manual);
+        assert_eq!(repitch.algorithm, StretchAlgorithm::ResampleOnly);
+        assert!(!repitch.preserve_pitch);
+
+        let preserve = with_basic_mode(&state, StretchBasicMode::PreservePitch);
+        assert_eq!(preserve.mode, StretchMode::Manual);
+        assert_eq!(preserve.algorithm, StretchAlgorithm::PhaseVocoder);
+        assert!(preserve.preserve_pitch);
+    }
 }
 
-/// STRETCH section body — mode/algorithm/preserve/ratio/percent/BPM.
-fn stretch_section_body(
-    clip_id: &str,
+fn stretch_backend_summary(s: &AudioClipStretchState) -> &'static str {
+    match stretch_basic_mode(s) {
+        StretchBasicMode::Off => "Off",
+        StretchBasicMode::RePitch => "RePitch",
+        StretchBasicMode::PreservePitch => "Signalsmith",
+    }
+}
+
+fn seconds_to_time_label(seconds: f64) -> String {
+    let seconds = seconds.max(0.0);
+    let minutes = (seconds / 60.0).floor() as u64;
+    let rem = seconds - minutes as f64 * 60.0;
+    format!("{minutes:02}:{rem:06.3}")
+}
+
+fn stretch_length_summary(
     s: &AudioClipStretchState,
     project_bpm: f64,
-    cb: &ClipStretchCb,
-) -> impl IntoElement {
-    let cur_src_bpm = s.bpm_source.unwrap_or(project_bpm);
-    let src_bpm_label = s
-        .bpm_source
-        .map(|b| format!("{b:.2}"))
-        .unwrap_or_else(|| "—".to_string());
-    let preserve_disabled = !mode_supports_preserve_pitch(s.mode);
-    let stretch_note = match s.mode {
-        StretchMode::Resample => Some("Resample is tape-style; pitch follows speed"),
-        StretchMode::Warp => Some("Warp markers stored; playback uses global stretch"),
-        StretchMode::Manual | StretchMode::TempoSync if s.preserve_pitch => {
-            Some("Preserve pitch uses basic fallback")
-        }
-        _ => None,
+    fallback_duration_seconds: Option<f64>,
+) -> String {
+    let sample_rate = s.project_sample_rate.max(s.original_sample_rate).max(1) as f64;
+    let source_seconds = if s.source_len_samples() > 0 {
+        s.source_len_samples() as f64 / sample_rate
+    } else {
+        fallback_duration_seconds.unwrap_or(0.0)
     };
+    let new_seconds = source_seconds * s.effective_time_ratio(project_bpm).max(0.0);
+    format!(
+        "{} -> {}",
+        seconds_to_time_label(source_seconds),
+        seconds_to_time_label(new_seconds)
+    )
+}
 
+fn stretch_field_block(label: impl Into<String>, control: impl IntoElement) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
         .gap(px(3.0))
-        .children(stretch_note.map(inspector_hint_text))
-        .child(shared_inspector_row(
-            "Mode",
-            false,
-            inspector_select("clip-stretch-mode", s.mode, STRETCH_MODE_OPTIONS, false, {
-                let s = s.clone();
-                let cb = cb.clone();
-                let clip_id = clip_id.to_string();
-                move |mode, w, cx| {
-                    cb(&(clip_id.clone(), with_mode(&s, mode)), w, cx);
-                }
-            }),
-        ))
-        .child(shared_inspector_row(
-            "Algorithm",
-            false,
-            inspector_select(
-                "clip-stretch-algo",
-                s.algorithm,
-                STRETCH_ALGORITHM_OPTIONS,
-                false,
-                {
-                    let s = s.clone();
-                    let cb = cb.clone();
-                    let clip_id = clip_id.to_string();
-                    move |algorithm, w, cx| {
-                        let mut next = s.clone();
-                        next.algorithm = algorithm;
-                        next.dirty = true;
-                        cb(&(clip_id.clone(), next), w, cx);
-                    }
-                },
-            ),
-        ))
-        .child(shared_inspector_row(
-            "Preserve",
-            preserve_disabled,
+        .py(px(2.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_muted())
+                .child(label.into()),
+        )
+        .child(control)
+}
+
+fn stretch_metric_row(label: impl Into<String>, value: impl Into<String>) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .min_w(px(0.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(Colors::text_muted())
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(10.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_secondary())
+                .child(value.into()),
+        )
+}
+
+/// STRETCH section body — compact Basic mode with real state-backed actions.
+fn stretch_section_body(
+    clip: &SelectedClipSummary<'_>,
+    s: &AudioClipStretchState,
+    project_bpm: f64,
+    tempo: &StretchTempoUiSnapshot,
+    cb: &ClipStretchCb,
+    callbacks: &InspectorCallbacks,
+) -> impl IntoElement {
+    let clip_id = clip.clip_id.to_string();
+    let stretch_enabled = s.mode != StretchMode::Off;
+    let preserve_mode = stretch_basic_mode(s) == StretchBasicMode::PreservePitch;
+    let (semi, fine) = s.pitch_semi_and_cents();
+    let cur_src_bpm = s
+        .bpm_source
+        .or(tempo.suggested_bpm.map(f64::from))
+        .unwrap_or(project_bpm);
+    let src_bpm_label = s
+        .bpm_source
+        .map(|b| format!("{b:.2}"))
+        .or_else(|| tempo.suggested_bpm.map(|b| format!("{b:.2} ?")))
+        .unwrap_or_else(|| "—".to_string());
+    let target_display = if matches!(s.mode, StretchMode::TempoSync) || s.bpm_target.is_none() {
+        format!("Project {project_bpm:.2}")
+    } else {
+        format!("Manual {:.2}", s.bpm_target.unwrap_or(project_bpm))
+    };
+    let ratio = s.effective_time_ratio(project_bpm);
+    let length_summary = stretch_length_summary(s, project_bpm, clip.source_duration_seconds);
+    let backend = stretch_backend_summary(s);
+    let pitch_summary = format!("{:+.2} st / {:+.0} ct", semi, fine);
+    let mut fit_selection = s.clone();
+    let fit_selection_enabled = clip
+        .selection_duration_beats
+        .map(|beats| fit_selection.fit_to_timeline_beats(beats as f64, project_bpm))
+        .unwrap_or(false);
+    let mut fit_clip = s.clone();
+    let fit_clip_enabled = fit_clip.fit_to_timeline_beats(clip.duration_beats as f64, project_bpm);
+    let mut reset = s.clone();
+    reset.reset_stretch_defaults();
+    let auto_find = callbacks.on_clip_stretch_auto_find_bpm.clone();
+    let fit_project = callbacks.on_clip_stretch_fit_project.clone();
+    let auto_find_id = clip_id.clone();
+    let fit_project_id = clip_id.clone();
+    let finding = tempo.finding;
+    let auto_find_label = if finding { "Finding..." } else { "Auto Find" };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(stretch_field_block(
+            "Enable Stretch",
             shared_inspector_checkbox(
-                "clip-stretch-preserve",
-                s.preserve_pitch,
-                preserve_disabled,
-                if s.preserve_pitch { "On" } else { "Off" },
+                "clip-stretch-enabled",
+                stretch_enabled,
+                false,
+                if stretch_enabled { "On" } else { "Off" },
                 {
                     let s = s.clone();
                     let cb = cb.clone();
-                    let clip_id = clip_id.to_string();
+                    let clip_id = clip_id.clone();
                     move |checked, w, cx| {
-                        let mut next = s.clone();
-                        next.preserve_pitch = checked && mode_supports_preserve_pitch(next.mode);
-                        next.dirty = true;
+                        let next = if checked {
+                            with_basic_mode(&s, StretchBasicMode::RePitch)
+                        } else {
+                            with_basic_mode(&s, StretchBasicMode::Off)
+                        };
                         cb(&(clip_id.clone(), next), w, cx);
                     }
                 },
             ),
         ))
-        .child(shared_inspector_row(
-            "Ratio",
-            false,
-            inspector_numeric_stepper(
-                "clip-stretch-ratio",
-                s.stretch_ratio,
-                format!("{:.3}x", s.stretch_ratio),
-                AudioClipStretchState::MIN_RATIO,
-                AudioClipStretchState::MAX_RATIO,
-                0.05,
-                false,
+        .child(stretch_field_block(
+            "Mode",
+            inspector_select(
+                "clip-stretch-mode",
+                if stretch_enabled {
+                    stretch_basic_mode(s)
+                } else {
+                    StretchBasicMode::RePitch
+                },
+                STRETCH_ACTIVE_MODE_OPTIONS,
+                !stretch_enabled,
                 {
                     let s = s.clone();
                     let cb = cb.clone();
-                    let clip_id = clip_id.to_string();
-                    move |ratio, w, cx| {
-                        let mut next = s.clone();
-                        next.set_stretch_ratio(ratio);
-                        cb(&(clip_id.clone(), next), w, cx);
+                    let clip_id = clip_id.clone();
+                    move |mode, w, cx| {
+                        cb(&(clip_id.clone(), with_basic_mode(&s, mode)), w, cx);
                     }
                 },
             ),
         ))
-        .child(shared_inspector_row(
-            "Percent",
-            false,
-            inspector_numeric_stepper(
-                "clip-stretch-pct",
-                s.stretch_percent(),
-                format!("{:.1} %", s.stretch_percent()),
-                AudioClipStretchState::MIN_RATIO * 100.0,
-                AudioClipStretchState::MAX_RATIO * 100.0,
-                5.0,
-                false,
-                {
-                    let s = s.clone();
-                    let cb = cb.clone();
-                    let clip_id = clip_id.to_string();
-                    move |percent, w, cx| {
-                        let mut next = s.clone();
-                        next.set_stretch_percent(percent);
-                        cb(&(clip_id.clone(), next), w, cx);
-                    }
-                },
-            ),
-        ))
-        .child(shared_inspector_row(
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_muted())
+                .child("Tempo"),
+        )
+        .child(stretch_field_block(
             "Source BPM",
-            false,
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(inspector_mini_button(
+                            "clip-stretch-auto-tempo",
+                            auto_find_label,
+                            !finding,
+                            move |_, w, cx| auto_find(&auto_find_id, w, cx),
+                        ))
+                        .child(inspector_numeric_stepper(
+                            "clip-stretch-srcbpm",
+                            cur_src_bpm,
+                            src_bpm_label,
+                            1.0,
+                            999.0,
+                            1.0,
+                            !stretch_enabled,
+                            {
+                                let s = s.clone();
+                                let cb = cb.clone();
+                                let clip_id = clip_id.clone();
+                                move |bpm, w, cx| {
+                                    let mut next = s.clone();
+                                    next.bpm_source = Some(bpm);
+                                    next.clip_timeline_duration_beats = 0.0;
+                                    next.dirty = true;
+                                    cb(&(clip_id.clone(), next), w, cx);
+                                }
+                            },
+                        )),
+                )
+                .children(tempo.error.as_ref().map(|error| {
+                    inspector_hint_text(format!("{error}"))
+                }))
+                .children(tempo.confidence.map(|confidence| {
+                    inspector_hint_text(format!(
+                        "Detected confidence: {:.0}%{}",
+                        confidence * 100.0,
+                        if tempo.low_confidence { " (low)" } else { "" }
+                    ))
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(4.0))
+                        .child({
+                            let s = s.clone();
+                            let cb = cb.clone();
+                            let clip_id = clip_id.clone();
+                            inspector_mini_button(
+                                "clip-stretch-bpm-half",
+                                "x0.5",
+                                s.bpm_source.is_some(),
+                                move |_, w, cx| {
+                                    let Some(bpm) = s.bpm_source else {
+                                        return;
+                                    };
+                                    let mut next = s.clone();
+                                    next.bpm_source = Some((bpm * 0.5).clamp(1.0, 999.0));
+                                    next.clip_timeline_duration_beats = 0.0;
+                                    next.dirty = true;
+                                    cb(&(clip_id.clone(), next), w, cx);
+                                },
+                            )
+                        })
+                        .child({
+                            let s = s.clone();
+                            let cb = cb.clone();
+                            let clip_id = clip_id.clone();
+                            inspector_mini_button(
+                                "clip-stretch-bpm-double",
+                                "x2",
+                                s.bpm_source.is_some(),
+                                move |_, w, cx| {
+                                    let Some(bpm) = s.bpm_source else {
+                                        return;
+                                    };
+                                    let mut next = s.clone();
+                                    next.bpm_source = Some((bpm * 2.0).clamp(1.0, 999.0));
+                                    next.clip_timeline_duration_beats = 0.0;
+                                    next.dirty = true;
+                                    cb(&(clip_id.clone(), next), w, cx);
+                                },
+                            )
+                        })
+                        .child({
+                            let s = s.clone();
+                            let cb = cb.clone();
+                            let clip_id = clip_id.clone();
+                            inspector_mini_button(
+                                "clip-stretch-bpm-match-project",
+                                "Match Project",
+                                true,
+                                move |_, w, cx| {
+                                    let mut next = s.clone();
+                                    next.bpm_source = Some(project_bpm);
+                                    next.clip_timeline_duration_beats = 0.0;
+                                    next.dirty = true;
+                                    cb(&(clip_id.clone(), next), w, cx);
+                                },
+                            )
+                        }),
+                )
+                .children((!tempo.alternatives.is_empty()).then(|| {
+                    let cb = cb.clone();
+                    let s = s.clone();
+                    let clip_id = clip_id.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(Colors::text_faint())
+                                .child("Alternatives"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(4.0))
+                                .children(tempo.alternatives.iter().map(|alt| {
+                                    let alt = *alt as f64;
+                                    let label = format!("{alt:.1}");
+                                    let cb = cb.clone();
+                                    let s = s.clone();
+                                    let clip_id = clip_id.clone();
+                                    inspector_mini_button(
+                                        format!("clip-stretch-alt-{alt:.1}"),
+                                        label,
+                                        true,
+                                        move |_, w, cx| {
+                                            let mut next = s.clone();
+                                            next.bpm_source = Some(alt);
+                                            next.clip_timeline_duration_beats = 0.0;
+                                            next.dirty = true;
+                                            cb(&(clip_id.clone(), next), w, cx);
+                                        },
+                                    )
+                                })),
+                        )
+                })),
+        ))
+        .child(stretch_field_block(
+            "Target BPM",
+            div()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .px(px(7.0))
+                .rounded_md()
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_input())
+                .text_size(px(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_secondary())
+                .child(target_display.clone()),
+        ))
+        .child(stretch_field_block(
+            "Fit",
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(4.0))
+                .child(inspector_mini_button(
+                    "clip-fit-project-tempo",
+                    "Fit Project",
+                    !finding,
+                    move |_, w, cx| fit_project(&fit_project_id, w, cx),
+                ))
+                .child(inspector_mini_button(
+                    "clip-fit-selection",
+                    "Fit Selection",
+                    fit_selection_enabled,
+                    {
+                        let cb = cb.clone();
+                        let clip_id = clip_id.clone();
+                        move |_, w, cx| {
+                            cb(&(clip_id.clone(), fit_selection.clone()), w, cx);
+                        }
+                    },
+                ))
+                .child(inspector_mini_button(
+                    "clip-fit-length",
+                    "Fit Clip",
+                    fit_clip_enabled,
+                    {
+                        let cb = cb.clone();
+                        let clip_id = clip_id.clone();
+                        move |_, w, cx| {
+                            cb(&(clip_id.clone(), fit_clip.clone()), w, cx);
+                        }
+                    },
+                )),
+        ))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_muted())
+                .child("Pitch"),
+        )
+        .children((!preserve_mode && stretch_enabled).then(|| {
+            inspector_hint_text("Pitch shift requires Preserve Pitch mode")
+        }))
+        .child(stretch_field_block(
+            "Semi",
             inspector_numeric_stepper(
-                "clip-stretch-srcbpm",
-                cur_src_bpm,
-                src_bpm_label,
+                "clip-pitch-semi",
+                semi as f64,
+                format!("{:+.2}", semi),
+                -48.0,
+                48.0,
                 1.0,
-                999.0,
-                1.0,
-                false,
+                !stretch_enabled || !preserve_mode,
                 {
                     let s = s.clone();
                     let cb = cb.clone();
-                    let clip_id = clip_id.to_string();
-                    move |bpm, w, cx| {
+                    let clip_id = clip_id.clone();
+                    move |semi, w, cx| {
+                        let (_, fine) = s.pitch_semi_and_cents();
                         let mut next = s.clone();
-                        next.bpm_source = Some(bpm);
-                        next.dirty = true;
+                        next.set_pitch_semi_and_cents(semi as f32, fine);
                         cb(&(clip_id.clone(), next), w, cx);
                     }
                 },
             ),
         ))
-        .child(shared_inspector_row(
-            "Target BPM",
-            false,
-            inspector_value(format!("{project_bpm:.2}")),
+        .child(stretch_field_block(
+            "Fine",
+            inspector_numeric_stepper(
+                "clip-pitch-fine",
+                fine as f64,
+                format!("{fine:+.0} ct"),
+                -99.0,
+                99.0,
+                50.0,
+                !stretch_enabled || !preserve_mode,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.clone();
+                    move |fine, w, cx| {
+                        let (semi, _) = s.pitch_semi_and_cents();
+                        let mut next = s.clone();
+                        next.set_pitch_semi_and_cents(semi, fine as f32);
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(stretch_field_block(
+            "",
+            inspector_mini_button(
+                "clip-reset-pitch",
+                "Reset Pitch",
+                stretch_enabled && preserve_mode,
+                {
+                    let s = s.clone();
+                    let cb = cb.clone();
+                    let clip_id = clip_id.clone();
+                    move |_, w, cx| {
+                        let mut next = s.clone();
+                        next.reset_pitch();
+                        cb(&(clip_id.clone(), next), w, cx);
+                    }
+                },
+            ),
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .pt(px(5.0))
+                .border_t(px(1.0))
+                .border_color(Colors::divider())
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::text_muted())
+                        .child("Result"),
+                )
+                .child(inspector_mini_button(
+                    "clip-reset-stretch",
+                    "Reset Stretch",
+                    true,
+                    {
+                        let cb = cb.clone();
+                        let clip_id = clip_id.clone();
+                        move |_, w, cx| {
+                            cb(&(clip_id.clone(), reset.clone()), w, cx);
+                        }
+                    },
+                )),
+        )
+        .child(stretch_metric_row("Ratio", format!("{ratio:.3}x")))
+        .children(s.bpm_source.map(|b| {
+            stretch_metric_row("Source", format!("{b:.2} BPM"))
+        }))
+        .child(stretch_metric_row("Target", target_display))
+        .child(stretch_metric_row("Pitch", pitch_summary))
+        .child(stretch_metric_row("Length", length_summary))
+        .child(stretch_metric_row("Backend", backend))
+        .children((stretch_enabled && !preserve_mode).then(|| {
+            inspector_hint_text(format!(
+                "Pitch follows speed. Extra pitch: {}",
+                format!("{:+.2} st", semi)
+            ))
+        }))
+        .children((stretch_enabled && preserve_mode).then(|| {
+            inspector_hint_text(format!("Pitch preserved. Pitch shift: {:+.2} st", semi))
+        }))
+        .children((!stretch_enabled).then(|| {
+            inspector_hint_text("Stretch is off; playback uses default params.")
+        }))
+        .children((!fit_selection_enabled).then(|| {
+            inspector_hint_text("Fit Selection enables when an arrangement time range is selected.")
+        }))
+        .child(stretch_field_block(
+            "Advanced",
+            inspector_hint_text("Formant, transient, warp markers, and quality — not available yet."),
         ))
 }
 
@@ -2236,6 +2637,7 @@ fn clip_inspector(
     clip: SelectedClipSummary<'_>,
     clip_name_input: &TextInputState,
     clip_name_focused: bool,
+    tempo: StretchTempoUiSnapshot,
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
     let clip_id = clip.clip_id.to_string();
@@ -2452,24 +2854,16 @@ fn clip_inspector(
                     )),
             ))
             .child(shared_inspector_section(
-                "Stretch",
+                "Audio Stretch",
                 None::<String>,
-                stretch_section_body(clip.clip_id, s, clip.project_bpm, &stretch_cb),
-            ))
-            .child(shared_inspector_section(
-                "Pitch",
-                None::<String>,
-                pitch_section_body(clip.clip_id, s, &stretch_cb),
-            ))
-            .child(shared_inspector_section(
-                "Transient",
-                None::<String>,
-                transient_section_body(clip.clip_id, s, &stretch_cb),
-            ))
-            .child(shared_inspector_section(
-                "Warp",
-                None::<String>,
-                warp_section_body(clip.clip_id, s, callbacks),
+                stretch_section_body(
+                    &clip,
+                    s,
+                    clip.project_bpm,
+                    &tempo,
+                    &stretch_cb,
+                    callbacks,
+                ),
             ))
             .child(shared_inspector_section(
                 "Source",

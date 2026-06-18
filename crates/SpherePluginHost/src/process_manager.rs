@@ -151,19 +151,13 @@ impl PluginHostProcessManager {
     pub fn mark_kill_required(&self, pid: u32) {
         if let Some(record) = self.hosts.lock().expect("plugin host lock").get_mut(&pid) {
             record.state = HostLifecycleState::KillRequired;
-            eprintln!(
-                "[PluginHost] timeout host_id={} pid={pid}",
-                record.host_id
-            );
+            eprintln!("[PluginHost] timeout host_id={} pid={pid}", record.host_id);
         }
     }
 
     pub fn mark_killed(&self, pid: u32) {
         if let Some(record) = self.hosts.lock().expect("plugin host lock").get_mut(&pid) {
-            eprintln!(
-                "[PluginHost] killed host_id={} pid={pid}",
-                record.host_id
-            );
+            eprintln!("[PluginHost] killed host_id={} pid={pid}", record.host_id);
         }
         self.hosts.lock().expect("plugin host lock").remove(&pid);
     }
@@ -236,10 +230,7 @@ pub fn shutdown_host_client(client: &mut PluginHostClient) {
     shutdown_host_client_with_timeout(client, HOST_SHUTDOWN_TIMEOUT);
 }
 
-pub fn shutdown_host_client_with_timeout(
-    client: &mut PluginHostClient,
-    timeout: Duration,
-) {
+pub fn shutdown_host_client_with_timeout(client: &mut PluginHostClient, timeout: Duration) {
     shutdown_host_client_on(PluginHostProcessManager::global(), client, timeout);
 }
 
@@ -261,10 +252,7 @@ fn shutdown_host_client_on(
     loop {
         match client.has_exited() {
             Some(true) => {
-                let code = client
-                    .wait_for_exit()
-                    .ok()
-                    .and_then(|status| status.code());
+                let code = client.wait_for_exit().ok().and_then(|status| status.code());
                 manager.mark_exited(pid, code);
                 eprintln!(
                     "[PluginHost] exited host_id=host-{pid} pid={pid} code={}",

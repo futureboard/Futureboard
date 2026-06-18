@@ -6,12 +6,12 @@ mod processor;
 mod ratios;
 
 pub use error::StretchError;
-pub use factory::{create_stretch_processor, resolve_backend};
+pub use factory::{create_stretch_processor, resolve_backend, signalsmith_stretch_available};
 pub use params::{StretchAlgorithm, StretchBackend, StretchMode, StretchParams};
 pub use processor::StretchProcessor;
 pub use ratios::{
-    effective_pitch_ratio, effective_time_ratio, source_read_rate_for_repitch,
-    stretched_duration_samples,
+    effective_pitch_ratio, effective_time_ratio, pitch_ratio_to_semitone_cents,
+    semitone_to_pitch_ratio, source_read_rate_for_repitch, stretched_duration_samples,
 };
 
 #[cfg(test)]
@@ -105,6 +105,15 @@ mod tests {
     }
 
     #[test]
+    fn source_read_rate_for_repitch_folds_pitch_ratio() {
+        let params = StretchParams {
+            pitch_ratio: 2.0,
+            ..manual(1.0)
+        };
+        approx(source_read_rate_for_repitch(&params, None), 2.0);
+    }
+
+    #[test]
     fn stretched_duration_samples_scales() {
         assert_eq!(
             stretched_duration_samples(48_000, &manual(2.0), None),
@@ -114,6 +123,15 @@ mod tests {
             stretched_duration_samples(48_000, &manual(0.5), None),
             24_000
         );
+    }
+
+    #[test]
+    fn semitone_pitch_ratio_helpers_roundtrip() {
+        approx(semitone_to_pitch_ratio(12.0, 0.0), 2.0);
+        approx(semitone_to_pitch_ratio(0.0, 100.0), 2.0_f32.powf(1.0 / 12.0));
+        let (semi, cents) = pitch_ratio_to_semitone_cents(2.0);
+        approx(semi, 12.0);
+        approx(cents, 0.0);
     }
 
     #[test]
@@ -163,13 +181,9 @@ mod tests {
     #[test]
     fn internal_repitch_process_stereo_does_not_crash() {
         let params = manual(2.0);
-        let mut processor = create_stretch_processor(
-            StretchBackend::InternalRePitch,
-            48_000.0,
-            2,
-            params,
-        )
-        .expect("create repitch processor");
+        let mut processor =
+            create_stretch_processor(StretchBackend::InternalRePitch, 48_000.0, 2, params)
+                .expect("create repitch processor");
 
         let input_l = [0.0_f32, 0.25, 0.5, 0.75];
         let input_r = [1.0_f32, 0.75, 0.5, 0.25];
@@ -187,13 +201,9 @@ mod tests {
     #[test]
     fn internal_repitch_buffer_length_mismatch_returns_error() {
         let params = manual(1.0);
-        let mut processor = create_stretch_processor(
-            StretchBackend::InternalRePitch,
-            48_000.0,
-            2,
-            params,
-        )
-        .expect("create repitch processor");
+        let mut processor =
+            create_stretch_processor(StretchBackend::InternalRePitch, 48_000.0, 2, params)
+                .expect("create repitch processor");
 
         let input_l = [0.0_f32; 4];
         let input_r = [0.0_f32; 3];
@@ -216,16 +226,12 @@ mod tests {
             ..StretchParams::default()
         };
 
-        let mut processor = match create_stretch_processor(
-            StretchBackend::Signalsmith,
-            48_000.0,
-            2,
-            params,
-        ) {
-            Ok(processor) => processor,
-            Err(StretchError::BackendUnavailable(StretchBackend::Signalsmith)) => return,
-            Err(err) => panic!("unexpected create error: {err}"),
-        };
+        let mut processor =
+            match create_stretch_processor(StretchBackend::Signalsmith, 48_000.0, 2, params) {
+                Ok(processor) => processor,
+                Err(StretchError::BackendUnavailable(StretchBackend::Signalsmith)) => return,
+                Err(err) => panic!("unexpected create error: {err}"),
+            };
 
         let input_l = [0.0_f32, 0.25, 0.5, 0.75, 1.0, 0.5, 0.0, -0.5];
         let input_r = [0.0_f32; 8];
@@ -235,5 +241,57 @@ mod tests {
         processor
             .process_stereo(&input_l, &input_r, &mut output_l, &mut output_r)
             .expect("signalsmith process");
+    }
+
+    #[test]
+    fn signalsmith_time_stretch_via_unequal_counts_if_available() {
+        // The bridge expresses time-stretch as output_len / input_len. Feeding
+        // fewer input samples than requested output (here 2× → slow down) must
+        // succeed without buffer-length errors and fill the whole output.
+        let params = StretchParams {
+            mode: StretchMode::Manual,
+            algorithm: StretchAlgorithm::PreservePitch,
+            time_ratio: 2.0,
+            preserve_pitch: true,
+            ..StretchParams::default()
+        };
+        let mut processor =
+            match create_stretch_processor(StretchBackend::Signalsmith, 48_000.0, 2, params) {
+                Ok(processor) => processor,
+                Err(StretchError::BackendUnavailable(StretchBackend::Signalsmith)) => return,
+                Err(err) => panic!("unexpected create error: {err}"),
+            };
+
+        let input_l = [0.1_f32; 256];
+        let input_r = [0.1_f32; 256];
+        let mut output_l = [f32::NAN; 512];
+        let mut output_r = [f32::NAN; 512];
+
+        processor
+            .process_stereo(&input_l, &input_r, &mut output_l, &mut output_r)
+            .expect("signalsmith stretch process");
+
+        assert!(output_l.iter().all(|v| v.is_finite()));
+        assert!(output_r.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn signalsmith_reports_bounded_latency_if_available() {
+        let mut processor =
+            match create_stretch_processor(StretchBackend::Signalsmith, 48_000.0, 2, manual(1.0)) {
+                Ok(processor) => processor,
+                Err(StretchError::BackendUnavailable(StretchBackend::Signalsmith)) => return,
+                Err(err) => panic!("unexpected create error: {err}"),
+            };
+        processor.set_params(StretchParams {
+            mode: StretchMode::Manual,
+            algorithm: StretchAlgorithm::PreservePitch,
+            preserve_pitch: true,
+            ..manual(1.0)
+        });
+        let latency = processor.latency_samples();
+        eprintln!("SIGNALSMITH_LATENCY_SAMPLES={latency}");
+        // Sanity bound: a sane preset stays well under a second of latency.
+        assert!(latency < 48_000, "unexpectedly large latency: {latency}");
     }
 }

@@ -3,6 +3,10 @@ use super::error::StretchError;
 use super::params::{StretchAlgorithm, StretchBackend, StretchMode, StretchParams};
 use super::processor::StretchProcessor;
 
+pub fn signalsmith_stretch_available() -> bool {
+    SignalsmithProcessor::new(48_000.0, 2).is_ok()
+}
+
 pub fn resolve_backend(params: &StretchParams) -> StretchBackend {
     if params.mode == StretchMode::Off {
         return StretchBackend::InternalRePitch;
@@ -44,7 +48,9 @@ pub fn create_stretch_processor(
                 Ok(Box::new(processor))
             }
             Err(err) => {
-                log::warn!("Signalsmith stretch init failed, falling back to InternalRePitch: {err}");
+                log::warn!(
+                    "Signalsmith stretch init failed, falling back to InternalRePitch: {err}"
+                );
                 let mut processor = RePitchProcessor::new(sample_rate, channels);
                 processor.set_params(params);
                 Ok(Box::new(processor))

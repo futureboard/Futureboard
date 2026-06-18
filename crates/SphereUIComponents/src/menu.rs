@@ -1,7 +1,7 @@
 //! Shared application menu manifest.
 //!
 //! Source of truth: `packages/shared/src/menu/menuItems.ts`. The Electron
-//! sync script (`apps/electron/scripts/sync-shared-menu.mjs`) emits a JSON
+//! sync script (`scripts/sync-shared-menu.mjs`) emits a JSON
 //! manifest at `packages/shared/generated/native-menu.json` which this
 //! module embeds via `include_str!` and parses at startup.
 //!

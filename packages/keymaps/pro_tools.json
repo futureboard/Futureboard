@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "default",
-  "label": "Futureboard Default",
+  "id": "pro-tools",
+  "label": "Pro Tools",
   "description": "Default shortcuts from the application menu manifest.",
   "sourceMenuVersion": 1,
   "generatedAt": "2026-05-30T05:03:52.108Z",

@@ -1176,8 +1176,16 @@ impl StudioLayout {
                 let state = &self.timeline.read(cx).state;
                 let bpm = state.effective_bpm_at_playhead();
                 let has_automation = state.tempo_has_automation();
+                let has_tap_session = self.tap_tempo.tap_count() > 0;
                 let mut entries = vec![
                     ContextMenuEntry::disabled_item(format!("Tempo: {bpm:.1} BPM"), "noop"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Tap Tempo", "tempo:tap"),
+                    ContextMenuEntry::item(
+                        "Add Current Tempo at Playhead",
+                        "tempo:add-tap-marker",
+                    ),
+                    menu_item_enabled("Reset Tap Session", "tempo:reset-tap", has_tap_session),
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item("Add Tempo Point at Playhead", "tempo:add-marker"),
                     ContextMenuEntry::item("Edit Current BPM…", "tempo:edit-bpm"),
@@ -1206,6 +1214,20 @@ impl StudioLayout {
                         "tempo:open-track",
                     ));
                 }
+                entries
+            }
+            ContextTarget::TapTempo => {
+                let has_tap_session = self.tap_tempo.tap_count() > 0;
+                let mut entries = vec![ContextMenuEntry::item("Tap", "tempo:tap")];
+                entries.push(ContextMenuEntry::item(
+                    "Add Current Tempo at Playhead",
+                    "tempo:add-tap-marker",
+                ));
+                entries.push(menu_item_enabled(
+                    "Reset Tap Session",
+                    "tempo:reset-tap",
+                    has_tap_session,
+                ));
                 entries
             }
             ContextTarget::TempoTrack {

@@ -84,6 +84,8 @@ pub enum ContextTarget {
     },
     /// The compact tempo menu opened from the transport BPM display.
     Tempo,
+    /// Tap Tempo control menu (apply / add marker / reset).
+    TapTempo,
     /// The compact time signature menu from the transport display.
     TimeSignature,
     /// Right-click on a time signature marker on the ruler or lane.

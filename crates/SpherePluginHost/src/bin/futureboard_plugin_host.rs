@@ -82,8 +82,6 @@ macro_rules! hlog {
     }};
 }
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 static MAIN_DAW_HWND: AtomicU64 = AtomicU64::new(0);
 
 fn store_main_hwnd(hwnd: Option<u64>) {

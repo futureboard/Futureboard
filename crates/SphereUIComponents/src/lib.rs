@@ -61,6 +61,7 @@ pub mod project;
 pub mod session_shutdown;
 pub mod settings;
 pub mod shutdown;
+pub mod tap_tempo;
 pub mod window_lifecycle;
 pub mod window_position;
 pub use shutdown::ShutdownState;
@@ -71,6 +72,7 @@ pub use sphere_plugin_host::plugin_host_lifecycle;
 pub use sphere_plugin_host::plugin_host_main_window;
 pub use sphere_plugin_host::process_manager::PluginHostProcessManager;
 pub mod splash;
+pub mod startup;
 pub mod theme;
 pub mod welcome;
 

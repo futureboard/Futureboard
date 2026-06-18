@@ -34,13 +34,6 @@ macro_rules! welcome_debug {
     ($($arg:tt)*) => { welcome_debug(format_args!($($arg)*)) };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StartupRoute {
-    Splash,
-    Welcome,
-    Workspace,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum WelcomeAction {
     EmptyProject,
@@ -83,9 +76,6 @@ pub struct WelcomeCallbacks {
 
 pub struct WelcomeWindow {
     version: SharedString,
-    route: StartupRoute,
-    loading_status: SharedString,
-    gpu_status: SharedString,
     active_nav: StartupNav,
     recent_projects: Vec<RecentProject>,
     selected: Option<WelcomeSelection>,
@@ -131,9 +121,6 @@ impl WelcomeWindow {
 
         Self {
             version: version.into(),
-            route: StartupRoute::Splash,
-            loading_status: SharedString::from("Loading Futureboard Studio"),
-            gpu_status: SharedString::from("Pending"),
             active_nav: StartupNav::Welcome,
             recent_projects: recent.entries().iter().take(7).cloned().collect(),
             selected: Some(WelcomeSelection::Start(0)),
@@ -149,19 +136,6 @@ impl WelcomeWindow {
             audio_device_out: SharedString::from(schema.hardware.audio.device_out),
             open_error: None,
         }
-    }
-
-    pub fn set_loading_status(&mut self, status: impl Into<SharedString>) {
-        self.loading_status = status.into();
-    }
-
-    pub fn set_gpu_status(&mut self, status: impl Into<SharedString>) {
-        self.gpu_status = status.into();
-    }
-
-    pub fn show_welcome(&mut self) {
-        self.route = StartupRoute::Welcome;
-        self.loading_status = SharedString::from("Ready");
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -324,11 +298,6 @@ crate::impl_single_input_window_ime!(WelcomeWindow, project_name_input);
 impl Render for WelcomeWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let target = cx.entity().clone();
-        let content = match self.route {
-            StartupRoute::Splash => self.render_splash(),
-            StartupRoute::Welcome | StartupRoute::Workspace => self.render_welcome(window, cx),
-        };
-
         div()
             .key_context("WelcomeWindow")
             .capture_key_down(move |event, window, cx| {
@@ -339,74 +308,12 @@ impl Render for WelcomeWindow {
             .size_full()
             .font(theme::ui_font())
             .bg(Colors::surface_startup_bg())
-            .child(startup_titlebar(window, self.route.clone()))
-            .child(content)
+            .child(startup_titlebar(window))
+            .child(self.render_welcome(window, cx))
     }
 }
 
 impl WelcomeWindow {
-    fn render_splash(&self) -> gpui::AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .items_center()
-            .justify_center()
-            .bg(Colors::surface_startup_bg())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(18.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(84.0))
-                            .h(px(84.0))
-                            .rounded_md()
-                            .border(px(1.0))
-                            .border_color(Colors::border_startup())
-                            .bg(Colors::surface_startup_window())
-                            .overflow_hidden()
-                            .child(
-                                img(SharedString::from(APP_LOGO_PATH))
-                                    .w(px(84.0))
-                                    .h(px(84.0)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(5.0))
-                            .child(
-                                div()
-                                    .text_size(px(20.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(Colors::text_startup_strong())
-                                    .child("Futureboard Studio"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(Colors::text_startup_muted())
-                                    .child(format!("v{}", self.version)),
-                            ),
-                    )
-                    .child(loading_rows(
-                        self.loading_status.clone(),
-                        self.gpu_status.clone(),
-                    )),
-            )
-            .into_any_element()
-    }
-
     fn render_welcome(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         // Center pane content depends on the selected sidebar tab.
         let center = match self.active_nav {
@@ -515,13 +422,8 @@ fn start_rows() -> Vec<StartRow> {
     ]
 }
 
-fn startup_titlebar(window: &Window, route: StartupRoute) -> impl IntoElement {
+fn startup_titlebar(window: &Window) -> impl IntoElement {
     let policy = PlatformChromePolicy::current();
-    let route_label = match route {
-        StartupRoute::Splash => "Startup",
-        StartupRoute::Welcome => "Welcome",
-        StartupRoute::Workspace => "Workspace",
-    };
 
     let mut chrome = div()
         .flex()
@@ -571,7 +473,7 @@ fn startup_titlebar(window: &Window, route: StartupRoute) -> impl IntoElement {
                     div()
                         .text_size(px(10.0))
                         .text_color(Colors::text_faint())
-                        .child(route_label),
+                        .child("Welcome"),
                 ),
         )
         .child(draggable_spacer());
@@ -1709,42 +1611,6 @@ fn format_last_opened(last_opened_at: u64) -> String {
     } else {
         String::new()
     }
-}
-
-fn loading_rows(status: SharedString, gpu_status: SharedString) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .w(px(320.0))
-        .child(loading_row("Assets", "Ready"))
-        .child(loading_row("Recent Projects", "Loaded"))
-        .child(loading_row("Audio", "Ready"))
-        .child(loading_row("GPU Renderer", gpu_status))
-        .child(loading_row("Workspace", status))
-}
-
-fn loading_row(label: impl Into<String>, value: impl Into<SharedString>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .h(px(28.0))
-        .border_b(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .child(
-            div()
-                .text_size(px(10.5))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_startup_muted())
-                .child(label.into()),
-        )
-        .child(
-            div()
-                .text_size(px(10.5))
-                .text_color(Colors::text_startup_strong())
-                .child(value.into()),
-        )
 }
 
 fn section_label(label: &'static str) -> impl IntoElement {

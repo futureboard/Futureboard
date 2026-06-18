@@ -18,6 +18,8 @@ pub mod form;
 mod icon;
 mod icon_button;
 pub mod inspector;
+pub mod key_recorder;
+pub mod keymap_window;
 pub mod knob;
 pub mod menu_bar;
 pub mod menu_dropdown;
@@ -92,6 +94,8 @@ pub use inspector::{
     inspector_checkbox, inspector_hint_text, inspector_mini_button, inspector_numeric_stepper,
     inspector_row, inspector_section, inspector_select, inspector_value, InspectorSelectOption,
 };
+pub use key_recorder::{key_recorder_field, KeyRecorderState};
+pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};
 pub use knob::knob;
 pub use menu_bar::{menu_bar, menu_label_button};
 pub use message_box_dialog::{

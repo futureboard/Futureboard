@@ -12,6 +12,10 @@ pub const APP_LOGO_PATH: &str = "images/app.png";
 static SPLASH_PNG: &[u8] = include_bytes!("../../../packages/shared/images/splash.png");
 static APP_LOGO_PNG: &[u8] = include_bytes!("../../../packages/assets/app.png");
 
+pub fn splash_image_available() -> bool {
+    !SPLASH_PNG.is_empty()
+}
+
 pub struct EmbeddedAssets;
 
 impl EmbeddedAssets {

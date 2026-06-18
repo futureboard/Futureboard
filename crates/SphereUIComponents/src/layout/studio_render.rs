@@ -1386,6 +1386,18 @@ impl Render for StudioLayout {
                         }
                         return;
                     }
+                    if is_tap_tempo_command(&normalize_command_id(&command_id))
+                        && shortcut_keydown_target
+                            .read(cx)
+                            .tap_tempo_shortcut_blocked(window)
+                    {
+                        if key_debug() {
+                            eprintln!(
+                                "[key] ignored command={command_id} reason=tap-tempo-shortcut-suppressed"
+                            );
+                        }
+                        return;
+                    }
                     if command_id == "transport:play-pause"
                         && event.keystroke.key.eq_ignore_ascii_case("space")
                     {

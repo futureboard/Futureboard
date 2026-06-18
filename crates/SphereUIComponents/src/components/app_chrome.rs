@@ -125,6 +125,70 @@ pub struct TransportChromeState {
     pub on_bpm_menu: BpmMenuCb,
     /// Opens the inline numeric BPM editor (double-click / "Edit BPM…").
     pub on_bpm_edit_start: ChromeActionCb,
+    /// Taps in the current session (0 = idle). Used for brief tap-button feedback only.
+    pub tap_tempo_session_taps: u8,
+    /// Left-click registers a tap; right-click opens the tap tempo menu.
+    pub on_tap_tempo: ChromeActionCb,
+    pub on_tap_tempo_menu: BpmMenuCb,
+}
+
+fn tap_tempo_chip(
+    session_taps: u8,
+    on_tap: ChromeActionCb,
+    on_menu: BpmMenuCb,
+) -> gpui::AnyElement {
+    let active = session_taps > 0;
+    let bg = if active {
+        Colors::with_alpha(Colors::accent_primary(), 0.2)
+    } else {
+        Colors::surface_input()
+    };
+    let border = if active {
+        Colors::with_alpha(Colors::accent_primary(), 0.45)
+    } else {
+        Colors::border_subtle()
+    };
+    let text_color = if active {
+        Colors::accent_primary()
+    } else {
+        Colors::text_secondary()
+    };
+
+    div()
+        .id("transport-tap-tempo")
+        .h(px(19.0))
+        .min_w(px(26.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(2.0))
+        .px(px(4.0))
+        .rounded_md()
+        .bg(bg)
+        .border(px(1.0))
+        .border_color(border)
+        .text_color(text_color)
+        .text_size(px(8.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .child("TAP")
+        .children((1..=session_taps.min(4)).map(|_| {
+            div()
+                .w(px(3.0))
+                .h(px(3.0))
+                .rounded_full()
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.85))
+        }))
+        .occlude()
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            on_tap(&(), window, cx);
+        })
+        .on_mouse_down(MouseButton::Right, move |event: &gpui::MouseDownEvent, window, cx| {
+            let pos = event.position;
+            on_menu(&(pos.x.into(), pos.y.into()), window, cx);
+        })
+        .into_any_element()
 }
 
 fn transport_debug_enabled() -> bool {
@@ -338,6 +402,9 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let bpm_editing = state.bpm_editing;
     let bpm_input = state.bpm_input.clone();
     let bpm_edit_focused = state.bpm_edit_focused;
+    let tap_tempo_session_taps = state.tap_tempo_session_taps;
+    let on_tap_tempo = state.on_tap_tempo.clone();
+    let on_tap_tempo_menu = state.on_tap_tempo_menu.clone();
     let ts_has_markers = state.ts_has_markers;
     let on_ts_menu = state.on_ts_menu.clone();
     let on_ts_edit_start = state.on_ts_edit_start.clone();
@@ -511,7 +578,12 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                     )
                 } else {
                     None
-                }),
+                })
+                .child(tap_tempo_chip(
+                    tap_tempo_session_taps,
+                    on_tap_tempo,
+                    on_tap_tempo_menu,
+                )),
         )
         // Time signature
         .child(

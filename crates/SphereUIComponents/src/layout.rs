@@ -68,7 +68,7 @@ use engine_snapshot::volume_norm_to_linear;
 use frame_diagnostics::FrameDiagnostics;
 use helpers::{
     edit_command_debug, find_clip_summary, is_midi_routable_edit_command, is_supported_audio_ext,
-    is_text_input_key, key_debug, normalize_command_id, reveal_path,
+    is_tap_tempo_command, is_text_input_key, key_debug, normalize_command_id, reveal_path,
     should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
 };
 use project_ops::LifecycleAction;
@@ -389,6 +389,8 @@ pub struct StudioLayout {
     /// Inline BPM + time-signature numeric editors opened from the transport
     /// bar. Grouped into [`transport_ops::TempoEditState`] (decomposition slice).
     tempo_edit: transport_ops::TempoEditState,
+    /// Transient tap-tempo session (not serialized; calculated BPM applies immediately).
+    tap_tempo: crate::tap_tempo::TapTempo,
     /// Owns keyboard focus for the studio surface. Without a focused
     /// element GPUI never dispatches key events to `capture_key_down`,
     /// so we focus this handle on first render — that is what makes
@@ -432,9 +434,9 @@ pub struct StudioLayout {
     /// [`close_ops::LifecycleGuardState`] (decomposition slice).
     lifecycle_guard: close_ops::LifecycleGuardState,
     project_switch: project_switch::ProjectSwitchGuardState,
-    /// Active keyboard shortcut profile. The default profile is bundled; other
-    /// profiles load from `<app dir>/Keymaps/<id>.json`. Drives `shortcut_command_id`.
-    active_keymap: crate::keymap::Keymap,
+    /// Active keyboard shortcut profile manager. Builtin profiles ship in
+    /// `packages/keymaps/`; user overrides live in `<app_data>/Keymaps/`.
+    keymap_manager: crate::keymap::KeymapManager,
     /// Authoritative project-lifecycle state (Part G). Drives the window title;
     /// the dirty bit is still tracked on `project_switcher.current_project`.
     project_state: crate::app_state::ProjectState,
@@ -680,6 +682,7 @@ impl StudioLayout {
 
         // settings and paths are loaded and registered at the top of this function
 
+        let app_data = paths.app_data.clone();
         let mut layout = Self {
             active_bottom_tab: components::BottomTab::Mixer,
             bottom_panel_state: BottomPanelState::default(),
@@ -735,6 +738,7 @@ impl StudioLayout {
             engine_sync: audio_transport::EngineSyncState::default(),
             bpm_drag: audio_transport::BpmDragState::default(),
             tempo_edit: transport_ops::TempoEditState::new(cx),
+            tap_tempo: crate::tap_tempo::TapTempo::new(),
             focus_handle: cx.focus_handle(),
             clip_clipboard: Vec::new(),
             logged_unsupported_commands: HashSet::new(),
@@ -749,7 +753,7 @@ impl StudioLayout {
             window_hooks: window_ops::StudioWindowHooks::default(),
             lifecycle_guard: close_ops::LifecycleGuardState::default(),
             project_switch: project_switch::ProjectSwitchGuardState::default(),
-            active_keymap: crate::keymap::Keymap::bundled_default(),
+            keymap_manager: crate::keymap::KeymapManager::new(app_data),
             project_state: crate::app_state::ProjectState::NoProject,
             last_window_title: None,
             session_install_status: crate::app_state::SessionInstallStatus::Ready,
@@ -864,20 +868,17 @@ impl StudioLayout {
     /// or invalid profile file leaves the current map untouched. Returns the
     /// active profile id after the call.
     pub fn set_keymap_profile(&mut self, id: &str) -> &str {
-        match crate::keymap::Keymap::load_profile(id) {
-            Some(map) => self.active_keymap = map,
-            None => {
-                if crate::keymap::shortcut_debug_enabled() {
-                    eprintln!("[shortcut] profile id={id} unavailable — keeping current map");
-                }
+        if let Err(error) = self.keymap_manager.set_active_profile(id) {
+            if crate::keymap::shortcut_debug_enabled() {
+                eprintln!("[shortcut] profile id={id} unavailable: {error}");
             }
         }
-        self.active_keymap.id.as_str()
+        self.keymap_manager.active_profile_id()
     }
 
     /// Id of the active keyboard shortcut profile (for the preferences UI).
     pub fn active_keymap_id(&self) -> &str {
-        &self.active_keymap.id
+        self.keymap_manager.active_profile_id()
     }
 
     /// Wire this layout to its own window handle so `close_project` can close
@@ -1061,6 +1062,15 @@ impl StudioLayout {
                 cx.notify();
             }
 
+            "tempo:tap" => {
+                self.tap_tempo_now(cx);
+            }
+            "tempo:reset-tap" => {
+                self.reset_tap_tempo(cx);
+            }
+            "tempo:add-tap-marker" => {
+                self.add_tempo_marker_from_current_tempo_at_playhead(cx);
+            }
             "tempo:add-marker" => {
                 self.add_tempo_marker_at_playhead(cx);
             }
@@ -1372,6 +1382,13 @@ impl StudioLayout {
             "dev:tracks-64" => self.stress_add_tracks(64, cx),
             "dev:tracks-128" => self.stress_add_tracks(128, cx),
             "dev:tracks-500" => self.stress_add_tracks(500, cx),
+
+            "help:keyboard-shortcuts" => {
+                self.open_keymap_window(owner_bounds, cx);
+            }
+            "app:about" | "app:check-for-updates" => {
+                self.open_settings_dialog(owner_bounds, cx);
+            }
 
             "app:preferences" | "edit:preferences" | "project:settings" => {
                 self.open_settings_dialog(owner_bounds, cx);
@@ -1813,7 +1830,7 @@ impl StudioLayout {
     /// a special case for the command palette since that command is not always
     /// present in a user-supplied map.
     fn shortcut_command_id(&self, event: &KeyDownEvent) -> Option<String> {
-        if let Some(command) = self.active_keymap.command_for_event(event) {
+        if let Some(command) = self.keymap_manager.command_for_event(event) {
             return Some(command.to_string());
         }
         let mods = event.keystroke.modifiers;

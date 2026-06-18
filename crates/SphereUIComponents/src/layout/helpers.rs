@@ -58,6 +58,13 @@ pub(super) fn should_handle_global_transport_shortcut(focus: &FocusContext) -> b
     !focus.text_input_focused
 }
 
+pub(super) fn is_tap_tempo_command(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "tempo:tap" | "tempo:reset-tap" | "tempo:add-tap-marker"
+    )
+}
+
 pub(super) fn key_debug() -> bool {
     std::env::var_os("FUTUREBOARD_KEY_DEBUG").is_some()
 }

@@ -145,6 +145,7 @@ impl StudioLayout {
                 ContextTarget::Mixer(track_id) => state.find_track(track_id).is_some(),
                 ContextTarget::SendPicker { track_id } => state.find_track(track_id).is_some(),
                 ContextTarget::Tempo
+                | ContextTarget::TapTempo
                 | ContextTarget::TimeSignature
                 | ContextTarget::TimelineRuler { .. } => true,
                 ContextTarget::TimeSignaturePoint { .. }

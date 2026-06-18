@@ -10,46 +10,39 @@
     "extensions/template"
   ],
   "scripts": {
-    "dev:web":      "bun run --cwd apps/web dev",
+    "dev:web": "bun run --cwd apps/web dev",
     "dev:electron": "concurrently -k -n web,electron \"bun run --cwd apps/web dev\" \"bun run --cwd apps/electron dev\"",
-    "dev:native":   "cargo run -p futureboard_native",
-    "dev:server":   "bun run --cwd apps/server dev",
-
-    "cargo:check":      "cargo check --workspace",
-    "cargo:build":      "cargo build --workspace",
-    "cargo:release":    "cargo build --workspace --release",
-    "cargo:test":       "cargo test --workspace",
-    "cargo:clippy":     "cargo clippy --workspace -- -D warnings",
-    "cargo:fmt":        "cargo fmt --all",
-    "cargo:fmt:check":  "cargo fmt --all -- --check",
-    "cargo:clean":      "cargo clean",
-
-    "build:native":       "cargo build --release -p futureboard_native",
+    "dev:native": "cargo run -p futureboard_native",
+    "dev:server": "bun run --cwd apps/server dev",
+    "cargo:check": "cargo check --workspace",
+    "cargo:build": "cargo build --workspace",
+    "cargo:release": "cargo build --workspace --release",
+    "cargo:test": "cargo test --workspace",
+    "cargo:clippy": "cargo clippy --workspace -- -D warnings",
+    "cargo:fmt": "cargo fmt --all",
+    "cargo:fmt:check": "cargo fmt --all -- --check",
+    "cargo:clean": "cargo clean",
+    "build:native": "cargo build --release -p futureboard_native",
     "build:native:debug": "cargo build -p futureboard_native",
-    "bundle:native:mac":  "bash packaging/native/bundle-macos.sh",
+    "bundle:native:mac": "bash packaging/native/bundle-macos.sh",
     "bundle:native:mac:dmg": "bash packaging/native/bundle-macos.sh && bash packaging/native/bundle-macos-dmg.sh",
-    "bundle:native:win":  "pwsh -File packaging/native/bundle-windows.ps1",
-
+    "bundle:native:win": "pwsh -File packaging/native/bundle-windows.ps1",
     "build:wasm": "bun run --cwd apps/web build:audio:wasm",
-
     "build:audio:plugins": "cargo check -p sphere-audio-plugins && cargo check --manifest-path extensions/template/Cargo.toml && bun install --cwd extensions/template && bun run --cwd extensions/template typecheck",
-
     "build:web": "bun run --cwd apps/web build",
-
-    "build:electron":      "bun run build:audio:plugins && bun run --cwd apps/electron build:all",
-    "pack:electron":       "bun run --cwd apps/electron pack",
-    "dist:electron":       "bun run --cwd apps/electron dist",
-    "dist:electron:win":   "bun run --cwd apps/electron dist:win",
-    "dist:electron:mac":   "bun run --cwd apps/electron dist:mac",
+    "build:electron": "bun run build:audio:plugins && bun run --cwd apps/electron build:all",
+    "pack:electron": "bun run --cwd apps/electron pack",
+    "dist:electron": "bun run --cwd apps/electron dist",
+    "dist:electron:win": "bun run --cwd apps/electron dist:win",
+    "dist:electron:mac": "bun run --cwd apps/electron dist:mac",
     "dist:electron:linux": "bun run --cwd apps/electron dist:linux",
-
     "build:all": "bun run build:wasm && bun run build:native && bun run build:electron",
-
     "check": "bun run cargo:check && bun run --cwd apps/web lint",
-    "lint":  "bun run cargo:clippy && bun run --cwd apps/web lint",
-    "fmt":   "bun run cargo:fmt"
+    "lint": "bun run cargo:clippy && bun run --cwd apps/web lint",
+    "fmt": "bun run cargo:fmt"
   },
   "dependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "sharp": "^0.35.1"
   }
 }

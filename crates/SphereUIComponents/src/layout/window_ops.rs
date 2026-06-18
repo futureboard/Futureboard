@@ -9,6 +9,7 @@ use crate::components::add_track_dialog::{
 use crate::components::combo_box::dedupe_preserve_order;
 use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
 use crate::session_shutdown::SessionShutdownSnapshot;
+use crate::components::keymap_window::{open_keymap_window, KeymapChangedCb};
 use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate};
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackType,
@@ -79,6 +80,8 @@ pub(crate) struct ExternalWindows {
         Option<gpui::WindowHandle<crate::components::plugin_manager::PluginManagerWindow>>,
     /// Export Arrangement window.
     pub export_arrangement: Option<gpui::WindowHandle<crate::export::ExportArrangementWindow>>,
+    /// Keymap / keyboard shortcuts editor window.
+    pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
 }
 
 impl StudioLayout {
@@ -461,6 +464,36 @@ impl StudioLayout {
         }
         self.overlay.text_context_menu = None;
         cx.notify();
+    }
+
+    pub(super) fn open_keymap_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.keymap.clone() {
+            if handle
+                .update(cx, |_keymap, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.keymap = None;
+        }
+
+        let manager = self.keymap_manager.clone();
+        let studio = cx.entity().clone();
+        let on_changed: KeymapChangedCb = Arc::new(move |manager, app| {
+            let _ = studio.update(app, |layout, cx| {
+                layout.keymap_manager = manager;
+                cx.notify();
+            });
+        });
+
+        match open_keymap_window(owner_bounds, manager, on_changed, cx) {
+            Ok(handle) => self.external_windows.keymap = Some(handle),
+            Err(err) => eprintln!("[keymap] failed to open window: {err}"),
+        }
     }
 
     pub(crate) fn open_mixer_external_window(

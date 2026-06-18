@@ -6,7 +6,15 @@ use crate::components;
 use crate::components::{PerformanceOverlaySnapshot, StatusBarContent, StatusBarPerfMetrics};
 use crate::components::text_input::TextInputState;
 
-use super::{StudioLayout, TransportCommand};
+use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, StudioLayout, TransportCommand};
+
+fn tap_tempo_now_secs() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
+}
 
 /// Inline BPM + time-signature numeric editors opened from the transport bar
 /// (the small pop-up fields on the BPM / time-sig displays). Second
@@ -327,6 +335,27 @@ impl StudioLayout {
             })
         };
 
+        let on_tap_tempo: components::ChromeActionCb = {
+            let this = cx.entity().clone();
+            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| {
+                    this.tap_tempo_now(cx);
+                });
+            })
+        };
+
+        let on_tap_tempo_menu: components::BpmMenuCb = {
+            let this = cx.entity().clone();
+            Arc::new(
+                move |pos: &(f32, f32), window: &mut Window, cx: &mut gpui::App| {
+                    let (x, y) = *pos;
+                    let _ = this.update(cx, |this, cx| {
+                        this.open_tap_tempo_menu(window, x, y, cx);
+                    });
+                },
+            )
+        };
+
         let on_ts_menu: components::BpmMenuCb = {
             let this = cx.entity().clone();
             Arc::new(
@@ -364,6 +393,7 @@ impl StudioLayout {
             // The layout's key handler routes keys while editing, so render the
             // caret whenever the editor is open.
             bpm_edit_focused: self.tempo_edit.bpm_editing,
+            tap_tempo_session_taps: self.tap_tempo.tap_count().min(u8::MAX as usize) as u8,
             time_signature_label,
             ts_has_markers,
             ts_editing: self.tempo_edit.ts_editing,
@@ -384,7 +414,90 @@ impl StudioLayout {
             on_bpm_drag,
             on_bpm_menu,
             on_bpm_edit_start,
+            on_tap_tempo,
+            on_tap_tempo_menu,
         }
+    }
+
+    pub(super) fn tap_tempo_now(&mut self, cx: &mut Context<Self>) {
+        let now = tap_tempo_now_secs();
+        if let Some(bpm) = self.tap_tempo.tap(now) {
+            self.apply_calculated_tap_bpm(bpm as f32, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn reset_tap_tempo(&mut self, cx: &mut Context<Self>) {
+        self.tap_tempo.reset();
+        cx.notify();
+    }
+
+    fn apply_calculated_tap_bpm(&mut self, bpm: f32, cx: &mut Context<Self>) {
+        let target_point_id = {
+            let state = &self.timeline.read(cx).state;
+            if state.tempo_has_automation() {
+                let beat = state.transport.playhead_beats as f64;
+                state
+                    .tempo_map
+                    .point_id_at_or_before_beat(beat)
+                    .map(|id| id.to_string())
+            } else {
+                None
+            }
+        };
+        self.apply_bpm_value(bpm, target_point_id.as_deref(), true, cx);
+    }
+
+    pub(super) fn add_tempo_marker_from_current_tempo_at_playhead(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_tempo_marker_at_playhead(cx);
+    }
+
+    pub(super) fn open_tap_tempo_menu(
+        &mut self,
+        window: &Window,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.try_open_context_menu(
+            ContextMenuRequest::from_window(
+                window,
+                x,
+                y,
+                ContextMenuTarget::Extended(ContextTarget::TapTempo),
+            ),
+            cx,
+        );
+    }
+
+    pub(super) fn tap_tempo_shortcut_blocked(&self, window: &Window) -> bool {
+        self.text_input_has_focus(window)
+            || self.keyboard_text_capture_live(window)
+            || self.tempo_edit.bpm_editing
+            || self.tempo_edit.ts_editing
+            || self.command_palette.is_open
+            || self.project_switcher.is_open
+            || self.plugin_picker.is_open
+            || self.focused_text_input_is_composing(window)
+    }
+
+    fn focused_text_input_is_composing(&self, window: &Window) -> bool {
+        [
+            &self.command_palette_input,
+            &self.project_switcher_search_input,
+            &self.browser_search_input,
+            &self.plugin_picker_search_input,
+            &self.inspector_name_edit.name_input,
+            &self.inspector_name_edit.clip_name_input,
+            &self.tempo_edit.bpm_input,
+            &self.tempo_edit.ts_num_input,
+            &self.tempo_edit.ts_den_input,
+        ]
+        .into_iter()
+        .any(|input| input.is_focused(window) && input.is_composing())
     }
 
     pub(super) fn status_text(&self) -> (String, String) {

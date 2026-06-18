@@ -1,13 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::window::{studio_window_options, welcome_window_options};
 use gpui::{App, AppContext, BorrowAppContext, Global, WindowHandle};
-use sphere_ui_components::app_state::{AppMode, AppSessionGate, StudioRoute};
+use sphere_ui_components::app_state::{AppMode, AppSessionGate};
 use sphere_ui_components::assets;
 use sphere_ui_components::boot;
-use sphere_ui_components::layout::warm_up_renderer_status;
 use sphere_ui_components::layout::{PendingCloseAction, ProjectOpenOptions, StudioLayout};
 use sphere_ui_components::loading_session::{
     begin_project_session_load, begin_session_shutdown, close_loading_session_window,
@@ -15,7 +13,8 @@ use sphere_ui_components::loading_session::{
     SessionShutdownSnapshot,
 };
 use sphere_ui_components::project::{ProjectCreateOptions, ProjectTemplate};
-use sphere_ui_components::settings::SettingsSchema;
+use sphere_ui_components::splash::SplashWindowHandle;
+use sphere_ui_components::startup::{log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute};
 use sphere_ui_components::welcome::{WelcomeAction, WelcomeCallbacks, WelcomeWindow};
 
 /// Retains the studio window handle at app scope so GPUI never drops the last
@@ -44,28 +43,61 @@ pub fn setup(cx: &mut App) {
     sphere_ui_components::layout::apply_saved_renderer_preference(cx);
     boot::log("renderer preference applied");
 
-    // Startup route honors the "Show start screen on launch" preference (Part G).
-    let show_welcome = SettingsSchema::load_from_disk().general.show_start_screen;
-    let route = StudioRoute::from_show_welcome(show_welcome);
-    boot::log(&format!("startup route: {}", route.label()));
-
-    match route {
-        // Launch flow: Splash / Loading -> Welcome (renderer warms during splash).
-        StudioRoute::Welcome => open_welcome_window(cx, false),
-        // Welcome disabled: warm the renderer now, then boot straight into an
-        // empty unsaved workspace. Welcome stays reachable via File → Close
-        // Project.
-        StudioRoute::StudioWorkspace => {
-            let warm = warm_up_renderer_status();
-            boot::log(&format!(
-                "renderer warm (no-welcome): {} [{}]",
-                warm.status_text(),
-                warm.backend_label
-            ));
-            open_studio_for_action(WelcomeAction::OpenEmptyWorkspace, cx);
-            boot::log("workspace entered (welcome disabled)");
+    // Splash first — before Welcome/Studio windows or heavy UI initialization.
+    let splash = match SplashWindowHandle::open(cx) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            boot::log(&format!("splash open failed: {error}"));
+            None
         }
-    }
+    };
+
+    cx.spawn(async move |cx| {
+        let plan = run_lightweight_boot(cx).await;
+        boot::log(&format!(
+            "startup route resolved: {:?} (show_welcome={})",
+            plan.route, plan.show_welcome_screen
+        ));
+
+        // Open the next surface before closing splash so Windows does not quit
+        // on LastWindowClosed while transitioning.
+        match plan.route {
+            StartupRoute::Welcome => {
+                log_startup_phase(StartupPhase::OpeningWelcome);
+                cx.update(open_welcome_window);
+            }
+            StartupRoute::EmptyWorkspace => {
+                log_startup_phase(StartupPhase::OpeningStudio);
+                cx.update(|app| {
+                    open_studio_for_action(WelcomeAction::OpenEmptyWorkspace, app);
+                    boot::log("workspace entered (welcome disabled)");
+                });
+            }
+            StartupRoute::RestoreLastProject(path) => {
+                log_startup_phase(StartupPhase::OpeningStudio);
+                cx.update(|app| {
+                    begin_load_project_from_welcome(
+                        path,
+                        ProjectOpenOptions {
+                            from_recent: true,
+                        },
+                        app,
+                    );
+                });
+            }
+            StartupRoute::OpenProject(path) => {
+                log_startup_phase(StartupPhase::OpeningStudio);
+                cx.update(|app| {
+                    begin_load_project_from_welcome(path, ProjectOpenOptions::default(), app);
+                });
+            }
+        }
+
+        if let Some(splash) = splash {
+            cx.update(|app| splash.close(app));
+        }
+    })
+    .detach();
 }
 
 fn set_app_mode(cx: &mut App, mode: AppMode) {
@@ -155,13 +187,9 @@ fn transition_loaded_package_to_existing_studio(
     eprintln!("[ProjectSwitch] complete");
 }
 
-/// Open (or re-open) the Welcome window. This is the fallback route whenever no
-/// project is open — at launch and after `Close Project`.
-///
-/// When `skip_splash` is true the window jumps straight to the Welcome screen
-/// (used when returning from a closed project); otherwise it plays the startup
-/// splash/loading sequence.
-fn open_welcome_window(cx: &mut App, skip_splash: bool) {
+/// Open the Welcome window (start screen). Used after splash boot and when
+/// returning from Close Project — never shows the splash window again.
+fn open_welcome_window(cx: &mut App) {
     set_app_mode(cx, AppMode::Welcome);
     let callbacks = WelcomeCallbacks {
         on_action: Arc::new(|action, welcome_window, cx| {
@@ -182,94 +210,17 @@ fn open_welcome_window(cx: &mut App, skip_splash: bool) {
                 }
                 other => {
                     open_studio_for_action(other, cx);
-                    // Welcome -> Workspace: the workspace is its own window, so close
-                    // Welcome once the studio is up.
                     welcome_window.remove_window();
                 }
             }
         }),
     };
-    let welcome = cx
+    let _welcome = cx
         .open_window(welcome_window_options(cx), |_window, cx| {
             cx.new(|cx| WelcomeWindow::new(env!("CARGO_PKG_VERSION"), callbacks, cx.focus_handle()))
         })
         .expect("failed to open welcome window");
     boot::log("welcome window shown");
-
-    if skip_splash {
-        let _ = welcome.update(cx, |welcome, _window, cx| {
-            welcome.show_welcome();
-            cx.notify();
-        });
-        return;
-    }
-
-    let executor = cx.background_executor().clone();
-    cx.spawn(async move |cx| {
-        for status in [
-            "Loading shared assets",
-            "Loading recent projects",
-            "Preparing native workspace",
-        ] {
-            executor.timer(Duration::from_millis(150)).await;
-            let _ = welcome.update(cx, |welcome, _window, cx| {
-                welcome.set_loading_status(status);
-                cx.notify();
-            });
-        }
-
-        // Real device initialization. Audio + MIDI are scanned into the process
-        // device registry so Preferences renders real devices (no mocks) and
-        // never scans on a render path. Scans run on the background executor;
-        // failures are non-fatal (empty registry + warning) so startup always
-        // continues into the workspace.
-        let _ = welcome.update(cx, |welcome, _window, cx| {
-            welcome.set_loading_status("Scanning audio devices");
-            cx.notify();
-        });
-        boot::log("[Startup] phase=ScanAudio");
-        executor
-            .spawn(async {
-                sphere_ui_components::device_registry::scan_audio();
-            })
-            .await;
-
-        let _ = welcome.update(cx, |welcome, _window, cx| {
-            welcome.set_loading_status("Scanning MIDI devices");
-            cx.notify();
-        });
-        boot::log("[Startup] phase=ScanMidi");
-        executor
-            .spawn(async {
-                sphere_ui_components::device_registry::scan_midi();
-            })
-            .await;
-
-        // Warm the GPU renderer here — on the loading screen — so the first
-        // studio frame doesn't stall on adapter/device creation. The warm-up
-        // runs on the main thread (inside the window update) and reuses the
-        // same thread-local renderer the studio paints with.
-        executor.timer(Duration::from_millis(120)).await;
-        let _ = welcome.update(cx, |welcome, _window, cx| {
-            welcome.set_loading_status("Initializing GPU renderer");
-            welcome.set_gpu_status("Initializing");
-            cx.notify();
-        });
-        let _ = welcome.update(cx, |welcome, _window, cx| {
-            let warm = sphere_ui_components::layout::warm_up_renderer_status();
-            welcome.set_gpu_status(format!("{} · {}", warm.status_text(), warm.backend_label));
-            welcome.set_loading_status("Ready");
-            cx.notify();
-        });
-        boot::log("renderer warm-up complete (welcome)");
-
-        executor.timer(Duration::from_millis(120)).await;
-        let _ = welcome.update(cx, |welcome, _window, cx| {
-            welcome.show_welcome();
-            cx.notify();
-        });
-    })
-    .detach();
 }
 
 fn transition_loaded_package_to_studio(package: LoadedSessionPackage, cx: &mut App) {
@@ -311,7 +262,7 @@ fn begin_close_project_session(
             shell.studio = None;
         });
         set_app_mode(cx, AppMode::Welcome);
-        open_welcome_window(cx, true);
+        open_welcome_window(cx);
         finish_loading_to_studio(cx);
     });
     begin_session_shutdown(snapshot, owner_bounds, on_complete, cx);
@@ -456,7 +407,7 @@ fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
         return;
     }
     set_app_mode(cx, AppMode::LoadFailed);
-    open_welcome_window(cx, true);
+    open_welcome_window(cx);
     close_loading_session_window(cx);
 }
 
@@ -544,7 +495,7 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
             // Wire the workspace lifecycle: its own window handle (so Close Project
             // can close it) and the hook that re-opens Welcome.
             layout.set_self_window(studio_handle.clone());
-            layout.set_request_welcome_callback(Arc::new(|cx| open_welcome_window(cx, true)));
+            layout.set_request_welcome_callback(Arc::new(|cx| open_welcome_window(cx)));
             layout.set_request_session_shutdown_callback(Arc::new({
                 move |snapshot, owner_bounds, self_window, cx| {
                     begin_close_project_session(snapshot, owner_bounds, self_window, cx);

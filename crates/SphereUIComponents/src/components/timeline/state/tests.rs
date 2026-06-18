@@ -482,6 +482,39 @@ mod audio_asset_key_tests {
         clip.stretch.set_stretch_ratio(2.0);
         assert_eq!(clip.audio_asset_key(), before.as_deref());
     }
+
+    #[test]
+    fn normal_audio_resize_does_not_snap_to_grid() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state.snap_to_grid = true;
+        state.grid_division = SnapDivision::Div1_4;
+
+        let clip_id = state.import_audio_at(
+            "C:/a/loop.wav".to_string(),
+            "loop".to_string(),
+            0.0,
+            1.0e9,
+        );
+        state.update_audio_clip_metadata(
+            "C:/a/loop.wav",
+            "wav",
+            48_000,
+            2,
+            48_000,
+            1.0,
+        );
+
+        assert!(state.resize_clip(&clip_id, ClipEdge::Right, 1.3));
+        let clip = state.find_clip(&clip_id).map(|(_, clip)| clip).unwrap();
+        assert!(
+            (clip.duration_beats - 1.3).abs() < 0.001,
+            "audio trim must follow cursor, not snap to grid: {}",
+            clip.duration_beats
+        );
+        assert_eq!(clip.stretch.mode, StretchMode::Off);
+        assert!(clip.stretch.source_end_samples < 48_000);
+    }
 }
 
 #[cfg(test)]

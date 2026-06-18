@@ -12,6 +12,7 @@ use crate::components::timeline::timeline_state::{
 use crate::components::timeline::waveform_cache::{
     self, WaveformDisplayStatus, CHUNK_PEAKS, PEAK_FINE_SPP,
 };
+use crate::components::timeline::waveform_canvas::resolve_waveform_source_range;
 use gpui::Rgba;
 
 /// Track rows included in this snapshot (after vertical virtualization).
@@ -190,13 +191,9 @@ impl TimelineRenderSnapshot {
         };
 
         let track_insert_y = state.drag_target_index.and_then(|index| {
-            state
-                .track_row_layout()
-                .row_for_index(index)
-                .map(|row| {
-                    (row.y - state.viewport.scroll_y)
-                        .clamp(0.0, grid_height.max(DEFAULT_TRACK_HEIGHT))
-                })
+            state.track_row_layout().row_for_index(index).map(|row| {
+                (row.y - state.viewport.scroll_y).clamp(0.0, grid_height.max(DEFAULT_TRACK_HEIGHT))
+            })
         });
 
         Self {
@@ -385,19 +382,12 @@ fn waveform_handle_for_clip(
         .ready_meta()
         .map(|m| m.sample_rate)
         .unwrap_or(48_000);
-    let source_start = clip.stretch.source_start_samples;
-    let effective_time_ratio = clip.stretch.effective_time_ratio(state.bpm as f64);
-    let source_end = if clip.stretch.source_end_samples > source_start {
-        clip.stretch.source_end_samples
-    } else {
-        let source_duration_beats =
-            clip.duration_beats.max(0.0) as f64 / effective_time_ratio.max(1e-6);
-        ((clip.offset_beats.max(0.0) as f64 + source_duration_beats)
-            * state.seconds_per_beat() as f64
-            * sample_rate as f64)
-            .round()
-            .max(source_start as f64) as u64
-    };
+    let total_frames = waveform_cache::get_file_status(asset_key)
+        .ready_meta()
+        .map(|m| m.total_frames)
+        .unwrap_or(clip.stretch.original_duration_samples);
+    let (source_start, source_end, effective_time_ratio) =
+        resolve_waveform_source_range(clip, total_frames, sample_rate, state.bpm as f64);
     let output_len =
         (source_end.saturating_sub(source_start) as f64 * effective_time_ratio).max(1.0);
     let s0 = clip_output_local_to_source_sample(

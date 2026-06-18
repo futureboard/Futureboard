@@ -158,6 +158,16 @@ impl TimelineState {
                 if clip.audio_asset_key() == Some(asset_key) {
                     matched = true;
                     clip.source_duration_seconds = Some(duration_seconds);
+                    clip.stretch.original_sample_rate = sample_rate;
+                    clip.stretch.project_sample_rate = sample_rate;
+                    clip.stretch.original_duration_samples = clip
+                        .stretch
+                        .original_duration_samples
+                        .max(total_frames);
+                    if clip.stretch.source_end_samples <= clip.stretch.source_start_samples {
+                        clip.stretch.source_start_samples = 0;
+                        clip.stretch.source_end_samples = total_frames;
+                    }
                     if (clip.duration_beats - duration_beats).abs() > 0.001 {
                         clip.duration_beats = duration_beats;
                         changed = true;

@@ -386,8 +386,11 @@ impl TimelineState {
         }
     }
 
-    /// Resize a clip by dragging one edge to `new_edge_beat` (absolute beats;
-    /// snapped here). The opposite edge stays fixed. Enforces a minimum length
+    /// Resize a clip by dragging one edge to `new_edge_beat` (absolute beats).
+    /// Audio clips are intentionally not snapped here: normal edge resize is a
+    /// source trim, not a musical quantize/stretch operation. MIDI clips keep
+    /// grid snapping because note boundaries are beat-authored. The opposite
+    /// edge stays fixed. Enforces a minimum length
     /// and, for MIDI clips, never shrinks below the last note end. Left-edge
     /// resizes re-offset clip-local notes so they keep their absolute position,
     /// clamping so the earliest note never crosses clip-local beat 0.
@@ -395,7 +398,15 @@ impl TimelineState {
     /// UI-mutating only — the caller marks the project dirty once on commit.
     /// Returns `true` when a matching clip was found.
     pub fn resize_clip(&mut self, clip_id: &str, edge: ClipEdge, new_edge_beat: f32) -> bool {
-        let snapped = self.snap_beats(new_edge_beat).max(0.0);
+        let is_audio_clip = self.find_clip(clip_id).is_some_and(|(_, clip)| {
+            matches!(clip.clip_type, ClipType::Audio { .. })
+        });
+        let edge_beat = if is_audio_clip {
+            new_edge_beat.max(0.0)
+        } else {
+            self.snap_beats(new_edge_beat).max(0.0)
+        };
+        let seconds_per_beat = self.seconds_per_beat();
         let Some(track) = self
             .tracks
             .iter_mut()
@@ -423,14 +434,41 @@ impl TimelineState {
             ClipEdge::Right => {
                 // Right edge moves; start fixed. Cannot shrink below the last
                 // note end or the minimum length.
-                let dur = (snapped - clip.start_beat).max(min_len).max(last_note_end);
+                let dur = (edge_beat - clip.start_beat).max(min_len).max(last_note_end);
                 clip.duration_beats = dur;
+                if !is_midi && matches!(clip.stretch.mode, StretchMode::Off) {
+                    let source_rate = clip
+                        .stretch
+                        .original_sample_rate
+                        .max(clip.stretch.project_sample_rate)
+                        .max(1) as f64;
+                    let source_start = clip.stretch.source_start_samples;
+                    let source_end = source_start.saturating_add(
+                        ((clip.duration_beats as f64 * seconds_per_beat as f64) * source_rate)
+                            .round()
+                            .max(0.0) as u64,
+                    );
+                    clip.stretch.apply_trim(source_start, source_end);
+                    if clip.stretch.original_duration_samples > 0 {
+                        clip.stretch.source_end_samples = clip
+                            .stretch
+                            .source_end_samples
+                            .min(clip.stretch.original_duration_samples);
+                        let source_len = clip
+                            .stretch
+                            .source_end_samples
+                            .saturating_sub(source_start);
+                        clip.duration_beats =
+                            ((source_len as f64 / source_rate) / seconds_per_beat as f64)
+                                .max(min_len as f64) as f32;
+                    }
+                }
             }
             ClipEdge::Left => {
                 let old_start = clip.start_beat;
                 let old_right = old_start + clip.duration_beats;
                 // Keep the right edge fixed; clamp the new start to [0, right-min].
-                let mut new_start = snapped.min(old_right - min_len).max(0.0);
+                let mut new_start = edge_beat.min(old_right - min_len).max(0.0);
                 // Trimming from the left must not push the earliest note < 0.
                 if let ClipType::Midi { notes, .. } = &clip.clip_type {
                     if let Some(min_local) = notes.iter().map(|n| n.start).reduce(f32::min) {
@@ -446,6 +484,20 @@ impl TimelineState {
                 }
                 clip.start_beat = new_start;
                 clip.duration_beats = (old_right - new_start).max(min_len);
+                if !is_midi && matches!(clip.stretch.mode, StretchMode::Off) {
+                    let source_rate = clip
+                        .stretch
+                        .original_sample_rate
+                        .max(clip.stretch.project_sample_rate)
+                        .max(1) as f64;
+                    let trim_delta_samples =
+                        ((new_start - old_start) as f64 * seconds_per_beat as f64 * source_rate)
+                            .round() as i64;
+                    let current_start = clip.stretch.source_start_samples as i64;
+                    let next_start = (current_start + trim_delta_samples).max(0) as u64;
+                    clip.stretch
+                        .apply_trim(next_start, clip.stretch.source_end_samples.max(next_start));
+                }
             }
         }
 

@@ -10,6 +10,33 @@ use gpui::{
     canvas, div, fill, point, px, size, Bounds, IntoElement, ParentElement, Pixels, Styled,
 };
 
+pub fn resolve_waveform_source_range(
+    clip: &ClipState,
+    total_source_frames: u64,
+    sample_rate: u32,
+    project_bpm: f64,
+) -> (u64, u64, f64) {
+    let effective_time_ratio = clip.stretch.effective_time_ratio(project_bpm).max(1e-6);
+    let total = total_source_frames.max(clip.stretch.original_duration_samples);
+    let (source_start, source_end) = clip.stretch.resolved_source_trim_range(total);
+    if source_end > source_start {
+        return (source_start, source_end, effective_time_ratio);
+    }
+
+    let source_rate = sample_rate.max(1) as f64;
+    let source_duration_seconds =
+        clip.duration_beats.max(0.0) as f64 * (60.0 / project_bpm.max(1.0)) / effective_time_ratio;
+    let fallback_end = (clip.stretch.source_start_samples as f64
+        + source_duration_seconds * source_rate)
+        .round()
+        .max(clip.stretch.source_start_samples as f64) as u64;
+    (
+        clip.stretch.source_start_samples,
+        fallback_end.max(clip.stretch.source_start_samples),
+        effective_time_ratio,
+    )
+}
+
 /// One bar per visible CSS pixel column. No hard cap on number of bars —
 /// the visible-range clamp naturally bounds it by viewport width.
 pub fn waveform_canvas(
@@ -186,21 +213,14 @@ fn draw_chunk_waveform_locked(
     let desired_spp =
         waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate);
     let spp = waveform_cache::best_available_samples_per_peak_in_entry(entry, desired_spp);
-    let source_start = clip.stretch.source_start_samples;
-    let effective_time_ratio = clip.stretch.effective_time_ratio(state.bpm as f64);
-    let source_end = if clip.stretch.source_end_samples > source_start {
-        clip.stretch.source_end_samples
-    } else {
-        let source_duration_beats =
-            clip.duration_beats.max(0.0) as f64 / effective_time_ratio.max(1e-6);
-        ((clip.offset_beats.max(0.0) as f64 + source_duration_beats)
-            * state.seconds_per_beat() as f64
-            * meta.sample_rate as f64)
-            .round()
-            .max(source_start as f64) as u64
-    };
-    let output_len =
-        (source_end.saturating_sub(source_start) as f64 * effective_time_ratio).max(1.0);
+    let (source_start, source_end, effective_time_ratio) =
+        resolve_waveform_source_range(clip, meta.total_frames, meta.sample_rate, state.bpm as f64);
+    let output_len = SphereAudioProcessor::stretched_duration_samples(
+        source_end.saturating_sub(source_start),
+        &clip.stretch.to_sphere_stretch_params(state.bpm as f64),
+        Some(state.bpm),
+    )
+    .max(1) as f64;
 
     let clip_w = clip_width.max(1.0) as f64;
 
@@ -217,6 +237,18 @@ fn draw_chunk_waveform_locked(
         source_start.hash(&mut hasher);
         source_end.hash(&mut hasher);
         effective_time_ratio.to_bits().hash(&mut hasher);
+        if matches!(
+            clip.stretch.mode,
+            super::timeline_state::StretchMode::TempoSync
+        ) {
+            state.bpm.to_bits().hash(&mut hasher);
+        }
+        clip.stretch.algorithm.to_tag().hash(&mut hasher);
+        (clip.stretch.preserve_pitch as u8).hash(&mut hasher);
+        clip.stretch
+            .pitch_shift_semitones
+            .to_bits()
+            .hash(&mut hasher);
         (clip.stretch.reverse as u8).hash(&mut hasher);
         hasher.finish()
     };

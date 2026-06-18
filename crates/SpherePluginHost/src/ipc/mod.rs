@@ -16,7 +16,7 @@
 //! loader in `native_editor`); sharing one instance with the audio engine is a
 //! later slice. See the plan / `native_editor` module docs.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -321,17 +321,40 @@ pub fn write_frame<W: Write>(writer: &mut W, msg: &impl Serialize) -> io::Result
     writer.flush()
 }
 
+/// Maximum size of a single newline-delimited frame. Frames carry base64
+/// plugin-state blobs, so the cap is generous — but bounded so a stuck or
+/// hostile peer cannot drive unbounded memory growth with one giant,
+/// newline-less line.
+pub const MAX_FRAME_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Read one newline-delimited JSON frame, skipping blank lines.
 ///
 /// Returns `Ok(None)` on EOF (the peer closed the pipe — for the client this
 /// means the host exited/crashed; for the host it means the main app is gone).
 pub fn read_frame<T: DeserializeOwned, R: BufRead>(reader: &mut R) -> io::Result<Option<T>> {
+    read_frame_limited(reader, MAX_FRAME_BYTES)
+}
+
+/// [`read_frame`] with an explicit per-frame byte ceiling. Split out so the
+/// bound is unit-testable without allocating the production-size limit.
+fn read_frame_limited<T: DeserializeOwned, R: BufRead>(
+    reader: &mut R,
+    max_bytes: u64,
+) -> io::Result<Option<T>> {
     let mut line = String::new();
     loop {
         line.clear();
-        let read = reader.read_line(&mut line)?;
+        // Bound the read so a frame without a trailing newline cannot grow
+        // `line` past the ceiling. `take` caps this single `read_line` call.
+        let read = reader.by_ref().take(max_bytes + 1).read_line(&mut line)?;
         if read == 0 {
             return Ok(None); // EOF
+        }
+        if read as u64 > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IPC frame exceeds maximum size",
+            ));
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -390,6 +413,26 @@ mod tests {
         let mut reader = Cursor::new(Vec::new());
         let decoded: Option<HostCommand> = read_frame(&mut reader).unwrap();
         assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn read_frame_rejects_oversized_line() {
+        // A line longer than the ceiling must error instead of growing the
+        // buffer without bound.
+        let line = format!("{}\n", "x".repeat(64));
+        let mut reader = Cursor::new(line.into_bytes());
+        let result: io::Result<Option<HostCommand>> = read_frame_limited(&mut reader, 16);
+        assert!(result.is_err(), "oversized frame must be rejected");
+    }
+
+    #[test]
+    fn read_frame_limited_accepts_within_limit() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &HostCommand::Shutdown).unwrap();
+        let mut reader = Cursor::new(buf);
+        let decoded: Option<HostCommand> =
+            read_frame_limited(&mut reader, MAX_FRAME_BYTES).unwrap();
+        assert_eq!(decoded, Some(HostCommand::Shutdown));
     }
 
     #[test]

@@ -22,6 +22,23 @@ The engine logs selected clip DSP state when the graph snapshot builds and when 
 
 ## Current Result
 
-`PhaseVocoderBasic` is now a basic streaming OLA/granular stretcher instead of the previous resample fallback. It is intentionally rough and allocation-free in the render callback. Independent pitch shifting on top of preserve-pitch mode is still pending and is debug-labeled as `pitch_shift=pending` when non-zero.
+Preserve-pitch clips now route through the **Signalsmith** backend by default
+(time-stretch + independent pitch transpose). Its ~120 ms algorithmic latency is
+compensated per-clip via `output_seek` pre-roll priming in
+`render_signalsmith_clip_segment`, so the next `process` output aligns to the
+playback position on every (re)start and stretched clips no longer drift behind
+the mix. Set `FUTUREBOARD_STRETCH_SIGNALSMITH=0` to force the old crude OLA
+fallback (`PhaseVocoderBasic`) for A/B comparison; it is zero-latency but warbly
+and now only used when Signalsmith is unavailable or explicitly disabled.
 
-Existing `ClipState::gain` and track pan remain canonical. `stretch.gain_db`, `stretch.pan`, and `stretch.normalize_gain` stay stored but inert so gain is not applied twice.
+### Preserve-pitch / pitch-shift QA
+
+- Manual mode, ratio 100%, set pitch to +7 st: pitch rises, length unchanged, no
+  warble; clip stays in sync with a metronome/other tracks (no ~120 ms drag).
+- Slow to 50% / speed to 200% with Preserve Pitch on: tempo changes, pitch holds.
+- Seek into the middle of a stretched clip and loop it: re-priming keeps the
+  output aligned at each (re)start with no growing offset.
+
+Existing `ClipState::gain` and track pan remain canonical. `stretch.gain_db`,
+`stretch.pan`, and `stretch.normalize_gain` stay stored but inert so gain is not
+applied twice.

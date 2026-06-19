@@ -547,14 +547,6 @@ fn render_signalsmith_clip_segment(
         )
     };
 
-    let clip = &mut runtime.clips[clip_index];
-    let Some(processor) = clip.stretch_processor.as_mut() else {
-        return false;
-    };
-    if clip.stretch_next_project_sample != Some(project_start_sample) {
-        processor.reset();
-    }
-
     // Map this output segment [rel_start, rel_start + frames) onto a *contiguous*
     // span of the source stream so successive blocks tile the source with no gap
     // or overlap, and the source is never over-read. The stretcher consumes
@@ -564,6 +556,55 @@ fn render_signalsmith_clip_segment(
     let total_input = (duration_samples as f64 / time_ratio).floor() as i64;
     let output_sr = output_sample_rate.max(1) as f64;
     let source_sr = source.sample_rate() as f64;
+
+    // Source-stream index → source sample position (reverse-aware). Reading the
+    // source at the output sample rate lets the seconds map handle the
+    // source↔output rate conversion, matching the per-sample resample path.
+    // Shared by the pre-roll priming and the per-block feed so both read one
+    // contiguous stream.
+    let source_pos_at = |stream_index: i64| -> f64 {
+        let effective = if reverse {
+            (total_input - 1 - stream_index).max(0)
+        } else {
+            stream_index
+        };
+        (offset_seconds + effective as f64 / output_sr) * source_sr
+    };
+
+    let clip = &mut runtime.clips[clip_index];
+    let Some(processor) = clip.stretch_processor.as_mut() else {
+        return false;
+    };
+
+    // On a (re)start/discontinuity, latency-align the stretcher to this playback
+    // position. `output_seek` pre-roll priming makes the *next* `process` output
+    // line up with the timeline, so a high-latency preserve-pitch backend
+    // (Signalsmith ≈120 ms) does not drift behind the rest of the mix.
+    // Zero-latency backends report `seek_input_len == 0` and just reset.
+    if clip.stretch_next_project_sample != Some(project_start_sample) {
+        let playback_rate = (1.0 / time_ratio.max(0.05)) as f32;
+        let seek_len = processor.seek_input_len(playback_rate);
+        if seek_len > 0 {
+            if clip.stretch_prime_l.len() < seek_len {
+                clip.stretch_prime_l.resize(seek_len, 0.0);
+                clip.stretch_prime_r.resize(seek_len, 0.0);
+            }
+            // Pre-roll = the `seek_len` source frames ending just before `in_start`
+            // (clamped/silent before the clip's source window).
+            for j in 0..seek_len {
+                let stream_index = in_start - seek_len as i64 + j as i64;
+                let (l, r) = sample_source_stereo(&source, source_pos_at(stream_index));
+                clip.stretch_prime_l[j] = l;
+                clip.stretch_prime_r[j] = r;
+            }
+            processor.output_seek(
+                &clip.stretch_prime_l[..seek_len],
+                &clip.stretch_prime_r[..seek_len],
+            );
+        } else {
+            processor.reset();
+        }
+    }
 
     if clip.stretch_input_l.len() < input_frames {
         clip.stretch_input_l.resize(input_frames, 0.0);
@@ -575,16 +616,7 @@ fn render_signalsmith_clip_segment(
     }
 
     for k in 0..input_frames {
-        let stream_index = in_start + k as i64;
-        let effective = if reverse {
-            (total_input - 1 - stream_index).max(0)
-        } else {
-            stream_index
-        };
-        // Read the source at the output sample rate (seconds map handles the
-        // source↔output rate conversion), matching the per-sample resample path.
-        let source_pos = (offset_seconds + effective as f64 / output_sr) * source_sr;
-        let (l, r) = sample_source_stereo(&source, source_pos);
+        let (l, r) = sample_source_stereo(&source, source_pos_at(in_start + k as i64));
         clip.stretch_input_l[k] = l;
         clip.stretch_input_r[k] = r;
     }

@@ -6,6 +6,22 @@ pub trait StretchProcessor {
     fn set_params(&mut self, params: StretchParams);
     fn latency_samples(&self) -> usize;
 
+    /// Pre-roll input length (in source frames) the caller must feed to
+    /// [`StretchProcessor::output_seek`] to align the next output, given
+    /// `playback_rate` = input samples consumed per output sample (`1.0 /
+    /// time_ratio`). `0` means the backend has no latency to compensate and the
+    /// caller should just [`StretchProcessor::reset`] instead. Default: `0`.
+    fn seek_input_len(&self, _playback_rate: f32) -> usize {
+        0
+    }
+
+    /// Prime the backend so the next [`StretchProcessor::process_stereo`] output
+    /// is aligned to the sample immediately after this pre-roll, compensating the
+    /// algorithmic latency. Feed exactly the source frames ending at the intended
+    /// playback position (length from [`StretchProcessor::seek_input_len`]).
+    /// Resets internally first. Default: no-op (zero-latency backends).
+    fn output_seek(&mut self, _input_l: &[f32], _input_r: &[f32]) {}
+
     /// Render `output_*.len()` output samples from `input_*.len()` source
     /// samples. For a streaming time-stretch backend the input and output
     /// lengths may differ (the time ratio is `output_len / input_len`); the

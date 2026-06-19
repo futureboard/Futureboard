@@ -28,6 +28,24 @@ int fb_signalsmith_process_stereo(
 
 int fb_signalsmith_latency_samples(void *handle);
 
+// Input pre-roll length (in source frames) to feed `fb_signalsmith_output_seek`
+// for a given `playback_rate` (input samples consumed per output sample, i.e.
+// `1.0 / time_ratio`). Equals `inputLatency + playback_rate * outputLatency`.
+int fb_signalsmith_output_seek_length(void *handle, float playback_rate);
+
+// Prime the stretcher so the *next* `process` output is aligned to the sample
+// immediately after this pre-roll — compensating the algorithmic latency. Feed
+// the `input_frames` source samples ending at the intended playback position
+// (length from `fb_signalsmith_output_seek_length`). Resets internally first.
+int fb_signalsmith_output_seek(
+    void *handle,
+    const float *input_l,
+    const float *input_r,
+    int input_frames,
+    float pitch_ratio,
+    float quality
+);
+
 #ifdef __cplusplus
 }
 #endif

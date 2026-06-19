@@ -22,6 +22,15 @@ unsafe extern "C" {
         quality: f32,
     ) -> i32;
     fn fb_signalsmith_latency_samples(handle: *mut std::ffi::c_void) -> i32;
+    fn fb_signalsmith_output_seek_length(handle: *mut std::ffi::c_void, playback_rate: f32) -> i32;
+    fn fb_signalsmith_output_seek(
+        handle: *mut std::ffi::c_void,
+        input_l: *const f32,
+        input_r: *const f32,
+        input_frames: i32,
+        pitch_ratio: f32,
+        quality: f32,
+    ) -> i32;
 }
 
 pub struct SignalsmithProcessor {
@@ -73,6 +82,36 @@ impl StretchProcessor for SignalsmithProcessor {
         latency.max(0) as usize
     }
 
+    fn seek_input_len(&self, playback_rate: f32) -> usize {
+        let rate = if playback_rate.is_finite() && playback_rate > 0.0 {
+            playback_rate
+        } else {
+            1.0
+        };
+        let len = unsafe { fb_signalsmith_output_seek_length(self.handle.as_ptr(), rate) };
+        len.max(0) as usize
+    }
+
+    fn output_seek(&mut self, input_l: &[f32], input_r: &[f32]) {
+        let frames = input_l.len().min(input_r.len());
+        let Ok(frames_i32) = i32::try_from(frames) else {
+            return;
+        };
+        if frames_i32 <= 0 {
+            return;
+        }
+        unsafe {
+            fb_signalsmith_output_seek(
+                self.handle.as_ptr(),
+                input_l.as_ptr(),
+                input_r.as_ptr(),
+                frames_i32,
+                self.pitch_ratio(),
+                self.params.quality,
+            );
+        }
+    }
+
     /// Time-stretch by `output.len() / input.len()` and pitch-shift by the
     /// param transpose factor. Input and output lengths may differ; the caller
     /// supplies exactly the source samples to consume (see [`StretchProcessor`]).
@@ -120,3 +159,58 @@ impl StretchProcessor for SignalsmithProcessor {
 }
 
 unsafe impl Send for SignalsmithProcessor {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stretching::factory::signalsmith_stretch_available;
+
+    /// After `output_seek` pre-roll priming, the *first* `process` output already
+    /// reflects the input level — i.e. the algorithmic latency is compensated and
+    /// the output is aligned to the playback position. Without priming the same
+    /// first block is still inside the latency ramp and is heavily attenuated.
+    #[test]
+    fn output_seek_compensates_latency() {
+        if !signalsmith_stretch_available() {
+            return; // C++ backend not built in this environment.
+        }
+
+        let block = 1024usize;
+        let make = || {
+            let mut p = SignalsmithProcessor::new(48_000.0, 2).expect("create");
+            p.set_params(StretchParams::default()); // pitch 1.0, identity transpose
+            p
+        };
+        let head = |out: &[f32]| out[..64].iter().sum::<f32>() / 64.0;
+
+        // Unprimed: reset, then process a DC=1.0 block. The first samples are the
+        // latency region flushing out → near silence.
+        let mut unprimed = make();
+        unprimed.reset();
+        let input = vec![1.0_f32; block];
+        let (mut ul, mut ur) = (vec![0.0_f32; block], vec![0.0_f32; block]);
+        unprimed
+            .process_stereo(&input, &input, &mut ul, &mut ur)
+            .expect("process");
+        let unprimed_head = head(&ul);
+
+        // Primed: feed `seek_input_len` of DC=1.0 history via output_seek, then the
+        // same block. The head should already sit near the input level.
+        let mut primed = make();
+        let seek_len = primed.seek_input_len(1.0);
+        assert!(seek_len > 0, "expected non-zero latency pre-roll");
+        let prime = vec![1.0_f32; seek_len];
+        primed.output_seek(&prime, &prime);
+        let (mut pl, mut pr) = (vec![0.0_f32; block], vec![0.0_f32; block]);
+        primed
+            .process_stereo(&input, &input, &mut pl, &mut pr)
+            .expect("process");
+        let primed_head = head(&pl);
+
+        assert!(
+            primed_head > unprimed_head + 0.25,
+            "priming should align output (primed head {primed_head} should exceed \
+             unprimed head {unprimed_head})"
+        );
+    }
+}

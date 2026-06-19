@@ -468,6 +468,11 @@ pub struct RuntimeClip {
     pub stretch_input_r: Vec<f32>,
     pub stretch_output_l: Vec<f32>,
     pub stretch_output_r: Vec<f32>,
+    /// Pre-roll scratch fed to `StretchProcessor::output_seek` to latency-align
+    /// the stretcher output to the timeline on (re)start. Grows lazily to the
+    /// largest seek length seen, then stays stable (no steady-state alloc).
+    pub stretch_prime_l: Vec<f32>,
+    pub stretch_prime_r: Vec<f32>,
     pub stretch_next_project_sample: Option<u64>,
 }
 
@@ -528,6 +533,8 @@ impl Clone for RuntimeClip {
             stretch_input_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
             stretch_output_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
             stretch_output_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+            stretch_prime_l: vec![0.0; self.stretch_prime_l.len()],
+            stretch_prime_r: vec![0.0; self.stretch_prime_r.len()],
             stretch_next_project_sample: None,
         }
     }
@@ -2741,16 +2748,23 @@ pub fn describe_clip_dsp_state(
     )
 }
 
-/// Opt-in switch for routing preserve-pitch clips through the real Signalsmith
-/// backend in the realtime render. Default-off because the Signalsmith default
-/// preset reports ~5760 samples (≈120 ms @ 48 kHz) of algorithmic latency, which
-/// is not yet compensated against the mix bus — until that lands (hooking the
-/// stretch latency into the Phase W PDC graph), preserve-pitch clips stay on the
-/// zero-latency `PhaseVocoderBasic` fallback so they don't drift behind other
-/// tracks. Set `FUTUREBOARD_STRETCH_SIGNALSMITH=1` to enable + audition it.
+/// Switch for routing preserve-pitch clips through the real Signalsmith backend
+/// in the realtime render. **Default-on**: the Signalsmith default preset reports
+/// ~5760 samples (≈120 ms @ 48 kHz) of algorithmic latency, which is now
+/// compensated per-clip via `output_seek` pre-roll priming in
+/// `render_signalsmith_clip_segment` (the next `process` output is aligned to the
+/// playback position on every (re)start), so stretched clips stay in sync without
+/// the crude zero-latency `PhaseVocoderBasic` fallback. Set
+/// `FUTUREBOARD_STRETCH_SIGNALSMITH=0` to force the fallback for A/B comparison.
 fn signalsmith_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_STRETCH_SIGNALSMITH").is_some())
+    *FLAG.get_or_init(|| match std::env::var("FUTUREBOARD_STRETCH_SIGNALSMITH") {
+        Ok(value) => {
+            let v = value.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
+    })
 }
 
 /// Build the per-clip preserve-pitch stretch processor for the realtime render.
@@ -2916,6 +2930,15 @@ fn build_clip_runtime(
     let stretch_processor =
         create_runtime_stretch_processor(stretch_backend, source.sample_rate(), &stretch);
 
+    // Preallocate the latency-priming pre-roll buffer on the control thread so
+    // the audio thread never grows it on first use. Sized for this clip's
+    // playback rate (`1 / time_ratio` input-per-output); `0` for zero-latency
+    // backends / no processor.
+    let stretch_prime_len = stretch_processor
+        .as_ref()
+        .map(|p| p.seek_input_len(1.0 / effective_time_ratio.max(0.01)))
+        .unwrap_or(0);
+
     Some(RuntimeClip {
         id: clip.id.clone(),
         track_id: clip.track_id.clone(),
@@ -2944,6 +2967,8 @@ fn build_clip_runtime(
         stretch_input_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
         stretch_output_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
         stretch_output_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+        stretch_prime_l: vec![0.0; stretch_prime_len],
+        stretch_prime_r: vec![0.0; stretch_prime_len],
         stretch_next_project_sample: None,
     })
 }

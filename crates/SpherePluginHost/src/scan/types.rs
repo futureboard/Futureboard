@@ -98,6 +98,12 @@ pub enum PluginScanError {
     AudioUnitMetadataFailed(String),
     AudioUnitInstantiationFailed(String),
     AudioUnitScannerCrashed { exit_code: Option<i32> },
+    /// The out-of-process scanner child exited abnormally while scanning the
+    /// given format (used for VST3/CLAP isolation, not just AudioUnit).
+    ScannerProcessCrashed {
+        format: PluginScanFormat,
+        exit_code: Option<i32>,
+    },
     InvalidComponent(String),
     NullComponentName,
     ScannerBinaryMissing(String),
@@ -126,6 +132,10 @@ impl PluginScanError {
             Self::AudioUnitScannerCrashed { exit_code } => match exit_code {
                 Some(code) => format!("AudioUnit scan process crashed (exit {code})"),
                 None => "AudioUnit scan process crashed".into(),
+            },
+            Self::ScannerProcessCrashed { format, exit_code } => match exit_code {
+                Some(code) => format!("{} scan process crashed (exit {code})", format.cli_arg()),
+                None => format!("{} scan process crashed", format.cli_arg()),
             },
             Self::InvalidComponent(detail) => format!("Invalid AudioUnit component: {detail}"),
             Self::NullComponentName => "AudioUnit component name was missing".into(),

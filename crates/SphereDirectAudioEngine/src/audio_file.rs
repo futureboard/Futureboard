@@ -115,6 +115,12 @@ pub const STREAMING_WAV_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 /// Non-WAV formats refuse in-memory decode above this size.
 pub const MAX_IN_MEMORY_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// A WAV `fmt ` chunk is 16 / 18 / 40 bytes in practice (PCM / WAVEFORMATEX /
+/// WAVEFORMATEXTENSIBLE). The chunk length is an untrusted 32-bit field, so a
+/// crafted file can claim up to 4 GiB here; reject anything past this generous
+/// ceiling before allocating the read buffer in `read_wav_header`.
+const MAX_WAV_FMT_CHUNK_BYTES: u64 = 4096;
+
 /// Generate a multi-LOD peak summary for any audio format supported by
 /// [`load_audio_file`] (WAV via inline RIFF parser, MP3 / FLAC / OGG / M4A /
 /// AIFF via symphonia). WAV files are scanned from disk in chunks without
@@ -202,6 +208,12 @@ fn generate_wav_peaks_streaming(
     })?;
     let (fmt, data_start, data_len) = read_wav_header(&mut file)
         .map_err(|e| SphereAudioError::NativeError(format!("WAV header read failed: {e}")))?;
+
+    // The `data` chunk size is an untrusted 32-bit header field; clamp it to the
+    // bytes actually on disk so a crafted size can't pre-size the LOD builders to
+    // gigabytes (`Vec::with_capacity`) before the read loop reaches EOF.
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let data_len = data_len.min(file_size.saturating_sub(data_start));
 
     let bytes_per_sample = match fmt.bits_per_sample {
         8 => 1usize,
@@ -311,6 +323,11 @@ fn generate_rauf_peaks_streaming(
     let channels = (header.channels as usize).max(1);
     let bytes_per_sample = 4usize; // S32 / F32 little-endian
     let bytes_per_frame = channels * bytes_per_sample;
+    // `frames_written` is an untrusted header field; clamp to the frames the file
+    // can actually hold so a crafted value can't blow up the LOD builders.
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let max_frames = file_size.saturating_sub(header.data_offset) / bytes_per_frame as u64;
+    let frames = frames.min(max_frames);
     let data_len = frames.saturating_mul(bytes_per_frame as u64);
 
     let mut builders: Vec<PeakLodBuilder> = PEAK_LOD_LEVELS
@@ -966,7 +983,17 @@ fn load_rauf(path: &Path) -> Result<AudioFileBuffer, String> {
             .map_err(|e| format!("RAUF recovery failed: {e}"))?
     };
     let channels = header.channels as usize;
-    let sample_count = frames as usize * channels;
+    // `frames` (from `frames_written` or size recovery) is untrusted — clamp to
+    // what the file can actually hold so a crafted header can't pre-allocate
+    // gigabytes via the `vec![0u8; byte_len]` below.
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let bytes_per_frame = (channels as u64).saturating_mul(4);
+    let frames = if bytes_per_frame == 0 {
+        0
+    } else {
+        frames.min(file_size.saturating_sub(header.data_offset) / bytes_per_frame)
+    };
+    let sample_count = (frames as usize).saturating_mul(channels);
     let mut file = File::open(path).map_err(|e| format!("open failed: {e}"))?;
     file.seek(SeekFrom::Start(header.data_offset))
         .map_err(|e| format!("seek failed: {e}"))?;
@@ -1021,6 +1048,12 @@ fn read_wav_header(file: &mut File) -> Result<(WavFmt, u64, u64), String> {
 
         match id {
             b"fmt " => {
+                // `len` is an untrusted 32-bit header field. Validate it against a
+                // sane ceiling *before* allocating so a crafted file can't drive a
+                // multi-gigabyte `vec![0u8; len]` (OOM/abort on import/probe).
+                if len < 16 || len > MAX_WAV_FMT_CHUNK_BYTES {
+                    return Err(format!("invalid fmt chunk length: {len}"));
+                }
                 let mut buf = vec![0u8; len as usize];
                 file.read_exact(&mut buf)
                     .map_err(|e| format!("read fmt chunk failed: {e}"))?;
@@ -1298,5 +1331,59 @@ mod peak_tests {
         assert_eq!(peaks.total_frames, 512);
         let first = peaks.lods[0].peaks.first().expect("at least one peak");
         assert!((first.max - 0.5).abs() < 1e-3, "max was {}", first.max);
+    }
+
+    /// A crafted WAV whose `fmt ` chunk claims ~4 GiB must be rejected by the
+    /// header parser instead of attempting a multi-gigabyte allocation.
+    #[test]
+    fn wav_header_rejects_absurd_fmt_chunk_length() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // riff size (unused here)
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes()); // absurd fmt length
+        let path = std::env::temp_dir().join(format!(
+            "fb_wav_fmt_guard_{}_{}.wav",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let result = read_wav_header(&mut file);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "absurd fmt chunk length must be rejected");
+    }
+
+    /// A finalized RAUF whose `frames_written` claims `u64::MAX` must not drive a
+    /// gigantic `Vec::with_capacity`; the scan clamps to the real file size.
+    #[test]
+    fn rauf_peaks_clamp_corrupt_frames_written_to_file_size() {
+        use std::io::Write;
+
+        let path = temp_path("corrupt_frames");
+        let samples: Vec<i32> = (0..256).map(|_| s32(0.25)).collect();
+        write_rauf(&path, 1, &samples);
+
+        // Patch `frames_written` (header offset 24, u64 LE) to a hostile value.
+        {
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(24)).unwrap();
+            f.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        }
+
+        let peaks = generate_audio_peaks(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // Bounded by the 256 frames actually present, not u64::MAX.
+        let finest = &peaks.lods[0];
+        assert!(
+            finest.peaks.len() <= 4,
+            "finest LOD must stay bounded to real frames, got {}",
+            finest.peaks.len()
+        );
     }
 }

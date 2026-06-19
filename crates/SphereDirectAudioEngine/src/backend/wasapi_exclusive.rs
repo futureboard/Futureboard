@@ -305,15 +305,39 @@ unsafe fn open_exclusive_stream(
 
     let native_sr = (*mix_fmt).nSamplesPerSec.max(1);
     let device_ch = (*mix_fmt).nChannels as usize;
-    let sample_rate = requested_sr.unwrap_or(native_sr);
+    let block_align = (*mix_fmt).nBlockAlign as u32;
+
+    // Negotiate the actual exclusive-mode sample rate. The device mix format is
+    // initialized as-is unless a *different* rate was requested — in which case
+    // it is only honoured when the device supports it in exclusive mode; we fall
+    // back to the device's native rate otherwise. `sample_rate` is the rate
+    // reported to the engine, so it must always equal the rate the hardware
+    // actually runs at — storing the requested rate while initializing the device
+    // at the native rate (the previous behaviour) desyncs transport/tempo/pitch.
+    // Stamping `nSamplesPerSec` requires updating `nAvgBytesPerSec` too or some
+    // drivers reject the format.
+    let mut sample_rate = requested_sr.unwrap_or(native_sr).max(1);
+    if sample_rate != native_sr {
+        (*mix_fmt).nSamplesPerSec = sample_rate;
+        (*mix_fmt).nAvgBytesPerSec = sample_rate.saturating_mul(block_align);
+        let probe = client.IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, mix_fmt, None);
+        if !probe.is_ok() {
+            eprintln!(
+                "[DAUx WASAPI Excl] Requested {sample_rate} Hz unsupported in exclusive mode — using device rate {native_sr} Hz"
+            );
+            sample_rate = native_sr;
+            (*mix_fmt).nSamplesPerSec = native_sr;
+            (*mix_fmt).nAvgBytesPerSec = native_sr.saturating_mul(block_align);
+        }
+    }
 
     // ── Query device periods ───────────────────────────────────────────────────
     // hnsMinimumDevicePeriod is the minimum exclusive-mode period.
     let mut _default_period: i64 = 0;
     let mut min_period_hns: i64 = 0;
     let _ = client.GetDevicePeriod(Some(&mut _default_period), Some(&mut min_period_hns));
-    // Compute HNS period from requested buffer size, clamped to minimum.
-    let requested_hns = (buf_frames as i64 * 10_000_000i64) / native_sr as i64;
+    // Compute HNS period from the buffer size at the rate we will actually run at.
+    let requested_hns = (buf_frames as i64 * 10_000_000i64) / sample_rate as i64;
     let hns = requested_hns.max(min_period_hns.max(1));
 
     // ── Check exclusive format support ────────────────────────────────────────
@@ -350,7 +374,7 @@ unsafe fn open_exclusive_stream(
                     return false;
                 }
             };
-            let aligned_hns = ((aligned_frames as i64) * 10_000_000i64) / native_sr as i64;
+            let aligned_hns = ((aligned_frames as i64) * 10_000_000i64) / sample_rate as i64;
             eprintln!(
                 "[DAUx WASAPI Excl] Aligned buffer: {aligned_frames} frames, {aligned_hns} hns"
             );

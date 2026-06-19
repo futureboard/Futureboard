@@ -143,8 +143,19 @@ pub fn run_isolated_format_scan(request: IsolatedScanRequest) -> IsolatedScanOut
         };
     }
 
-    if request.format == PluginScanFormat::AudioUnit {
+    // Prefer the out-of-process scanner for EVERY format, not just AudioUnit, so
+    // a crashing or malicious plugin takes down the scanner child rather than the
+    // host process. (Previously VST3/CLAP loaded plugin binaries directly
+    // in-process here — `catch_unwind` cannot stop a C++ access violation, so a
+    // single bad plugin crashed the app despite the "isolated" name.) The
+    // in-process branch below is a best-effort fallback for builds shipped
+    // without the scanner binary.
+    if locate_scanner_binary().is_ok() {
         return run_subprocess_scan(request);
+    }
+
+    if request.format == PluginScanFormat::AudioUnit {
+        return run_inprocess_au_scan(request);
     }
 
     match run_inprocess_scan(request.format, &request.paths) {
@@ -287,7 +298,10 @@ fn run_subprocess_scan(request: IsolatedScanRequest) -> IsolatedScanOutcome {
     let exit_code = output.status.code();
     if !output.status.success() {
         scan_process_crashed(request.format, exit_code);
-        let error = PluginScanError::AudioUnitScannerCrashed { exit_code };
+        let error = PluginScanError::ScannerProcessCrashed {
+            format: request.format,
+            exit_code,
+        };
         scan_finished(request.format, 0, 0, 1);
         return IsolatedScanOutcome {
             payload: ScanResultPayload::process_crash(request.format, exit_code, error.message()),

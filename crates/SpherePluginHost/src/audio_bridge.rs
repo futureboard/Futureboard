@@ -627,7 +627,9 @@ impl std::fmt::Debug for BridgeKickEvent {
 #[cfg(windows)]
 mod imp {
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, INVALID_HANDLE_VALUE,
+    };
     use windows::Win32::System::Memory::{
         CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
         MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
@@ -660,6 +662,20 @@ mod imp {
                 )
             }
             .map_err(std::io::Error::other)?;
+            // Reject name squatting: `CreateFileMappingW` opens the existing
+            // section (returning a valid handle) when the name is already taken,
+            // signalling it only via `ERROR_ALREADY_EXISTS`. The creator side
+            // must own a fresh, exclusively-created region — never map one another
+            // process planted first.
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "shared audio bridge name already in use (possible squatting)",
+                ));
+            }
             let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
             if view.Value.is_null() {
                 let err = std::io::Error::last_os_error();
@@ -788,6 +804,19 @@ mod tests {
         };
         bridge.store_transport(&pushed);
         assert_eq!(bridge.load_transport(), pushed);
+    }
+
+    /// A second creator on an already-taken section name must be rejected rather
+    /// than silently handed the existing region (name-squatting defence).
+    #[cfg(windows)]
+    #[test]
+    fn create_named_rejects_squatted_name() {
+        let name = format!("Local\\FutureboardBridgeSquatTest-{}", std::process::id());
+        let first =
+            SharedAudioRegion::create_named(&name, 48_000, 256, 2).expect("first create succeeds");
+        let second = SharedAudioRegion::create_named(&name, 48_000, 256, 2);
+        assert!(second.is_err(), "squatted name must be rejected");
+        drop(first);
     }
 
     /// The producer-wake event pairs a creator and an opener on the same name:

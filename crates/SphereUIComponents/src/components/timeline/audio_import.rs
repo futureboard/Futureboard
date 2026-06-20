@@ -444,7 +444,7 @@ pub async fn run_import_pipeline(
             let format = info.format.as_str().to_string();
             let path_key = key.clone();
             let changed = timeline_probe
-                .update(cx, move |timeline, cx| {
+                .update(cx, move |timeline, _cx| {
                     let changed = timeline.state.update_audio_clip_metadata(
                         &path_key,
                         &format,

@@ -295,7 +295,8 @@ pub fn inspector_panel<'a>(
 ) -> impl IntoElement {
     let body: gpui::AnyElement = if let Some(clip) = clip_summary {
         let tempo = stretch_tempo.unwrap_or_default();
-        clip_inspector(clip, clip_name_input, clip_name_focused, tempo, callbacks).into_any_element()
+        clip_inspector(clip, clip_name_input, clip_name_focused, tempo, callbacks)
+            .into_any_element()
     } else if let Some(tid) = selected_track_id {
         match tracks.iter().find(|t| t.id == tid) {
             Some(t) => track_inspector(t, name_input, name_focused, callbacks).into_any_element(),
@@ -2127,9 +2128,12 @@ fn stretch_section_body(
                             },
                         )),
                 )
-                .children(tempo.error.as_ref().map(|error| {
-                    inspector_hint_text(format!("{error}"))
-                }))
+                .children(
+                    tempo
+                        .error
+                        .as_ref()
+                        .map(|error| inspector_hint_text(format!("{error}"))),
+                )
                 .children(tempo.confidence.map(|confidence| {
                     inspector_hint_text(format!(
                         "Detected confidence: {:.0}%{}",
@@ -2215,32 +2219,27 @@ fn stretch_section_body(
                                 .text_color(Colors::text_faint())
                                 .child("Alternatives"),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_wrap()
-                                .gap(px(4.0))
-                                .children(tempo.alternatives.iter().map(|alt| {
-                                    let alt = *alt as f64;
-                                    let label = format!("{alt:.1}");
-                                    let cb = cb.clone();
-                                    let s = s.clone();
-                                    let clip_id = clip_id.clone();
-                                    inspector_mini_button(
-                                        format!("clip-stretch-alt-{alt:.1}"),
-                                        label,
-                                        true,
-                                        move |_, w, cx| {
-                                            let mut next = s.clone();
-                                            next.bpm_source = Some(alt);
-                                            next.clip_timeline_duration_beats = 0.0;
-                                            next.dirty = true;
-                                            cb(&(clip_id.clone(), next), w, cx);
-                                        },
-                                    )
-                                })),
-                        )
+                        .child(div().flex().flex_row().flex_wrap().gap(px(4.0)).children(
+                            tempo.alternatives.iter().map(|alt| {
+                                let alt = *alt as f64;
+                                let label = format!("{alt:.1}");
+                                let cb = cb.clone();
+                                let s = s.clone();
+                                let clip_id = clip_id.clone();
+                                inspector_mini_button(
+                                    format!("clip-stretch-alt-{alt:.1}"),
+                                    label,
+                                    true,
+                                    move |_, w, cx| {
+                                        let mut next = s.clone();
+                                        next.bpm_source = Some(alt);
+                                        next.clip_timeline_duration_beats = 0.0;
+                                        next.dirty = true;
+                                        cb(&(clip_id.clone(), next), w, cx);
+                                    },
+                                )
+                            }),
+                        ))
                 })),
         ))
         .child(stretch_field_block(
@@ -2304,9 +2303,10 @@ fn stretch_section_body(
                 .text_color(Colors::text_muted())
                 .child("Pitch"),
         )
-        .children((!preserve_mode && stretch_enabled).then(|| {
-            inspector_hint_text("Pitch shift requires Preserve Pitch mode")
-        }))
+        .children(
+            (!preserve_mode && stretch_enabled)
+                .then(|| inspector_hint_text("Pitch shift requires Preserve Pitch mode")),
+        )
         .child(stretch_field_block(
             "Semi",
             inspector_numeric_stepper(
@@ -2402,9 +2402,10 @@ fn stretch_section_body(
                 )),
         )
         .child(stretch_metric_row("Ratio", format!("{ratio:.3}x")))
-        .children(s.bpm_source.map(|b| {
-            stretch_metric_row("Source", format!("{b:.2} BPM"))
-        }))
+        .children(
+            s.bpm_source
+                .map(|b| stretch_metric_row("Source", format!("{b:.2} BPM"))),
+        )
         .child(stretch_metric_row("Target", target_display))
         .child(stretch_metric_row("Pitch", pitch_summary))
         .child(stretch_metric_row("Length", length_summary))
@@ -2415,18 +2416,23 @@ fn stretch_section_body(
                 format!("{:+.2} st", semi)
             ))
         }))
-        .children((stretch_enabled && preserve_mode).then(|| {
-            inspector_hint_text(format!("Pitch preserved. Pitch shift: {:+.2} st", semi))
-        }))
-        .children((!stretch_enabled).then(|| {
-            inspector_hint_text("Stretch is off; playback uses default params.")
-        }))
+        .children(
+            (stretch_enabled && preserve_mode).then(|| {
+                inspector_hint_text(format!("Pitch preserved. Pitch shift: {:+.2} st", semi))
+            }),
+        )
+        .children(
+            (!stretch_enabled)
+                .then(|| inspector_hint_text("Stretch is off; playback uses default params.")),
+        )
         .children((!fit_selection_enabled).then(|| {
             inspector_hint_text("Fit Selection enables when an arrangement time range is selected.")
         }))
         .child(stretch_field_block(
             "Advanced",
-            inspector_hint_text("Formant, transient, warp markers, and quality — not available yet."),
+            inspector_hint_text(
+                "Formant, transient, warp markers, and quality — not available yet.",
+            ),
         ))
 }
 
@@ -2856,14 +2862,7 @@ fn clip_inspector(
             .child(shared_inspector_section(
                 "Audio Stretch",
                 None::<String>,
-                stretch_section_body(
-                    &clip,
-                    s,
-                    clip.project_bpm,
-                    &tempo,
-                    &stretch_cb,
-                    callbacks,
-                ),
+                stretch_section_body(&clip, s, clip.project_bpm, &tempo, &stretch_cb, callbacks),
             ))
             .child(shared_inspector_section(
                 "Source",

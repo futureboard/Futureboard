@@ -1,5 +1,6 @@
 //! Futureboard Studio — WebAudioCore DSP Framework
 //!
+#![allow(non_snake_case)]
 //! A Rust-based audio engine core for the Futureboard Studio DAW.
 //! Compiles to both native and WebAssembly targets.
 //!

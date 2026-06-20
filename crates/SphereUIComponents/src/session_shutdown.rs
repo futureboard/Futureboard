@@ -99,7 +99,7 @@ pub struct PluginUnloadTarget {
 pub struct SessionShutdownSnapshot {
     pub reason: SessionShutdownReason,
     pub plugin_targets: Vec<PluginUnloadTarget>,
-    pub bridge_runtime: Option<SharedPluginBridgeRuntime>,
+    pub(crate) bridge_runtime: Option<SharedPluginBridgeRuntime>,
     pub instrument_track_ids: Vec<String>,
 }
 

@@ -500,6 +500,16 @@ pub fn drain_commands(
             }
             EngineCommand::SetBridgeEditorActive { track_id, active } => {
                 runtime.set_bridge_editor_active(&track_id, active);
+                if !active {
+                    // UI/control path command consumed on the realtime callback.
+                    // The plugin editor's own VSTi keyboard is internal to the
+                    // bridged host, so closing the editor does not show up as an
+                    // engine MIDI preview. Keep the graph/bridge handshake alive
+                    // long enough for the host to drain note-off and release tails.
+                    local.preview_tail_samples = local
+                        .preview_tail_samples
+                        .max(post_stop_tail_samples(runtime.sample_rate));
+                }
             }
             EngineCommand::SetTrackVolume { track_id, value } => {
                 runtime.update_track_volume(&track_id, value);

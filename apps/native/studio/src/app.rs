@@ -35,6 +35,12 @@ pub fn setup(cx: &mut App) {
     });
     cx.set_global(NativeShellWindows::default());
 
+    let theme_report = sphere_ui_components::theme::initialize_theme_system();
+    boot::log(&format!(
+        "theme initialized: {} ({})",
+        theme_report.active_id, theme_report.active_name
+    ));
+
     // Fonts must be registered before the first native view renders.
     assets::register_fonts(cx);
     boot::log("fonts registered");

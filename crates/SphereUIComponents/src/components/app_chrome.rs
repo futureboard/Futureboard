@@ -10,8 +10,7 @@ use crate::assets;
 use crate::components::menu_bar;
 use crate::components::text_input::TextInputState;
 use crate::components::title_bar::{
-    chrome_button, draggable_spacer, section_separator, window_control_button, CHROME_PAD_X,
-    CHROME_TITLE_SIZE,
+    chrome_button, draggable_spacer, section_separator, window_control_button, CHROME_TITLE_SIZE,
 };
 use crate::platform_chrome::PlatformChromePolicy;
 use crate::theme::Colors;

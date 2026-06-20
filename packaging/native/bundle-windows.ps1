@@ -2,7 +2,8 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Bin = "",
-    [string]$Out = ""
+    [string]$Out = "",
+    [switch]$RequireRuntimeDlls
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,20 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 $destExe = Join-Path $stage "$productName.exe"
 Copy-Item -Force $Bin $destExe
+
+$copyRuntimeArgs = @(
+    "-File", (Join-Path $PSScriptRoot "copy-runtime-dlls.ps1"),
+    "-Root", $Root,
+    "-Profile", "release",
+    "-Out", $stage
+)
+if (-not $RequireRuntimeDlls) {
+    $copyRuntimeArgs += "-AllowMissing"
+}
+& pwsh @copyRuntimeArgs
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 
 # Ship shared PNG for shortcuts / installers (optional).
 $iconPng = Join-Path $Root "apps\shared\app.png"

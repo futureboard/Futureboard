@@ -11,7 +11,7 @@ use crate::components::{external_mixer_debug, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
 use super::{
-    ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, OpenPopover, StudioLayout,
+    ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, StudioLayout,
 };
 
 /// Mixer-panel view state — horizontal scroll, the shared insert/send section

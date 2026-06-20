@@ -910,7 +910,7 @@ impl StudioLayout {
             ContextTarget::Track(track_id) => {
                 let track = self.timeline.read(cx).state.find_track(track_id).cloned();
                 let exists = track.is_some();
-                let mut entries = vec![
+                let entries = vec![
                     menu_item_enabled("Rename Track", "track:rename", exists),
                     menu_item_enabled("Duplicate Track", "track:duplicate", false),
                     danger_menu_item_enabled("Delete Track", "track:delete", exists),

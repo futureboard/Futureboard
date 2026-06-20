@@ -3,7 +3,7 @@ use gpui::Context;
 use crate::components::edit::{ClipSnapshot, EditCommand, TrackSnapshot};
 #[cfg(debug_assertions)]
 use crate::components::timeline::timeline_state::TrackType;
-use crate::components::timeline::timeline_state::{self, InputMonitorMode};
+use crate::components::timeline::timeline_state::{self};
 
 use super::StudioLayout;
 impl StudioLayout {
@@ -29,7 +29,7 @@ impl StudioLayout {
                         volume: timeline_state::volume::db_to_norm(0.0),
                         pan: 0.0,
                         armed: false,
-                        input_monitor: InputMonitorMode::Off,
+                        input_monitor: timeline_state::InputMonitorMode::Off,
                     });
             }
         });

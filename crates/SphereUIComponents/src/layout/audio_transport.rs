@@ -1,4 +1,5 @@
 use gpui::{App, Context, Window};
+use sphere_midi_service::{MidiInputEvent, MidiInputRouteStatus, MidiInputSource, MidiInputTarget};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -152,34 +153,32 @@ impl StudioLayout {
                 pitch,
                 velocity,
                 ..
-            } => crate::midi_input::MidiInputEvent::NoteOn {
+            } => MidiInputEvent::NoteOn {
                 note: pitch,
                 velocity,
                 channel,
             },
             components::piano_roll::UiMidiPreviewCommand::NoteOff { channel, pitch, .. } => {
-                crate::midi_input::MidiInputEvent::NoteOff {
+                MidiInputEvent::NoteOff {
                     note: pitch,
                     channel,
                 }
             }
             components::piano_roll::UiMidiPreviewCommand::AllNotesOff { .. } => {
-                crate::midi_input::MidiInputEvent::AllNotesOff
+                MidiInputEvent::AllNotesOff
             }
-            components::piano_roll::UiMidiPreviewCommand::MidiPanic { .. } => {
-                crate::midi_input::MidiInputEvent::Panic
-            }
+            components::piano_roll::UiMidiPreviewCommand::MidiPanic { .. } => MidiInputEvent::Panic,
         };
         let result = self.route_midi_input_event(
-            crate::midi_input::MidiInputSource::PianoRollPreview,
-            crate::midi_input::MidiInputTarget {
+            MidiInputSource::PianoRollPreview,
+            MidiInputTarget {
                 track_id,
                 plugin_instance_id,
             },
             event,
             cx,
         );
-        if let crate::midi_input::MidiInputRouteStatus::DispatchFailed(error) = result {
+        if let MidiInputRouteStatus::DispatchFailed(error) = result {
             eprintln!("[EngineMidiPreview] dispatch failed: {error}");
         }
         if crate::forensic_trace::preview_perf_trace_enabled() {

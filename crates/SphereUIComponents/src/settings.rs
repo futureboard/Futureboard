@@ -4,6 +4,8 @@ use gpui::AppContext;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub use sphere_midi_service::{MidiDeviceDirection, MidiDeviceSetting, MidiHardwareSettings};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectDefaults {
     pub tempo: f64,
@@ -138,52 +140,6 @@ impl Default for AudioHardwareSettings {
             device_out: "Speakers (Realtek)".to_string(),
             active_inputs: vec![0, 1],
             active_outputs: vec![0, 1],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MidiDeviceDirection {
-    Input,
-    Output,
-    InputOutput,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MidiDeviceSetting {
-    pub id: String,
-    pub name: String,
-    pub direction: MidiDeviceDirection,
-    pub enabled: bool,
-    pub connected: bool,
-    #[serde(default)]
-    pub clock_enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MidiHardwareSettings {
-    #[serde(default)]
-    pub devices: Vec<MidiDeviceSetting>,
-    pub clock_sync: bool,
-    /// Legacy — migrated into [`devices`] on load.
-    #[serde(default, skip_serializing)]
-    pub enabled_inputs: Vec<String>,
-    #[serde(default, skip_serializing)]
-    pub enabled_outputs: Vec<String>,
-}
-
-impl Default for MidiHardwareSettings {
-    fn default() -> Self {
-        // No mock devices: the real list comes from the startup device scan
-        // (`device_registry::scan_midi`). Any device the user has enabled is
-        // persisted here and re-surfaced (as Missing if absent) by
-        // `midi_devices::resolve_midi_devices`.
-        Self {
-            devices: Vec::new(),
-            clock_sync: false,
-            enabled_inputs: Vec::new(),
-            enabled_outputs: Vec::new(),
         }
     }
 }
@@ -665,7 +621,7 @@ impl SettingsSchema {
             self.appearance.ui_scale = 2.5;
         }
 
-        crate::midi_devices::migrate_legacy_midi_settings(&mut self.hardware.midi);
+        sphere_midi_service::migrate_legacy_midi_settings(&mut self.hardware.midi);
     }
 }
 

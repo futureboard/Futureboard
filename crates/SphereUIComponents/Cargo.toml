@@ -34,6 +34,7 @@ sphere-audio-editor.workspace = true
 sphere-plugin-host.workspace = true
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).
 sphere-graphic-engine.workspace = true
+sphere-midi-service.workspace = true
 # Cross-platform user directories for the file browser default location.
 dirs.workspace = true
 # Menu manifest is shared with Electron/Web via a generated JSON file.

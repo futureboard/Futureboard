@@ -14,8 +14,7 @@
 use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
-use crate::midi_devices::{scan_midi_ports, DetectedMidiDevice};
-use crate::settings::MidiDeviceDirection;
+use sphere_midi_service::{scan_midi_ports, DetectedMidiDevice, MidiDeviceDirection};
 
 /// One enumerated audio endpoint. Mirrors the engine's `JsAudioDeviceInfo`
 /// fields we actually surface in Preferences.

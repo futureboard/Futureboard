@@ -7,8 +7,8 @@ use gpui::{
     Styled, Window, WindowId,
 };
 
-use crate::midi_input::VirtualKeyboardEvent;
 use crate::theme::Colors;
+use sphere_midi_service::VirtualKeyboardEvent;
 
 pub type VirtualKeyboardEventSink =
     Arc<dyn Fn(VirtualKeyboardEvent, &mut App) -> bool + Send + Sync + 'static>;

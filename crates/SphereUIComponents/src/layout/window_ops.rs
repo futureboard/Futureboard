@@ -20,7 +20,7 @@ use crate::window_position::resolve_owner_bounds_with_preferred;
 use SpherePluginHost::{PluginFormat as RegistryPluginFormat, PluginKind};
 
 use super::helpers::{cleaned_track_name, numbered_name_stem};
-use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout};
+use super::{ContextMenuTarget, OpenPopover, StudioLayout};
 
 fn dialog_audio_format(format: AudioFormat) -> TrackAudioFormat {
     match format {

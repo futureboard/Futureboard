@@ -1,4 +1,4 @@
-use super::model::{KeyBinding, KeymapConflict, KeymapSource, ResolvedKeyBinding};
+use super::model::{KeyBinding, KeymapConflict, ResolvedKeyBinding};
 use super::normalize::canonical_accel;
 use std::collections::HashMap;
 

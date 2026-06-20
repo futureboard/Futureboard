@@ -1075,7 +1075,6 @@ impl Timeline {
         position: gpui::Point<gpui::Pixels>,
     ) -> (usize, f32) {
         let dx: f32 = (position.x - origin.x).into();
-        let dy: f32 = (position.y - origin.y).into();
         let ppb = self.state.viewport.pixels_per_second * self.state.seconds_per_beat();
         let new_start = (drag.start_beat + dx / ppb.max(1.0)).max(0.0);
         let snapped = self.state.snap_beats(new_start).max(0.0);

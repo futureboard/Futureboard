@@ -1,6 +1,6 @@
 mod methods;
 mod render;
-pub use render::*;
+pub(crate) use render::*;
 
 use crate::assets;
 use crate::components::edit::{normalize_range, ClipSnapshot, EditCommand, EditHistory};

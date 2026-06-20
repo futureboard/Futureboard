@@ -2885,6 +2885,16 @@ where
                         }
                         EngineCommand::SetBridgeEditorActive { track_id, active } => {
                             runtime.set_bridge_editor_active(&track_id, active);
+                            if !active {
+                                // The plugin editor's VSTi keyboard lives inside the bridged host,
+                                // not the engine preview tracker. Closing the editor must keep the
+                                // stopped-transport graph alive long enough to drain note-off/release.
+                                metronome.preview_tail_samples = metronome
+                                    .preview_tail_samples
+                                    .max(crate::backend::render::post_stop_tail_samples(
+                                        runtime.sample_rate,
+                                    ));
+                            }
                         }
                         EngineCommand::SetTrackVolume { track_id, value } => {
                             runtime.update_track_volume(&track_id, value);
@@ -3341,7 +3351,9 @@ mod clip_fade_tests {
     fn fade_in_ramps_zero_to_one() {
         // 100-sample fade-in over a 1000-sample clip.
         assert_eq!(clip_fade_gain(0, 1000, 100, 0), 0.0);
-        assert!((clip_fade_gain(50, 1000, 100, 0) - 0.5).abs() < 1e-6);
+        assert!(
+            (clip_fade_gain(50, 1000, 100, 0) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6
+        );
         // At/after the fade-in length it is full gain.
         assert_eq!(clip_fade_gain(100, 1000, 100, 0), 1.0);
         assert_eq!(clip_fade_gain(900, 1000, 100, 0), 1.0);
@@ -3352,7 +3364,9 @@ mod clip_fade_tests {
         // 100-sample fade-out: starts at sample 900 (duration - fade_out).
         assert_eq!(clip_fade_gain(899, 1000, 0, 100), 1.0);
         assert!((clip_fade_gain(900, 1000, 0, 100) - 1.0).abs() < 1e-6);
-        assert!((clip_fade_gain(950, 1000, 0, 100) - 0.5).abs() < 1e-6);
+        assert!(
+            (clip_fade_gain(950, 1000, 0, 100) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6
+        );
         assert!(clip_fade_gain(1000, 1000, 0, 100) <= 0.0);
     }
 
@@ -3361,7 +3375,8 @@ mod clip_fade_tests {
         // In the flat middle region both fades are unity.
         assert!((clip_fade_gain(500, 1000, 100, 100) - 1.0).abs() < 1e-6);
         // Inside the fade-in region only the fade-in shapes the gain.
-        assert!((clip_fade_gain(25, 1000, 100, 100) - 0.25).abs() < 1e-6);
+        let expected = (0.25f32 * std::f32::consts::FRAC_PI_2).sin();
+        assert!((clip_fade_gain(25, 1000, 100, 100) - expected).abs() < 1e-6);
     }
 }
 

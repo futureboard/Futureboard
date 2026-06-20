@@ -453,10 +453,9 @@ pub struct RuntimeClip {
     pub reverse: bool,
     /// Clip-level mute — a muted clip is skipped entirely during render.
     pub muted: bool,
-    /// Linear fade lengths in output samples, resolved from the snapshot's
+    /// Equal-power fade lengths in output samples, resolved from the snapshot's
     /// fade durations at build time. `0` means no fade. Clamped so
-    /// `fade_in + fade_out <= duration_samples`. Curve shaping beyond linear is
-    /// a placeholder (see `clip_fade_gain`).
+    /// `fade_in + fade_out <= duration_samples` (see `clip_fade_gain`).
     pub fade_in_samples: u64,
     pub fade_out_samples: u64,
     pub source: Arc<ClipAudioSource>,
@@ -2480,6 +2479,7 @@ pub enum ClipDspProcessor {
 
 /// Resolve the DSP path from the snapshot's `mode` key (see
 /// `engine_snapshot::stretch_mode_key`) and `preserve_pitch` flag.
+#[cfg(test)]
 pub fn resolve_clip_processor(mode: &str, preserve_pitch: bool) -> ClipDspProcessor {
     match mode {
         "off" | "none" => ClipDspProcessor::NoStretch,
@@ -2797,7 +2797,9 @@ fn create_runtime_stretch_processor(
         Err(err) => {
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!("[clip-stretch] signalsmith processor unavailable, using fallback: {err}");
+                eprintln!(
+                    "[clip-stretch] signalsmith processor unavailable, using fallback: {err}"
+                );
             }
             None
         }

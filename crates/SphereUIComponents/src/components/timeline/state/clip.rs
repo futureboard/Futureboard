@@ -398,9 +398,9 @@ impl TimelineState {
     /// UI-mutating only — the caller marks the project dirty once on commit.
     /// Returns `true` when a matching clip was found.
     pub fn resize_clip(&mut self, clip_id: &str, edge: ClipEdge, new_edge_beat: f32) -> bool {
-        let is_audio_clip = self.find_clip(clip_id).is_some_and(|(_, clip)| {
-            matches!(clip.clip_type, ClipType::Audio { .. })
-        });
+        let is_audio_clip = self
+            .find_clip(clip_id)
+            .is_some_and(|(_, clip)| matches!(clip.clip_type, ClipType::Audio { .. }));
         let edge_beat = if is_audio_clip {
             new_edge_beat.max(0.0)
         } else {
@@ -434,7 +434,9 @@ impl TimelineState {
             ClipEdge::Right => {
                 // Right edge moves; start fixed. Cannot shrink below the last
                 // note end or the minimum length.
-                let dur = (edge_beat - clip.start_beat).max(min_len).max(last_note_end);
+                let dur = (edge_beat - clip.start_beat)
+                    .max(min_len)
+                    .max(last_note_end);
                 clip.duration_beats = dur;
                 if !is_midi && matches!(clip.stretch.mode, StretchMode::Off) {
                     let source_rate = clip
@@ -454,10 +456,8 @@ impl TimelineState {
                             .stretch
                             .source_end_samples
                             .min(clip.stretch.original_duration_samples);
-                        let source_len = clip
-                            .stretch
-                            .source_end_samples
-                            .saturating_sub(source_start);
+                        let source_len =
+                            clip.stretch.source_end_samples.saturating_sub(source_start);
                         clip.duration_beats =
                             ((source_len as f64 / source_rate) / seconds_per_beat as f64)
                                 .max(min_len as f64) as f32;

@@ -1701,7 +1701,7 @@ pub(crate) fn format_arrangement_target_debug(target: &ArrangementHitTarget) -> 
 /// Live ghost-clip overlay for the in-flight pen MIDI clip draw. Translucent,
 /// track-colored, with a pulsing outline and a floating length/range label so
 /// the user sees the exact bounds and musical length before releasing.
-pub(crate) fn pen_clip_draw_overlay(
+fn pen_clip_draw_overlay(
     preview: &ClipDrawPreview,
     state: &TimelineState,
 ) -> Option<gpui::AnyElement> {

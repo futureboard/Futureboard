@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import "./styles/index.css";
 import App from "./App.tsx";
+import { installDefaultTheme } from "./themeSystem";
 import { ExternalMixerWindow } from "./routes/ExternalMixerWindow";
 import { ExternalProjectWizardWindow } from "./routes/ExternalProjectWizardWindow";
 import { ExternalSettingsWindow } from "./routes/ExternalSettingsWindow";
@@ -11,6 +12,8 @@ import { ExternalAddTrackWindow } from "./routes/ExternalAddTrackWindow";
 import { ExternalPianoRollWindow } from "./routes/ExternalPianoRollWindow";
 // Supports weights 100-900
 import "@fontsource-variable/inter/opsz.css";
+
+installDefaultTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

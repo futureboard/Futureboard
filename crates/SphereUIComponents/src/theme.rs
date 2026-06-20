@@ -1,4 +1,11 @@
-use gpui::{font, rgb, rgba, Font, FontFallbacks, Rgba};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+
+use gpui::{font, Font, FontFallbacks, Rgba};
+use serde::Deserialize;
+use serde_json::Value;
 
 /// Primary Latin/UI font family used across the native app.
 pub const FONT_FAMILY: &str = "Inter Variable Text";
@@ -17,6 +24,11 @@ pub const SYSTEM_UI_FONT_FAMILY: &str = "Segoe UI";
 /// Alias kept for callsites that want an explicit "display" name. Points at
 /// the same variable family.
 pub const DISPLAY_FONT_FAMILY: &str = FONT_FAMILY;
+
+/// Bundled cross-surface theme template. Installed to AppData on first run and
+/// used as the fallback when no user theme exists or a user theme omits tokens.
+pub const DEFAULT_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Default.json");
+pub const TEMPLATE_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Template.json");
 
 /// Central UI font fallback stack (Latin → Thai → system).
 pub fn ui_font_fallback_stack() -> Vec<String> {
@@ -103,477 +115,494 @@ pub mod menu {
     pub const ITEM_GAP: f32 = 1.0;
 }
 
+#[derive(Debug, Clone)]
+pub struct LoadedTheme {
+    pub id: String,
+    pub name: String,
+    pub path: Option<PathBuf>,
+    colors: HashMap<String, Rgba>,
+    track_colors: Vec<Rgba>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThemeLoadReport {
+    pub active_id: String,
+    pub active_name: String,
+    pub active_path: Option<PathBuf>,
+    pub discovered: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThemeManifest {
+    id: Option<String>,
+    name: Option<String>,
+    tokens: Option<Value>,
+    track_colors: Option<Vec<String>>,
+}
+
+static ACTIVE_THEME: OnceLock<RwLock<LoadedTheme>> = OnceLock::new();
+static LAST_THEME_REPORT: OnceLock<RwLock<Option<ThemeLoadReport>>> = OnceLock::new();
+
+fn active_theme_store() -> &'static RwLock<LoadedTheme> {
+    ACTIVE_THEME.get_or_init(|| RwLock::new(load_default_theme()))
+}
+
+fn report_store() -> &'static RwLock<Option<ThemeLoadReport>> {
+    LAST_THEME_REPORT.get_or_init(|| RwLock::new(None))
+}
+
+pub fn active_theme_summary() -> (String, String, Option<PathBuf>) {
+    let theme = active_theme_store()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    (theme.id.clone(), theme.name.clone(), theme.path.clone())
+}
+
+pub fn last_theme_load_report() -> Option<ThemeLoadReport> {
+    report_store()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Initialize the Native GPUI theme system from:
+/// `%APPDATA%/Futureboard Studio/Extensions/Themes/**/theme.json` on Windows
+/// and the equivalent config path on other platforms.
+///
+/// Selection order:
+/// 1. `FUTUREBOARD_THEME_ID=<theme id>` when set.
+/// 2. First discovered non-default, non-template user theme, sorted by path.
+/// 3. Bundled `futureboard.default`.
+pub fn initialize_theme_system() -> ThemeLoadReport {
+    let paths = crate::paths::FutureboardPaths::resolve();
+    let _ = fs::create_dir_all(&paths.themes);
+    install_builtin_theme_templates(&paths.themes);
+
+    let default = load_default_theme();
+    let mut discovered = discover_theme_files(&paths.themes);
+    discovered.sort();
+
+    let requested_id = std::env::var("FUTUREBOARD_THEME_ID").ok();
+    let mut loaded = Vec::new();
+    let mut errors = Vec::new();
+
+    for path in &discovered {
+        match load_theme_file(path, &default) {
+            Ok(theme) => loaded.push(theme),
+            Err(error) => errors.push(format!("{}: {error}", path.display())),
+        }
+    }
+
+    let chosen = requested_id
+        .as_deref()
+        .and_then(|id| loaded.iter().find(|theme| theme.id == id).cloned())
+        .or_else(|| {
+            loaded
+                .iter()
+                .find(|theme| theme.id != default.id && theme.id != "publisher.theme-id")
+                .cloned()
+        })
+        .unwrap_or(default);
+
+    let report = ThemeLoadReport {
+        active_id: chosen.id.clone(),
+        active_name: chosen.name.clone(),
+        active_path: chosen.path.clone(),
+        discovered: loaded.len(),
+        errors,
+    };
+
+    *active_theme_store()
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = chosen;
+    *report_store().write().unwrap_or_else(|e| e.into_inner()) = Some(report.clone());
+
+    eprintln!(
+        "[theme] active={} name={} discovered={} path={}",
+        report.active_id,
+        report.active_name,
+        report.discovered,
+        report
+            .active_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<bundled>".to_string())
+    );
+    for error in &report.errors {
+        eprintln!("[theme] failed to load {error}");
+    }
+
+    report
+}
+
+fn install_builtin_theme_templates(themes_dir: &Path) {
+    let default_path = themes_dir.join("Default").join("theme.json");
+    if !default_path.exists() {
+        if let Some(parent) = default_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&default_path, DEFAULT_THEME_JSON);
+    }
+
+    // Keep the authoring template outside the `**/theme.json` discovery pattern
+    // so it is available for users to copy but never auto-activates.
+    let template_path = themes_dir.join("Template.json");
+    if !template_path.exists() {
+        let _ = fs::write(&template_path, TEMPLATE_THEME_JSON);
+    }
+}
+
+fn discover_theme_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(read_dir) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.eq_ignore_ascii_case("theme.json"))
+                .unwrap_or(false)
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    files
+}
+
+fn load_default_theme() -> LoadedTheme {
+    load_theme_from_str(DEFAULT_THEME_JSON, None, None).unwrap_or_else(|error| {
+        eprintln!("[theme] bundled Default.json is invalid: {error}");
+        LoadedTheme {
+            id: "futureboard.default".to_string(),
+            name: "Futureboard Default".to_string(),
+            path: None,
+            colors: HashMap::new(),
+            track_colors: DEFAULT_TRACK_COLOR_VALUES
+                .iter()
+                .map(|c| rgba_from_u32(*c))
+                .collect(),
+        }
+    })
+}
+
+fn load_theme_file(path: &Path, base: &LoadedTheme) -> Result<LoadedTheme, String> {
+    let json = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    load_theme_from_str(&json, Some(path.to_path_buf()), Some(base))
+}
+
+fn load_theme_from_str(
+    json: &str,
+    path: Option<PathBuf>,
+    base: Option<&LoadedTheme>,
+) -> Result<LoadedTheme, String> {
+    let manifest: ThemeManifest = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let mut colors = base.map(|theme| theme.colors.clone()).unwrap_or_default();
+
+    if let Some(tokens) = manifest.tokens.as_ref() {
+        flatten_theme_tokens(tokens, "", &mut colors)?;
+    }
+
+    let track_colors = manifest
+        .track_colors
+        .as_ref()
+        .and_then(|colors| {
+            let parsed: Vec<Rgba> = colors
+                .iter()
+                .filter_map(|color| parse_theme_color(color).ok())
+                .collect();
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
+        })
+        .or_else(|| base.map(|theme| theme.track_colors.clone()))
+        .unwrap_or_else(|| {
+            DEFAULT_TRACK_COLOR_VALUES
+                .iter()
+                .map(|c| rgba_from_u32(*c))
+                .collect()
+        });
+
+    Ok(LoadedTheme {
+        id: manifest
+            .id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| "futureboard.unnamed".to_string()),
+        name: manifest
+            .name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "Unnamed Theme".to_string()),
+        path,
+        colors,
+        track_colors,
+    })
+}
+
+fn flatten_theme_tokens(
+    value: &Value,
+    prefix: &str,
+    out: &mut HashMap<String, Rgba>,
+) -> Result<(), String> {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                let next = if prefix.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_theme_tokens(value, &next, out)?;
+            }
+        }
+        Value::String(color) => {
+            let parsed = parse_theme_color(color)
+                .map_err(|e| format!("invalid color token {prefix}={color:?}: {e}"))?;
+            out.insert(prefix.to_string(), parsed);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_theme_color(input: &str) -> Result<Rgba, crate::color::ColorParseError> {
+    crate::color::parse_hex_color(input)
+}
+
+fn rgba_from_u32(value: u32) -> Rgba {
+    Rgba {
+        r: ((value >> 16) & 0xFF) as f32 / 255.0,
+        g: ((value >> 8) & 0xFF) as f32 / 255.0,
+        b: (value & 0xFF) as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+macro_rules! theme_color {
+    ($name:ident, $key:literal, $fallback:literal) => {
+        pub fn $name() -> Rgba {
+            Self::resolve($key, $fallback)
+        }
+    };
+}
+
 pub struct Colors;
 
+const DEFAULT_TRACK_COLOR_VALUES: [u32; 12] = [
+    0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0xA99CFF, 0x6EB7E8, 0xE89B61, 0xD982B6, 0xA8D36F,
+    0x9CAFE8, 0xC49A6C, 0x71D6B5,
+];
+
 impl Colors {
+    fn resolve(key: &str, fallback: &str) -> Rgba {
+        let theme = active_theme_store()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        theme
+            .colors
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| parse_theme_color(fallback).unwrap_or_else(|_| Rgba::default()))
+    }
+
     // Startup / welcome window
-    pub fn surface_startup_bg() -> Rgba {
-        rgb(0x16181C)
-    }
+    theme_color!(surface_startup_bg, "surface.startupBg", "#16181C");
+    theme_color!(surface_startup_window, "surface.startupWindow", "#1B1D22");
+    theme_color!(surface_startup_panel, "surface.startupPanel", "#1E2025");
+    theme_color!(
+        surface_startup_elevated,
+        "surface.startupElevated",
+        "#23262C"
+    );
+    theme_color!(border_startup, "border.startup", "#33363D");
+    theme_color!(border_startup_soft, "border.startupSoft", "#25272D");
+    theme_color!(text_startup, "text.startup", "#D7DAE0");
+    theme_color!(text_startup_strong, "text.startupStrong", "#F0F2F5");
+    theme_color!(text_startup_muted, "text.startupMuted", "#9BA1AD");
+    theme_color!(text_startup_faint, "text.startupFaint", "#FFFFFF55");
+    theme_color!(accent_startup, "accent.startup", "#72D7D7");
+    theme_color!(accent_startup_soft, "accent.startupSoft", "#72D7D726");
+    theme_color!(feed_badge_background, "feed.badgeBackground", "#FFFFFF12");
+    theme_color!(feed_badge_text, "feed.badgeText", "#9BA1AD");
+    theme_color!(feed_unread_dot, "feed.unreadDot", "#72D7D7");
 
-    pub fn surface_startup_window() -> Rgba {
-        rgb(0x1B1D22)
-    }
-
-    pub fn surface_startup_panel() -> Rgba {
-        rgb(0x1E2025)
-    }
-
-    pub fn surface_startup_elevated() -> Rgba {
-        rgb(0x23262C)
-    }
-
-    pub fn border_startup() -> Rgba {
-        rgb(0x33363D)
-    }
-
-    pub fn border_startup_soft() -> Rgba {
-        rgb(0x25272D)
-    }
-
-    pub fn text_startup() -> Rgba {
-        rgb(0xD7DAE0)
-    }
-
-    pub fn text_startup_strong() -> Rgba {
-        rgb(0xF0F2F5)
-    }
-
-    pub fn text_startup_muted() -> Rgba {
-        rgb(0x9BA1AD)
-    }
-
-    pub fn text_startup_faint() -> Rgba {
-        rgba(0xFFFFFF55)
-    }
-
-    pub fn accent_startup() -> Rgba {
-        rgb(0x72D7D7)
-    }
-
-    /// Soft tinted fill derived from the startup accent. Used for selected
-    /// filter chips / pills on the Welcome screen.
-    pub fn accent_startup_soft() -> Rgba {
-        rgba(0x72D7D726)
-    }
-
-    /// Background for category / status badges on the Welcome Feeds tab.
-    pub fn feed_badge_background() -> Rgba {
-        rgba(0xFFFFFF12)
-    }
-
-    /// Text color for category / status badges on the Welcome Feeds tab.
-    pub fn feed_badge_text() -> Rgba {
-        rgb(0x9BA1AD)
-    }
-
-    /// Unread / "new" indicator dot on Feeds items.
-    pub fn feed_unread_dot() -> Rgba {
-        rgb(0x72D7D7)
-    }
-
-    // Backgrounds — JetBrains Fleet Dark inspired palette
-    pub fn surface_base() -> Rgba {
-        rgb(0x1E1F22)
-    }
-
-    pub fn surface_panel() -> Rgba {
-        rgb(0x25262B)
-    }
-
-    pub fn surface_panel_alt() -> Rgba {
-        rgb(0x1B1C20)
-    }
-
-    pub fn surface_panel_raised() -> Rgba {
-        rgb(0x2B2D33)
-    }
-
-    pub fn surface_canvas() -> Rgba {
-        rgb(0x15161A)
-    }
-
-    pub fn surface_raised() -> Rgba {
-        rgb(0x2B2D33)
-    }
-
-    pub fn surface_input() -> Rgba {
-        rgb(0x181A1F)
-    }
-
-    pub fn surface_window() -> Rgba {
-        rgb(0x15161A)
-    }
-
-    pub fn surface_titlebar() -> Rgba {
-        rgb(0x1B1C20)
-    }
-
-    pub fn surface_card() -> Rgba {
-        rgb(0x202126)
-    }
-
-    pub fn surface_hover() -> Rgba {
-        rgb(0x30323A)
-    }
-
-    pub fn surface_active() -> Rgba {
-        rgb(0x2B2D33)
-    }
-
-    pub fn surface_control_hover() -> Rgba {
-        rgb(0x292B31)
-    }
-
-    pub fn surface_overlay() -> Rgba {
-        rgba(0x00000085)
-    }
+    // Backgrounds
+    theme_color!(surface_base, "surface.base", "#1E1F22");
+    theme_color!(surface_panel, "surface.panel", "#25262B");
+    theme_color!(surface_panel_alt, "surface.panelAlt", "#1B1C20");
+    theme_color!(surface_panel_raised, "surface.panelRaised", "#2B2D33");
+    theme_color!(surface_canvas, "surface.canvas", "#15161A");
+    theme_color!(surface_raised, "surface.raised", "#2B2D33");
+    theme_color!(surface_input, "surface.input", "#181A1F");
+    theme_color!(surface_window, "surface.window", "#15161A");
+    theme_color!(surface_titlebar, "surface.titlebar", "#1B1C20");
+    theme_color!(surface_card, "surface.card", "#202126");
+    theme_color!(surface_hover, "surface.hover", "#30323A");
+    theme_color!(surface_active, "surface.active", "#2B2D33");
+    theme_color!(surface_control_hover, "surface.controlHover", "#292B31");
+    theme_color!(surface_overlay, "surface.overlay", "#00000085");
 
     // Borders
-    pub fn border_subtle() -> Rgba {
-        rgba(0xFFFFFF14)
-    }
-
-    pub fn border_default() -> Rgba {
-        rgba(0xFFFFFF1F)
-    }
-
-    pub fn border_strong() -> Rgba {
-        rgb(0x4C505C)
-    }
-
-    pub fn border_focus() -> Rgba {
-        rgba(0x7B61FFB8)
-    }
-
-    pub fn border_accent() -> Rgba {
-        rgba(0x7B61FF80)
-    }
-
-    pub fn divider() -> Rgba {
-        rgba(0xFFFFFF0F)
-    }
+    theme_color!(border_subtle, "border.subtle", "#FFFFFF14");
+    theme_color!(border_default, "border.default", "#FFFFFF1F");
+    theme_color!(border_strong, "border.strong", "#4C505C");
+    theme_color!(border_focus, "border.focus", "#7B61FFB8");
+    theme_color!(border_accent, "border.accent", "#7B61FF80");
+    theme_color!(divider, "border.divider", "#FFFFFF0F");
 
     // Text
-    pub fn text_primary() -> Rgba {
-        rgb(0xDFE1E5)
-    }
+    theme_color!(text_primary, "text.primary", "#DFE1E5");
+    theme_color!(text_secondary, "text.secondary", "#C3C7D0");
+    theme_color!(text_muted, "text.muted", "#8E96A3");
+    theme_color!(text_faint, "text.faint", "#FFFFFF45");
+    theme_color!(text_dim, "text.dim", "#FFFFFF66");
+    theme_color!(text_disabled, "text.disabled", "#FFFFFF3B");
+    theme_color!(text_inverse, "text.inverse", "#1E1F22");
 
-    pub fn text_secondary() -> Rgba {
-        rgb(0xC3C7D0)
-    }
-
-    pub fn text_muted() -> Rgba {
-        rgb(0x8E96A3)
-    }
-
-    pub fn text_faint() -> Rgba {
-        rgba(0xFFFFFF45)
-    }
-
-    pub fn text_dim() -> Rgba {
-        rgba(0xFFFFFF66)
-    }
-
-    pub fn text_disabled() -> Rgba {
-        rgba(0xFFFFFF3B)
-    }
-
-    pub fn text_inverse() -> Rgba {
-        rgb(0x1E1F22)
-    }
-
-    // Accent — Fleet-style violet/blue
-    pub fn accent_primary() -> Rgba {
-        rgb(0x7B61FF)
-    }
-
-    pub fn accent_primary_hover() -> Rgba {
-        rgb(0x8D78FF)
-    }
-
-    pub fn accent_soft() -> Rgba {
-        rgba(0x7B61FF30)
-    }
-
-    pub fn accent_muted() -> Rgba {
-        rgba(0x7B61FF20)
-    }
-
-    pub fn accent_pressed() -> Rgba {
-        rgba(0x7B61FF28)
-    }
-
-    pub fn on_accent() -> Rgba {
-        rgb(0xFFFFFF)
-    }
+    // Accent
+    theme_color!(accent_primary, "accent.primary", "#7B61FF");
+    theme_color!(accent_primary_hover, "accent.primaryHover", "#8D78FF");
+    theme_color!(accent_soft, "accent.soft", "#7B61FF30");
+    theme_color!(accent_muted, "accent.muted", "#7B61FF20");
+    theme_color!(accent_pressed, "accent.pressed", "#7B61FF28");
+    theme_color!(on_accent, "accent.onAccent", "#FFFFFF");
 
     // Status / Alert Accents
-    pub fn status_error() -> Rgba {
-        rgb(0xFF6B68)
-    }
-
-    pub fn status_warning() -> Rgba {
-        rgb(0xE5C07B)
-    }
-
-    pub fn status_success() -> Rgba {
-        rgb(0x6FCF97)
-    }
-
-    pub fn accent_success() -> Rgba {
-        rgb(0x6FCF97)
-    }
-
-    pub fn accent_warning() -> Rgba {
-        rgb(0xE5C07B)
-    }
-
-    pub fn accent_danger() -> Rgba {
-        rgb(0xFF6B68)
-    }
-
-    pub fn accent_purple() -> Rgba {
-        rgb(0xBB86FC)
-    }
+    theme_color!(status_error, "status.error", "#FF6B68");
+    theme_color!(status_warning, "status.warning", "#E5C07B");
+    theme_color!(status_success, "status.success", "#6FCF97");
+    theme_color!(accent_success, "accent.success", "#6FCF97");
+    theme_color!(accent_warning, "accent.warning", "#E5C07B");
+    theme_color!(accent_danger, "accent.danger", "#FF6B68");
+    theme_color!(accent_purple, "accent.purple", "#BB86FC");
 
     // DAW-specific
-    pub fn meter_bg() -> Rgba {
-        rgba(0xFFFFFF0D)
-    }
-
-    pub fn meter_low() -> Rgba {
-        rgb(0x6FCF97)
-    }
-
-    pub fn meter_mid() -> Rgba {
-        rgb(0xE5C07B)
-    }
-
-    pub fn meter_high() -> Rgba {
-        rgb(0xFF6B68)
-    }
-
-    pub fn fader_rail() -> Rgba {
-        rgba(0xFFFFFF0F)
-    }
-
-    pub fn fader_thumb() -> Rgba {
-        rgb(0xDFE1E5)
-    }
-
-    pub fn fader_tick() -> Rgba {
-        rgba(0xFFFFFF1F)
-    }
-
-    pub fn fader_scale_text() -> Rgba {
-        rgba(0xFFFFFF38)
-    }
-
-    pub fn knob_bg() -> Rgba {
-        rgb(0x181A1F)
-    }
-
-    pub fn knob_ring() -> Rgba {
-        rgb(0x7B61FF)
-    }
-
-    pub fn slot_bg() -> Rgba {
-        rgba(0xFFFFFF08)
-    }
-
-    pub fn slot_border() -> Rgba {
-        rgba(0xFFFFFF12)
-    }
-
-    pub fn statusbar_bg() -> Rgba {
-        rgb(0x1B1C20)
-    }
-
-    pub fn statusbar_text() -> Rgba {
-        rgb(0x8E96A3)
-    }
-
-    pub fn mixer_bg() -> Rgba {
-        rgb(0x111418)
-    }
-
-    pub fn master_strip_bg() -> Rgba {
-        rgb(0x181A1F)
-    }
-
-    pub fn timeline_grid_major() -> Rgba {
-        rgba(0xFFFFFF12)
-    }
-
-    pub fn timeline_grid_minor() -> Rgba {
-        rgba(0xFFFFFF08)
-    }
-
-    pub fn timeline_grid_bar() -> Rgba {
-        rgba(0xFFFFFF1A)
-    }
-
-    pub fn timeline_playhead() -> Rgba {
-        rgb(0xFF6B68)
-    }
-
-    pub fn timeline_background() -> Rgba {
-        Self::surface_base()
-    }
-
-    pub fn timeline_content_background() -> Rgba {
-        Self::surface_base()
-    }
-
-    pub fn timeline_region_background() -> Rgba {
-        rgba(0xFFFFFF06)
-    }
-
-    pub fn timeline_region_background_alt() -> Rgba {
-        rgba(0xFFFFFF04)
-    }
-
-    pub fn timeline_lane_background() -> Rgba {
-        rgba(0xFFFFFF07)
-    }
-
-    pub fn timeline_lane_alt_background() -> Rgba {
-        rgba(0x00000029)
-    }
-
-    pub fn timeline_selected_lane_background() -> Rgba {
-        rgba(0xFFFFFF12)
-    }
-
-    pub fn timeline_empty_body_background() -> Rgba {
-        // Slightly calmer than lane alt so the grid doesn't look "too forward"
-        // in empty space below the last track.
-        rgba(0x00000024)
-    }
-
-    pub fn timeline_ruler_background() -> Rgba {
-        Self::surface_panel()
-    }
-
-    pub fn timeline_ruler_tick() -> Rgba {
-        rgba(0xFFFFFF1F)
-    }
-
-    pub fn timeline_ruler_text() -> Rgba {
-        Self::text_secondary()
-    }
-
-    pub fn timeline_selection() -> Rgba {
-        Self::accent_soft()
-    }
+    theme_color!(meter_bg, "meter.background", "#FFFFFF0D");
+    theme_color!(meter_low, "meter.low", "#6FCF97");
+    theme_color!(meter_mid, "meter.mid", "#E5C07B");
+    theme_color!(meter_high, "meter.high", "#FF6B68");
+    theme_color!(fader_rail, "fader.rail", "#FFFFFF0F");
+    theme_color!(fader_thumb, "fader.thumb", "#DFE1E5");
+    theme_color!(fader_tick, "fader.tick", "#FFFFFF1F");
+    theme_color!(fader_scale_text, "fader.scaleText", "#FFFFFF38");
+    theme_color!(knob_bg, "knob.background", "#181A1F");
+    theme_color!(knob_ring, "knob.ring", "#7B61FF");
+    theme_color!(slot_bg, "slot.background", "#FFFFFF08");
+    theme_color!(slot_border, "slot.border", "#FFFFFF12");
+    theme_color!(statusbar_bg, "statusbar.background", "#1B1C20");
+    theme_color!(statusbar_text, "statusbar.text", "#8E96A3");
+    theme_color!(mixer_bg, "mixer.background", "#111418");
+    theme_color!(master_strip_bg, "mixer.masterStripBackground", "#181A1F");
+    theme_color!(timeline_grid_major, "timeline.gridMajor", "#FFFFFF12");
+    theme_color!(timeline_grid_minor, "timeline.gridMinor", "#FFFFFF08");
+    theme_color!(timeline_grid_bar, "timeline.gridBar", "#FFFFFF1A");
+    theme_color!(timeline_playhead, "timeline.playhead", "#FF6B68");
+    theme_color!(timeline_background, "timeline.background", "#1E1F22");
+    theme_color!(
+        timeline_content_background,
+        "timeline.contentBackground",
+        "#1E1F22"
+    );
+    theme_color!(
+        timeline_region_background,
+        "timeline.regionBackground",
+        "#FFFFFF06"
+    );
+    theme_color!(
+        timeline_region_background_alt,
+        "timeline.regionBackgroundAlt",
+        "#FFFFFF04"
+    );
+    theme_color!(
+        timeline_lane_background,
+        "timeline.laneBackground",
+        "#FFFFFF07"
+    );
+    theme_color!(
+        timeline_lane_alt_background,
+        "timeline.laneAltBackground",
+        "#00000029"
+    );
+    theme_color!(
+        timeline_selected_lane_background,
+        "timeline.selectedLaneBackground",
+        "#FFFFFF12"
+    );
+    theme_color!(
+        timeline_empty_body_background,
+        "timeline.emptyBodyBackground",
+        "#00000024"
+    );
+    theme_color!(
+        timeline_ruler_background,
+        "timeline.rulerBackground",
+        "#25262B"
+    );
+    theme_color!(timeline_ruler_tick, "timeline.rulerTick", "#FFFFFF1F");
+    theme_color!(timeline_ruler_text, "timeline.rulerText", "#C3C7D0");
+    theme_color!(timeline_selection, "timeline.selection", "#7B61FF30");
 
     // Track colors (fallbacks)
-    pub fn track_audio() -> Rgba {
-        rgb(0x5FCED0)
-    }
-
-    pub fn track_midi() -> Rgba {
-        rgb(0xE5C07B)
-    }
-
-    pub fn track_instrument() -> Rgba {
-        rgb(0xBB86FC)
-    }
-
-    pub fn track_bus() -> Rgba {
-        rgb(0x7B61FF)
-    }
-
-    pub fn track_return() -> Rgba {
-        rgb(0x6FCF97)
-    }
-
-    pub fn track_master() -> Rgba {
-        rgb(0xDFE1E5)
-    }
+    theme_color!(track_audio, "track.audio", "#5FCED0");
+    theme_color!(track_midi, "track.midi", "#E5C07B");
+    theme_color!(track_instrument, "track.instrument", "#BB86FC");
+    theme_color!(track_bus, "track.bus", "#7B61FF");
+    theme_color!(track_return, "track.return", "#6FCF97");
+    theme_color!(track_master, "track.master", "#DFE1E5");
 
     // Surfaces
-    pub fn bottom_panel_bg() -> Rgba {
-        rgb(0x25262B)
-    }
-
-    pub fn bottom_panel_header_bg() -> Rgba {
-        rgb(0x1B1C20)
-    }
-
-    pub fn mixer_strip_bg() -> Rgba {
-        rgba(0xFFFFFF08)
-    }
-
-    pub fn mixer_strip_bg_alt() -> Rgba {
-        rgba(0xFFFFFF05)
-    }
-
-    pub fn mixer_strip_selected_bg() -> Rgba {
-        rgba(0xFFFFFF14)
-    }
-
-    pub fn master_strip_header_bg() -> Rgba {
-        rgb(0x181A1F)
-    }
+    theme_color!(bottom_panel_bg, "surface.bottomPanel", "#25262B");
+    theme_color!(
+        bottom_panel_header_bg,
+        "surface.bottomPanelHeader",
+        "#1B1C20"
+    );
+    theme_color!(mixer_strip_bg, "surface.mixerStrip", "#FFFFFF08");
+    theme_color!(mixer_strip_bg_alt, "surface.mixerStripAlt", "#FFFFFF05");
+    theme_color!(
+        mixer_strip_selected_bg,
+        "surface.mixerStripSelected",
+        "#FFFFFF14"
+    );
+    theme_color!(
+        master_strip_header_bg,
+        "surface.masterStripHeader",
+        "#181A1F"
+    );
 
     // Borders
-    pub fn panel_border() -> Rgba {
-        rgba(0xFFFFFF14)
-    }
-
-    pub fn strip_border() -> Rgba {
-        rgba(0xFFFFFF26)
-    }
-
-    pub fn strip_border_subtle() -> Rgba {
-        rgba(0xFFFFFF0A)
-    }
-
-    pub fn master_strip_border() -> Rgba {
-        rgba(0xFFFFFF1A)
-    }
+    theme_color!(panel_border, "border.panel", "#FFFFFF14");
+    theme_color!(strip_border, "border.strip", "#FFFFFF26");
+    theme_color!(strip_border_subtle, "border.stripSubtle", "#FFFFFF0A");
+    theme_color!(master_strip_border, "border.masterStrip", "#FFFFFF1A");
 
     // Slots
-    pub fn slot_bg_hover() -> Rgba {
-        rgba(0xFFFFFF14)
-    }
-
-    pub fn slot_empty_text() -> Rgba {
-        rgba(0xFFFFFF45)
-    }
+    theme_color!(slot_bg_hover, "slot.backgroundHover", "#FFFFFF14");
+    theme_color!(slot_empty_text, "slot.emptyText", "#FFFFFF45");
 
     // Fader
-    pub fn fader_groove() -> Rgba {
-        rgb(0x15161A)
-    }
-
-    pub fn fader_thumb_border() -> Rgba {
-        rgba(0xFFFFFF40)
-    }
+    theme_color!(fader_groove, "fader.groove", "#15161A");
+    theme_color!(fader_thumb_border, "fader.thumbBorder", "#FFFFFF40");
 
     // Meters
-    pub fn meter_rail() -> Rgba {
-        rgba(0xFFFFFF0A)
-    }
-
-    pub fn meter_peak() -> Rgba {
-        rgb(0xFFD700)
-    }
+    theme_color!(meter_rail, "meter.rail", "#FFFFFF0A");
+    theme_color!(meter_peak, "meter.peak", "#FFD700");
 
     // Status
-    pub fn statusbar_text_muted() -> Rgba {
-        rgba(0xFFFFFF66)
-    }
-
-    pub fn statusbar_accent() -> Rgba {
-        rgb(0x7B61FF)
-    }
-
-    pub fn statusbar_warning() -> Rgba {
-        rgb(0xE5C07B)
-    }
+    theme_color!(statusbar_text_muted, "statusbar.textMuted", "#FFFFFF66");
+    theme_color!(statusbar_accent, "statusbar.accent", "#7B61FF");
+    theme_color!(statusbar_warning, "statusbar.warning", "#E5C07B");
 
     // Helper to dynamically adjust alpha channel
     pub fn with_alpha(color: Rgba, alpha: f32) -> Rgba {
@@ -585,12 +614,16 @@ impl Colors {
         }
     }
 
-    pub const TRACK_COLORS: [u32; 12] = [
-        0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0xA99CFF, 0x6EB7E8, 0xE89B61, 0xD982B6, 0xA8D36F,
-        0x9CAFE8, 0xC49A6C, 0x71D6B5,
-    ];
+    pub const TRACK_COLORS: [u32; 12] = DEFAULT_TRACK_COLOR_VALUES;
 
     pub fn track_color_for_index(index: usize) -> Rgba {
-        rgb(Self::TRACK_COLORS[index % Self::TRACK_COLORS.len()])
+        let theme = active_theme_store()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        theme
+            .track_colors
+            .get(index % theme.track_colors.len())
+            .copied()
+            .unwrap_or_else(|| rgba_from_u32(Self::TRACK_COLORS[index % Self::TRACK_COLORS.len()]))
     }
 }

@@ -8,7 +8,9 @@ use windows::{
         ViewManagement::{UIColorType, UISettings},
     },
     Win32::{
-        Foundation::*, Graphics::Dwm::*, System::LibraryLoader::LoadLibraryA,
+        Foundation::*,
+        Graphics::{Dwm::*, Gdi::*},
+        System::LibraryLoader::LoadLibraryA,
         UI::WindowsAndMessaging::*,
     },
     core::{BOOL, PCSTR},
@@ -91,6 +93,10 @@ pub(crate) fn windows_credentials_target_name(url: &str) -> String {
 }
 
 pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
+    if let Some(cursor) = load_custom_cursor(style) {
+        return Some(cursor);
+    }
+
     static ARROW: OnceLock<SafeCursor> = OnceLock::new();
     static IBEAM: OnceLock<SafeCursor> = OnceLock::new();
     static CROSS: OnceLock<SafeCursor> = OnceLock::new();
@@ -128,6 +134,178 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
             .into()
         })),
     )
+}
+
+#[allow(dead_code)]
+struct CursorAssetSet {
+    half: &'static [u8],
+    one: &'static [u8],
+    one_half: &'static [u8],
+    two: &'static [u8],
+    hotspot_1x: (u32, u32),
+}
+
+const FB_ARROW: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/Arrow@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/Arrow@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/Arrow@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/Arrow@2x.png"),
+    hotspot_1x: (2, 3),
+};
+
+const FB_SELECT: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/Select@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/Select@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/Select@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/Select@2x.png"),
+    hotspot_1x: (2, 2),
+};
+
+const FB_MARQUEE: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/Marquee@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/Marquee@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/Marquee@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/Marquee@2x.png"),
+    hotspot_1x: (8, 8),
+};
+
+const FB_MOVE: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/Move@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/Move@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/Move@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/Move@2x.png"),
+    hotspot_1x: (52, 52),
+};
+
+const FB_FADE_IN: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/FadeIn@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/FadeIn@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/FadeIn@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/FadeIn@2x.png"),
+    hotspot_1x: (6, 37),
+};
+
+const FB_FADE_OUT: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/FadeOut@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/FadeOut@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/FadeOut@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/FadeOut@2x.png"),
+    hotspot_1x: (72, 37),
+};
+
+const FB_RESIZE_HORIZON: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/ResizeHorizon@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/ResizeHorizon@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/ResizeHorizon@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/ResizeHorizon@2x.png"),
+    hotspot_1x: (45, 32),
+};
+
+const FB_RESIZE_LEFT: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/ResizeLeft@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/ResizeLeft@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/ResizeLeft@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/ResizeLeft@2x.png"),
+    hotspot_1x: (4, 53),
+};
+
+const FB_RESIZE_RIGHT: CursorAssetSet = CursorAssetSet {
+    half: include_bytes!("../../../../../packages/shared/cursors/ResizeRight@0.5x.png"),
+    one: include_bytes!("../../../../../packages/shared/cursors/ResizeRight@1x.png"),
+    one_half: include_bytes!("../../../../../packages/shared/cursors/ResizeRight@1.5x.png"),
+    two: include_bytes!("../../../../../packages/shared/cursors/ResizeRight@2x.png"),
+    hotspot_1x: (82, 53),
+};
+
+fn load_custom_cursor(style: CursorStyle) -> Option<HCURSOR> {
+    static ARROW: OnceLock<SafeCursor> = OnceLock::new();
+    static SELECT: OnceLock<SafeCursor> = OnceLock::new();
+    static MARQUEE: OnceLock<SafeCursor> = OnceLock::new();
+    static MOVE: OnceLock<SafeCursor> = OnceLock::new();
+    static FADE_IN: OnceLock<SafeCursor> = OnceLock::new();
+    static FADE_OUT: OnceLock<SafeCursor> = OnceLock::new();
+    static RESIZE_HORIZON: OnceLock<SafeCursor> = OnceLock::new();
+    static RESIZE_LEFT: OnceLock<SafeCursor> = OnceLock::new();
+    static RESIZE_RIGHT: OnceLock<SafeCursor> = OnceLock::new();
+
+    let (lock, assets) = match style {
+        CursorStyle::Arrow | CursorStyle::FutureboardArrow => (&ARROW, &FB_ARROW),
+        CursorStyle::FutureboardSelect => (&SELECT, &FB_SELECT),
+        CursorStyle::FutureboardMarquee => (&MARQUEE, &FB_MARQUEE),
+        CursorStyle::FutureboardMove => (&MOVE, &FB_MOVE),
+        CursorStyle::FutureboardFadeIn => (&FADE_IN, &FB_FADE_IN),
+        CursorStyle::FutureboardFadeOut => (&FADE_OUT, &FB_FADE_OUT),
+        CursorStyle::FutureboardResizeHorizon => (&RESIZE_HORIZON, &FB_RESIZE_HORIZON),
+        CursorStyle::FutureboardResizeLeft => (&RESIZE_LEFT, &FB_RESIZE_LEFT),
+        CursorStyle::FutureboardResizeRight => (&RESIZE_RIGHT, &FB_RESIZE_RIGHT),
+        _ => return None,
+    };
+
+    Some(**lock.get_or_init(|| create_custom_cursor(assets).unwrap_or_default().into()))
+}
+
+fn select_cursor_png(assets: &CursorAssetSet) -> (&'static [u8], f32) {
+    (assets.half, 0.5)
+}
+
+fn create_custom_cursor(assets: &CursorAssetSet) -> Option<HCURSOR> {
+    let (bytes, scale) = select_cursor_png(assets);
+    let image = image::load_from_memory(bytes).log_err()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    let hotspot_x = ((assets.hotspot_1x.0 as f32) * scale).round() as u32;
+    let hotspot_y = ((assets.hotspot_1x.1 as f32) * scale).round() as u32;
+
+    unsafe {
+        let mut bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [RGBQUAD::default()],
+        };
+        let mut bits = std::ptr::null_mut();
+        let color_bitmap =
+            CreateDIBSection(None, &mut bitmap_info, DIB_RGB_COLORS, &mut bits, None, 0)
+                .log_err()?;
+        if color_bitmap.is_invalid() || bits.is_null() {
+            return None;
+        }
+
+        let dest = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (width * height * 4) as usize);
+        for (src, dst) in image.as_raw().chunks_exact(4).zip(dest.chunks_exact_mut(4)) {
+            let r = src[0] as u16;
+            let g = src[1] as u16;
+            let b = src[2] as u16;
+            let a = src[3] as u16;
+            dst[0] = ((b * a + 127) / 255) as u8;
+            dst[1] = ((g * a + 127) / 255) as u8;
+            dst[2] = ((r * a + 127) / 255) as u8;
+            dst[3] = a as u8;
+        }
+
+        let mask_bitmap = CreateBitmap(width as i32, height as i32, 1, 1, None);
+        if mask_bitmap.is_invalid() {
+            let _ = DeleteObject(HGDIOBJ(color_bitmap.0));
+            return None;
+        }
+
+        let icon_info = ICONINFO {
+            fIcon: BOOL(0),
+            xHotspot: hotspot_x.min(width.saturating_sub(1)),
+            yHotspot: hotspot_y.min(height.saturating_sub(1)),
+            hbmMask: mask_bitmap,
+            hbmColor: color_bitmap,
+        };
+        let icon = CreateIconIndirect(&icon_info).log_err();
+        let _ = DeleteObject(HGDIOBJ(color_bitmap.0));
+        let _ = DeleteObject(HGDIOBJ(mask_bitmap.0));
+        icon.map(|icon| HCURSOR(icon.0)).filter(|cursor| !cursor.is_invalid())
+    }
 }
 
 /// This function is used to configure the dark mode for the window built-in title bar.

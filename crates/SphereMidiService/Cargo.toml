@@ -1,0 +1,20 @@
+[package]
+name = "SphereMidiService"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "SphereMidiService"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+serde.workspace = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+midir.workspace = true
+
+[lints]
+workspace = true

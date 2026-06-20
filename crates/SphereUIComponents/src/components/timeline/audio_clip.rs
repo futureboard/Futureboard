@@ -2,7 +2,7 @@ use crate::components::timeline::timeline_state::{
     ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, StretchMode, TimelineState,
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
-use crate::theme::Colors;
+use crate::{custom_cursors, theme::Colors};
 use gpui::{
     div, px, AppContext, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window,
@@ -69,13 +69,15 @@ pub fn audio_clip(
         dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
     on_open_editor: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>>,
-    on_context_menu: Option<
+    _on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     on_erase_clip: Option<
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     erase_target: bool,
+    auto_crossfade_in_beats: f32,
+    auto_crossfade_out_beats: f32,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("AudioClip");
     let clip_id = clip.id.clone();
@@ -87,9 +89,17 @@ pub fn audio_clip(
     let pixels_per_second = state.viewport.pixels_per_second;
     let seconds_per_beat = state.seconds_per_beat();
     let stretch_badge = stretch_badge_label(clip, state);
-
     let left = state.beats_to_x(clip.start_beat);
     let width = (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
+    let clip_duration_seconds = (clip.duration_beats * seconds_per_beat).max(0.001);
+    let fade_in_seconds = (clip.stretch.fade_in_ms.max(0.0) / 1000.0)
+        .max(auto_crossfade_in_beats.max(0.0) * seconds_per_beat)
+        .min(clip_duration_seconds);
+    let fade_out_seconds = (clip.stretch.fade_out_ms.max(0.0) / 1000.0)
+        .max(auto_crossfade_out_beats.max(0.0) * seconds_per_beat)
+        .min((clip_duration_seconds - fade_in_seconds).max(0.0));
+    let fade_in_w = (fade_in_seconds * pixels_per_second).min(width);
+    let fade_out_w = (fade_out_seconds * pixels_per_second).min((width - fade_in_w).max(0.0));
 
     // Geometry offsets matching layout
     let pad = 7.0;
@@ -104,8 +114,6 @@ pub fn audio_clip(
 
     let on_select = on_select_clip.clone();
     let open_editor = on_open_editor.clone();
-    let context_clip_id = clip.id.clone();
-    let ctx_cb = on_context_menu.clone();
     let clip_for_erase = clip.id.clone();
     let erase_cb = on_erase_clip.clone();
     let resize_left = ClipResizeDrag {
@@ -144,7 +152,7 @@ pub fn audio_clip(
             c.a = 0.4;
             c
         })
-        .cursor(gpui::CursorStyle::PointingHand)
+        .cursor(custom_cursors::move_clip())
         .id(("audio-clip", id_num))
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -165,13 +173,9 @@ pub fn audio_clip(
         )
         .on_mouse_down(
             gpui::MouseButton::Right,
-            move |event: &gpui::MouseDownEvent, window, cx| {
+            move |_event: &gpui::MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                if let Some(cb) = ctx_cb.as_ref() {
-                    let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
-                    cb(&(context_clip_id.clone(), x, y), window, cx);
-                } else if let Some(erase) = erase_cb.as_ref() {
+                if let Some(erase) = erase_cb.as_ref() {
                     erase(&clip_for_erase, window, cx);
                 }
             },
@@ -246,6 +250,30 @@ pub fn audio_clip(
                         .child(format!("{:.1} bt", clip.duration_beats)),
                 ),
         )
+        .children((fade_in_w > 1.0).then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom(px(14.0))
+                .w(px(fade_in_w))
+                .cursor(custom_cursors::fade_in())
+                .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.26))
+                .border_r(px(1.0))
+                .border_color(Colors::with_alpha(track_color, 0.55))
+        }))
+        .children((fade_out_w > 1.0).then(|| {
+            div()
+                .absolute()
+                .right_0()
+                .top_0()
+                .bottom(px(14.0))
+                .w(px(fade_out_w))
+                .cursor(custom_cursors::fade_out())
+                .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.26))
+                .border_l(px(1.0))
+                .border_color(Colors::with_alpha(track_color, 0.55))
+        }))
         .child(
             div()
                 .absolute()
@@ -253,7 +281,7 @@ pub fn audio_clip(
                 .left_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .cursor(custom_cursors::resize_left())
                 .id(("audio-clip-resize-l", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_left, |drag, _offset, _window, cx| {
@@ -267,7 +295,7 @@ pub fn audio_clip(
                 .right_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .cursor(custom_cursors::resize_right())
                 .id(("audio-clip-resize-r", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_right, |drag, _offset, _window, cx| {

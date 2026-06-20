@@ -92,6 +92,7 @@ fn store_main_hwnd(hwnd: Option<u64>) {
     }
 }
 
+#[allow(dead_code)]
 fn main_hwnd() -> u64 {
     MAIN_DAW_HWND.load(Ordering::SeqCst)
 }

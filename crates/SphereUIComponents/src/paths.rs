@@ -80,6 +80,10 @@ pub struct FutureboardPaths {
     pub plugin_db: PathBuf,
     /// `<app_data>/Keymaps/` — user keyboard shortcut profiles and overrides.
     pub keymaps: PathBuf,
+    /// `<app_data>/Extensions/` — user-installed extension content.
+    pub extensions: PathBuf,
+    /// `<app_data>/Extensions/Themes/` — Native GPUI + WebUI theme packages.
+    pub themes: PathBuf,
 
     // ── Audio ──────────────────────────────────────────────────────────────
     /// Platform default audio/music directory (e.g. `~/Music`).
@@ -135,6 +139,8 @@ impl FutureboardPaths {
         let app_cache = app_data.join("Cache");
         let plugin_db = app_data.join("Plugin Database");
         let keymaps = app_data.join("Keymaps");
+        let extensions = app_data.join("Extensions");
+        let themes = extensions.join("Themes");
 
         // ── Audio directory ───────────────────────────────────────────────
         let audio_files = dirs::audio_dir().unwrap_or_else(|| {
@@ -166,6 +172,8 @@ impl FutureboardPaths {
             app_cache,
             plugin_db,
             keymaps,
+            extensions,
+            themes,
             audio_files,
             vst3_paths,
             clap_paths,
@@ -202,6 +210,8 @@ impl FutureboardPaths {
             &self.app_cache,
             &self.plugin_db,
             &self.keymaps,
+            &self.extensions,
+            &self.themes,
         ];
         for dir in &app_dirs {
             fs::create_dir_all(dir)?;

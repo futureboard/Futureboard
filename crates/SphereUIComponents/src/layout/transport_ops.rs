@@ -189,6 +189,7 @@ impl StudioLayout {
     pub(super) fn is_recording_active(&self, cx: &mut Context<Self>) -> bool {
         self.timeline.read(cx).state.transport.recording
             || self.recording.preview.is_some()
+            || self.recording.midi.is_some()
             || self
                 .audio_bridge
                 .engine

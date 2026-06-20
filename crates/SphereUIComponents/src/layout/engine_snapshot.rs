@@ -1,7 +1,7 @@
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::timeline::timeline_state::{
-    self, ClipType, InsertSlotState, MidiControllerKind, StretchMode, TimelineState, TrackState,
-    TrackType, MASTER_TRACK_ID,
+    self, ClipState, ClipType, InsertSlotState, MidiControllerKind, StretchMode, TimelineState,
+    TrackState, TrackType, MASTER_TRACK_ID,
 };
 
 use DAUx::types::{
@@ -30,6 +30,71 @@ fn sphere_stretch_params_from_clip_stretch(
     project_bpm: f64,
 ) -> SphereAudioProcessor::StretchParams {
     stretch.to_sphere_stretch_params(project_bpm)
+}
+
+fn is_renderable_audio_clip(clip: &ClipState) -> bool {
+    if clip.muted {
+        return false;
+    }
+    matches!(
+        &clip.clip_type,
+        ClipType::Audio {
+            source_path: Some(path),
+            ..
+        } if !path.trim().is_empty()
+    )
+}
+
+fn apply_auto_crossfades(state: &TimelineState, clips: &mut [EngineClipSnapshot]) {
+    for track in &state.tracks {
+        let mut track_audio: Vec<&ClipState> = track
+            .clips
+            .iter()
+            .filter(|clip| is_renderable_audio_clip(clip))
+            .collect();
+        track_audio.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
+
+        for pair in track_audio.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            let a_end = a.start_beat + a.duration_beats;
+            let b_end = b.start_beat + b.duration_beats;
+            let overlap_start = a.start_beat.max(b.start_beat);
+            let overlap_end = a_end.min(b_end);
+            if overlap_end <= overlap_start {
+                continue;
+            }
+
+            let overlap_beats = overlap_end - overlap_start;
+            let overlap_seconds = state.beats_to_seconds(overlap_beats).max(0.0) as f64;
+            if overlap_seconds <= 0.0 {
+                continue;
+            }
+            extend_engine_fade(clips, &a.id, 0.0, overlap_seconds);
+            extend_engine_fade(clips, &b.id, overlap_seconds, 0.0);
+        }
+    }
+}
+
+fn extend_engine_fade(
+    clips: &mut [EngineClipSnapshot],
+    clip_id: &str,
+    fade_in_seconds: f64,
+    fade_out_seconds: f64,
+) {
+    let Some(clip) = clips.iter_mut().find(|clip| clip.id == clip_id) else {
+        return;
+    };
+    let fades = clip.fades.get_or_insert_with(|| EngineFadeSnapshot {
+        in_duration: 0.0,
+        out_duration: 0.0,
+        in_curve: "equal_power".to_string(),
+        out_curve: "equal_power".to_string(),
+    });
+    fades.in_duration = fades.in_duration.max(fade_in_seconds);
+    fades.out_duration = fades.out_duration.max(fade_out_seconds);
+    fades.in_curve = "equal_power".to_string();
+    fades.out_curve = "equal_power".to_string();
 }
 
 /// Map a controller lane kind to its VST3 controller number, or `None` for
@@ -426,7 +491,7 @@ fn build_engine_project_snapshot_inner(
         automation_lanes: Vec::new(),
     });
 
-    let clips = state
+    let mut clips: Vec<EngineClipSnapshot> = state
         .tracks
         .iter()
         .flat_map(|track| {
@@ -474,8 +539,8 @@ fn build_engine_project_snapshot_inner(
                     Some(EngineFadeSnapshot {
                         in_duration: (stretch.fade_in_ms.max(0.0) as f64) / 1000.0,
                         out_duration: (stretch.fade_out_ms.max(0.0) as f64) / 1000.0,
-                        in_curve: "linear".to_string(),
-                        out_curve: "linear".to_string(),
+                        in_curve: "equal_power".to_string(),
+                        out_curve: "equal_power".to_string(),
                     })
                 } else {
                     None
@@ -526,6 +591,7 @@ fn build_engine_project_snapshot_inner(
             })
         })
         .collect();
+    apply_auto_crossfades(state, &mut clips);
 
     // MIDI clips (Phase 2): notes stay clip-relative; the engine resolves them
     // to absolute beats/samples. Muted clips are skipped, matching audio clips.

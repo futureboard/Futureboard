@@ -8,8 +8,8 @@ use crate::menu::{MenuItem, MenuManifest};
 
 use super::conflicts::{annotate_row_conflicts, find_conflicts_for_binding};
 use super::model::{
-    KeyBinding, KeymapConflict, KeymapProfile, KeymapRow, KeymapSource, ProfileDescriptor,
-    ResolvedKeyBinding, PROFILE_DESCRIPTORS, USER_OVERRIDES_FILE,
+    KeyBinding, KeymapConflict, KeymapProfile, KeymapRow, KeymapSource, ResolvedKeyBinding,
+    PROFILE_DESCRIPTORS,
 };
 use super::normalize::{canonical_accel, format_accel_display, global_priority};
 use super::storage::{

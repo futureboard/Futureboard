@@ -55,8 +55,8 @@ mod project_ops;
 mod project_switch;
 mod recording_ops;
 mod session_load;
-mod studio_render;
 mod stretch_tempo_ops;
+mod studio_render;
 mod studio_state;
 mod track_clip_ops;
 mod transport_freeze_debug;
@@ -543,11 +543,11 @@ impl StudioLayout {
         {
             let target = cx.entity().clone();
             let sink = Arc::new(
-                move |event: crate::midi_input::VirtualKeyboardEvent, cx: &mut gpui::App| {
+                move |event: sphere_midi_service::VirtualKeyboardEvent, cx: &mut gpui::App| {
                     target.update(cx, |layout, cx| {
                         matches!(
                             layout.route_virtual_keyboard_event(event, cx),
-                            crate::midi_input::MidiInputRouteStatus::Routed
+                            sphere_midi_service::MidiInputRouteStatus::Routed
                         )
                     })
                 },

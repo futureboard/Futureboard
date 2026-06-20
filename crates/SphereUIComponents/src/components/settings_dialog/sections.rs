@@ -706,7 +706,7 @@ pub(crate) fn midi_devices_section(
     on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
     on_refresh_midi: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
 ) -> impl IntoElement {
-    let detected = enumerate_midi_devices();
+    let detected = cached_midi_devices();
     let resolved = resolve_midi_devices(&schema.hardware.midi.devices, &detected);
 
     let inputs: Vec<_> = resolved

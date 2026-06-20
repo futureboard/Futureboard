@@ -2,7 +2,7 @@ use crate::components::timeline::timeline_state::{
     midi_debug_enabled, ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType,
     MidiControllerKind, MidiControllerPoint, TimelineState,
 };
-use crate::theme::Colors;
+use crate::{custom_cursors, theme::Colors};
 use gpui::{
     canvas, div, fill, point, px, size, AppContext, Bounds, InteractiveElement, IntoElement,
     ParentElement, Pixels, StatefulInteractiveElement, Styled,
@@ -194,7 +194,7 @@ pub fn midi_clip(
             c.a = 0.4;
             c
         })
-        .cursor(gpui::CursorStyle::PointingHand)
+        .cursor(custom_cursors::move_clip())
         .id(("midi-clip", id_num))
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -293,7 +293,7 @@ pub fn midi_clip(
                 .left_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .cursor(custom_cursors::resize_left())
                 .id(("midi-clip-resize-l", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_left, |drag, _offset, _window, cx| {
@@ -307,7 +307,7 @@ pub fn midi_clip(
                 .right_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .cursor(custom_cursors::resize_right())
                 .id(("midi-clip-resize-r", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_right, |drag, _offset, _window, cx| {

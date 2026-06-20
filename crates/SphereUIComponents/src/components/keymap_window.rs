@@ -3,12 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, size, uniform_list, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, ScrollHandle,
-    StatefulInteractiveElement, Styled, UniformListScrollHandle, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    Styled, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind,
 };
 
 use crate::components::controls::{fb_button, fb_field_label, FbButtonKind};

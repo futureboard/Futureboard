@@ -295,23 +295,24 @@ fn phase_vocoder_basic_sample(
     (al * (1.0 - w) + bl * w, ar * (1.0 - w) + br * w)
 }
 
-/// Linear clip-fade gain for a sample at offset `rel` from the clip start.
+/// Equal-power clip-fade gain for a sample at offset `rel` from the clip start.
 ///
 /// `1.0` outside both fade regions; ramps `0→1` across the fade-in and `1→0`
-/// across the fade-out. Linear is the current placeholder shape — the snapshot
-/// carries per-fade curve names (`audio-system-plan.md` §6) which a later slice
-/// can map to equal-power / exponential shaping here. Allocation-free.
+/// across the fade-out. The sine/cosine shape keeps the midpoint near -3 dB,
+/// which is the default DAW-friendly crossfade for less-correlated material.
+/// Allocation-free and safe for the realtime render path.
 #[inline]
 pub(crate) fn clip_fade_gain(rel: u64, duration: u64, fade_in: u64, fade_out: u64) -> f32 {
     let mut gain = 1.0f32;
     if fade_in > 0 && rel < fade_in {
-        gain *= rel as f32 / fade_in as f32;
+        let t = (rel as f32 / fade_in as f32).clamp(0.0, 1.0);
+        gain *= (t * std::f32::consts::FRAC_PI_2).sin();
     }
     if fade_out > 0 {
         let fade_out_start = duration.saturating_sub(fade_out);
         if rel >= fade_out_start {
-            let into = (rel - fade_out_start) as f32;
-            gain *= (1.0 - into / fade_out as f32).max(0.0);
+            let t = ((rel - fade_out_start) as f32 / fade_out as f32).clamp(0.0, 1.0);
+            gain *= (t * std::f32::consts::FRAC_PI_2).cos().max(0.0);
         }
     }
     gain

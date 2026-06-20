@@ -1,7 +1,7 @@
 mod combo;
 mod sections;
 mod window;
-pub use combo::*;
+pub(crate) use combo::*;
 pub use sections::*;
 pub use window::*;
 
@@ -40,10 +40,8 @@ use crate::components::text_input::{
 };
 use crate::components::timeline::render::list_available_gpu_devices;
 use crate::components::title_bar::external_window_titlebar;
+use crate::device_registry::cached_midi_devices;
 use crate::i18n::{I18n, Locale};
-use crate::midi_devices::{
-    enumerate_midi_devices, midi_settings_debug_enabled, resolve_midi_devices, upsert_midi_device,
-};
 use crate::overlay::{
     anchor_visible_in_window, compute_overlay_position, external_dialog_overlay_bounds,
     form_combo_trigger_bounds, refresh_form_anchor, settings_form_column, OverlayAnchor,
@@ -55,6 +53,7 @@ use crate::settings::{
 };
 use crate::theme::{self, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
+use sphere_midi_service::{midi_settings_debug_enabled, resolve_midi_devices, upsert_midi_device};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {

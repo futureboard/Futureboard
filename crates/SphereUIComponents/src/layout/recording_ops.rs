@@ -1,11 +1,14 @@
-use gpui::Context;
+use gpui::{App, Context};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::components::timeline::timeline_state::{
-    TrackAudioFormat, TrackInputRouting, TrackState, TrackType,
+    AudioClipStretchState, AudioImportState, ClipState, ClipType, MidiControllerLane,
+    MidiNoteState, TrackAudioFormat, TrackInputRouting, TrackState, TrackType, MIN_NOTE_BEATS,
 };
 use crate::components::timeline::waveform_cache::{self, WaveformPeak};
+use sphere_midi_service::MidiInputEvent;
 
 use super::{RecordingPreviewUi, RecordingUiState, StudioLayout, RECORDING_PREVIEW_CLIP_ID};
 use DAUx::types::{JsRecordingTrackConfig, JsStartRecordingConfig};
@@ -21,6 +24,10 @@ pub(crate) struct RecordingSessionState {
     /// Live recording waveform preview (Part 1). `Some` while a take draws a
     /// growing preview clip in the arrangement.
     pub preview: Option<RecordingPreviewUi>,
+    /// Native MIDI/instrument track capture. This is UI/control-path state — MIDI
+    /// hardware/virtual-keyboard events already arrive on the control router, so
+    /// no realtime audio callback work is required.
+    pub midi: Option<MidiRecordingTake>,
 }
 
 impl Default for RecordingSessionState {
@@ -29,8 +36,39 @@ impl Default for RecordingSessionState {
             start_beat: 0.0,
             ui_state: RecordingUiState::Idle,
             preview: None,
+            midi: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MidiRecordingTake {
+    pub start_beat: f32,
+    pub tracks: HashMap<String, MidiRecordingTrack>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MidiRecordingTrack {
+    pub track_id: String,
+    pub track_name: String,
+    pub notes: Vec<MidiNoteState>,
+    pub active_notes: HashMap<(u8, u8), ActiveMidiNote>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ActiveMidiNote {
+    pub pitch: u8,
+    pub velocity: u8,
+    pub start_beat: f32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MidiRecordingResult {
+    pub track_id: String,
+    pub track_name: String,
+    pub start_beat: f32,
+    pub duration_beats: f32,
+    pub notes: Vec<MidiNoteState>,
 }
 
 impl StudioLayout {
@@ -46,19 +84,6 @@ impl StudioLayout {
     pub(super) fn start_native_recording(&mut self, cx: &mut Context<Self>) {
         self.recording.ui_state = RecordingUiState::Preparing;
         cx.notify();
-
-        let project_root = match self.project_folder.as_ref() {
-            Some(path) => path.clone(),
-            None => {
-                self.audio_bridge.last_error =
-                    Some("save the project to a folder before recording".to_string());
-                self.recording.ui_state = RecordingUiState::Failed {
-                    reason: "save the project to a folder before recording".to_string(),
-                };
-                eprintln!("[recording] no project folder — save project first");
-                return;
-            }
-        };
 
         // Clone the engine handle (cheap, Arc-backed) so the local `engine`
         // borrow targets `engine_handle` instead of `self`. That lets the
@@ -83,17 +108,30 @@ impl StudioLayout {
             })
             .collect();
 
-        let (bpm, start_beat, sample_rate, input_device_name) = {
+        let (bpm, start_beat, sample_rate, input_device_name, midi_tracks) = {
             let timeline = self.timeline.read(cx);
             let settings = self.settings.read(cx);
-            let armed_count = timeline
+            let audio_armed = timeline
                 .state
                 .tracks
                 .iter()
-                .filter(|t| t.armed && t.track_type == TrackType::Audio)
-                .count();
-            if armed_count == 0 {
-                self.fail_recording_start("no armed audio tracks", cx);
+                .any(|t| t.armed && t.track_type == TrackType::Audio);
+            let midi_tracks = timeline
+                .state
+                .tracks
+                .iter()
+                .filter(|t| {
+                    t.armed && matches!(t.track_type, TrackType::Midi | TrackType::Instrument)
+                })
+                .map(|track| MidiRecordingTrack {
+                    track_id: track.id.clone(),
+                    track_name: track.name.clone(),
+                    notes: Vec::new(),
+                    active_notes: HashMap::new(),
+                })
+                .collect::<Vec<_>>();
+            if !audio_armed && midi_tracks.is_empty() {
+                self.fail_recording_start("no armed audio or MIDI tracks", cx);
                 return;
             }
             (
@@ -101,6 +139,7 @@ impl StudioLayout {
                 timeline.state.transport.playhead_beats,
                 self.current_audio_sample_rate(),
                 settings.current.hardware.audio.device_in.clone(),
+                midi_tracks,
             )
         };
 
@@ -158,27 +197,32 @@ impl StudioLayout {
             (configs, explicit_device_id, monitor_channels)
         };
 
-        // Every record precondition has now passed (engine present, at least
-        // one armed audio track, input devices/channels resolved). Only now
-        // honour `save_before_recording`: the auto-save must never fire for a
-        // Record click that won't actually start a take, otherwise the project
-        // title flips to "Saved" with no recording. Save remains an explicit
-        // command everywhere else — this is the only record-triggered save.
-        let save_before_recording = self
-            .settings
-            .read(cx)
-            .current
-            .recording
-            .audio
-            .save_before_recording;
-        if save_before_recording && self.project_session.is_dirty {
-            let Some(project_path) = self.project_session.project_file_path.clone() else {
+        if !tracks.is_empty() {
+            let Some(_project_root) = self.project_folder.as_ref() else {
                 self.fail_recording_start("save the project to a folder before recording", cx);
                 return;
             };
-            if !self.do_save_project(&project_path, cx) {
-                self.fail_recording_start("could not save the project before recording", cx);
-                return;
+
+            // Every audio-record precondition has now passed (engine present, at
+            // least one armed audio track, input devices/channels resolved). Only
+            // now honour `save_before_recording`: the auto-save must never fire
+            // for a Record click that won't actually start an audio take.
+            let save_before_recording = self
+                .settings
+                .read(cx)
+                .current
+                .recording
+                .audio
+                .save_before_recording;
+            if save_before_recording && self.project_session.is_dirty {
+                let Some(project_path) = self.project_session.project_file_path.clone() else {
+                    self.fail_recording_start("save the project to a folder before recording", cx);
+                    return;
+                };
+                if !self.do_save_project(&project_path, cx) {
+                    self.fail_recording_start("could not save the project before recording", cx);
+                    return;
+                }
             }
         }
 
@@ -196,23 +240,43 @@ impl StudioLayout {
         let session_id = format!("rec-{timestamp}");
         let project_name = self.project_session.name.clone();
 
-        let config = JsStartRecordingConfig {
-            project_root: project_root.to_string_lossy().into_owned(),
-            project_name,
-            session_id,
-            timestamp,
-            bpm: bpm.max(1.0) as f64,
-            start_beat: start_beat.max(0.0) as f64,
-            sample_rate: sample_rate.max(1),
-            input_device_id,
-            tracks,
-            monitor_mix: !monitor_channels.is_empty(),
-            monitor_channels,
-        };
+        if !midi_tracks.is_empty() {
+            self.recording.midi = Some(MidiRecordingTake {
+                start_beat: start_beat.max(0.0),
+                tracks: midi_tracks
+                    .into_iter()
+                    .map(|track| (track.track_id.clone(), track))
+                    .collect(),
+            });
+        } else {
+            self.recording.midi = None;
+        }
 
-        if let Err(error) = engine.start_recording(config) {
-            self.fail_recording_start(&error.to_string(), cx);
-            return;
+        if !tracks.is_empty() {
+            let Some(project_root) = self.project_folder.as_ref() else {
+                self.recording.midi = None;
+                self.fail_recording_start("save the project to a folder before recording", cx);
+                return;
+            };
+            let config = JsStartRecordingConfig {
+                project_root: project_root.to_string_lossy().into_owned(),
+                project_name,
+                session_id,
+                timestamp,
+                bpm: bpm.max(1.0) as f64,
+                start_beat: start_beat.max(0.0) as f64,
+                sample_rate: sample_rate.max(1),
+                input_device_id,
+                tracks,
+                monitor_mix: !monitor_channels.is_empty(),
+                monitor_channels,
+            };
+
+            if let Err(error) = engine.start_recording(config) {
+                self.recording.midi = None;
+                self.fail_recording_start(&error.to_string(), cx);
+                return;
+            }
         }
 
         self.recording.start_beat = start_beat.max(0.0);
@@ -236,46 +300,51 @@ impl StudioLayout {
 
     pub(super) fn stop_native_recording(&mut self, cx: &mut Context<Self>) {
         self.stop_recording_transport_ui(cx);
+        self.recording.ui_state = RecordingUiState::Finalizing;
+        cx.notify();
 
-        let Some(engine) = self.audio_bridge.engine.clone() else {
+        let midi_results = self.finish_midi_recording_take(cx);
+        let midi_committed = !midi_results.is_empty();
+
+        if let Some(engine) = self.audio_bridge.engine.clone() {
+            let engine_recording = engine.recording_status().active;
+            if let Err(error) = engine.pause() {
+                self.audio_bridge.last_error = Some(error.to_string());
+                eprintln!("[audio] stop transport while recording failed: {error}");
+            }
+            self.audio_bridge.stats = Some(engine.stats());
+
+            if engine_recording {
+                let results = match engine.stop_recording() {
+                    Ok(results) => results,
+                    Err(error) => {
+                        self.audio_bridge.last_error = Some(error.to_string());
+                        self.recording.ui_state = RecordingUiState::Failed {
+                            reason: error.to_string(),
+                        };
+                        eprintln!("[recording] stop failed: {error}");
+                        return;
+                    }
+                };
+                self.commit_recording_results(cx, results);
+            }
+        } else if midi_results.is_empty() {
             self.recording.ui_state = RecordingUiState::Failed {
                 reason: "audio engine unavailable".to_string(),
             };
             cx.notify();
             return;
-        };
-
-        let engine_recording = engine.recording_status().active;
-        if let Err(error) = engine.pause() {
-            self.audio_bridge.last_error = Some(error.to_string());
-            eprintln!("[audio] stop transport while recording failed: {error}");
-        }
-        self.audio_bridge.stats = Some(engine.stats());
-
-        if !engine_recording {
-            self.recording.ui_state = RecordingUiState::Idle;
-            cx.notify();
-            return;
         }
 
-        self.recording.ui_state = RecordingUiState::Finalizing;
-        cx.notify();
+        self.commit_midi_recording_results(cx, midi_results);
 
-        let results = match engine.stop_recording() {
-            Ok(results) => results,
-            Err(error) => {
-                self.audio_bridge.last_error = Some(error.to_string());
-                self.recording.ui_state = RecordingUiState::Failed {
-                    reason: error.to_string(),
-                };
-                eprintln!("[recording] stop failed: {error}");
-                return;
-            }
-        };
-
-        self.commit_recording_results(cx, results);
         if !matches!(self.recording.ui_state, RecordingUiState::Failed { .. }) {
             self.recording.ui_state = RecordingUiState::Idle;
+            if midi_committed {
+                self.audio_bridge.project_dirty = true;
+                self.audio_bridge.media_dirty = true;
+                self.schedule_audio_project_sync(cx, true, "recording_commit");
+            }
             cx.notify();
         }
     }
@@ -296,6 +365,133 @@ impl StudioLayout {
             }
         });
         self.finish_recording_preview(cx);
+    }
+
+    pub(super) fn capture_midi_record_event(
+        &mut self,
+        track_id: &str,
+        event: &MidiInputEvent,
+        cx: &App,
+    ) {
+        let current_beat = self.timeline.read(cx).state.transport.playhead_beats;
+        let Some(take) = self.recording.midi.as_mut() else {
+            return;
+        };
+        let relative_beat = (current_beat - take.start_beat).max(0.0);
+        let Some(track) = take.tracks.get_mut(track_id) else {
+            return;
+        };
+
+        match *event {
+            MidiInputEvent::NoteOn {
+                note,
+                velocity,
+                channel,
+            } => {
+                let pitch = note.min(127);
+                let velocity = velocity.min(127);
+                let channel = channel.min(15);
+                let key = (channel, pitch);
+                if let Some(active) = track.active_notes.remove(&key) {
+                    push_recorded_midi_note(track, active, relative_beat);
+                }
+                track.active_notes.insert(
+                    key,
+                    ActiveMidiNote {
+                        pitch,
+                        velocity,
+                        start_beat: relative_beat,
+                    },
+                );
+            }
+            MidiInputEvent::NoteOff { note, channel } => {
+                let key = (channel.min(15), note.min(127));
+                if let Some(active) = track.active_notes.remove(&key) {
+                    push_recorded_midi_note(track, active, relative_beat);
+                }
+            }
+            MidiInputEvent::AllNotesOff | MidiInputEvent::Panic => {
+                close_all_recorded_midi_notes(track, relative_beat);
+            }
+            MidiInputEvent::ControlChange { .. } => {}
+        }
+    }
+
+    fn finish_midi_recording_take(&mut self, cx: &mut Context<Self>) -> Vec<MidiRecordingResult> {
+        let end_beat = self.timeline.read(cx).state.transport.playhead_beats;
+        let Some(mut take) = self.recording.midi.take() else {
+            return Vec::new();
+        };
+        let relative_end = (end_beat - take.start_beat).max(0.0);
+        let mut results = Vec::new();
+        for (_, mut track) in take.tracks.drain() {
+            close_all_recorded_midi_notes(&mut track, relative_end);
+            if track.notes.is_empty() {
+                continue;
+            }
+            let note_end = track
+                .notes
+                .iter()
+                .map(|note| note.start + note.duration)
+                .fold(0.0_f32, f32::max);
+            results.push(MidiRecordingResult {
+                track_id: track.track_id,
+                track_name: track.track_name,
+                start_beat: take.start_beat,
+                duration_beats: relative_end.max(note_end).max(MIN_NOTE_BEATS),
+                notes: track.notes,
+            });
+        }
+        results
+    }
+
+    fn commit_midi_recording_results(
+        &mut self,
+        cx: &mut Context<Self>,
+        results: Vec<MidiRecordingResult>,
+    ) {
+        if results.is_empty() {
+            return;
+        }
+
+        self.timeline.update(cx, |timeline, cx| {
+            let mut selected_clip_ids = Vec::new();
+            let mut selected_track_id = None;
+            for result in results {
+                let clip_id = timeline.state.next_clip_id();
+                let clip = ClipState {
+                    id: clip_id.clone(),
+                    name: format!("{} MIDI Recording", result.track_name),
+                    start_beat: result.start_beat.max(0.0),
+                    duration_beats: result.duration_beats.max(MIN_NOTE_BEATS),
+                    source_duration_seconds: None,
+                    offset_beats: 0.0,
+                    gain: 1.0,
+                    clip_type: ClipType::Midi {
+                        notes: result.notes,
+                        controller_lanes: Vec::<MidiControllerLane>::new(),
+                    },
+                    muted: false,
+                    audio_import: AudioImportState::default(),
+                    stretch: AudioClipStretchState::default(),
+                };
+                if let Some(track) = timeline
+                    .state
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == result.track_id)
+                {
+                    track.clips.push(clip);
+                    selected_track_id = Some(track.id.clone());
+                    selected_clip_ids.push(clip_id);
+                }
+            }
+            if !selected_clip_ids.is_empty() {
+                timeline.state.selection.selected_track_id = selected_track_id;
+                timeline.state.selection.selected_clip_ids = selected_clip_ids;
+                cx.notify();
+            }
+        });
     }
 
     fn commit_recording_results(
@@ -514,8 +710,26 @@ impl StudioLayout {
         self.recording.ui_state = RecordingUiState::Failed {
             reason: message.to_string(),
         };
+        self.recording.midi = None;
         eprintln!("[recording] start blocked: {message}");
         cx.notify();
+    }
+}
+
+fn push_recorded_midi_note(track: &mut MidiRecordingTrack, active: ActiveMidiNote, end_beat: f32) {
+    let duration = (end_beat - active.start_beat).max(MIN_NOTE_BEATS);
+    track.notes.push(MidiNoteState::new(
+        active.pitch,
+        active.start_beat.max(0.0),
+        duration,
+        active.velocity,
+    ));
+}
+
+fn close_all_recorded_midi_notes(track: &mut MidiRecordingTrack, end_beat: f32) {
+    let active_notes = std::mem::take(&mut track.active_notes);
+    for active in active_notes.into_values() {
+        push_recorded_midi_note(track, active, end_beat);
     }
 }
 

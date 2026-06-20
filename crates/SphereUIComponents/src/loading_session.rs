@@ -45,7 +45,7 @@ macro_rules! session_log {
 pub struct SessionInstallHandoff {
     pub engine: DAUx::AudioEngine,
     pub engine_stats: DAUx::EngineStats,
-    pub bridge_runtime: Option<crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime>,
+    pub(crate) bridge_runtime: Option<crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime>,
     pub timeline_state: TimelineState,
 }
 
@@ -401,9 +401,9 @@ impl LoadingSessionWindow {
         let shutdown_done_job = shutdown_done.clone();
         let this = cx.entity().clone();
 
-        cx.spawn(async move |_view, mut cx| {
+        cx.spawn(async move |_view, cx| {
             let progress_ui = this.clone();
-            let progress_task = cx.spawn(async move |mut cx| {
+            let progress_task = cx.spawn(async move |cx| {
                 while !shutdown_done_ui.load(std::sync::atomic::Ordering::Relaxed) {
                     cx.background_executor()
                         .timer(Duration::from_millis(50))
@@ -488,9 +488,9 @@ impl LoadingSessionWindow {
         let install_done_job = install_done.clone();
         let this = cx.entity().clone();
 
-        cx.spawn(async move |_view, mut cx| {
+        cx.spawn(async move |_view, cx| {
             let progress_ui = this.clone();
-            let progress_task = cx.spawn(async move |mut cx| {
+            let progress_task = cx.spawn(async move |cx| {
                 while !install_done_ui.load(std::sync::atomic::Ordering::Relaxed) {
                     cx.background_executor()
                         .timer(Duration::from_millis(50))
@@ -644,7 +644,7 @@ fn store_loading_session_window(cx: &mut App, handle: WindowHandle<LoadingSessio
 }
 
 impl Render for LoadingSessionWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let heading = self.heading.clone();
         let detail = self.detail.clone();
         let progress = self.progress;

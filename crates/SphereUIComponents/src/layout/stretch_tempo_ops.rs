@@ -121,7 +121,11 @@ impl StretchTempoState {
         pending
     }
 
-    pub fn complete_find_applied(&mut self, clip_id: &str, detection: &TempoDetectionResult) -> bool {
+    pub fn complete_find_applied(
+        &mut self,
+        clip_id: &str,
+        detection: &TempoDetectionResult,
+    ) -> bool {
         let job = self.job_mut(clip_id);
         let pending = job.pending_fit_project;
         job.finding = false;
@@ -297,9 +301,10 @@ impl StudioLayout {
                 return;
             };
             let source_path = match &clip.clip_type {
-                crate::components::timeline::timeline_state::ClipType::Audio { source_path, .. } => {
-                    source_path.clone()
-                }
+                crate::components::timeline::timeline_state::ClipType::Audio {
+                    source_path,
+                    ..
+                } => source_path.clone(),
                 _ => {
                     self.stretch_tempo
                         .fail_find(clip_id, "Selected item is not an audio clip");
@@ -338,10 +343,8 @@ impl StudioLayout {
         };
 
         if !Path::new(&path).exists() {
-            self.stretch_tempo.fail_find(
-                clip_id,
-                "Selected clip has no audio source",
-            );
+            self.stretch_tempo
+                .fail_find(clip_id, "Selected clip has no audio source");
             cx.notify();
             return;
         }
@@ -362,7 +365,8 @@ impl StudioLayout {
 
             let _ = this.update(cx, move |this, cx| {
                 if this.timeline.read(cx).state.find_clip(&clip_id).is_none() {
-                    this.stretch_tempo.fail_find(&clip_id, "No audio clip selected");
+                    this.stretch_tempo
+                        .fail_find(&clip_id, "No audio clip selected");
                     cx.notify();
                     return;
                 }

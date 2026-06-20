@@ -1,17 +1,23 @@
-export const TRACK_COLORS = [
-  "#56C7C9", // cyan / lead
-  "#7EDB9A", // green / drums
-  "#F2C96D", // amber / bass
-  "#F27E77", // coral / vocal
-  "#A99CFF", // violet / synth
-  "#6EB7E8", // blue / keys
-  "#E89B61", // orange / percussion
-  "#D982B6", // rose / fx
-  "#A8D36F", // lime / guitar
-  "#9CAFE8", // periwinkle / pads
-  "#C49A6C", // warm brown / acoustic
-  "#71D6B5", // mint / bus
-] as const;
+import { DEFAULT_THEME, getThemeToken } from "./themeSystem";
+
+function token(path: string, fallback: string): string {
+  return getThemeToken(DEFAULT_THEME, path) ?? fallback;
+}
+
+export const TRACK_COLORS = (DEFAULT_THEME.trackColors ?? [
+  "#56C7C9",
+  "#7EDB9A",
+  "#F2C96D",
+  "#F27E77",
+  "#A99CFF",
+  "#6EB7E8",
+  "#E89B61",
+  "#D982B6",
+  "#A8D36F",
+  "#9CAFE8",
+  "#C49A6C",
+  "#71D6B5",
+]) as readonly string[];
 
 export function getTrackColor(index: number): string {
   return TRACK_COLORS[index % TRACK_COLORS.length];
@@ -26,45 +32,44 @@ export const MIXER_HEIGHT = 240;
 
 export const semanticColors = {
   surface: {
-    base: "#171B22",
-    sunken: "#11151B",
-    panel: "#202631",
-    raised: "#2A3240",
-    hover: "#313A49",
-    active: "#394456",
-    overlay: "rgba(0,0,0,0.22)",
-    subtle: "rgba(255,255,255,0.03)",
-    selected: "rgba(255,255,255,0.038)",
+    base: token("surface.base", "#1E1F22"),
+    sunken: token("surface.canvas", "#15161A"),
+    panel: token("surface.panel", "#25262B"),
+    raised: token("surface.raised", "#2B2D33"),
+    hover: token("surface.hover", "#30323A"),
+    active: token("surface.active", "#2B2D33"),
+    overlay: token("surface.overlay", "#00000085"),
+    subtle: token("surface.mixerStripAlt", "#FFFFFF05"),
+    selected: token("surface.mixerStripSelected", "#FFFFFF14"),
   },
   border: {
-    subtle: "rgba(255,255,255,0.075)",
-    muted: "rgba(255,255,255,0.055)",
-    strong: "#536173",
-    focus: "rgba(95,206,208,0.55)",
+    subtle: token("border.subtle", "#FFFFFF14"),
+    muted: token("border.default", "#FFFFFF1F"),
+    strong: token("border.strong", "#4C505C"),
+    focus: token("border.focus", "#7B61FFB8"),
   },
   text: {
-    primary: "#F1F5F9",
-    secondary: "#D2DBE6",
-    muted: "#9AA7B8",
-    faint: "#6B7888",
-    disabled: "rgba(255,255,255,0.3)",
+    primary: token("text.primary", "#DFE1E5"),
+    secondary: token("text.secondary", "#C3C7D0"),
+    muted: token("text.muted", "#8E96A3"),
+    faint: token("text.faint", "#FFFFFF45"),
+    disabled: token("text.disabled", "#FFFFFF3B"),
   },
   accent: {
-    primary: "#5FCED0",
-    hover: "#8AE9EB",
-    soft: "rgba(95,206,208,0.18)",
-    border: "rgba(95,206,208,0.48)",
+    primary: token("accent.primary", "#7B61FF"),
+    hover: token("accent.primaryHover", "#8D78FF"),
+    soft: token("accent.soft", "#7B61FF30"),
+    border: token("border.accent", "#7B61FF80"),
   },
   status: {
-    success: "#85E0A3",
-    warning: "#F4CF7A",
-    error: "#F4877F",
-    info: "#7BC4F0",
+    success: token("status.success", "#6FCF97"),
+    warning: token("status.warning", "#E5C07B"),
+    error: token("status.error", "#FF6B68"),
+    info: token("track.audio", "#5FCED0"),
   },
 } as const;
 
 export const C = {
-  // Core surfaces - lighter dark, still professional
   bg: semanticColors.surface.base,
   sunken: semanticColors.surface.sunken,
   surface: semanticColors.surface.panel,
@@ -72,43 +77,36 @@ export const C = {
   surfaceHover: semanticColors.surface.hover,
   surfaceActive: semanticColors.surface.active,
 
-  // Borders
-  border: "#3A4554",
+  border: semanticColors.border.strong,
   borderSoft: semanticColors.border.subtle,
   borderHard: semanticColors.border.strong,
 
-  // Text
   faint: semanticColors.text.faint,
   dim: semanticColors.text.muted,
   text: semanticColors.text.primary,
   textSoft: semanticColors.text.secondary,
 
-  // Main identity
   accent: semanticColors.accent.primary,
   accentSoft: semanticColors.accent.soft,
   accentHard: semanticColors.accent.hover,
 
-  // Status
   green: semanticColors.status.success,
   red: semanticColors.status.error,
   yellow: semanticColors.status.warning,
   orange: "#EFA66D",
-  violet: "#B7ABFF",
-  blue: "#7BC4F0",
+  violet: token("accent.purple", "#BB86FC"),
+  blue: semanticColors.status.info,
 
-  // Timeline
-  gridMinor: "rgba(255,255,255,0.045)",
-  gridMajor: "rgba(255,255,255,0.095)",
-  playhead: "#5FCED0",
-  selection: "rgba(95,206,208,0.20)",
+  gridMinor: token("timeline.gridMinor", "#FFFFFF08"),
+  gridMajor: token("timeline.gridMajor", "#FFFFFF12"),
+  playhead: token("timeline.playhead", "#FF6B68"),
+  selection: token("timeline.selection", "#7B61FF30"),
 
-  // Clips / waveform
-  clipBg: "rgba(95,206,208,0.18)",
-  clipBorder: "rgba(95,206,208,0.48)",
-  waveform: "rgba(234,242,250,0.76)",
+  clipBg: token("accent.soft", "#7B61FF30"),
+  clipBorder: token("border.accent", "#7B61FF80"),
+  waveform: token("text.secondary", "#C3C7D0"),
 
-  // Mixer
-  meterGreen: "#85E0A3",
-  meterYellow: "#F4CF7A",
-  meterRed: "#F4877F",
+  meterGreen: token("meter.low", "#6FCF97"),
+  meterYellow: token("meter.mid", "#E5C07B"),
+  meterRed: token("meter.high", "#FF6B68"),
 } as const;

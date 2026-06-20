@@ -2,7 +2,7 @@ use gpui::{App, Context};
 
 use crate::components;
 use crate::components::timeline::timeline_state::TrackType;
-use crate::midi_input::{
+use sphere_midi_service::{
     MidiInputEvent, MidiInputRouteStatus, MidiInputRouter, MidiInputSource, MidiInputTarget,
     VirtualKeyboardEvent,
 };
@@ -100,9 +100,10 @@ impl StudioLayout {
         source: MidiInputSource,
         target: MidiInputTarget,
         event: MidiInputEvent,
-        _cx: &App,
+        cx: &App,
     ) -> MidiInputRouteStatus {
         let _source = source;
+        self.capture_midi_record_event(&target.track_id, &event, cx);
         let bridge_instance = target.plugin_instance_id.clone();
         let sink_ready = match self
             .plugin_editors

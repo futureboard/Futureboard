@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "id": "publisher.theme-id",
+  "name": "Theme Display Name",
+  "version": "1.0.0",
+  "author": "Your Name",
+  "appearance": "dark",
+  "targets": ["native-gpui", "web-ui"],
+  "tokens": {
+    "surface": {
+      "base": "#1E1F22",
+      "panel": "#25262B",
+      "raised": "#2B2D33",
+      "canvas": "#15161A",
+      "input": "#181A1F",
+      "window": "#15161A",
+      "hover": "#30323A",
+      "active": "#2B2D33",
+      "overlay": "#00000085"
+    },
+    "border": {
+      "subtle": "#FFFFFF14",
+      "default": "#FFFFFF1F",
+      "strong": "#4C505C",
+      "focus": "#7B61FFB8"
+    },
+    "text": {
+      "primary": "#DFE1E5",
+      "secondary": "#C3C7D0",
+      "muted": "#8E96A3",
+      "faint": "#FFFFFF45",
+      "disabled": "#FFFFFF3B",
+      "inverse": "#1E1F22"
+    },
+    "accent": {
+      "primary": "#7B61FF",
+      "primaryHover": "#8D78FF",
+      "soft": "#7B61FF30",
+      "onAccent": "#FFFFFF"
+    },
+    "status": {
+      "error": "#FF6B68",
+      "warning": "#E5C07B",
+      "success": "#6FCF97"
+    },
+    "timeline": {
+      "gridMajor": "#FFFFFF12",
+      "gridMinor": "#FFFFFF08",
+      "playhead": "#FF6B68",
+      "selection": "#7B61FF30"
+    }
+  },
+  "trackColors": [
+    "#56C7C9",
+    "#7EDB9A",
+    "#F2C96D",
+    "#F27E77",
+    "#A99CFF",
+    "#6EB7E8",
+    "#E89B61",
+    "#D982B6",
+    "#A8D36F",
+    "#9CAFE8",
+    "#C49A6C",
+    "#71D6B5"
+  ],
+  "web": {
+    "cssVariables": {
+      "--color-daw-bg": "surface.base",
+      "--color-daw-surface": "surface.panel",
+      "--color-daw-surface-high": "surface.raised",
+      "--color-daw-border": "border.strong",
+      "--color-daw-text": "text.primary",
+      "--color-daw-dim": "text.secondary",
+      "--color-daw-faint": "text.muted",
+      "--color-daw-accent": "accent.primary",
+      "--color-daw-accent-h": "accent.primaryHover",
+      "--color-daw-green": "status.success",
+      "--color-daw-yellow": "status.warning",
+      "--color-daw-red": "status.error"
+    }
+  }
+}

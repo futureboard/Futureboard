@@ -207,7 +207,12 @@ fn remove_dc(samples: &[f32]) -> Vec<f32> {
     if samples.is_empty() {
         return Vec::new();
     }
-    let mean = samples.iter().copied().filter(|s| s.is_finite()).sum::<f32>() / samples.len() as f32;
+    let mean = samples
+        .iter()
+        .copied()
+        .filter(|s| s.is_finite())
+        .sum::<f32>()
+        / samples.len() as f32;
     samples
         .iter()
         .map(|s| if s.is_finite() { *s - mean } else { 0.0 })
@@ -224,7 +229,10 @@ fn normalize_peak_safe(samples: &[f32]) -> Vec<f32> {
     if peak <= f32::EPSILON {
         return samples.to_vec();
     }
-    samples.iter().map(|s| (s / peak).clamp(-1.0, 1.0)).collect()
+    samples
+        .iter()
+        .map(|s| (s / peak).clamp(-1.0, 1.0))
+        .collect()
 }
 
 fn downsample_mono(samples: &[f32], source_rate: f32, target_rate: f32) -> Vec<f32> {
@@ -258,11 +266,7 @@ fn build_onset_envelope(
     if samples.len() < frame {
         return Vec::new();
     }
-    let energy: Vec<f32> = samples
-        .windows(frame)
-        .step_by(hop)
-        .map(rms_frame)
-        .collect();
+    let energy: Vec<f32> = samples.windows(frame).step_by(hop).map(rms_frame).collect();
     let n = energy.len();
     if n < 4 {
         return Vec::new();
@@ -362,12 +366,21 @@ fn tempo_family_ratios() -> [(f32, TempoRelation); 9] {
     ]
 }
 
-fn expand_tempo_family(base_bpm: f32, base_score: f32, min_bpm: f32, max_bpm: f32) -> Vec<TempoCandidate> {
+fn expand_tempo_family(
+    base_bpm: f32,
+    base_score: f32,
+    min_bpm: f32,
+    max_bpm: f32,
+) -> Vec<TempoCandidate> {
     let mut out = Vec::new();
     for (ratio, relation) in tempo_family_ratios() {
         let bpm = base_bpm * ratio;
         if bpm >= min_bpm && bpm <= max_bpm {
-            let penalty = if ratio < 0.66 || ratio > 1.51 { 0.92 } else { 1.0 };
+            let penalty = if ratio < 0.66 || ratio > 1.51 {
+                0.92
+            } else {
+                1.0
+            };
             out.push(TempoCandidate {
                 bpm,
                 confidence: base_score * penalty,
@@ -378,7 +391,11 @@ fn expand_tempo_family(base_bpm: f32, base_score: f32, min_bpm: f32, max_bpm: f3
     out
 }
 
-fn merge_tempo_candidates(candidates: Vec<TempoCandidate>, min_bpm: f32, max_bpm: f32) -> Vec<TempoCandidate> {
+fn merge_tempo_candidates(
+    candidates: Vec<TempoCandidate>,
+    min_bpm: f32,
+    max_bpm: f32,
+) -> Vec<TempoCandidate> {
     let mut merged: Vec<TempoCandidate> = Vec::new();
     for candidate in candidates {
         if candidate.bpm < min_bpm || candidate.bpm > max_bpm || !candidate.confidence.is_finite() {
@@ -462,7 +479,9 @@ fn scan_tempo_scores(
 ) -> TempoScan {
     let slow_debias =
         |bpm: f32| 0.85 + 0.15 * ((bpm - min_bpm) / (max_bpm - min_bpm).max(1.0)).clamp(0.0, 1.0);
-    let score_bpm = |bpm: f32| comb_autocorr_score(envelope, lag_from_bpm(bpm, env_rate)).max(0.0) * slow_debias(bpm);
+    let score_bpm = |bpm: f32| {
+        comb_autocorr_score(envelope, lag_from_bpm(bpm, env_rate)).max(0.0) * slow_debias(bpm)
+    };
 
     let mut points: Vec<(f32, f32)> = Vec::new();
     let mut bpm = min_bpm;
@@ -631,7 +650,11 @@ pub fn prepare_mono_for_tempo_analysis(samples: &[f32], sample_rate: f32) -> (Ve
 
     let start = (best_start_block * block).min(samples.len());
     let end = samples.len().min(start + max_samples);
-    let slice = if end > start { &samples[start..end] } else { samples };
+    let slice = if end > start {
+        &samples[start..end]
+    } else {
+        samples
+    };
     let duration = slice.len() as f32 / sample_rate;
     (slice.to_vec(), duration)
 }
@@ -755,7 +778,12 @@ pub fn detect_tempo_from_mono(
     let mut all_candidates: Vec<TempoCandidate> = Vec::new();
     all_candidates.extend(raw_peaks.iter().take(8).cloned());
     for peak in raw_peaks.iter().take(6) {
-        all_candidates.extend(expand_tempo_family(peak.bpm, peak.confidence, min_bpm, max_bpm));
+        all_candidates.extend(expand_tempo_family(
+            peak.bpm,
+            peak.confidence,
+            min_bpm,
+            max_bpm,
+        ));
     }
     // Always seed project tempo and its half/double as candidates so they can be
     // selected/promoted and always appear among alternatives (spec Fix 5/6).
@@ -1079,8 +1107,7 @@ impl AudioClipStretchState {
         } else {
             SphereAudioProcessor::StretchAlgorithm::RePitch
         };
-        let pitch_ratio =
-            Self::pitch_ratio_from_semitones(self.pitch_shift_semitones) as f32;
+        let pitch_ratio = Self::pitch_ratio_from_semitones(self.pitch_shift_semitones) as f32;
         let target_bpm = self.bpm_target.or(Some(project_bpm)).map(|v| v as f32);
 
         SphereAudioProcessor::StretchParams {
@@ -1607,13 +1634,17 @@ mod tests {
                 }
             }
         }
-        let result = detect_tempo_from_mono(&samples, sample_rate, 60.0, 200.0, Some(120.0)).unwrap();
+        let result =
+            detect_tempo_from_mono(&samples, sample_rate, 60.0, 200.0, Some(120.0)).unwrap();
         assert!(
             (result.bpm - 120.0).abs() < 8.0,
             "expected ~120 BPM, got {:?}",
             result
         );
-        assert!(result.alternatives.iter().any(|b| (*b - 120.0).abs() < 10.0));
+        assert!(result
+            .alternatives
+            .iter()
+            .any(|b| (*b - 120.0).abs() < 10.0));
     }
 
     #[test]
@@ -1760,7 +1791,10 @@ mod tests {
         let octave = project_prior_bonus(60.0, 120.0);
         approx(exact as f64, TEMPO_PROJECT_PRIOR_WEIGHT as f64);
         assert!(near < exact && near > octave);
-        assert!(octave < 0.001, "an octave away should be negligible: {octave}");
+        assert!(
+            octave < 0.001,
+            "an octave away should be negligible: {octave}"
+        );
     }
 
     #[test]
@@ -1819,6 +1853,9 @@ mod tests {
             || result.alternatives.iter().any(|b| (*b - 118.0).abs() < 3.0);
         let has_project = result.alternatives.iter().any(|b| (*b - 120.0).abs() < 2.0);
         assert!(near_118, "expected 118 detected or offered: {result:?}");
-        assert!(has_project, "expected project 120 among alternatives: {result:?}");
+        assert!(
+            has_project,
+            "expected project 120 among alternatives: {result:?}"
+        );
     }
 }

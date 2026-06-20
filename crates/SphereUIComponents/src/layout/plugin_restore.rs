@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{App, BorrowAppContext, Context};
+use gpui::{App, Context};
 
 use super::StudioLayout;
 use crate::components::progress_dialog::ProgressBarValue;
@@ -33,7 +33,7 @@ pub(super) struct PluginRestoreReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PluginRestoreWaitOutcome {
+pub(super) enum PluginRestoreWaitOutcome {
     Pending,
     Ready,
     Failed,
@@ -308,7 +308,7 @@ impl StudioLayout {
     fn restore_in_process_target(
         &mut self,
         target: &PluginRestoreTarget,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> PluginRestoreWaitOutcome {
         let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return PluginRestoreWaitOutcome::Pending;

@@ -160,10 +160,8 @@ impl TimelineState {
                     clip.source_duration_seconds = Some(duration_seconds);
                     clip.stretch.original_sample_rate = sample_rate;
                     clip.stretch.project_sample_rate = sample_rate;
-                    clip.stretch.original_duration_samples = clip
-                        .stretch
-                        .original_duration_samples
-                        .max(total_frames);
+                    clip.stretch.original_duration_samples =
+                        clip.stretch.original_duration_samples.max(total_frames);
                     if clip.stretch.source_end_samples <= clip.stretch.source_start_samples {
                         clip.stretch.source_start_samples = 0;
                         clip.stretch.source_end_samples = total_frames;

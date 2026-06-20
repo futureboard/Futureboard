@@ -43,8 +43,9 @@ use crate::tempo_map::{TempoMap, TempoPoint};
 use crate::transport::{self, RuntimeTransportSnapshot};
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
-    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
-    JsRecordingStatus, JsSphereAudioStatus, JsStartRecordingConfig, JsTrackMeterSnapshot,
+    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot,
+    JsPluginOutputMeterSnapshot, JsRecordingResult, JsRecordingStatus, JsSphereAudioStatus,
+    JsStartRecordingConfig, JsTrackMeterSnapshot,
 };
 use crate::vst3_processor::RuntimeTransportContext;
 
@@ -1024,9 +1025,22 @@ impl EngineInner {
                 rms_r: meter.rms_r as f64,
             })
             .collect();
+        let plugin_outputs = self
+            .runtime
+            .lock()
+            .plugin_output_meter_snapshots()
+            .into_iter()
+            .map(|meter| JsPluginOutputMeterSnapshot {
+                track_id: meter.track_id,
+                insert_id: meter.insert_id,
+                channel: meter.channel as u32,
+                peak: meter.peak as f64,
+            })
+            .collect();
 
         JsMeterSnapshot {
             tracks,
+            plugin_outputs,
             master_peak_l: f32_load(self.shared.peak_l.load(Ordering::Relaxed)) as f64,
             master_peak_r: f32_load(self.shared.peak_r.load(Ordering::Relaxed)) as f64,
             master_rms_l: f32_load(self.shared.rms_l.load(Ordering::Relaxed)) as f64,
@@ -2739,6 +2753,7 @@ where
                             // The panic pushed into the preserved sinks above
                             // still needs flushing through the new graph.
                             runtime.bridge_panic_flush_samples = old.bridge_panic_flush_samples;
+                            runtime.bridge_preview_tail_samples = old.bridge_preview_tail_samples;
                             let pos = shared.position_samples.load(Ordering::Relaxed);
                             metronome.set_tempo_map(
                                 runtime.tempo_map.clone(),
@@ -3062,7 +3077,7 @@ where
                     // Keep release-tail processing queued past the note-off so a
                     // stopped-transport preview doesn't cut the instrument dead.
                     metronome.preview_tail_samples =
-                        (runtime.sample_rate as u64).saturating_mul(2);
+                        crate::backend::render::post_stop_tail_samples(runtime.sample_rate);
                 }
                 // Post-panic flush: keep the bridge handshake alive after a
                 // stop/seek/mute panic so the host drains the panic CCs instead
@@ -3073,10 +3088,17 @@ where
                         .bridge_panic_flush_samples
                         .saturating_sub(frames_in_block);
                 }
+                let bridge_preview_tail = runtime.bridge_preview_tail_samples > 0;
+                if !playing_local && bridge_preview_tail {
+                    runtime.bridge_preview_tail_samples = runtime
+                        .bridge_preview_tail_samples
+                        .saturating_sub(frames_in_block);
+                }
                 let bridge_editor_wakeup = runtime.has_bridge_editor_active();
                 let preview_render_active = has_preview
                     || pending_midi
                     || panic_flush
+                    || bridge_preview_tail
                     || metronome.preview_tail_samples > 0
                     || metronome.stop_tail_samples > 0
                     || bridge_editor_wakeup;
@@ -3217,6 +3239,13 @@ where
                         sum_sq_l += l * l;
                         sum_sq_r += r * r;
                     }
+                    if !playing_local
+                        && runtime.bridge_preview_tail_samples > 0
+                        && peak_l.max(peak_r) > 0.00001
+                    {
+                        runtime.bridge_preview_tail_samples =
+                            crate::backend::render::post_stop_tail_samples(runtime.sample_rate);
+                    }
                 } else if ch >= 2 {
                     for frame in data.chunks_mut(ch) {
                         let (tone_l, tone_r) = if gen_tone {
@@ -3351,9 +3380,7 @@ mod clip_fade_tests {
     fn fade_in_ramps_zero_to_one() {
         // 100-sample fade-in over a 1000-sample clip.
         assert_eq!(clip_fade_gain(0, 1000, 100, 0), 0.0);
-        assert!(
-            (clip_fade_gain(50, 1000, 100, 0) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6
-        );
+        assert!((clip_fade_gain(50, 1000, 100, 0) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
         // At/after the fade-in length it is full gain.
         assert_eq!(clip_fade_gain(100, 1000, 100, 0), 1.0);
         assert_eq!(clip_fade_gain(900, 1000, 100, 0), 1.0);
@@ -3364,9 +3391,7 @@ mod clip_fade_tests {
         // 100-sample fade-out: starts at sample 900 (duration - fade_out).
         assert_eq!(clip_fade_gain(899, 1000, 0, 100), 1.0);
         assert!((clip_fade_gain(900, 1000, 0, 100) - 1.0).abs() < 1e-6);
-        assert!(
-            (clip_fade_gain(950, 1000, 0, 100) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6
-        );
+        assert!((clip_fade_gain(950, 1000, 0, 100) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
         assert!(clip_fade_gain(1000, 1000, 0, 100) <= 0.0);
     }
 
@@ -3581,6 +3606,7 @@ mod bridge_insert_tests {
                 enabled: true,
                 params,
                 bridge_is_effect: true,
+                bridge_enabled_output_channels: Vec::new(),
                 bridge_sink: None,
                 dsp: InsertDspState::default(),
                 vst3: None,
@@ -3680,6 +3706,7 @@ mod bridge_insert_tests {
             enabled: true,
             params,
             bridge_is_effect: true,
+            bridge_enabled_output_channels: Vec::new(),
             bridge_sink: None,
             dsp: InsertDspState::default(),
             vst3: None,

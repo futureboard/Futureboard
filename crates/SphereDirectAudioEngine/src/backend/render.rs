@@ -334,6 +334,7 @@ pub fn drain_commands(
                 // The panic the all_notes_off above pushed into the (preserved)
                 // sinks still needs flushing through the new graph.
                 runtime.bridge_panic_flush_samples = old.bridge_panic_flush_samples;
+                runtime.bridge_preview_tail_samples = old.bridge_preview_tail_samples;
                 crate::graveyard::retire(old);
                 // Transport/audio-graph separation: a graph swap must never
                 // change the user's transport state.  If the transport was
@@ -700,6 +701,7 @@ fn fill_output_f32_inner(
         let preview_wake = matches!(engine_state, crate::engine::AudioEngineState::Paused)
             && (runtime.has_active_midi_preview()
                 || runtime.bridge_panic_flush_samples > 0
+                || runtime.bridge_preview_tail_samples > 0
                 || runtime.has_bridge_editor_active()
                 || local.preview_tail_samples > 0
                 || local.stop_tail_samples > 0
@@ -806,7 +808,7 @@ fn fill_output_f32_inner(
     } else if has_preview || pending_midi {
         // A preview note is held (or its on/off just queued) — keep enough tail
         // queued to render the instrument's release after the eventual note-off.
-        local.preview_tail_samples = (runtime.sample_rate as u64).saturating_mul(2);
+        local.preview_tail_samples = post_stop_tail_samples(runtime.sample_rate);
     }
     // Post-panic flush: keep requesting bridge blocks until the host has had
     // time to drain the panic CCs (stop/seek/mute) — counted down per block.
@@ -816,6 +818,12 @@ fn fill_output_f32_inner(
             .bridge_panic_flush_samples
             .saturating_sub(frames_in_block);
     }
+    let bridge_preview_tail = runtime.bridge_preview_tail_samples > 0;
+    if !transport_playing && bridge_preview_tail {
+        runtime.bridge_preview_tail_samples = runtime
+            .bridge_preview_tail_samples
+            .saturating_sub(frames_in_block);
+    }
     // An open external plugin editor keeps the graph rendering while stopped
     // so the plugin's own UI keyboard stays audible (parity with the legacy
     // callback path).
@@ -823,6 +831,7 @@ fn fill_output_f32_inner(
     let preview_render_active = has_preview
         || pending_midi
         || panic_flush
+        || bridge_preview_tail
         || bridge_editor_wakeup
         || local.preview_tail_samples > 0
         || local.stop_tail_samples > 0;
@@ -943,6 +952,12 @@ fn fill_output_f32_inner(
             peak_r = peak_r.max(r.abs());
             sum_sq_l += l * l;
             sum_sq_r += r * r;
+        }
+        if !transport_playing
+            && runtime.bridge_preview_tail_samples > 0
+            && peak_l.max(peak_r) > 0.00001
+        {
+            runtime.bridge_preview_tail_samples = post_stop_tail_samples(runtime.sample_rate);
         }
     } else if channels >= 2 {
         for frame in data.chunks_mut(channels) {

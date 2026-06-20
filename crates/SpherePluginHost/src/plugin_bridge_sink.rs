@@ -6,12 +6,24 @@
 //! request the next one. All methods are wait-free — they only touch the
 //! lock-free shared region (atomics + raw buffer copies), never allocate or lock.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use DAUx::plugin_bridge::{PluginBridgeSink, SharedPluginBridgeSink};
 
-use crate::audio_bridge::{BridgeKickEvent, SharedAudioRegion, SharedMidiEvent, MAX_BLOCK_FRAMES};
+use crate::audio_bridge::{
+    BridgeKickEvent, SharedAudioRegion, SharedMidiEvent, MAX_BLOCK_FRAMES, MAX_CHANNELS,
+};
+
+#[inline]
+fn f32_store(v: f32) -> u32 {
+    v.to_bits()
+}
+
+#[inline]
+fn f32_load(v: u32) -> f32 {
+    f32::from_bits(v)
+}
 
 /// `FUTUREBOARD_PLUGIN_BRIDGE_DEBUG=1` enables the ring-full drop traces.
 /// These pushes run on the engine's audio callback, so stderr is debug-only;
@@ -35,6 +47,7 @@ pub struct SharedRegionSink {
     /// returns 0 so the engine bypasses/silences the block instead of
     /// replaying the stale `audio_out` contents every callback.
     last_read_seq: AtomicU64,
+    output_channel_peaks: [AtomicU32; MAX_CHANNELS],
 }
 
 impl std::fmt::Debug for SharedRegionSink {
@@ -55,6 +68,7 @@ impl SharedRegionSink {
             region,
             kick,
             last_read_seq: AtomicU64::new(0),
+            output_channel_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
         }
     }
 
@@ -77,6 +91,16 @@ impl PluginBridgeSink for SharedRegionSink {
     }
 
     fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
+        self.read_output_for_channels(out_l, out_r, frames, &[])
+    }
+
+    fn read_output_for_channels(
+        &self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        frames: usize,
+        enabled_channels: &[u8],
+    ) -> usize {
         let bridge = self.region.bridge();
         // Freshness guard: only hand a produced block to the engine once. When
         // the host misses its deadline (editor open/close or plugin load holds
@@ -87,9 +111,37 @@ impl PluginBridgeSink for SharedRegionSink {
             return 0;
         }
         self.last_read_seq.store(done, Ordering::Relaxed);
+        let output_channels = bridge
+            .plugin_output_channels()
+            .min(crate::audio_bridge::MAX_CHANNELS as u32) as usize;
+        let mut peaks = [0.0f32; MAX_CHANNELS];
         // SAFETY: the engine consumes `audio_out` while it holds the block (the
         // host waits on `done_seq` before producing the next one).
-        unsafe { bridge.audio_out.read_deinterleaved(out_l, out_r, frames) }
+        let read = unsafe {
+            bridge
+                .audio_out
+                .read_downmixed_to_stereo_selected_with_peaks(
+                    out_l,
+                    out_r,
+                    frames,
+                    output_channels,
+                    enabled_channels,
+                    &mut peaks,
+                )
+        };
+        for (index, peak) in peaks.into_iter().enumerate() {
+            let peak = if index < output_channels { peak } else { 0.0 };
+            self.output_channel_peaks[index].store(f32_store(peak), Ordering::Relaxed);
+        }
+        read
+    }
+
+    fn output_channel_peak(&self, channel: u8) -> f32 {
+        let index = channel.saturating_sub(1) as usize;
+        self.output_channel_peaks
+            .get(index)
+            .map(|peak| f32_load(peak.load(Ordering::Relaxed)))
+            .unwrap_or(0.0)
     }
 
     fn push_midi(&self, status: u8, data1: u8, data2: u8, sample_offset: u32) {

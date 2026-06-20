@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::components;
+use crate::components::mixer_panel::{vsti_output_meter_key, VstiOutputMeterState};
 
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
 use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
@@ -672,6 +673,7 @@ impl StudioLayout {
         }
         self.engine_sync.meter_applied_at = Instant::now();
         let meters = engine.meters();
+        let plugin_output_meters = meters.plugin_outputs.clone();
         if crate::forensic_trace::forensic_trace_enabled() {
             for track_meter in &meters.tracks {
                 let peak = track_meter.peak_l.max(track_meter.peak_r);
@@ -684,7 +686,7 @@ impl StudioLayout {
                 eprintln!("[Meter] master peak={master_peak:.6}");
             }
         }
-        self.timeline.update(cx, |timeline, _cx| {
+        let mut changed = self.timeline.update(cx, |timeline, _cx| {
             let mut changed = false;
             for track_meter in meters.tracks {
                 if let Some(track) = timeline
@@ -725,7 +727,36 @@ impl StudioLayout {
                 master.meter_peak_hold_l.max(master.meter_peak_hold_r),
             );
             changed
-        })
+        });
+        let mut live_keys = std::collections::HashSet::new();
+        for meter in plugin_output_meters {
+            let channel = meter.channel.clamp(1, 16) as u8;
+            let key = vsti_output_meter_key(&meter.track_id, &meter.insert_id, channel);
+            live_keys.insert(key.clone());
+            let entry = self
+                .mixer_view
+                .vsti_output_meters
+                .entry(key)
+                .or_insert_with(VstiOutputMeterState::default);
+            let next = meter.peak.clamp(0.0, 1.0) as f32;
+            changed |= smooth_meter_value(&mut entry.level, next);
+            update_meter_hold(&mut entry.peak_hold, entry.level);
+            update_meter_clip(&mut entry.clip, meter.peak, meter.peak, entry.peak_hold);
+        }
+        self.mixer_view.vsti_output_meters.retain(|key, meter| {
+            if live_keys.contains(key) {
+                return true;
+            }
+            let mut keep = false;
+            changed |= smooth_meter_value(&mut meter.level, 0.0);
+            update_meter_hold(&mut meter.peak_hold, meter.level);
+            update_meter_clip(&mut meter.clip, 0.0, 0.0, meter.peak_hold);
+            if meter.level > 0.0 || meter.peak_hold > 0.0 || meter.clip {
+                keep = true;
+            }
+            keep
+        });
+        changed
     }
 
     /// Queue a background engine sync. `load_project` decodes media on the

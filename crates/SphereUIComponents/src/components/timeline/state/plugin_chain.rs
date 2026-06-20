@@ -113,6 +113,9 @@ pub struct InsertSlotState {
     pub runtime_state: PluginRuntimeState,
     pub host_pid: Option<u32>,
     pub parameters: Vec<PluginParameterState>,
+    /// 1-based VSTi output channels enabled for the engine-side stereo downmix.
+    /// Empty means the default main output pair (1/2).
+    pub enabled_audio_output_channels: Vec<u8>,
     /// When true, open the plugin editor once runtime reaches Active/Loaded.
     pub pending_open_editor: bool,
     /// Packed VST3 state (`Vst3PluginState::to_packed_bytes`) for project
@@ -138,6 +141,7 @@ impl InsertSlotState {
             runtime_state: PluginRuntimeState::Unloaded,
             host_pid: None,
             parameters: Vec::new(),
+            enabled_audio_output_channels: Vec::new(),
             pending_open_editor: false,
             vst3_state: None,
         }
@@ -622,6 +626,32 @@ impl TimelineState {
             );
         }
         slot.load_status = status;
+        true
+    }
+
+    pub fn auto_enable_detected_insert_outputs(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        output_channels: u32,
+    ) -> bool {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
+            return false;
+        };
+        let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
+            return false;
+        };
+        if !slot.enabled_audio_output_channels.is_empty() {
+            return false;
+        }
+        let output_channels = output_channels.clamp(2, 16) as u8;
+        slot.enabled_audio_output_channels = (1..=output_channels).collect();
+        if plugin_debug_enabled() {
+            eprintln!(
+                "[plugin] auto_enable_outputs track={} slot={} channels={:?}",
+                track_id, insert_id, slot.enabled_audio_output_channels
+            );
+        }
         true
     }
 

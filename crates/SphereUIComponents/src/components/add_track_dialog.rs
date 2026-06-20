@@ -415,6 +415,17 @@ fn instrument_plugin_options(plugins: &[RegistryPlugin]) -> Vec<SelectOption> {
     options
 }
 
+fn find_instrument_plugin<'a>(
+    plugins: &'a [RegistryPlugin],
+    value: &str,
+) -> Option<&'a RegistryPlugin> {
+    plugins.iter().find(|plugin| {
+        plugin.id == value
+            || plugin.class_id.as_deref() == Some(value)
+            || plugin.name.eq_ignore_ascii_case(value)
+    })
+}
+
 fn add_track_select_open(open_select: Option<AddTrackSelectId>, id: AddTrackSelectId) -> bool {
     open_select == Some(id)
 }
@@ -1749,12 +1760,18 @@ impl Render for AddTrackWindow {
                             this.state.instrument_plugin_id = None;
                             this.state.instrument_plugin_name = None;
                         } else {
-                            this.state.instrument_plugin_name = this
-                                .instrument_plugins
-                                .iter()
-                                .find(|plugin| plugin.id == value)
-                                .map(|plugin| plugin.name.clone());
-                            this.state.instrument_plugin_id = Some(value);
+                            let selected = find_instrument_plugin(&this.instrument_plugins, &value);
+                            let plugin_id = selected
+                                .map(|plugin| plugin.id.clone())
+                                .unwrap_or_else(|| value.clone());
+                            let plugin_name = selected
+                                .map(|plugin| plugin.name.clone())
+                                .unwrap_or_else(|| value.clone());
+                            this.state.instrument_plugin_id = Some(plugin_id);
+                            this.state.instrument_plugin_name = Some(plugin_name.clone());
+                            this.state.track_name = plugin_name;
+                            this.track_name_input.set_value(this.state.track_name.clone());
+                            this.track_name_input.select_all();
                         }
                         this.open_select = None;
                         cx.notify();

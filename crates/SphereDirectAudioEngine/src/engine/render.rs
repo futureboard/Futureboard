@@ -1220,10 +1220,11 @@ pub(crate) fn apply_external_bridge_insert_block(
         insert.scratch_l.resize(frames, 0.0);
         insert.scratch_r.resize(frames, 0.0);
     }
-    let got = sink.read_output(
+    let got = sink.read_output_for_channels(
         &mut insert.scratch_l[..frames],
         &mut insert.scratch_r[..frames],
         frames,
+        &insert.bridge_enabled_output_channels,
     );
 
     // Missed-deadline accounting: `read_output` returns 0 when the host has

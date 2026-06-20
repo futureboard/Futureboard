@@ -86,6 +86,29 @@ mod instrument_lifecycle_tests {
         );
     }
 
+    #[test]
+    fn detected_vsti_outputs_auto_enable_for_fresh_slot_only() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "drums", "C:/p/drums.vst3");
+
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
+        let channels = state
+            .find_insert_slot(&track_id, &slot)
+            .unwrap()
+            .enabled_audio_output_channels
+            .clone();
+        assert_eq!(channels, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+
+        assert!(!state.auto_enable_detected_insert_outputs(&track_id, &slot, 16));
+        let channels = state
+            .find_insert_slot(&track_id, &slot)
+            .unwrap()
+            .enabled_audio_output_channels
+            .clone();
+        assert_eq!(channels, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
     /// Test 3: load the SAME plugin file, remove, load it again → two distinct
     /// instance ids (same file is loadable as independent instances).
     #[test]

@@ -3,7 +3,7 @@
 //! Renders from a cloned [`MixerSnapshot`] — never reads [`StudioLayout`] during
 //! `Render` (avoids GPUI entity re-entrancy when the main studio is updating).
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::components::mixer_panel::{
     clamp_mixer_section_height_px, mixer_panel, MixerCallbacks, MixerSplit, MixerSplitAction,
-    MixerSplitTarget,
+    MixerSplitTarget, VstiOutputMeterState,
 };
 use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
@@ -37,6 +37,9 @@ pub struct MixerSnapshot {
     pub mixer_send_section_px: f32,
     /// Active splitter target while dragging (drives active-handle highlight).
     pub mixer_split_active_target: Option<MixerSplitTarget>,
+    /// Collapsed VSTi output strip groups keyed by `track_id:insert_id`.
+    pub collapsed_vsti_output_groups: HashSet<String>,
+    pub vsti_output_meters: std::collections::HashMap<String, VstiOutputMeterState>,
 }
 
 pub struct MixerWindow {
@@ -92,6 +95,8 @@ impl Render for MixerWindow {
             mixer_insert_section_px,
             mixer_send_section_px,
             mixer_split_active_target,
+            collapsed_vsti_output_groups,
+            vsti_output_meters,
         } = self.snapshot.clone();
         let mixer_callbacks = self.callbacks.clone();
         let on_mixer_scroll = self.on_mixer_scroll.clone();
@@ -134,6 +139,8 @@ impl Render for MixerWindow {
                         &master,
                         selected_track_id.as_deref(),
                         mixer_callbacks,
+                        &collapsed_vsti_output_groups,
+                        &vsti_output_meters,
                         mixer_scroll_x,
                         mixer_viewport_width,
                         mixer_viewport_height,

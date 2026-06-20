@@ -64,6 +64,20 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_process_stereo_block_with_midi(
     const SphereDauxVst3MidiEvent* events,
     int event_count);
 
+/// Process the main audio output bus into an interleaved buffer with
+/// `output_channels` channels. `output_channels` must be at least the plugin's
+/// main output channel count (or the desired capped bridge channel count).
+/// Missing / unsupported channels are zero-filled by the host bridge.
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_process_main_output_block_with_midi(
+    SphereDauxVst3Processor* processor,
+    const float* in_l,
+    const float* in_r,
+    float* out_interleaved,
+    int frames,
+    int output_channels,
+    const SphereDauxVst3MidiEvent* events,
+    int event_count);
+
 /// Number of event input buses reported at plugin setup (0 if none).
 SPHERE_DAUX_VST3_API int sphere_daux_vst3_event_input_bus_count(
     SphereDauxVst3Processor* processor);

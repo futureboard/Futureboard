@@ -33,9 +33,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// Layout version — bump on any change to [`SharedAudioBridge`] field order/size.
 /// v2 added the transport / ProcessContext block (tempo, time signature,
-/// project position, playing/recording). v3 added VSTi output-channel metadata;
-/// the shared audio buffers are still stereo until the next data-path stage.
-pub const BRIDGE_LAYOUT_VERSION: u32 = 3;
+/// project position, playing/recording). v3 added VSTi output-channel metadata.
+/// v4 expands the shared audio buffers to carry up to 16 plugin output channels.
+pub const BRIDGE_LAYOUT_VERSION: u32 = 4;
 
 /// `transport_flags` bits.
 pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
@@ -45,8 +45,10 @@ pub const TRANSPORT_FLAG_RECORDING: u32 = 1 << 1;
 /// must be `<=` this; the region is sized for the worst case so it never
 /// reallocates.
 pub const MAX_BLOCK_FRAMES: usize = 2048;
-/// Channels per audio buffer (stereo).
-pub const MAX_CHANNELS: usize = 2;
+/// Channels per audio buffer. The engine still consumes a stereo track today,
+/// but the bridge carries multichannel VSTi main-output data so no plugin
+/// output channels are silently dropped before the engine-side downmix.
+pub const MAX_CHANNELS: usize = 16;
 /// Interleaved samples per audio buffer.
 pub const AUDIO_BUF_LEN: usize = MAX_BLOCK_FRAMES * MAX_CHANNELS;
 
@@ -220,6 +222,164 @@ impl SharedAudioBuffer {
                 out_l[i] = *src.add(i * 2);
                 out_r[i] = *src.add(i * 2 + 1);
             }
+        }
+        n
+    }
+
+    /// Read interleaved plugin output and downmix `channels` to stereo.
+    ///
+    /// Channel layout is intentionally conservative until the mixer has real
+    /// multi-output routing: mono goes center, stereo pairs keep L/R, and any
+    /// additional pairs are folded into L/R at equal-power-ish pair gain.
+    ///
+    /// # Safety
+    /// SPSC contract: only the consuming side (engine) may call this while it
+    /// holds the block.
+    pub unsafe fn read_downmixed_to_stereo(
+        &self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        frames: usize,
+        channels: usize,
+    ) -> usize {
+        let channels = channels.clamp(1, MAX_CHANNELS);
+        let n = frames
+            .min(MAX_BLOCK_FRAMES)
+            .min(out_l.len())
+            .min(out_r.len());
+        let src = self.samples.as_ptr() as *const f32;
+        let extra_pair_gain = 0.70710677f32;
+        for i in 0..n {
+            let base = i * channels;
+            let mut l = unsafe { *src.add(base) };
+            let mut r = if channels > 1 {
+                unsafe { *src.add(base + 1) }
+            } else {
+                l
+            };
+            let mut ch = 2usize;
+            while ch < channels {
+                let extra_l = unsafe { *src.add(base + ch) };
+                let extra_r = if ch + 1 < channels {
+                    unsafe { *src.add(base + ch + 1) }
+                } else {
+                    extra_l
+                };
+                l += extra_l * extra_pair_gain;
+                r += extra_r * extra_pair_gain;
+                ch += 2;
+            }
+            out_l[i] = l;
+            out_r[i] = r;
+        }
+        n
+    }
+
+    /// Read interleaved plugin output and downmix only selected 1-based output
+    /// channels to stereo. Empty selection falls back to channels 1/2.
+    ///
+    /// # Safety
+    /// SPSC contract: only the consuming side (engine) may call this while it
+    /// holds the block.
+    pub unsafe fn read_downmixed_to_stereo_selected(
+        &self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        frames: usize,
+        channels: usize,
+        enabled_channels: &[u8],
+    ) -> usize {
+        let channels = channels.clamp(1, MAX_CHANNELS);
+        if enabled_channels.is_empty() {
+            return unsafe { self.read_downmixed_to_stereo(out_l, out_r, frames, channels.min(2)) };
+        }
+
+        let n = frames
+            .min(MAX_BLOCK_FRAMES)
+            .min(out_l.len())
+            .min(out_r.len());
+        let src = self.samples.as_ptr() as *const f32;
+        let extra_pair_gain = 0.70710677f32;
+        for i in 0..n {
+            let base = i * channels;
+            let mut l = 0.0f32;
+            let mut r = 0.0f32;
+            for &channel in enabled_channels {
+                let ch = channel as usize;
+                if ch == 0 || ch > channels || ch > MAX_CHANNELS {
+                    continue;
+                }
+                let sample = unsafe { *src.add(base + ch - 1) };
+                match ch {
+                    1 => l += sample,
+                    2 => r += sample,
+                    _ if ch % 2 == 1 => l += sample * extra_pair_gain,
+                    _ => r += sample * extra_pair_gain,
+                }
+            }
+            out_l[i] = l;
+            out_r[i] = r;
+        }
+        n
+    }
+
+    /// Read interleaved plugin output, fold selected 1-based channels to
+    /// stereo, and compute per-output peak values for the same fresh block.
+    ///
+    /// # Safety
+    /// SPSC contract: only the consuming side (engine) may call this while it
+    /// holds the block.
+    pub unsafe fn read_downmixed_to_stereo_selected_with_peaks(
+        &self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        frames: usize,
+        channels: usize,
+        enabled_channels: &[u8],
+        peaks: &mut [f32; MAX_CHANNELS],
+    ) -> usize {
+        peaks.fill(0.0);
+        let channels = channels.clamp(1, MAX_CHANNELS);
+        let n = frames
+            .min(MAX_BLOCK_FRAMES)
+            .min(out_l.len())
+            .min(out_r.len());
+        let src = self.samples.as_ptr() as *const f32;
+        let extra_pair_gain = 0.70710677f32;
+        for i in 0..n {
+            let base = i * channels;
+            for ch_ix in 0..channels {
+                let sample = unsafe { *src.add(base + ch_ix) };
+                peaks[ch_ix] = peaks[ch_ix].max(sample.abs());
+            }
+
+            if enabled_channels.is_empty() {
+                out_l[i] = unsafe { *src.add(base) };
+                out_r[i] = if channels > 1 {
+                    unsafe { *src.add(base + 1) }
+                } else {
+                    out_l[i]
+                };
+                continue;
+            }
+
+            let mut l = 0.0f32;
+            let mut r = 0.0f32;
+            for &channel in enabled_channels {
+                let ch = channel as usize;
+                if ch == 0 || ch > channels || ch > MAX_CHANNELS {
+                    continue;
+                }
+                let sample = unsafe { *src.add(base + ch - 1) };
+                match ch {
+                    1 => l += sample,
+                    2 => r += sample,
+                    _ if ch % 2 == 1 => l += sample * extra_pair_gain,
+                    _ => r += sample * extra_pair_gain,
+                }
+            }
+            out_l[i] = l;
+            out_r[i] = r;
         }
         n
     }
@@ -791,6 +951,54 @@ mod tests {
         let mut dst = vec![0.0f32; AUDIO_BUF_LEN];
         unsafe { buf.read_interleaved(&mut dst, AUDIO_BUF_LEN) };
         assert_eq!(src, dst);
+    }
+
+    #[test]
+    fn audio_buffer_downmixes_multichannel_to_stereo() {
+        let region = SharedAudioRegion::new_in_process();
+        let buf = &region.bridge().audio_out;
+        let frames = 2usize;
+        let channels = 4usize;
+        let src = [
+            1.0f32, 2.0, 0.5, 0.25, // frame 0
+            3.0, 4.0, 1.0, 2.0, // frame 1
+        ];
+        unsafe { buf.write_interleaved(&src) };
+
+        let mut out_l = [0.0f32; 2];
+        let mut out_r = [0.0f32; 2];
+        let got = unsafe { buf.read_downmixed_to_stereo(&mut out_l, &mut out_r, frames, channels) };
+
+        assert_eq!(got, frames);
+        assert!((out_l[0] - (1.0 + 0.5 * 0.70710677)).abs() < 1e-6);
+        assert!((out_r[0] - (2.0 + 0.25 * 0.70710677)).abs() < 1e-6);
+        assert!((out_l[1] - (3.0 + 1.0 * 0.70710677)).abs() < 1e-6);
+        assert!((out_r[1] - (4.0 + 2.0 * 0.70710677)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn audio_buffer_downmixes_only_selected_output_channels() {
+        let region = SharedAudioRegion::new_in_process();
+        let buf = &region.bridge().audio_out;
+        let frames = 2usize;
+        let channels = 4usize;
+        let src = [
+            1.0f32, 2.0, 10.0, 20.0, // frame 0
+            3.0, 4.0, 30.0, 40.0, // frame 1
+        ];
+        unsafe { buf.write_interleaved(&src) };
+
+        let mut out_l = [0.0f32; 2];
+        let mut out_r = [0.0f32; 2];
+        let got = unsafe {
+            buf.read_downmixed_to_stereo_selected(&mut out_l, &mut out_r, frames, channels, &[3, 4])
+        };
+
+        assert_eq!(got, frames);
+        assert!((out_l[0] - 10.0 * 0.70710677).abs() < 1e-6);
+        assert!((out_r[0] - 20.0 * 0.70710677).abs() < 1e-6);
+        assert!((out_l[1] - 30.0 * 0.70710677).abs() < 1e-6);
+        assert!((out_r[1] - 40.0 * 0.70710677).abs() < 1e-6);
     }
 
     #[test]

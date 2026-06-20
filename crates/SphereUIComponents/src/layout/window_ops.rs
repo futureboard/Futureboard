@@ -296,8 +296,11 @@ impl StudioLayout {
                             }
                             if dialog.selected_kind == AddTrackKind::Instrument {
                                 if let Some(plugin_id) = dialog.instrument_plugin_id.as_deref() {
-                                    if let Some(reg) =
-                                        instrument_registry.iter().find(|p| p.id == plugin_id)
+                                    if let Some(reg) = instrument_registry.iter().find(|p| {
+                                        p.id == plugin_id
+                                            || p.class_id.as_deref() == Some(plugin_id)
+                                            || p.name.eq_ignore_ascii_case(plugin_id)
+                                    })
                                     {
                                         if let Some(slot_id) = timeline.state.add_insert(&id) {
                                             let format = match reg.format {

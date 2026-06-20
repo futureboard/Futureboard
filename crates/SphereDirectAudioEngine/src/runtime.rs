@@ -331,6 +331,14 @@ pub struct RuntimeTrackMeterSnapshot {
     pub rms_r: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimePluginOutputMeterSnapshot {
+    pub track_id: String,
+    pub insert_id: String,
+    pub channel: u8,
+    pub peak: f32,
+}
+
 impl RuntimeTrackMeter {
     #[inline]
     fn store(&self, peak_l: f32, peak_r: f32, rms_l: f32, rms_r: f32) {
@@ -388,6 +396,9 @@ pub struct RuntimeInsert {
     /// For [`RuntimeInsertKind::ExternalBridge`]: `params["role"] == "effect"`,
     /// resolved at build time so the block path never reads the params map.
     pub bridge_is_effect: bool,
+    /// For bridged instruments: 1-based plugin output channels selected by the
+    /// inspector for the engine-side stereo downmix. Empty means default 1/2.
+    pub bridge_enabled_output_channels: Vec<u8>,
     /// For [`RuntimeInsertKind::ExternalBridge`]: the installed realtime sink.
     /// Cached from [`RuntimeProject::plugin_bridge_sinks`] by
     /// [`RuntimeProject::resolve_bridge_sinks`] (LoadProject /
@@ -409,6 +420,30 @@ pub struct RuntimeInsert {
 pub type InsertDspState = AudioPluginDspState;
 
 const DEFAULT_AUDIO_BLOCK_CAPACITY: usize = 8192;
+const ENABLED_AUDIO_OUTPUT_CHANNELS_PARAM: &str = "enabledAudioOutputChannels";
+
+fn bridge_enabled_output_channels_from_params(params: &HashMap<String, Value>) -> Vec<u8> {
+    let Some(values) = params
+        .get(ENABLED_AUDIO_OUTPUT_CHANNELS_PARAM)
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut channels = Vec::with_capacity(values.len().min(16));
+    for value in values {
+        let Some(channel) = value.as_u64() else {
+            continue;
+        };
+        if (1..=16).contains(&channel) {
+            let channel = channel as u8;
+            if !channels.contains(&channel) {
+                channels.push(channel);
+            }
+        }
+    }
+    channels
+}
 
 #[derive(Debug, Clone)]
 pub struct RuntimeSend {
@@ -643,6 +678,11 @@ pub struct RuntimeProject {
     /// the next play. Counted down by the callback while the transport is
     /// stopped; transient, never persisted.
     pub bridge_panic_flush_samples: u64,
+    /// Samples of post-preview release-tail processing still owed to bridged
+    /// plugin hosts after a note-off / sustain-off while transport is stopped.
+    /// Unlike `bridge_editor_active`, this is armed by MIDI itself, so closing
+    /// the editor does not decide whether a VSTi release tail can keep rendering.
+    pub bridge_preview_tail_samples: u64,
 }
 
 impl RuntimeProject {
@@ -973,6 +1013,9 @@ impl RuntimeProject {
                         .and_then(Value::as_str)
                         .map(|role| role.eq_ignore_ascii_case("effect"))
                         .unwrap_or(false),
+                    bridge_enabled_output_channels: bridge_enabled_output_channels_from_params(
+                        &insert.params,
+                    ),
                     bridge_sink: None,
                     params: insert.params.clone(),
                     dsp: InsertDspState::new(
@@ -1262,6 +1305,7 @@ impl RuntimeProject {
             plugin_bridge_sinks: std::collections::HashMap::new(),
             bridge_editor_active: std::collections::HashSet::new(),
             bridge_panic_flush_samples: 0,
+            bridge_preview_tail_samples: 0,
         };
         // Resolve cross-entity indices once, on this worker thread, so the
         // audio callback never does an id lookup per block.
@@ -1646,6 +1690,7 @@ impl RuntimeProject {
         if bridged {
             self.push_bridge_preview_midi(plugin_instance_id, 0x80 | channel, pitch, 0, "note_off");
             self.set_preview_active(track_id, channel, pitch, false);
+            self.arm_bridge_preview_tail();
             return;
         }
         if self.queue_preview_event(
@@ -1678,6 +1723,7 @@ impl RuntimeProject {
                 value,
                 "control_change",
             );
+            self.arm_bridge_preview_tail();
             return;
         }
         let _ = self.queue_preview_event(
@@ -1775,6 +1821,16 @@ impl RuntimeProject {
     /// is momentarily stalled behind an editor open/close.
     pub fn arm_bridge_panic_flush(&mut self) {
         self.bridge_panic_flush_samples = (self.sample_rate.max(1) as u64) / 4;
+    }
+
+    /// Arm a stopped-transport render window for bridged preview note releases.
+    /// Four seconds matches the existing post-stop tail window; the callback
+    /// refreshes it while output remains audible, so long synth releases are not
+    /// hard-cut just because the plugin editor is closed.
+    pub fn arm_bridge_preview_tail(&mut self) {
+        self.bridge_preview_tail_samples = self
+            .bridge_preview_tail_samples
+            .max((self.sample_rate.max(1) as u64).saturating_mul(4));
     }
 
     fn queue_preview_event(
@@ -2009,6 +2065,27 @@ impl RuntimeProject {
             .iter()
             .map(|track| track.meter.load(&track.id))
             .collect()
+    }
+
+    pub fn plugin_output_meter_snapshots(&self) -> Vec<RuntimePluginOutputMeterSnapshot> {
+        let mut snapshots = Vec::new();
+        for track in &self.tracks {
+            for insert in &track.inserts {
+                let Some(sink) = insert.bridge_sink.as_ref() else {
+                    continue;
+                };
+                let channels = sink.plugin_output_channels().clamp(0, 16) as u8;
+                for channel in 1..=channels {
+                    snapshots.push(RuntimePluginOutputMeterSnapshot {
+                        track_id: track.id.clone(),
+                        insert_id: insert.id.clone(),
+                        channel,
+                        peak: sink.output_channel_peak(channel),
+                    });
+                }
+            }
+        }
+        snapshots
     }
 
     #[inline]
@@ -3376,6 +3453,7 @@ mod midi_tests {
                 enabled: true,
                 params: HashMap::new(),
                 bridge_is_effect: false,
+                bridge_enabled_output_channels: Vec::new(),
                 bridge_sink: None,
                 dsp: InsertDspState::default(),
                 vst3: None,
@@ -3511,6 +3589,23 @@ mod midi_tests {
                 (0x90, 64, 110, 0),
                 (0x80, 64, 0, 0),
             ]
+        );
+        assert!(p.bridge_preview_tail_samples > 0);
+    }
+
+    #[test]
+    fn bridge_preview_note_off_arms_release_tail_without_editor() {
+        let (mut p, sink) = bridged_project();
+        p.bridge_preview_note_on("track-1", "insert-1", 0, 67, 96);
+        sink.take();
+
+        p.bridge_preview_note_off("track-1", "insert-1", 0, 67);
+
+        assert_eq!(sink.take(), vec![(0x80, 67, 0, 0)]);
+        assert!(!p.has_active_midi_preview());
+        assert_eq!(
+            p.bridge_preview_tail_samples,
+            (p.sample_rate as u64).saturating_mul(4)
         );
     }
 

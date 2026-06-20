@@ -28,6 +28,7 @@ use gpui::{
     div, px, svg, App, AppContext, ClickEvent, DragMoveEvent, Empty, InteractiveElement,
     IntoElement, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
+use std::collections::HashSet;
 
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
@@ -203,6 +204,9 @@ pub struct MixerCallbacks {
     /// Toggle bypass on the named insert slot.
     pub on_toggle_insert_bypass:
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Expand/collapse the VSTi output sub-strips for a track/insert group.
+    pub on_toggle_vsti_output_group:
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     /// Drag-reorder commit for an insert slot. `(track_id, dragged_insert_id,
     /// insertion_index)` where `insertion_index` is the gap (0..=len) the
     /// dragged slot moves into. Identity is the stable `plugin_instance_id`,
@@ -257,6 +261,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_add_insert: noop_track.clone(),
         on_remove_insert: noop_insert_pair.clone(),
         on_toggle_insert_bypass: noop_insert_pair.clone(),
+        on_toggle_vsti_output_group: Arc::new(|_: &String, _: &mut Window, _: &mut App| {}),
         on_reorder_insert: noop_insert_reorder,
         on_drop_plugin_preset: noop_preset_drop,
         on_open_insert_editor: noop_insert_open.clone(),
@@ -519,7 +524,15 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
 
 // ─── Strip sections ─────────────────────────────────────────────────────────
 
-fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
+fn vsti_output_group_key(track_id: &str, insert_id: &str) -> String {
+    format!("{track_id}:{insert_id}")
+}
+
+fn strip_header(
+    track: &TrackState,
+    index: usize,
+    vsti_output_group: Option<(&str, bool, usize, &MixerCallbacks)>,
+) -> impl IntoElement {
     let type_label = match track.track_type {
         TrackType::Audio => "AUDIO",
         TrackType::Midi => "MIDI",
@@ -577,6 +590,72 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
                         ),
                 ),
         )
+        .children(
+            vsti_output_group.map(|(group_key, expanded, count, callbacks)| {
+                let group_key = group_key.to_string();
+                let toggle = callbacks.on_toggle_vsti_output_group.clone();
+                div()
+                    .id(gpui::SharedString::from(format!(
+                        "vsti-output-group-toggle-{group_key}"
+                    )))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(18.0))
+                    .h(px(20.0))
+                    .rounded_sm()
+                    .border(px(1.0))
+                    .border_color(Colors::slot_border())
+                    .bg(if count > 0 {
+                        Colors::accent_muted()
+                    } else {
+                        Colors::slot_bg()
+                    })
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .hover(|s| s.bg(Colors::surface_control_hover()))
+                    .child(
+                        svg()
+                            .path(if expanded {
+                                assets::ICON_CHEVRON_DOWN_PATH
+                            } else {
+                                assets::ICON_CHEVRON_RIGHT_PATH
+                            })
+                            .w(px(11.0))
+                            .h(px(11.0))
+                            .text_color(Colors::text_primary()),
+                    )
+                    .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                        toggle(&group_key, w, cx);
+                    })
+                    .occlude()
+            }),
+        )
+}
+
+fn normalized_vsti_output_channels(slot: &InsertSlotState) -> Vec<u8> {
+    let mut channels = if slot.enabled_audio_output_channels.is_empty() {
+        vec![1, 2]
+    } else {
+        slot.enabled_audio_output_channels.clone()
+    };
+    if !channels.contains(&1) {
+        channels.push(1);
+    }
+    if !channels.contains(&2) {
+        channels.push(2);
+    }
+    channels.retain(|channel| (1..=16).contains(channel));
+    channels.sort_unstable();
+    channels.dedup();
+    channels
+}
+
+fn vsti_output_subchannels(slot: &InsertSlotState) -> Vec<u8> {
+    normalized_vsti_output_channels(slot)
+        .into_iter()
+        .filter(|channel| *channel > 2)
+        .collect()
 }
 
 fn insert_chip(
@@ -1115,6 +1194,25 @@ fn sends_section(
         )
 }
 
+fn inert_rack_section(label: &'static str, accent: gpui::Rgba, height_px: f32) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .h(px(height_px))
+        .overflow_hidden()
+        .border_b(px(1.0))
+        .border_color(Colors::divider())
+        .child(section_header(label, accent, None))
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(empty_slot()),
+        )
+}
+
 fn pan_section(
     track: &TrackState,
     callbacks: &MixerCallbacks,
@@ -1367,6 +1465,7 @@ fn channel_strip(
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
     strip_available_px: f32,
+    vsti_group_expanded: Option<bool>,
 ) -> impl IntoElement {
     let id_num = {
         use std::hash::{Hash, Hasher};
@@ -1401,6 +1500,15 @@ fn channel_strip(
         split.send_px,
         strip_available_px.max(STRIP_MIN_HEIGHT),
     );
+    let vsti_group = track
+        .instrument_insert()
+        .filter(|slot| !slot.is_empty())
+        .map(|slot| {
+            let group_key = vsti_output_group_key(&track.id, &slot.id);
+            let expanded = vsti_group_expanded.unwrap_or(true);
+            let count = vsti_output_subchannels(slot).len();
+            (group_key, expanded, count)
+        });
 
     div()
         .flex()
@@ -1427,7 +1535,13 @@ fn channel_strip(
         })
         // Top accent line
         .child(div().w_full().h(px(2.0)).bg(track.color))
-        .child(strip_header(track, index))
+        .child(strip_header(
+            track,
+            index,
+            vsti_group.as_ref().map(|(group_key, expanded, count)| {
+                (group_key.as_str(), *expanded, *count, callbacks)
+            }),
+        ))
         .child(inserts_section(track, index, callbacks, insert_h))
         .child(vertical_split_handle(
             id_num,
@@ -1456,6 +1570,111 @@ fn channel_strip(
                 .child(button_row(track, callbacks, id_num)),
         )
         .child(strip_footer(&track.name))
+}
+
+fn vsti_output_sub_strip(
+    track: &TrackState,
+    track_index: usize,
+    insert_id: &str,
+    channel: u8,
+    vsti_output_meters: &std::collections::HashMap<String, VstiOutputMeterState>,
+    callbacks: &MixerCallbacks,
+    split: &MixerSplit,
+    strip_available_px: f32,
+) -> impl IntoElement {
+    let id_num = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        track.id.hash(&mut hasher);
+        channel.hash(&mut hasher);
+        hasher.finish() as usize
+    };
+    let output_label = format!("Ch {channel}");
+    let mut sub_track = track.clone();
+    sub_track.id = format!("{}::vsti-output-{channel}", track.id);
+    sub_track.name = format!("Out {output_label}");
+    sub_track.inserts.clear();
+    sub_track.sends.clear();
+    if let Some(meter) =
+        vsti_output_meters.get(&vsti_output_meter_key(&track.id, insert_id, channel))
+    {
+        sub_track.meter_level_l = meter.level;
+        sub_track.meter_level_r = meter.level;
+        sub_track.meter_peak_hold_l = meter.peak_hold;
+        sub_track.meter_peak_hold_r = meter.peak_hold;
+        sub_track.meter_clip = meter.clip;
+    } else {
+        sub_track.meter_level_l = 0.0;
+        sub_track.meter_level_r = 0.0;
+        sub_track.meter_peak_hold_l = 0.0;
+        sub_track.meter_peak_hold_r = 0.0;
+        sub_track.meter_clip = false;
+    }
+    let sub_callbacks = noop_mixer_callbacks();
+    let select_id = track.id.clone();
+    let select_cb = callbacks.on_select_track.clone();
+    let on_select_strip =
+        move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
+            select_cb(&select_id, w, cx);
+        };
+    let context_id = track.id.clone();
+    let on_context = callbacks.on_context_menu.clone();
+    let (insert_h, send_h) = clamp_mixer_section_heights_for_strip(
+        split.insert_px,
+        split.send_px,
+        strip_available_px.max(STRIP_MIN_HEIGHT),
+    );
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(px(STRIP_WIDTH))
+        .min_h(px(STRIP_MIN_HEIGHT))
+        .h_full()
+        .overflow_hidden()
+        .bg(Colors::mixer_strip_bg_alt())
+        .border_r(px(1.0))
+        .border_color(Colors::strip_border_subtle())
+        .id(("mix-vsti-sub-strip", id_num))
+        .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
+        .when_some(on_context, |this, cb| {
+            this.on_mouse_down(
+                gpui::MouseButton::Right,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    cb(&(context_id.clone(), x, y), window, cx);
+                },
+            )
+        })
+        .child(div().w_full().h(px(2.0)).bg(track.color))
+        .child(strip_header(&sub_track, track_index, None))
+        .child(inert_rack_section("INSERTS", track.color, insert_h))
+        .child(vertical_split_handle(
+            id_num,
+            MixerSplitTarget::InsertSend,
+            split,
+        ))
+        .child(inert_rack_section("SENDS", track.color, send_h))
+        .child(vertical_split_handle(
+            id_num,
+            MixerSplitTarget::SendFader,
+            split,
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(LOWER_CONTROL_MIN_H))
+                .overflow_hidden()
+                .w_full()
+                .child(pan_section(&sub_track, &sub_callbacks, false))
+                .child(fader_area(&sub_track, &sub_callbacks, false))
+                .child(button_row(&sub_track, &sub_callbacks, id_num)),
+        )
+        .child(strip_footer(&format!("{} {}", track.name, output_label)))
 }
 
 // ─── Master block ───────────────────────────────────────────────────────────
@@ -1680,6 +1899,58 @@ fn master_strip(
 /// prevent pop-in during horizontal mixer scrolling.
 const MIXER_OVERSCAN: usize = 1;
 
+#[derive(Clone, Debug, Default)]
+pub struct VstiOutputMeterState {
+    pub level: f32,
+    pub peak_hold: f32,
+    pub clip: bool,
+}
+
+pub fn vsti_output_meter_key(track_id: &str, insert_id: &str, channel: u8) -> String {
+    format!("{track_id}:{insert_id}:{channel}")
+}
+
+#[derive(Clone, Copy)]
+enum MixerRenderItem {
+    Track {
+        track_index: usize,
+    },
+    VstiOutput {
+        track_index: usize,
+        insert_index: usize,
+        channel: u8,
+    },
+}
+
+fn collect_mixer_render_items(
+    tracks: &[TrackState],
+    collapsed_vsti_output_groups: &HashSet<String>,
+) -> Vec<MixerRenderItem> {
+    let mut items = Vec::with_capacity(tracks.len());
+    for (track_index, track) in tracks.iter().enumerate() {
+        items.push(MixerRenderItem::Track { track_index });
+        let Some(slot) = track.instrument_insert().filter(|slot| !slot.is_empty()) else {
+            continue;
+        };
+        let group_key = vsti_output_group_key(&track.id, &slot.id);
+        if collapsed_vsti_output_groups.contains(&group_key) {
+            continue;
+        }
+        let Some(insert_index) = track.inserts.iter().position(|insert| insert.id == slot.id)
+        else {
+            continue;
+        };
+        for channel in vsti_output_subchannels(slot) {
+            items.push(MixerRenderItem::VstiOutput {
+                track_index,
+                insert_index,
+                channel,
+            });
+        }
+    }
+    items
+}
+
 fn mixer_empty_bay(spare_w: f32) -> impl IntoElement {
     let stripe_count = (spare_w / STRIP_WIDTH).ceil().clamp(0.0, 64.0) as usize;
     let stripes: Vec<gpui::AnyElement> = (0..stripe_count)
@@ -1710,6 +1981,8 @@ pub fn mixer_panel(
     master: &MasterBusState,
     selected_track_id: Option<&str>,
     callbacks: MixerCallbacks,
+    collapsed_vsti_output_groups: &HashSet<String>,
+    vsti_output_meters: &std::collections::HashMap<String, VstiOutputMeterState>,
     // Current horizontal scroll offset in pixels.
     scroll_x: f32,
     // Width of the scrollable channel area in pixels (for computing visibility).
@@ -1724,6 +1997,8 @@ pub fn mixer_panel(
     let _s = crate::perf::PerfScope::enter("MixerPanel");
     let track_count = tracks.len();
     crate::perf::count("mixer_strips", track_count as u64);
+    let render_items = collect_mixer_render_items(tracks, collapsed_vsti_output_groups);
+    let strip_count = render_items.len();
 
     let accent = Colors::accent_primary();
     let on_master = callbacks.on_master_volume_change.clone();
@@ -1732,7 +2007,7 @@ pub fn mixer_panel(
     // Only strips whose screen-space X overlaps [0, viewport_width] are built.
     // The rest are represented by opaque spacer divs so the total scroll width
     // stays correct even though individual strip elements don't exist.
-    let total_content_w = track_count as f32 * STRIP_WIDTH;
+    let total_content_w = strip_count as f32 * STRIP_WIDTH;
     let max_scroll_x = (total_content_w - viewport_width).max(0.0);
     let scroll_x = scroll_x.clamp(0.0, max_scroll_x.max(0.0));
     let spare_channel_w = (viewport_width - total_content_w).max(0.0);
@@ -1741,32 +2016,56 @@ pub fn mixer_panel(
     let first_visible = (scroll_x / STRIP_WIDTH).floor() as usize;
     let visible_start = first_visible.saturating_sub(MIXER_OVERSCAN);
     let last_visible = ((scroll_x + viewport_width) / STRIP_WIDTH).ceil() as usize;
-    let visible_end = (last_visible + MIXER_OVERSCAN).min(track_count);
+    let visible_end = (last_visible + MIXER_OVERSCAN).min(strip_count);
 
     let left_spacer_w = visible_start as f32 * STRIP_WIDTH;
-    let right_spacer_w = track_count.saturating_sub(visible_end) as f32 * STRIP_WIDTH;
+    let right_spacer_w = strip_count.saturating_sub(visible_end) as f32 * STRIP_WIDTH;
 
     crate::perf::count(
         "visible_mixer_strips",
         visible_end.saturating_sub(visible_start) as u64,
     );
 
-    let visible_strips: Vec<gpui::AnyElement> = tracks[visible_start..visible_end]
+    let visible_strips: Vec<gpui::AnyElement> = render_items[visible_start..visible_end]
         .iter()
-        .enumerate()
-        .map(|(rel_i, t)| {
-            let abs_i = visible_start + rel_i;
-            let is_sel = selected_track_id == Some(t.id.as_str());
-            channel_strip(
-                t,
-                tracks,
-                abs_i,
-                is_sel,
+        .map(|item| match *item {
+            MixerRenderItem::Track { track_index } => {
+                let track = &tracks[track_index];
+                let is_sel = selected_track_id == Some(track.id.as_str());
+                let vsti_group_expanded = track
+                    .instrument_insert()
+                    .filter(|slot| !slot.is_empty())
+                    .map(|slot| {
+                        !collapsed_vsti_output_groups
+                            .contains(&vsti_output_group_key(&track.id, &slot.id))
+                    });
+                channel_strip(
+                    track,
+                    tracks,
+                    track_index,
+                    is_sel,
+                    &callbacks,
+                    &split,
+                    strip_available_px,
+                    vsti_group_expanded,
+                )
+                .into_any_element()
+            }
+            MixerRenderItem::VstiOutput {
+                track_index,
+                insert_index,
+                channel,
+            } => vsti_output_sub_strip(
+                &tracks[track_index],
+                track_index,
+                &tracks[track_index].inserts[insert_index].id,
+                channel,
+                vsti_output_meters,
                 &callbacks,
                 &split,
                 strip_available_px,
             )
-            .into_any_element()
+            .into_any_element(),
         })
         .collect();
 

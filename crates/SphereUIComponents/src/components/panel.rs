@@ -54,6 +54,8 @@ type InsertPairCb = Arc<dyn Fn(&(String, String), &mut Window, &mut App) + 'stat
 type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) + 'static>;
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
+type InsertOutputChannelCb =
+    Arc<dyn Fn(&(String, String, u8, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
 type ClipBoolCb = Arc<dyn Fn(&(String, bool), &mut Window, &mut App) + 'static>;
 /// Apply a full replacement of a clip's stretch/pitch state. One callback drives
@@ -109,6 +111,7 @@ pub enum InspectorRoutingCombo {
     AudioFormat,
     AudioInput,
     AudioOutput,
+    VstiOutputs,
     MidiInput,
     MidiChannel,
     MidiOut,
@@ -139,6 +142,7 @@ pub struct InspectorCallbacks {
     pub on_remove_insert: InsertPairCb,
     pub on_toggle_insert_bypass: InsertPairCb,
     pub on_toggle_insert_enabled: InsertPairCb,
+    pub on_toggle_insert_output_channel: InsertOutputChannelCb,
     pub on_move_insert: InsertMoveCb,
     /// Drag-reorder commit for an FX/insert slot (one undo entry per drag).
     pub on_reorder_insert: InsertReorderCb,
@@ -569,6 +573,117 @@ fn output_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl I
     )
 }
 
+fn normalized_vsti_output_channels(slot: &InsertSlotState) -> Vec<u8> {
+    let mut channels = if slot.enabled_audio_output_channels.is_empty() {
+        vec![1, 2]
+    } else {
+        slot.enabled_audio_output_channels.clone()
+    };
+    if !channels.contains(&1) {
+        channels.push(1);
+    }
+    if !channels.contains(&2) {
+        channels.push(2);
+    }
+    channels.retain(|channel| (1..=16).contains(channel));
+    channels.sort_unstable();
+    channels.dedup();
+    channels
+}
+
+fn vsti_output_label(slot: &InsertSlotState) -> String {
+    let channels = normalized_vsti_output_channels(slot);
+    let extras: Vec<String> = channels
+        .iter()
+        .copied()
+        .filter(|channel| *channel > 2)
+        .map(|channel| format!("Ch {channel}"))
+        .collect();
+    if extras.is_empty() {
+        "Main 1/2".to_string()
+    } else {
+        format!("Main 1/2 + {}", extras.join(", "))
+    }
+}
+
+fn vsti_output_selector(slot: &InsertSlotState, callbacks: &InspectorCallbacks) -> impl IntoElement {
+    routing_combo_trigger(
+        "inspector-vsti-output-combo",
+        vsti_output_label(slot),
+        InspectorRoutingCombo::VstiOutputs,
+        callbacks.open_routing_combo,
+        callbacks.on_toggle_routing_combo.clone(),
+    )
+}
+
+fn vsti_output_dropdown(
+    track: &TrackState,
+    slot: &InsertSlotState,
+    callbacks: &InspectorCallbacks,
+    position: crate::overlay::OverlayPosition,
+) -> impl IntoElement {
+    let selected = normalized_vsti_output_channels(slot);
+    let left: f32 = position.x.into();
+    let top: f32 = position.y.into();
+    let width: f32 = position.width.map(|w| w.into()).unwrap_or(176.0);
+    let max_h: f32 = position.max_height.map(|h| h.into()).unwrap_or(260.0);
+    let mut menu = div()
+        .id("inspector-vsti-output-dropdown")
+        .absolute()
+        .left(px(left))
+        .top(px(top))
+        .w(px(width))
+        .max_h(px(max_h))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .p(px(6.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_card())
+        .shadow(vec![gpui::BoxShadow {
+            color: Colors::surface_overlay().into(),
+            offset: gpui::point(px(0.0), px(10.0)),
+            blur_radius: px(28.0),
+            spread_radius: px(0.0),
+            inset: false,
+        }])
+        .overflow_y_scroll()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation());
+
+    menu = menu.child(fb_checkbox(
+        "vsti-output-main",
+        "Main 1/2",
+        true,
+        false,
+        |_, _, _| {},
+    ));
+
+    for channel in 3u8..=16 {
+        let track_id = track.id.clone();
+        let insert_id = slot.id.clone();
+        let checked = selected.contains(&channel);
+        let toggle = callbacks.on_toggle_insert_output_channel.clone();
+        menu = menu.child(fb_checkbox(
+            ("vsti-output-channel", channel as u32),
+            format!("Channel {channel}"),
+            checked,
+            true,
+            move |_, window, cx| {
+                toggle(
+                    &(track_id.clone(), insert_id.clone(), channel, !checked),
+                    window,
+                    cx,
+                )
+            },
+        ));
+    }
+
+    menu
+}
+
 fn audio_format_options() -> Vec<String> {
     vec![
         TrackAudioFormat::Mono.label().to_string(),
@@ -927,6 +1042,10 @@ pub fn inspector_routing_combo_overlay(
             )
             .into_any_element()
         }
+        InspectorRoutingCombo::VstiOutputs => track
+            .instrument_insert()
+            .map(|slot| vsti_output_dropdown(track, slot, callbacks, position).into_any_element())
+            .unwrap_or_else(|| div().into_any_element()),
         InspectorRoutingCombo::MidiInput => {
             let selected = midi_input_combo_label(&track.routing.midi_input);
             let options = midi_input_options(&detected_midi_inputs);
@@ -1303,9 +1422,11 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
         .child(kv_row("Output", track.routing.output.label()));
 
     if let Some(slot) = slot {
-        section = section.child(insert_action_row(
-            &track.id, slot, 0, callbacks, false, false, true,
-        ));
+        section = section
+            .child(fb_form_row("VSTi Outputs", vsti_output_selector(slot, callbacks)))
+            .child(insert_action_row(
+                &track.id, slot, 0, callbacks, false, false, true,
+            ));
     } else {
         let track_id = track.id.clone();
         let picker = callbacks.on_open_insert_picker.clone();

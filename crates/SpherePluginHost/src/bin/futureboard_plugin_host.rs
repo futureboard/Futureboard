@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use SpherePluginHost::audio_bridge::{
     bridge_kick_event_name, BridgeKickEvent, SharedAudioRegion, AUDIO_BUF_LEN, MAX_BLOCK_FRAMES,
+    MAX_CHANNELS,
 };
 use SpherePluginHost::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
 use SpherePluginHost::native_editor::{self, EmbedRegion};
@@ -331,8 +332,14 @@ fn service_audio_bridge(
             .audio_in
             .read_deinterleaved(&mut in_l[..frames], &mut in_r[..frames], frames);
     }
+    let output_channels = dsp
+        .main_audio_output_channel_count_for_instance(plugin_instance_id)
+        .unwrap_or_else(|| bridge.plugin_output_channels())
+        .max(1)
+        .min(MAX_CHANNELS as u32) as usize;
+    bridge.set_plugin_output_channels(output_channels as u32);
     let mut interleaved = [0.0f32; AUDIO_BUF_LEN];
-    let len = (frames * 2).min(AUDIO_BUF_LEN);
+    let len = (frames * output_channels).min(AUDIO_BUF_LEN);
     // Real transport ProcessContext published by the engine for this block.
     let bt = bridge.load_transport();
     let transport = DAUx::RuntimeTransportContext {
@@ -345,31 +352,26 @@ fn service_audio_bridge(
         playing: bt.playing,
         recording: bt.recording,
     };
-    // Preallocated stack output buffers — the producer renders allocation-free
-    // every block (no per-block Vec churn that could spike latency and drop a
-    // block → VSTi stutter).
-    let mut mix_l = [0.0f32; MAX_BLOCK_FRAMES];
-    let mut mix_r = [0.0f32; MAX_BLOCK_FRAMES];
-    dsp.render_single_voice(
+    let produced_channels = dsp.render_single_voice_interleaved(
         plugin_instance_id,
         frames,
         &in_l[..frames],
         &in_r[..frames],
-        &mut mix_l[..frames],
-        &mut mix_r[..frames],
+        &mut interleaved[..len],
+        output_channels,
         transport,
     );
+    let produced_channels = produced_channels.max(1).min(output_channels);
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     for i in 0..frames {
-        let l = mix_l[i];
-        let r = mix_r[i];
-        if let Some(slot) = interleaved.get_mut(i * 2) {
-            *slot = l;
-        }
-        if let Some(slot) = interleaved.get_mut(i * 2 + 1) {
-            *slot = r;
-        }
+        let base = i * output_channels;
+        let l = interleaved[base];
+        let r = if produced_channels > 1 {
+            interleaved[base + 1]
+        } else {
+            l
+        };
         peak_l = peak_l.max(l.abs());
         peak_r = peak_r.max(r.abs());
     }
@@ -401,7 +403,7 @@ fn service_audio_bridge(
         && VST3_PROCESS_LOG_BLOCKS.fetch_add(1, Ordering::Relaxed) % 256 == 0
     {
         eprintln!(
-            "[vst3-process] instance={plugin_instance_id} frames={frames} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
+            "[vst3-process] instance={plugin_instance_id} frames={frames} channels={produced_channels} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
         );
     }
     bridge.done_seq.store(req, Ordering::Release);

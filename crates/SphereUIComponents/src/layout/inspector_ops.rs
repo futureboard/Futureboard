@@ -37,6 +37,8 @@ type InsertOpenCb = Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) 
 type InsertMoveCb = Arc<dyn Fn(&(String, String, bool), &mut Window, &mut App) + 'static>;
 type InsertReorderCb = Arc<dyn Fn(&(String, String, usize), &mut Window, &mut App) + 'static>;
 type InsertPickerCb = Arc<dyn Fn(&(String, usize, bool), &mut Window, &mut App) + 'static>;
+type InsertOutputChannelCb =
+    Arc<dyn Fn(&(String, String, u8, bool), &mut Window, &mut App) + 'static>;
 type ClipF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
 type ClipBoolCb = Arc<dyn Fn(&(String, bool), &mut Window, &mut App) + 'static>;
 type ClipStretchCb = Arc<dyn Fn(&(String, AudioClipStretchState), &mut Window, &mut App) + 'static>;
@@ -165,6 +167,7 @@ impl StudioLayout {
         let on_remove_insert = self.remove_insert_cb(owner.clone());
         let on_toggle_insert_bypass = self.toggle_insert_bypass_cb(owner.clone());
         let on_toggle_insert_enabled = self.toggle_insert_enabled_cb(owner.clone());
+        let on_toggle_insert_output_channel = self.toggle_insert_output_channel_cb(owner.clone());
         let on_move_insert = self.move_insert_cb(owner.clone());
         let on_reorder_insert = self.reorder_insert_cb(owner.clone());
         let on_open_insert_editor = self.open_insert_editor_cb(owner.clone());
@@ -239,6 +242,7 @@ impl StudioLayout {
             on_remove_insert,
             on_toggle_insert_bypass,
             on_toggle_insert_enabled,
+            on_toggle_insert_output_channel,
             on_move_insert,
             on_reorder_insert,
             on_open_insert_editor,
@@ -757,6 +761,66 @@ impl StudioLayout {
                 cx.notify();
             });
         })
+    }
+
+    fn toggle_insert_output_channel_cb(&self, owner: Entity<Self>) -> InsertOutputChannelCb {
+        Arc::new(
+            move |(track_id, insert_id, channel, enabled): &(String, String, u8, bool),
+                  _w,
+                  cx| {
+                let track_id = track_id.clone();
+                let insert_id = insert_id.clone();
+                let channel = *channel;
+                let enabled = *enabled;
+                StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                    let changed = this.timeline.update(cx, |timeline, cx| {
+                        let Some(slots) = timeline.state.insert_slots_mut(&track_id) else {
+                            return false;
+                        };
+                        let Some(slot) = slots.iter_mut().find(|slot| slot.id == insert_id) else {
+                            return false;
+                        };
+
+                        let mut channels = if slot.enabled_audio_output_channels.is_empty() {
+                            vec![1, 2]
+                        } else {
+                            slot.enabled_audio_output_channels.clone()
+                        };
+                        if enabled {
+                            channels.push(channel);
+                        } else if channel > 2 {
+                            channels.retain(|ch| *ch != channel);
+                        }
+                        if !channels.contains(&1) {
+                            channels.push(1);
+                        }
+                        if !channels.contains(&2) {
+                            channels.push(2);
+                        }
+                        channels.retain(|ch| (1..=16).contains(ch));
+                        channels.sort_unstable();
+                        channels.dedup();
+
+                        if slot.enabled_audio_output_channels == channels {
+                            return false;
+                        }
+                        slot.enabled_audio_output_channels = channels;
+                        cx.notify();
+                        true
+                    });
+                    if changed {
+                        inspector_debug(&format!(
+                            "insert output channel track={track_id} insert={insert_id} channel={channel} enabled={enabled}"
+                        ));
+                        this.mark_dirty();
+                        this.audio_bridge.project_dirty = true;
+                        this.schedule_audio_project_sync(cx, false, "inspector_vsti_output_channel");
+                        this.push_mixer_snapshot_to_window(cx);
+                        cx.notify();
+                    }
+                });
+            },
+        )
     }
 
     fn move_insert_cb(&self, owner: Entity<Self>) -> InsertMoveCb {

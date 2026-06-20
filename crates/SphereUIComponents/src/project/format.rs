@@ -29,7 +29,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// ratio, BPM pair, pitch/formant/transient/fade/gain/pan, warp markers). Pre-v16
 /// clips load with [`AudioClipStretchState::default`] (mode Off, ratio 1.0,
 /// preserve_pitch false).
-pub const PROJECT_VERSION: u32 = 17;
+/// v18 persists enabled VSTi output channels per insert.
+pub const PROJECT_VERSION: u32 = 18;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -436,6 +437,10 @@ fn encode_insert(w: &mut FbWriter, ins: &ProjectInsert) {
     w.write_str(&ins.id);
     w.write_u32(ins.slot_index);
     w.write_bool(ins.bypassed);
+    w.write_u32(ins.enabled_audio_output_channels.len() as u32);
+    for channel in &ins.enabled_audio_output_channels {
+        w.write_u8(*channel);
+    }
     match &ins.plugin {
         None => w.write_u8(0),
         Some(inst) => {
@@ -874,10 +879,23 @@ fn decode_plugin_instance(r: &mut FbReader) -> Result<ProjectPluginInstance, Pro
     })
 }
 
-fn decode_insert(r: &mut FbReader) -> Result<ProjectInsert, ProjectError> {
+fn decode_insert(r: &mut FbReader, version: u32) -> Result<ProjectInsert, ProjectError> {
     let id = r.read_str()?;
     let slot_index = r.read_u32()?;
     let bypassed = r.read_bool()?;
+    let enabled_audio_output_channels = if version >= 18 {
+        let count = r.read_u32()? as usize;
+        let mut channels = Vec::with_capacity(count.min(16));
+        for _ in 0..count {
+            let channel = r.read_u8()?;
+            if (1..=16).contains(&channel) && !channels.contains(&channel) {
+                channels.push(channel);
+            }
+        }
+        channels
+    } else {
+        Vec::new()
+    };
     let plugin = match r.read_u8()? {
         0 => None,
         1 => Some(decode_plugin_instance(r)?),
@@ -891,6 +909,7 @@ fn decode_insert(r: &mut FbReader) -> Result<ProjectInsert, ProjectError> {
         id,
         slot_index,
         bypassed,
+        enabled_audio_output_channels,
         plugin,
     })
 }
@@ -1283,7 +1302,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     let insert_count = r.read_u32()? as usize;
     let mut inserts = Vec::with_capacity(insert_count);
     for _ in 0..insert_count {
-        inserts.push(decode_insert(r)?);
+        inserts.push(decode_insert(r, version)?);
     }
 
     let lane_count = r.read_u32()? as usize;
@@ -1370,7 +1389,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         let insert_count = r.read_u32()? as usize;
         let mut inserts = Vec::with_capacity(insert_count);
         for _ in 0..insert_count {
-            inserts.push(decode_insert(&mut r)?);
+            inserts.push(decode_insert(&mut r, version)?);
         }
         inserts
     } else {
@@ -1701,6 +1720,25 @@ mod tests {
 
         let mut r = FbReader::new(&bytes);
         assert_eq!(decode_track_input_routing(&mut r).unwrap(), routing);
+    }
+
+    #[test]
+    fn insert_audio_output_channels_roundtrip_v18() {
+        let mut project = FutureboardProject::new("Insert Outputs");
+        project.mixer.master_inserts.push(ProjectInsert {
+            id: "insert-1".to_string(),
+            slot_index: 0,
+            bypassed: false,
+            enabled_audio_output_channels: vec![1, 2, 3, 4],
+            plugin: None,
+        });
+
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode");
+        assert_eq!(
+            decoded.mixer.master_inserts[0].enabled_audio_output_channels,
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[test]

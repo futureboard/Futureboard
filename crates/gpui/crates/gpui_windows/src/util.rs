@@ -3,17 +3,17 @@ use std::sync::OnceLock;
 use ::util::ResultExt;
 use anyhow::Context;
 use windows::{
-    UI::{
-        Color,
-        ViewManagement::{UIColorType, UISettings},
-    },
+    core::{BOOL, PCSTR},
     Win32::{
         Foundation::*,
         Graphics::{Dwm::*, Gdi::*},
         System::LibraryLoader::LoadLibraryA,
         UI::WindowsAndMessaging::*,
     },
-    core::{BOOL, PCSTR},
+    UI::{
+        Color,
+        ViewManagement::{UIColorType, UISettings},
+    },
 };
 
 use crate::*;
@@ -145,6 +145,8 @@ struct CursorAssetSet {
     hotspot_1x: (u32, u32),
 }
 
+const FUTUREBOARD_CURSOR_RENDER_SCALE: f32 = 0.7;
+
 const FB_ARROW: CursorAssetSet = CursorAssetSet {
     half: include_bytes!("../../../../../packages/shared/cursors/Arrow@0.5x.png"),
     one: include_bytes!("../../../../../packages/shared/cursors/Arrow@1x.png"),
@@ -250,10 +252,26 @@ fn select_cursor_png(assets: &CursorAssetSet) -> (&'static [u8], f32) {
 
 fn create_custom_cursor(assets: &CursorAssetSet) -> Option<HCURSOR> {
     let (bytes, scale) = select_cursor_png(assets);
-    let image = image::load_from_memory(bytes).log_err()?.into_rgba8();
+    let mut image = image::load_from_memory(bytes).log_err()?.into_rgba8();
     let (width, height) = image.dimensions();
-    let hotspot_x = ((assets.hotspot_1x.0 as f32) * scale).round() as u32;
-    let hotspot_y = ((assets.hotspot_1x.1 as f32) * scale).round() as u32;
+    if FUTUREBOARD_CURSOR_RENDER_SCALE != 1.0 {
+        let scaled_width = ((width as f32) * FUTUREBOARD_CURSOR_RENDER_SCALE)
+            .round()
+            .max(1.0) as u32;
+        let scaled_height = ((height as f32) * FUTUREBOARD_CURSOR_RENDER_SCALE)
+            .round()
+            .max(1.0) as u32;
+        image = image::imageops::resize(
+            &image,
+            scaled_width,
+            scaled_height,
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
+    let (width, height) = image.dimensions();
+    let effective_scale = scale * FUTUREBOARD_CURSOR_RENDER_SCALE;
+    let hotspot_x = ((assets.hotspot_1x.0 as f32) * effective_scale).round() as u32;
+    let hotspot_y = ((assets.hotspot_1x.1 as f32) * effective_scale).round() as u32;
 
     unsafe {
         let mut bitmap_info = BITMAPINFO {
@@ -304,7 +322,8 @@ fn create_custom_cursor(assets: &CursorAssetSet) -> Option<HCURSOR> {
         let icon = CreateIconIndirect(&icon_info).log_err();
         let _ = DeleteObject(HGDIOBJ(color_bitmap.0));
         let _ = DeleteObject(HGDIOBJ(mask_bitmap.0));
-        icon.map(|icon| HCURSOR(icon.0)).filter(|cursor| !cursor.is_invalid())
+        icon.map(|icon| HCURSOR(icon.0))
+            .filter(|cursor| !cursor.is_invalid())
     }
 }
 

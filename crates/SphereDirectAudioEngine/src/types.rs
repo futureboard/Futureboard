@@ -123,8 +123,18 @@ pub struct JsTrackMeterSnapshot {
 
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Default, Clone)]
+pub struct JsPluginOutputMeterSnapshot {
+    pub track_id: String,
+    pub insert_id: String,
+    pub channel: u32,
+    pub peak: f64,
+}
+
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
 pub struct JsMeterSnapshot {
     pub tracks: Vec<JsTrackMeterSnapshot>,
+    pub plugin_outputs: Vec<JsPluginOutputMeterSnapshot>,
     pub master_peak_l: f64,
     pub master_peak_r: f64,
     pub master_rms_l: f64,

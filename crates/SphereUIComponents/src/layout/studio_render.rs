@@ -1541,6 +1541,8 @@ impl Render for StudioLayout {
                         &master,
                         selected_track_id.as_deref(),
                         mixer_callbacks,
+                        &self.mixer_view.collapsed_vsti_output_groups,
+                        &self.mixer_view.vsti_output_meters,
                         mixer_scroll_x,
                         mixer_viewport_width,
                         on_mixer_scroll,

@@ -165,6 +165,16 @@ extern "C" {
         events: *const Vst3MidiEvent,
         event_count: i32,
     ) -> i32;
+    fn sphere_daux_vst3_process_main_output_block_with_midi(
+        processor: *mut SphereDauxVst3Processor,
+        in_l: *const c_float,
+        in_r: *const c_float,
+        out_interleaved: *mut c_float,
+        frames: i32,
+        output_channels: i32,
+        events: *const Vst3MidiEvent,
+        event_count: i32,
+    ) -> i32;
     fn sphere_daux_vst3_event_input_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_audio_input_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_audio_output_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
@@ -577,6 +587,43 @@ impl Vst3RuntimeProcessor {
             )
         };
         ok != 0
+    }
+
+    #[inline]
+    pub fn process_main_output_block_with_midi(
+        &mut self,
+        in_l: &[f32],
+        in_r: &[f32],
+        out_interleaved: &mut [f32],
+        output_channels: usize,
+        midi_events: &[Vst3MidiEvent],
+    ) -> Option<usize> {
+        let channels = output_channels.max(1);
+        let frames = in_l
+            .len()
+            .min(in_r.len())
+            .min(out_interleaved.len() / channels);
+        if self.inner.raw.is_null() || frames == 0 {
+            return None;
+        }
+        let (events_ptr, event_count) = if midi_events.is_empty() {
+            (std::ptr::null(), 0)
+        } else {
+            (midi_events.as_ptr(), midi_events.len() as i32)
+        };
+        let got_channels = unsafe {
+            sphere_daux_vst3_process_main_output_block_with_midi(
+                self.inner.raw,
+                in_l.as_ptr(),
+                in_r.as_ptr(),
+                out_interleaved.as_mut_ptr(),
+                frames as i32,
+                channels as i32,
+                events_ptr,
+                event_count,
+            )
+        };
+        (got_channels > 0).then_some(got_channels as usize)
     }
 
     #[inline]

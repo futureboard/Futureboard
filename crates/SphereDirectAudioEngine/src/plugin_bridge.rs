@@ -31,6 +31,26 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
     /// reuse previous output. Wait-free.
     fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize;
 
+    /// Read the same fresh block as [`Self::read_output`], but only fold the
+    /// 1-based plugin output channels listed in `enabled_channels` into the
+    /// engine's stereo track. Default sinks ignore the selection and preserve
+    /// the legacy stereo contract.
+    fn read_output_for_channels(
+        &self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        frames: usize,
+        _enabled_channels: &[u8],
+    ) -> usize {
+        self.read_output(out_l, out_r, frames)
+    }
+
+    /// Peak for a 1-based plugin output channel from the last fresh block read
+    /// by the engine. This is meter-only metadata; reading it must be wait-free.
+    fn output_channel_peak(&self, _channel: u8) -> f32 {
+        0.0
+    }
+
     /// Push one MIDI event for the host to apply to the next block (Stage 4 clip
     /// playback / automation). Wait-free ring push; dropped if the ring is full.
     fn push_midi(&self, status: u8, data1: u8, data2: u8, sample_offset: u32);

@@ -205,6 +205,7 @@ pub struct ProjectInsert {
     pub id: String,
     pub slot_index: u32,
     pub bypassed: bool,
+    pub enabled_audio_output_channels: Vec<u8>,
     pub plugin: Option<ProjectPluginInstance>,
 }
 
@@ -581,6 +582,7 @@ fn timeline_insert_to_project(idx: usize, slot: &InsertSlotState) -> ProjectInse
         id: slot.id.clone(),
         slot_index: idx as u32,
         bypassed: slot.bypassed,
+        enabled_audio_output_channels: slot.enabled_audio_output_channels.clone(),
         plugin,
     }
 }
@@ -639,6 +641,7 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
                 runtime_state,
                 host_pid: None,
                 parameters: Vec::new(),
+                enabled_audio_output_channels: pi.enabled_audio_output_channels.clone(),
                 pending_open_editor: false,
                 vst3_state: (!plugin.state.state_bytes.is_empty())
                     .then(|| std::sync::Arc::new(plugin.state.state_bytes.clone())),

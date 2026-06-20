@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use DAUx::vst3_processor::{Vst3MidiEvent, Vst3PluginState, Vst3RuntimeProcessor};
 
-use crate::audio_bridge::SharedMidiEvent;
+use crate::audio_bridge::{SharedMidiEvent, MAX_CHANNELS};
 
 fn forensic_trace_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -204,6 +204,31 @@ fn render_voice(
     }
 }
 
+fn render_voice_interleaved(
+    processor: &Vst3RuntimeProcessor,
+    midi: &Mutex<VoiceMidiState>,
+    in_l: &[f32],
+    in_r: &[f32],
+    out_interleaved: &mut [f32],
+    output_channels: usize,
+    transport: DAUx::vst3_processor::RuntimeTransportContext,
+) -> usize {
+    let mut state = midi.lock();
+    let events = std::mem::take(&mut state.pending_events);
+    let mut processor = processor.clone();
+    processor.set_process_context(&transport);
+    let channels = output_channels.clamp(1, MAX_CHANNELS);
+    let got_channels = processor
+        .process_main_output_block_with_midi(in_l, in_r, out_interleaved, channels, &events)
+        .unwrap_or(0);
+    if events.is_empty() && state.active_notes.is_empty() {
+        state.tail_blocks = state.tail_blocks.saturating_sub(1);
+    } else {
+        state.tail_blocks = PREVIEW_TAIL_BLOCKS;
+    }
+    got_channels.min(channels)
+}
+
 /// Block-path handle for the audio producer thread. Replaces taking the whole
 /// `PluginHostPreviewEngine` mutex per block: the voice list is an `Arc`
 /// snapshot republished by the engine on load/unload only, and the flags are
@@ -309,6 +334,13 @@ impl BridgeAudioShared {
             .map(|v| v.processor.get_latency_samples().max(0))
     }
 
+    pub fn main_audio_output_channel_count_for_instance(&self, instance_id: &str) -> Option<u32> {
+        self.snapshot()
+            .iter()
+            .find(|v| v.instance_id == instance_id)
+            .map(|v| v.processor.main_audio_output_channel_count().max(1) as u32)
+    }
+
     /// Apply one engine-pushed parameter change (normalized VST3 ParamID value)
     /// to the voice owning `instance_id`. The C++ processor queues it for the
     /// next `process()` call; routed to the matching voice only.
@@ -354,6 +386,41 @@ impl BridgeAudioShared {
                 &mut out_r[..n],
                 transport,
             );
+        }
+    }
+
+    pub fn render_single_voice_interleaved(
+        &self,
+        instance_id: &str,
+        frames: usize,
+        in_l: &[f32],
+        in_r: &[f32],
+        out_interleaved: &mut [f32],
+        output_channels: usize,
+        transport: DAUx::vst3_processor::RuntimeTransportContext,
+    ) -> usize {
+        let channels = output_channels.clamp(1, MAX_CHANNELS);
+        let n = frames
+            .min(in_l.len())
+            .min(in_r.len())
+            .min(out_interleaved.len() / channels);
+        out_interleaved[..n * channels].fill(0.0);
+        if !self.dsp_ready() {
+            return 0;
+        }
+        let voices = self.snapshot();
+        if let Some(voice) = voices.iter().find(|v| v.instance_id == instance_id) {
+            render_voice_interleaved(
+                &voice.processor,
+                &voice.midi,
+                &in_l[..n],
+                &in_r[..n],
+                &mut out_interleaved[..n * channels],
+                channels,
+                transport,
+            )
+        } else {
+            0
         }
     }
 

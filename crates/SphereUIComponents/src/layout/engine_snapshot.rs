@@ -239,6 +239,10 @@ fn build_engine_inserts_for(
                     "displayName".to_string(),
                     serde_json::json!(slot.display_name),
                 );
+                params.insert(
+                    "enabledAudioOutputChannels".to_string(),
+                    serde_json::json!(normalized_enabled_audio_outputs(slot)),
+                );
                 params.insert("bridge".to_string(), serde_json::json!(true));
                 params.insert("role".to_string(), serde_json::json!(role));
 
@@ -288,6 +292,10 @@ fn build_engine_inserts_for(
                 "displayName".to_string(),
                 serde_json::json!(slot.display_name),
             );
+            params.insert(
+                "enabledAudioOutputChannels".to_string(),
+                serde_json::json!(normalized_enabled_audio_outputs(slot)),
+            );
 
             Some(EngineInsertSnapshot {
                 id: slot.id.clone(),
@@ -306,6 +314,24 @@ fn build_engine_inserts_for(
             })
         })
         .collect()
+}
+
+fn normalized_enabled_audio_outputs(slot: &InsertSlotState) -> Vec<u8> {
+    let mut channels = if slot.enabled_audio_output_channels.is_empty() {
+        vec![1, 2]
+    } else {
+        slot.enabled_audio_output_channels.clone()
+    };
+    if !channels.contains(&1) {
+        channels.push(1);
+    }
+    if !channels.contains(&2) {
+        channels.push(2);
+    }
+    channels.retain(|channel| (1..=16).contains(channel));
+    channels.sort_unstable();
+    channels.dedup();
+    channels
 }
 
 fn build_engine_inserts(track: &TrackState, export_mode: bool) -> Vec<EngineInsertSnapshot> {

@@ -84,6 +84,8 @@ const EDITOR_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 /// Lifecycle state of a native main-owned bridge editor session.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BridgeEditorState {
+    /// Shell is visible while the plugin instance is still loading in the host.
+    Loading,
     /// `PrepareEditorView` sent; awaiting `EditorPreferredSize`.
     Preparing,
     /// Shell resized to preferred size; `ConfirmEditorContentReady` sent.
@@ -306,13 +308,20 @@ impl StudioLayout {
                             .state
                             .insert_owner_ids_containing(&plugin_instance_id);
                         track_ids.into_iter().any(|track_id| {
-                            timeline.state.set_insert_runtime(
+                            let runtime_changed = timeline.state.set_insert_runtime(
                                 &track_id,
                                 &plugin_instance_id,
                                 PluginRuntimeBackend::ExternalBridge,
                                 PluginRuntimeState::Active,
                                 host_pid,
-                            )
+                            );
+                            let outputs_changed =
+                                timeline.state.auto_enable_detected_insert_outputs(
+                                    &track_id,
+                                    &plugin_instance_id,
+                                    output_channels,
+                                );
+                            runtime_changed || outputs_changed
                         })
                     });
                     self.sync_plugin_bridge_sinks_to_engine(cx, "processing_prepared");
@@ -633,6 +642,7 @@ impl StudioLayout {
             .bridge
             .get(&key)
             .map(|s| (s.state.clone(), s.requested_at));
+        let mut loading_session = None;
         if let Some((state, requested_at)) = existing {
             if let BridgeEditorState::Failed(reason) = &state {
                 ped_log!(
@@ -640,6 +650,12 @@ impl StudioLayout {
                 );
                 self.close_bridge_editor(cx, track_id, instance_id);
                 // fall through to a fresh open below
+            } else if state == BridgeEditorState::Loading {
+                ped_log!(
+                    "Open Request track={track_id} slot={instance_id} state=Loading -> attach existing shell (loading_ms={})",
+                    requested_at.elapsed().as_millis()
+                );
+                loading_session = self.plugin_editors.bridge.remove(&key);
             } else {
                 if let Some(session) = self.plugin_editors.bridge.get(&key) {
                     session.shell.focus();
@@ -665,13 +681,23 @@ impl StudioLayout {
         };
 
         let defaults = shell_defaults();
-        let content_w = defaults.default_content_width;
-        let content_h = defaults.default_content_height;
-        let Some(shell) =
-            NativeEditorShell::create(&display_name, content_w, content_h, owner_hwnd)
-        else {
-            eprintln!("[plugin-editor-window] native shell create FAILED instance={instance_id}");
-            return;
+        let shell = if let Some(session) = loading_session {
+            session
+                .shell
+                .set_status("Attaching plugin editor...", false);
+            session.shell
+        } else {
+            let content_w = defaults.default_content_width;
+            let content_h = defaults.default_content_height;
+            let Some(shell) =
+                NativeEditorShell::create(&display_name, content_w, content_h, owner_hwnd)
+            else {
+                eprintln!(
+                    "[plugin-editor-window] native shell create FAILED instance={instance_id}"
+                );
+                return;
+            };
+            shell
         };
         let content_hwnd = shell.content_hwnd();
         let (cw, ch) = shell.content_size();
@@ -744,6 +770,64 @@ impl StudioLayout {
                 );
             }
         }
+    }
+
+    pub(super) fn open_bridge_loading_editor(
+        &mut self,
+        track_id: &str,
+        instance_id: &str,
+        display_name: String,
+        owner_hwnd: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (track_id.to_string(), instance_id.to_string());
+        if let Some(session) = self.plugin_editors.bridge.get(&key) {
+            if !matches!(session.state, BridgeEditorState::Failed(_)) {
+                session.shell.focus();
+                session.shell.set_status("Loading plugin editor...", false);
+                return;
+            }
+        }
+        if matches!(
+            self.plugin_editors
+                .bridge
+                .get(&key)
+                .map(|session| &session.state),
+            Some(BridgeEditorState::Failed(_))
+        ) {
+            self.close_bridge_editor(cx, track_id, instance_id);
+        }
+
+        let defaults = shell_defaults();
+        let Some(shell) = NativeEditorShell::create(
+            &display_name,
+            defaults.default_content_width,
+            defaults.default_content_height,
+            owner_hwnd,
+        ) else {
+            eprintln!(
+                "[plugin-editor-window] native loading shell create FAILED instance={instance_id}"
+            );
+            return;
+        };
+        shell.set_status("Loading plugin editor...", false);
+        let (cw, ch) = shell.content_size();
+        eprintln!("[plugin-editor-window] loading shell visible instance={instance_id}");
+        self.plugin_editors.bridge.insert(
+            key,
+            BridgeEditorSession {
+                track_id: track_id.to_string(),
+                instance_id: instance_id.to_string(),
+                display_name,
+                shell,
+                state: BridgeEditorState::Loading,
+                preferred_applied: false,
+                last_content: (cw, ch),
+                host_hwnd: 0,
+                requested_at: Instant::now(),
+            },
+        );
+        cx.notify();
     }
 
     /// Per-tick driver for native editor shells: honor OS close requests and
@@ -995,6 +1079,14 @@ impl StudioLayout {
                     resolved_plugin_instance_id.clone(),
                 ));
                 if super::plugin_bridge_runtime::bridge_enabled() {
+                    let owner_hwnd = studio_native_hwnd(window);
+                    self.open_bridge_loading_editor(
+                        track_id,
+                        insert_id,
+                        display_name.clone(),
+                        owner_hwnd,
+                        cx,
+                    );
                     let _ = self.load_bridge_insert_for_slot(track_id, insert_id, cx);
                 }
                 return;
@@ -1048,6 +1140,14 @@ impl StudioLayout {
                 .is_some();
             if !bridge_loaded {
                 eprintln!("[PluginEditor] no runtime instance; loading plugin");
+                let owner_hwnd = studio_native_hwnd(window);
+                self.open_bridge_loading_editor(
+                    track_id,
+                    insert_id,
+                    display_name.clone(),
+                    owner_hwnd,
+                    cx,
+                );
                 if self.load_bridge_insert_for_slot(track_id, insert_id, cx) {
                     let _ = self.timeline.update(cx, |timeline, _cx| {
                         timeline

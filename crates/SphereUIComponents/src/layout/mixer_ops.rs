@@ -1,18 +1,19 @@
 use gpui::{Context, Entity, Window, WindowHandle};
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use crate::components::edit::EditCommand;
 use crate::components::mixer_panel::{
     clamp_mixer_section_height_px, MixerCallbacks, MixerSplitAction, MixerSplitTarget,
-    MIXER_INSERT_SECTION_DEFAULT_PX, MIXER_SEND_SECTION_DEFAULT_PX,
+    VstiOutputMeterState, MIXER_INSERT_SECTION_DEFAULT_PX, MIXER_SEND_SECTION_DEFAULT_PX,
 };
 use crate::components::timeline::timeline_state::{self, TrackState};
 use crate::components::{external_mixer_debug, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
-use super::{
-    ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, StudioLayout,
-};
+use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, StudioLayout};
 
 /// Mixer-panel view state — horizontal scroll, the shared insert/send section
 /// heights, and the transient splitter-drag anchors. `StudioLayout` decomposition
@@ -32,6 +33,9 @@ pub(crate) struct MixerViewState {
     pub split_resize_start_send_px: f32,
     /// Active splitter-drag target, if a drag is in progress.
     pub split_active_target: Option<MixerSplitTarget>,
+    /// Collapsed VSTi output sub-strip groups, keyed by `track_id:insert_id`.
+    pub collapsed_vsti_output_groups: HashSet<String>,
+    pub vsti_output_meters: HashMap<String, VstiOutputMeterState>,
 }
 
 impl Default for MixerViewState {
@@ -44,6 +48,8 @@ impl Default for MixerViewState {
             split_resize_start_insert_px: 0.0,
             split_resize_start_send_px: 0.0,
             split_active_target: None,
+            collapsed_vsti_output_groups: HashSet::new(),
+            vsti_output_meters: HashMap::new(),
         }
     }
 }
@@ -65,6 +71,8 @@ impl StudioLayout {
             ),
             mixer_send_section_px: clamp_mixer_section_height_px(self.mixer_view.send_section_px),
             mixer_split_active_target: self.mixer_view.split_active_target,
+            collapsed_vsti_output_groups: self.mixer_view.collapsed_vsti_output_groups.clone(),
+            vsti_output_meters: self.mixer_view.vsti_output_meters.clone(),
         }
     }
 
@@ -117,6 +125,20 @@ impl StudioLayout {
 
     pub(crate) fn mixer_split_active_target(&self) -> Option<MixerSplitTarget> {
         self.mixer_view.split_active_target
+    }
+
+    pub(crate) fn toggle_vsti_output_group(&mut self, group_key: &str, cx: &mut Context<Self>) {
+        if !self
+            .mixer_view
+            .collapsed_vsti_output_groups
+            .remove(group_key)
+        {
+            self.mixer_view
+                .collapsed_vsti_output_groups
+                .insert(group_key.to_string());
+        }
+        self.push_mixer_snapshot_to_window(cx);
+        cx.notify();
     }
 
     /// Apply a splitter intent from any channel-strip handle. Shared across all
@@ -459,6 +481,17 @@ impl StudioLayout {
                 });
             })
         };
+        let on_toggle_vsti_output_group: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |group_key: &String, _w, cx| {
+                let group_key = group_key.clone();
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
+                    this.toggle_vsti_output_group(&group_key, cx);
+                });
+            })
+        };
         // Drag-reorder commit (mirrors the Inspector's `reorder_insert_cb`). The
         // drop handler supplies the dragged `plugin_instance_id` and the
         // insertion gap; we snapshot the current id order, compute the new order,
@@ -606,6 +639,7 @@ impl StudioLayout {
             on_add_insert,
             on_remove_insert,
             on_toggle_insert_bypass,
+            on_toggle_vsti_output_group,
             on_reorder_insert,
             on_drop_plugin_preset,
             on_open_insert_editor,

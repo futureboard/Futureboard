@@ -39,16 +39,6 @@ jobs:
             native-bin: target/release/FutureboardNative.exe
             native-artifact-name: futureboard-native-win
             native-bundle-glob: packaging/native/out/win/**/*
-          - os: macos-latest
-            platform: mac
-            native-bin: target/release/FutureboardNative
-            native-artifact-name: futureboard-native-mac
-            native-bundle-glob: packaging/native/out/**
-          - os: ubuntu-24.04
-            platform: linux
-            native-bin: target/release/FutureboardNative
-            native-artifact-name: futureboard-native-linux
-            native-bundle-glob: ""
 
     steps:
       - name: Checkout
@@ -94,7 +84,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for f in apps/shared/app.png apps/shared/icon.ico apps/shared/icon.icns apps/shared/app.rc apps/shared/app.manifest; do
+          for f in \
+            packages/shared/app/icons/app.png \
+            packages/shared/app/icons/icon.ico \
+            packages/shared/app/icons/icon.icns \
+            packages/shared/app/windows/app.rc \
+            packages/shared/app/windows/app.manifest; do
             test -f "$f" || { echo "missing $f"; exit 1; }
           done
           echo "Shared app assets OK"

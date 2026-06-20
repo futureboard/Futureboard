@@ -568,6 +568,8 @@ struct SphereDauxVst3Processor {
   Steinberg::Vst::ProcessData     process_data{};
   int audio_input_bus_count{0};
   int audio_output_bus_count{0};
+  int main_audio_input_channel_count{2};
+  int main_audio_output_channel_count{2};
   bool processing{false};
 
   // Diagnostics
@@ -706,8 +708,34 @@ struct SphereDauxVst3Processor {
         component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput);
     audio_input_bus_count = static_cast<int>(input_bus_count);
     audio_output_bus_count = static_cast<int>(output_bus_count);
-    std::fprintf(stderr, "[SphereVST3] busCount input=%d output=%d\n",
-                 (int)input_bus_count, (int)output_bus_count);
+    main_audio_input_channel_count = audio_input_bus_count > 0 ? 2 : 0;
+    main_audio_output_channel_count = audio_output_bus_count > 0 ? 2 : 0;
+    if (audio_input_bus_count > 0) {
+      Steinberg::Vst::BusInfo input_info{};
+      if (component->getBusInfo(Steinberg::Vst::kAudio,
+                                Steinberg::Vst::kInput,
+                                0,
+                                input_info) == Steinberg::kResultOk &&
+          input_info.channelCount > 0) {
+        main_audio_input_channel_count = static_cast<int>(input_info.channelCount);
+      }
+    }
+    if (audio_output_bus_count > 0) {
+      Steinberg::Vst::BusInfo output_info{};
+      if (component->getBusInfo(Steinberg::Vst::kAudio,
+                                Steinberg::Vst::kOutput,
+                                0,
+                                output_info) == Steinberg::kResultOk &&
+          output_info.channelCount > 0) {
+        main_audio_output_channel_count = static_cast<int>(output_info.channelCount);
+      }
+    }
+    std::fprintf(stderr,
+                 "[SphereVST3] busCount input=%d output=%d mainInputChannels=%d mainOutputChannels=%d\n",
+                 (int)input_bus_count,
+                 (int)output_bus_count,
+                 main_audio_input_channel_count,
+                 main_audio_output_channel_count);
 
     event_input_bus_count =
         component->getBusCount(Steinberg::Vst::kEvent, Steinberg::Vst::kInput);
@@ -3118,6 +3146,30 @@ extern "C" int sphere_daux_vst3_event_input_bus_count(
     SphereDauxVst3Processor* processor) {
   if (!processor) return 0;
   return processor->event_input_bus_count;
+}
+
+extern "C" int sphere_daux_vst3_audio_input_bus_count(
+    SphereDauxVst3Processor* processor) {
+  if (!processor) return 0;
+  return processor->audio_input_bus_count;
+}
+
+extern "C" int sphere_daux_vst3_audio_output_bus_count(
+    SphereDauxVst3Processor* processor) {
+  if (!processor) return 0;
+  return processor->audio_output_bus_count;
+}
+
+extern "C" int sphere_daux_vst3_main_audio_input_channel_count(
+    SphereDauxVst3Processor* processor) {
+  if (!processor) return 0;
+  return processor->main_audio_input_channel_count;
+}
+
+extern "C" int sphere_daux_vst3_main_audio_output_channel_count(
+    SphereDauxVst3Processor* processor) {
+  if (!processor) return 0;
+  return processor->main_audio_output_channel_count;
 }
 
 /// Enqueue a normalized parameter change for delivery on the next process call.

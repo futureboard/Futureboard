@@ -72,6 +72,10 @@ impl PluginBridgeSink for SharedRegionSink {
         self.region.bridge().dsp_output_ready()
     }
 
+    fn plugin_output_channels(&self) -> u32 {
+        self.region.bridge().plugin_output_channels()
+    }
+
     fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
         let bridge = self.region.bridge();
         // Freshness guard: only hand a produced block to the engine once. When

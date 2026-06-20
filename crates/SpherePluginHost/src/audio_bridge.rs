@@ -33,8 +33,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// Layout version — bump on any change to [`SharedAudioBridge`] field order/size.
 /// v2 added the transport / ProcessContext block (tempo, time signature,
-/// project position, playing/recording).
-pub const BRIDGE_LAYOUT_VERSION: u32 = 2;
+/// project position, playing/recording). v3 added VSTi output-channel metadata;
+/// the shared audio buffers are still stereo until the next data-path stage.
+pub const BRIDGE_LAYOUT_VERSION: u32 = 3;
 
 /// `transport_flags` bits.
 pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
@@ -252,6 +253,11 @@ pub struct SharedAudioBridge {
     pub max_block_size: AtomicU32,
     pub in_channels: AtomicU32,
     pub out_channels: AtomicU32,
+    /// Actual main audio output channels reported by the loaded plugin. This is
+    /// metadata for routing; `out_channels` above still describes the current
+    /// shared-buffer layout.
+    pub plugin_output_channels: AtomicU32,
+    pub _pad_header: AtomicU32,
 
     // --- Block handshake (lock-free, one-block latency) ---
     /// Bumped by the engine after it writes `audio_in` + the rings for a block.
@@ -313,6 +319,8 @@ impl SharedAudioBridge {
         );
         self.in_channels.store(channels, Ordering::Relaxed);
         self.out_channels.store(channels, Ordering::Relaxed);
+        self.plugin_output_channels
+            .store(channels.max(1), Ordering::Relaxed);
         self.layout_version
             .store(BRIDGE_LAYOUT_VERSION, Ordering::Relaxed);
         self.dsp_output_state
@@ -351,6 +359,15 @@ impl SharedAudioBridge {
 
     pub fn dsp_output_ready(&self) -> bool {
         self.dsp_output_state.load(Ordering::Acquire) == DSP_OUTPUT_READY
+    }
+
+    pub fn set_plugin_output_channels(&self, channels: u32) {
+        self.plugin_output_channels
+            .store(channels.max(1), Ordering::Release);
+    }
+
+    pub fn plugin_output_channels(&self) -> u32 {
+        self.plugin_output_channels.load(Ordering::Acquire).max(1)
     }
 
     /// Store the host output peak meters (host side).
@@ -730,6 +747,9 @@ mod tests {
         assert!(bridge.header_valid());
         assert_eq!(bridge.sample_rate.load(Ordering::Relaxed), 48_000);
         assert_eq!(bridge.max_block_size.load(Ordering::Relaxed), 256);
+        assert_eq!(bridge.plugin_output_channels(), 2);
+        bridge.set_plugin_output_channels(8);
+        assert_eq!(bridge.plugin_output_channels(), 8);
         assert!(!bridge.dsp_output_ready());
         bridge.set_dsp_output_ready(true);
         assert!(bridge.dsp_output_ready());

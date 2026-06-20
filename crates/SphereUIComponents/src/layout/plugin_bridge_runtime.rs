@@ -176,6 +176,16 @@ impl PluginBridgeRuntime {
         true
     }
 
+    pub fn mark_plugin_output_channels(&mut self, instance: &str, output_channels: u32) {
+        if let Some(region) = self.shared_audio.get(instance) {
+            let channels = output_channels.max(1);
+            region.bridge().set_plugin_output_channels(channels);
+            eprintln!(
+                "[plugin-bridge] plugin output metadata instance={instance} channels={channels}"
+            );
+        }
+    }
+
     pub fn mark_plugin_load_failed(&mut self, instance: &str) {
         self.loaded.remove(instance);
         self.shared_audio.remove(instance);

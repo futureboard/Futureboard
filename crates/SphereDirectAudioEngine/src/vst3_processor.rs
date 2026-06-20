@@ -166,6 +166,14 @@ extern "C" {
         event_count: i32,
     ) -> i32;
     fn sphere_daux_vst3_event_input_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_audio_input_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_audio_output_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
+    fn sphere_daux_vst3_main_audio_input_channel_count(
+        processor: *mut SphereDauxVst3Processor,
+    ) -> i32;
+    fn sphere_daux_vst3_main_audio_output_channel_count(
+        processor: *mut SphereDauxVst3Processor,
+    ) -> i32;
     fn sphere_daux_vst3_process_count(processor: *mut SphereDauxVst3Processor) -> u64;
     fn sphere_daux_vst3_last_input_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
     fn sphere_daux_vst3_last_output_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
@@ -375,6 +383,10 @@ struct Vst3RuntimeProcessorInner {
     class_id: String,
     sample_rate: u32,
     event_input_bus_count: i32,
+    audio_input_bus_count: i32,
+    audio_output_bus_count: i32,
+    main_audio_input_channel_count: i32,
+    main_audio_output_channel_count: i32,
     destroy_reason: std::sync::Mutex<Option<String>>,
 }
 
@@ -448,9 +460,22 @@ impl Vst3RuntimeProcessor {
             return None;
         }
         let event_input_bus_count = unsafe { sphere_daux_vst3_event_input_bus_count(raw) };
+        let audio_input_bus_count = unsafe { sphere_daux_vst3_audio_input_bus_count(raw) };
+        let audio_output_bus_count = unsafe { sphere_daux_vst3_audio_output_bus_count(raw) };
+        let main_audio_input_channel_count =
+            unsafe { sphere_daux_vst3_main_audio_input_channel_count(raw) };
+        let main_audio_output_channel_count =
+            unsafe { sphere_daux_vst3_main_audio_output_channel_count(raw) };
         eprintln!(
-            "{log_tag} create ok path='{}' classId='{}' handle=0x{:x} eventInputBuses={}",
-            plugin_path, class_id, raw as usize, event_input_bus_count
+            "{log_tag} create ok path='{}' classId='{}' handle=0x{:x} eventInputBuses={} audioInBuses={} audioOutBuses={} mainInChannels={} mainOutChannels={}",
+            plugin_path,
+            class_id,
+            raw as usize,
+            event_input_bus_count,
+            audio_input_bus_count,
+            audio_output_bus_count,
+            main_audio_input_channel_count,
+            main_audio_output_channel_count
         );
         Some(Self {
             inner: Arc::new(Vst3RuntimeProcessorInner {
@@ -459,6 +484,10 @@ impl Vst3RuntimeProcessor {
                 class_id: class_id.to_string(),
                 sample_rate: sample_rate.max(1),
                 event_input_bus_count,
+                audio_input_bus_count,
+                audio_output_bus_count,
+                main_audio_input_channel_count,
+                main_audio_output_channel_count,
                 destroy_reason: std::sync::Mutex::new(None),
             }),
         })
@@ -495,6 +524,26 @@ impl Vst3RuntimeProcessor {
     #[inline]
     pub fn event_input_bus_count(&self) -> i32 {
         self.inner.event_input_bus_count
+    }
+
+    #[inline]
+    pub fn audio_input_bus_count(&self) -> i32 {
+        self.inner.audio_input_bus_count
+    }
+
+    #[inline]
+    pub fn audio_output_bus_count(&self) -> i32 {
+        self.inner.audio_output_bus_count
+    }
+
+    #[inline]
+    pub fn main_audio_input_channel_count(&self) -> i32 {
+        self.inner.main_audio_input_channel_count
+    }
+
+    #[inline]
+    pub fn main_audio_output_channel_count(&self) -> i32 {
+        self.inner.main_audio_output_channel_count
     }
 
     #[inline]

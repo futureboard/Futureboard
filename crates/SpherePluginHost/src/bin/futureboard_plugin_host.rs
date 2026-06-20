@@ -1339,7 +1339,9 @@ fn dispatch(
             eprintln!(
                 "[plugin-bridge] PrepareProcessing instance={plugin_instance_id} sr={sample_rate} block={max_block_size}"
             );
-            if !preview.lock().has_instance(&plugin_instance_id) {
+            let mut preview_guard = preview.lock();
+            if !preview_guard.has_instance(&plugin_instance_id) {
+                drop(preview_guard);
                 emit_attach_failed(
                     out,
                     &plugin_instance_id,
@@ -1350,10 +1352,14 @@ fn dispatch(
             eprintln!(
                 "[plugin-host] PrepareProcessing uses existing instance={plugin_instance_id}"
             );
-            let (sr, block) = preview.lock().configure(sample_rate, max_block_size);
-            preview.lock().set_dsp_ready(true);
+            let (sr, block) = preview_guard.configure(sample_rate, max_block_size);
+            preview_guard.set_dsp_ready(true);
+            let actual_output_channels = preview_guard
+                .main_audio_output_channel_count_for_instance(&plugin_instance_id)
+                .unwrap_or(output_channels.max(1));
+            drop(preview_guard);
             eprintln!(
-                "[plugin-host-dsp] prepared instance={plugin_instance_id} sr={sr} block={block} outputs={output_channels} same_instance=true"
+                "[plugin-host-dsp] prepared instance={plugin_instance_id} sr={sr} block={block} requestedOutputs={output_channels} outputs={actual_output_channels} same_instance=true"
             );
             let _ = ipc::write_frame(
                 out,
@@ -1361,7 +1367,7 @@ fn dispatch(
                     plugin_instance_id,
                     sample_rate: sr,
                     max_block_size: block,
-                    output_channels,
+                    output_channels: actual_output_channels,
                 },
             );
             let _ = input_channels;

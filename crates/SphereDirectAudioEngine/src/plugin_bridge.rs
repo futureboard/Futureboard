@@ -15,6 +15,13 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
     /// True when the host signals it is producing DSP output.
     fn dsp_ready(&self) -> bool;
 
+    /// Actual main output channel count reported by the bridged plugin. This is
+    /// routing metadata; the current audio sample exchange remains stereo until
+    /// the multichannel buffer data path is enabled.
+    fn plugin_output_channels(&self) -> u32 {
+        2
+    }
+
     /// Read the host's most-recently produced block (deinterleaved) into
     /// `out_l` / `out_r` (each at least `frames` long). Returns the number of
     /// frames actually read. Each produced block is handed out **at most

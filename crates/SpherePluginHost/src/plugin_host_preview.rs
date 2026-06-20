@@ -498,6 +498,16 @@ impl PluginHostPreviewEngine {
         self.instances.keys().cloned().collect()
     }
 
+    pub fn main_audio_output_channel_count_for_instance(
+        &self,
+        plugin_instance_id: &str,
+    ) -> Option<u32> {
+        self.instances
+            .get(plugin_instance_id)
+            .map(|instance| instance.processor.main_audio_output_channel_count())
+            .map(|channels| channels.max(1) as u32)
+    }
+
     /// Capture the instance's VST3 state for project persistence. Runs
     /// `getState` without the voice mutex — VST3 allows state capture while
     /// processing (it is how every host saves projects during playback).
@@ -639,12 +649,11 @@ impl PluginHostPreviewEngine {
 
     pub fn unload_instance(&mut self, plugin_instance_id: &str) {
         eprintln!("[plugin-host-registry] unload instance={plugin_instance_id}");
-        if let Some(instance) = self.instances.get(plugin_instance_id) {
-            instance.processor.embed_detach();
-        }
         let retired = self.instances.remove(plugin_instance_id);
         if let Some(instance) = &retired {
-            instance.midi.lock().panic();
+            let mut midi = instance.midi.lock();
+            instance.processor.embed_detach();
+            midi.panic();
         }
         if self.instances.is_empty() {
             self.set_continuous_mode(false);
@@ -723,6 +732,10 @@ impl PluginHostPreviewEngine {
     /// Detach editor UI only — processor stays loaded and active.
     pub fn editor_detach_for_instance(&mut self, plugin_instance_id: &str) {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
+            // Control path only: IPlugView::removed() can touch the same plugin
+            // internals as process(), so serialize it with the per-voice render
+            // guard instead of racing the audio producer.
+            let _voice_guard = instance.midi.lock();
             instance.processor.embed_detach();
         }
         eprintln!(
@@ -734,8 +747,9 @@ impl PluginHostPreviewEngine {
     /// Full detach + MIDI panic (unload / crash paths).
     pub fn embed_detach_for_instance(&mut self, plugin_instance_id: &str) {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
+            let mut midi = instance.midi.lock();
             instance.processor.embed_detach();
-            instance.midi.lock().panic();
+            midi.panic();
         }
     }
 

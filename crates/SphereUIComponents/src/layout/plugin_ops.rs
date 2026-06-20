@@ -297,7 +297,10 @@ impl StudioLayout {
                     );
                     eprintln!("[PluginRestore] setActive true result=ok");
                     eprintln!("[plugin-runtime] dsp_output=ready");
-                    let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
+                    let host_pid = runtime.lock().ok().and_then(|mut r| {
+                        r.mark_plugin_output_channels(&plugin_instance_id, output_channels);
+                        r.host_pid()
+                    });
                     changed |= self.timeline.update(cx, |timeline, _cx| {
                         let track_ids = timeline
                             .state

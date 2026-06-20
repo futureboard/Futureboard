@@ -44,7 +44,7 @@ impl WaveformViewModel {
 
 pub fn waveform_view(
     view_h: f32,
-    clip_width_px: f32,
+    viewport_width: f32,
     waveform: &WaveformViewModel,
     theme: &AudioEditorTheme,
     waveform_color: gpui::Rgba,
@@ -137,7 +137,7 @@ pub fn waveform_view(
 
     div()
         .relative()
-        .w(px(clip_width_px.max(1.0)))
+        .w(px(viewport_width.max(1.0)))
         .h(px(view_h))
         .overflow_hidden()
         .bg(gpui::Rgba {

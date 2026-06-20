@@ -143,7 +143,7 @@ pub fn audio_editor_panel(
 ) -> impl IntoElement {
     let ppb = state.pixels_per_beat;
     let scroll_x = state.scroll_x;
-    let clip_width_px = vm.duration_beats * ppb;
+    let viewport_width = viewport_width.max(1.0);
     let view_h = WAVEFORM_H;
 
     let grid = build_grid_lines(
@@ -157,7 +157,7 @@ pub fn audio_editor_panel(
 
     let waveform_el = waveform_view(
         view_h,
-        clip_width_px,
+        viewport_width,
         &vm.waveform,
         &vm.theme,
         vm.track_color,
@@ -225,18 +225,21 @@ pub fn audio_editor_panel(
             &vm.theme,
         ))
         .child(
-            div().flex_1().min_h_0().relative().overflow_hidden().child(
-                div().absolute().top(px(0.0)).left(px(-scroll_x)).child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .overflow_hidden()
+                .child(
                     div()
                         .relative()
-                        .w(px(clip_width_px.max(viewport_width)))
+                        .w(px(viewport_width))
                         .h(px(view_h))
                         .children(grid)
                         .child(waveform_el)
                         .children(selection)
                         .children(playhead),
                 ),
-            ),
         )
 }
 

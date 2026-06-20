@@ -1,6 +1,6 @@
 //! GPUI host for the audio clip editor — reads timeline + peak cache each frame.
 
-use std::cell::Cell;
+use std::{cell::Cell, rc::Rc};
 
 use gpui::{
     div, Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
@@ -20,7 +20,7 @@ use crate::theme::Colors;
 pub struct AudioEditorHost {
     timeline: Entity<Timeline>,
     state: AudioEditorState,
-    viewport_width: Cell<f32>,
+    viewport_width: Rc<Cell<f32>>,
     focus: FocusHandle,
     last_editing_clip: Option<String>,
 }
@@ -30,7 +30,7 @@ impl AudioEditorHost {
         Self {
             timeline,
             state: AudioEditorState::default(),
-            viewport_width: Cell::new(800.0),
+            viewport_width: Rc::new(Cell::new(800.0)),
             focus: cx.focus_handle(),
             last_editing_clip: None,
         }
@@ -135,6 +135,7 @@ impl Render for AudioEditorHost {
             }
             None => empty_audio_editor(&theme).into_any_element(),
         };
+        let viewport_width = self.viewport_width.clone();
 
         div()
             .key_context("AudioEditor")
@@ -144,7 +145,23 @@ impl Render for AudioEditorHost {
             .size_full()
             .bg(Colors::surface_base())
             .on_scroll_wheel(cx.listener(Self::on_wheel))
-            .child(div().flex_1().min_h_0().size_full().child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .size_full()
+                    .on_children_prepainted(move |bounds, _window, cx| {
+                        let Some(bounds) = bounds.first() else {
+                            return;
+                        };
+                        let width = f32::from(bounds.size.width).max(1.0);
+                        if (viewport_width.get() - width).abs() > 0.5 {
+                            viewport_width.set(width);
+                            cx.refresh_windows();
+                        }
+                    })
+                    .child(body),
+            )
     }
 }
 

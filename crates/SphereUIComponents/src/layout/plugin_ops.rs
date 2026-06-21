@@ -1071,16 +1071,18 @@ impl StudioLayout {
             | PluginRuntimeState::NotLoaded
             | PluginRuntimeState::Unloaded => {
                 eprintln!("[PluginEditor] plugin still loading; queueing editor open");
-                let _ = self.timeline.update(cx, |timeline, _cx| {
+                let queued = self.timeline.update(cx, |timeline, _cx| {
                     timeline
                         .state
-                        .set_insert_pending_editor_open(track_id, insert_id, true);
+                        .set_insert_pending_editor_open(track_id, insert_id, true)
                 });
-                self.plugin_editors.deferred_opens.push((
-                    track_id.to_string(),
-                    insert_index,
-                    resolved_plugin_instance_id.clone(),
-                ));
+                if queued {
+                    self.plugin_editors.deferred_opens.push((
+                        track_id.to_string(),
+                        insert_index,
+                        resolved_plugin_instance_id.clone(),
+                    ));
+                }
                 if super::plugin_bridge_runtime::bridge_enabled() {
                     let owner_hwnd = studio_native_hwnd(window);
                     self.open_bridge_loading_editor(
@@ -1090,7 +1092,9 @@ impl StudioLayout {
                         owner_hwnd,
                         cx,
                     );
-                    let _ = self.load_bridge_insert_for_slot(track_id, insert_id, cx);
+                    if !matches!(runtime_state, PluginRuntimeState::Loading) {
+                        let _ = self.load_bridge_insert_for_slot(track_id, insert_id, cx);
+                    }
                 }
                 return;
             }
@@ -2463,23 +2467,16 @@ impl StudioLayout {
             &mut self.plugin_editors.bridge_runtime,
         ) {
             Ok(runtime) => {
-                let already_loaded = runtime
+                let load_requested = runtime
                     .lock()
                     .ok()
-                    .and_then(|runtime| runtime.loaded_descriptor(slot_id))
-                    .is_some();
-                if already_loaded {
+                    .map(|runtime| runtime.has_load_request(slot_id))
+                    .unwrap_or(false);
+                if load_requested {
                     eprintln!(
-                        "[PluginRestore] runtime instance already loaded instance_id={slot_id}; reusing bridge"
+                        "[PluginRestore] runtime instance already requested instance_id={slot_id}; reusing bridge"
                     );
                     self.sync_plugin_bridge_sinks_to_engine(cx, "plugin_restore_reuse");
-                    let _ = self.on_bridge_plugin_host_ready(
-                        slot_id,
-                        &display_name,
-                        &runtime,
-                        cx,
-                        "plugin_restore_reuse",
-                    );
                     self.mark_dirty();
                     return true;
                 }

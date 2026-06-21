@@ -152,6 +152,10 @@ impl PluginBridgeRuntime {
             .cloned()
     }
 
+    pub fn has_load_request(&self, instance: &str) -> bool {
+        self.loaded.contains_key(instance)
+    }
+
     pub fn loaded_instance_ids(&self) -> Vec<String> {
         self.loaded
             .iter()

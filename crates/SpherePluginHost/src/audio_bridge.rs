@@ -34,8 +34,8 @@ pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// Layout version — bump on any change to [`SharedAudioBridge`] field order/size.
 /// v2 added the transport / ProcessContext block (tempo, time signature,
 /// project position, playing/recording). v3 added VSTi output-channel metadata.
-/// v4 expands the shared audio buffers to carry up to 16 plugin output channels.
-pub const BRIDGE_LAYOUT_VERSION: u32 = 4;
+/// v5 expands the shared audio buffers to carry up to 32 plugin output channels.
+pub const BRIDGE_LAYOUT_VERSION: u32 = 5;
 
 /// `transport_flags` bits.
 pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
@@ -46,9 +46,9 @@ pub const TRANSPORT_FLAG_RECORDING: u32 = 1 << 1;
 /// reallocates.
 pub const MAX_BLOCK_FRAMES: usize = 2048;
 /// Channels per audio buffer. The engine still consumes a stereo track today,
-/// but the bridge carries multichannel VSTi main-output data so no plugin
+/// but the bridge carries multichannel VSTi output-bus data so no plugin
 /// output channels are silently dropped before the engine-side downmix.
-pub const MAX_CHANNELS: usize = 16;
+pub const MAX_CHANNELS: usize = 32;
 /// Interleaved samples per audio buffer.
 pub const AUDIO_BUF_LEN: usize = MAX_BLOCK_FRAMES * MAX_CHANNELS;
 
@@ -1035,6 +1035,28 @@ mod tests {
         assert_eq!(got, frames);
         assert!((out_l[0] - (1.0 + 10.0 * 0.70710677)).abs() < 1e-6);
         assert!((out_r[0] - (2.0 + 20.0 * 0.70710677)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn audio_buffer_empty_selection_keeps_ad2_tail_bus_audible() {
+        let region = SharedAudioRegion::new_in_process();
+        let buf = &region.bridge().audio_out;
+        let frames = 1usize;
+        let channels = 28usize;
+        let mut src = vec![0.0f32; frames * channels];
+        src[26] = 0.75;
+        src[27] = 0.5;
+        unsafe { buf.write_interleaved(&src) };
+
+        let mut out_l = [0.0f32; 1];
+        let mut out_r = [0.0f32; 1];
+        let got = unsafe {
+            buf.read_downmixed_to_stereo_selected(&mut out_l, &mut out_r, frames, channels, &[])
+        };
+
+        assert_eq!(got, frames);
+        assert!((out_l[0] - 0.75 * 0.70710677).abs() < 1e-6);
+        assert!((out_r[0] - 0.5 * 0.70710677).abs() < 1e-6);
     }
 
     #[test]

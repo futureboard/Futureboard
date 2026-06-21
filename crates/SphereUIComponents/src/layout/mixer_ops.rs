@@ -288,6 +288,12 @@ impl StudioLayout {
         let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
+                let before_state = timeline_mute
+                    .read(cx)
+                    .state
+                    .find_track(&id)
+                    .map(|track| track.muted)
+                    .unwrap_or(false);
                 let mut muted = false;
                 external_mixer_debug(&format!("mixer command dispatched toggle_mute id={id}"));
                 timeline_mute.update(cx, |t, cx| {
@@ -299,12 +305,37 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
-                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
+                let id_for_side_effect_log = id.clone();
+                StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
+                    let graph_version_before = this.audio_bridge.route_graph_version;
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
+                    let graph_version_after = this.audio_bridge.route_graph_version;
+                    if crate::forensic_trace::forensic_trace_enabled() {
+                        eprintln!(
+                            "[SOLO_MUTE TOGGLE SIDE EFFECT CHECK]\naction=mute\nstrip_id={id_for_side_effect_log}\nmixer_channel_id={id_for_side_effect_log}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nroute_changed={}\nsound_was_silent_before=unknown\nsound_after_toggle=unknown",
+                            graph_version_before != graph_version_after
+                        );
+                    }
                 });
+                let mut audio_router_applied = false;
                 if let Some(engine) = audio_engine.as_ref() {
-                    let _ = engine.update_track_param(&id, "mute", if muted { 1.0 } else { 0.0 });
+                    audio_router_applied = engine
+                        .update_track_param(&id, "muted", if muted { 1.0 } else { 0.0 })
+                        .is_ok();
+                }
+                if crate::forensic_trace::forensic_trace_enabled() {
+                    let bus_index = id
+                        .rsplit_once(":bus:")
+                        .and_then(|(_, bus)| bus.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let plugin_instance_id = id
+                        .strip_prefix("vsti-out:")
+                        .and_then(|rest| rest.split_once(":bus:").map(|(plugin, _)| plugin))
+                        .unwrap_or("");
+                    eprintln!(
+                        "[SOLO_MUTE COMMAND]\naction=mute\nrequested_value={muted}\nstrip_view_id={id}\nplugin_instance_id={plugin_instance_id}\nbus_index={bus_index}\nui_mixer_channel_id={id}\nengine_target_channel_id={id}\nbefore_state={before_state}\nafter_state={muted}\naudio_router_applied={audio_router_applied}"
+                    );
                 }
             });
 
@@ -314,6 +345,12 @@ impl StudioLayout {
         let on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
+                let before_state = timeline_solo
+                    .read(cx)
+                    .state
+                    .find_track(&id)
+                    .map(|track| track.solo)
+                    .unwrap_or(false);
                 let mut solo = false;
                 external_mixer_debug(&format!("mixer command dispatched toggle_solo id={id}"));
                 timeline_solo.update(cx, |t, cx| {
@@ -325,12 +362,37 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
-                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
+                let id_for_side_effect_log = id.clone();
+                StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
+                    let graph_version_before = this.audio_bridge.route_graph_version;
                     this.mark_dirty();
                     this.push_mixer_snapshot_to_window(cx);
+                    let graph_version_after = this.audio_bridge.route_graph_version;
+                    if crate::forensic_trace::forensic_trace_enabled() {
+                        eprintln!(
+                            "[SOLO_MUTE TOGGLE SIDE EFFECT CHECK]\naction=solo\nstrip_id={id_for_side_effect_log}\nmixer_channel_id={id_for_side_effect_log}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nroute_changed={}\nsound_was_silent_before=unknown\nsound_after_toggle=unknown",
+                            graph_version_before != graph_version_after
+                        );
+                    }
                 });
+                let mut audio_router_applied = false;
                 if let Some(engine) = audio_engine.as_ref() {
-                    let _ = engine.update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 });
+                    audio_router_applied = engine
+                        .update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 })
+                        .is_ok();
+                }
+                if crate::forensic_trace::forensic_trace_enabled() {
+                    let bus_index = id
+                        .rsplit_once(":bus:")
+                        .and_then(|(_, bus)| bus.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let plugin_instance_id = id
+                        .strip_prefix("vsti-out:")
+                        .and_then(|rest| rest.split_once(":bus:").map(|(plugin, _)| plugin))
+                        .unwrap_or("");
+                    eprintln!(
+                        "[SOLO_MUTE COMMAND]\naction=solo\nrequested_value={solo}\nstrip_view_id={id}\nplugin_instance_id={plugin_instance_id}\nbus_index={bus_index}\nui_mixer_channel_id={id}\nengine_target_channel_id={id}\nbefore_state={before_state}\nafter_state={solo}\naudio_router_applied={audio_router_applied}"
+                    );
                 }
             });
 

@@ -97,7 +97,9 @@ pub enum PluginScanError {
     AudioUnitEnumerationFailed(String),
     AudioUnitMetadataFailed(String),
     AudioUnitInstantiationFailed(String),
-    AudioUnitScannerCrashed { exit_code: Option<i32> },
+    AudioUnitScannerCrashed {
+        exit_code: Option<i32>,
+    },
     /// The out-of-process scanner child exited abnormally while scanning the
     /// given format (used for VST3/CLAP isolation, not just AudioUnit).
     ScannerProcessCrashed {

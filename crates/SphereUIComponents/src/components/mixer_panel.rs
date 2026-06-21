@@ -37,8 +37,8 @@ use crate::components::panel::FxSlotDrag;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
-    volume, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState, TrackState,
-    TrackType, MASTER_TRACK_ID,
+    is_vsti_output_child_track_id, volume, InsertLoadStatus, InsertSlotState, MasterBusState,
+    SendSlotState, TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::theme::Colors;
@@ -645,7 +645,7 @@ fn normalized_vsti_output_channels(slot: &InsertSlotState) -> Vec<u8> {
     if !channels.contains(&2) {
         channels.push(2);
     }
-    channels.retain(|channel| (1..=16).contains(channel));
+    channels.retain(|channel| (1..=32).contains(channel));
     channels.sort_unstable();
     channels.dedup();
     channels
@@ -656,6 +656,64 @@ fn vsti_output_subchannels(slot: &InsertSlotState) -> Vec<u8> {
         .into_iter()
         .filter(|channel| *channel > 2)
         .collect()
+}
+
+fn log_vsti_child_meter_subscribe_once(track: &TrackState) {
+    if !crate::forensic_trace::forensic_trace_enabled() || !is_vsti_output_child_track_id(&track.id)
+    {
+        return;
+    }
+    static LOGGED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let logged = LOGGED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let Ok(mut logged) = logged.lock() else {
+        return;
+    };
+    if !logged.insert(track.id.clone()) {
+        return;
+    }
+    let bus_index = track
+        .id
+        .rsplit_once(":bus:")
+        .and_then(|(_, bus)| bus.parse::<u8>().ok())
+        .unwrap_or(0);
+    eprintln!(
+        "[METER SUBSCRIBE]\nstrip_view_id={}\nsubscription_key={}\nmixer_channel_id={}\nbus_index={}\ninitial_peak_l={:.6}\ninitial_peak_r={:.6}",
+        track.id,
+        track.id,
+        track.id,
+        bus_index,
+        track.meter_level_l,
+        track.meter_level_r
+    );
+}
+
+fn log_vsti_child_strip_state(track: &TrackState) {
+    if !crate::forensic_trace::forensic_trace_enabled() || !is_vsti_output_child_track_id(&track.id)
+    {
+        return;
+    }
+    let bus_index = track
+        .id
+        .rsplit_once(":bus:")
+        .and_then(|(_, bus)| bus.parse::<u8>().ok())
+        .unwrap_or(0);
+    let plugin_instance_id = track
+        .id
+        .strip_prefix("vsti-out:")
+        .and_then(|rest| rest.split_once(":bus:").map(|(plugin, _)| plugin))
+        .unwrap_or("");
+    eprintln!(
+        "[STRIP STATE]\nstrip_view_id={}\nplugin_instance_id={}\nbus_index={}\nmixer_channel_id={}\nvu_peak_l={:.6}\nvu_peak_r={:.6}\nmute_state={}\nsolo_state={}",
+        track.id,
+        plugin_instance_id,
+        bus_index,
+        track.id,
+        track.meter_level_l,
+        track.meter_level_r,
+        track.muted,
+        track.solo
+    );
 }
 
 fn insert_chip(
@@ -1467,6 +1525,8 @@ fn channel_strip(
     strip_available_px: f32,
     vsti_group_expanded: Option<bool>,
 ) -> impl IntoElement {
+    log_vsti_child_meter_subscribe_once(track);
+    log_vsti_child_strip_state(track);
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1924,28 +1984,13 @@ enum MixerRenderItem {
 
 fn collect_mixer_render_items(
     tracks: &[TrackState],
-    collapsed_vsti_output_groups: &HashSet<String>,
+    _collapsed_vsti_output_groups: &HashSet<String>,
 ) -> Vec<MixerRenderItem> {
     let mut items = Vec::with_capacity(tracks.len());
     for (track_index, track) in tracks.iter().enumerate() {
         items.push(MixerRenderItem::Track { track_index });
-        let Some(slot) = track.instrument_insert().filter(|slot| !slot.is_empty()) else {
+        if is_vsti_output_child_track_id(&track.id) {
             continue;
-        };
-        let group_key = vsti_output_group_key(&track.id, &slot.id);
-        if collapsed_vsti_output_groups.contains(&group_key) {
-            continue;
-        }
-        let Some(insert_index) = track.inserts.iter().position(|insert| insert.id == slot.id)
-        else {
-            continue;
-        };
-        for channel in vsti_output_subchannels(slot) {
-            items.push(MixerRenderItem::VstiOutput {
-                track_index,
-                insert_index,
-                channel,
-            });
         }
     }
     items

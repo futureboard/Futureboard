@@ -45,7 +45,8 @@ macro_rules! session_log {
 pub struct SessionInstallHandoff {
     pub engine: DAUx::AudioEngine,
     pub engine_stats: DAUx::EngineStats,
-    pub(crate) bridge_runtime: Option<crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime>,
+    pub(crate) bridge_runtime:
+        Option<crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime>,
     pub timeline_state: TimelineState,
 }
 

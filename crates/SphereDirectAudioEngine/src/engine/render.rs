@@ -55,7 +55,9 @@ pub fn render_project_sample(
         }
         let has_solo = runtime.has_solo;
         if effective_track_muted(&runtime.tracks[track_index], beat)
-            || (has_solo && !runtime.tracks[track_index].solo)
+            || (has_solo
+                && !runtime.tracks[track_index].solo
+                && !has_soloed_vsti_output_child(runtime, track_index))
         {
             continue;
         }
@@ -189,6 +191,26 @@ pub fn render_project_sample(
 #[inline]
 fn is_routing_type(track_type: &str) -> bool {
     is_routing_track_type(track_type)
+}
+
+#[inline]
+fn is_vsti_output_child_track_id(track_id: &str) -> bool {
+    track_id.starts_with("vsti-out:")
+}
+
+#[inline]
+fn has_soloed_vsti_output_child(runtime: &RuntimeProject, source_track_index: usize) -> bool {
+    let Some(source_track) = runtime.tracks.get(source_track_index) else {
+        return false;
+    };
+    source_track.inserts.iter().any(|insert| {
+        insert.vsti_output_children.iter().any(|child| {
+            child
+                .dest_track_index
+                .and_then(|idx| runtime.tracks.get(idx))
+                .is_some_and(|track| track.solo)
+        })
+    })
 }
 
 /// Two distinct mutable elements of a slice without allocation. Panics in
@@ -417,6 +439,11 @@ fn process_track_block(
     transport: RuntimeTransportContext,
 ) {
     apply_track_chain_block(&mut runtime.tracks[track_index], frames, true, transport);
+    // Multi-out: demux this track's bridged-instrument output channels into the
+    // child "Out Ch" tracks' receive buffers (no-op unless the insert defines
+    // child routes). Runs before pass 2, where the child routing tracks consume
+    // their `recv_*`.
+    scatter_vsti_output_children(runtime, track_index, frames, output, channels);
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
     apply_fader(&mut runtime.tracks[track_index], frames, beat);
@@ -768,7 +795,9 @@ pub fn render_project_block_interleaved(
             continue;
         };
         if effective_track_muted(&runtime.tracks[track_index], block_beat)
-            || (runtime.has_solo && !runtime.tracks[track_index].solo)
+            || (runtime.has_solo
+                && !runtime.tracks[track_index].solo
+                && !has_soloed_vsti_output_child(runtime, track_index))
         {
             continue;
         }
@@ -872,7 +901,9 @@ pub fn render_project_block_interleaved(
     let pass1_indices = std::mem::take(&mut runtime.audio_graph.pass1_source_indices);
     for &track_index in &pass1_indices {
         if effective_track_muted(&runtime.tracks[track_index], block_beat)
-            || (runtime.has_solo && !runtime.tracks[track_index].solo)
+            || (runtime.has_solo
+                && !runtime.tracks[track_index].solo
+                && !has_soloed_vsti_output_child(runtime, track_index))
         {
             continue;
         }
@@ -950,8 +981,15 @@ pub fn render_project_block_interleaved(
     // a *source* track still lets its send reach the return. Order comes from
     // the precomputed topological sort in `RuntimeAudioGraph`.
     let pass2_indices = std::mem::take(&mut runtime.audio_graph.pass2_routing_indices);
+    let mut child_channels_summed = 0usize;
     for &track_index in &pass2_indices {
         if effective_track_muted(&runtime.tracks[track_index], block_beat) {
+            continue;
+        }
+        if runtime.has_solo
+            && is_vsti_output_child_track_id(&runtime.tracks[track_index].id)
+            && !runtime.tracks[track_index].solo
+        {
             continue;
         }
         {
@@ -968,13 +1006,20 @@ pub fn render_project_block_interleaved(
             block_beat,
             transport,
         );
+        if is_vsti_output_child_track_id(&runtime.tracks[track_index].id)
+            && (runtime.tracks[track_index]
+                .meter_peak_l
+                .max(runtime.tracks[track_index].meter_peak_r)
+                > 0.0001)
+        {
+            child_channels_summed = child_channels_summed.saturating_add(1);
+        }
     }
     runtime.audio_graph.pass2_routing_indices = pass2_indices;
 
     // ── Master bus: apply master track inserts on the summed output ──
     if let Some(m_idx) = master_index {
-        let muted = effective_track_muted(&runtime.tracks[m_idx], block_beat)
-            || (runtime.has_solo && !runtime.tracks[m_idx].solo);
+        let muted = effective_track_muted(&runtime.tracks[m_idx], block_beat);
         if !muted {
             let master = &mut runtime.tracks[m_idx];
             // Copy summed output into master scratch buffer.
@@ -1005,6 +1050,28 @@ pub fn render_project_block_interleaved(
         let out = &mut output[i * channels..i * channels + channels];
         out[0] = crate::dsp::gain::soft_limit(out[0] * master_volume);
         out[1] = crate::dsp::gain::soft_limit(out[1] * master_volume);
+    }
+    {
+        static MASTER_INPUT_LOG_SEQ: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let process_seq = MASTER_INPUT_LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if crate::forensic_trace::forensic_trace_enabled() || process_seq.is_multiple_of(30) {
+            let mut peak_l = 0.0f32;
+            let mut peak_r = 0.0f32;
+            for i in 0..frames {
+                let frame = &output[i * channels..i * channels + channels];
+                peak_l = peak_l.max(frame[0].abs());
+                peak_r = peak_r.max(frame[1].abs());
+            }
+            eprintln!(
+                "[MASTER INPUT]\nprocess_seq={process_seq}\nnum_child_channels_summed={child_channels_summed}\nmaster_peak_l={peak_l:.6}\nmaster_peak_r={peak_r:.6}\naudio_device_write_peak_l={peak_l:.6}\naudio_device_write_peak_r={peak_r:.6}"
+            );
+            if child_channels_summed > 0 && peak_l.max(peak_r) <= 0.0001 {
+                eprintln!(
+                    "[ROUTING ERROR]\nprocess_seq={process_seq}\nreason=child mixer channels had signal but master/audio device output is zero"
+                );
+            }
+        }
     }
 
     frames as u64
@@ -1220,12 +1287,51 @@ pub(crate) fn apply_external_bridge_insert_block(
         insert.scratch_l.resize(frames, 0.0);
         insert.scratch_r.resize(frames, 0.0);
     }
-    let got = sink.read_output_for_channels(
-        &mut insert.scratch_l[..frames],
-        &mut insert.scratch_r[..frames],
-        frames,
-        &insert.bridge_enabled_output_channels,
-    );
+    let got = if insert.vsti_output_children.is_empty() {
+        // Default single-track path (unchanged): fold the selected channels into
+        // this track's stereo.
+        sink.read_output_for_channels(
+            &mut insert.scratch_l[..frames],
+            &mut insert.scratch_r[..frames],
+            frames,
+            &insert.bridge_enabled_output_channels,
+        )
+    } else {
+        // Multi-out path: ONE freshness-guarded read of the whole plugin block
+        // into `scratch_multi` (a second sink read would see the guard return
+        // 0). Every active VST3 output bus routes to an explicit child mixer
+        // track, including bus 0. With explicit children present the parent
+        // instrument track does not receive a fallback downmix.
+        const MAX_BRIDGE_CHANNELS: usize = 32;
+        let channels = (sink.plugin_output_channels() as usize).clamp(1, MAX_BRIDGE_CHANNELS);
+        let needed = frames * channels;
+        insert.scratch_multi.resize(needed, 0.0);
+        let (got, channels) =
+            sink.read_output_multichannel(&mut insert.scratch_multi[..needed], frames);
+        let _ = channels;
+        insert.scratch_l[..got].fill(0.0);
+        insert.scratch_r[..got].fill(0.0);
+        got
+    };
+
+    // Multi-out diagnostic: which plugin output channels actually carry signal
+    // this block, and which the engine is folding. Tells separate-out silence
+    // apart from "the plugin only writes its main bus" without a debugger.
+    // `FUTUREBOARD_PLUGIN_BRIDGE_DEBUG=1`, throttled to ~every 256 blocks.
+    if bridge_debug_enabled() && got > 0 {
+        static MULTIOUT_PEAK_LOG: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        if MULTIOUT_PEAK_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 256 == 0 {
+            let mut ch_peaks = [0.0f32; 32];
+            for (i, peak) in ch_peaks.iter_mut().enumerate() {
+                *peak = sink.output_channel_peak((i as u8) + 1);
+            }
+            eprintln!(
+                "[Bridge] multiout instance={} enabled_channels={:?} channel_peaks={:?}",
+                insert.id, insert.bridge_enabled_output_channels, ch_peaks
+            );
+        }
+    }
 
     // Missed-deadline accounting: `read_output` returns 0 when the host has
     // not produced a fresh block (its service thread is stalled behind an
@@ -1337,6 +1443,252 @@ pub(crate) fn apply_external_bridge_insert_block(
         );
     }
     sink.request_block(frames as u32);
+}
+
+/// Multi-out (Slice 2): after a bridged instrument's chain has run and read the
+/// full plugin block into each insert's `scratch_multi`, scatter every child
+/// route's channel pair into the destination "Out Ch" track's receive buffer.
+/// The dest tracks are routing-style and process in pass 2, so by the time they
+/// run their `recv_*` already holds the demuxed pair. No-op (cheap bail) for the
+/// overwhelmingly common case of a track with no multi-out children.
+///
+/// Children read the *raw* plugin output (pre the instrument track's fader), so
+/// each child strip is independently mixable — exactly the multi-out contract.
+#[inline]
+fn track_has_master_route(runtime: &RuntimeProject, track_index: usize) -> bool {
+    let mut current = track_index;
+    for _ in 0..runtime.tracks.len().saturating_add(1) {
+        let Some(track) = runtime.tracks.get(current) else {
+            return false;
+        };
+        let Some(next) = track.output_track_index else {
+            return true;
+        };
+        if next >= runtime.tracks.len() || next == current {
+            return true;
+        }
+        if !is_routing_type(&runtime.tracks[next].track_type) {
+            return true;
+        }
+        current = next;
+    }
+    false
+}
+
+#[inline]
+fn add_bus_pair_to_master_output(
+    scratch: &[f32],
+    scratch_channels: usize,
+    ch_l: usize,
+    ch_r: usize,
+    frames: usize,
+    output: &mut [f32],
+    output_channels: usize,
+) {
+    if output_channels < 2 || scratch_channels == 0 {
+        return;
+    }
+    let n = frames
+        .min(scratch.len() / scratch_channels)
+        .min(output.len() / output_channels);
+    for i in 0..n {
+        let base = i * scratch_channels;
+        let out = &mut output[i * output_channels..i * output_channels + output_channels];
+        out[0] += scratch[base + ch_l - 1];
+        out[1] += scratch[base + ch_r - 1];
+    }
+}
+
+pub(crate) fn scatter_vsti_output_children(
+    runtime: &mut RuntimeProject,
+    source_track_index: usize,
+    frames: usize,
+    output: &mut [f32],
+    output_channels: usize,
+) {
+    if frames == 0 || source_track_index >= runtime.tracks.len() {
+        return;
+    }
+    let insert_count = runtime.tracks[source_track_index].inserts.len();
+    for ins in 0..insert_count {
+        let child_count = runtime.tracks[source_track_index].inserts[ins]
+            .vsti_output_children
+            .len();
+        if child_count == 0 {
+            continue;
+        }
+        // `scratch_multi` is sized to exactly `frames * channels` by the read
+        // above, so the channel stride is recoverable here without extra state.
+        let channels = {
+            let len = runtime.tracks[source_track_index].inserts[ins]
+                .scratch_multi
+                .len();
+            if len == 0 {
+                continue;
+            }
+            len / frames
+        };
+        if channels == 0 {
+            continue;
+        }
+        for c in 0..child_count {
+            let (dest_idx, ch_l, ch_r, bus_index, channel_count, dest_track_id, insert_id) = {
+                let child =
+                    &runtime.tracks[source_track_index].inserts[ins].vsti_output_children[c];
+                let ch_l = child.channel_l as usize;
+                let ch_r = child.channel_r as usize;
+                if !(1..=channels).contains(&ch_l) || !(1..=channels).contains(&ch_r) {
+                    continue;
+                }
+                (
+                    child.dest_track_index,
+                    ch_l,
+                    ch_r,
+                    child.bus_index,
+                    child.channel_count,
+                    child.dest_track_id.clone(),
+                    runtime.tracks[source_track_index].inserts[ins].id.clone(),
+                )
+            };
+            let scratch_len = runtime.tracks[source_track_index].inserts[ins]
+                .scratch_multi
+                .len();
+            let n = frames.min(scratch_len / channels);
+            if n == 0 {
+                continue;
+            }
+            let mut source_peak_l = 0.0f32;
+            let mut source_peak_r = 0.0f32;
+            let mut sum_l = 0.0f64;
+            let mut sum_r = 0.0f64;
+            {
+                let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
+                for i in 0..n {
+                    let base = i * channels;
+                    let l = scratch[base + ch_l - 1];
+                    let r = scratch[base + ch_r - 1];
+                    source_peak_l = source_peak_l.max(l.abs());
+                    source_peak_r = source_peak_r.max(r.abs());
+                    sum_l += (l as f64) * (l as f64);
+                    sum_r += (r as f64) * (r as f64);
+                }
+            }
+            let nonzero = source_peak_l.max(source_peak_r) > 0.0001;
+            let process_seq = {
+                static BUS_AUDIO_ROUTE_SEQ: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                BUS_AUDIO_ROUTE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            };
+            let route_log = crate::forensic_trace::forensic_trace_enabled()
+                || process_seq.is_multiple_of(30)
+                || nonzero;
+            if route_log {
+                let rms_l = (sum_l / n as f64).sqrt();
+                let rms_r = (sum_r / n as f64).sqrt();
+                eprintln!(
+                    "[VSTI PROCESS OUT]\nplugin_instance_id={insert_id}\nplugin_name={insert_id}\nprocess_seq={process_seq}\nbus_index={bus_index}\nchannel_count={channel_count}\npeak_l={source_peak_l:.6}\npeak_r={source_peak_r:.6}\nrms_l={rms_l:.6}\nrms_r={rms_r:.6}\nnonzero={nonzero}"
+                );
+            }
+            let Some(dest_idx) = dest_idx else {
+                if nonzero {
+                    let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
+                    add_bus_pair_to_master_output(
+                        scratch,
+                        channels,
+                        ch_l,
+                        ch_r,
+                        frames,
+                        output,
+                        output_channels,
+                    );
+                    eprintln!(
+                        "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=destination mixer channel does not exist\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
+                    );
+                }
+                if route_log {
+                    eprintln!(
+                        "[BUS TO MIXER WRITE]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nsource_peak_l={source_peak_l:.6}\nsource_peak_r={source_peak_r:.6}\ndestination_mixer_channel_id={dest_track_id}\ndestination_exists=false\nsamples_written=false\nwrite_peak_l=0.000000\nwrite_peak_r=0.000000"
+                    );
+                }
+                continue;
+            };
+            if dest_idx >= runtime.tracks.len() || dest_idx == source_track_index {
+                if nonzero {
+                    let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
+                    add_bus_pair_to_master_output(
+                        scratch,
+                        channels,
+                        ch_l,
+                        ch_r,
+                        frames,
+                        output,
+                        output_channels,
+                    );
+                    eprintln!(
+                        "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=stale mixer channel index\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
+                    );
+                }
+                continue;
+            }
+            let route_to_master_exists = track_has_master_route(runtime, dest_idx);
+            let (write_peak_l, write_peak_r, mute, solo, gain) = {
+                let (src_track, dst_track) =
+                    two_mut(&mut runtime.tracks, source_track_index, dest_idx);
+                let scratch = &src_track.inserts[ins].scratch_multi;
+                let n = n.min(dst_track.recv_l.len()).min(dst_track.recv_r.len());
+                for i in 0..n {
+                    let base = i * channels;
+                    dst_track.recv_l[i] += scratch[base + ch_l - 1];
+                    dst_track.recv_r[i] += scratch[base + ch_r - 1];
+                }
+                let write_peak_l = dst_track.recv_l[..n]
+                    .iter()
+                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+                let write_peak_r = dst_track.recv_r[..n]
+                    .iter()
+                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+                (
+                    write_peak_l,
+                    write_peak_r,
+                    dst_track.muted,
+                    dst_track.solo,
+                    dst_track.volume,
+                )
+            };
+            if route_log {
+                eprintln!(
+                    "[BUS TO MIXER WRITE]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nsource_peak_l={source_peak_l:.6}\nsource_peak_r={source_peak_r:.6}\ndestination_mixer_channel_id={dest_track_id}\ndestination_exists=true\nsamples_written={}\nwrite_peak_l={write_peak_l:.6}\nwrite_peak_r={write_peak_r:.6}",
+                    write_peak_l.max(write_peak_r) > 0.0001
+                );
+                eprintln!(
+                    "[MIXER CHANNEL AFTER STRIP]\nmixer_channel_id={dest_track_id}\nroute_node_id={dest_track_id}\nbus_index={bus_index}\nmute={mute}\nsolo={solo}\ngain={gain:.6}\npost_strip_peak_l={write_peak_l:.6}\npost_strip_peak_r={write_peak_r:.6}\nroute_to_master_exists={route_to_master_exists}"
+                );
+            }
+            if nonzero && !route_to_master_exists {
+                let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
+                add_bus_pair_to_master_output(
+                    scratch,
+                    channels,
+                    ch_l,
+                    ch_r,
+                    frames,
+                    output,
+                    output_channels,
+                );
+                eprintln!(
+                    "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=destination mixer channel has no route to master\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
+                );
+            }
+            if route_log && nonzero {
+                let rms_l = (sum_l / n as f64).sqrt();
+                let rms_r = (sum_r / n as f64).sqrt();
+                eprintln!(
+                    "[BUS AUDIO ROUTE]\nprocess_seq={process_seq}\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nsource_processdata_output_index={bus_index}\nsource_channel_count={channel_count}\ndestination_mixer_channel_id={dest_track_id}\npeak_l={source_peak_l:.6}\npeak_r={source_peak_r:.6}\nrms_l={rms_l:.6}\nrms_r={rms_r:.6}\ncopied_to_parent_track=false\nfallback_downmix={}",
+                    !route_to_master_exists
+                );
+            }
+        }
+    }
 }
 
 #[inline]

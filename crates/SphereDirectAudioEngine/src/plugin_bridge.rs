@@ -53,6 +53,21 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
         0.0
     }
 
+    /// Multi-out (Slice 1): read the fresh block as raw interleaved samples
+    /// (`out_interleaved` laid out `[frame0_ch0, frame0_ch1, …]`). Returns
+    /// `(frames_written, channels)`. Consumes the freshness guard exactly like
+    /// [`Self::read_output`] — the caller reads ONCE per block, then folds the
+    /// main pair and scatters the child pairs from the same buffer (a second
+    /// sink read would see the guard return 0). Default sinks have no
+    /// multichannel layout, so they report 0 frames / 0 channels.
+    fn read_output_multichannel(
+        &self,
+        _out_interleaved: &mut [f32],
+        _frames: usize,
+    ) -> (usize, usize) {
+        (0, 0)
+    }
+
     /// Push one MIDI event for the host to apply to the next block (Stage 4 clip
     /// playback / automation). Wait-free ring push; dropped if the ring is full.
     fn push_midi(&self, status: u8, data1: u8, data2: u8, sample_offset: u32);

@@ -101,6 +101,19 @@ impl PluginBridgeSink for SharedRegionSink {
         frames: usize,
         enabled_channels: &[u8],
     ) -> usize {
+        // The bare main pair `[1, 2]` is the forced default the UI can never
+        // deselect — it means "no explicit multi-out routing", not "Master
+        // only". Multi-out instruments (e.g. Addictive Drums 2 in separate-out
+        // mode) move their audio OFF the main bus onto aux buses and leave 1/2
+        // silent, so folding only `[1, 2]` yields silence. Treat the bare
+        // default like an empty selection and fold every reported channel (the
+        // `1111453a` "keep unsynced multi-outs audible" intent). An explicit
+        // selection that adds aux channels is `!= [1, 2]` and is still honored.
+        let enabled_channels: &[u8] = if matches!(enabled_channels, [1, 2]) {
+            &[]
+        } else {
+            enabled_channels
+        };
         let bridge = self.region.bridge();
         // Freshness guard: only hand a produced block to the engine once. When
         // the host misses its deadline (editor open/close or plugin load holds
@@ -134,6 +147,44 @@ impl PluginBridgeSink for SharedRegionSink {
             self.output_channel_peaks[index].store(f32_store(peak), Ordering::Relaxed);
         }
         read
+    }
+
+    fn read_output_multichannel(
+        &self,
+        out_interleaved: &mut [f32],
+        frames: usize,
+    ) -> (usize, usize) {
+        let bridge = self.region.bridge();
+        // Same freshness guard as `read_output_for_channels`: hand a produced
+        // block to the engine exactly once. The caller folds the main pair and
+        // scatters child pairs from this single read.
+        let done = bridge.done_seq.load(Ordering::Acquire);
+        if done == self.last_read_seq.load(Ordering::Relaxed) {
+            return (0, 0);
+        }
+        self.last_read_seq.store(done, Ordering::Relaxed);
+        let channels = bridge.plugin_output_channels().min(MAX_CHANNELS as u32) as usize;
+        let frames = frames.min(crate::audio_bridge::MAX_BLOCK_FRAMES);
+        let len = (frames * channels).min(out_interleaved.len());
+        // SAFETY: the engine owns `audio_out` while it holds the block.
+        unsafe {
+            bridge.audio_out.read_interleaved(out_interleaved, len);
+        }
+        // Refresh per-channel meter peaks for the same fresh block so the mixer
+        // sub-strips stay live (the fold read path is skipped in multi-out mode).
+        for ch in 0..channels.min(MAX_CHANNELS) {
+            let mut peak = 0.0f32;
+            let mut i = ch;
+            while i < len {
+                peak = peak.max(out_interleaved[i].abs());
+                i += channels;
+            }
+            self.output_channel_peaks[ch].store(f32_store(peak), Ordering::Relaxed);
+        }
+        for ch in channels..MAX_CHANNELS {
+            self.output_channel_peaks[ch].store(f32_store(0.0), Ordering::Relaxed);
+        }
+        (frames, channels)
     }
 
     fn output_channel_peak(&self, channel: u8) -> f32 {
@@ -300,6 +351,75 @@ mod tests {
         assert_eq!(ev.data1, 60);
         assert_eq!(ev.data2, 100);
         assert_eq!(ev.sample_offset, 7);
+    }
+
+    /// The bare default `[1, 2]` selection must behave like "fold all" so a
+    /// multi-out instrument that silences its main bus (audio on aux channels)
+    /// stays audible. Regression guard for the AD2 separate-out silence.
+    #[test]
+    fn sink_bare_main_pair_folds_all_channels() {
+        let region = Arc::new(SharedAudioRegion::new_in_process());
+        region.bridge().init_header(48_000, 256, 4);
+        region.bridge().set_plugin_output_channels(4);
+        let sink = SharedRegionSink::new(region.clone());
+
+        // Main bus (ch 1/2) silent; aux bus (ch 3/4) carries the signal.
+        let frames = 2usize;
+        let interleaved = [
+            0.0f32, 0.0, 1.0, 2.0, // frame 0
+            0.0, 0.0, 3.0, 4.0, // frame 1
+        ];
+        // SAFETY: single-threaded test; no concurrent reader.
+        unsafe { region.bridge().audio_out.write_interleaved(&interleaved) };
+        region.bridge().done_seq.store(1, Ordering::Release);
+
+        let mut out_l = [0.0f32; 2];
+        let mut out_r = [0.0f32; 2];
+        let got = sink.read_output_for_channels(&mut out_l, &mut out_r, frames, &[1, 2]);
+        assert_eq!(got, frames);
+        // [1,2] is treated as "fold all": the aux pair is mixed in at pair gain,
+        // so the output is non-silent even though the main bus is silent.
+        assert!(
+            out_l[0] > 0.0,
+            "aux channel must reach L (got {})",
+            out_l[0]
+        );
+        assert!(
+            out_r[0] > 0.0,
+            "aux channel must reach R (got {})",
+            out_r[0]
+        );
+    }
+
+    /// The multichannel read returns the raw interleaved block once (frames,
+    /// channels) and obeys the freshness guard — the foundation for multi-out
+    /// fold + scatter from a single read.
+    #[test]
+    fn sink_read_output_multichannel_once_per_block() {
+        let region = Arc::new(SharedAudioRegion::new_in_process());
+        region.bridge().init_header(48_000, 256, 4);
+        region.bridge().set_plugin_output_channels(4);
+        let sink = SharedRegionSink::new(region.clone());
+
+        let frames = 2usize;
+        let interleaved = [
+            0.0f32, 0.0, 1.0, 2.0, // frame 0: main silent, aux loud
+            0.0, 0.0, 3.0, 4.0, // frame 1
+        ];
+        // SAFETY: single-threaded test; no concurrent reader.
+        unsafe { region.bridge().audio_out.write_interleaved(&interleaved) };
+        region.bridge().done_seq.store(1, Ordering::Release);
+
+        let mut out = [0.0f32; 8];
+        let (got_frames, got_channels) = sink.read_output_multichannel(&mut out, frames);
+        assert_eq!((got_frames, got_channels), (frames, 4));
+        assert_eq!(&out[..8], &interleaved[..8]);
+        // Per-channel meter peaks updated from the same block.
+        assert_eq!(sink.output_channel_peak(3), 3.0); // ch3 max(1,3)
+        assert_eq!(sink.output_channel_peak(4), 4.0); // ch4 max(2,4)
+                                                      // Freshness guard: the same block is not handed out twice.
+        let again = sink.read_output_multichannel(&mut out, frames);
+        assert_eq!(again, (0, 0));
     }
 
     #[test]

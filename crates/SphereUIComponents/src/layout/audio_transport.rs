@@ -118,6 +118,13 @@ pub(crate) struct AudioBridgeState {
     pub sync_in_flight: bool,
     /// Queued when media/project changes during an in-flight sync.
     pub sync_pending: bool,
+    /// Preserves force=true for a pending sync queued behind an in-flight sync.
+    pub sync_pending_force: bool,
+    /// Monotonic UI-side route graph publication version for diagnostics.
+    pub route_graph_version: u64,
+    pub route_graph_in_flight_version: u64,
+    pub route_graph_in_flight_child_channels: usize,
+    pub route_graph_in_flight_master_routes: usize,
     /// Start transport once the current background sync completes.
     pub play_after_sync: bool,
 }
@@ -134,6 +141,11 @@ impl Default for AudioBridgeState {
             media_dirty: true,
             sync_in_flight: false,
             sync_pending: false,
+            sync_pending_force: false,
+            route_graph_version: 0,
+            route_graph_in_flight_version: 0,
+            route_graph_in_flight_child_channels: 0,
+            route_graph_in_flight_master_routes: 0,
             play_after_sync: false,
         }
     }
@@ -697,6 +709,29 @@ impl StudioLayout {
                 {
                     let next_l = track_meter.peak_l.clamp(0.0, 1.0) as f32;
                     let next_r = track_meter.peak_r.clamp(0.0, 1.0) as f32;
+                    if crate::forensic_trace::forensic_trace_enabled()
+                        && track.id.starts_with("vsti-out:")
+                        && next_l.max(next_r) > 0.0001
+                    {
+                        let bus_index = track
+                            .id
+                            .rsplit_once(":bus:")
+                            .and_then(|(_, bus)| bus.parse::<u8>().ok())
+                            .unwrap_or(0);
+                        let plugin_instance_id = track
+                            .id
+                            .strip_prefix("vsti-out:")
+                            .and_then(|rest| rest.split_once(":bus:").map(|(plugin, _)| plugin))
+                            .unwrap_or("");
+                        eprintln!(
+                            "[METER PUBLISH]\naudio_callback_seq=0\nplugin_instance_id={plugin_instance_id}\nbus_index={bus_index}\nmixer_channel_id={}\npeak_l={:.6}\npeak_r={:.6}\nrms_l={:.6}\nrms_r={:.6}\nsubscriber_count=1",
+                            track.id,
+                            track_meter.peak_l,
+                            track_meter.peak_r,
+                            track_meter.rms_l,
+                            track_meter.rms_r
+                        );
+                    }
                     changed |= smooth_meter_value(&mut track.meter_level_l, next_l);
                     changed |= smooth_meter_value(&mut track.meter_level_r, next_r);
                     update_meter_hold(&mut track.meter_peak_hold_l, track.meter_level_l);
@@ -730,7 +765,7 @@ impl StudioLayout {
         });
         let mut live_keys = std::collections::HashSet::new();
         for meter in plugin_output_meters {
-            let channel = meter.channel.clamp(1, 16) as u8;
+            let channel = meter.channel.clamp(1, 32) as u8;
             let key = vsti_output_meter_key(&meter.track_id, &meter.insert_id, channel);
             live_keys.insert(key.clone());
             let entry = self
@@ -739,6 +774,22 @@ impl StudioLayout {
                 .entry(key)
                 .or_insert_with(VstiOutputMeterState::default);
             let next = meter.peak.clamp(0.0, 1.0) as f32;
+            if crate::forensic_trace::forensic_trace_enabled() && next > 0.0001 {
+                let bus_index = (channel.saturating_sub(1)) / 2;
+                let mixer_channel_id =
+                    crate::components::timeline::timeline_state::vsti_output_child_track_id(
+                        &meter.insert_id,
+                        bus_index,
+                    );
+                eprintln!(
+                    "[METER PUBLISH]\naudio_callback_seq=0\nplugin_instance_id={}\nbus_index={}\nmixer_channel_id={}\npeak_l={:.6}\npeak_r={:.6}\nrms_l=0.000000\nrms_r=0.000000\nsubscriber_count=1",
+                    meter.insert_id,
+                    bus_index,
+                    mixer_channel_id,
+                    meter.peak,
+                    meter.peak
+                );
+            }
             changed |= smooth_meter_value(&mut entry.level, next);
             update_meter_hold(&mut entry.peak_hold, entry.level);
             update_meter_clip(&mut entry.clip, meter.peak, meter.peak, entry.peak_hold);
@@ -777,6 +828,10 @@ impl StudioLayout {
 
         if self.audio_bridge.sync_in_flight {
             self.audio_bridge.sync_pending = true;
+            self.audio_bridge.sync_pending_force |= force;
+            if force {
+                self.audio_bridge.project_dirty = true;
+            }
             self.queue_background_task(
                 "native-sync-pending",
                 crate::components::BackgroundTaskKind::NativeSync,
@@ -791,6 +846,7 @@ impl StudioLayout {
         }
 
         let sample_rate = self.current_audio_sample_rate();
+        let graph_version_before = self.audio_bridge.route_graph_version;
         let project_root = self
             .project_folder
             .as_ref()
@@ -838,6 +894,25 @@ impl StudioLayout {
         }
 
         self.audio_bridge.sync_in_flight = true;
+        self.audio_bridge.route_graph_version =
+            self.audio_bridge.route_graph_version.saturating_add(1);
+        let graph_version_after = self.audio_bridge.route_graph_version;
+        let num_plugin_child_channels = snapshot
+            .tracks
+            .iter()
+            .filter(|track| track.id.starts_with("vsti-out:"))
+            .count();
+        let num_routes_to_master = snapshot
+            .tracks
+            .iter()
+            .filter(|track| track.id.starts_with("vsti-out:") && track.output_track_id.is_none())
+            .count();
+        self.audio_bridge.route_graph_in_flight_version = graph_version_after;
+        self.audio_bridge.route_graph_in_flight_child_channels = num_plugin_child_channels;
+        self.audio_bridge.route_graph_in_flight_master_routes = num_routes_to_master;
+        eprintln!(
+            "[ROUTE GRAPH REBUILD]\nreason={reason}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nnum_plugin_child_channels={num_plugin_child_channels}\nnum_routes_to_master={num_routes_to_master}\npublished_to_audio_thread=false"
+        );
         self.start_background_task(
             "native-sync",
             crate::components::BackgroundTaskKind::NativeSync,
@@ -879,11 +954,23 @@ impl StudioLayout {
         signature: String,
     ) {
         self.audio_bridge.sync_in_flight = false;
+        let pending_sync_queued = self.audio_bridge.sync_pending;
         match result {
             Ok(()) => {
+                eprintln!(
+                    "[ROUTE GRAPH REBUILD]\nreason=audio_project_sync_complete\ngraph_version_before={}\ngraph_version_after={}\nnum_plugin_child_channels={}\nnum_routes_to_master={}\npublished_to_audio_thread=true",
+                    self.audio_bridge
+                        .route_graph_in_flight_version
+                        .saturating_sub(1),
+                    self.audio_bridge.route_graph_in_flight_version,
+                    self.audio_bridge.route_graph_in_flight_child_channels,
+                    self.audio_bridge.route_graph_in_flight_master_routes
+                );
                 self.audio_bridge.last_project_signature = Some(signature);
-                self.audio_bridge.project_dirty = false;
-                self.audio_bridge.media_dirty = false;
+                if !pending_sync_queued {
+                    self.audio_bridge.project_dirty = false;
+                    self.audio_bridge.media_dirty = false;
+                }
                 self.audio_bridge.last_error = None;
                 self.complete_background_task(
                     "native-sync",
@@ -896,8 +983,10 @@ impl StudioLayout {
                 eprintln!("[audio] load_project failed: {error}");
                 self.fail_background_task("native-sync", error.to_string());
                 // Clear dirty so a failed decode does not retry every poll tick.
-                self.audio_bridge.project_dirty = false;
-                self.audio_bridge.media_dirty = false;
+                if !pending_sync_queued {
+                    self.audio_bridge.project_dirty = false;
+                    self.audio_bridge.media_dirty = false;
+                }
             }
         }
 
@@ -914,9 +1003,11 @@ impl StudioLayout {
         }
 
         let pending_sync = self.audio_bridge.sync_pending;
+        let pending_force = self.audio_bridge.sync_pending_force;
         self.audio_bridge.sync_pending = false;
+        self.audio_bridge.sync_pending_force = false;
         if pending_sync {
-            self.schedule_audio_project_sync(cx, false, "audio_sync_pending");
+            self.schedule_audio_project_sync(cx, pending_force, "audio_sync_pending");
             return;
         }
 

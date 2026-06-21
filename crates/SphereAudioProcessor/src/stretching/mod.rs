@@ -128,7 +128,10 @@ mod tests {
     #[test]
     fn semitone_pitch_ratio_helpers_roundtrip() {
         approx(semitone_to_pitch_ratio(12.0, 0.0), 2.0);
-        approx(semitone_to_pitch_ratio(0.0, 100.0), 2.0_f32.powf(1.0 / 12.0));
+        approx(
+            semitone_to_pitch_ratio(0.0, 100.0),
+            2.0_f32.powf(1.0 / 12.0),
+        );
         let (semi, cents) = pitch_ratio_to_semitone_cents(2.0);
         approx(semi, 12.0);
         approx(cents, 0.0);

@@ -765,46 +765,64 @@ impl StudioLayout {
 
     fn toggle_insert_output_channel_cb(&self, owner: Entity<Self>) -> InsertOutputChannelCb {
         Arc::new(
-            move |(track_id, insert_id, channel, enabled): &(String, String, u8, bool),
-                  _w,
-                  cx| {
+            move |(track_id, insert_id, channel, enabled): &(String, String, u8, bool), _w, cx| {
                 let track_id = track_id.clone();
                 let insert_id = insert_id.clone();
                 let channel = *channel;
                 let enabled = *enabled;
                 StudioLayout::defer_update(&owner, cx, move |this, cx| {
                     let changed = this.timeline.update(cx, |timeline, cx| {
-                        let Some(slots) = timeline.state.insert_slots_mut(&track_id) else {
-                            return false;
-                        };
-                        let Some(slot) = slots.iter_mut().find(|slot| slot.id == insert_id) else {
-                            return false;
-                        };
+                        let ensure_args: Option<(String, u32)> = {
+                            let Some(slots) = timeline.state.insert_slots_mut(&track_id) else {
+                                return false;
+                            };
+                            let Some(slot) = slots.iter_mut().find(|slot| slot.id == insert_id)
+                            else {
+                                return false;
+                            };
 
-                        let mut channels = if slot.enabled_audio_output_channels.is_empty() {
-                            vec![1, 2]
-                        } else {
-                            slot.enabled_audio_output_channels.clone()
-                        };
-                        if enabled {
-                            channels.push(channel);
-                        } else if channel > 2 {
-                            channels.retain(|ch| *ch != channel);
-                        }
-                        if !channels.contains(&1) {
-                            channels.push(1);
-                        }
-                        if !channels.contains(&2) {
-                            channels.push(2);
-                        }
-                        channels.retain(|ch| (1..=16).contains(ch));
-                        channels.sort_unstable();
-                        channels.dedup();
+                            let mut channels = if slot.enabled_audio_output_channels.is_empty() {
+                                vec![1, 2]
+                            } else {
+                                slot.enabled_audio_output_channels.clone()
+                            };
+                            if enabled {
+                                channels.push(channel);
+                            } else if channel > 2 {
+                                channels.retain(|ch| *ch != channel);
+                            }
+                            if !channels.contains(&1) {
+                                channels.push(1);
+                            }
+                            if !channels.contains(&2) {
+                                channels.push(2);
+                            }
+                            channels.retain(|ch| (1..=32).contains(ch));
+                            channels.sort_unstable();
+                            channels.dedup();
 
-                        if slot.enabled_audio_output_channels == channels {
+                            if slot.enabled_audio_output_channels == channels {
+                                return false;
+                            }
+                            slot.enabled_audio_output_channels = channels;
+                            let plugin_name = slot.display_name.clone();
+                            let output_channels =
+                                slot.enabled_audio_output_channels
+                                    .iter()
+                                    .copied()
+                                    .max()
+                                    .unwrap_or(2) as u32;
+                            Some((plugin_name, output_channels))
+                        };
+                        let Some((plugin_name, output_channels)) = ensure_args else {
                             return false;
-                        }
-                        slot.enabled_audio_output_channels = channels;
+                        };
+                        timeline.state.ensure_vsti_output_child_tracks(
+                            &track_id,
+                            &insert_id,
+                            output_channels,
+                            &plugin_name,
+                        );
                         cx.notify();
                         true
                     });
@@ -814,7 +832,11 @@ impl StudioLayout {
                         ));
                         this.mark_dirty();
                         this.audio_bridge.project_dirty = true;
-                        this.schedule_audio_project_sync(cx, false, "inspector_vsti_output_channel");
+                        this.schedule_audio_project_sync(
+                            cx,
+                            false,
+                            "inspector_vsti_output_channel",
+                        );
                         this.push_mixer_snapshot_to_window(cx);
                         cx.notify();
                     }
@@ -1129,7 +1151,7 @@ impl StudioLayout {
             });
             if let Some(engine) = audio_engine.as_ref() {
                 let param = match kind {
-                    TrackToggle::Mute => Some("mute"),
+                    TrackToggle::Mute => Some("muted"),
                     TrackToggle::Solo => Some("solo"),
                     TrackToggle::Arm | TrackToggle::Input => None,
                 };

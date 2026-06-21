@@ -416,12 +416,38 @@ pub struct RuntimeInsert {
     pub bridge_missed_blocks: u32,
     pub scratch_l: Vec<f32>,
     pub scratch_r: Vec<f32>,
+    /// Multi-out (Slice 1): per-channel routes from this bridged instrument's
+    /// output channels to child "Out Ch N" tracks. Empty unless the project
+    /// defines separate-output child strips, so the default single-track fold
+    /// path is unaffected. When non-empty, `apply_external_bridge_insert_block`
+    /// reads the full plugin block once into [`Self::scratch_multi`] and the
+    /// engine scatters each pair into the child track's receive buffer.
+    pub vsti_output_children: Vec<RuntimeVstiOutputChild>,
+    /// Interleaved multi-channel read buffer, sized lazily to `frames * channels`
+    /// only when [`Self::vsti_output_children`] is non-empty (no allocation on
+    /// the default path).
+    pub scratch_multi: Vec<f32>,
+}
+
+/// One multi-out route: a 1-based plugin output channel pair (`channel_l`,
+/// `channel_r`) of a bridged instrument feeding a child "Out Ch" track.
+#[derive(Debug, Clone)]
+pub struct RuntimeVstiOutputChild {
+    pub dest_track_id: String,
+    /// [`Self::dest_track_id`] resolved to a track index at build time
+    /// ([`RuntimeProject::resolve_indices`]); `None` when the track is missing.
+    pub dest_track_index: Option<usize>,
+    pub bus_index: u8,
+    pub channel_count: u8,
+    pub channel_l: u8,
+    pub channel_r: u8,
 }
 
 pub type InsertDspState = AudioPluginDspState;
 
 const DEFAULT_AUDIO_BLOCK_CAPACITY: usize = 8192;
 const ENABLED_AUDIO_OUTPUT_CHANNELS_PARAM: &str = "enabledAudioOutputChannels";
+const MAX_VSTI_OUTPUT_CHANNELS: u64 = 32;
 
 fn bridge_enabled_output_channels_from_params(params: &HashMap<String, Value>) -> Vec<u8> {
     let Some(values) = params
@@ -431,12 +457,12 @@ fn bridge_enabled_output_channels_from_params(params: &HashMap<String, Value>) -
         return Vec::new();
     };
 
-    let mut channels = Vec::with_capacity(values.len().min(16));
+    let mut channels = Vec::with_capacity(values.len().min(MAX_VSTI_OUTPUT_CHANNELS as usize));
     for value in values {
         let Some(channel) = value.as_u64() else {
             continue;
         };
-        if (1..=16).contains(&channel) {
+        if (1..=MAX_VSTI_OUTPUT_CHANNELS).contains(&channel) {
             let channel = channel as u8;
             if !channels.contains(&channel) {
                 channels.push(channel);
@@ -444,6 +470,58 @@ fn bridge_enabled_output_channels_from_params(params: &HashMap<String, Value>) -
         }
     }
     channels
+}
+
+const VSTI_OUTPUT_CHILDREN_PARAM: &str = "vstiOutputChildren";
+
+/// Parse the multi-out child routes from an insert's params. Each entry is
+/// `{ "trackId": "<dest track>", "channelL": <1-32>, "channelR": <1-32> }`.
+/// Absent/empty (the default) → no child routing, so the single-track fold path
+/// is used. The snapshot emits this once the mixer creates child strips.
+fn vsti_output_children_from_params(
+    params: &HashMap<String, Value>,
+) -> Vec<RuntimeVstiOutputChild> {
+    let Some(values) = params
+        .get(VSTI_OUTPUT_CHILDREN_PARAM)
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut children = Vec::with_capacity(values.len().min(MAX_VSTI_OUTPUT_CHANNELS as usize));
+    for value in values {
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let Some(dest_track_id) = obj.get("trackId").and_then(Value::as_str) else {
+            continue;
+        };
+        let channel_l = obj.get("channelL").and_then(Value::as_u64).unwrap_or(0);
+        let channel_r = obj.get("channelR").and_then(Value::as_u64).unwrap_or(0);
+        let bus_index = obj
+            .get("busIndex")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| channel_l.saturating_sub(1) / 2);
+        let channel_count = obj
+            .get("channelCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(2)
+            .clamp(1, MAX_VSTI_OUTPUT_CHANNELS);
+        if !(1..=MAX_VSTI_OUTPUT_CHANNELS).contains(&channel_l)
+            || !(1..=MAX_VSTI_OUTPUT_CHANNELS).contains(&channel_r)
+            || bus_index > MAX_VSTI_OUTPUT_CHANNELS
+        {
+            continue;
+        }
+        children.push(RuntimeVstiOutputChild {
+            dest_track_id: dest_track_id.to_string(),
+            dest_track_index: None, // resolved in resolve_indices
+            bus_index: bus_index as u8,
+            channel_count: channel_count as u8,
+            channel_l: channel_l as u8,
+            channel_r: channel_r as u8,
+        });
+    }
+    children
 }
 
 #[derive(Debug, Clone)]
@@ -719,6 +797,17 @@ impl RuntimeProject {
                     self.tracks.iter().position(|t| &t.id == id)
                 };
                 self.tracks[i].sends[s].return_track_index = target_ix;
+            }
+            // Multi-out (Slice 1): resolve each bridged instrument insert's child
+            // "Out Ch" route destination track. Almost always empty.
+            for n in 0..self.tracks[i].inserts.len() {
+                for c in 0..self.tracks[i].inserts[n].vsti_output_children.len() {
+                    let dest_ix = {
+                        let id = &self.tracks[i].inserts[n].vsti_output_children[c].dest_track_id;
+                        self.tracks.iter().position(|t| &t.id == id)
+                    };
+                    self.tracks[i].inserts[n].vsti_output_children[c].dest_track_index = dest_ix;
+                }
             }
         }
         self.resolve_bridge_sinks();
@@ -1030,6 +1119,10 @@ impl RuntimeProject {
                     bridge_missed_blocks: 0,
                     scratch_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                     scratch_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                    // Populated by the snapshot in a later slice; empty here so
+                    // the default single-track fold path is unchanged.
+                    vsti_output_children: vsti_output_children_from_params(&insert.params),
+                    scratch_multi: Vec::new(),
                 });
             }
 
@@ -2075,7 +2168,9 @@ impl RuntimeProject {
                 let Some(sink) = insert.bridge_sink.as_ref() else {
                     continue;
                 };
-                let channels = sink.plugin_output_channels().clamp(0, 16) as u8;
+                let channels = sink
+                    .plugin_output_channels()
+                    .clamp(0, MAX_VSTI_OUTPUT_CHANNELS as u32) as u8;
                 for channel in 1..=channels {
                     snapshots.push(RuntimePluginOutputMeterSnapshot {
                         track_id: track.id.clone(),
@@ -3463,6 +3558,8 @@ mod midi_tests {
                 bridge_missed_blocks: 0,
                 scratch_l: vec![0.0; 64],
                 scratch_r: vec![0.0; 64],
+                vsti_output_children: Vec::new(),
+                scratch_multi: Vec::new(),
             }],
             sends: Vec::new(),
             automation_lanes: Vec::new(),
@@ -3484,6 +3581,80 @@ mod midi_tests {
             pdc_delay_r: Vec::new(),
             pdc_write_pos: 0,
         }
+    }
+
+    #[test]
+    fn vsti_output_children_scatter_demuxes_channel_pairs() {
+        use crate::engine::scatter_vsti_output_children;
+        let frames = 2usize;
+        let channels = 4usize;
+
+        let mut p = project_with(vec![]);
+        // Source bridged instrument with a child route: plugin ch 3/4 -> "out-3".
+        let mut inst = bridged_instrument_track("track-1");
+        inst.inserts[0].vsti_output_children = vec![RuntimeVstiOutputChild {
+            dest_track_id: "out-3".to_string(),
+            dest_track_index: None,
+            bus_index: 1,
+            channel_count: 2,
+            channel_l: 3,
+            channel_r: 4,
+        }];
+        // Interleaved 4-ch block read by the engine: ch1/2 are bus 0 L/R,
+        // ch3/4 are bus 1 L/R. These are audio channels, not drum-piece names.
+        inst.inserts[0].scratch_multi = vec![
+            10.0, 20.0, 3.0, 4.0, // frame 0
+            11.0, 21.0, 5.0, 6.0, // frame 1
+        ];
+        assert_eq!(inst.inserts[0].scratch_multi.len() / frames, channels);
+        p.tracks.push(inst);
+
+        // Destination "Out Ch" track (routing-style); recv starts zeroed.
+        let mut dest = bridged_instrument_track("out-3");
+        dest.track_type = "bus".to_string();
+        dest.inserts.clear();
+        p.tracks.push(dest);
+
+        p.resolve_indices();
+        let src_idx = p.tracks.iter().position(|t| t.id == "track-1").unwrap();
+        let mut master = vec![0.0f32; frames * 2];
+        scatter_vsti_output_children(&mut p, src_idx, frames, &mut master, 2);
+
+        let dest_idx = p.tracks.iter().position(|t| t.id == "out-3").unwrap();
+        // The child strip received plugin channels 3/4, not the main 1/2.
+        assert_eq!(p.tracks[dest_idx].recv_l[0], 3.0);
+        assert_eq!(p.tracks[dest_idx].recv_r[0], 4.0);
+        assert_eq!(p.tracks[dest_idx].recv_l[1], 5.0);
+        assert_eq!(p.tracks[dest_idx].recv_r[1], 6.0);
+        assert_eq!(master, vec![0.0; frames * 2]);
+    }
+
+    #[test]
+    fn vsti_output_child_missing_destination_falls_back_to_master() {
+        use crate::engine::scatter_vsti_output_children;
+        let frames = 2usize;
+        let mut p = project_with(vec![]);
+        let mut inst = bridged_instrument_track("track-1");
+        inst.inserts[0].vsti_output_children = vec![RuntimeVstiOutputChild {
+            dest_track_id: "missing-out".to_string(),
+            dest_track_index: None,
+            bus_index: 1,
+            channel_count: 2,
+            channel_l: 3,
+            channel_r: 4,
+        }];
+        inst.inserts[0].scratch_multi = vec![
+            0.0, 0.0, 0.25, 0.5, // frame 0
+            0.0, 0.0, 0.75, 1.0, // frame 1
+        ];
+        p.tracks.push(inst);
+        p.resolve_indices();
+
+        let src_idx = p.tracks.iter().position(|t| t.id == "track-1").unwrap();
+        let mut master = vec![0.0f32; frames * 2];
+        scatter_vsti_output_children(&mut p, src_idx, frames, &mut master, 2);
+
+        assert_eq!(master, vec![0.25, 0.5, 0.75, 1.0]);
     }
 
     /// Project with the one-note clip on a bridged instrument track plus a

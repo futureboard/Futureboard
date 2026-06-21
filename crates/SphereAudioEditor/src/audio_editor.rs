@@ -225,21 +225,16 @@ pub fn audio_editor_panel(
             &vm.theme,
         ))
         .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .relative()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .relative()
-                        .w(px(viewport_width))
-                        .h(px(view_h))
-                        .children(grid)
-                        .child(waveform_el)
-                        .children(selection)
-                        .children(playhead),
-                ),
+            div().flex_1().min_h_0().relative().overflow_hidden().child(
+                div()
+                    .relative()
+                    .w(px(viewport_width))
+                    .h(px(view_h))
+                    .children(grid)
+                    .child(waveform_el)
+                    .children(selection)
+                    .children(playhead),
+            ),
         )
 }
 

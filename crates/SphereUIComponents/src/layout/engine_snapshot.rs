@@ -1,7 +1,8 @@
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::timeline::timeline_state::{
-    self, ClipState, ClipType, InsertSlotState, MidiControllerKind, StretchMode, TimelineState,
-    TrackState, TrackType, MASTER_TRACK_ID,
+    self, vsti_output_bus_index_for_channel, vsti_output_child_channels_for_bus,
+    vsti_output_child_track_id, ClipState, ClipType, InsertSlotState, MidiControllerKind,
+    StretchMode, TimelineState, TrackState, TrackType, MASTER_TRACK_ID,
 };
 
 use DAUx::types::{
@@ -243,6 +244,10 @@ fn build_engine_inserts_for(
                     "enabledAudioOutputChannels".to_string(),
                     serde_json::json!(normalized_enabled_audio_outputs(slot)),
                 );
+                params.insert(
+                    "vstiOutputChildren".to_string(),
+                    vsti_output_children_json(slot),
+                );
                 params.insert("bridge".to_string(), serde_json::json!(true));
                 params.insert("role".to_string(), serde_json::json!(role));
 
@@ -296,6 +301,10 @@ fn build_engine_inserts_for(
                 "enabledAudioOutputChannels".to_string(),
                 serde_json::json!(normalized_enabled_audio_outputs(slot)),
             );
+            params.insert(
+                "vstiOutputChildren".to_string(),
+                vsti_output_children_json(slot),
+            );
 
             Some(EngineInsertSnapshot {
                 id: slot.id.clone(),
@@ -328,10 +337,38 @@ fn normalized_enabled_audio_outputs(slot: &InsertSlotState) -> Vec<u8> {
     if !channels.contains(&2) {
         channels.push(2);
     }
-    channels.retain(|channel| (1..=16).contains(channel));
+    channels.retain(|channel| (1..=32).contains(channel));
     channels.sort_unstable();
     channels.dedup();
     channels
+}
+
+fn vsti_output_children_json(slot: &InsertSlotState) -> serde_json::Value {
+    let mut bus_indices: Vec<u8> = normalized_enabled_audio_outputs(slot)
+        .into_iter()
+        .filter_map(vsti_output_bus_index_for_channel)
+        .collect();
+    bus_indices.sort_unstable();
+    bus_indices.dedup();
+    serde_json::Value::Array(
+        bus_indices
+            .into_iter()
+            .map(|bus_index| {
+                let (channel_l, channel_r) = vsti_output_child_channels_for_bus(bus_index);
+                let child_id = vsti_output_child_track_id(&slot.id, bus_index);
+                serde_json::json!({
+                    "trackId": child_id,
+                    "pluginInstanceId": slot.id,
+                    "busIndex": bus_index,
+                    "channelCount": 2,
+                    "channelL": channel_l,
+                    "channelR": channel_r,
+                    "mixerChannelId": child_id,
+                    "routeNodeId": child_id,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn build_engine_inserts(track: &TrackState, export_mode: bool) -> Vec<EngineInsertSnapshot> {
@@ -938,6 +975,83 @@ mod tests {
         );
         assert_eq!(track.inserts[0].id, slot_a);
         assert_eq!(track.inserts[1].id, slot_b);
+    }
+
+    #[test]
+    fn vsti_multiout_children_are_stable_tracks_and_engine_routes() {
+        use crate::components::timeline::timeline_state::{
+            vsti_output_child_track_id, InsertPluginFormat,
+        };
+
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Drums".to_string(),
+            color: gpui::Rgba {
+                r: 0.2,
+                g: 0.3,
+                b: 0.4,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "ad2-class".to_string(),
+            Some(std::path::PathBuf::from(
+                "C:/plugins/Addictive Drums 2.vst3",
+            )),
+            InsertPluginFormat::Vst3,
+            "Addictive Drums 2".to_string(),
+        );
+
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
+        let bus_0_id = vsti_output_child_track_id(&slot, 0);
+        let bus_1_id = vsti_output_child_track_id(&slot, 1);
+        let bus_3_id = vsti_output_child_track_id(&slot, 3);
+        assert!(state.tracks.iter().any(|track| track.id == bus_0_id));
+        assert!(state.tracks.iter().any(|track| track.id == bus_1_id));
+        assert!(state.tracks.iter().any(|track| track.id == bus_3_id));
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let parent = snap
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .expect("parent track");
+        let insert = parent
+            .inserts
+            .iter()
+            .find(|insert| insert.id == slot)
+            .expect("parent insert");
+        let children = insert
+            .params
+            .get("vstiOutputChildren")
+            .and_then(|value| value.as_array())
+            .expect("vsti children");
+        assert_eq!(children.len(), 4);
+        assert!(children.iter().any(|child| {
+            child.get("busIndex").and_then(|v| v.as_u64()) == Some(0)
+                && child.get("trackId").and_then(|v| v.as_str()) == Some(bus_0_id.as_str())
+                && child.get("channelCount").and_then(|v| v.as_u64()) == Some(2)
+                && child.get("channelL").and_then(|v| v.as_u64()) == Some(1)
+                && child.get("channelR").and_then(|v| v.as_u64()) == Some(2)
+        }));
+        assert!(children.iter().any(|child| {
+            child.get("busIndex").and_then(|v| v.as_u64()) == Some(3)
+                && child.get("trackId").and_then(|v| v.as_str()) == Some(bus_3_id.as_str())
+                && child.get("mixerChannelId").and_then(|v| v.as_str()) == Some(bus_3_id.as_str())
+                && child.get("routeNodeId").and_then(|v| v.as_str()) == Some(bus_3_id.as_str())
+                && child.get("channelCount").and_then(|v| v.as_u64()) == Some(2)
+                && child.get("channelL").and_then(|v| v.as_u64()) == Some(7)
+                && child.get("channelR").and_then(|v| v.as_u64()) == Some(8)
+        }));
     }
 
     #[test]

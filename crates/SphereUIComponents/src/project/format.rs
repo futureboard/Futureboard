@@ -885,10 +885,10 @@ fn decode_insert(r: &mut FbReader, version: u32) -> Result<ProjectInsert, Projec
     let bypassed = r.read_bool()?;
     let enabled_audio_output_channels = if version >= 18 {
         let count = r.read_u32()? as usize;
-        let mut channels = Vec::with_capacity(count.min(16));
+        let mut channels = Vec::with_capacity(count.min(32));
         for _ in 0..count {
             let channel = r.read_u8()?;
-            if (1..=16).contains(&channel) && !channels.contains(&channel) {
+            if (1..=32).contains(&channel) && !channels.contains(&channel) {
                 channels.push(channel);
             }
         }

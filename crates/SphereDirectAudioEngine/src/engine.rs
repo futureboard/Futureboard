@@ -3615,6 +3615,8 @@ mod bridge_insert_tests {
                 bridge_missed_blocks: 0,
                 scratch_l: vec![0.0; 8],
                 scratch_r: vec![0.0; 8],
+                vsti_output_children: Vec::new(),
+                scratch_multi: Vec::new(),
             }],
             sends: Vec::new(),
             automation_lanes: Vec::new(),
@@ -3715,6 +3717,8 @@ mod bridge_insert_tests {
             bridge_missed_blocks: 0,
             scratch_l: vec![0.0; 8],
             scratch_r: vec![0.0; 8],
+            vsti_output_children: Vec::new(),
+            scratch_multi: Vec::new(),
         }
     }
 

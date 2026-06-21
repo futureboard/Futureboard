@@ -1,5 +1,26 @@
 use super::*;
 
+pub const VSTI_OUTPUT_CHILD_TRACK_PREFIX: &str = "vsti-out:";
+
+pub fn vsti_output_child_track_id(plugin_instance_id: &str, bus_index: u8) -> String {
+    format!("{VSTI_OUTPUT_CHILD_TRACK_PREFIX}{plugin_instance_id}:bus:{bus_index}")
+}
+
+pub fn is_vsti_output_child_track_id(track_id: &str) -> bool {
+    track_id.starts_with(VSTI_OUTPUT_CHILD_TRACK_PREFIX)
+}
+
+pub fn vsti_output_bus_index_for_channel(channel: u8) -> Option<u8> {
+    (channel > 0).then_some((channel - 1) / 2)
+}
+
+pub fn vsti_output_child_channels_for_bus(bus_index: u8) -> (u8, u8) {
+    (
+        bus_index.saturating_mul(2).saturating_add(1),
+        bus_index.saturating_mul(2).saturating_add(2),
+    )
+}
+
 /// Plugin format identifier mirrored from `project::PluginFormat`. Kept
 /// in the UI state so we can render an icon/badge without depending on
 /// the project crate from render code.
@@ -411,6 +432,9 @@ impl TimelineState {
                 track_id, insert_id, track.instrument_plugin_instance_id
             );
         }
+        let child_prefix = format!("{VSTI_OUTPUT_CHILD_TRACK_PREFIX}{insert_id}:bus:");
+        self.tracks
+            .retain(|track| !track.id.starts_with(&child_prefix));
         if plugin_debug_enabled() {
             eprintln!(
                 "[plugin] remove_insert track={} slot={}",
@@ -460,6 +484,9 @@ impl TimelineState {
         if track.instrument_plugin_instance_id.as_deref() == Some(old_insert_id) {
             track.instrument_plugin_instance_id = None;
         }
+        let child_prefix = format!("{VSTI_OUTPUT_CHILD_TRACK_PREFIX}{old_insert_id}:bus:");
+        self.tracks
+            .retain(|track| !track.id.starts_with(&child_prefix));
         eprintln!(
             "[PluginAdd] replace_insert_with_fresh_slot track={track_id} old={old_insert_id} new={fresh_id}"
         );
@@ -641,18 +668,164 @@ impl TimelineState {
         let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
             return false;
         };
-        if !slot.enabled_audio_output_channels.is_empty() {
+        let mut changed = false;
+        if slot.enabled_audio_output_channels.is_empty() {
+            let output_channels = output_channels.clamp(2, 32) as u8;
+            slot.enabled_audio_output_channels = (1..=output_channels).collect();
+            changed = true;
+            if plugin_debug_enabled() {
+                eprintln!(
+                    "[plugin] auto_enable_outputs track={} slot={} channels={:?}",
+                    track_id, insert_id, slot.enabled_audio_output_channels
+                );
+            }
+        }
+        let plugin_name = slot.display_name.clone();
+        changed |= self.ensure_vsti_output_child_tracks(
+            track_id,
+            insert_id,
+            output_channels,
+            &plugin_name,
+        );
+        changed
+    }
+
+    pub fn ensure_vsti_output_child_tracks(
+        &mut self,
+        parent_track_id: &str,
+        insert_id: &str,
+        output_channels: u32,
+        plugin_name: &str,
+    ) -> bool {
+        let Some(parent_index) = self
+            .tracks
+            .iter()
+            .position(|track| track.id == parent_track_id)
+        else {
             return false;
+        };
+        let Some(slot) = self.tracks[parent_index]
+            .inserts
+            .iter()
+            .find(|slot| slot.id == insert_id)
+        else {
+            return false;
+        };
+        let max_channel = output_channels.clamp(2, 32) as u8;
+        let mut bus_indices: Vec<u8> = slot
+            .enabled_audio_output_channels
+            .iter()
+            .copied()
+            .filter(|channel| *channel <= max_channel)
+            .filter_map(vsti_output_bus_index_for_channel)
+            .collect();
+        bus_indices.sort_unstable();
+        bus_indices.dedup();
+
+        let parent_color = self.tracks[parent_index].color;
+        let parent_id = self.tracks[parent_index].id.clone();
+        let mut changed = false;
+        let expected_ids: std::collections::HashSet<String> = bus_indices
+            .iter()
+            .map(|bus| vsti_output_child_track_id(insert_id, *bus))
+            .collect();
+
+        let before_len = self.tracks.len();
+        self.tracks.retain(|track| {
+            !track
+                .id
+                .strip_prefix(VSTI_OUTPUT_CHILD_TRACK_PREFIX)
+                .is_some_and(|rest| {
+                    rest.strip_prefix(insert_id)
+                        .is_some_and(|suffix| suffix.starts_with(":bus:"))
+                        && !expected_ids.contains(&track.id)
+                })
+        });
+        changed |= self.tracks.len() != before_len;
+
+        let mut insert_at = self
+            .tracks
+            .iter()
+            .position(|track| track.id == parent_id)
+            .map(|idx| idx + 1)
+            .unwrap_or(self.tracks.len());
+        while insert_at < self.tracks.len()
+            && self.tracks[insert_at]
+                .id
+                .strip_prefix(VSTI_OUTPUT_CHILD_TRACK_PREFIX)
+                .is_some_and(|rest| rest.starts_with(insert_id))
+        {
+            insert_at += 1;
         }
-        let output_channels = output_channels.clamp(2, 16) as u8;
-        slot.enabled_audio_output_channels = (1..=output_channels).collect();
-        if plugin_debug_enabled() {
-            eprintln!(
-                "[plugin] auto_enable_outputs track={} slot={} channels={:?}",
-                track_id, insert_id, slot.enabled_audio_output_channels
+
+        if !bus_indices.is_empty() {
+            let mut map_log = format!(
+                "[VSTI BUS TO MIXER CHANNEL MAP]\nplugin_instance_id={insert_id}\nplugin_name={plugin_name}\nparent_track_id={parent_track_id}\n"
             );
+            for bus_index in &bus_indices {
+                let child_id = vsti_output_child_track_id(insert_id, *bus_index);
+                let bus_number = bus_index.saturating_add(1);
+                let bus_name = format!("Out Ch {bus_number}");
+                let strip_label = format!("{plugin_name} {bus_name}");
+                eprintln!(
+                    "[VSTI BUS MODEL]\nplugin_instance_id={insert_id}\nplugin_name={plugin_name}\nbus_index={bus_index}\nvst3_bus_name=\"{bus_name}\"\nchannel_count=2\nspeaker_arrangement=stereo\nhost_channel_labels=L,R\nIMPORTANT_ASSERTION=\"channels_are_audio_channels_not_drum_pieces\""
+                );
+                map_log.push_str(&format!(
+                    "active_output_bus bus_index={bus_index} vst3_bus_name=\"{bus_name}\" channel_count=2 speaker_arrangement=stereo mixer_channel_id={child_id} route_node_id={child_id} strip_view_id={child_id} strip_label=\"{strip_label}\" meter_source_id={child_id} mute_solo_target_id={child_id}\n"
+                ));
+            }
+            eprint!("{map_log}");
         }
-        true
+
+        for bus_index in bus_indices {
+            let child_id = vsti_output_child_track_id(insert_id, bus_index);
+            if self.tracks.iter().any(|track| track.id == child_id) {
+                continue;
+            }
+            let bus_number = bus_index.saturating_add(1);
+            let bus_name = format!("Out Ch {bus_number}");
+            let name = format!("{plugin_name} {bus_name}");
+            let subscription_key = child_id.clone();
+            eprintln!(
+                "[MIXER MULTIOUT STRIP CREATED]\nplugin_instance_id={insert_id}\nplugin_name={plugin_name}\nbus_index={bus_index}\nbus_name=\"{bus_name}\"\nchannel_count=2\nmixer_channel_id={child_id}\nroute_node_id={child_id}\nparent_track_id={parent_track_id}\nsubscription_key={subscription_key}\nmeter_source_id={child_id}\nsolo_mute_target_id={child_id}"
+            );
+            eprintln!(
+                "[CHILD MIXER INIT]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nmixer_channel_id={child_id}\nroute_node_id={child_id}\ninitial_gain=1.000000\ninitial_pan=0.000000\ninitial_mute=false\ninitial_solo=false\nroute_enabled=true\ndefault_destination=master\nroute_to_master_exists=true\nmeter_source_id={child_id}\nstate_inserted_in_central_store=true\naudio_thread_route_published=false"
+            );
+            self.tracks.insert(
+                insert_at,
+                TrackState {
+                    id: child_id,
+                    name,
+                    track_type: TrackType::Bus,
+                    color: parent_color,
+                    volume: volume::db_to_norm(0.0),
+                    volume_effective: volume::db_to_norm(0.0),
+                    volume_automation_read: true,
+                    pan: 0.0,
+                    muted: false,
+                    solo: false,
+                    armed: false,
+                    input_monitor: InputMonitorMode::Off,
+                    meter_level_l: 0.0,
+                    meter_level_r: 0.0,
+                    meter_peak_hold_l: 0.0,
+                    meter_peak_hold_r: 0.0,
+                    meter_clip: false,
+                    clips: Vec::new(),
+                    automation_lanes: Vec::new(),
+                    lane_mode: TrackLaneMode::Clips,
+                    selected_automation_target: None,
+                    inserts: Vec::new(),
+                    instrument_plugin_instance_id: None,
+                    sends: Vec::new(),
+                    routing: TrackRoutingState::for_track_type(TrackType::Bus),
+                },
+            );
+            insert_at += 1;
+            changed = true;
+        }
+        changed
     }
 
     pub fn set_insert_pending_editor_open(

@@ -585,7 +585,7 @@ fn normalized_vsti_output_channels(slot: &InsertSlotState) -> Vec<u8> {
     if !channels.contains(&2) {
         channels.push(2);
     }
-    channels.retain(|channel| (1..=16).contains(channel));
+    channels.retain(|channel| (1..=32).contains(channel));
     channels.sort_unstable();
     channels.dedup();
     channels
@@ -606,7 +606,10 @@ fn vsti_output_label(slot: &InsertSlotState) -> String {
     }
 }
 
-fn vsti_output_selector(slot: &InsertSlotState, callbacks: &InspectorCallbacks) -> impl IntoElement {
+fn vsti_output_selector(
+    slot: &InsertSlotState,
+    callbacks: &InspectorCallbacks,
+) -> impl IntoElement {
     routing_combo_trigger(
         "inspector-vsti-output-combo",
         vsti_output_label(slot),
@@ -661,7 +664,7 @@ fn vsti_output_dropdown(
         |_, _, _| {},
     ));
 
-    for channel in 3u8..=16 {
+    for channel in 3u8..=32 {
         let track_id = track.id.clone();
         let insert_id = slot.id.clone();
         let checked = selected.contains(&channel);
@@ -1423,7 +1426,10 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
 
     if let Some(slot) = slot {
         section = section
-            .child(fb_form_row("VSTi Outputs", vsti_output_selector(slot, callbacks)))
+            .child(fb_form_row(
+                "VSTi Outputs",
+                vsti_output_selector(slot, callbacks),
+            ))
             .child(insert_action_row(
                 &track.id, slot, 0, callbacks, false, false, true,
             ));

@@ -63,6 +63,42 @@ void set_last_error(std::string value) {
   g_last_error = std::move(value);
 }
 
+bool daux_vst3_bus_debug() {
+  static const bool enabled =
+      std::getenv("FUTUREBOARD_PLUGIN_DEBUG") != nullptr ||
+      std::getenv("FUTUREBOARD_PLUGIN_BRIDGE_DEBUG") != nullptr ||
+      std::getenv("FUTUREBOARD_VST3_BUS_DEBUG") != nullptr ||
+      std::getenv("FUTUREBOARD_FORENSIC_TRACE") != nullptr;
+  return enabled;
+}
+
+std::string vst3_tchar_to_utf8(const Steinberg::Vst::TChar* value) {
+  if (!value) return {};
+  std::string out;
+  for (int i = 0; i < 128 && value[i] != 0; ++i) {
+    const auto ch = static_cast<unsigned int>(value[i]);
+    out.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+  }
+  return out;
+}
+
+const char* vst3_bus_type_name(Steinberg::Vst::BusType type) {
+  switch (type) {
+    case Steinberg::Vst::kMain: return "main";
+    case Steinberg::Vst::kAux: return "aux";
+    default: return "unknown";
+  }
+}
+
+struct Vst3BusAudioStats {
+  double peak_l{0.0};
+  double peak_r{0.0};
+  double rms_l{0.0};
+  double rms_r{0.0};
+  int first_non_zero{-1};
+  bool ptr_valid{false};
+};
+
 #ifdef _WIN32
 constexpr const wchar_t* kDauxEditorWindowClass = L"FutureboardDauxVst3EditorWindow";
 constexpr const wchar_t* kDauxEditorChildClass = L"FutureboardDauxVst3EditorAttach";
@@ -542,8 +578,9 @@ void  shutdown_editor_linux(SphereDauxVst3Processor*);
 
 struct SphereDauxVst3Processor {
   static constexpr int kMaxPending = 64;
-  static constexpr int kMaxBridgeChannels = 16;
+  static constexpr int kMaxBridgeChannels = 32;
   static constexpr int kMaxBridgeBuses = 16;
+  static constexpr int kMaxProcessFrames = 8192;
 
   VST3::Hosting::Module::Ptr                        module;
   Steinberg::Vst::HostApplication                   host_context;
@@ -574,6 +611,13 @@ struct SphereDauxVst3Processor {
   int main_audio_output_channel_count{2};
   int bridge_audio_output_channel_count{2};
   std::array<int, kMaxBridgeBuses> audio_output_bus_channel_counts{};
+  std::array<std::string, kMaxBridgeBuses> audio_output_bus_names{};
+  std::array<Steinberg::Vst::BusType, kMaxBridgeBuses> audio_output_bus_types{};
+  std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> audio_output_bus_arrangements{};
+  std::array<bool, kMaxBridgeBuses> audio_output_bus_active_before{};
+  std::array<bool, kMaxBridgeBuses> audio_output_bus_active_after{};
+  std::array<Steinberg::tresult, kMaxBridgeBuses> audio_output_bus_activate_results{};
+  int active_audio_output_bus_count{0};
   bool processing{false};
 
   // Diagnostics
@@ -582,6 +626,7 @@ struct SphereDauxVst3Processor {
   double last_output_peak{0.0};
   double last_difference_peak{0.0};
   bool   first_process_done{false};
+  bool   process_audio_out_logged{false};
 
   // Thread-safe parameter change queue (no dynamic allocation)
   std::array<PendingParam, kMaxPending> pending_buf{};
@@ -689,6 +734,85 @@ struct SphereDauxVst3Processor {
     }
   }
 
+  int output_bus_count_for_process() const {
+    const int reported = std::min(audio_output_bus_count, kMaxBridgeBuses);
+    if (reported <= 0) return 0;
+    const int active = std::min(active_audio_output_bus_count, reported);
+    return active > 0 ? active : reported;
+  }
+
+  int output_bus_channels_for_process(int bus) const {
+    if (bus < 0 || bus >= kMaxBridgeBuses) return 0;
+    int channels = audio_output_bus_channel_counts[bus];
+    if (channels <= 0 && bus == 0) channels = main_audio_output_channel_count;
+    return std::max(0, std::min(channels, kMaxBridgeChannels));
+  }
+
+  static Vst3BusAudioStats compute_bus_stats(
+      const Steinberg::Vst::AudioBusBuffers& bus,
+      int frames) {
+    Vst3BusAudioStats stats{};
+    stats.ptr_valid = bus.numChannels > 0 && bus.channelBuffers32 != nullptr;
+    if (!stats.ptr_valid || frames <= 0) return stats;
+    const float* left = bus.channelBuffers32[0];
+    const float* right = bus.numChannels > 1 ? bus.channelBuffers32[1] : left;
+    stats.ptr_valid = left != nullptr && right != nullptr;
+    if (!stats.ptr_valid) return stats;
+    double sum_l = 0.0;
+    double sum_r = 0.0;
+    for (int i = 0; i < frames; ++i) {
+      const double l = static_cast<double>(left[i]);
+      const double r = static_cast<double>(right[i]);
+      const double abs_l = std::abs(l);
+      const double abs_r = std::abs(r);
+      stats.peak_l = std::max(stats.peak_l, abs_l);
+      stats.peak_r = std::max(stats.peak_r, abs_r);
+      sum_l += l * l;
+      sum_r += r * r;
+      if (stats.first_non_zero < 0 && (abs_l > 0.0000001 || abs_r > 0.0000001)) {
+        stats.first_non_zero = i;
+      }
+    }
+    const double n = static_cast<double>(std::max(frames, 1));
+    stats.rms_l = std::sqrt(sum_l / n);
+    stats.rms_r = std::sqrt(sum_r / n);
+    return stats;
+  }
+
+  void log_process_audio_out_once(
+      int frames,
+      int num_output_buses,
+      const Steinberg::Vst::AudioBusBuffers* output_buses,
+      const Vst3BusAudioStats* stats) {
+    if (process_audio_out_logged && !daux_vst3_bus_debug()) return;
+    process_audio_out_logged = true;
+    std::fprintf(stderr,
+                 "[PROCESS AUDIO OUT]\n"
+                 "block_size=%d\n"
+                 "sample_rate=%.0f\n"
+                 "num_output_buses_passed_to_process=%d\n",
+                 frames,
+                 process_context.sampleRate,
+                 num_output_buses);
+    for (int bus = 0; bus < num_output_buses; ++bus) {
+      const auto& s = stats[bus];
+      const auto silence_flags = output_buses ? output_buses[bus].silenceFlags : 0;
+      std::fprintf(stderr,
+                   "output_bus index=%d channel_count=%d ptr_valid=%d silence_flags=0x%llx "
+                   "peak_l=%.8f peak_r=%.8f rms_l=%.8f rms_r=%.8f "
+                   "first_non_zero_sample_index=%d routed_destination=downmix:fallback\n",
+                   bus,
+                   output_buses ? output_buses[bus].numChannels : 0,
+                   s.ptr_valid ? 1 : 0,
+                   static_cast<unsigned long long>(silence_flags),
+                   s.peak_l,
+                   s.peak_r,
+                   s.rms_l,
+                   s.rms_r,
+                   s.first_non_zero);
+    }
+  }
+
   bool setup(double sample_rate) {
     const double sr = sample_rate > 0.0 ? sample_rate : 44100.0;
 
@@ -732,6 +856,13 @@ struct SphereDauxVst3Processor {
     main_audio_output_channel_count = audio_output_bus_count > 0 ? 2 : 0;
     bridge_audio_output_channel_count = 0;
     audio_output_bus_channel_counts.fill(0);
+    audio_output_bus_names.fill(std::string{});
+    audio_output_bus_types.fill(Steinberg::Vst::kAux);
+    audio_output_bus_arrangements.fill(Steinberg::Vst::SpeakerArr::kEmpty);
+    audio_output_bus_active_before.fill(false);
+    audio_output_bus_active_after.fill(false);
+    audio_output_bus_activate_results.fill(Steinberg::kResultFalse);
+    active_audio_output_bus_count = 0;
     if (audio_input_bus_count > 0) {
       Steinberg::Vst::BusInfo input_info{};
       if (component->getBusInfo(Steinberg::Vst::kAudio,
@@ -761,8 +892,20 @@ struct SphereDauxVst3Processor {
                                   bus_info) == Steinberg::kResultOk &&
             bus_info.channelCount > 0) {
           channels = static_cast<int>(bus_info.channelCount);
+          audio_output_bus_names[bus] = vst3_tchar_to_utf8(bus_info.name);
+          audio_output_bus_types[bus] = bus_info.busType;
+          audio_output_bus_active_before[bus] =
+              (bus_info.flags & Steinberg::Vst::BusInfo::kDefaultActive) != 0;
         }
         audio_output_bus_channel_counts[bus] = channels;
+        Steinberg::Vst::SpeakerArrangement arrangement = Steinberg::Vst::SpeakerArr::kEmpty;
+        if (processor->getBusArrangement(Steinberg::Vst::kOutput, bus, arrangement) ==
+                Steinberg::kResultOk &&
+            arrangement != Steinberg::Vst::SpeakerArr::kEmpty) {
+          audio_output_bus_arrangements[bus] = arrangement;
+        } else {
+          audio_output_bus_arrangements[bus] = arrangement_for_channels(channels);
+        }
         bridge_audio_output_channel_count =
             std::min(kMaxBridgeChannels, bridge_audio_output_channel_count + channels);
       }
@@ -791,40 +934,61 @@ struct SphereDauxVst3Processor {
       }
     }
 
-    input_arrangement =
-        audio_input_bus_count > 0 ? arrangement_for_channels(main_audio_input_channel_count)
-                                  : Steinberg::Vst::SpeakerArr::kEmpty;
-    output_arrangement =
-        audio_output_bus_count > 0 ? arrangement_for_channels(main_audio_output_channel_count)
-                                   : Steinberg::Vst::SpeakerArr::kEmpty;
-    // Set bus arrangements before bus activation. Some VST3 processors
-    // reject processing if the arrangement is changed after activation. Keep
-    // this to the main bus only: many multi-output instruments expose fixed
-    // aux output buses and reject a full per-bus arrangement list even though
-    // those buses can be activated and processed.
-    Steinberg::Vst::SpeakerArrangement* input_arrangements =
-        audio_input_bus_count > 0 ? &input_arrangement : nullptr;
-    Steinberg::Vst::SpeakerArrangement* output_arrangement_ptr =
-        audio_output_bus_count > 0 ? &output_arrangement : nullptr;
+    // Set bus arrangements before bus activation. VST3 requires ONE arrangement
+    // per bus for both directions — passing a single entry for a multi-bus
+    // plugin makes setBusArrangements return kResultFalse, which leaves
+    // instruments like Addictive Drums 2 (14 output buses) in an unconfigured
+    // state that renders silence on every bus. Build the full per-bus list from
+    // each bus's actual channel count; if the plugin still rejects it we fall
+    // back to its default arrangement (and process() below provides buffers for
+    // every active bus regardless, so a rejection no longer means silence).
+    const int arr_in_buses = std::min(audio_input_bus_count, kMaxBridgeBuses);
+    const int arr_out_buses = std::min(audio_output_bus_count, kMaxBridgeBuses);
+    std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> in_arrangements{};
+    std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> out_arrangements{};
+    for (int bus = 0; bus < arr_in_buses; ++bus) {
+      int ch = (bus == 0) ? main_audio_input_channel_count : 2;
+      Steinberg::Vst::BusInfo bi{};
+      if (component->getBusInfo(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, bus, bi) ==
+              Steinberg::kResultOk &&
+          bi.channelCount > 0) {
+        ch = static_cast<int>(bi.channelCount);
+      }
+      in_arrangements[bus] = arrangement_for_channels(ch);
+    }
+    for (int bus = 0; bus < arr_out_buses; ++bus) {
+      int ch = audio_output_bus_channel_counts[bus];
+      if (ch <= 0) ch = (bus == 0) ? main_audio_output_channel_count : 2;
+      out_arrangements[bus] = arrangement_for_channels(ch);
+      audio_output_bus_arrangements[bus] = out_arrangements[bus];
+    }
+    // Keep the legacy single-arrangement members in sync for the stereo
+    // single-sample I/O path (bus 0).
+    input_arrangement = arr_in_buses > 0 ? in_arrangements[0]
+                                         : Steinberg::Vst::SpeakerArr::kEmpty;
+    output_arrangement = arr_out_buses > 0 ? out_arrangements[0]
+                                           : Steinberg::Vst::SpeakerArr::kEmpty;
     const auto arrangement_res = processor->setBusArrangements(
-        input_arrangements,
-        audio_input_bus_count > 0 ? 1 : 0,
-        output_arrangement_ptr,
-        audio_output_bus_count > 0 ? 1 : 0);
+        arr_in_buses > 0 ? in_arrangements.data() : nullptr,
+        arr_in_buses,
+        arr_out_buses > 0 ? out_arrangements.data() : nullptr,
+        arr_out_buses);
     if (arrangement_res != Steinberg::kResultOk) {
       std::ostringstream err;
       err << g_last_error
           << "; setBusArrangements returned " << (int)arrangement_res
-          << " for requested main in/out channels "
-          << main_audio_input_channel_count << "/" << main_audio_output_channel_count
+          << " for " << arr_in_buses << " in / " << arr_out_buses << " out buses"
           << "; continuing with plugin default arrangement";
       set_last_error(err.str());
-      std::fprintf(stderr, "[SphereVST3] setBusArrangements result=%d failed\n",
-                   (int)arrangement_res);
+      std::fprintf(stderr,
+                   "[SphereVST3] setBusArrangements result=%d failed inBuses=%d outBuses=%d\n",
+                   (int)arrangement_res, arr_in_buses, arr_out_buses);
     } else {
       std::fprintf(stderr,
-                   "[SphereVST3] setBusArrangements result=%d ok mainIn=%d mainOut=%d\n",
+                   "[SphereVST3] setBusArrangements result=%d ok inBuses=%d outBuses=%d mainIn=%d mainOut=%d\n",
                    (int)arrangement_res,
+                   arr_in_buses,
+                   arr_out_buses,
                    main_audio_input_channel_count,
                    main_audio_output_channel_count);
     }
@@ -848,6 +1012,12 @@ struct SphereDauxVst3Processor {
     for (int bus = 0; bus < output_buses_to_activate; ++bus) {
       const auto bus_res = component->activateBus(
           Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, bus, true);
+      audio_output_bus_activate_results[bus] = bus_res;
+      audio_output_bus_active_after[bus] =
+          audio_output_bus_channel_counts[bus] > 0 && bus_res == Steinberg::kResultOk;
+      if (audio_output_bus_active_after[bus]) {
+        active_audio_output_bus_count = bus + 1;
+      }
       if (bus_res != Steinberg::kResultOk) {
         out_res = bus_res;
         std::fprintf(stderr,
@@ -860,10 +1030,37 @@ struct SphereDauxVst3Processor {
     std::fprintf(stderr, "[SphereVST3] activateBus inputResult=%d outputResult=%d outputBuses=%d\n",
                  (int)in_res, (int)out_res, output_buses_to_activate);
 
+    if (active_audio_output_bus_count == 0 && audio_output_bus_count > 0) {
+      active_audio_output_bus_count = std::min(audio_output_bus_count, kMaxBridgeBuses);
+    }
+
+    std::fprintf(stderr,
+                 "[PLUGIN BUS MAP]\n"
+                 "plugin_name=%s\n"
+                 "num_audio_inputs=%d\n"
+                 "num_audio_outputs=%d\n",
+                 plugin_path.c_str(),
+                 audio_input_bus_count,
+                 audio_output_bus_count);
+    for (int bus = 0; bus < output_buses_to_activate; ++bus) {
+      std::fprintf(stderr,
+                   "output_bus index=%d name=\"%s\" media_type=audio bus_type=%s "
+                   "channel_count=%d speaker_arrangement=0x%llx active_before=%d "
+                   "activate_result=%d active_after=%d routed_to_track_or_downmix=downmix:fallback\n",
+                   bus,
+                   audio_output_bus_names[bus].empty() ? "(unnamed)" : audio_output_bus_names[bus].c_str(),
+                   vst3_bus_type_name(audio_output_bus_types[bus]),
+                   audio_output_bus_channel_counts[bus],
+                   static_cast<unsigned long long>(audio_output_bus_arrangements[bus]),
+                   audio_output_bus_active_before[bus] ? 1 : 0,
+                   static_cast<int>(audio_output_bus_activate_results[bus]),
+                   audio_output_bus_active_after[bus] ? 1 : 0);
+    }
+
     process_data.numInputs = audio_input_bus_count > 0 ? 1 : 0;
     process_data.inputs = audio_input_bus_count > 0 ? &input_bus : nullptr;
-    process_data.numOutputs = audio_output_bus_count > 0 ? 1 : 0;
-    process_data.outputs = audio_output_bus_count > 0 ? &output_bus : nullptr;
+    process_data.numOutputs = active_audio_output_bus_count;
+    process_data.outputs = nullptr;
 
     // setupProcessing
     Steinberg::Vst::ProcessSetup ps{};
@@ -3032,13 +3229,14 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
     }
   }
 
+  instance->plugin_path = plugin_path ? plugin_path : "";
+
   if (!instance->setup(sample_rate)) {
     set_last_error(g_last_error + "; setup failed");
     instance->shutdown();
     return nullptr;
   }
 
-  instance->plugin_path = plugin_path ? plugin_path : "";
   set_last_error("");
   std::fprintf(stderr, "[DAUx VST3] processor ready: %s handle=0x%p\n",
                plugin_path, static_cast<void*>(instance.get()));
@@ -3079,6 +3277,18 @@ extern "C" int sphere_daux_vst3_process_stereo_sample(
   processor->input_r  = in_r;
   processor->output_l = 0.f;
   processor->output_r = 0.f;
+  processor->input_bus.numChannels = 2;
+  processor->input_bus.channelBuffers32 = processor->input_channels;
+  processor->output_bus.numChannels = 2;
+  processor->output_bus.channelBuffers32 = processor->output_channels;
+  processor->output_bus.silenceFlags = 0;
+  processor->process_data.numSamples = 1;
+  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.inputs =
+      processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
+  processor->process_data.numOutputs = processor->audio_output_bus_count > 0 ? 1 : 0;
+  processor->process_data.outputs =
+      processor->audio_output_bus_count > 0 ? &processor->output_bus : nullptr;
 
   const auto result = processor->processor->process(processor->process_data);
 
@@ -3142,18 +3352,47 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
       const_cast<float*>(in_l),
       const_cast<float*>(in_r),
   };
-  float* output_channels[2] = {out_l, out_r};
   processor->input_bus.numChannels = 2;
   processor->input_bus.channelBuffers32 = input_channels;
-  processor->output_bus.numChannels = 2;
-  processor->output_bus.channelBuffers32 = output_channels;
   processor->process_data.numSamples = frames;
   processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
   processor->process_data.inputs =
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
-  processor->process_data.numOutputs = processor->audio_output_bus_count > 0 ? 1 : 0;
-  processor->process_data.outputs =
-      processor->audio_output_bus_count > 0 ? &processor->output_bus : nullptr;
+
+  static thread_local std::array<std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>,
+                                 SphereDauxVst3Processor::kMaxBridgeChannels>
+      planes{};
+  static thread_local std::array<Steinberg::Vst::AudioBusBuffers,
+                                 SphereDauxVst3Processor::kMaxBridgeBuses>
+      output_buses{};
+  static thread_local std::array<std::array<float*, SphereDauxVst3Processor::kMaxBridgeChannels>,
+                                 SphereDauxVst3Processor::kMaxBridgeBuses>
+      output_channel_ptrs{};
+  static thread_local std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>
+      discard_plane{};
+  const int n = std::min(frames, SphereDauxVst3Processor::kMaxProcessFrames);
+  int flat_channel = 0;
+  const int buses_used = processor->output_bus_count_for_process();
+  for (int bus = 0; bus < buses_used; ++bus) {
+    const int bus_channels = processor->output_bus_channels_for_process(bus);
+    output_buses[bus].numChannels = bus_channels;
+    output_buses[bus].silenceFlags = 0;
+    for (int ch = 0; ch < bus_channels; ++ch) {
+      float* plane = flat_channel < SphereDauxVst3Processor::kMaxBridgeChannels
+                         ? planes[flat_channel].data()
+                         : discard_plane.data();
+      std::fill(plane, plane + n, 0.0f);
+      output_channel_ptrs[bus][ch] = plane;
+      if (flat_channel < SphereDauxVst3Processor::kMaxBridgeChannels) {
+        ++flat_channel;
+      }
+    }
+    output_buses[bus].channelBuffers32 =
+        bus_channels > 0 ? output_channel_ptrs[bus].data() : nullptr;
+  }
+  processor->process_data.numSamples = n;
+  processor->process_data.numOutputs = buses_used;
+  processor->process_data.outputs = buses_used > 0 ? output_buses.data() : nullptr;
 
   const auto result = processor->processor->process(processor->process_data);
 
@@ -3170,9 +3409,40 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
   double output_peak_l = 0.0;
   double output_peak_r = 0.0;
   double diff_peak = 0.0;
+  std::array<Vst3BusAudioStats, SphereDauxVst3Processor::kMaxBridgeBuses> bus_stats{};
+  for (int bus = 0; bus < buses_used; ++bus) {
+    bus_stats[bus] = SphereDauxVst3Processor::compute_bus_stats(output_buses[bus], n);
+  }
   for (int i = 0; i < frames; ++i) {
+    if (i < n) {
+      out_l[i] = 0.0f;
+      out_r[i] = 0.0f;
+    }
     input_peak_l = std::max(input_peak_l, std::abs(static_cast<double>(in_l[i])));
     input_peak_r = std::max(input_peak_r, std::abs(static_cast<double>(in_r[i])));
+  }
+  for (int bus = 0; bus < buses_used; ++bus) {
+    const int bus_channels = output_buses[bus].numChannels;
+    if (bus_channels <= 0 || output_buses[bus].channelBuffers32 == nullptr) continue;
+    for (int i = 0; i < n; ++i) {
+      if (bus_channels == 1 && output_buses[bus].channelBuffers32[0]) {
+        const float sample = output_buses[bus].channelBuffers32[0][i];
+        out_l[i] += sample;
+        out_r[i] += sample;
+      } else {
+        for (int ch = 0; ch < bus_channels; ++ch) {
+          const float* src = output_buses[bus].channelBuffers32[ch];
+          if (!src) continue;
+          if ((ch & 1) == 0) {
+            out_l[i] += src[i];
+          } else {
+            out_r[i] += src[i];
+          }
+        }
+      }
+    }
+  }
+  for (int i = 0; i < n; ++i) {
     output_peak_l = std::max(output_peak_l, std::abs(static_cast<double>(out_l[i])));
     output_peak_r = std::max(output_peak_r, std::abs(static_cast<double>(out_r[i])));
     diff_peak = std::max(diff_peak, std::abs(static_cast<double>(out_l[i] - in_l[i])));
@@ -3181,6 +3451,7 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
   processor->last_input_peak = std::max(input_peak_l, input_peak_r);
   processor->last_output_peak = std::max(output_peak_l, output_peak_r);
   processor->last_difference_peak = diff_peak;
+  processor->log_process_audio_out_once(n, buses_used, output_buses.data(), bus_stats.data());
 
   if (!processor->first_process_done) {
     processor->first_process_done = true;
@@ -3195,14 +3466,13 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
 
   processor->process_data.numSamples = 1;
   processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
-  processor->process_data.numOutputs = processor->audio_output_bus_count > 0 ? 1 : 0;
+  processor->process_data.numOutputs = processor->output_bus_count_for_process();
   processor->process_data.inputEvents = nullptr;
   processor->input_bus.channelBuffers32 = processor->input_channels;
   processor->output_bus.channelBuffers32 = processor->output_channels;
   processor->process_data.inputs =
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
-  processor->process_data.outputs =
-      processor->audio_output_bus_count > 0 ? &processor->output_bus : nullptr;
+  processor->process_data.outputs = nullptr;
 
   if (result != Steinberg::kResultOk) return 0;
   processor->process_count += 1;
@@ -3246,33 +3516,44 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
 
   // VST3 wants per-channel contiguous buffers. The bridge wire format is
   // interleaved, so process into fixed stack channel planes, then interleave.
-  std::array<std::array<float, 2048>, SphereDauxVst3Processor::kMaxBridgeChannels> planes{};
-  std::array<Steinberg::Vst::AudioBusBuffers, SphereDauxVst3Processor::kMaxBridgeBuses> output_buses{};
-  std::array<std::array<float*, SphereDauxVst3Processor::kMaxBridgeChannels>,
-             SphereDauxVst3Processor::kMaxBridgeBuses>
+  static thread_local std::array<std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>,
+                                 SphereDauxVst3Processor::kMaxBridgeChannels>
+      planes{};
+  static thread_local std::array<Steinberg::Vst::AudioBusBuffers,
+                                 SphereDauxVst3Processor::kMaxBridgeBuses>
+      output_buses{};
+  static thread_local std::array<std::array<float*, SphereDauxVst3Processor::kMaxBridgeChannels>,
+                                 SphereDauxVst3Processor::kMaxBridgeBuses>
       output_channel_ptrs{};
-  const int n = std::min(frames, 2048);
-  int flat_channel = 0;
-  int buses_used = 0;
-  const int output_buses_available =
-      std::min(processor->audio_output_bus_count, SphereDauxVst3Processor::kMaxBridgeBuses);
-  for (int bus = 0; bus < output_buses_available && flat_channel < channels; ++bus) {
-    int bus_channels = processor->audio_output_bus_channel_counts[bus];
-    if (bus_channels <= 0) {
-      bus_channels = bus == 0 ? processor->main_audio_output_channel_count : 0;
-    }
-    bus_channels = std::max(0, std::min(bus_channels, channels - flat_channel));
+  // Channels past the read window still need valid buffers: a spec-conformant
+  // instrument renders silence on EVERY bus when `numOutputs` is short of its
+  // active output-bus count (AD2 exposes 14). So provide a buffer for every
+  // active bus — real planes for the first `kMaxBridgeChannels` flat channels we
+  // downmix, a shared throwaway plane (write-only, discarded) for the rest — and
+  // set `numOutputs` to the full active-bus count.
+  static thread_local std::array<float, SphereDauxVst3Processor::kMaxProcessFrames> discard_plane{};
+  const int n = std::min(frames, SphereDauxVst3Processor::kMaxProcessFrames);
+  int read_channels = 0;  // channels captured in `planes` (what we downmix)
+  const int output_buses_available = processor->output_bus_count_for_process();
+  for (int bus = 0; bus < output_buses_available; ++bus) {
+    const int bus_channels = processor->output_bus_channels_for_process(bus);
     output_buses[bus].numChannels = bus_channels;
     output_buses[bus].silenceFlags = 0;
     for (int ch = 0; ch < bus_channels; ++ch) {
-      output_channel_ptrs[bus][ch] = planes[flat_channel + ch].data();
+      if (read_channels < SphereDauxVst3Processor::kMaxBridgeChannels) {
+        output_channel_ptrs[bus][ch] = planes[read_channels].data();
+        std::fill(planes[read_channels].begin(), planes[read_channels].begin() + n, 0.0f);
+        ++read_channels;
+      } else {
+        output_channel_ptrs[bus][ch] = discard_plane.data();
+        std::fill(discard_plane.begin(), discard_plane.begin() + n, 0.0f);
+      }
     }
     output_buses[bus].channelBuffers32 =
         bus_channels > 0 ? output_channel_ptrs[bus].data() : nullptr;
-    flat_channel += bus_channels;
-    buses_used = bus + 1;
   }
-  const int produced_channels = std::max(1, flat_channel);
+  const int buses_used = output_buses_available;
+  const int produced_channels = std::max(1, read_channels);
   processor->process_data.numSamples = n;
   processor->process_data.numOutputs = buses_used > 0 ? buses_used : 0;
   processor->process_data.outputs = buses_used > 0 ? output_buses.data() : nullptr;
@@ -3283,10 +3564,14 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
   double input_peak_r = 0.0;
   double output_peak = 0.0;
   double diff_peak = 0.0;
+  std::array<Vst3BusAudioStats, SphereDauxVst3Processor::kMaxBridgeBuses> bus_stats{};
+  for (int bus = 0; bus < buses_used; ++bus) {
+    bus_stats[bus] = SphereDauxVst3Processor::compute_bus_stats(output_buses[bus], n);
+  }
   for (int i = 0; i < n; ++i) {
     input_peak_l = std::max(input_peak_l, std::abs(static_cast<double>(in_l[i])));
     input_peak_r = std::max(input_peak_r, std::abs(static_cast<double>(in_r[i])));
-    for (int ch = 0; ch < produced_channels; ++ch) {
+    for (int ch = 0; ch < std::min(produced_channels, channels); ++ch) {
       const float sample = planes[ch][i];
       out_interleaved[i * channels + ch] = sample;
       output_peak = std::max(output_peak, std::abs(static_cast<double>(sample)));
@@ -3298,6 +3583,7 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
   processor->last_input_peak = std::max(input_peak_l, input_peak_r);
   processor->last_output_peak = output_peak;
   processor->last_difference_peak = diff_peak;
+  processor->log_process_audio_out_once(n, buses_used, output_buses.data(), bus_stats.data());
 
   if (!processor->first_process_done) {
     processor->first_process_done = true;
@@ -3312,15 +3598,14 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
 
   processor->process_data.numSamples = 1;
   processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
-  processor->process_data.numOutputs = processor->audio_output_bus_count > 0 ? 1 : 0;
+  processor->process_data.numOutputs = processor->output_bus_count_for_process();
   processor->process_data.inputEvents = nullptr;
   processor->input_bus.channelBuffers32 = processor->input_channels;
   processor->output_bus.numChannels = 2;
   processor->output_bus.channelBuffers32 = processor->output_channels;
   processor->process_data.inputs =
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
-  processor->process_data.outputs =
-      processor->audio_output_bus_count > 0 ? &processor->output_bus : nullptr;
+  processor->process_data.outputs = nullptr;
 
   if (result != Steinberg::kResultOk) return 0;
   processor->process_count += 1;

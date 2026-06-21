@@ -303,7 +303,7 @@ impl StudioLayout {
                         r.mark_plugin_output_channels(&plugin_instance_id, output_channels);
                         r.host_pid()
                     });
-                    changed |= self.timeline.update(cx, |timeline, _cx| {
+                    let processing_changed = self.timeline.update(cx, |timeline, _cx| {
                         let track_ids = timeline
                             .state
                             .insert_owner_ids_containing(&plugin_instance_id);
@@ -324,9 +324,12 @@ impl StudioLayout {
                             runtime_changed || outputs_changed
                         })
                     });
+                    changed |= processing_changed;
                     self.sync_plugin_bridge_sinks_to_engine(cx, "processing_prepared");
-                    self.audio_bridge.project_dirty = true;
-                    self.schedule_audio_project_sync(cx, true, "bridge_processing_prepared");
+                    if processing_changed {
+                        self.audio_bridge.project_dirty = true;
+                        self.schedule_audio_project_sync(cx, true, "bridge_processing_prepared");
+                    }
                 }
                 _ => {}
             }
@@ -2378,8 +2381,10 @@ impl StudioLayout {
         self.plugin_editors.deferred_opens.extend(pending_opens);
         eprintln!("[plugin-runtime] state Loading -> Active source={source}");
         self.sync_plugin_bridge_sinks_to_engine(cx, source);
-        self.audio_bridge.project_dirty = true;
-        self.schedule_audio_project_sync(cx, true, source);
+        if slot_changed {
+            self.audio_bridge.project_dirty = true;
+            self.schedule_audio_project_sync(cx, true, source);
+        }
         slot_changed
     }
 

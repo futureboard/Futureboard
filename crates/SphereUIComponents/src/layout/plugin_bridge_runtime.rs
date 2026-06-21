@@ -271,6 +271,13 @@ impl PluginBridgeRuntime {
         max_block_size: u32,
     ) -> Result<(), PluginHostClientError> {
         let _ = self.configure_audio_bridge(sample_rate, max_block_size);
+        if self.loaded.contains_key(&descriptor.insert_id) {
+            eprintln!(
+                "[plugin-bridge] LoadPlugin skipped instance={} reason=already_loaded",
+                descriptor.insert_id
+            );
+            return Ok(());
+        }
         let instance = descriptor.insert_id.clone();
         eprintln!(
             "[plugin-bridge] sending LoadPlugin instance={} path={}",

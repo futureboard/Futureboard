@@ -2463,6 +2463,26 @@ impl StudioLayout {
             &mut self.plugin_editors.bridge_runtime,
         ) {
             Ok(runtime) => {
+                let already_loaded = runtime
+                    .lock()
+                    .ok()
+                    .and_then(|runtime| runtime.loaded_descriptor(slot_id))
+                    .is_some();
+                if already_loaded {
+                    eprintln!(
+                        "[PluginRestore] runtime instance already loaded instance_id={slot_id}; reusing bridge"
+                    );
+                    self.sync_plugin_bridge_sinks_to_engine(cx, "plugin_restore_reuse");
+                    let _ = self.on_bridge_plugin_host_ready(
+                        slot_id,
+                        &display_name,
+                        &runtime,
+                        cx,
+                        "plugin_restore_reuse",
+                    );
+                    self.mark_dirty();
+                    return true;
+                }
                 let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
                 let _ = self.timeline.update(cx, |timeline, _cx| {
                     timeline.state.set_insert_runtime(

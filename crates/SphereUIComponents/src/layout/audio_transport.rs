@@ -830,6 +830,10 @@ impl StudioLayout {
         {
             self.audio_bridge.project_dirty = false;
             self.audio_bridge.media_dirty = false;
+            if self.audio_bridge.play_after_sync {
+                self.audio_bridge.play_after_sync = false;
+                self.start_native_playback(cx);
+            }
             return;
         }
 

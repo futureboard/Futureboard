@@ -259,6 +259,7 @@ impl StudioLayout {
                 let _ = layout.update(cx, |this, cx| {
                     this.mark_dirty();
                     let selected_input_device = this.selected_input_device_channels(cx);
+                    let mut bridge_inserts = Vec::new();
                     let _ = this.timeline.update(cx, |timeline, cx| {
                         let count = dialog.count.clamp(1, 128) as usize;
                         let base_name =
@@ -352,6 +353,9 @@ impl StudioLayout {
                                                 format,
                                                 reg.name.clone(),
                                             );
+                                            if format == InsertPluginFormat::Vst3 {
+                                                bridge_inserts.push((id.clone(), slot_id));
+                                            }
                                         }
                                     }
                                 }
@@ -370,6 +374,14 @@ impl StudioLayout {
                         ));
                         cx.notify();
                     });
+                    let mut bridge_loaded = false;
+                    for (track_id, slot_id) in bridge_inserts {
+                        bridge_loaded |= this.load_bridge_insert_for_slot(&track_id, &slot_id, cx);
+                    }
+                    if !bridge_loaded {
+                        this.audio_bridge.project_dirty = true;
+                        this.schedule_audio_project_sync(cx, true, "add_track_dialog");
+                    }
                     cx.notify();
                 });
             });

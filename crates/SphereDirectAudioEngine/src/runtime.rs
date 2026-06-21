@@ -397,7 +397,8 @@ pub struct RuntimeInsert {
     /// resolved at build time so the block path never reads the params map.
     pub bridge_is_effect: bool,
     /// For bridged instruments: 1-based plugin output channels selected by the
-    /// inspector for the engine-side stereo downmix. Empty means default 1/2.
+    /// inspector for the engine-side stereo downmix. Empty means all reported
+    /// bridge channels so legacy/unsynced projects still pass multi-out audio.
     pub bridge_enabled_output_channels: Vec<u8>,
     /// For [`RuntimeInsertKind::ExternalBridge`]: the installed realtime sink.
     /// Cached from [`RuntimeProject::plugin_bridge_sinks`] by

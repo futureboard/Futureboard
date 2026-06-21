@@ -33,8 +33,10 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
 
     /// Read the same fresh block as [`Self::read_output`], but only fold the
     /// 1-based plugin output channels listed in `enabled_channels` into the
-    /// engine's stereo track. Default sinks ignore the selection and preserve
-    /// the legacy stereo contract.
+    /// engine's stereo track. Empty selection means "all reported channels" for
+    /// shared-region sinks, so unsynced multi-out instruments stay audible.
+    /// Default sinks ignore the selection and preserve the legacy stereo
+    /// contract.
     fn read_output_for_channels(
         &self,
         out_l: &mut [f32],

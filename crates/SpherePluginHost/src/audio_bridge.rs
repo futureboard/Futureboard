@@ -275,8 +275,10 @@ impl SharedAudioBuffer {
         n
     }
 
-    /// Read interleaved plugin output and downmix only selected 1-based output
-    /// channels to stereo. Empty selection falls back to channels 1/2.
+    /// Read interleaved plugin output and downmix selected 1-based output
+    /// channels to stereo. Empty selection folds all reported channels; this
+    /// keeps legacy/unsynced multi-out instruments audible instead of dropping
+    /// routed aux buses until the UI selection reaches the engine.
     ///
     /// # Safety
     /// SPSC contract: only the consuming side (engine) may call this while it
@@ -291,7 +293,7 @@ impl SharedAudioBuffer {
     ) -> usize {
         let channels = channels.clamp(1, MAX_CHANNELS);
         if enabled_channels.is_empty() {
-            return unsafe { self.read_downmixed_to_stereo(out_l, out_r, frames, channels.min(2)) };
+            return unsafe { self.read_downmixed_to_stereo(out_l, out_r, frames, channels) };
         }
 
         let n = frames
@@ -354,12 +356,26 @@ impl SharedAudioBuffer {
             }
 
             if enabled_channels.is_empty() {
-                out_l[i] = unsafe { *src.add(base) };
-                out_r[i] = if channels > 1 {
+                let mut l = unsafe { *src.add(base) };
+                let mut r = if channels > 1 {
                     unsafe { *src.add(base + 1) }
                 } else {
-                    out_l[i]
+                    l
                 };
+                let mut ch = 2usize;
+                while ch < channels {
+                    let extra_l = unsafe { *src.add(base + ch) };
+                    let extra_r = if ch + 1 < channels {
+                        unsafe { *src.add(base + ch + 1) }
+                    } else {
+                        extra_l
+                    };
+                    l += extra_l * extra_pair_gain;
+                    r += extra_r * extra_pair_gain;
+                    ch += 2;
+                }
+                out_l[i] = l;
+                out_r[i] = r;
                 continue;
             }
 
@@ -999,6 +1015,26 @@ mod tests {
         assert!((out_r[0] - 20.0 * 0.70710677).abs() < 1e-6);
         assert!((out_l[1] - 30.0 * 0.70710677).abs() < 1e-6);
         assert!((out_r[1] - 40.0 * 0.70710677).abs() < 1e-6);
+    }
+
+    #[test]
+    fn audio_buffer_empty_selection_downmixes_all_output_channels() {
+        let region = SharedAudioRegion::new_in_process();
+        let buf = &region.bridge().audio_out;
+        let frames = 1usize;
+        let channels = 4usize;
+        let src = [1.0f32, 2.0, 10.0, 20.0];
+        unsafe { buf.write_interleaved(&src) };
+
+        let mut out_l = [0.0f32; 1];
+        let mut out_r = [0.0f32; 1];
+        let got = unsafe {
+            buf.read_downmixed_to_stereo_selected(&mut out_l, &mut out_r, frames, channels, &[])
+        };
+
+        assert_eq!(got, frames);
+        assert!((out_l[0] - (1.0 + 10.0 * 0.70710677)).abs() < 1e-6);
+        assert!((out_r[0] - (2.0 + 20.0 * 0.70710677)).abs() < 1e-6);
     }
 
     #[test]

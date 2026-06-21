@@ -1537,6 +1537,7 @@ impl StudioLayout {
                         this.plugin_picker_au_error = load_au_cache_state().last_error;
                         this.plugin_catalog.cache_present = true;
                         this.plugin_catalog.status = PluginCatalogStatus::Ready;
+                        this.update_add_track_instrument_plugins(cx);
                         if debug {
                             eprintln!(
                                 "[plugin-db] loaded rows={count} sqlite_ms={sqlite_ms} path={} total_ms={}",
@@ -1549,6 +1550,7 @@ impl StudioLayout {
                         this.plugin_catalog.available = Some(Vec::new());
                         this.plugin_catalog.cache_present = false;
                         this.plugin_catalog.status = PluginCatalogStatus::MissingDatabase;
+                        this.update_add_track_instrument_plugins(cx);
                         if debug {
                             eprintln!(
                                 "[plugin-db] path={} exists=false",
@@ -1561,6 +1563,7 @@ impl StudioLayout {
                         this.plugin_catalog.cache_present = path.exists();
                         this.plugin_catalog.status =
                             PluginCatalogStatus::Error(message.clone());
+                        this.update_add_track_instrument_plugins(cx);
                         if debug {
                             eprintln!(
                                 "[plugin-db] error path={} message={}",

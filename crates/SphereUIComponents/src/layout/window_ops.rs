@@ -22,6 +22,26 @@ use SpherePluginHost::{PluginFormat as RegistryPluginFormat, PluginKind};
 use super::helpers::{cleaned_track_name, numbered_name_stem};
 use super::{ContextMenuTarget, OpenPopover, StudioLayout};
 
+fn add_track_instrument_plugins_from_catalog(
+    catalog: &super::plugin_ops::PluginCatalogState,
+) -> Vec<SpherePluginHost::RegistryPlugin> {
+    catalog
+        .available
+        .as_ref()
+        .map(|plugins| {
+            plugins
+                .iter()
+                .filter(|plugin| {
+                    plugin.kind == PluginKind::Instrument
+                        && plugin.supports_insert()
+                        && plugin.scan_status.is_usable()
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn dialog_audio_format(format: AudioFormat) -> TrackAudioFormat {
     match format {
         AudioFormat::Mono => TrackAudioFormat::Mono,
@@ -137,6 +157,17 @@ pub(crate) struct ExternalWindows {
 }
 
 impl StudioLayout {
+    pub(super) fn update_add_track_instrument_plugins(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.external_windows.add_track.clone() else {
+            return;
+        };
+        let instrument_plugins = add_track_instrument_plugins_from_catalog(&self.plugin_catalog);
+        let _ = handle.update(cx, |add_track, _window, cx| {
+            add_track.set_instrument_plugins(instrument_plugins);
+            cx.notify();
+        });
+    }
+
     pub(super) fn open_add_track_external_window(
         &mut self,
         kind: AddTrackKind,
@@ -185,9 +216,13 @@ impl StudioLayout {
             .add_track_value();
         if let Some(handle) = self.external_windows.add_track.clone() {
             if handle
-                .update(cx, |win, window, _cx| {
+                .update(cx, |win, window, cx| {
+                    win.set_instrument_plugins(add_track_instrument_plugins_from_catalog(
+                        &self.plugin_catalog,
+                    ));
                     win.set_context(kind, track_count, has_master_track, default_monitor_mode);
                     window.activate_window();
+                    cx.notify();
                 })
                 .is_ok()
             {
@@ -212,26 +247,10 @@ impl StudioLayout {
         {
             self.arm_catalog_load(cx);
         }
-        let instrument_plugins: Vec<SpherePluginHost::RegistryPlugin> = self
-            .plugin_catalog
-            .available
-            .as_ref()
-            .map(|plugins| {
-                plugins
-                    .iter()
-                    .filter(|plugin| {
-                        plugin.kind == PluginKind::Instrument
-                            && plugin.supports_insert()
-                            && plugin.scan_status.is_usable()
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let instrument_plugins = add_track_instrument_plugins_from_catalog(&self.plugin_catalog);
 
         let layout = cx.entity().clone();
         let language = self.settings.read(cx).current.general.language.clone();
-        let instrument_registry = instrument_plugins.clone();
         let on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static> =
             Arc::new(move |dialog, _name, cx| {
                 let Some(track_type) = dialog.selected_kind.native_track_type() else {
@@ -296,12 +315,15 @@ impl StudioLayout {
                             }
                             if dialog.selected_kind == AddTrackKind::Instrument {
                                 if let Some(plugin_id) = dialog.instrument_plugin_id.as_deref() {
+                                    let instrument_registry =
+                                        add_track_instrument_plugins_from_catalog(
+                                            &this.plugin_catalog,
+                                        );
                                     if let Some(reg) = instrument_registry.iter().find(|p| {
                                         p.id == plugin_id
                                             || p.class_id.as_deref() == Some(plugin_id)
                                             || p.name.eq_ignore_ascii_case(plugin_id)
-                                    })
-                                    {
+                                    }) {
                                         if let Some(slot_id) = timeline.state.add_insert(&id) {
                                             let format = match reg.format {
                                                 RegistryPluginFormat::Vst3 => {

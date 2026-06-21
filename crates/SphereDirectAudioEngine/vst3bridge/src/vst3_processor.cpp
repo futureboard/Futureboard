@@ -797,26 +797,20 @@ struct SphereDauxVst3Processor {
     output_arrangement =
         audio_output_bus_count > 0 ? arrangement_for_channels(main_audio_output_channel_count)
                                    : Steinberg::Vst::SpeakerArr::kEmpty;
-    std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> output_arrangements{};
-    const int arrangement_output_buses = std::min(audio_output_bus_count, kMaxBridgeBuses);
-    for (int bus = 0; bus < arrangement_output_buses; ++bus) {
-      const int channels = audio_output_bus_channel_counts[bus] > 0
-          ? audio_output_bus_channel_counts[bus]
-          : (bus == 0 ? main_audio_output_channel_count : 0);
-      output_arrangements[bus] = arrangement_for_channels(channels);
-    }
-
     // Set bus arrangements before bus activation. Some VST3 processors
-    // reject processing if the arrangement is changed after activation.
+    // reject processing if the arrangement is changed after activation. Keep
+    // this to the main bus only: many multi-output instruments expose fixed
+    // aux output buses and reject a full per-bus arrangement list even though
+    // those buses can be activated and processed.
     Steinberg::Vst::SpeakerArrangement* input_arrangements =
         audio_input_bus_count > 0 ? &input_arrangement : nullptr;
     Steinberg::Vst::SpeakerArrangement* output_arrangement_ptr =
-        arrangement_output_buses > 0 ? output_arrangements.data() : nullptr;
+        audio_output_bus_count > 0 ? &output_arrangement : nullptr;
     const auto arrangement_res = processor->setBusArrangements(
         input_arrangements,
         audio_input_bus_count > 0 ? 1 : 0,
         output_arrangement_ptr,
-        arrangement_output_buses);
+        audio_output_bus_count > 0 ? 1 : 0);
     if (arrangement_res != Steinberg::kResultOk) {
       std::ostringstream err;
       err << g_last_error

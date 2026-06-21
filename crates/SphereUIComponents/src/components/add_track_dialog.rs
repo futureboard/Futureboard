@@ -1358,6 +1358,10 @@ impl AddTrackWindow {
         self.state = dialog;
     }
 
+    pub fn set_instrument_plugins(&mut self, instrument_plugins: Vec<RegistryPlugin>) {
+        self.instrument_plugins = instrument_plugins;
+    }
+
     /// Push the picker's current selection back into the dialog state so the
     /// confirm path (and quick-swatch highlight) see the chosen color.
     fn sync_color_from_picker(&mut self) {
@@ -1770,7 +1774,8 @@ impl Render for AddTrackWindow {
                             this.state.instrument_plugin_id = Some(plugin_id);
                             this.state.instrument_plugin_name = Some(plugin_name.clone());
                             this.state.track_name = plugin_name;
-                            this.track_name_input.set_value(this.state.track_name.clone());
+                            this.track_name_input
+                                .set_value(this.state.track_name.clone());
                             this.track_name_input.select_all();
                         }
                         this.open_select = None;

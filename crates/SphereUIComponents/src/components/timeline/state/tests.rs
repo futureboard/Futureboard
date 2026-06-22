@@ -121,7 +121,8 @@ mod instrument_lifecycle_tests {
         let track_id = instrument_track(&mut state);
         let slot = load_vsti(&mut state, &track_id, 0, "drums", "C:/p/drums.vst3");
 
-        // Enabling 8 plugin outputs creates 4 stereo child mixer channels (buses 0..=3).
+        // A declared 4-bus layout creates 4 child mixer channels (buses 0..=3).
+        state.set_insert_output_bus_layout(&track_id, &slot, &[2, 2, 2, 2]);
         assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
 
         let child_count = state
@@ -160,6 +161,24 @@ mod instrument_lifecycle_tests {
         assert!(
             layout.track_at_content_y(parent_height + 1.0).is_none(),
             "child channels must not be hit-testable as arrangement rows"
+        );
+    }
+
+    #[test]
+    fn detected_outputs_without_multibus_layout_do_not_create_child_channels() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "synth", "C:/p/synth.vst3");
+
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
+        assert_eq!(
+            state
+                .tracks
+                .iter()
+                .filter(|track| is_vsti_output_child_track_id(&track.id))
+                .count(),
+            0,
+            "flat output channel count alone is not multi-bus capability data"
         );
     }
 
@@ -213,7 +232,10 @@ mod instrument_lifecycle_tests {
             .filter(|t| is_vsti_output_child_track_id(&t.id))
             .map(|t| t.id.clone())
             .collect();
-        assert_eq!(after, child_ids, "expand must reuse the same child channels");
+        assert_eq!(
+            after, child_ids,
+            "expand must reuse the same child channels"
+        );
     }
 
     /// Test 3: load the SAME plugin file, remove, load it again → two distinct

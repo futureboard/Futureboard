@@ -101,9 +101,9 @@ pub fn vsti_output_child_channels_for_bus_layout(
 
 /// Output bus indices that should become child mixer strips, given the real
 /// per-bus layout. Every bus whose flat channels fit within the bridge cap gets
-/// a strip — but only when the plugin genuinely exposes **more than one** output
-/// bus (a normal single-bus stereo VSTi keeps playing on its instrument track,
-/// criteria #28). Returns empty for single-bus / unknown layouts.
+/// a strip, but only when the plugin declares more than one output bus. A
+/// normal single-bus instrument keeps playing on its parent instrument track.
+/// Returns empty for single-bus / unknown layouts.
 pub fn vsti_output_bus_strip_indices(bus_counts: &[u8]) -> Vec<u8> {
     if bus_counts.len() <= 1 {
         return Vec::new();
@@ -479,12 +479,15 @@ impl TimelineState {
             PluginRuntimeState::NotLoaded | PluginRuntimeState::Unloaded => {
                 InsertLoadStatus::Loading
             }
-            PluginRuntimeState::Loading | PluginRuntimeState::EditorOpening => {
-                InsertLoadStatus::Loading
-            }
+            PluginRuntimeState::Loading => InsertLoadStatus::Loading,
+            // EditorOpening is an EDITOR-state, not a plugin-load state: the
+            // plugin itself is already loaded. Conflating it with Loading made
+            // the inspector show "Loading" forever whenever an editor open
+            // stalled. The plugin-load status here reflects the plugin only.
             PluginRuntimeState::Loaded
             | PluginRuntimeState::Active
             | PluginRuntimeState::Ready
+            | PluginRuntimeState::EditorOpening
             | PluginRuntimeState::EditorOpen
             | PluginRuntimeState::EditorClosed
             | PluginRuntimeState::Bypassed => InsertLoadStatus::Ready,
@@ -776,9 +779,9 @@ impl TimelineState {
     }
 
     /// Store the plugin's real per-bus output channel counts (reported by the
-    /// host on `ProcessingPrepared`). Sanitizes to `1..=2`-ish counts but keeps
-    /// the bus-by-bus order intact so the flat-channel ranges line up with the
-    /// bridge. Returns `true` if the stored layout changed.
+    /// host on `ProcessingPrepared`). Sanitizes counts but keeps the bus-by-bus
+    /// order intact so the flat-channel ranges line up with the bridge. Returns
+    /// `true` if the stored layout changed.
     pub fn set_insert_output_bus_layout(
         &mut self,
         track_id: &str,
@@ -867,11 +870,13 @@ impl TimelineState {
             }
         }
         let plugin_name = slot.display_name.clone();
+        let can_create_child_strips = slot.output_bus_channel_counts.len() > 1;
         changed |= self.ensure_vsti_output_child_tracks(
             track_id,
             insert_id,
             output_channels,
             &plugin_name,
+            can_create_child_strips,
         );
         changed
     }
@@ -880,8 +885,9 @@ impl TimelineState {
         &mut self,
         parent_track_id: &str,
         insert_id: &str,
-        output_channels: u32,
+        _output_channels: u32,
         plugin_name: &str,
+        user_multiout_enabled: bool,
     ) -> bool {
         let Some(parent_index) = self
             .tracks
@@ -897,21 +903,26 @@ impl TimelineState {
         else {
             return false;
         };
-        let mut bus_indices: Vec<u8> = if slot.output_bus_channel_counts.is_empty() {
-            // Legacy fallback (real bus layout not reported yet): assume the
-            // enabled flat channels group into consecutive stereo pairs.
-            let max_channel = output_channels.clamp(2, 32) as u8;
-            slot.enabled_audio_output_channels
-                .iter()
-                .copied()
-                .filter(|channel| *channel <= max_channel)
-                .filter_map(vsti_output_bus_index_for_channel)
-                .collect()
+        let output_bus_channel_counts = slot.output_bus_channel_counts.clone();
+        let multiout_capable = output_bus_channel_counts.len() > 1;
+        let selected_path = if multiout_capable && user_multiout_enabled {
+            "multiout_child_channels"
         } else {
+            "parent_stereo"
+        };
+        eprintln!(
+            "[PLUGIN CAPABILITY_DECISION]\nplugin_instance_id={insert_id}\nplugin_name={plugin_name}\nvendor=(unknown)\nis_instrument=true\nis_effect=false\naudio_input_bus_count=(unknown)\naudio_output_bus_count={}\nevent_input_bus_count=(unknown)\nmain_output_bus_count={}\naux_output_bus_count={}\nmultiout_capable={multiout_capable}\nuser_multiout_enabled={user_multiout_enabled}\nselected_path={selected_path}\ndecision_reason_from_capabilities_only=true",
+            output_bus_channel_counts.len(),
+            usize::from(!output_bus_channel_counts.is_empty()),
+            output_bus_channel_counts.len().saturating_sub(1)
+        );
+        let mut bus_indices: Vec<u8> = if multiout_capable && user_multiout_enabled {
             // Real per-bus layout: one strip per genuine output bus. A mono bus
             // becomes its own stereo strip (duplicated L/R) instead of being
             // paired with the next bus's channel.
-            vsti_output_bus_strip_indices(&slot.output_bus_channel_counts)
+            vsti_output_bus_strip_indices(&output_bus_channel_counts)
+        } else {
+            Vec::new()
         };
         bus_indices.sort_unstable();
         bus_indices.dedup();
@@ -961,8 +972,26 @@ impl TimelineState {
                 let bus_number = bus_index.saturating_add(1);
                 let bus_name = format!("Out Ch {bus_number}");
                 let strip_label = format!("{plugin_name} {bus_name}");
+                let (channel_l, channel_r) = vsti_output_child_channels_for_bus_layout(
+                    &output_bus_channel_counts,
+                    *bus_index,
+                )
+                .unwrap_or_else(|| vsti_output_child_channels_for_bus(*bus_index));
+                let source_kind = output_bus_channel_counts
+                    .get(*bus_index as usize)
+                    .map(|count| match *count {
+                        0 | 1 => "mono",
+                        2 => "stereo",
+                        _ => "multichannel",
+                    })
+                    .unwrap_or("stereo");
+                let normalization = match source_kind {
+                    "mono" => "mono_duplicate",
+                    "stereo" => "preserve_stereo",
+                    _ => "downmix_to_stereo",
+                };
                 eprintln!(
-                    "[VSTI BUS MODEL]\nplugin_instance_id={insert_id}\nplugin_name={plugin_name}\nbus_index={bus_index}\nvst3_bus_name=\"{bus_name}\"\nchannel_count=2\nspeaker_arrangement=stereo\nhost_channel_labels=L,R\nIMPORTANT_ASSERTION=\"channels_are_audio_channels_not_drum_pieces\""
+                    "[BUS_TO_MIXER_GENERIC_MAP]\nplugin_instance_id={insert_id}\nsource_index={bus_index}\nsource_bus_index={bus_index}\nsource_channel_indices={channel_l},{channel_r}\nsource_kind={source_kind}\ntarget_mixer_channel_id={child_id}\ntarget_is_stereo=true\nnormalization={normalization}\nused_vendor_logic=false"
                 );
                 map_log.push_str(&format!(
                     "active_output_bus bus_index={bus_index} vst3_bus_name=\"{bus_name}\" channel_count=2 speaker_arrangement=stereo mixer_channel_id={child_id} route_node_id={child_id} strip_view_id={child_id} strip_label=\"{strip_label}\" meter_source_id={child_id} mute_solo_target_id={child_id}\n"
@@ -1070,11 +1099,11 @@ mod vsti_output_bus_layout_tests {
 
     #[test]
     fn mono_buses_each_become_an_independent_stereo_strip() {
-        // 4 mono output buses (e.g. AD2 routed to separate mono outs).
+        // 4 mono output buses routed to separate mono outs.
         let counts = [1u8, 1, 1, 1];
         assert_eq!(vsti_output_bus_strip_indices(&counts), vec![0, 1, 2, 3]);
-        // Each mono bus duplicates its single flat channel to BOTH L and R —
-        // never paired with the next bus ("Kick on L, Snare on R" is the bug).
+        // Each mono bus duplicates its single flat channel to both L and R,
+        // never paired with the next bus.
         assert_eq!(
             vsti_output_child_channels_for_bus_layout(&counts, 0),
             Some((1, 1))

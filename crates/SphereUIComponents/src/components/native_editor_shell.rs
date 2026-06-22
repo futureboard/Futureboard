@@ -1861,6 +1861,31 @@ mod imp {
             }
         }
 
+        /// Host-owned (detached) mode: the bridge plugin-host process owns the
+        /// real top-level editor window, so the main app creates NO window at
+        /// all — there is no main-thread HWND that the foreign plugin view is
+        /// ever parented under. This is what breaks the cross-process
+        /// input-queue coupling that froze the GPUI main thread.
+        ///
+        /// The returned shell is a *proxy*: `top_hwnd`/`content_hwnd` are 0 and
+        /// every window method degrades to a harmless no-op (Win32 calls on a
+        /// null HWND fail without side effects). It exists only so the existing
+        /// session/state machinery can keep operating unchanged; the visible
+        /// window and all of its input live entirely in the host process.
+        pub fn host_owned_proxy(title: &str) -> Self {
+            let inner = ShellInner::new(title.to_string(), format!("Opening: {title}"), None);
+            Self {
+                inner,
+                top_hwnd: 0,
+                content_hwnd: 0,
+            }
+        }
+
+        /// True for a [`host_owned_proxy`] shell (no main-owned window).
+        pub fn is_host_owned_proxy(&self) -> bool {
+            self.top_hwnd == 0
+        }
+
         pub fn top_hwnd(&self) -> u64 {
             self.top_hwnd
         }
@@ -1979,6 +2004,9 @@ mod imp {
 
         /// Update the content overlay shown until attach (loading / error text).
         pub fn set_status(&self, text: &str, is_error: bool) {
+            if is_error {
+                self.inner.attached.store(false, Ordering::Relaxed);
+            }
             if let Ok(mut s) = self.inner.status.lock() {
                 *s = (text.to_string(), is_error);
             }
@@ -2134,6 +2162,11 @@ mod imp {
         }
 
         pub fn pump_messages(&self) {
+            // Host-owned proxy: no window. PeekMessage with a null HWND would
+            // drain the GPUI main thread's own message queue — never do that.
+            if self.top_hwnd == 0 {
+                return;
+            }
             pump_shell_messages(hwnd_from(self.top_hwnd), hwnd_from(self.content_hwnd));
         }
 
@@ -2177,6 +2210,11 @@ mod imp {
 
     impl Drop for NativeEditorShell {
         fn drop(&mut self) {
+            // Host-owned proxy owns no window; the host process destroys the
+            // real editor window on CloseEditor.
+            if self.top_hwnd == 0 {
+                return;
+            }
             unsafe {
                 let _ = DestroyWindow(hwnd_from(self.top_hwnd));
             }
@@ -2200,6 +2238,12 @@ mod imp {
             _owner_hwnd: Option<u64>,
         ) -> Option<Self> {
             None
+        }
+        pub fn host_owned_proxy(_title: &str) -> Self {
+            Self { _private: () }
+        }
+        pub fn is_host_owned_proxy(&self) -> bool {
+            true
         }
         pub fn top_hwnd(&self) -> u64 {
             0

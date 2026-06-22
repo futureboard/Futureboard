@@ -102,13 +102,12 @@ impl PluginBridgeSink for SharedRegionSink {
         enabled_channels: &[u8],
     ) -> usize {
         // The bare main pair `[1, 2]` is the forced default the UI can never
-        // deselect — it means "no explicit multi-out routing", not "Master
-        // only". Multi-out instruments (e.g. Addictive Drums 2 in separate-out
-        // mode) move their audio OFF the main bus onto aux buses and leave 1/2
-        // silent, so folding only `[1, 2]` yields silence. Treat the bare
-        // default like an empty selection and fold every reported channel (the
-        // `1111453a` "keep unsynced multi-outs audible" intent). An explicit
-        // selection that adds aux channels is `!= [1, 2]` and is still honored.
+        // deselect. It means "no explicit multi-out routing", not "main bus
+        // only". Some multi-output instruments move audio from the main bus to
+        // aux buses, so folding only `[1, 2]` can be silent. Treat the bare
+        // default like an empty selection and fold every reported channel. An
+        // explicit selection that adds aux channels is `!= [1, 2]` and is still
+        // honored.
         let enabled_channels: &[u8] = if matches!(enabled_channels, [1, 2]) {
             &[]
         } else {
@@ -355,7 +354,7 @@ mod tests {
 
     /// The bare default `[1, 2]` selection must behave like "fold all" so a
     /// multi-out instrument that silences its main bus (audio on aux channels)
-    /// stays audible. Regression guard for the AD2 separate-out silence.
+    /// stays audible.
     #[test]
     fn sink_bare_main_pair_folds_all_channels() {
         let region = Arc::new(SharedAudioRegion::new_in_process());

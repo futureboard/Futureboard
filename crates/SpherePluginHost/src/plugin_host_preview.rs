@@ -731,6 +731,32 @@ impl PluginHostPreviewEngine {
         true
     }
 
+    pub fn insert_loaded_instance(
+        &mut self,
+        plugin_instance_id: &str,
+        processor: Vst3RuntimeProcessor,
+    ) -> bool {
+        if self.instances.contains_key(plugin_instance_id) {
+            eprintln!(
+                "[plugin-host-vst3] insert skipped reason=instance_exists instance={plugin_instance_id}"
+            );
+            return false;
+        }
+        processor.embed_set_instance_label(plugin_instance_id);
+        self.instances.insert(
+            plugin_instance_id.to_string(),
+            PreviewInstance {
+                processor,
+                midi: Arc::new(Mutex::new(VoiceMidiState::default())),
+            },
+        );
+        self.publish_bridge_snapshot();
+        self.set_continuous_mode(true);
+        eprintln!("[plugin-host-registry] loaded instance={plugin_instance_id}");
+        self.log_host_registry();
+        true
+    }
+
     pub fn unload_instance(&mut self, plugin_instance_id: &str) {
         eprintln!("[plugin-host-registry] unload instance={plugin_instance_id}");
         let retired = self.instances.remove(plugin_instance_id);
@@ -840,9 +866,6 @@ impl PluginHostPreviewEngine {
     pub fn editor_content_size_for_instance(&self, plugin_instance_id: &str) -> (u32, u32) {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
             if let Some((w, h)) = instance.processor.embed_content_size() {
-                return (w.max(1) as u32, h.max(1) as u32);
-            }
-            if let Some((w, h)) = instance.processor.prepare_editor_view() {
                 return (w.max(1) as u32, h.max(1) as u32);
             }
         }

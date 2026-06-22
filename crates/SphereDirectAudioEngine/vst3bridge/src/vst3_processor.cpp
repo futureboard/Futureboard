@@ -934,14 +934,12 @@ struct SphereDauxVst3Processor {
       }
     }
 
-    // Set bus arrangements before bus activation. VST3 requires ONE arrangement
-    // per bus for both directions — passing a single entry for a multi-bus
-    // plugin makes setBusArrangements return kResultFalse, which leaves
-    // instruments like Addictive Drums 2 (14 output buses) in an unconfigured
-    // state that renders silence on every bus. Build the full per-bus list from
-    // each bus's actual channel count; if the plugin still rejects it we fall
-    // back to its default arrangement (and process() below provides buffers for
-    // every active bus regardless, so a rejection no longer means silence).
+    // Set bus arrangements before bus activation. VST3 requires one arrangement
+    // per bus for both directions. Passing a single entry for a multi-bus plugin
+    // can leave the instance unconfigured and silent. Build the full per-bus
+    // list from each bus's actual channel count; if the plugin still rejects it
+    // we fall back to its default arrangement. Processing below provides buffers
+    // for every active bus regardless, so a rejection no longer means silence.
     const int arr_in_buses = std::min(audio_input_bus_count, kMaxBridgeBuses);
     const int arr_out_buses = std::min(audio_output_bus_count, kMaxBridgeBuses);
     std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> in_arrangements{};
@@ -993,10 +991,10 @@ struct SphereDauxVst3Processor {
                    main_audio_output_channel_count);
     }
 
-    // Activate audio buses. VSTi instruments such as Addictive Drums expose
-    // each mixer route as a separate stereo output bus, not as channels inside
-    // bus 0, so every reported output bus must be active and present in
-    // ProcessData.outputs for multi-out audio to exist.
+    // Activate audio buses. Multi-output instruments can expose each mixer
+    // route as a separate output bus, not as channels inside bus 0, so every
+    // reported output bus must be active and present in ProcessData.outputs for
+    // multi-out audio to exist.
     Steinberg::tresult in_res = Steinberg::kResultOk;
     if (audio_input_bus_count > 0) {
       in_res = component->activateBus(
@@ -2250,7 +2248,6 @@ void daux_embed_ensure_com_initialized() {
 
 // ── Generic browser/WebView runtime compatibility layer ──────────────────────
 // Many modern VST3 plug-ins render their editor with an embedded browser engine
-// (WebView2, CEF/Chromium, JUCE WebBrowserComponent, vendor browser runtimes)
 // and ship the runtime DLLs/resources *inside* the .vst3 bundle. The loader DLLs
 // resolve dependents from their own directory, so before createView/attached we
 // detect the bundled runtime and add ONLY its native dir(s) to the DLL search
@@ -3526,11 +3523,11 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
                                  SphereDauxVst3Processor::kMaxBridgeBuses>
       output_channel_ptrs{};
   // Channels past the read window still need valid buffers: a spec-conformant
-  // instrument renders silence on EVERY bus when `numOutputs` is short of its
-  // active output-bus count (AD2 exposes 14). So provide a buffer for every
-  // active bus — real planes for the first `kMaxBridgeChannels` flat channels we
-  // downmix, a shared throwaway plane (write-only, discarded) for the rest — and
-  // set `numOutputs` to the full active-bus count.
+  // instrument may render silence on every bus when `numOutputs` is short of
+  // its active output-bus count. Provide a buffer for every active bus: real
+  // planes for the first `kMaxBridgeChannels` flat channels we downmix, and a
+  // shared throwaway plane (write-only, discarded) for the rest. Set
+  // `numOutputs` to the full active-bus count.
   static thread_local std::array<float, SphereDauxVst3Processor::kMaxProcessFrames> discard_plane{};
   const int n = std::min(frames, SphereDauxVst3Processor::kMaxProcessFrames);
   int read_channels = 0;  // channels captured in `planes` (what we downmix)
@@ -4308,6 +4305,21 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   daux_editor_install_frame(processor);
   std::fprintf(stderr, "[PluginEditor] setFrame ok\n");
   daux_log_hwnd_state("sized_before_attach", top, content);
+
+  // Show the host window + content child BEFORE attached(). Browser/WebView
+  // based editors (any plug-in whose editor embeds a web runtime) block inside
+  // IPlugView::attached() until they can composite into a *visible* window; and
+  // because attached() blocks the very thread that owns these windows, the
+  // post-attach ShowWindow below would never run, so the editor would hang
+  // forever. Showing first lets DWM composite the surface while the plug-in
+  // initializes. Generic — no plug-in/vendor branch; non-browser editors simply
+  // attach into an already-visible window, which is also valid.
+  ShowWindow(top, kind == 2 ? SW_SHOWNORMAL : SW_SHOWNA);
+  ShowWindow(content, SW_SHOW);
+  UpdateWindow(content);
+  UpdateWindow(top);
+  std::fprintf(stderr, "[vst3-editor] shown_before_attach top=0x%p content=0x%p\n",
+               static_cast<void*>(top), static_cast<void*>(content));
 
   const ULONGLONG attach_start_ms = GetTickCount64();
   auto attach_returned = std::make_shared<std::atomic<bool>>(false);

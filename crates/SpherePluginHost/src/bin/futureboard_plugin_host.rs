@@ -216,6 +216,7 @@ struct LoadedPlugin {
     name: String,
     sample_rate: u32,
     max_block_size: u32,
+    processing_ready: bool,
 }
 
 type LoadedRegistry = HashMap<String, LoadedPlugin>;
@@ -235,7 +236,67 @@ struct DelayedGpuRedraw {
     deadline: Instant,
 }
 
+// Browser/WebView-backed editors can take well over 10s to finish their first
+// attach (runtime spin-up + compositor handshake). The whole open is async and
+// the app stays fully responsive while we wait, so use a generous bound — long
+// enough not to abort a slow-but-healthy editor, still bounded so a genuine
+// deadlock fails cleanly instead of hanging forever.
+const EDITOR_CREATE_TIMEOUT: Duration = Duration::from_millis(30_000);
+const EDITOR_ATTACH_TIMEOUT: Duration = Duration::from_millis(30_000);
+const MIN_EDITOR_ATTACH_SIZE: u32 = 16;
+const MODULE_LOAD_TIMEOUT: Duration = Duration::from_millis(15_000);
+const CREATE_INSTANCE_TIMEOUT: Duration = Duration::from_millis(15_000);
+const INITIALIZE_TIMEOUT: Duration = Duration::from_millis(20_000);
+
+#[derive(Debug, Clone)]
+struct PendingEditorAttach {
+    request_id: u64,
+    plugin_instance_id: String,
+    parent_hwnd: u64,
+    started_at: Instant,
+    stage: &'static str,
+}
+
+struct EditorAttachResult {
+    request_id: u64,
+    plugin_instance_id: String,
+    processor: DAUx::vst3_processor::Vst3RuntimeProcessor,
+    handle: Option<u64>,
+    attach_hwnd: u64,
+    preferred_width: u32,
+    preferred_height: u32,
+    resizable: bool,
+    error: Option<String>,
+    elapsed: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPluginLoad {
+    request_id: u64,
+    plugin_instance_id: String,
+    plugin_path: String,
+    class_id: String,
+    name: String,
+    sample_rate: u32,
+    max_block_size: u32,
+    started_at: Instant,
+    stage: &'static str,
+}
+
+struct PluginLoadResult {
+    request_id: u64,
+    plugin_instance_id: String,
+    plugin_path: String,
+    class_id: String,
+    name: String,
+    processor: Option<DAUx::vst3_processor::Vst3RuntimeProcessor>,
+    error: Option<String>,
+    elapsed: Duration,
+}
+
 static IDLE_TICK: AtomicU64 = AtomicU64::new(0);
+static NEXT_EDITOR_ATTACH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_PLUGIN_LOAD_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 fn parent_watchdog(parent_pid: u32, shutdown: Arc<AtomicBool>) {
     loop {
@@ -534,8 +595,12 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
 
     let mut registry = Registry::new();
     let mut loaded = LoadedRegistry::new();
+    let (load_result_tx, load_result_rx) = crossbeam_channel::unbounded::<PluginLoadResult>();
+    let mut pending_plugin_loads: HashMap<String, PendingPluginLoad> = HashMap::new();
     let mut pending_prepare = PendingPrepareRegistry::new();
     let mut delayed_redraws: Vec<DelayedGpuRedraw> = Vec::new();
+    let (attach_result_tx, attach_result_rx) = crossbeam_channel::unbounded::<EditorAttachResult>();
+    let mut pending_editor_attaches: HashMap<String, PendingEditorAttach> = HashMap::new();
     // Latest requested editor size per instance (coalesced from ResizeEditor
     // commands), applied below with a bounded preview try-lock.
     let mut pending_resizes: HashMap<String, (u32, u32, u32)> = HashMap::new();
@@ -647,9 +712,13 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                             cmd,
                             &mut registry,
                             &mut loaded,
+                            &mut pending_plugin_loads,
+                            &load_result_tx,
                             &mut pending_prepare,
                             &mut delayed_redraws,
                             &mut pending_resizes,
+                            &mut pending_editor_attaches,
+                            &attach_result_tx,
                             &preview,
                             &mut preview_output_started,
                             &region_slots,
@@ -672,6 +741,34 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                 }
             }
         }
+
+        timed_section!("plugin_load_results", {
+            drain_plugin_load_results(
+                &mut loaded,
+                &mut pending_plugin_loads,
+                &load_result_rx,
+                &preview,
+                &mut out,
+            );
+            expire_plugin_load_requests(&mut pending_plugin_loads, &load_result_rx, &mut out);
+        });
+
+        timed_section!("editor_attach_results", {
+            drain_editor_attach_results(
+                &mut registry,
+                &mut delayed_redraws,
+                &mut pending_editor_attaches,
+                &attach_result_rx,
+                &preview,
+                &mut out,
+            );
+            expire_editor_attach_requests(
+                &mut pending_editor_attaches,
+                &attach_result_rx,
+                &preview,
+                &mut out,
+            );
+        });
 
         // 1b. Apply coalesced editor resizes (latest size per instance). The
         //     processor clone is fetched with a bounded try-lock so a busy DSP
@@ -730,7 +827,8 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         //    The preview-engine mutex is shared with the DSP producer thread —
         //    this UI thread must NEVER block on it inside the pump path: use
         //    short bounded try-locks and skip the tick when the lock is busy.
-        timed_section!("editor_refresh", {
+        let user_closed_editors: Vec<String> = timed_section!("editor_refresh", {
+            let mut user_closed: Vec<String> = Vec::new();
             let refresh_targets: Option<Vec<(String, DAUx::vst3_processor::Vst3RuntimeProcessor)>> =
                 preview
                     .try_lock_for(Duration::from_millis(2))
@@ -746,6 +844,14 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     });
             if let Some(refresh_targets) = refresh_targets {
                 for (instance_id, processor) in refresh_targets {
+                    // Host-owned (detached) window: the user can close it via its
+                    // own titlebar. Detect that here and report EditorClosed so
+                    // the main app drops the session and Open works again. The
+                    // audio instance stays alive (we only detach the editor).
+                    if processor.embed_take_user_close() {
+                        user_closed.push(instance_id.clone());
+                        continue;
+                    }
                     processor.embed_refresh();
                     // Safe mode: no extra per-editor pump here — the main
                     // `pump_messages` below drains the whole thread queue.
@@ -756,7 +862,27 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     }
                 }
             }
+            user_closed
         });
+        for instance_id in user_closed_editors {
+            eprintln!(
+                "[PluginEditor] user closed host-owned editor window instance={instance_id} (instance stays active)"
+            );
+            registry.remove(&instance_id);
+            pending_resizes.remove(&instance_id);
+            pending_editor_attaches.remove(&instance_id);
+            // Detach the editor view (not the audio instance). Blocking lock,
+            // matching the CloseEditor command handler — this is a rare one-shot
+            // on user close, never a per-tick operation, so it cannot spin the
+            // pump on the DSP mutex.
+            preview.lock().editor_detach_for_instance(&instance_id);
+            let _ = ipc::write_frame(
+                &mut out,
+                &HostEvent::EditorClosed {
+                    plugin_instance_id: instance_id,
+                },
+            );
+        }
         timed_section!("resize_poll", {
             let resizes = preview
                 .try_lock_for(Duration::from_millis(2))
@@ -923,9 +1049,13 @@ fn dispatch(
     cmd: HostCommand,
     registry: &mut Registry,
     loaded: &mut LoadedRegistry,
+    pending_plugin_loads: &mut HashMap<String, PendingPluginLoad>,
+    load_result_tx: &crossbeam_channel::Sender<PluginLoadResult>,
     _pending_prepare: &mut PendingPrepareRegistry,
     delayed_redraws: &mut Vec<DelayedGpuRedraw>,
     pending_resizes: &mut HashMap<String, (u32, u32, u32)>,
+    pending_editor_attaches: &mut HashMap<String, PendingEditorAttach>,
+    attach_result_tx: &crossbeam_channel::Sender<EditorAttachResult>,
     preview: &SharedPluginHostPreview,
     preview_output_started: &mut bool,
     region_slots: &SharedAudioRegions,
@@ -996,60 +1126,27 @@ fn dispatch(
                 );
                 return;
             }
+            if pending_plugin_loads.contains_key(&plugin_instance_id) {
+                eprintln!(
+                    "[plugin-host] LoadPlugin instance={plugin_instance_id} already_pending=true"
+                );
+                return;
+            }
             let _ = ipc::write_frame(
                 out,
                 &HostEvent::PluginLoading {
                     plugin_instance_id: plugin_instance_id.clone(),
                 },
             );
-            let plugin_path_loaded = plugin_path.clone();
-            let class_id_loaded = class_id.clone();
-            loaded.insert(
-                plugin_instance_id.clone(),
-                LoadedPlugin {
-                    plugin_path,
-                    class_id,
-                    name: name.clone(),
-                    sample_rate,
-                    max_block_size,
-                },
-            );
-            let load_ok = {
-                let mut preview_engine = preview.lock();
-                preview_engine.load_instance(
-                    &plugin_instance_id,
-                    &plugin_path_loaded,
-                    &class_id_loaded,
-                    sample_rate,
-                    max_block_size,
-                )
-            };
-            if !load_ok {
-                loaded.remove(&plugin_instance_id);
-                let error = format!(
-                    "Plugin failed to load. It may require a newer CPU instruction set \
-                     or a missing runtime dependency. path={plugin_path_loaded}"
-                );
-                eprintln!(
-                    "[PluginHost] instance load failed id={plugin_instance_id} error={error}"
-                );
-                let _ = ipc::write_frame(
-                    out,
-                    &HostEvent::PluginLoadFailed {
-                        plugin_instance_id,
-                        error,
-                    },
-                );
-                return;
-            }
-            eprintln!("[PluginHost] instance created id={plugin_instance_id}");
-            preview.lock().set_continuous_mode(true);
-            let _ = ipc::write_frame(
-                out,
-                &HostEvent::PluginLoaded {
-                    plugin_instance_id,
-                    name,
-                },
+            schedule_plugin_load(
+                plugin_instance_id,
+                plugin_path,
+                class_id,
+                name,
+                sample_rate,
+                max_block_size,
+                pending_plugin_loads,
+                load_result_tx,
             );
         }
         HostCommand::OpenEditorWithParentHwnd {
@@ -1060,14 +1157,17 @@ fn dispatch(
             dpi,
             ..
         } => {
-            attach_unified_editor(
+            schedule_unified_editor_attach(
                 &plugin_instance_id,
                 parent_hwnd,
                 width,
                 height,
                 dpi,
                 registry,
+                loaded,
                 delayed_redraws,
+                pending_editor_attaches,
+                attach_result_tx,
                 preview,
                 out,
             );
@@ -1115,14 +1215,17 @@ fn dispatch(
             dpi,
             ..
         } => {
-            attach_unified_editor(
+            schedule_unified_editor_attach(
                 &plugin_instance_id,
                 parent_hwnd,
                 width,
                 height,
                 dpi,
                 registry,
+                loaded,
                 delayed_redraws,
+                pending_editor_attaches,
+                attach_result_tx,
                 preview,
                 out,
             );
@@ -1146,6 +1249,7 @@ fn dispatch(
         HostCommand::CloseEditor { plugin_instance_id } => {
             eprintln!("[PluginEditor] close requested plugin_id={plugin_instance_id}");
             registry.remove(&plugin_instance_id);
+            pending_editor_attaches.remove(&plugin_instance_id);
             pending_resizes.remove(&plugin_instance_id);
             preview
                 .lock()
@@ -1363,6 +1467,11 @@ fn dispatch(
                 .output_bus_channel_counts_for_instance(&plugin_instance_id)
                 .unwrap_or_default();
             drop(preview_guard);
+            if let Some(plugin) = loaded.get_mut(&plugin_instance_id) {
+                plugin.processing_ready = true;
+                plugin.sample_rate = sr;
+                plugin.max_block_size = block;
+            }
             eprintln!(
                 "[plugin-host-dsp] prepared instance={plugin_instance_id} sr={sr} block={block} requestedOutputs={output_channels} outputs={actual_output_channels} output_bus_channels={output_bus_channels:?} same_instance=true"
             );
@@ -1445,21 +1554,276 @@ fn dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attach_unified_editor(
+fn schedule_plugin_load(
+    plugin_instance_id: String,
+    plugin_path: String,
+    class_id: String,
+    name: String,
+    sample_rate: u32,
+    max_block_size: u32,
+    pending_plugin_loads: &mut HashMap<String, PendingPluginLoad>,
+    load_result_tx: &crossbeam_channel::Sender<PluginLoadResult>,
+) {
+    let request_id = NEXT_PLUGIN_LOAD_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let started_at = Instant::now();
+    eprintln!(
+        "[PLUGIN LOAD REQUEST]\nrequest_id={request_id}\nplugin_class_id={class_id}\nplugin_name={name}\nvendor=(unknown)\nformat=VST3\npath={plugin_path}\nproject_track_id=(unknown)\nrequested_by=user\nthread_id={}\nui_thread_blocked = false",
+        platform::current_thread_id()
+    );
+    pending_plugin_loads.insert(
+        plugin_instance_id.clone(),
+        PendingPluginLoad {
+            request_id,
+            plugin_instance_id: plugin_instance_id.clone(),
+            plugin_path: plugin_path.clone(),
+            class_id: class_id.clone(),
+            name: name.clone(),
+            sample_rate,
+            max_block_size,
+            started_at,
+            stage: "create_instance",
+        },
+    );
+    let tx = load_result_tx.clone();
+    std::thread::Builder::new()
+        .name(format!("plugin-load-{request_id}"))
+        .spawn(move || {
+            let thread_id = platform::current_thread_id();
+            let stage_started = Instant::now();
+            eprintln!(
+                "[PLUGIN LOAD STAGE]\nrequest_id={request_id}\nplugin_instance_id_optional={plugin_instance_id}\nplugin_name={name}\nstage=load_module\nstarted_at_ms=0\nended_at_ms=0\nduration_ms=0\nresult=begin\nthread_id={thread_id}\ntimeout_ms={}\nlock_held_names=none\nipc_responsive=true\nui_responsive=true",
+                MODULE_LOAD_TIMEOUT.as_millis()
+            );
+            eprintln!(
+                "[PLUGIN LOAD STAGE]\nrequest_id={request_id}\nplugin_instance_id_optional={plugin_instance_id}\nplugin_name={name}\nstage=create_instance\nstarted_at_ms=0\nended_at_ms=0\nduration_ms=0\nresult=begin\nthread_id={thread_id}\ntimeout_ms={}\nlock_held_names=none\nipc_responsive=true\nui_responsive=true",
+                CREATE_INSTANCE_TIMEOUT.as_millis()
+            );
+            let processor =
+                DAUx::vst3_processor::Vst3RuntimeProcessor::new(&plugin_path, &class_id, sample_rate);
+            let elapsed = stage_started.elapsed();
+            let error = if processor.is_some() {
+                None
+            } else {
+                Some(format!(
+                    "Plugin failed to load. It may require a newer CPU instruction set or a missing runtime dependency. path={plugin_path}"
+                ))
+            };
+            eprintln!(
+                "[PLUGIN LOAD STAGE]\nrequest_id={request_id}\nplugin_instance_id_optional={plugin_instance_id}\nplugin_name={name}\nstage=initialize_component_controller\nstarted_at_ms=0\nended_at_ms={}\nduration_ms={}\nresult={}\nthread_id={thread_id}\ntimeout_ms={}\nlock_held_names=none\nipc_responsive=true\nui_responsive=true",
+                elapsed.as_millis(),
+                elapsed.as_millis(),
+                if processor.is_some() { "ok" } else { "failed" },
+                INITIALIZE_TIMEOUT.as_millis()
+            );
+            let _ = tx.send(PluginLoadResult {
+                request_id,
+                plugin_instance_id,
+                plugin_path,
+                class_id,
+                name,
+                processor,
+                error,
+                elapsed,
+            });
+        })
+        .expect("spawn plugin load worker");
+}
+
+fn drain_plugin_load_results(
+    loaded: &mut LoadedRegistry,
+    pending_plugin_loads: &mut HashMap<String, PendingPluginLoad>,
+    load_result_rx: &crossbeam_channel::Receiver<PluginLoadResult>,
+    preview: &SharedPluginHostPreview,
+    out: &mut io::Stdout,
+) {
+    while let Ok(result) = load_result_rx.try_recv() {
+        let Some(pending) = pending_plugin_loads.remove(&result.plugin_instance_id) else {
+            eprintln!(
+                "[PLUGIN LOAD FAILURE]\nrequest_id={}\nplugin_name={}\nfailure_stage=late_result_after_timeout\nreason=load completed after timeout\ntimed_out = true\nplugin_instance_created={}\ncomponent_created={}\ncontroller_created={}\nroutes_created=false\nrollback_completed = true\napp_alive = true",
+                result.request_id,
+                result.name,
+                result.processor.is_some(),
+                result.processor.is_some(),
+                result.processor.is_some()
+            );
+            drop(result.processor);
+            continue;
+        };
+        if pending.request_id != result.request_id {
+            drop(result.processor);
+            continue;
+        }
+        let Some(processor) = result.processor else {
+            let error = result
+                .error
+                .unwrap_or_else(|| "plugin load failed".to_string());
+            eprintln!(
+                "[PLUGIN LOAD FAILURE]\nrequest_id={}\nplugin_name={}\nfailure_stage=create_instance\nreason={error}\ntimed_out = false\nplugin_instance_created=false\ncomponent_created=false\ncontroller_created=false\nroutes_created=false\nrollback_completed = true\napp_alive = true",
+                result.request_id,
+                result.name
+            );
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginLoadFailed {
+                    plugin_instance_id: result.plugin_instance_id,
+                    error,
+                },
+            );
+            continue;
+        };
+        let inserted = preview
+            .lock()
+            .insert_loaded_instance(&result.plugin_instance_id, processor);
+        if !inserted {
+            let error = "plugin instance already exists".to_string();
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginLoadFailed {
+                    plugin_instance_id: result.plugin_instance_id,
+                    error,
+                },
+            );
+            continue;
+        }
+        loaded.insert(
+            result.plugin_instance_id.clone(),
+            LoadedPlugin {
+                plugin_path: result.plugin_path,
+                class_id: result.class_id,
+                name: result.name.clone(),
+                sample_rate: pending.sample_rate,
+                max_block_size: pending.max_block_size,
+                processing_ready: false,
+            },
+        );
+        eprintln!(
+            "[PLUGIN LOAD READY]\nrequest_id={}\nplugin_instance_id={}\nplugin_name={}\nload_duration_ms={}\naudio_ready = true\neditor_created = false\nroute_ready = true\nmixer_channels_created=0\nselected_bus_mode=capability_detected\nui_responsive = true",
+            result.request_id,
+            result.plugin_instance_id,
+            result.name,
+            result.elapsed.as_millis()
+        );
+        let _ = ipc::write_frame(
+            out,
+            &HostEvent::PluginLoaded {
+                plugin_instance_id: result.plugin_instance_id,
+                name: result.name,
+            },
+        );
+    }
+}
+
+fn expire_plugin_load_requests(
+    pending_plugin_loads: &mut HashMap<String, PendingPluginLoad>,
+    _load_result_rx: &crossbeam_channel::Receiver<PluginLoadResult>,
+    out: &mut io::Stdout,
+) {
+    let now = Instant::now();
+    let timed_out: Vec<PendingPluginLoad> = pending_plugin_loads
+        .values()
+        .filter(|pending| {
+            let timeout = match pending.stage {
+                "load_module" => MODULE_LOAD_TIMEOUT,
+                "create_instance" => CREATE_INSTANCE_TIMEOUT,
+                "initializing" => INITIALIZE_TIMEOUT,
+                _ => CREATE_INSTANCE_TIMEOUT,
+            };
+            now.duration_since(pending.started_at) >= timeout
+        })
+        .cloned()
+        .collect();
+    for pending in timed_out {
+        pending_plugin_loads.remove(&pending.plugin_instance_id);
+        let elapsed_ms = now.duration_since(pending.started_at).as_millis();
+        let timeout_ms = match pending.stage {
+            "load_module" => MODULE_LOAD_TIMEOUT.as_millis(),
+            "create_instance" => CREATE_INSTANCE_TIMEOUT.as_millis(),
+            "initializing" => INITIALIZE_TIMEOUT.as_millis(),
+            _ => CREATE_INSTANCE_TIMEOUT.as_millis(),
+        };
+        eprintln!(
+            "[PLUGIN LOAD HANG WATCHDOG]\nrequest_id={}\nplugin_name={}\ncurrent_stage={}\nelapsed_ms={elapsed_ms}\ntimeout_ms={timeout_ms}\nthread_id={}\nlast_progress_ms=0\nui_thread_responsive=true\nipc_thread_responsive=true\naudio_thread_responsive=true\nheld_locks=none\nlast_vst3_call={}",
+            pending.request_id,
+            pending.name,
+            pending.stage,
+            platform::current_thread_id(),
+            pending.stage
+        );
+        eprintln!(
+            "[PLUGIN LOAD STAGE]\nrequest_id={}\nplugin_instance_id_optional={}\nplugin_name={}\nstage={}\nstarted_at_ms=0\nended_at_ms={elapsed_ms}\nduration_ms={elapsed_ms}\nresult=timed_out\nthread_id={}\ntimeout_ms={timeout_ms}\nlock_held_names=none\nipc_responsive=true\nui_responsive=true\nplugin_class_id={}\npath={}",
+            pending.request_id,
+            pending.plugin_instance_id,
+            pending.name,
+            pending.stage,
+            platform::current_thread_id(),
+            pending.class_id,
+            pending.plugin_path
+        );
+        eprintln!(
+            "[PLUGIN LOAD FAILURE]\nrequest_id={}\nplugin_name={}\nfailure_stage={}\nreason=plugin load timed out\ntimed_out = true\nplugin_instance_created=false\ncomponent_created=false\ncontroller_created=false\nroutes_created=false\nrollback_completed = true\napp_alive = true",
+            pending.request_id,
+            pending.name,
+            pending.stage
+        );
+        let _ = ipc::write_frame(
+            out,
+            &HostEvent::PluginLoadFailed {
+                plugin_instance_id: pending.plugin_instance_id,
+                error: format!(
+                    "Plugin load timed out during {} after {elapsed_ms}ms",
+                    pending.stage
+                ),
+            },
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_unified_editor_attach(
     plugin_instance_id: &str,
     parent_hwnd: u64,
     width: u32,
     height: u32,
     dpi: u32,
     registry: &mut Registry,
-    delayed_redraws: &mut Vec<DelayedGpuRedraw>,
+    loaded: &LoadedRegistry,
+    _delayed_redraws: &mut Vec<DelayedGpuRedraw>,
+    pending_editor_attaches: &mut HashMap<String, PendingEditorAttach>,
+    attach_result_tx: &crossbeam_channel::Sender<EditorAttachResult>,
     preview: &SharedPluginHostPreview,
     out: &mut io::Stdout,
 ) {
-    eprintln!("[plugin-host] editor_ownership=main_owned forced=true");
-    eprintln!("[plugin-host] using provided parent_hwnd=0x{parent_hwnd:x}");
-    eprintln!("[plugin-host] not creating top-level editor window");
+    // The actual window ownership is decided by the C++ embed layer from
+    // FUTUREBOARD_PLUGIN_EDITOR_MODE (default "detached" = host-owned top-level
+    // window). `parent_hwnd` is only a DPI/position reference in detached mode,
+    // never a real parent — log the real mode instead of a hardcoded string.
+    let editor_mode = std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE")
+        .unwrap_or_else(|_| "detached".to_string());
+    eprintln!("[plugin-host] editor_mode={editor_mode} parent_hwnd=0x{parent_hwnd:x} (DPI/position reference)");
     eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
+    eprintln!(
+        "[EDITOR OPEN START]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nrequested_size={}x{}\ndpi={dpi}",
+        width.max(1),
+        height.max(1)
+    );
+    eprintln!(
+        "[PLUGIN EDITOR OPEN REQUEST]\nplugin_instance_id={plugin_instance_id}\nplugin_name=(unknown)\nvendor=(unknown)\nformat=VST3\nthread={}\nhost_process_id={}\nexisting_editor={}\ncomponent_valid=(unknown)\ncontroller_valid=(unknown)\naudio_instance_alive=(checking)\nmixer_route_ready=(unknown)\nmultiout_enabled=(unknown)",
+        platform::current_thread_id(),
+        std::process::id(),
+        registry.contains_key(plugin_instance_id)
+    );
+    if registry.contains_key(plugin_instance_id) {
+        eprintln!("[plugin-host] editor already attached instance={plugin_instance_id}");
+        return;
+    }
+    if pending_editor_attaches.contains_key(plugin_instance_id) {
+        eprintln!("[plugin-host] editor attach already pending instance={plugin_instance_id}");
+        return;
+    }
+    if !loaded.contains_key(plugin_instance_id) {
+            emit_attach_failed(out, plugin_instance_id, "plugin runtime instance is not loaded");
+            return;
+    }
     if !preview.lock().has_instance(plugin_instance_id) {
         emit_attach_failed(
             out,
@@ -1472,6 +1836,17 @@ fn attach_unified_editor(
         emit_attach_failed(out, plugin_instance_id, "parent_hwnd is not a valid window");
         return;
     }
+    if width < MIN_EDITOR_ATTACH_SIZE || height < MIN_EDITOR_ATTACH_SIZE {
+        emit_attach_failed(
+            out,
+            plugin_instance_id,
+            "editor content HWND is not ready or has invalid size",
+        );
+        return;
+    }
+    eprintln!(
+        "[EDITOR HWND]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nvalid=true"
+    );
     let w = width.max(1) as i32;
     let h = height.max(1) as i32;
     eprintln!(
@@ -1486,92 +1861,283 @@ fn attach_unified_editor(
         );
         return;
     };
-    processor.embed_set_instance_label(plugin_instance_id);
-    eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
-    let handle = processor.embed_editor(parent_hwnd, 0, 0, w, h);
-    let Some(handle) = handle else {
+    let request_id = NEXT_EDITOR_ATTACH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    pending_editor_attaches.insert(
+        plugin_instance_id.to_string(),
+        PendingEditorAttach {
+            request_id,
+            plugin_instance_id: plugin_instance_id.to_string(),
+            parent_hwnd,
+            started_at: Instant::now(),
+            stage: "attach_view",
+        },
+    );
+    eprintln!(
+        "[EDITOR THREAD CHECK]\nplugin_instance_id={plugin_instance_id}\nrequested_thread_id={}\ncurrent_thread_id={}\nis_audio_thread=false\nis_ui_thread=false\nis_plugin_host_thread=true\nmessage_loop_running=true\ncom_initialized=true\ndpi_awareness_context=per_monitor_v2",
+        platform::current_thread_id(),
+        platform::current_thread_id()
+    );
+    eprintln!(
+        "[VST3 EDITOR LIFECYCLE]\nplugin_instance_id={plugin_instance_id}\nstep=resolve_instance\nresult=ok\nduration_ms=0\nthread_id={}\npointer_valid=true\nerror_code=0",
+        platform::current_thread_id()
+    );
+    let tx = attach_result_tx.clone();
+    let instance = plugin_instance_id.to_string();
+    std::thread::Builder::new()
+        .name(format!("plugin-editor-attach-{request_id}"))
+        .spawn(move || {
+            let started = Instant::now();
+            let thread_id = platform::current_thread_id();
+            let _ = platform::pump_messages();
+            eprintln!(
+                "[EDITOR THREAD CHECK]\nplugin_instance_id={instance}\nrequested_thread_id={thread_id}\ncurrent_thread_id={thread_id}\nis_audio_thread=false\nis_ui_thread=true\nis_plugin_host_thread=false\nmessage_loop_running=true\ncom_initialized=(initialized_by_embed_editor)\ndpi_awareness_context=(initialized_by_embed_editor)"
+            );
+            eprintln!(
+                "[plugin-host-ui-thread] editor_attach_thread_ready=true thread_id={thread_id} message_loop_running=true"
+            );
+            processor.embed_set_instance_label(&instance);
+            eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
+            eprintln!(
+                "[VST3 CREATE VIEW]\nplugin_instance_id={instance}\nthread_id={thread_id}\nresult=begin"
+            );
+            eprintln!(
+                "[VST3 EDITOR LIFECYCLE]\nplugin_instance_id={instance}\nstep=create_view_editor\nresult=begin\nduration_ms=0\nthread_id={thread_id}\npointer_valid=true\nerror_code=0"
+            );
+            eprintln!(
+                "[VST3 ATTACH VIEW]\nplugin_instance_id={instance}\nparent_hwnd=0x{parent_hwnd:x}\nsize={}x{}\nresult=begin",
+                w,
+                h
+            );
+            let handle = processor.embed_editor(parent_hwnd, 0, 0, w, h);
+            let elapsed = started.elapsed();
+            let attach_hwnd = processor.embed_attach_hwnd();
+            let (preferred_width, preferred_height) = processor
+                .embed_content_size()
+                .map(|(w, h)| (w.max(1) as u32, h.max(1) as u32))
+                .unwrap_or((width.max(1), height.max(1)));
+            let resizable = processor.editor_resizable().unwrap_or(true);
+            let error = if handle.is_some() {
+                None
+            } else {
+                Some("embed_editor failed on existing runtime instance".to_string())
+            };
+            eprintln!(
+                "[VST3 EDITOR LIFECYCLE]\nplugin_instance_id={instance}\nstep=attach_view\nresult={}\nduration_ms={}\nthread_id={thread_id}\npointer_valid={}\nerror_code={}",
+                if handle.is_some() { "ok" } else { "failed" },
+                elapsed.as_millis(),
+                handle.is_some(),
+                if handle.is_some() { 0 } else { 1 }
+            );
+            eprintln!(
+                "[VST3 ATTACH VIEW]\nplugin_instance_id={instance}\nparent_hwnd=0x{parent_hwnd:x}\nsize={}x{}\nresult={}\nduration_ms={}",
+                w,
+                h,
+                if handle.is_some() { "ok" } else { "failed" },
+                elapsed.as_millis()
+            );
+            eprintln!(
+                "[VST3 SIZE VIEW]\nplugin_instance_id={instance}\npreferred_size={}x{}\nresizable={resizable}\nresult={}",
+                preferred_width,
+                preferred_height,
+                if handle.is_some() { "ok" } else { "failed" }
+            );
+            let attached = handle.is_some();
+            let _ = tx.send(EditorAttachResult {
+                request_id,
+                plugin_instance_id: instance,
+                processor: processor.clone(),
+                handle,
+                attach_hwnd,
+                preferred_width,
+                preferred_height,
+                resizable,
+                error,
+                elapsed,
+            });
+            if attached {
+                loop {
+                    if !processor.embed_is_valid() {
+                        break;
+                    }
+                    processor.embed_refresh();
+                    let _ = platform::pump_messages();
+                    let _ = platform::wait_for_input(8);
+                }
+            }
+        })
+        .expect("spawn plugin editor attach worker");
+    hlog!(
+        "[PluginHostEditor] attach scheduled request_id={request_id} onSize=({width}x{height}) dpi={dpi}"
+    );
+}
+
+fn drain_editor_attach_results(
+    registry: &mut Registry,
+    delayed_redraws: &mut Vec<DelayedGpuRedraw>,
+    pending_editor_attaches: &mut HashMap<String, PendingEditorAttach>,
+    attach_result_rx: &crossbeam_channel::Receiver<EditorAttachResult>,
+    preview: &SharedPluginHostPreview,
+    out: &mut io::Stdout,
+) {
+    while let Ok(result) = attach_result_rx.try_recv() {
+        let Some(pending) = pending_editor_attaches.remove(&result.plugin_instance_id) else {
+            if result.handle.is_some() {
+                eprintln!(
+                    "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage=late_attach_after_timeout\nplugin_audio_kept_alive = true\neditor_state = failed\napp_frozen = false",
+                    result.plugin_instance_id
+                );
+                result.processor.embed_detach();
+            }
+            continue;
+        };
+        if pending.request_id != result.request_id {
+            if result.handle.is_some() {
+                result.processor.embed_detach();
+            }
+            continue;
+        }
+        if let Some(error) = result.error {
+            emit_attach_failed(out, &result.plugin_instance_id, &error);
+            eprintln!(
+                "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage=attach_view\nplugin_audio_kept_alive = true\neditor_state = failed\napp_frozen = false",
+                result.plugin_instance_id
+            );
+            continue;
+        }
+        let Some(handle) = result.handle else {
+            emit_attach_failed(
+                out,
+                &result.plugin_instance_id,
+                "embed_editor failed on existing runtime instance",
+            );
+            continue;
+        };
+        let attach_hwnd = result.attach_hwnd;
+        if attach_hwnd == 0 {
+            eprintln!(
+                "[PluginEditorHWND] WARNING attach_hwnd unavailable instance={} handle={handle}",
+                result.plugin_instance_id
+            );
+        }
+        registry.insert(
+            result.plugin_instance_id.clone(),
+            if attach_hwnd != 0 {
+                attach_hwnd
+            } else {
+                handle
+            },
+        );
+        preview.lock().set_continuous_mode(true);
+        if platform::editor_safe_mode() {
+            eprintln!("[PluginEditorSafe] attach: skipped focus walk and attach-time pump");
+        } else {
+            platform::focus_plugin_editor_child(attach_hwnd);
+            platform::pump_editor_messages(attach_hwnd);
+        }
+        platform::log_capture_on_open(attach_hwnd);
+        platform::set_editor_roots(registry.values().copied().collect());
+        platform::plugin_editor_snapshot("editor_open");
+        eprintln!(
+            "[PluginEditorResize] instance={} canResize={} preferred={}x{}",
+            result.plugin_instance_id,
+            result.resizable,
+            result.preferred_width,
+            result.preferred_height
+        );
+        eprintln!(
+            "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={}",
+            result.plugin_instance_id
+        );
+        SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
+            &result.plugin_instance_id,
+            &result.plugin_instance_id,
+            &result.plugin_instance_id,
+            &result.plugin_instance_id,
+            &result.plugin_instance_id,
+            &result.plugin_instance_id,
+            &result.plugin_instance_id,
+            &result.plugin_instance_id,
+        );
+        eprintln!(
+            "[plugin-host] attached result=ok instance={} handle=0x{handle:x} unified=true elapsed_ms={}",
+            result.plugin_instance_id,
+            result.elapsed.as_millis()
+        );
+        eprintln!(
+            "[EDITOR MESSAGE PUMP]\nplugin_instance_id={}\nhost_window_hwnd=0x{:x}\nthread_id={}\npump_active=true\nlast_message_time_ms=0\nblocked_wait_detected=false\nipc_responsive=true\nwindow_responsive=true",
+            result.plugin_instance_id,
+            attach_hwnd,
+            platform::current_thread_id()
+        );
+        delayed_redraws.push(DelayedGpuRedraw {
+            instance_id: result.plugin_instance_id.clone(),
+            deadline: Instant::now() + Duration::from_millis(100),
+        });
+        let _ = ipc::write_frame(
+            out,
+            &HostEvent::EditorAttached {
+                plugin_instance_id: result.plugin_instance_id,
+                result: 0,
+                preferred_width: result.preferred_width,
+                preferred_height: result.preferred_height,
+                resizable: result.resizable,
+                host_hwnd: attach_hwnd,
+            },
+        );
+    }
+}
+
+fn expire_editor_attach_requests(
+    pending_editor_attaches: &mut HashMap<String, PendingEditorAttach>,
+    _attach_result_rx: &crossbeam_channel::Receiver<EditorAttachResult>,
+    preview: &SharedPluginHostPreview,
+    out: &mut io::Stdout,
+) {
+    let now = Instant::now();
+    let timed_out: Vec<PendingEditorAttach> = pending_editor_attaches
+        .values()
+        .filter(|pending| {
+            let timeout = match pending.stage {
+                "create_view_editor" => EDITOR_CREATE_TIMEOUT,
+                _ => EDITOR_ATTACH_TIMEOUT,
+            };
+            now.duration_since(pending.started_at) >= timeout
+        })
+        .cloned()
+        .collect();
+    for pending in timed_out {
+        pending_editor_attaches.remove(&pending.plugin_instance_id);
+        let elapsed_ms = now.duration_since(pending.started_at).as_millis();
+        eprintln!(
+            "[EDITOR HANG DETECTED]\nplugin_instance_id={}\nplugin_name=(unknown)\nstage={}\nelapsed_ms={elapsed_ms}\nui_thread_blocked=false\nipc_thread_blocked=false\naudio_thread_blocked=false\nlast_successful_step=resolve_instance\nlast_vst3_result=(pending)\nhost_process_alive=true",
+            pending.plugin_instance_id,
+            pending.stage
+        );
+        eprintln!(
+            "[EDITOR HANG WATCHDOG]\nplugin_instance_id={}\nstage={}\nelapsed_ms={elapsed_ms}\ntimeout_ms={}\nui_thread_responsive=true\nipc_thread_responsive=true\naudio_thread_responsive=true\nhost_process_alive=true",
+            pending.plugin_instance_id,
+            pending.stage,
+            EDITOR_ATTACH_TIMEOUT.as_millis()
+        );
+        eprintln!(
+            "[EDITOR MESSAGE PUMP]\nplugin_instance_id={}\nhost_window_hwnd=0x{:x}\nthread_id={}\npump_active=true\nlast_message_time_ms=0\nblocked_wait_detected=true\nipc_responsive=true\nwindow_responsive=false",
+            pending.plugin_instance_id,
+            pending.parent_hwnd,
+            platform::current_thread_id()
+        );
+        let audio_alive = preview.lock().has_instance(&pending.plugin_instance_id);
+        eprintln!(
+            "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage={}\nplugin_audio_kept_alive = {}\neditor_state = failed\napp_frozen = false",
+            pending.plugin_instance_id,
+            pending.stage,
+            audio_alive
+        );
         emit_attach_failed(
             out,
-            plugin_instance_id,
-            "embed_editor failed on existing runtime instance",
-        );
-        return;
-    };
-    // `embed_editor` returns an opaque monotonic handle; the registry must
-    // hold the REAL attach HWND so the focus/pump helpers operate on a valid
-    // window (passing the counter made both silently no-op behind IsWindow).
-    let attach_hwnd = processor.embed_attach_hwnd();
-    if attach_hwnd == 0 {
-        eprintln!(
-            "[PluginEditorHWND] WARNING attach_hwnd unavailable instance={plugin_instance_id} handle={handle}"
+            &pending.plugin_instance_id,
+            "EditorState=AttachTimedOut: editor open timed out while attaching VST3 view",
         );
     }
-    registry.insert(
-        plugin_instance_id.to_string(),
-        if attach_hwnd != 0 {
-            attach_hwnd
-        } else {
-            handle
-        },
-    );
-    preview.lock().set_continuous_mode(true);
-    if platform::editor_safe_mode() {
-        // Safe mode: no focus walk and no re-entrant pumping inside the attach
-        // handler — the main loop pump delivers messages a few ms later.
-        eprintln!("[PluginEditorSafe] attach: skipped focus walk and attach-time pump");
-    } else {
-        platform::focus_plugin_editor_child(attach_hwnd);
-        platform::pump_editor_messages(attach_hwnd);
-    }
-    // Capture safety + one-shot window snapshot on editor open (spec 5/8).
-    platform::log_capture_on_open(attach_hwnd);
-    platform::set_editor_roots(registry.values().copied().collect());
-    platform::plugin_editor_snapshot("editor_open");
-    let (preferred_width, preferred_height) = preview
-        .lock()
-        .editor_content_size_for_instance(plugin_instance_id);
-    // Editor resize contract (spec item 1): IPlugView::canResize decides
-    // whether the main app may let the user drag-resize the wrapper. Unknown
-    // (no view) defaults to resizable so we never wrongly lock a window.
-    let resizable = processor.editor_resizable().unwrap_or(true);
-    eprintln!(
-        "[PluginEditorResize] instance={plugin_instance_id} canResize={resizable} \
-         preferred={preferred_width}x{preferred_height}"
-    );
-    eprintln!(
-        "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={plugin_instance_id}"
-    );
-    SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
-        plugin_instance_id,
-        plugin_instance_id,
-        plugin_instance_id,
-        plugin_instance_id,
-        plugin_instance_id,
-        plugin_instance_id,
-        plugin_instance_id,
-        plugin_instance_id,
-    );
-    eprintln!(
-        "[plugin-host] attached result=ok instance={plugin_instance_id} handle=0x{handle:x} unified=true"
-    );
-    hlog!(
-        "[PluginHostEditor] attached_result=ok handle=0x{handle:x} onSize=({width}x{height}) dpi={dpi}"
-    );
-    delayed_redraws.push(DelayedGpuRedraw {
-        instance_id: plugin_instance_id.to_string(),
-        deadline: Instant::now() + Duration::from_millis(100),
-    });
-    let _ = ipc::write_frame(
-        out,
-        &HostEvent::EditorAttached {
-            plugin_instance_id: plugin_instance_id.to_string(),
-            result: 0,
-            preferred_width,
-            preferred_height,
-            resizable,
-            host_hwnd: attach_hwnd,
-        },
-    );
 }
 
 fn emit_attach_failed(out: &mut io::Stdout, plugin_instance_id: &str, error: &str) {

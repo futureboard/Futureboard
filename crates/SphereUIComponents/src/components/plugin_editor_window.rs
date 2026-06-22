@@ -1537,7 +1537,7 @@ pub(crate) fn open_plugin_editor_window(
             "[plugin-view] editor_backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1 instance={track_id}::{insert_id}"
         );
         eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
-        eprintln!("[plugin-runtime] legacy path may hang GPU/OpenGL/JUCE plugin editors");
+        eprintln!("[plugin-runtime] legacy path may hang GPU/browser-backed plugin editors");
     }
     if plugin_view_debug() {
         eprintln!(

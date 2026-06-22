@@ -74,8 +74,8 @@ impl TrackRowLayout {
         let mut y = 0.0_f32;
         let mut rows = Vec::with_capacity(state.tracks.len());
         for (index, track) in state.tracks.iter().enumerate() {
-            // VSTi multi-out child channels (e.g. AD2's per-bus outputs) are
-            // mixer-only — they live in `state.tracks` so the engine snapshot and
+            // VSTi multi-out child channels are mixer-only. They live in `state.tracks`
+            // so the engine snapshot and
             // mixer can route/meter them, but they must NOT occupy arrangement
             // space. Keep them in the rows vector (1:1 with `state.tracks`, so the
             // `row.index == state.tracks position` invariant the timeline relies

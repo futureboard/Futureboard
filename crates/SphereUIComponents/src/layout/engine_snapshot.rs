@@ -1,9 +1,9 @@
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::timeline::timeline_state::{
-    self, vsti_output_bus_flat_range, vsti_output_bus_index_for_channel,
-    vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
-    vsti_output_child_track_id, ClipState, ClipType, InsertSlotState, MidiControllerKind,
-    StretchMode, TimelineState, TrackState, TrackType, MASTER_TRACK_ID,
+    self, vsti_output_bus_flat_range, vsti_output_bus_strip_indices,
+    vsti_output_child_channels_for_bus_layout, vsti_output_child_track_id, ClipState, ClipType,
+    InsertSlotState, MidiControllerKind, StretchMode, TimelineState, TrackState, TrackType,
+    MASTER_TRACK_ID,
 };
 
 use DAUx::types::{
@@ -347,17 +347,11 @@ fn normalized_enabled_audio_outputs(slot: &InsertSlotState) -> Vec<u8> {
 fn vsti_output_children_json(slot: &InsertSlotState) -> serde_json::Value {
     let bus_counts = &slot.output_bus_channel_counts;
     // Mirror `ensure_vsti_output_child_tracks` exactly so child track ids line up:
-    // real per-bus layout when known, legacy stereo pairing otherwise.
-    let bus_indices: Vec<u8> = if bus_counts.is_empty() {
-        let mut indices: Vec<u8> = normalized_enabled_audio_outputs(slot)
-            .into_iter()
-            .filter_map(vsti_output_bus_index_for_channel)
-            .collect();
-        indices.sort_unstable();
-        indices.dedup();
-        indices
-    } else {
+    // child routes are created only from declared multi-bus capability data.
+    let bus_indices: Vec<u8> = if bus_counts.len() > 1 {
         vsti_output_bus_strip_indices(bus_counts)
+    } else {
+        Vec::new()
     };
     serde_json::Value::Array(
         bus_indices
@@ -1022,14 +1016,13 @@ mod tests {
         state.set_insert_plugin(
             &track_id,
             &slot,
-            "ad2-class".to_string(),
-            Some(std::path::PathBuf::from(
-                "C:/plugins/Addictive Drums 2.vst3",
-            )),
+            "multiout-class".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/MultiOut.vst3")),
             InsertPluginFormat::Vst3,
-            "Addictive Drums 2".to_string(),
+            "MultiOut".to_string(),
         );
 
+        assert!(state.set_insert_output_bus_layout(&track_id, &slot, &[2, 2, 2, 2]));
         assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
         let bus_0_id = vsti_output_child_track_id(&slot, 0);
         let bus_1_id = vsti_output_child_track_id(&slot, 1);

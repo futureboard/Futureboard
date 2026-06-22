@@ -1217,17 +1217,7 @@ void embed_post_attach_refresh(HWND child, int w, int h) {
   std::fprintf(stderr, "[gpu-editor] post_attach_show_resize_redraw\n");
 }
 
-bool embed_class_looks_gpu(const wchar_t* class_name) {
-  if (!class_name || !class_name[0]) return false;
-  auto contains = [&](const wchar_t* token) {
-    return wcsstr(class_name, token) != nullptr;
-  };
-  return contains(L"JUCE") || contains(L"OpenGL") || contains(L"Chrome") ||
-         contains(L"WebView") || contains(L"CEF") || contains(L"ANGLE");
-}
-
 struct EmbedGpuDetectCtx {
-  bool detected = false;
   int child_count = 0;
 };
 
@@ -1235,23 +1225,15 @@ BOOL CALLBACK embed_gpu_detect_child(HWND hwnd, LPARAM lparam) {
   auto* ctx = reinterpret_cast<EmbedGpuDetectCtx*>(lparam);
   if (!hwnd || !IsWindow(hwnd)) return TRUE;
   ctx->child_count++;
-  wchar_t class_name[256]{};
-  const int len = GetClassNameW(hwnd, class_name, static_cast<int>(std::size(class_name)));
-  if (len > 0 && embed_class_looks_gpu(class_name)) {
-    ctx->detected = true;
-  }
   EnumChildWindows(hwnd, embed_gpu_detect_child, lparam);
   return TRUE;
 }
 
-bool embed_detect_gpu_children(HWND root) {
-  if (!root || !IsWindow(root)) return false;
+int embed_count_plugin_children(HWND root) {
+  if (!root || !IsWindow(root)) return 0;
   EmbedGpuDetectCtx ctx;
   EnumChildWindows(root, embed_gpu_detect_child, reinterpret_cast<LPARAM>(&ctx));
-  if (ctx.detected) {
-    std::fprintf(stderr, "[gpu-editor] gpu_editor_detected=true child_count=%d\n", ctx.child_count);
-  }
-  return ctx.detected;
+  return ctx.child_count;
 }
 
 void embed_sync_parent_visibility(EmbedSession* session) {
@@ -1690,10 +1672,9 @@ unsigned long long embed_complete_attach(
                static_cast<void*>(GetFocus()),
                static_cast<void*>(GetCapture()));
 
-  const bool gpu_detected = embed_detect_gpu_children(child);
-  if (gpu_detected) {
-    embed_post_attach_refresh(child, content_w, content_h);
-  }
+  const int plugin_child_count = embed_count_plugin_children(child);
+  std::fprintf(stderr, "[gpu-editor] plugin_child_count=%d\n", plugin_child_count);
+  embed_post_attach_refresh(child, content_w, content_h);
 
   Steinberg::ViewRect after{};
   const auto after_result = session->vst3->view->getSize(&after);

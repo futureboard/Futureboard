@@ -89,11 +89,22 @@ fn sanitize_child_env(command: &mut Command) {
         command.env_remove(key);
     }
     command.env("FUTUREBOARD_PROCESS_ROLE", "plugin_host");
-    // Native borderless shell owns the content HWND — the VST3 view must embed as
-    // WS_CHILD filling that rect, not as a floating tool window (default kind=1).
-    command.env("FUTUREBOARD_PLUGIN_EDITOR_MODE", "child");
+    // Editor window ownership (single source of truth for both processes):
+    //   host-owned (default) -> "detached": the host owns a standalone top-level
+    //     editor window. The plugin view is parented under a HOST-thread window,
+    //     never under the GPUI main thread, so a slow/hanging editor cannot
+    //     freeze the app. This is the fix for the cross-process input-queue
+    //     coupling.
+    //   legacy main-owned -> "child": the old WS_CHILD-into-main-content-HWND
+    //     embedding (kept only behind FUTUREBOARD_PLUGIN_EDITOR_MAIN_OWNED_SHELL).
+    let editor_mode = if editor_main_owned_shell_enabled() {
+        "child"
+    } else {
+        "detached"
+    };
+    command.env("FUTUREBOARD_PLUGIN_EDITOR_MODE", editor_mode);
     eprintln!("[plugin-bridge] child_env_set FUTUREBOARD_PROCESS_ROLE=plugin_host");
-    eprintln!("[plugin-bridge] child_env_set FUTUREBOARD_PLUGIN_EDITOR_MODE=child");
+    eprintln!("[plugin-bridge] child_env_set FUTUREBOARD_PLUGIN_EDITOR_MODE={editor_mode}");
     eprintln!("[plugin-host-env] sanitized=true");
 }
 
@@ -133,6 +144,21 @@ pub fn plugin_host_bridge_enabled() -> bool {
     !legacy_in_process_enabled()
 }
 
+/// Legacy escape hatch: keep the old *main-owned* editor shell, where the main
+/// app creates a Win32 content HWND and the host embeds the VST3 view into it
+/// as a cross-process `WS_CHILD`. That parenting attaches the host UI thread's
+/// input queue to the GPUI main thread, so a slow/hanging plugin editor (e.g. a
+/// GPU/WebView editor mid-init) freezes the whole app ("Not responding").
+///
+/// Default is OFF: the bridge editor is **host-owned** — the host process owns
+/// a detached top-level editor window and the main app owns no plugin window,
+/// fully decoupling the GPUI main thread. Set
+/// `FUTUREBOARD_PLUGIN_EDITOR_MAIN_OWNED_SHELL=1` only to restore the old
+/// (coupled) behavior for comparison. Vendor-agnostic; no plugin branches.
+pub fn editor_main_owned_shell_enabled() -> bool {
+    env_is_truthy("FUTUREBOARD_PLUGIN_EDITOR_MAIN_OWNED_SHELL")
+}
+
 /// One-time boot diagnostics for plugin runtime selection. Call early in app
 /// startup.
 pub fn log_bridge_env() {
@@ -147,7 +173,7 @@ pub fn log_bridge_env() {
             "[plugin-runtime] backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1"
         );
         eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
-        eprintln!("[plugin-runtime] legacy path may hang GPU/OpenGL/JUCE plugin editors");
+        eprintln!("[plugin-runtime] legacy path may hang GPU/browser-backed plugin editors");
     } else {
         eprintln!("[plugin-runtime] backend=external_bridge reason=forced_default");
     }

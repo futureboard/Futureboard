@@ -1,5 +1,6 @@
 //! Generic HWND-tree diagnostics for plugin editor windows (spec Part 1/4).
-//! No plugin/vendor hardcoding — GPU-like child detection uses window class names only.
+//! No plugin/vendor hardcoding — diagnostics inspect structure, visibility, and
+//! parent-chain only.
 
 #[derive(Debug, Clone, Default)]
 pub struct GpuEditorDiagnostics {
@@ -25,30 +26,14 @@ mod imp {
         HWND(handle as *mut c_void)
     }
 
-    fn class_looks_gpu(class_name: &str) -> bool {
-        let upper = class_name.to_ascii_uppercase();
-        ["JUCE", "OPENGL", "CHROME", "WEBVIEW", "CEF", "ANGLE"]
-            .iter()
-            .any(|token| upper.contains(token))
-    }
-
     struct EnumCtx {
         children: Vec<u64>,
-        gpu_detected: bool,
     }
 
     unsafe extern "system" fn enum_child(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let ctx = &mut *(lparam.0 as *mut EnumCtx);
         if IsWindow(Some(hwnd)).as_bool() {
             ctx.children.push(hwnd.0 as u64);
-            let mut buf = [0u16; 256];
-            let len = GetClassNameW(hwnd, &mut buf);
-            if len > 0 {
-                let class_name = String::from_utf16_lossy(&buf[..len as usize]);
-                if class_looks_gpu(&class_name) {
-                    ctx.gpu_detected = true;
-                }
-            }
         }
         BOOL(1)
     }
@@ -125,7 +110,6 @@ mod imp {
 
         let mut ctx = EnumCtx {
             children: Vec::new(),
-            gpu_detected: false,
         };
         let root = if host_hwnd != 0 {
             host_hwnd
@@ -150,16 +134,13 @@ mod imp {
 
         let chain_ok = parent_chain_ok(content_hwnd, shell_hwnd, host_hwnd);
         eprintln!("[gpu-editor-diagnostics] parent_chain_ok={chain_ok}");
-        if ctx.gpu_detected {
-            eprintln!("[gpu-editor-diagnostics] gpu_editor_detected=true");
-        }
 
         let self_pid = unsafe { GetCurrentProcessId() };
         eprintln!("[gpu-editor-diagnostics] main_process_pid={self_pid}");
 
         GpuEditorDiagnostics {
             child_count: ctx.children.len() as u32,
-            gpu_editor_detected: ctx.gpu_detected,
+            gpu_editor_detected: false,
             parent_chain_ok: chain_ok,
         }
     }

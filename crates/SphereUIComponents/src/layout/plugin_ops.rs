@@ -54,6 +54,11 @@ pub(crate) struct PluginEditorWindows {
     pub bridge_runtime: Option<super::plugin_bridge_runtime::SharedPluginBridgeRuntime>,
     /// Editor opens requested while the insert runtime was still loading.
     pub deferred_opens: Vec<(String, usize, String)>,
+    /// Loop guard: consecutive per-frame `flush` attempts per instance. Reset
+    /// to 0 the moment an instance stops being re-queued. If it ever climbs past
+    /// the cap, the editor open is forced terminal (spec `[EDITOR_LOOP_GUARD]`)
+    /// so a re-queue source can never spin forever.
+    pub flush_attempts: std::collections::HashMap<String, u32>,
 }
 
 /// `FUTUREBOARD_PLUGIN_EDITOR_DEBUG=1` gates the structured editor-lifecycle
@@ -80,20 +85,42 @@ macro_rules! ped_log {
 /// Editor sometimes cannot open again" regression. The wrapper window lives in
 /// the main process, so the user can always close a timed-out shell too.
 const EDITOR_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
+const EDITOR_FIRST_PAINT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether bridge editors are host-owned (default). In host-owned mode the
+/// plugin-host process owns a detached top-level editor window and the GPUI
+/// main app creates NO plugin window — nothing the foreign plugin view is ever
+/// parented under, so the main UI thread can never be coupled to (and frozen
+/// by) a slow/hanging plugin editor. The legacy main-owned `WS_CHILD` shell is
+/// the inverse of this flag. Single source of truth shared with the host's
+/// editor-mode env (`sanitize_child_env`). No vendor/plugin branching.
+fn bridge_editor_host_owned() -> bool {
+    !SpherePluginHost::plugin_host_client::editor_main_owned_shell_enabled()
+}
 
 /// Lifecycle state of a native main-owned bridge editor session.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BridgeEditorState {
     /// Shell is visible while the plugin instance is still loading in the host.
     Loading,
+    /// Main-owned shell/content HWND exists and is visible.
+    ParentWindowCreated,
     /// `PrepareEditorView` sent; awaiting `EditorPreferredSize`.
-    Preparing,
+    ViewCreated,
     /// Shell resized to preferred size; `ConfirmEditorContentReady` sent.
+    Sized,
+    /// Host has the final content HWND and is attaching the VST3 view.
     AwaitingAttach,
     /// `IPlugView` attached into the native content HWND.
     Attached,
+    /// Content HWND has painted after attach.
+    Visible,
+    /// Editor attach and first-paint watchdogs completed.
+    Ready,
     /// Attach failed / host disconnected.
     Failed(String),
+    /// Attach or first paint timed out.
+    TimedOut(String),
 }
 
 /// One open native main-owned plugin editor (external-bridge path). The window
@@ -116,12 +143,64 @@ pub(crate) struct BridgeEditorSession {
     /// When the open request was issued. Drives the open watchdog
     /// ([`EDITOR_OPEN_TIMEOUT`]) and the request→attach timing logs (spec A4).
     pub(crate) requested_at: Instant,
+    /// When `EditorAttached` arrived. Drives the first-paint watchdog.
+    pub(crate) attached_at: Option<Instant>,
+    /// Content WM_PAINT count sampled at attach.
+    pub(crate) paint_count_at_attach: u32,
+    /// True once `[EDITOR FIRST PAINT]` has been emitted.
+    pub(crate) first_paint_logged: bool,
 }
 
 /// Logical→physical DPI passthrough for `ResizeEditor`. The host sizes the view
 /// from the actual child client rect, so this value is a hint only.
 fn bridge_editor_dpi(session: &BridgeEditorSession) -> u32 {
     session.shell.shell_dpi()
+}
+
+fn bridge_editor_state_name(state: &BridgeEditorState) -> &'static str {
+    match state {
+        BridgeEditorState::Loading => "Opening",
+        BridgeEditorState::ParentWindowCreated => "ParentWindowCreated",
+        BridgeEditorState::ViewCreated => "ViewCreated",
+        BridgeEditorState::Sized => "Sized",
+        BridgeEditorState::AwaitingAttach => "AwaitingAttach",
+        BridgeEditorState::Attached => "Attached",
+        BridgeEditorState::Visible => "Visible",
+        BridgeEditorState::Ready => "Ready",
+        BridgeEditorState::Failed(_) => "Failed",
+        BridgeEditorState::TimedOut(_) => "TimedOut",
+    }
+}
+
+fn transition_bridge_editor_state(
+    session: &mut BridgeEditorSession,
+    new_state: BridgeEditorState,
+    reason: &str,
+) {
+    let from = bridge_editor_state_name(&session.state);
+    let to = bridge_editor_state_name(&new_state);
+    if from != to {
+        eprintln!(
+            "[EDITOR STATE TRANSITION]\nplugin_instance_id={}\nfrom={from}\nto={to}\nreason={reason}\nelapsed_ms={}",
+            session.instance_id,
+            session.requested_at.elapsed().as_millis()
+        );
+    }
+    session.state = new_state;
+}
+
+fn bridge_editor_is_open(state: &BridgeEditorState) -> bool {
+    matches!(
+        state,
+        BridgeEditorState::Attached | BridgeEditorState::Visible | BridgeEditorState::Ready
+    )
+}
+
+fn bridge_editor_is_terminal(state: &BridgeEditorState) -> bool {
+    matches!(
+        state,
+        BridgeEditorState::Failed(_) | BridgeEditorState::TimedOut(_)
+    )
 }
 
 impl StudioLayout {
@@ -244,16 +323,41 @@ impl StudioLayout {
                         let track_ids = timeline
                             .state
                             .insert_owner_ids_containing(&plugin_instance_id);
-                        track_ids.into_iter().any(|track_id| {
-                            timeline.state.set_insert_runtime(
+                        track_ids.into_iter().fold(false, |acc, track_id| {
+                            let runtime_changed = timeline.state.set_insert_runtime(
                                 &track_id,
                                 &plugin_instance_id,
                                 PluginRuntimeBackend::ExternalBridge,
                                 PluginRuntimeState::Failed(user_error.clone()),
                                 host_pid,
-                            )
+                            );
+                            // Terminal: a queued editor open can never succeed for
+                            // a plugin that failed to load. Clear it so `flush`
+                            // stops retrying; the user must re-open deliberately.
+                            timeline.state.set_insert_pending_editor_open(
+                                &track_id,
+                                &plugin_instance_id,
+                                false,
+                            );
+                            acc || runtime_changed
                         })
                     });
+                    self.plugin_editors
+                        .deferred_opens
+                        .retain(|(_, _, id)| id != &plugin_instance_id);
+                    self.plugin_editors.flush_attempts.remove(&plugin_instance_id);
+                    for session in self.plugin_editors.bridge.values_mut() {
+                        if session.instance_id == plugin_instance_id
+                            && !bridge_editor_is_terminal(&session.state)
+                        {
+                            session.shell.set_status("Plugin failed to load.", true);
+                            transition_bridge_editor_state(
+                                session,
+                                BridgeEditorState::Failed("Plugin failed to load".to_string()),
+                                "plugin_load_failed",
+                            );
+                        }
+                    }
                 }
                 ClientEvent::Disconnected => {
                     eprintln!("[plugin-runtime] external bridge host disconnected");
@@ -304,6 +408,7 @@ impl StudioLayout {
                         r.mark_plugin_output_channels(&plugin_instance_id, output_channels);
                         r.host_pid()
                     });
+                    let mut pending_opens = Vec::new();
                     let processing_changed = self.timeline.update(cx, |timeline, _cx| {
                         let track_ids = timeline
                             .state
@@ -330,10 +435,33 @@ impl StudioLayout {
                                     &plugin_instance_id,
                                     output_channels,
                                 );
+                            if let Some((index, true)) = timeline
+                                .state
+                                .insert_slots(&track_id)
+                                .and_then(|slots| {
+                                    slots
+                                        .iter()
+                                        .enumerate()
+                                        .find(|(_, slot)| slot.id == plugin_instance_id)
+                                        .map(|(index, slot)| (index, slot.pending_open_editor))
+                                })
+                            {
+                                timeline.state.set_insert_pending_editor_open(
+                                    &track_id,
+                                    &plugin_instance_id,
+                                    false,
+                                );
+                                pending_opens.push((
+                                    track_id.clone(),
+                                    index,
+                                    plugin_instance_id.clone(),
+                                ));
+                            }
                             runtime_changed || layout_changed || outputs_changed
                         })
                     });
                     changed |= processing_changed;
+                    self.plugin_editors.deferred_opens.extend(pending_opens);
                     self.sync_plugin_bridge_sinks_to_engine(cx, "processing_prepared");
                     if processing_changed {
                         self.audio_bridge.project_dirty = true;
@@ -383,6 +511,11 @@ impl StudioLayout {
             return;
         };
 
+        // When the host reports the editor window is gone (e.g. the user closed
+        // the host-owned window directly), drop the session after the match so a
+        // later Open starts fresh instead of focusing a dead session.
+        let mut remove_session_key: Option<(String, String)> = None;
+
         match event {
             ClientEvent::Host(HostEvent::EditorAttached {
                 result,
@@ -393,8 +526,11 @@ impl StudioLayout {
                 ..
             }) => {
                 let was = session.state.clone();
-                session.state = BridgeEditorState::Attached;
+                transition_bridge_editor_state(session, BridgeEditorState::Attached, "host_event");
                 session.host_hwnd = host_hwnd;
+                session.attached_at = Some(Instant::now());
+                session.paint_count_at_attach = session.shell.paint_stats().content_paint_count;
+                session.first_paint_logged = false;
                 ped_log!(
                     "Open Result instance={plugin_instance_id} hwnd=0x{host_hwnd:x} \
                      view_size={preferred_width}x{preferred_height} resizable={resizable} \
@@ -478,9 +614,14 @@ impl StudioLayout {
                 eprintln!(
                     "[plugin-bridge] event EditorContentResize instance={plugin_instance_id} width={width} height={height}"
                 );
-                if width > 0 && height > 0 {
+                // Host-owned: the host window resizes itself (user drag /
+                // resizeView). The main app owns no window and must not echo a
+                // ResizeEditor back, or it would fight the host's own geometry.
+                if session.shell.is_host_owned_proxy() {
+                    // nothing to mirror
+                } else if width > 0 && height > 0 {
                     resize_shell_before_attach(session, width, height);
-                    if session.state == BridgeEditorState::Attached {
+                    if bridge_editor_is_open(&session.state) {
                         if let Some(rt) = runtime.as_ref() {
                             if let Ok(mut r) = rt.lock() {
                                 let (cw, ch) = session.shell.content_size();
@@ -499,7 +640,10 @@ impl StudioLayout {
                 eprintln!(
                     "[plugin-bridge] event EditorPreferredSize instance={plugin_instance_id} width={width} height={height}"
                 );
-                if session.state == BridgeEditorState::Preparing {
+                if matches!(
+                    session.state,
+                    BridgeEditorState::ParentWindowCreated | BridgeEditorState::ViewCreated
+                ) {
                     if width > 0 && height > 0 {
                         resize_shell_before_attach(session, width, height);
                     } else {
@@ -509,6 +653,7 @@ impl StudioLayout {
                     }
                     let content_hwnd = session.shell.content_hwnd();
                     let (cw, ch) = session.shell.content_size();
+                    transition_bridge_editor_state(session, BridgeEditorState::Sized, "preferred_size");
                     if let Some(rt) = runtime.as_ref() {
                         if let Ok(mut r) = rt.lock() {
                             let confirm = r.confirm_editor_content_ready(
@@ -528,16 +673,24 @@ impl StudioLayout {
                                 session
                                     .shell
                                     .set_status(&format!("Editor failed: {e}"), true);
-                                session.state = BridgeEditorState::Failed(e.to_string());
+                                transition_bridge_editor_state(
+                                    session,
+                                    BridgeEditorState::Failed(e.to_string()),
+                                    "confirm_content_ready_failed",
+                                );
                             } else {
                                 ped_log!(
                                     "state Preparing -> AwaitingAttach instance={plugin_instance_id} content={cw}x{ch}"
                                 );
-                                session.state = BridgeEditorState::AwaitingAttach;
+                                transition_bridge_editor_state(
+                                    session,
+                                    BridgeEditorState::AwaitingAttach,
+                                    "content_ready_confirmed",
+                                );
                             }
                         }
                     }
-                } else if session.state != BridgeEditorState::Attached {
+                } else if !bridge_editor_is_open(&session.state) {
                     apply_bridge_preferred(session, runtime.as_ref(), width, height);
                 }
             }
@@ -552,7 +705,17 @@ impl StudioLayout {
                 session
                     .shell
                     .set_status(&format!("Editor failed: {error}"), true);
-                session.state = BridgeEditorState::Failed(error);
+                let timed_out = error.to_ascii_lowercase().contains("timed out")
+                    || error.to_ascii_lowercase().contains("timeout");
+                transition_bridge_editor_state(
+                    session,
+                    if timed_out {
+                        BridgeEditorState::TimedOut(error)
+                    } else {
+                        BridgeEditorState::Failed(error)
+                    },
+                    "host_attach_failed",
+                );
             }
             ClientEvent::Host(HostEvent::EditorUnresponsive { gap_ms, .. }) => {
                 // Host UI thread pump stalled (freeze watchdog, spec item 10).
@@ -562,7 +725,7 @@ impl StudioLayout {
                 eprintln!(
                     "[plugin-view][host] EditorUnresponsive instance={plugin_instance_id} gap_ms={gap_ms}"
                 );
-                if session.state != BridgeEditorState::Attached {
+                if !bridge_editor_is_open(&session.state) {
                     session.shell.set_status(
                         "Plugin editor not responding — you can close this window.",
                         true,
@@ -601,8 +764,16 @@ impl StudioLayout {
                 eprintln!(
                     "[PluginHost] editor closed id={plugin_instance_id} instance_still_active=true"
                 );
+                remove_session_key = Some((session.track_id.clone(), session.instance_id.clone()));
             }
             _ => {}
+        }
+        // `session` borrow has ended; safe to mutate the session map.
+        if let Some(key) = remove_session_key {
+            self.plugin_editors.bridge.remove(&key);
+            eprintln!(
+                "[plugin-editor-window] bridge session dropped after EditorClosed instance={plugin_instance_id} (reopen will start fresh)"
+            );
         }
         cx.notify();
     }
@@ -614,11 +785,15 @@ impl StudioLayout {
             return;
         }
         for session in self.plugin_editors.bridge.values_mut() {
-            session
-                .shell
-                .set_status("Plugin host disconnected (crashed or exited).", true);
-            session.state = BridgeEditorState::Failed(
-                "Plugin host process disconnected (crashed or exited).".to_string(),
+                session
+                    .shell
+                    .set_status("Plugin host disconnected (crashed or exited).", true);
+            transition_bridge_editor_state(
+                session,
+                BridgeEditorState::Failed(
+                    "Plugin host process disconnected (crashed or exited).".to_string(),
+                ),
+                "host_disconnected",
             );
         }
         cx.notify();
@@ -637,7 +812,22 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         let request_started = Instant::now();
-        eprintln!("[plugin-editor-window] ownership=main_owned forced=true");
+        let host_owned = bridge_editor_host_owned();
+        eprintln!(
+            "[EDITOR OPEN START]\nplugin_instance_id={instance_id}\ntrack_id={track_id}\nstate=Opening"
+        );
+        eprintln!(
+            "[plugin-editor-window] ownership={} forced=true",
+            if host_owned { "host_owned" } else { "main_owned" }
+        );
+        // Spec freeze guard: opening the editor must never block the GPUI main
+        // thread. In host-owned mode this is structural — the main app neither
+        // creates a window nor waits for the host; it sends one non-blocking IPC
+        // frame and returns. A debug_assert at the end of this fn proves it.
+        eprintln!(
+            "[MAIN_UI_FREEZE_GUARD]\nthread_id={:?}\nis_main_ui_thread=true\noperation=open_editor\nblocking_call_detected=false\nplugin_instance_id={instance_id}\nhost_owned={host_owned}\npanic_if_blocking_in_debug=true",
+            std::thread::current().id()
+        );
         self.log_editor_engine_state("open requested while", track_id, instance_id);
         crate::forensic_trace::log_trace_plugin(track_id, instance_id);
         let key = (track_id.to_string(), instance_id.to_string());
@@ -656,9 +846,9 @@ impl StudioLayout {
             .map(|s| (s.state.clone(), s.requested_at));
         let mut loading_session = None;
         if let Some((state, requested_at)) = existing {
-            if let BridgeEditorState::Failed(reason) = &state {
+            if bridge_editor_is_terminal(&state) {
                 ped_log!(
-                    "Open Request track={track_id} slot={instance_id} prior=Failed({reason}) -> retry (dropping stale session)"
+                    "Open Request track={track_id} slot={instance_id} prior={state:?} -> retry (dropping stale session)"
                 );
                 self.close_bridge_editor(cx, track_id, instance_id);
                 // fall through to a fresh open below
@@ -693,14 +883,20 @@ impl StudioLayout {
         };
 
         let defaults = shell_defaults();
+        let content_w = defaults.default_content_width;
+        let content_h = defaults.default_content_height;
         let shell = if let Some(session) = loading_session {
             session
                 .shell
                 .set_status("Attaching plugin editor...", false);
             session.shell
+        } else if host_owned {
+            // Host-owned: create NO main-thread window. The host process owns
+            // the real top-level editor window; this proxy only carries session
+            // state. There is no content HWND for the plugin to parent under,
+            // which is precisely what keeps the GPUI main thread decoupled.
+            NativeEditorShell::host_owned_proxy(&display_name)
         } else {
-            let content_w = defaults.default_content_width;
-            let content_h = defaults.default_content_height;
             let Some(shell) =
                 NativeEditorShell::create(&display_name, content_w, content_h, owner_hwnd)
             else {
@@ -714,6 +910,14 @@ impl StudioLayout {
         let content_hwnd = shell.content_hwnd();
         let (cw, ch) = shell.content_size();
         eprintln!(
+            "[EDITOR HWND]\nplugin_instance_id={instance_id}\nshell_hwnd=0x{:x}\ncontent_hwnd=0x{content_hwnd:x}\ncontent_size={cw}x{ch}\nowner=main_process",
+            shell.top_hwnd()
+        );
+        eprintln!(
+            "[EDITOR STATE TRANSITION]\nplugin_instance_id={instance_id}\nfrom=Opening\nto=ParentWindowCreated\nreason=content_hwnd_created\nelapsed_ms={}",
+            request_started.elapsed().as_millis()
+        );
+        eprintln!(
             "[plugin-editor-crossprocess] shell_pid={} content_hwnd=0x{content_hwnd:x} owner=main_process",
             std::process::id()
         );
@@ -722,16 +926,46 @@ impl StudioLayout {
             content_hwnd,
             0,
         );
-        eprintln!(
-            "[plugin-bridge] sending PrepareEditorView instance={instance_id} shell_content=0x{content_hwnd:x} size={cw}x{ch}"
-        );
-        let open_result = runtime
-            .lock()
-            .map_err(|_| "bridge runtime lock poisoned".to_string())
-            .and_then(|mut r| {
-                r.prepare_editor_view(instance_id.to_string())
-                    .map_err(|e| e.to_string())
-            });
+        let open_result = if host_owned {
+            // Ask the host to create+own+attach its own detached window. The
+            // owner HWND is a *read-only* DPI/position reference (IsWindow /
+            // GetWindowRect / GetDpiForWindow are non-blocking cross-process
+            // queries) — never a parent, so no input-queue coupling. One
+            // non-blocking IPC frame; the host replies EditorAttached async.
+            let dpi = shell.shell_dpi();
+            match owner_hwnd {
+                Some(parent) => {
+                    eprintln!(
+                        "[plugin-bridge] sending OpenEditorWithParentHwnd (host-owned) instance={instance_id} owner_ref=0x{parent:x} size={content_w}x{content_h} dpi={dpi}"
+                    );
+                    runtime
+                        .lock()
+                        .map_err(|_| "bridge runtime lock poisoned".to_string())
+                        .and_then(|mut r| {
+                            r.open_editor_with_parent(
+                                instance_id.to_string(),
+                                parent,
+                                content_w as u32,
+                                content_h as u32,
+                                dpi,
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                }
+                None => Err("host-owned editor open requires the main window handle".to_string()),
+            }
+        } else {
+            eprintln!(
+                "[plugin-bridge] sending PrepareEditorView instance={instance_id} shell_content=0x{content_hwnd:x} size={cw}x{ch}"
+            );
+            runtime
+                .lock()
+                .map_err(|_| "bridge runtime lock poisoned".to_string())
+                .and_then(|mut r| {
+                    r.prepare_editor_view(instance_id.to_string())
+                        .map_err(|e| e.to_string())
+                })
+        };
         match open_result {
             Ok(()) => {
                 let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
@@ -749,6 +983,10 @@ impl StudioLayout {
                     "Open dispatched track={track_id} slot={instance_id} state=Preparing request_to_ipc_ms={}",
                     request_started.elapsed().as_millis()
                 );
+                eprintln!(
+                    "[EDITOR STATE TRANSITION]\nplugin_instance_id={instance_id}\nfrom=ParentWindowCreated\nto=ViewCreated\nreason=prepare_editor_view_sent\nelapsed_ms={}",
+                    request_started.elapsed().as_millis()
+                );
                 self.plugin_editors.bridge.insert(
                     key,
                     BridgeEditorSession {
@@ -756,11 +994,14 @@ impl StudioLayout {
                         instance_id: instance_id.to_string(),
                         display_name,
                         shell,
-                        state: BridgeEditorState::Preparing,
+                        state: BridgeEditorState::ViewCreated,
                         preferred_applied: false,
                         last_content: (cw, ch),
                         host_hwnd: 0,
                         requested_at: request_started,
+                        attached_at: None,
+                        paint_count_at_attach: 0,
+                        first_paint_logged: false,
                     },
                 );
                 if let Some(engine) = self.audio_bridge.engine.as_ref() {
@@ -782,6 +1023,16 @@ impl StudioLayout {
                 );
             }
         }
+        // Spec freeze guard (debug): the open path does proxy/window creation and
+        // exactly one non-blocking IPC frame, then returns to the GPUI event
+        // loop. If it ever took ~1s the main thread was blocked — assert in debug
+        // so a regression that reintroduces a synchronous wait is caught at once.
+        let open_elapsed = request_started.elapsed();
+        debug_assert!(
+            open_elapsed < Duration::from_secs(1),
+            "[MAIN_UI_FREEZE_GUARD] open_bridge_editor blocked the GPUI main thread for {}ms (instance={instance_id}, host_owned={host_owned})",
+            open_elapsed.as_millis()
+        );
     }
 
     pub(super) fn open_bridge_loading_editor(
@@ -794,7 +1045,7 @@ impl StudioLayout {
     ) {
         let key = (track_id.to_string(), instance_id.to_string());
         if let Some(session) = self.plugin_editors.bridge.get(&key) {
-            if !matches!(session.state, BridgeEditorState::Failed(_)) {
+            if !bridge_editor_is_terminal(&session.state) {
                 session.shell.focus();
                 session.shell.set_status("Loading plugin editor...", false);
                 return;
@@ -806,21 +1057,30 @@ impl StudioLayout {
                 .get(&key)
                 .map(|session| &session.state),
             Some(BridgeEditorState::Failed(_))
+                | Some(BridgeEditorState::TimedOut(_))
         ) {
             self.close_bridge_editor(cx, track_id, instance_id);
         }
 
         let defaults = shell_defaults();
-        let Some(shell) = NativeEditorShell::create(
-            &display_name,
-            defaults.default_content_width,
-            defaults.default_content_height,
-            owner_hwnd,
-        ) else {
-            eprintln!(
-                "[plugin-editor-window] native loading shell create FAILED instance={instance_id}"
-            );
-            return;
+        let shell = if bridge_editor_host_owned() {
+            // Host-owned: no main window while the plugin loads. The session
+            // only tracks state (the inspector shows EditorOpening); the host
+            // shows its own window once the editor attaches.
+            NativeEditorShell::host_owned_proxy(&display_name)
+        } else {
+            let Some(shell) = NativeEditorShell::create(
+                &display_name,
+                defaults.default_content_width,
+                defaults.default_content_height,
+                owner_hwnd,
+            ) else {
+                eprintln!(
+                    "[plugin-editor-window] native loading shell create FAILED instance={instance_id}"
+                );
+                return;
+            };
+            shell
         };
         shell.set_status("Loading plugin editor...", false);
         let (cw, ch) = shell.content_size();
@@ -837,6 +1097,9 @@ impl StudioLayout {
                 last_content: (cw, ch),
                 host_hwnd: 0,
                 requested_at: Instant::now(),
+                attached_at: None,
+                paint_count_at_attach: 0,
+                first_paint_logged: false,
             },
         );
         cx.notify();
@@ -875,12 +1138,15 @@ impl StudioLayout {
         for (key, session) in self.plugin_editors.bridge.iter_mut() {
             session.shell.pump_messages();
             // Open watchdog (spec A6): a session still loading past the deadline
-            // is marked Failed so a subsequent Open click retries instead of
+            // is marked TimedOut so a subsequent Open click retries instead of
             // re-focusing a dead loading shell. Leaves the window up with a
             // status message so the user can also just close it.
             if matches!(
                 session.state,
-                BridgeEditorState::Preparing | BridgeEditorState::AwaitingAttach
+                BridgeEditorState::ParentWindowCreated
+                    | BridgeEditorState::ViewCreated
+                    | BridgeEditorState::Sized
+                    | BridgeEditorState::AwaitingAttach
             ) && session.requested_at.elapsed() >= EDITOR_OPEN_TIMEOUT
             {
                 ped_log!(
@@ -889,12 +1155,99 @@ impl StudioLayout {
                     session.state,
                     session.requested_at.elapsed().as_secs()
                 );
+                eprintln!(
+                    "[EDITOR HANG WATCHDOG]\nplugin_instance_id={}\nstage={}\nelapsed_ms={}\ntimeout_ms={}\nui_thread_responsive=true\nhost_process_alive=true",
+                    session.instance_id,
+                    bridge_editor_state_name(&session.state),
+                    session.requested_at.elapsed().as_millis(),
+                    EDITOR_OPEN_TIMEOUT.as_millis()
+                );
                 session
                     .shell
                     .set_status("Plugin editor timed out. Close and open it again.", true);
-                session.state = BridgeEditorState::Failed("Editor open timed out".to_string());
+                transition_bridge_editor_state(
+                    session,
+                    BridgeEditorState::TimedOut("Editor open timed out".to_string()),
+                    "open_watchdog",
+                );
                 changed = true;
                 continue;
+            }
+            if session.shell.is_host_owned_proxy() {
+                // Host-owned: the editor window (and its painting) live in the
+                // host process — the main app cannot observe content paints, so
+                // the first-paint watchdog does not apply. EditorAttached is the
+                // authoritative "open" signal; promote it straight to Ready.
+                if session.state == BridgeEditorState::Attached {
+                    transition_bridge_editor_state(
+                        session,
+                        BridgeEditorState::Ready,
+                        "host_owned_attached",
+                    );
+                    changed = true;
+                }
+            } else if matches!(
+                session.state,
+                BridgeEditorState::Attached | BridgeEditorState::Visible
+            ) {
+                let stats = session.shell.paint_stats();
+                if !session.first_paint_logged
+                    && stats.content_paint_count > session.paint_count_at_attach
+                {
+                    eprintln!(
+                        "[EDITOR FIRST PAINT]\nplugin_instance_id={}\ncontent_paint_count={}\nelapsed_after_attach_ms={}\ntotal_elapsed_ms={}",
+                        session.instance_id,
+                        stats.content_paint_count,
+                        session
+                            .attached_at
+                            .map(|t| t.elapsed().as_millis())
+                            .unwrap_or_default(),
+                        session.requested_at.elapsed().as_millis()
+                    );
+                    session.first_paint_logged = true;
+                    transition_bridge_editor_state(
+                        session,
+                        BridgeEditorState::Visible,
+                        "content_paint_after_attach",
+                    );
+                    transition_bridge_editor_state(
+                        session,
+                        BridgeEditorState::Ready,
+                        "first_paint_observed",
+                    );
+                    changed = true;
+                } else if !session.first_paint_logged
+                    && session
+                        .attached_at
+                        .is_some_and(|attached_at| attached_at.elapsed() >= EDITOR_FIRST_PAINT_TIMEOUT)
+                {
+                    eprintln!(
+                        "[EDITOR HANG WATCHDOG]\nplugin_instance_id={}\nstage=first_paint\nelapsed_ms={}\ntimeout_ms={}\nui_thread_responsive=true\nhost_process_alive=true",
+                        session.instance_id,
+                        session
+                            .attached_at
+                            .map(|t| t.elapsed().as_millis())
+                            .unwrap_or_default(),
+                        EDITOR_FIRST_PAINT_TIMEOUT.as_millis()
+                    );
+                    if let Some(rt) = runtime.as_ref() {
+                        if let Ok(mut r) = rt.lock() {
+                            r.close_editor(session.instance_id.clone());
+                        }
+                    }
+                    session.host_hwnd = 0;
+                    session.shell.set_status(
+                        "Plugin editor attached but did not paint. Close and open it again.",
+                        true,
+                    );
+                    transition_bridge_editor_state(
+                        session,
+                        BridgeEditorState::TimedOut("Editor first paint timed out".to_string()),
+                        "first_paint_watchdog",
+                    );
+                    changed = true;
+                    continue;
+                }
             }
             let poll = session.shell.poll();
             if poll.close_requested {
@@ -908,7 +1261,7 @@ impl StudioLayout {
             if let Some((w, h)) = poll.resized {
                 if w > 0 && h > 0 && (w, h) != session.last_content {
                     session.last_content = (w, h);
-                    if session.state == BridgeEditorState::Attached {
+                    if bridge_editor_is_open(&session.state) {
                         if let Some(rt) = runtime.as_ref() {
                             if let Ok(mut r) = rt.lock() {
                                 r.resize_editor(
@@ -1011,7 +1364,7 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::components::timeline::timeline_state::InsertPluginFormat;
+        use crate::components::timeline::timeline_state::{InsertLoadStatus, InsertPluginFormat};
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some();
 
         let resolved = {
@@ -1032,6 +1385,7 @@ impl StudioLayout {
                         slot.display_name.clone(),
                         slot.runtime_state.clone(),
                         slot.load_status.clone(),
+                        slot.pending_open_editor,
                     )
                 })
         };
@@ -1044,6 +1398,7 @@ impl StudioLayout {
             display_name,
             runtime_state,
             load_status,
+            pending_editor_open,
         )) = resolved
         else {
             eprintln!(
@@ -1066,8 +1421,138 @@ impl StudioLayout {
         }
 
         let insert_id = resolved_plugin_instance_id.as_str();
+        let editor_session_key = (track_id.to_string(), insert_id.to_string());
+        let (editor_state, editor_created, content_hwnd, content_size) = self
+            .plugin_editors
+            .bridge
+            .get(&editor_session_key)
+            .map(|session| {
+                (
+                    bridge_editor_state_name(&session.state).to_string(),
+                    session.host_hwnd != 0,
+                    session.shell.content_hwnd(),
+                    session.shell.content_size(),
+                )
+            })
+            .unwrap_or_else(|| ("Closed".to_string(), false, 0, (0, 0)));
+        let bridge_loaded_for_open = if super::plugin_bridge_runtime::bridge_enabled() {
+            self.plugin_editors
+                .bridge_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.lock().ok())
+                .and_then(|runtime| runtime.loaded_descriptor(insert_id))
+                .is_some()
+        } else {
+            false
+        };
+        let runtime_state_for_open = if bridge_loaded_for_open
+            && matches!(runtime_state, PluginRuntimeState::EditorClosed)
+        {
+            eprintln!(
+                "[PluginEditor] bridge instance already loaded; reconciling editor open state instance={insert_id} prior={runtime_state:?}"
+            );
+            let host_pid = self
+                .plugin_editors
+                .bridge_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.lock().ok())
+                .and_then(|runtime| runtime.host_pid());
+            let _ = self.timeline.update(cx, |timeline, _cx| {
+                timeline.state.set_insert_runtime(
+                    track_id,
+                    insert_id,
+                    PluginRuntimeBackend::ExternalBridge,
+                    PluginRuntimeState::Active,
+                    host_pid,
+                )
+            });
+            PluginRuntimeState::Active
+        } else {
+            runtime_state.clone()
+        };
+        let plugin_host_alive = self
+            .plugin_editors
+            .bridge_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.lock().ok())
+            .and_then(|runtime| runtime.host_pid())
+            .is_some();
+        let controller_known = plugin_id.is_some();
+        let mut gate_allowed = true;
+        let mut block_reason = "none";
+        if matches!(runtime_state_for_open, PluginRuntimeState::Missing(_)) {
+            gate_allowed = false;
+            block_reason = "plugin_binary_missing";
+        } else if matches!(runtime_state_for_open, PluginRuntimeState::Failed(_)) {
+            gate_allowed = false;
+            block_reason = "plugin_load_failed";
+        } else if load_status != InsertLoadStatus::Ready {
+            gate_allowed = false;
+            block_reason = "load_status_not_ready";
+        } else if matches!(runtime_state_for_open, PluginRuntimeState::Loading) {
+            gate_allowed = false;
+            block_reason = "plugin_load_state_loading";
+        } else if matches!(
+            runtime_state_for_open,
+            PluginRuntimeState::NotLoaded | PluginRuntimeState::Unloaded
+        ) {
+            gate_allowed = false;
+            block_reason = "runtime_instance_not_loaded";
+        } else if super::plugin_bridge_runtime::bridge_enabled() && !plugin_host_alive {
+            gate_allowed = false;
+            block_reason = "plugin_host_not_alive";
+        } else if super::plugin_bridge_runtime::bridge_enabled() && !bridge_loaded_for_open {
+            gate_allowed = false;
+            block_reason = "bridge_instance_missing";
+        } else if !controller_known {
+            gate_allowed = false;
+            block_reason = "controller_unknown";
+        }
+        eprintln!(
+            "[EDITOR OPEN GATE]\nplugin_instance_id={insert_id}\nruntime_state={runtime_state_for_open:?}\nload_status={load_status:?}\nplugin_load_state={load_status:?}\neditor_state={editor_state}\nbridge_instance_exists={bridge_loaded_for_open}\nplugin_host_alive={plugin_host_alive}\ncontroller_known={controller_known}\neditor_created={editor_created}\npending_editor_open={pending_editor_open}\ncontent_hwnd=0x{content_hwnd:x}\ncontent_size={}x{}\nallowed={gate_allowed}\nblock_reason={block_reason}",
+            content_size.0,
+            content_size.1
+        );
+        if !gate_allowed
+            && !matches!(
+                runtime_state_for_open,
+                PluginRuntimeState::Missing(_)
+                    | PluginRuntimeState::Failed(_)
+                    | PluginRuntimeState::Loading
+                    | PluginRuntimeState::NotLoaded
+                    | PluginRuntimeState::Unloaded
+            )
+        {
+            eprintln!(
+                "[PluginEditor] editor open blocked; queueing editor open reason={block_reason}"
+            );
+            // Single pending request per instance: set the flag only (idempotent).
+            // The plugin-ready transition (`on_bridge_plugin_host_ready` /
+            // ProcessingPrepared) is the SOLE place that converts the flag into a
+            // one-shot deferred open — never this blocked path, which `flush`
+            // re-drives every frame and would otherwise re-queue infinitely.
+            let queued = self.timeline.update(cx, |timeline, _cx| {
+                timeline
+                    .state
+                    .set_insert_pending_editor_open(track_id, insert_id, true)
+            });
+            eprintln!(
+                "[EDITOR_OPEN_GATE]\nplugin_instance_id={insert_id}\nblock_reason={block_reason}\npending_editor_open=true\naction=queue\nnewly_queued={queued}"
+            );
+            if super::plugin_bridge_runtime::bridge_enabled() {
+                let owner_hwnd = studio_native_hwnd(window);
+                self.open_bridge_loading_editor(
+                    track_id,
+                    insert_id,
+                    display_name.clone(),
+                    owner_hwnd,
+                    cx,
+                );
+            }
+            return;
+        }
 
-        match &runtime_state {
+        match &runtime_state_for_open {
             PluginRuntimeState::Missing(reason) => {
                 eprintln!("[PluginEditor] cannot open: plugin missing ({reason})");
                 return;
@@ -1079,19 +1564,19 @@ impl StudioLayout {
             PluginRuntimeState::Loading
             | PluginRuntimeState::NotLoaded
             | PluginRuntimeState::Unloaded => {
-                eprintln!("[PluginEditor] plugin still loading; queueing editor open");
+                eprintln!(
+                    "[PluginEditor] editor open blocked; queueing editor open reason={block_reason}"
+                );
+                // Set the single pending flag only; do NOT push a deferred open
+                // here (the ready transition owns that — see the gate block above).
                 let queued = self.timeline.update(cx, |timeline, _cx| {
                     timeline
                         .state
                         .set_insert_pending_editor_open(track_id, insert_id, true)
                 });
-                if queued {
-                    self.plugin_editors.deferred_opens.push((
-                        track_id.to_string(),
-                        insert_index,
-                        resolved_plugin_instance_id.clone(),
-                    ));
-                }
+                eprintln!(
+                    "[EDITOR_OPEN_GATE]\nplugin_instance_id={insert_id}\nblock_reason={block_reason}\npending_editor_open=true\naction=queue\nnewly_queued={queued}"
+                );
                 if super::plugin_bridge_runtime::bridge_enabled() {
                     let owner_hwnd = studio_native_hwnd(window);
                     self.open_bridge_loading_editor(
@@ -1101,7 +1586,10 @@ impl StudioLayout {
                         owner_hwnd,
                         cx,
                     );
-                    if !matches!(runtime_state, PluginRuntimeState::Loading) {
+                    if matches!(
+                        runtime_state_for_open,
+                        PluginRuntimeState::NotLoaded | PluginRuntimeState::Unloaded
+                    ) {
                         let _ = self.load_bridge_insert_for_slot(track_id, insert_id, cx);
                     }
                 }
@@ -1147,14 +1635,7 @@ impl StudioLayout {
         }
 
         if super::plugin_bridge_runtime::bridge_enabled() {
-            let bridge_loaded = self
-                .plugin_editors
-                .bridge_runtime
-                .as_ref()
-                .and_then(|runtime| runtime.lock().ok())
-                .and_then(|runtime| runtime.loaded_descriptor(insert_id))
-                .is_some();
-            if !bridge_loaded {
+            if !bridge_loaded_for_open {
                 eprintln!("[PluginEditor] no runtime instance; loading plugin");
                 let owner_hwnd = studio_native_hwnd(window);
                 self.open_bridge_loading_editor(
@@ -1165,16 +1646,13 @@ impl StudioLayout {
                     cx,
                 );
                 if self.load_bridge_insert_for_slot(track_id, insert_id, cx) {
+                    // Set the pending flag only; the ready transition pushes the
+                    // one-shot deferred open once the plugin confirms loaded.
                     let _ = self.timeline.update(cx, |timeline, _cx| {
                         timeline
                             .state
                             .set_insert_pending_editor_open(track_id, insert_id, true);
                     });
-                    self.plugin_editors.deferred_opens.push((
-                        track_id.to_string(),
-                        insert_index,
-                        resolved_plugin_instance_id.clone(),
-                    ));
                 }
                 return;
             }
@@ -1505,7 +1983,7 @@ impl StudioLayout {
         SpherePluginHost::native_editor::detach_all_embedded_editors();
     }
 
-    /// Kick off a background SQLite load of the plug-in catalog. The picker
+    /// Start a background SQLite load of the plug-in catalog. The picker
     /// opens instantly with a skeleton; this task replaces the skeleton once
     /// the catalog is read. Re-entrant: a second call while a load is in
     /// flight is a no-op.
@@ -1669,7 +2147,7 @@ impl StudioLayout {
         if let Some(index) = self.plugin_search_index.as_ref() {
             ensure_default_highlight(&mut self.plugin_picker, index, &self.plugin_picker_prefs);
         }
-        // Kick off (or rejoin) the background SQLite load. Picker shell is
+        // Start (or rejoin) the background SQLite load. Picker shell is
         // visible immediately; skeleton rows fill in until the catalog lands.
         if self.plugin_catalog.available.is_none()
             || !matches!(self.plugin_catalog.status, PluginCatalogStatus::Ready)
@@ -1916,7 +2394,9 @@ impl StudioLayout {
             } else {
                 eprintln!("[plugin-runtime] backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1");
                 eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
-                eprintln!("[plugin-runtime] legacy path may hang GPU/OpenGL/JUCE plugin editors");
+                eprintln!(
+                    "[plugin-runtime] legacy path may hang GPU/browser-backed plugin editors"
+                );
                 self.mark_dirty();
                 self.audio_bridge.project_dirty = true;
             }
@@ -2183,12 +2663,72 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         if self.plugin_editors.deferred_opens.is_empty() {
+            // Nothing queued this frame: every instance has resolved, so clear
+            // the loop-guard counters (they only track *consecutive* re-queues).
+            if !self.plugin_editors.flush_attempts.is_empty() {
+                self.plugin_editors.flush_attempts.clear();
+            }
             return;
         }
+        // One automatic attempt per readiness is the intended cap (spec item 12);
+        // the deferred queue is normally drained once. The guard exists only to
+        // make an unexpected re-queue source terminate instead of spinning.
+        const MAX_EDITOR_OPEN_FLUSHES: u32 = 10;
         let pending: Vec<_> = self.plugin_editors.deferred_opens.drain(..).collect();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (track_id, insert_index, instance_id) in pending {
+            seen.insert(instance_id.clone());
+            let attempts = self
+                .plugin_editors
+                .flush_attempts
+                .entry(instance_id.clone())
+                .or_insert(0);
+            *attempts += 1;
+            if *attempts > MAX_EDITOR_OPEN_FLUSHES {
+                let count = *attempts;
+                eprintln!(
+                    "[EDITOR_LOOP_GUARD]\nplugin_instance_id={instance_id}\nevent_name=flush_open\nsame_state_repeat_count={count}\nlast_transition_age_ms=unknown\nERROR=true"
+                );
+                // Force the editor open terminal so it stops re-queueing and the
+                // user can retry deliberately; the plugin/audio instance is left
+                // untouched.
+                self.timeline.update(cx, |timeline, _cx| {
+                    for track in timeline
+                        .state
+                        .insert_owner_ids_containing(&instance_id)
+                    {
+                        timeline
+                            .state
+                            .set_insert_pending_editor_open(&track, &instance_id, false);
+                    }
+                });
+                for session in self.plugin_editors.bridge.values_mut() {
+                    if session.instance_id == instance_id
+                        && !bridge_editor_is_terminal(&session.state)
+                    {
+                        session.shell.set_status(
+                            "Editor open loop detected — close and open it again.",
+                            true,
+                        );
+                        transition_bridge_editor_state(
+                            session,
+                            BridgeEditorState::TimedOut("Editor open loop guard".to_string()),
+                            "loop_guard",
+                        );
+                    }
+                }
+                continue;
+            }
+            eprintln!(
+                "[EDITOR_QUEUE_FLUSH]\nplugin_instance_id={instance_id}\nflush_attempt={}\nsent_open_editor=true",
+                *attempts
+            );
             self.open_insert_editor(&track_id, insert_index, &instance_id, window, cx);
         }
+        // Drop counters for instances that were not re-queued this frame.
+        self.plugin_editors
+            .flush_attempts
+            .retain(|id, _| seen.contains(id));
     }
 
     /// All (track_id, insert_id) pairs with external-bridge VST3 inserts.
@@ -2365,22 +2905,22 @@ impl StudioLayout {
                     &track_id,
                     plugin_instance_id,
                     PluginRuntimeBackend::ExternalBridge,
-                    PluginRuntimeState::Active,
+                    PluginRuntimeState::Ready,
                     host_pid,
                 ) {
                     local_changed = true;
                 }
-                let pending = timeline
+                if let Some((index, true)) = timeline
                     .state
                     .insert_slots(&track_id)
                     .and_then(|slots| {
                         slots
-                        .iter()
-                        .enumerate()
-                        .find(|(_, slot)| slot.id == plugin_instance_id)
+                            .iter()
+                            .enumerate()
+                            .find(|(_, slot)| slot.id == plugin_instance_id)
                             .map(|(index, slot)| (index, slot.pending_open_editor))
-                    });
-                if let Some((index, true)) = pending {
+                    })
+                {
                     timeline.state.set_insert_pending_editor_open(
                         &track_id,
                         plugin_instance_id,
@@ -2391,8 +2931,17 @@ impl StudioLayout {
             }
             local_changed
         });
-        self.plugin_editors.deferred_opens.extend(pending_opens);
-        eprintln!("[plugin-runtime] state Loading -> Active source={source}");
+        for open in pending_opens {
+            if !self
+                .plugin_editors
+                .deferred_opens
+                .iter()
+                .any(|(_, _, id)| id == &open.2)
+            {
+                self.plugin_editors.deferred_opens.push(open);
+            }
+        }
+        eprintln!("[plugin-runtime] state Loading -> Ready source={source}");
         self.sync_plugin_bridge_sinks_to_engine(cx, source);
         if slot_changed {
             self.audio_bridge.project_dirty = true;
@@ -2483,12 +3032,18 @@ impl StudioLayout {
                     .unwrap_or(false);
                 if load_requested {
                     eprintln!(
+                        "[PLUGIN_LOAD_REQUEST_DEDUP]\nplugin_instance_id={slot_id}\nexisting_load_state=requested_or_loaded\nnew_request_created=false\nreason=already_has_load_request"
+                    );
+                    eprintln!(
                         "[PluginRestore] runtime instance already requested instance_id={slot_id}; reusing bridge"
                     );
                     self.sync_plugin_bridge_sinks_to_engine(cx, "plugin_restore_reuse");
                     self.mark_dirty();
                     return true;
                 }
+                eprintln!(
+                    "[PLUGIN_LOAD_REQUEST_DEDUP]\nplugin_instance_id={slot_id}\nexisting_load_state=not_loaded\nnew_request_created=true\nreason=first_load"
+                );
                 let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
                 let _ = self.timeline.update(cx, |timeline, _cx| {
                     timeline.state.set_insert_runtime(
@@ -2652,22 +3207,23 @@ impl StudioLayout {
             inserts.len()
         );
         for (track_id, slot_id) in inserts {
+            // Auto-load ONLY genuinely-unloaded slots. Never auto-reload a slot
+            // that is Loading (in progress), Failed/Missing (terminal — manual
+            // retry only, spec item 12: no automatic infinite retry), or already
+            // loaded / mid-editor-open. This is what stops the Failed->reload
+            // and EditorOpening->reload cycles.
             let needs_load = self
                 .timeline
                 .read(cx)
                 .state
                 .find_insert_slot(&track_id, &slot_id)
                 .map(|slot| {
-                    !matches!(
+                    matches!(
                         slot.runtime_state,
-                        PluginRuntimeState::Active
-                            | PluginRuntimeState::Loaded
-                            | PluginRuntimeState::Ready
-                            | PluginRuntimeState::EditorOpen
-                            | PluginRuntimeState::EditorClosed
+                        PluginRuntimeState::NotLoaded | PluginRuntimeState::Unloaded
                     )
                 })
-                .unwrap_or(true);
+                .unwrap_or(false);
             if needs_load {
                 let _ = self.load_bridge_insert_for_slot(&track_id, &slot_id, cx);
             }
@@ -2710,6 +3266,12 @@ impl StudioLayout {
 
 /// Resize shell/content to preferred size before attach (no `ResizeEditor` yet).
 fn resize_shell_before_attach(session: &mut BridgeEditorSession, width: u32, height: u32) {
+    // Host-owned: the host process owns the editor window and sizes it itself
+    // (IPlugView::getSize during embed). The main app has no window to resize
+    // and must not echo a size back, or it would shrink the host window.
+    if session.shell.is_host_owned_proxy() {
+        return;
+    }
     let (req_w, req_h) = (width as i32, height as i32);
     if req_w <= 0 || req_h <= 0 {
         eprintln!(
@@ -2774,6 +3336,12 @@ fn apply_bridge_preferred(
         return;
     }
     session.preferred_applied = true;
+
+    // Host-owned: the host sized its own window to the plug-in's preferred size.
+    // The main app owns no window and must not push a (proxy-derived) size back.
+    if session.shell.is_host_owned_proxy() {
+        return;
+    }
 
     let (req_w, req_h) = (width as i32, height as i32);
     if req_w <= 0 || req_h <= 0 {

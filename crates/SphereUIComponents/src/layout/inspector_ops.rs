@@ -772,7 +772,7 @@ impl StudioLayout {
                 let enabled = *enabled;
                 StudioLayout::defer_update(&owner, cx, move |this, cx| {
                     let changed = this.timeline.update(cx, |timeline, cx| {
-                        let ensure_args: Option<(String, u32)> = {
+                        let ensure_args: Option<(String, u32, bool)> = {
                             let Some(slots) = timeline.state.insert_slots_mut(&track_id) else {
                                 return false;
                             };
@@ -812,9 +812,11 @@ impl StudioLayout {
                                     .copied()
                                     .max()
                                     .unwrap_or(2) as u32;
-                            Some((plugin_name, output_channels))
+                            let multiout_capable = slot.output_bus_channel_counts.len() > 1;
+                            Some((plugin_name, output_channels, multiout_capable))
                         };
-                        let Some((plugin_name, output_channels)) = ensure_args else {
+                        let Some((plugin_name, output_channels, multiout_capable)) = ensure_args
+                        else {
                             return false;
                         };
                         timeline.state.ensure_vsti_output_child_tracks(
@@ -822,6 +824,7 @@ impl StudioLayout {
                             &insert_id,
                             output_channels,
                             &plugin_name,
+                            multiout_capable,
                         );
                         cx.notify();
                         true

@@ -1,6 +1,7 @@
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::timeline::timeline_state::{
-    self, vsti_output_bus_index_for_channel, vsti_output_child_channels_for_bus,
+    self, vsti_output_bus_flat_range, vsti_output_bus_index_for_channel,
+    vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
     vsti_output_child_track_id, ClipState, ClipType, InsertSlotState, MidiControllerKind,
     StretchMode, TimelineState, TrackState, TrackType, MASTER_TRACK_ID,
 };
@@ -344,28 +345,46 @@ fn normalized_enabled_audio_outputs(slot: &InsertSlotState) -> Vec<u8> {
 }
 
 fn vsti_output_children_json(slot: &InsertSlotState) -> serde_json::Value {
-    let mut bus_indices: Vec<u8> = normalized_enabled_audio_outputs(slot)
-        .into_iter()
-        .filter_map(vsti_output_bus_index_for_channel)
-        .collect();
-    bus_indices.sort_unstable();
-    bus_indices.dedup();
+    let bus_counts = &slot.output_bus_channel_counts;
+    // Mirror `ensure_vsti_output_child_tracks` exactly so child track ids line up:
+    // real per-bus layout when known, legacy stereo pairing otherwise.
+    let bus_indices: Vec<u8> = if bus_counts.is_empty() {
+        let mut indices: Vec<u8> = normalized_enabled_audio_outputs(slot)
+            .into_iter()
+            .filter_map(vsti_output_bus_index_for_channel)
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    } else {
+        vsti_output_bus_strip_indices(bus_counts)
+    };
     serde_json::Value::Array(
         bus_indices
             .into_iter()
-            .map(|bus_index| {
-                let (channel_l, channel_r) = vsti_output_child_channels_for_bus(bus_index);
+            .filter_map(|bus_index| {
+                // Real flat-channel pair for this bus. Mono bus → (ch, ch) so the
+                // engine duplicates it to L/R; stereo → (l, r) preserved.
+                let (channel_l, channel_r) =
+                    vsti_output_child_channels_for_bus_layout(bus_counts, bus_index)?;
+                let channel_count = if bus_counts.is_empty() {
+                    2
+                } else {
+                    vsti_output_bus_flat_range(bus_counts, bus_index as usize)
+                        .map(|(_, count)| count)
+                        .unwrap_or(2)
+                };
                 let child_id = vsti_output_child_track_id(&slot.id, bus_index);
-                serde_json::json!({
+                Some(serde_json::json!({
                     "trackId": child_id,
                     "pluginInstanceId": slot.id,
                     "busIndex": bus_index,
-                    "channelCount": 2,
+                    "channelCount": channel_count,
                     "channelL": channel_l,
                     "channelR": channel_r,
                     "mixerChannelId": child_id,
                     "routeNodeId": child_id,
-                })
+                }))
             })
             .collect(),
     )

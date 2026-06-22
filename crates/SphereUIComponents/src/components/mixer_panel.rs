@@ -37,8 +37,8 @@ use crate::components::panel::FxSlotDrag;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
-    is_vsti_output_child_track_id, volume, InsertLoadStatus, InsertSlotState, MasterBusState,
-    SendSlotState, TrackState, TrackType, MASTER_TRACK_ID,
+    is_vsti_output_child_track_id, volume, vsti_output_child_insert_id, InsertLoadStatus,
+    InsertSlotState, MasterBusState, SendSlotState, TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::theme::Colors;
@@ -1984,14 +1984,26 @@ enum MixerRenderItem {
 
 fn collect_mixer_render_items(
     tracks: &[TrackState],
-    _collapsed_vsti_output_groups: &HashSet<String>,
+    collapsed_vsti_output_groups: &HashSet<String>,
 ) -> Vec<MixerRenderItem> {
     let mut items = Vec::with_capacity(tracks.len());
     for (track_index, track) in tracks.iter().enumerate() {
-        items.push(MixerRenderItem::Track { track_index });
-        if is_vsti_output_child_track_id(&track.id) {
-            continue;
+        // VSTi multi-out child channels are mixer-only strips. Collapse/expand is
+        // purely a VIEW concern: when the parent instrument's group is collapsed we
+        // simply omit the child's render item. The child track and its route stay
+        // in the model and the engine snapshot, so audio routing, meters, and
+        // mute/solo state are completely untouched while hidden.
+        if let Some(insert_id) = vsti_output_child_insert_id(&track.id) {
+            let parent_group_collapsed = tracks
+                .iter()
+                .find(|parent| parent.inserts.iter().any(|slot| slot.id == insert_id))
+                .map(|parent| vsti_output_group_key(&parent.id, insert_id))
+                .is_some_and(|key| collapsed_vsti_output_groups.contains(&key));
+            if parent_group_collapsed {
+                continue;
+            }
         }
+        items.push(MixerRenderItem::Track { track_index });
     }
     items
 }
@@ -2215,4 +2227,61 @@ pub fn mixer_panel(
                     strip_available_px,
                 )),
         )
+}
+
+#[cfg(test)]
+mod collapse_filter_tests {
+    use super::{collect_mixer_render_items, vsti_output_group_key};
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, InsertPluginFormat, TimelineState, TrackType,
+    };
+    use std::collections::HashSet;
+
+    fn drum_scenario() -> (TimelineState, String, String) {
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            name: "Drums".to_string(),
+            track_type: TrackType::Instrument,
+            color: crate::theme::Colors::track_color_for_index(0),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "drums".to_string(),
+            Some(std::path::PathBuf::from("C:/p/drums.vst3")),
+            InsertPluginFormat::Vst3,
+            "drums".to_string(),
+        );
+        // 3 stereo output buses → 3 child mixer strips.
+        state.set_insert_output_bus_layout(&track_id, &slot, &[2, 2, 2]);
+        state.auto_enable_detected_insert_outputs(&track_id, &slot, 6);
+        (state, track_id, slot)
+    }
+
+    #[test]
+    fn expanded_includes_children_collapsed_hides_only_children() {
+        let (state, track_id, slot) = drum_scenario();
+
+        // Expanded (empty collapsed set): parent + 3 child strips = 4 items.
+        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
+        assert_eq!(expanded.len(), 4);
+
+        // Collapsed: child strips filtered out, only the parent strip remains.
+        let mut collapsed = HashSet::new();
+        collapsed.insert(vsti_output_group_key(&track_id, &slot));
+        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed);
+        assert_eq!(
+            collapsed_items.len(),
+            1,
+            "collapse hides only the child strips, never the parent"
+        );
+
+        // The model still holds every track — collapse changed the VIEW only.
+        assert_eq!(state.tracks.len(), 4);
+    }
 }

@@ -10,6 +10,39 @@ pub fn is_vsti_output_child_track_id(track_id: &str) -> bool {
     track_id.starts_with(VSTI_OUTPUT_CHILD_TRACK_PREFIX)
 }
 
+/// Parent plugin instance (insert) id embedded in a child mixer-channel track id
+/// (`vsti-out:{insert}:bus:{n}`), or `None` if `track_id` is not a child id.
+pub fn vsti_output_child_insert_id(track_id: &str) -> Option<&str> {
+    track_id
+        .strip_prefix(VSTI_OUTPUT_CHILD_TRACK_PREFIX)?
+        .split_once(":bus:")
+        .map(|(insert, _)| insert)
+}
+
+/// The mixer group key (`track_id:insert_id`) used by [`vsti_output_group_key`]
+/// in the mixer view, for a parent track + instrument insert.
+pub fn vsti_output_group_key(track_id: &str, insert_id: &str) -> String {
+    format!("{track_id}:{insert_id}")
+}
+
+/// Group keys of every instrument whose VSTi multi-out group is collapsed, read
+/// from the persisted per-insert `multiout_collapsed` flag (the single source of
+/// truth). Both the docked and floating mixer derive their hidden-strip set from
+/// this so they can never drift.
+pub fn collapsed_vsti_output_group_keys_from_tracks(
+    tracks: &[TrackState],
+) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for track in tracks {
+        if let Some(slot) = track.instrument_insert() {
+            if slot.multiout_collapsed {
+                keys.insert(vsti_output_group_key(&track.id, &slot.id));
+            }
+        }
+    }
+    keys
+}
+
 pub fn vsti_output_bus_index_for_channel(channel: u8) -> Option<u8> {
     (channel > 0).then_some((channel - 1) / 2)
 }
@@ -19,6 +52,77 @@ pub fn vsti_output_child_channels_for_bus(bus_index: u8) -> (u8, u8) {
         bus_index.saturating_mul(2).saturating_add(1),
         bus_index.saturating_mul(2).saturating_add(2),
     )
+}
+
+/// Maximum flat output channels the bridge carries (mirrors the engine's
+/// `MAX_CHANNELS` / C++ `kMaxBridgeChannels`). Output buses whose flat channels
+/// fall entirely past this cap are dropped by the bridge and cannot be heard, so
+/// the host does not create silent strips for them.
+pub const VSTI_MAX_BRIDGE_CHANNELS: u8 = 16;
+
+/// Given the real per-bus output channel counts (bus-by-bus order, as the bridge
+/// flattens them), return the `(start_channel_1based, channel_count)` of
+/// `bus_index`, or `None` if out of range / zero-width.
+pub fn vsti_output_bus_flat_range(bus_counts: &[u8], bus_index: usize) -> Option<(u8, u8)> {
+    let mut start: u32 = 1;
+    for (i, &count) in bus_counts.iter().enumerate() {
+        if i == bus_index {
+            if count == 0 || start > u8::MAX as u32 {
+                return None;
+            }
+            return Some((start as u8, count));
+        }
+        start += count as u32;
+    }
+    None
+}
+
+/// The `(channel_l, channel_r)` 1-based flat channels a child stereo strip reads
+/// for `bus_index`. With a real per-bus layout: a **mono** bus maps to
+/// `(ch, ch)` so the engine duplicates it to both L and R (never paired with the
+/// next bus); a **stereo+** bus maps to `(start, start+1)` preserving L/R (first
+/// two channels of a multichannel bus). With an empty layout (unknown) it falls
+/// back to the legacy "every bus is a consecutive stereo pair" assumption.
+pub fn vsti_output_child_channels_for_bus_layout(
+    bus_counts: &[u8],
+    bus_index: u8,
+) -> Option<(u8, u8)> {
+    if bus_counts.is_empty() {
+        return Some(vsti_output_child_channels_for_bus(bus_index));
+    }
+    let (start, count) = vsti_output_bus_flat_range(bus_counts, bus_index as usize)?;
+    let r = if count >= 2 {
+        start.saturating_add(1)
+    } else {
+        start
+    };
+    Some((start, r))
+}
+
+/// Output bus indices that should become child mixer strips, given the real
+/// per-bus layout. Every bus whose flat channels fit within the bridge cap gets
+/// a strip — but only when the plugin genuinely exposes **more than one** output
+/// bus (a normal single-bus stereo VSTi keeps playing on its instrument track,
+/// criteria #28). Returns empty for single-bus / unknown layouts.
+pub fn vsti_output_bus_strip_indices(bus_counts: &[u8]) -> Vec<u8> {
+    if bus_counts.len() <= 1 {
+        return Vec::new();
+    }
+    let mut indices = Vec::new();
+    for bus_index in 0..bus_counts.len() {
+        let Some((start, count)) = vsti_output_bus_flat_range(bus_counts, bus_index) else {
+            continue;
+        };
+        // Drop buses the bridge can't carry (start past the channel cap).
+        if start > VSTI_MAX_BRIDGE_CHANNELS {
+            continue;
+        }
+        let _ = count;
+        if bus_index <= u8::MAX as usize {
+            indices.push(bus_index as u8);
+        }
+    }
+    indices
 }
 
 /// Plugin format identifier mirrored from `project::PluginFormat`. Kept
@@ -137,6 +241,19 @@ pub struct InsertSlotState {
     /// 1-based VSTi output channels enabled for the engine-side stereo downmix.
     /// Empty means the default main output pair (1/2).
     pub enabled_audio_output_channels: Vec<u8>,
+    /// Real per-bus output channel counts reported by the plugin, in the
+    /// bus-by-bus order the bridge flattens them (bus0 channels, then bus1…).
+    /// Drives one mixer strip per real output bus with correct mono→stereo
+    /// duplication. Empty = unknown (falls back to legacy stereo pairing). Not
+    /// persisted — re-detected from the host on every load via `ProcessingPrepared`.
+    pub output_bus_channel_counts: Vec<u8>,
+    /// Mixer-only view flag for this instrument's VSTi multi-out group: when
+    /// `true` the child bus strips are hidden from the mixer (collapsed). This is
+    /// a pure VIEW concern — it never changes audio routing, never removes child
+    /// mixer channels or route nodes, and is not sent to the engine. Persisted so
+    /// the collapsed/expanded state survives save/restore. Default `false`
+    /// (expanded). Only meaningful on the instrument insert (`inserts[0]`).
+    pub multiout_collapsed: bool,
     /// When true, open the plugin editor once runtime reaches Active/Loaded.
     pub pending_open_editor: bool,
     /// Packed VST3 state (`Vst3PluginState::to_packed_bytes`) for project
@@ -163,6 +280,8 @@ impl InsertSlotState {
             host_pid: None,
             parameters: Vec::new(),
             enabled_audio_output_channels: Vec::new(),
+            output_bus_channel_counts: Vec::new(),
+            multiout_collapsed: false,
             pending_open_editor: false,
             vst3_state: None,
         }
@@ -656,6 +775,73 @@ impl TimelineState {
         true
     }
 
+    /// Store the plugin's real per-bus output channel counts (reported by the
+    /// host on `ProcessingPrepared`). Sanitizes to `1..=2`-ish counts but keeps
+    /// the bus-by-bus order intact so the flat-channel ranges line up with the
+    /// bridge. Returns `true` if the stored layout changed.
+    pub fn set_insert_output_bus_layout(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        bus_channel_counts: &[u32],
+    ) -> bool {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
+            return false;
+        };
+        let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
+            return false;
+        };
+        let sanitized: Vec<u8> = bus_channel_counts
+            .iter()
+            .map(|c| (*c).clamp(0, u8::MAX as u32) as u8)
+            .collect();
+        if slot.output_bus_channel_counts == sanitized {
+            return false;
+        }
+        if plugin_debug_enabled() {
+            eprintln!(
+                "[plugin] set_output_bus_layout track={} slot={} buses={:?}",
+                track_id, insert_id, sanitized
+            );
+        }
+        slot.output_bus_channel_counts = sanitized;
+        true
+    }
+
+    /// Set the VSTi multi-out group's collapsed (mixer-view) flag on an insert.
+    /// Returns the new value (`true` = collapsed) so the caller can log/persist.
+    /// Pure view state — does not touch routing, child channels, or the engine.
+    pub fn set_insert_multiout_collapsed(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        collapsed: bool,
+    ) -> bool {
+        if let Some(slots) = self.insert_slots_mut(track_id) {
+            if let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) {
+                slot.multiout_collapsed = collapsed;
+            }
+        }
+        collapsed
+    }
+
+    /// Flip the collapsed flag for an insert's multi-out group, returning the new
+    /// value. `false` when the insert is not found (no-op).
+    pub fn toggle_insert_multiout_collapsed(&mut self, track_id: &str, insert_id: &str) -> bool {
+        let current = self
+            .find_insert_slot(track_id, insert_id)
+            .map(|slot| slot.multiout_collapsed)
+            .unwrap_or(false);
+        self.set_insert_multiout_collapsed(track_id, insert_id, !current)
+    }
+
+    /// Group keys (`track_id:insert_id`) of every instrument whose VSTi multi-out
+    /// group is currently collapsed. Used to derive the mixer's hidden-strip set
+    /// from the persisted model (the single source of truth).
+    pub fn collapsed_vsti_output_group_keys(&self) -> std::collections::HashSet<String> {
+        collapsed_vsti_output_group_keys_from_tracks(&self.tracks)
+    }
+
     pub fn auto_enable_detected_insert_outputs(
         &mut self,
         track_id: &str,
@@ -711,14 +897,22 @@ impl TimelineState {
         else {
             return false;
         };
-        let max_channel = output_channels.clamp(2, 32) as u8;
-        let mut bus_indices: Vec<u8> = slot
-            .enabled_audio_output_channels
-            .iter()
-            .copied()
-            .filter(|channel| *channel <= max_channel)
-            .filter_map(vsti_output_bus_index_for_channel)
-            .collect();
+        let mut bus_indices: Vec<u8> = if slot.output_bus_channel_counts.is_empty() {
+            // Legacy fallback (real bus layout not reported yet): assume the
+            // enabled flat channels group into consecutive stereo pairs.
+            let max_channel = output_channels.clamp(2, 32) as u8;
+            slot.enabled_audio_output_channels
+                .iter()
+                .copied()
+                .filter(|channel| *channel <= max_channel)
+                .filter_map(vsti_output_bus_index_for_channel)
+                .collect()
+        } else {
+            // Real per-bus layout: one strip per genuine output bus. A mono bus
+            // becomes its own stereo strip (duplicated L/R) instead of being
+            // paired with the next bus's channel.
+            vsti_output_bus_strip_indices(&slot.output_bus_channel_counts)
+        };
         bus_indices.sort_unstable();
         bus_indices.dedup();
 
@@ -864,5 +1058,104 @@ impl TimelineState {
             }
         }
         pending
+    }
+}
+
+#[cfg(test)]
+mod vsti_output_bus_layout_tests {
+    use super::{
+        vsti_output_bus_flat_range, vsti_output_bus_strip_indices,
+        vsti_output_child_channels_for_bus_layout,
+    };
+
+    #[test]
+    fn mono_buses_each_become_an_independent_stereo_strip() {
+        // 4 mono output buses (e.g. AD2 routed to separate mono outs).
+        let counts = [1u8, 1, 1, 1];
+        assert_eq!(vsti_output_bus_strip_indices(&counts), vec![0, 1, 2, 3]);
+        // Each mono bus duplicates its single flat channel to BOTH L and R —
+        // never paired with the next bus ("Kick on L, Snare on R" is the bug).
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 0),
+            Some((1, 1))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 1),
+            Some((2, 2))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 2),
+            Some((3, 3))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 3),
+            Some((4, 4))
+        );
+    }
+
+    #[test]
+    fn stereo_buses_preserve_left_right() {
+        let counts = [2u8, 2, 2];
+        assert_eq!(vsti_output_bus_strip_indices(&counts), vec![0, 1, 2]);
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 0),
+            Some((1, 2))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 1),
+            Some((3, 4))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 2),
+            Some((5, 6))
+        );
+    }
+
+    #[test]
+    fn mixed_mono_and_stereo_buses_map_to_real_boundaries() {
+        // bus0 stereo (ch1,2), bus1 mono (ch3), bus2 mono (ch4).
+        let counts = [2u8, 1, 1];
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 0),
+            Some((1, 2))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 1),
+            Some((3, 3))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&counts, 2),
+            Some((4, 4))
+        );
+        assert_eq!(vsti_output_bus_flat_range(&counts, 1), Some((3, 1)));
+    }
+
+    #[test]
+    fn single_bus_plugin_creates_no_child_strips() {
+        // A normal stereo VSTi keeps playing on its instrument track (criteria #28).
+        assert!(vsti_output_bus_strip_indices(&[2u8]).is_empty());
+        assert!(vsti_output_bus_strip_indices(&[1u8]).is_empty());
+    }
+
+    #[test]
+    fn buses_past_the_bridge_channel_cap_are_dropped() {
+        // 18 mono buses → only the first 16 flat channels can be carried.
+        let counts = [1u8; 18];
+        let indices = vsti_output_bus_strip_indices(&counts);
+        assert_eq!(indices.len(), 16);
+        assert_eq!(*indices.last().unwrap(), 15);
+    }
+
+    #[test]
+    fn unknown_layout_falls_back_to_legacy_stereo_pairing() {
+        // Empty layout (host hasn't reported yet) → legacy consecutive pairs.
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[], 0),
+            Some((1, 2))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[], 1),
+            Some((3, 4))
+        );
     }
 }

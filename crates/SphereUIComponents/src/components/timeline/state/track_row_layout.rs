@@ -74,7 +74,18 @@ impl TrackRowLayout {
         let mut y = 0.0_f32;
         let mut rows = Vec::with_capacity(state.tracks.len());
         for (index, track) in state.tracks.iter().enumerate() {
-            let height = state.track_row_height(track);
+            // VSTi multi-out child channels (e.g. AD2's per-bus outputs) are
+            // mixer-only — they live in `state.tracks` so the engine snapshot and
+            // mixer can route/meter them, but they must NOT occupy arrangement
+            // space. Keep them in the rows vector (1:1 with `state.tracks`, so the
+            // `row.index == state.tracks position` invariant the timeline relies
+            // on stays intact) but collapse them to zero height: they emit no lane,
+            // no clip, no header, and never match `track_at_content_y`.
+            let height = if is_vsti_output_child_track_id(&track.id) {
+                0.0
+            } else {
+                state.track_row_height(track)
+            };
             rows.push(TrackRowLayoutEntry {
                 track_id: track.id.clone(),
                 index,

@@ -291,6 +291,12 @@ pub enum HostEvent {
         sample_rate: u32,
         max_block_size: u32,
         output_channels: u32,
+        /// Real per-bus output channel counts (bus-by-bus order). Lets the host
+        /// model one mixer strip per plugin output bus with correct mono→stereo
+        /// duplication instead of pairing flat channels into stereo strips.
+        /// `#[serde(default)]` keeps frames from older hosts decodable.
+        #[serde(default)]
+        output_bus_channels: Vec<u32>,
     },
     /// Reply to [`HostCommand::GetPluginState`]. `ok` is false when the
     /// instance is not loaded or state capture failed; blobs are base64 of the

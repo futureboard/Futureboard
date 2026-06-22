@@ -2,7 +2,8 @@ use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::timeline::automation_lane::automation_lane;
 use crate::components::timeline::timeline_state::{
-    AutomationMarquee, TimelineState, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
+    is_vsti_output_child_track_id, AutomationMarquee, TimelineState, DEFAULT_TRACK_HEIGHT,
+    HEADER_WIDTH,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
@@ -99,6 +100,12 @@ pub fn track_list(
     }
 
     for track in state.tracks[visible_start..visible_end].iter() {
+        // VSTi multi-out child channels are mixer-only — never render them as
+        // arrangement rows (no header, no lane, no resize handle). They have a
+        // zero-height entry in the row layout, so spacers/indices stay aligned.
+        if is_vsti_output_child_track_id(&track.id) {
+            continue;
+        }
         let index = row_layout
             .row_for_track(&track.id)
             .map(|row| row.index)

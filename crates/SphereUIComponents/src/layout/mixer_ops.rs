@@ -1,8 +1,5 @@
 use gpui::{Context, Entity, Window, WindowHandle};
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use crate::components::edit::EditCommand;
 use crate::components::mixer_panel::{
@@ -33,8 +30,6 @@ pub(crate) struct MixerViewState {
     pub split_resize_start_send_px: f32,
     /// Active splitter-drag target, if a drag is in progress.
     pub split_active_target: Option<MixerSplitTarget>,
-    /// Collapsed VSTi output sub-strip groups, keyed by `track_id:insert_id`.
-    pub collapsed_vsti_output_groups: HashSet<String>,
     pub vsti_output_meters: HashMap<String, VstiOutputMeterState>,
 }
 
@@ -48,7 +43,6 @@ impl Default for MixerViewState {
             split_resize_start_insert_px: 0.0,
             split_resize_start_send_px: 0.0,
             split_active_target: None,
-            collapsed_vsti_output_groups: HashSet::new(),
             vsti_output_meters: HashMap::new(),
         }
     }
@@ -71,7 +65,9 @@ impl StudioLayout {
             ),
             mixer_send_section_px: clamp_mixer_section_height_px(self.mixer_view.send_section_px),
             mixer_split_active_target: self.mixer_view.split_active_target,
-            collapsed_vsti_output_groups: self.mixer_view.collapsed_vsti_output_groups.clone(),
+            // Derived from the persisted per-instrument collapse flag (single
+            // source of truth) — never a separate, drift-prone view cache.
+            collapsed_vsti_output_groups: timeline.state.collapsed_vsti_output_group_keys(),
             vsti_output_meters: self.mixer_view.vsti_output_meters.clone(),
         }
     }
@@ -128,17 +124,64 @@ impl StudioLayout {
     }
 
     pub(crate) fn toggle_vsti_output_group(&mut self, group_key: &str, cx: &mut Context<Self>) {
-        if !self
-            .mixer_view
-            .collapsed_vsti_output_groups
-            .remove(group_key)
-        {
-            self.mixer_view
-                .collapsed_vsti_output_groups
-                .insert(group_key.to_string());
+        // Group key is `{track_id}:{insert_id}`; insert ids contain no ':' so the
+        // last ':' splits the pair. Collapse/expand is a VIEW concern stored on the
+        // instrument insert (single source of truth) — it never touches routing,
+        // child mixer channels, route nodes, or the engine snapshot.
+        let Some((track_id, insert_id)) = group_key.rsplit_once(':') else {
+            return;
+        };
+        let track_id = track_id.to_string();
+        let insert_id = insert_id.to_string();
+        let now_collapsed = self.timeline.update(cx, |timeline, _cx| {
+            timeline
+                .state
+                .toggle_insert_multiout_collapsed(&track_id, &insert_id)
+        });
+
+        if crate::forensic_trace::forensic_trace_enabled() {
+            self.log_multiout_collapse_toggle(&track_id, &insert_id, now_collapsed, cx);
         }
+
+        // Persist the new view state (so save/restore keeps it) WITHOUT rebuilding
+        // the audio graph: the collapse flag is not part of the engine snapshot, so
+        // the next dedup'd sync is a no-op and `route_graph_version` is unchanged.
+        self.mark_dirty();
         self.push_mixer_snapshot_to_window(cx);
         cx.notify();
+    }
+
+    /// Structured `[MULTIOUT COLLAPSE]` / `[MULTIOUT EXPAND]` diagnostics proving
+    /// the toggle preserves routes (graph version unchanged, no channels
+    /// created/deleted). Forensic-gated; runs off the audio thread.
+    fn log_multiout_collapse_toggle(
+        &self,
+        track_id: &str,
+        insert_id: &str,
+        now_collapsed: bool,
+        cx: &gpui::App,
+    ) {
+        let prefix = format!("vsti-out:{insert_id}:bus:");
+        let timeline = self.timeline.read(cx);
+        let child_ids: Vec<String> = timeline
+            .state
+            .tracks
+            .iter()
+            .filter(|t| t.id.starts_with(&prefix))
+            .map(|t| t.id.clone())
+            .collect();
+        let gv = self.audio_bridge.route_graph_version;
+        if now_collapsed {
+            eprintln!(
+                "[MULTIOUT COLLAPSE]\nplugin_instance_id={insert_id}\nparent_mixer_channel_id={track_id}\nchild_count={}\nchild_mixer_channel_ids={child_ids:?}\nroute_nodes_preserved=true\naudio_routes_preserved=true\ngraph_version_before={gv}\ngraph_version_after={gv}\ncreated_or_deleted_channels=false",
+                child_ids.len()
+            );
+        } else {
+            eprintln!(
+                "[MULTIOUT EXPAND]\nplugin_instance_id={insert_id}\nparent_mixer_channel_id={track_id}\nchild_count={}\nchild_mixer_channel_ids={child_ids:?}\nused_existing_channels=true\nduplicated_channels=false\nroute_nodes_preserved=true\ngraph_version_before={gv}\ngraph_version_after={gv}",
+                child_ids.len()
+            );
+        }
     }
 
     /// Apply a splitter intent from any channel-strip handle. Shared across all

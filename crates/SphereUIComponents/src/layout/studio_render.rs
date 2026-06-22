@@ -1541,7 +1541,9 @@ impl Render for StudioLayout {
                         &master,
                         selected_track_id.as_deref(),
                         mixer_callbacks,
-                        &self.mixer_view.collapsed_vsti_output_groups,
+                        // Derived from the persisted per-insert collapse flag — the
+                        // same single source of truth the floating mixer uses.
+                        &crate::components::timeline::timeline_state::collapsed_vsti_output_group_keys_from_tracks(&tracks),
                         &self.mixer_view.vsti_output_meters,
                         mixer_scroll_x,
                         mixer_viewport_width,

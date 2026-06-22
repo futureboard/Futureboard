@@ -1359,9 +1359,12 @@ fn dispatch(
             let actual_output_channels = preview_guard
                 .main_audio_output_channel_count_for_instance(&plugin_instance_id)
                 .unwrap_or(output_channels.max(1));
+            let output_bus_channels = preview_guard
+                .output_bus_channel_counts_for_instance(&plugin_instance_id)
+                .unwrap_or_default();
             drop(preview_guard);
             eprintln!(
-                "[plugin-host-dsp] prepared instance={plugin_instance_id} sr={sr} block={block} requestedOutputs={output_channels} outputs={actual_output_channels} same_instance=true"
+                "[plugin-host-dsp] prepared instance={plugin_instance_id} sr={sr} block={block} requestedOutputs={output_channels} outputs={actual_output_channels} output_bus_channels={output_bus_channels:?} same_instance=true"
             );
             let _ = ipc::write_frame(
                 out,
@@ -1370,6 +1373,7 @@ fn dispatch(
                     sample_rate: sr,
                     max_block_size: block,
                     output_channels: actual_output_channels,
+                    output_bus_channels,
                 },
             );
             let _ = input_channels;

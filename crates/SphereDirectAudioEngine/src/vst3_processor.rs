@@ -184,6 +184,11 @@ extern "C" {
     fn sphere_daux_vst3_main_audio_output_channel_count(
         processor: *mut SphereDauxVst3Processor,
     ) -> i32;
+    fn sphere_daux_vst3_output_bus_channel_counts(
+        processor: *mut SphereDauxVst3Processor,
+        out_counts: *mut i32,
+        max_count: i32,
+    ) -> i32;
     fn sphere_daux_vst3_process_count(processor: *mut SphereDauxVst3Processor) -> u64;
     fn sphere_daux_vst3_last_input_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
     fn sphere_daux_vst3_last_output_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
@@ -554,6 +559,32 @@ impl Vst3RuntimeProcessor {
     #[inline]
     pub fn main_audio_output_channel_count(&self) -> i32 {
         self.inner.main_audio_output_channel_count
+    }
+
+    /// Per-bus output channel counts in the bus-by-bus order the bridge
+    /// flattens them into the interleaved block (bus0 channels, then bus1…).
+    /// Queried live — the bus arrangement is fixed after activation. Empty if
+    /// the processor is null or reports no output buses. The host uses this to
+    /// place one mixer strip per real output bus (a mono bus stays its own
+    /// stereo strip) instead of assuming every channel pair is a stereo bus.
+    pub fn output_bus_channel_counts(&self) -> Vec<u8> {
+        if self.inner.raw.is_null() {
+            return Vec::new();
+        }
+        const MAX_BUSES: usize = 32;
+        let mut counts = [0i32; MAX_BUSES];
+        let n = unsafe {
+            sphere_daux_vst3_output_bus_channel_counts(
+                self.inner.raw,
+                counts.as_mut_ptr(),
+                MAX_BUSES as i32,
+            )
+        };
+        let n = n.clamp(0, MAX_BUSES as i32) as usize;
+        counts[..n]
+            .iter()
+            .map(|&c| c.clamp(0, u8::MAX as i32) as u8)
+            .collect()
     }
 
     #[inline]

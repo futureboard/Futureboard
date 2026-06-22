@@ -290,9 +290,10 @@ impl StudioLayout {
                     sample_rate,
                     max_block_size,
                     output_channels,
+                    output_bus_channels,
                 }) => {
                     eprintln!(
-                        "[plugin-bridge] event ProcessingPrepared instance={plugin_instance_id} sr={sample_rate} block={max_block_size} outputs={output_channels}"
+                        "[plugin-bridge] event ProcessingPrepared instance={plugin_instance_id} sr={sample_rate} block={max_block_size} outputs={output_channels} buses={output_bus_channels:?}"
                     );
                     eprintln!(
                         "[PluginRestore] setupProcessing sample_rate={sample_rate} block_size={max_block_size}"
@@ -315,13 +316,21 @@ impl StudioLayout {
                                 PluginRuntimeState::Active,
                                 host_pid,
                             );
+                            // Record the real per-bus output layout BEFORE building
+                            // child strips so multi-out plugins get one strip per
+                            // real bus (mono→stereo) instead of paired flat channels.
+                            let layout_changed = timeline.state.set_insert_output_bus_layout(
+                                &track_id,
+                                &plugin_instance_id,
+                                &output_bus_channels,
+                            );
                             let outputs_changed =
                                 timeline.state.auto_enable_detected_insert_outputs(
                                     &track_id,
                                     &plugin_instance_id,
                                     output_channels,
                                 );
-                            runtime_changed || outputs_changed
+                            runtime_changed || layout_changed || outputs_changed
                         })
                     });
                     changed |= processing_changed;

@@ -3642,6 +3642,24 @@ extern "C" int sphere_daux_vst3_main_audio_output_channel_count(
   return processor->bridge_audio_output_channel_count;
 }
 
+/// Per-bus output channel counts in the exact order the bridge flattens them
+/// into the interleaved block (bus-by-bus: bus0 channels, then bus1 channels…).
+/// Writes up to `max_count` entries into `out_counts` and returns the number
+/// written. The host uses this to reconstruct real plugin output-bus boundaries
+/// (one mixer strip per bus) instead of assuming every channel pair is a stereo
+/// bus — a mono bus must become its own stereo strip, never paired with the
+/// next bus.
+extern "C" int sphere_daux_vst3_output_bus_channel_counts(
+    SphereDauxVst3Processor* processor, int* out_counts, int max_count) {
+  if (!processor || !out_counts || max_count <= 0) return 0;
+  const int buses = processor->output_bus_count_for_process();
+  const int n = std::min(buses, max_count);
+  for (int i = 0; i < n; ++i) {
+    out_counts[i] = processor->output_bus_channels_for_process(i);
+  }
+  return n;
+}
+
 /// Enqueue a normalized parameter change for delivery on the next process call.
 /// Safe to call from any thread (audio thread or UI thread).
 extern "C" void sphere_daux_vst3_set_param(

@@ -30,7 +30,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// clips load with [`AudioClipStretchState::default`] (mode Off, ratio 1.0,
 /// preserve_pitch false).
 /// v18 persists enabled VSTi output channels per insert.
-pub const PROJECT_VERSION: u32 = 18;
+/// v19 persists the per-instrument VSTi multi-out mixer collapse flag.
+pub const PROJECT_VERSION: u32 = 19;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -441,6 +442,8 @@ fn encode_insert(w: &mut FbWriter, ins: &ProjectInsert) {
     for channel in &ins.enabled_audio_output_channels {
         w.write_u8(*channel);
     }
+    // v19: mixer-only multi-out collapse flag (visual; never affects routing).
+    w.write_bool(ins.multiout_collapsed);
     match &ins.plugin {
         None => w.write_u8(0),
         Some(inst) => {
@@ -896,6 +899,11 @@ fn decode_insert(r: &mut FbReader, version: u32) -> Result<ProjectInsert, Projec
     } else {
         Vec::new()
     };
+    let multiout_collapsed = if version >= 19 {
+        r.read_bool()?
+    } else {
+        false
+    };
     let plugin = match r.read_u8()? {
         0 => None,
         1 => Some(decode_plugin_instance(r)?),
@@ -910,6 +918,7 @@ fn decode_insert(r: &mut FbReader, version: u32) -> Result<ProjectInsert, Projec
         slot_index,
         bypassed,
         enabled_audio_output_channels,
+        multiout_collapsed,
         plugin,
     })
 }
@@ -1730,11 +1739,16 @@ mod tests {
             slot_index: 0,
             bypassed: false,
             enabled_audio_output_channels: vec![1, 2, 3, 4],
+            multiout_collapsed: true,
             plugin: None,
         });
 
         let bytes = encode_project(&project);
         let decoded = decode_project(&bytes).expect("decode");
+        assert!(
+            decoded.mixer.master_inserts[0].multiout_collapsed,
+            "collapse flag must roundtrip"
+        );
         assert_eq!(
             decoded.mixer.master_inserts[0].enabled_audio_output_channels,
             vec![1, 2, 3, 4]

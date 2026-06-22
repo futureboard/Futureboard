@@ -206,6 +206,9 @@ pub struct ProjectInsert {
     pub slot_index: u32,
     pub bypassed: bool,
     pub enabled_audio_output_channels: Vec<u8>,
+    /// Mixer-only collapsed/expanded view flag for this instrument's VSTi
+    /// multi-out group. Visual state only — never affects routing.
+    pub multiout_collapsed: bool,
     pub plugin: Option<ProjectPluginInstance>,
 }
 
@@ -583,6 +586,7 @@ fn timeline_insert_to_project(idx: usize, slot: &InsertSlotState) -> ProjectInse
         slot_index: idx as u32,
         bypassed: slot.bypassed,
         enabled_audio_output_channels: slot.enabled_audio_output_channels.clone(),
+        multiout_collapsed: slot.multiout_collapsed,
         plugin,
     }
 }
@@ -642,6 +646,9 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
                 host_pid: None,
                 parameters: Vec::new(),
                 enabled_audio_output_channels: pi.enabled_audio_output_channels.clone(),
+                // Re-detected from the host on ProcessingPrepared after load.
+                output_bus_channel_counts: Vec::new(),
+                multiout_collapsed: pi.multiout_collapsed,
                 pending_open_editor: false,
                 vst3_state: (!plugin.state.state_bytes.is_empty())
                     .then(|| std::sync::Arc::new(plugin.state.state_bytes.clone())),

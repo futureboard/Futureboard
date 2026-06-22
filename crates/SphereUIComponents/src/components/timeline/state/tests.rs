@@ -109,6 +109,113 @@ mod instrument_lifecycle_tests {
         assert_eq!(channels, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
+    /// VSTi multi-out child channels are mixer-only: they live in `state.tracks`
+    /// (so the engine snapshot/mixer can route + meter them) but must never take
+    /// up arrangement space — zero row height, excluded from the timeline's
+    /// scrollable height, and never hit-tested as an arrangement row. The rows
+    /// vector stays 1:1 with `state.tracks` so the timeline's
+    /// `row.index == state.tracks position` invariant is preserved.
+    #[test]
+    fn vsti_output_child_channels_are_excluded_from_arrangement_layout() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "drums", "C:/p/drums.vst3");
+
+        // Enabling 8 plugin outputs creates 4 stereo child mixer channels (buses 0..=3).
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
+
+        let child_count = state
+            .tracks
+            .iter()
+            .filter(|t| is_vsti_output_child_track_id(&t.id))
+            .count();
+        assert_eq!(child_count, 4, "one mixer-only strip per stereo output bus");
+
+        let layout = state.track_row_layout();
+        // 1:1 with state.tracks → arrangement index invariant intact.
+        assert_eq!(layout.rows.len(), state.tracks.len());
+
+        let parent_height = layout
+            .rows
+            .iter()
+            .find(|r| r.track_id == track_id)
+            .map(|r| r.height)
+            .expect("parent instrument row");
+        assert!(parent_height > 0.0);
+        for row in &layout.rows {
+            if is_vsti_output_child_track_id(&row.track_id) {
+                assert_eq!(
+                    row.height, 0.0,
+                    "child channel {} must not occupy timeline space",
+                    row.track_id
+                );
+            }
+        }
+        assert_eq!(
+            layout.total_height, parent_height,
+            "child channels must not contribute to arrangement height"
+        );
+
+        // Nothing is hit-tested below the single visible instrument track.
+        assert!(
+            layout.track_at_content_y(parent_height + 1.0).is_none(),
+            "child channels must not be hit-testable as arrangement rows"
+        );
+    }
+
+    /// Collapse/expand of a VSTi multi-out group is a VIEW concern: it flips the
+    /// instrument insert's `multiout_collapsed` flag and changes which group keys
+    /// are reported as collapsed, but it NEVER removes/recreates child mixer
+    /// channels — the same child tracks (same ids) survive across collapse →
+    /// expand. Audio routing is untouched (the engine snapshot ignores the flag).
+    #[test]
+    fn collapse_expand_multiout_group_is_view_only() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "drums", "C:/p/drums.vst3");
+        // 3 stereo output buses → 3 child mixer strips.
+        state.set_insert_output_bus_layout(&track_id, &slot, &[2, 2, 2]);
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 6));
+
+        let child_ids: Vec<String> = state
+            .tracks
+            .iter()
+            .filter(|t| is_vsti_output_child_track_id(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(child_ids.len(), 3);
+
+        // Default = expanded → nothing collapsed.
+        assert!(state.collapsed_vsti_output_group_keys().is_empty());
+
+        // Collapse: flag flips, child channels remain in the model untouched.
+        assert!(state.toggle_insert_multiout_collapsed(&track_id, &slot));
+        assert!(state
+            .collapsed_vsti_output_group_keys()
+            .contains(&format!("{track_id}:{slot}")));
+        let still_there: Vec<String> = state
+            .tracks
+            .iter()
+            .filter(|t| is_vsti_output_child_track_id(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(
+            still_there, child_ids,
+            "collapse must not delete or rename child mixer channels"
+        );
+
+        // Expand: same child ids restored, flag cleared.
+        assert!(!state.toggle_insert_multiout_collapsed(&track_id, &slot));
+        assert!(state.collapsed_vsti_output_group_keys().is_empty());
+        let after: Vec<String> = state
+            .tracks
+            .iter()
+            .filter(|t| is_vsti_output_child_track_id(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(after, child_ids, "expand must reuse the same child channels");
+    }
+
     /// Test 3: load the SAME plugin file, remove, load it again → two distinct
     /// instance ids (same file is loadable as independent instances).
     #[test]

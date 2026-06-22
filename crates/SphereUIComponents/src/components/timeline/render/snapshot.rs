@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use super::viewport::TimelineViewport;
 use crate::components::timeline::timeline_state::{
-    clip_output_local_to_source_sample, ClipState, ClipType, GridLineLevel, TimelineState,
-    TrackRowLayoutEntry, TrackState, DEFAULT_TRACK_HEIGHT,
+    clip_output_local_to_source_sample, is_vsti_output_child_track_id, ClipState, ClipType,
+    GridLineLevel, TimelineState, TrackRowLayoutEntry, TrackState, DEFAULT_TRACK_HEIGHT,
 };
 use crate::components::timeline::waveform_cache::{
     self, WaveformDisplayStatus, CHUNK_PEAKS, PEAK_FINE_SPP,
@@ -243,6 +243,9 @@ fn build_lanes(state: &TimelineState, range: &VisibleTrackRange) -> Vec<RenderLa
     state.tracks[range.start_index..range.end_index]
         .iter()
         .enumerate()
+        // VSTi multi-out child channels are mixer-only — exclude them from the
+        // arrangement canvas the same way the GPUI track list does.
+        .filter(|(_, track)| !is_vsti_output_child_track_id(&track.id))
         .map(|(rel, track)| {
             let index = range.start_index + rel;
             let row = row_layout
@@ -281,6 +284,10 @@ fn build_clips(
         .iter()
         .enumerate()
     {
+        // Mixer-only VSTi child channels never carry arrangement clips.
+        if is_vsti_output_child_track_id(&track.id) {
+            continue;
+        }
         let track_index = range.start_index + rel;
         let row = row_layout
             .row_for_track(&track.id)

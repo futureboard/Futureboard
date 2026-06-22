@@ -575,6 +575,23 @@ impl PluginHostPreviewEngine {
             .map(|channels| channels.max(1) as u32)
     }
 
+    /// Real per-bus output channel counts (bus-by-bus order) for the instance,
+    /// so the host can model one mixer strip per plugin output bus instead of
+    /// pairing flat channels. Empty when unknown.
+    pub fn output_bus_channel_counts_for_instance(
+        &self,
+        plugin_instance_id: &str,
+    ) -> Option<Vec<u32>> {
+        self.instances.get(plugin_instance_id).map(|instance| {
+            instance
+                .processor
+                .output_bus_channel_counts()
+                .into_iter()
+                .map(|c| c as u32)
+                .collect()
+        })
+    }
+
     /// Capture the instance's VST3 state for project persistence. Runs
     /// `getState` without the voice mutex — VST3 allows state capture while
     /// processing (it is how every host saves projects during playback).

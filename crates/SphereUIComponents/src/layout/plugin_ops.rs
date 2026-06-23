@@ -1426,6 +1426,12 @@ impl StudioLayout {
             eprintln!("[PluginEditor] no runtime instance; cannot open (insert id mismatch)");
             return;
         }
+        if SpherePluginHost::plugin_host_client::vst3_editor_backend_disabled() {
+            eprintln!(
+                "[VST3Editor] backend=disabled action=skip_open instance={resolved_plugin_instance_id}"
+            );
+            return;
+        }
 
         let insert_id = resolved_plugin_instance_id.as_str();
         let editor_session_key = (track_id.to_string(), insert_id.to_string());
@@ -1637,6 +1643,12 @@ impl StudioLayout {
         if !editable {
             eprintln!(
                 "[PluginEditor] cannot open: not editable fmt={plugin_format:?} path={path:?}"
+            );
+            return;
+        }
+        if SpherePluginHost::plugin_host_client::vst3_editor_backend_disabled() {
+            eprintln!(
+                "[VST3Editor] backend=disabled action=skip_open instance={insert_id}"
             );
             return;
         }

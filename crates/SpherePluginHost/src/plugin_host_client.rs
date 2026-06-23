@@ -135,13 +135,22 @@ fn env_is_truthy(name: &str) -> bool {
 /// default.
 pub fn legacy_in_process_enabled() -> bool {
     env_is_truthy("FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS")
+        || std::env::var("FUTUREBOARD_VST3_EDITOR_BACKEND")
+            .map(|v| v.trim().eq_ignore_ascii_case("rust_legacy"))
+            .unwrap_or(false)
+}
+
+pub fn vst3_editor_backend_disabled() -> bool {
+    std::env::var("FUTUREBOARD_VST3_EDITOR_BACKEND")
+        .map(|v| v.trim().eq_ignore_ascii_case("disabled"))
+        .unwrap_or(false)
 }
 
 /// Whether the external plugin-host bridge is active. This is the default and
 /// must not depend on `FUTUREBOARD_PLUGIN_HOST_BRIDGE`; that flag is deprecated
 /// and is ignored for backend selection.
 pub fn plugin_host_bridge_enabled() -> bool {
-    !legacy_in_process_enabled()
+    !legacy_in_process_enabled() && !vst3_editor_backend_disabled()
 }
 
 /// Legacy escape hatch: keep the old *main-owned* editor shell, where the main
@@ -163,18 +172,26 @@ pub fn editor_main_owned_shell_enabled() -> bool {
 /// startup.
 pub fn log_bridge_env() {
     let legacy = legacy_in_process_enabled();
+    let requested_editor_backend =
+        std::env::var("FUTUREBOARD_VST3_EDITOR_BACKEND").unwrap_or_else(|_| "cpp_shell".into());
+    let disabled = vst3_editor_backend_disabled();
     eprintln!("[plugin-runtime] default_backend=external_bridge");
+    eprintln!("[VST3Editor] backend={requested_editor_backend}");
     eprintln!("[plugin-runtime] legacy_override={legacy}");
     if let Ok(raw) = std::env::var("FUTUREBOARD_PLUGIN_HOST_BRIDGE") {
         eprintln!("[plugin-runtime] deprecated_env_ignored FUTUREBOARD_PLUGIN_HOST_BRIDGE={raw}");
     }
-    if legacy {
+    if disabled {
+        eprintln!("[plugin-runtime] backend=disabled reason=FUTUREBOARD_VST3_EDITOR_BACKEND=disabled");
+    } else if legacy {
+        eprintln!("[VST3Editor] backend=rust_legacy");
         eprintln!(
             "[plugin-runtime] backend=in_process reason=FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1"
         );
         eprintln!("[plugin-runtime] WARNING using legacy in-process plugin runtime");
         eprintln!("[plugin-runtime] legacy path may hang GPU/browser-backed plugin editors");
     } else {
+        eprintln!("[VST3Editor] backend=cpp_shell");
         eprintln!("[plugin-runtime] backend=external_bridge reason=forced_default");
     }
 }

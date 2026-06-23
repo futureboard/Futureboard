@@ -19,6 +19,8 @@
 //!
 //! Still **main-owned**: created and controlled by `FutureboardNative.exe`.
 //! NOT `host_detached` (PluginHost-owned) and NOT in-process hosting.
+//! This is now a legacy/fallback shell; the default VST3 editor backend is the
+//! host-owned C++ shell (`FUTUREBOARD_VST3_EDITOR_BACKEND=cpp_shell`).
 //!
 //! Non-Windows targets get no-op stubs so the crate compiles everywhere.
 

@@ -1878,11 +1878,12 @@ fn schedule_unified_editor_attach(
 ) {
     // The actual window ownership is decided by the C++ embed layer from
     // FUTUREBOARD_PLUGIN_EDITOR_MODE (default "detached" = host-owned top-level
-    // window). `parent_hwnd` is only a DPI/position reference in detached mode,
-    // never a real parent — log the real mode instead of a hardcoded string.
+    // owned popup). In detached mode `parent_hwnd` is the Studio main HWND used
+    // as the Win32 owner, not a child parent and never SetParent.
     let editor_mode =
         std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE").unwrap_or_else(|_| "detached".to_string());
-    eprintln!("[plugin-host] editor_mode={editor_mode} parent_hwnd=0x{parent_hwnd:x} (DPI/position reference)");
+    eprintln!("[plugin-host] editor_mode={editor_mode} owner_hwnd=0x{parent_hwnd:x}");
+    eprintln!("[VST3Editor] owner_hwnd=0x{parent_hwnd:x}");
     eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
     eprintln!(
         "[EDITOR OPEN START]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nrequested_size={}x{}\ndpi={dpi}",
@@ -1897,6 +1898,10 @@ fn schedule_unified_editor_attach(
     );
     if registry.contains_key(plugin_instance_id) {
         eprintln!("[plugin-host] editor already attached instance={plugin_instance_id}");
+        if let Some(hwnd) = registry.get(plugin_instance_id).copied() {
+            let focused = platform::focus_editor_window(hwnd);
+            eprintln!("[NativeEditorShell] focus_existing result={focused}");
+        }
         return;
     }
     if pending_editor_attaches.contains_key(plugin_instance_id) {
@@ -2401,15 +2406,17 @@ mod platform {
         GetCapture, GetFocus, IsWindowEnabled, ReleaseCapture, SetFocus,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-        EnumThreadWindows, GetAncestor, GetClassNameW, GetParent, GetWindow, GetWindowLongPtrW,
-        GetWindowRect, GetWindowThreadProcessId, IsChild, IsDialogMessageW, IsWindow,
-        IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
+        BringWindowToTop, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow,
+        DispatchMessageW, EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW,
+        GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+        IsChild, IsDialogMessageW, IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx,
+        PeekMessageW, PostThreadMessageW, SetForegroundWindow, SetWindowPos, ShowWindow,
         TranslateMessage, WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT,
-        GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_OWNER, MSG, MWMO_INPUTAVAILABLE,
-        PM_REMOVE, QS_ALLINPUT, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WS_CHILD,
-        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_OWNER, HWND_TOP, MSG,
+        MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
     /// End-to-end plugin debug switch (`FUTUREBOARD_PLUGIN_DEBUG=1`), shared
@@ -2584,6 +2591,26 @@ mod platform {
             return false;
         }
         unsafe { IsWindow(Some(hwnd_from(handle))).as_bool() }
+    }
+
+    pub fn focus_editor_window(handle: u64) -> bool {
+        if handle == 0 {
+            return false;
+        }
+        unsafe {
+            let hwnd = hwnd_from(handle);
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return false;
+            }
+            eprintln!("[NativeEditorShell] show/focus requested existing=0x{handle:x}");
+            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+            let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            let _ = BringWindowToTop(hwnd);
+            let ok = SetForegroundWindow(hwnd).as_bool();
+            let _ = SetFocus(Some(hwnd));
+            eprintln!("[NativeEditorShell] foreground result={ok}");
+            ok
+        }
     }
 
     fn log_window_brief(label: &str, hwnd: HWND) {
@@ -3164,6 +3191,9 @@ mod platform {
     }
     pub fn is_window(handle: u64) -> bool {
         handle != 0
+    }
+    pub fn focus_editor_window(_handle: u64) -> bool {
+        false
     }
     pub fn pump_messages() -> u32 {
         0

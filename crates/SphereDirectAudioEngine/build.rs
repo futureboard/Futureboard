@@ -62,6 +62,7 @@ fn apply_vst3_platform_config(
             build.define("SMTG_OS_WINDOWS", "1");
             build.file(sdk_root.join("public.sdk/source/vst/hosting/module_win32.cpp"));
             println!("cargo:rustc-link-lib=ole32");
+            println!("cargo:rustc-link-lib=dwrite");
         }
         "macos" => {
             build.define("SMTG_OS_MACOS", "1");

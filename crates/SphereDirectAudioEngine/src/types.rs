@@ -10,7 +10,7 @@ use napi_derive::napi;
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Default, Clone)]
 pub struct JsDauxBackendInfo {
-    /// Machine-readable id: "auto" | "wasapi-shared" | "wasapi-exclusive" | "coreaudio" | "alsa" | "mme"
+    /// Machine-readable id: "auto" | "wasapi-shared" | "wasapi-exclusive" | "wdm-ks" | "coreaudio" | "alsa" | "mme"
     pub id: String,
     /// Human-readable name: "DAUx WASAPI Shared", etc.
     pub name: String,

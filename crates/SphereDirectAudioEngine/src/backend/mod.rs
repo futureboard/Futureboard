@@ -7,6 +7,7 @@
 //! |--------------------------|--------------|-------------------------------------|
 //! | `DauxCpalBackend`        | All          | cpal: WASAPI Shared / CoreAudio / ALSA |
 //! | `DauxWasapiExclBackend`  | Windows only | Raw WASAPI exclusive + MMCSS        |
+//! | `DauxWdmKsBackend`       | Windows only | WDM-KS low-level driver path        |
 //! | `DauxMmeBackend`         | Windows only | Legacy MME stub (fallback only)     |
 //!
 //! Audio engine rule: all backends share `Arc<SharedState>` for meters/transport
@@ -17,6 +18,8 @@ pub mod render;
 
 #[cfg(target_os = "windows")]
 pub mod wasapi_exclusive;
+#[cfg(target_os = "windows")]
+pub mod wdm_ks;
 
 // ── Backend kind ──────────────────────────────────────────────────────────────
 
@@ -30,6 +33,8 @@ pub enum BackendKind {
     WasapiShared,
     /// Windows: WASAPI Exclusive event-driven (lowest practical latency without ASIO).
     WasapiExclusive,
+    /// Windows: WDM-KS low-level driver path (experimental).
+    WdmKs,
     /// macOS: CoreAudio (same as Auto on macOS, explicit selection).
     CoreAudio,
     /// Linux: ALSA PCM (same as Auto on Linux, explicit selection).
@@ -44,6 +49,7 @@ impl BackendKind {
             BackendKind::Auto => "Auto",
             BackendKind::WasapiShared => "DAUx WASAPI Shared",
             BackendKind::WasapiExclusive => "DAUx WASAPI Exclusive",
+            BackendKind::WdmKs => "DAUx WDM-KS",
             BackendKind::CoreAudio => "DAUx CoreAudio",
             BackendKind::Alsa => "DAUx ALSA",
             BackendKind::MmeFallback => "DAUx MME (Legacy Fallback)",
@@ -55,6 +61,7 @@ impl BackendKind {
             BackendKind::Auto => "auto",
             BackendKind::WasapiShared => "wasapi-shared",
             BackendKind::WasapiExclusive => "wasapi-exclusive",
+            BackendKind::WdmKs => "wdm-ks",
             BackendKind::CoreAudio => "coreaudio",
             BackendKind::Alsa => "alsa",
             BackendKind::MmeFallback => "mme",
@@ -65,6 +72,7 @@ impl BackendKind {
         match s.to_ascii_lowercase().as_str() {
             "wasapi-shared" | "wasapishared" => BackendKind::WasapiShared,
             "wasapi-exclusive" | "wasapiexclusive" => BackendKind::WasapiExclusive,
+            "wdm-ks" | "wdmks" | "wdm_ks" => BackendKind::WdmKs,
             "coreaudio" | "core-audio" => BackendKind::CoreAudio,
             "alsa" => BackendKind::Alsa,
             "mme" | "mmefallback" => BackendKind::MmeFallback,
@@ -155,6 +163,13 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
             is_default: false,
             description: "WASAPI Exclusive + MMCSS — lowest latency, requires device support"
                 .into(),
+        });
+        list.push(BackendInfo {
+            id: "wdm-ks".into(),
+            name: "DAUx WDM-KS".into(),
+            available: true,
+            is_default: false,
+            description: "WDM-KS low-level Windows driver path — experimental".into(),
         });
         list.push(BackendInfo {
             id: "mme".into(),

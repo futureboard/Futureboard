@@ -567,8 +567,10 @@ fn build_settings_content(
     // Audio panel
     if (state.active_tab == SettingsTab::Audio && query.is_empty())
         || (!query.is_empty()
-            && (is_match("Audio Driver", &["driver", "backend", "wasapi"])
-                || is_match("Input Device", &["input", "microphone"])
+            && (is_match(
+                "Audio Driver",
+                &["driver", "backend", "wasapi", "wdm", "ks"],
+            ) || is_match("Input Device", &["input", "microphone"])
                 || is_match("Output Device", &["output", "speakers"])
                 || is_match("Sample Rate", &["sample", "rate", "hz"])
                 || is_match("Buffer Size", &["buffer", "latency"])))
@@ -628,14 +630,23 @@ fn build_settings_content(
                 .child(settings_daw_row(
                     i18n.tr("settings.field.driver-status"),
                     settings_status_badge(
-                        if latency.engine_open && !latency.device_state.is_empty() {
+                        if let Some(error) = latency
+                            .last_error
+                            .as_ref()
+                            .filter(|error| !error.is_empty())
+                        {
+                            error.clone()
+                        } else if latency.engine_open && !latency.backend_name.is_empty() {
+                            format!("{} · {}", latency.device_state, latency.backend_name)
+                        } else if latency.engine_open && !latency.device_state.is_empty() {
                             latency.device_state.clone()
                         } else if latency.engine_open {
                             i18n.tr("settings.driver-status.ready")
                         } else {
                             i18n.tr("settings.latency.engine-closed")
                         },
-                        !latency.engine_open || latency.device_state != "DeviceLost",
+                        latency.last_error.is_none()
+                            && (!latency.engine_open || latency.device_state != "DeviceLost"),
                     ),
                 ))
                 .into_any_element(),

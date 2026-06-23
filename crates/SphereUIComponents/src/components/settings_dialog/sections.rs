@@ -423,8 +423,10 @@ pub(crate) fn tab_matches_search(
                 || is_match("Buffer", &["buffer", "latency"])
         }
         SettingsTab::Audio => {
-            is_match("Audio Driver", &["driver", "wasapi", "backend"])
-                || is_match("Input Device", &["input", "microphone"])
+            is_match(
+                "Audio Driver",
+                &["driver", "wasapi", "wdm", "ks", "backend"],
+            ) || is_match("Input Device", &["input", "microphone"])
                 || is_match("Output Device", &["output", "speakers"])
                 || is_match("Latency", &["latency", "pdc", "delay", "buffer"])
                 || is_match("Buffer Size", &["buffer", "sample"])

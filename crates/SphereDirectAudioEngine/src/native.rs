@@ -45,31 +45,72 @@ pub enum AudioBackend {
     Cpal,
     /// Windows: WASAPI Exclusive event-driven (lowest latency).
     WasapiExclusive,
+    /// Windows: WDM-KS low-level driver path (experimental).
+    WdmKs,
 }
 
 impl AudioBackend {
+    pub fn display_name(self) -> &'static str {
+        self.to_backend_kind().display_name()
+    }
+
     fn to_backend_kind(self) -> BackendKind {
         match self {
             AudioBackend::Auto => BackendKind::Auto,
             AudioBackend::Cpal => BackendKind::Auto,
             AudioBackend::WasapiExclusive => BackendKind::WasapiExclusive,
+            AudioBackend::WdmKs => BackendKind::WdmKs,
         }
     }
 
     fn backend_id(self) -> &'static str {
         self.to_backend_kind().id()
     }
+
+    fn accepts_device_id(self, device_id: &AudioDeviceId) -> bool {
+        matches!(
+            (self, device_id),
+            (AudioBackend::WasapiExclusive, AudioDeviceId::WasapiEndpoint(_))
+                | (AudioBackend::WdmKs, AudioDeviceId::WdmKsFilterPin { .. })
+                | (AudioBackend::Auto | AudioBackend::Cpal, AudioDeviceId::DauxEndpoint(_))
+        )
+    }
+}
+
+/// Backend-scoped audio device identifier.
+///
+/// Keeping these as distinct variants prevents accidentally applying a WASAPI
+/// endpoint to WDM-KS, or a WDM-KS filter/pin path to a DAUx/cpal backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioDeviceId {
+    /// Windows MMDevice endpoint id/name used by WASAPI exclusive.
+    WasapiEndpoint(String),
+    /// Windows Kernel Streaming filter path plus render pin id.
+    WdmKsFilterPin { filter_path: String, pin_id: u32 },
+    /// Cross-platform DAUx/cpal endpoint id/name (Auto/Cpal/CoreAudio/ALSA path).
+    DauxEndpoint(String),
+}
+
+impl AudioDeviceId {
+    pub fn raw_id(&self) -> &str {
+        match self {
+            AudioDeviceId::WasapiEndpoint(id) | AudioDeviceId::DauxEndpoint(id) => id,
+            AudioDeviceId::WdmKsFilterPin { filter_path, .. } => filter_path,
+        }
+    }
 }
 
 /// Configuration for opening the engine's audio stream.
 ///
 /// `sample_rate == 0` or `buffer_size == 0` means "use the device default".
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineConfig {
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub channels: u16,
     pub backend: AudioBackend,
+    pub input_device: Option<AudioDeviceId>,
+    pub output_device: Option<AudioDeviceId>,
 }
 
 impl Default for EngineConfig {
@@ -79,6 +120,8 @@ impl Default for EngineConfig {
             buffer_size: DEFAULT_BUFFER_SIZE,
             channels: 2,
             backend: AudioBackend::Auto,
+            input_device: None,
+            output_device: None,
         }
     }
 }
@@ -91,6 +134,7 @@ impl Default for EngineConfig {
 #[derive(Debug, Clone)]
 pub struct EngineDeviceInfo {
     pub id: String,
+    pub device_id: AudioDeviceId,
     pub name: String,
     pub kind: String,
     pub channels: u32,
@@ -99,9 +143,27 @@ pub struct EngineDeviceInfo {
     pub backend: String,
 }
 
-impl From<crate::types::JsAudioDeviceInfo> for EngineDeviceInfo {
-    fn from(d: crate::types::JsAudioDeviceInfo) -> Self {
+impl EngineDeviceInfo {
+    #[cfg(target_os = "windows")]
+    fn from_wdm_ks(d: crate::backend::wdm_ks::WdmKsDeviceInfo) -> Self {
         Self {
+            id: d.filter_path.clone(),
+            device_id: AudioDeviceId::WdmKsFilterPin {
+                filter_path: d.filter_path,
+                pin_id: d.pin_id,
+            },
+            name: d.name,
+            kind: "output".into(),
+            channels: d.channels,
+            default_sample_rate: d.default_sample_rate,
+            is_default: false,
+            backend: "DAUx WDM-KS".into(),
+        }
+    }
+
+    fn from_daux(d: crate::types::JsAudioDeviceInfo) -> Self {
+        Self {
+            device_id: AudioDeviceId::DauxEndpoint(d.id.clone()),
             id: d.id,
             name: d.name,
             kind: d.kind,
@@ -109,6 +171,19 @@ impl From<crate::types::JsAudioDeviceInfo> for EngineDeviceInfo {
             default_sample_rate: d.default_sample_rate,
             is_default: d.is_default,
             backend: d.backend,
+        }
+    }
+
+    fn from_wasapi(d: crate::types::JsAudioDeviceInfo) -> Self {
+        Self {
+            device_id: AudioDeviceId::WasapiEndpoint(d.id.clone()),
+            id: d.id,
+            name: d.name,
+            kind: d.kind,
+            channels: d.channels,
+            default_sample_rate: d.default_sample_rate,
+            is_default: d.is_default,
+            backend: "DAUx WASAPI Exclusive".into(),
         }
     }
 }
@@ -150,6 +225,19 @@ pub struct AudioEngine {
     config: EngineConfig,
 }
 
+#[cfg(target_os = "windows")]
+fn list_wdm_ks_output_devices() -> Vec<EngineDeviceInfo> {
+    crate::backend::wdm_ks::list_output_devices()
+        .into_iter()
+        .map(EngineDeviceInfo::from_wdm_ks)
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn list_wdm_ks_output_devices() -> Vec<EngineDeviceInfo> {
+    Vec::new()
+}
+
 impl AudioEngine {
     /// The default native configuration. Equivalent to
     /// `EngineConfig::default()`; provided as a method so call sites read
@@ -189,6 +277,46 @@ impl AudioEngine {
         self.inner.engine_state()
     }
 
+    fn daux_config_from_engine_config(config: &EngineConfig) -> Result<JsDauxConfig, SphereAudioError> {
+        Self::validate_config(config)?;
+        Ok(JsDauxConfig {
+            backend_id: config.backend.backend_id().to_string(),
+            output_device_id: config.output_device.as_ref().map(|id| id.raw_id().to_string()),
+            sample_rate: if config.sample_rate > 0 {
+                Some(config.sample_rate)
+            } else {
+                None
+            },
+            buffer_size: if config.buffer_size > 0 {
+                Some(config.buffer_size)
+            } else {
+                None
+            },
+            mmcss_priority: false,
+            safe_mode: false,
+        })
+    }
+
+    pub fn validate_config(config: &EngineConfig) -> Result<(), SphereAudioError> {
+        if let Some(device_id) = &config.output_device {
+            if !config.backend.accepts_device_id(device_id) {
+                return Err(SphereAudioError::InvalidConfig(format!(
+                    "output device id is not valid for {}",
+                    config.backend.display_name()
+                )));
+            }
+        }
+        if let Some(device_id) = &config.input_device {
+            if !config.backend.accepts_device_id(device_id) {
+                return Err(SphereAudioError::InvalidConfig(format!(
+                    "input device id is not valid for {}",
+                    config.backend.display_name()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Open the audio stream and start it. The stream stays paused at the
     /// transport level — use [`AudioEngine::play`] to advance the
     /// timeline once playback work is wired up.
@@ -203,22 +331,7 @@ impl AudioEngine {
         if st.stream_open {
             return self.inner.start();
         }
-        let daux = JsDauxConfig {
-            backend_id: self.config.backend.backend_id().to_string(),
-            output_device_id: None,
-            sample_rate: if self.config.sample_rate > 0 {
-                Some(self.config.sample_rate)
-            } else {
-                None
-            },
-            buffer_size: if self.config.buffer_size > 0 {
-                Some(self.config.buffer_size)
-            } else {
-                None
-            },
-            mmcss_priority: false,
-            safe_mode: false,
-        };
+        let daux = Self::daux_config_from_engine_config(&self.config)?;
         self.inner.open_daux(daux)?;
         self.inner.start()
     }
@@ -227,14 +340,7 @@ impl AudioEngine {
     /// same engine/runtime handle alive. This is a control-thread operation for
     /// Settings changes; it never runs on the realtime callback.
     pub fn reopen_with_config(&mut self, config: EngineConfig) -> Result<(), SphereAudioError> {
-        let daux = JsDauxConfig {
-            backend_id: config.backend.backend_id().to_string(),
-            output_device_id: None,
-            sample_rate: (config.sample_rate > 0).then_some(config.sample_rate),
-            buffer_size: (config.buffer_size > 0).then_some(config.buffer_size),
-            mmcss_priority: false,
-            safe_mode: false,
-        };
+        let daux = Self::daux_config_from_engine_config(&config)?;
         self.inner.open_daux_safe(daux)?;
         self.config = config;
         self.inner.start()
@@ -457,21 +563,44 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Enumerate output devices on the default host. Returns an empty list
-    /// on any backend error rather than panicking.
+    /// Enumerate output devices for the engine's configured backend.
     pub fn list_output_devices(&self) -> Vec<EngineDeviceInfo> {
-        device::list_output_devices()
-            .into_iter()
-            .map(EngineDeviceInfo::from)
-            .collect()
+        self.list_output_devices_for_backend(self.config.backend)
     }
 
-    /// Enumerate input devices on the default host.
+    /// Enumerate output devices for a specific backend. Settings UIs should use
+    /// this with their draft backend so device selections never cross backends.
+    pub fn list_output_devices_for_backend(&self, backend: AudioBackend) -> Vec<EngineDeviceInfo> {
+        match backend {
+            AudioBackend::WdmKs => list_wdm_ks_output_devices(),
+            AudioBackend::WasapiExclusive => device::list_output_devices()
+                .into_iter()
+                .map(EngineDeviceInfo::from_wasapi)
+                .collect(),
+            AudioBackend::Auto | AudioBackend::Cpal => device::list_output_devices()
+                .into_iter()
+                .map(EngineDeviceInfo::from_daux)
+                .collect(),
+        }
+    }
+
+    /// Enumerate input devices for the engine's configured backend.
     pub fn list_input_devices(&self) -> Vec<EngineDeviceInfo> {
-        device::list_input_devices()
-            .into_iter()
-            .map(EngineDeviceInfo::from)
-            .collect()
+        self.list_input_devices_for_backend(self.config.backend)
+    }
+
+    pub fn list_input_devices_for_backend(&self, backend: AudioBackend) -> Vec<EngineDeviceInfo> {
+        match backend {
+            AudioBackend::WdmKs => Vec::new(),
+            AudioBackend::WasapiExclusive => device::list_input_devices()
+                .into_iter()
+                .map(EngineDeviceInfo::from_wasapi)
+                .collect(),
+            AudioBackend::Auto | AudioBackend::Cpal => device::list_input_devices()
+                .into_iter()
+                .map(EngineDeviceInfo::from_daux)
+                .collect(),
+        }
     }
 
     /// Return the default output device descriptor, if the platform has one.
@@ -501,7 +630,7 @@ impl AudioEngine {
             buffer_size: st.buffer_size,
             backend_name: daux.backend_name,
             output_device: daux.output_device,
-            last_error: st.last_error,
+            last_error: daux.last_error.or(st.last_error),
             glitch_count: daux.glitch_count as u64,
             estimated_latency_ms: daux.estimated_latency_ms,
             device_lost: daux.device_lost,
@@ -536,13 +665,9 @@ impl AudioEngine {
     /// Whether switching to `config` would require a controlled device restart
     /// versus the currently-open device.
     pub fn requires_restart(&self, config: &EngineConfig) -> bool {
-        let daux = JsDauxConfig {
-            backend_id: config.backend.backend_id().to_string(),
-            output_device_id: None,
-            sample_rate: (config.sample_rate > 0).then_some(config.sample_rate),
-            buffer_size: (config.buffer_size > 0).then_some(config.buffer_size),
-            mmcss_priority: false,
-            safe_mode: false,
+        let daux = match Self::daux_config_from_engine_config(config) {
+            Ok(daux) => daux,
+            Err(_) => return true,
         };
         self.inner.daux_requires_restart(&daux)
     }

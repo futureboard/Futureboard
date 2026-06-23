@@ -227,18 +227,25 @@ pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &
     }
 }
 
+fn native_audio_backend_from_driver_type(driver_type: &str) -> DAUx::AudioBackend {
+    match driver_type {
+        "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
+        "WDM-KS" => DAUx::AudioBackend::WdmKs,
+        _ => DAUx::AudioBackend::Auto,
+    }
+}
+
 pub(crate) fn build_and_warm_audio_engine(
     schema: crate::settings::SettingsSchema,
 ) -> Result<(DAUx::AudioEngine, DAUx::EngineStats), String> {
-    let backend = match schema.hardware.audio.driver_type.as_str() {
-        "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
-        _ => DAUx::AudioBackend::Auto,
-    };
+    let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
     let audio_config = DAUx::EngineConfig {
         sample_rate: schema.general.project_defaults.sample_rate,
         buffer_size: schema.general.project_defaults.buffer_size,
         channels: 2,
         backend,
+        input_device: None,
+        output_device: None,
     };
 
     let mut engine = DAUx::AudioEngine::new(audio_config).map_err(|error| error.to_string())?;
@@ -1841,10 +1848,9 @@ impl StudioLayout {
             sample_rate: schema.general.project_defaults.sample_rate,
             buffer_size: schema.general.project_defaults.buffer_size,
             channels: 2,
-            backend: match schema.hardware.audio.driver_type.as_str() {
-                "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
-                _ => DAUx::AudioBackend::Auto,
-            },
+            backend: native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type),
+            input_device: None,
+            output_device: None,
         };
 
         if let Some(engine) = self.audio_bridge.engine.as_mut() {
@@ -1891,15 +1897,14 @@ impl StudioLayout {
             }
 
             // Construct new config
-            let backend = match schema.hardware.audio.driver_type.as_str() {
-                "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
-                _ => DAUx::AudioBackend::Auto,
-            };
+            let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
             let config = DAUx::EngineConfig {
                 sample_rate: schema.general.project_defaults.sample_rate,
                 buffer_size: schema.general.project_defaults.buffer_size,
                 channels: 2,
                 backend,
+                input_device: None,
+                output_device: None,
             };
 
             // Build new engine

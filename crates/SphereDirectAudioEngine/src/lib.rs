@@ -78,7 +78,7 @@ pub use crate::latency_graph::{
     RuntimeLatencyGraph,
 };
 pub use crate::native::{
-    AudioBackend, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo,
+    AudioBackend, AudioDeviceId, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo,
     EngineInsertStatus, EngineStats, DEFAULT_BUFFER_SIZE, DEFAULT_SAMPLE_RATE,
 };
 pub use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint, TempoSegment};

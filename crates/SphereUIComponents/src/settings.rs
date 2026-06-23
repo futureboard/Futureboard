@@ -521,6 +521,8 @@ impl Default for PlaybackSettings {
 pub struct SettingsAudioLatencySnapshot {
     pub engine_open: bool,
     pub device_state: String,
+    pub backend_name: String,
+    pub last_error: Option<String>,
     pub buffer_ms: f64,
     pub buffer_frames: u32,
     pub round_trip_ms: f64,
@@ -650,6 +652,8 @@ impl SettingsAudioLatencySnapshot {
         Self {
             engine_open: stats.stream_open,
             device_state: stats.device_state,
+            backend_name: stats.backend_name,
+            last_error: stats.last_error,
             buffer_ms: info.buffer_ms,
             buffer_frames: info.buffer_frames,
             round_trip_ms: info.buffer_ms * 2.0,

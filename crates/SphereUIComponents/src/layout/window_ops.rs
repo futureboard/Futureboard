@@ -495,8 +495,9 @@ impl StudioLayout {
             .unwrap_or_default();
 
         let available_backends = vec![
-            "WASAPI Exclusive".to_string(),
             "WASAPI Shared".to_string(),
+            "WASAPI Exclusive".to_string(),
+            "WDM-KS".to_string(),
             "ASIO".to_string(),
         ];
 

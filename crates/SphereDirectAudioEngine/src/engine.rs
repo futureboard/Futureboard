@@ -25,6 +25,8 @@ use crate::audio_graph::is_routing_track_type;
 use crate::audio_source::{sample_source_stereo, ClipAudioSource};
 #[cfg(target_os = "windows")]
 use crate::backend::wasapi_exclusive::{self, WasapiExclusiveHandle};
+#[cfg(target_os = "windows")]
+use crate::backend::wdm_ks::{self, WdmKsHandle};
 use crate::backend::{
     cpal_backend::{self, CpalStreamHandle},
     list_available_backends, BackendKind, DauxDeviceConfig,
@@ -347,6 +349,8 @@ enum ActiveStream {
     Cpal(CpalStreamHandle),
     #[cfg(target_os = "windows")]
     WasapiExclusive(WasapiExclusiveHandle),
+    #[cfg(target_os = "windows")]
+    WdmKs(WdmKsHandle),
 }
 
 impl ActiveStream {
@@ -355,6 +359,8 @@ impl ActiveStream {
             ActiveStream::Cpal(h) => Some(&h.cmd_tx),
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => Some(&h.cmd_tx),
+            #[cfg(target_os = "windows")]
+            ActiveStream::WdmKs(h) => Some(&h.cmd_tx),
         }
     }
     fn play(&self) -> Result<(), String> {
@@ -362,6 +368,8 @@ impl ActiveStream {
             ActiveStream::Cpal(h) => h.play(),
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(_) => Ok(()), // already playing from stream start
+            #[cfg(target_os = "windows")]
+            ActiveStream::WdmKs(_) => Ok(()), // already playing from stream start
         }
     }
     fn pause(&self) -> Result<(), String> {
@@ -369,6 +377,8 @@ impl ActiveStream {
             ActiveStream::Cpal(h) => h.pause(),
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(_) => Ok(()), // no pause in exclusive — caller mutes output
+            #[cfg(target_os = "windows")]
+            ActiveStream::WdmKs(_) => Ok(()), // no pause in low-level backend — caller mutes output
         }
     }
     #[allow(dead_code)]
@@ -377,6 +387,8 @@ impl ActiveStream {
             ActiveStream::Cpal(h) => h.sample_rate,
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => h.sample_rate,
+            #[cfg(target_os = "windows")]
+            ActiveStream::WdmKs(h) => h.sample_rate,
         }
     }
     #[allow(dead_code)]
@@ -385,6 +397,8 @@ impl ActiveStream {
             ActiveStream::Cpal(h) => h.buffer_size,
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => h.buffer_size,
+            #[cfg(target_os = "windows")]
+            ActiveStream::WdmKs(h) => h.buffer_size,
         }
     }
     #[allow(dead_code)]
@@ -393,6 +407,8 @@ impl ActiveStream {
             ActiveStream::Cpal(h) => &h.device_name,
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => &h.device_name,
+            #[cfg(target_os = "windows")]
+            ActiveStream::WdmKs(h) => &h.device_name,
         }
     }
     fn backend_name(&self) -> &str {
@@ -400,6 +416,8 @@ impl ActiveStream {
             ActiveStream::Cpal(h) => &h.backend_name,
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(_) => "DAUx WASAPI Exclusive",
+            #[cfg(target_os = "windows")]
+            ActiveStream::WdmKs(_) => "DAUx WDM-KS",
         }
     }
 }
@@ -1910,6 +1928,27 @@ impl EngineInner {
                 self.commit_stream_open(sr, bs, dev_name, "DAUx WASAPI Exclusive".into());
                 stream
             }
+            #[cfg(target_os = "windows")]
+            BackendKind::WdmKs => {
+                let handle = wdm_ks::open(
+                    &daux_cfg,
+                    Arc::clone(&self.shared),
+                    initial_runtime,
+                    Arc::clone(&self.glitch_counter),
+                )?;
+                let sr = handle.sample_rate;
+                let bs = handle.buffer_size;
+                let dev_name = handle.device_name.clone();
+                let stream = ActiveStream::WdmKs(handle);
+                self.commit_stream_open(sr, bs, dev_name, "DAUx WDM-KS".into());
+                stream
+            }
+            #[cfg(not(target_os = "windows"))]
+            BackendKind::WdmKs => {
+                return Err(SphereAudioError::BackendUnavailable(
+                    "DAUx WDM-KS is only available on Windows".into(),
+                ));
+            }
             _ => {
                 let handle = cpal_backend::open(
                     &daux_cfg,
@@ -1979,6 +2018,7 @@ impl EngineInner {
     /// `Err(message)` describing why exclusive failed (after restoring the
     /// previous backend).  The engine always ends up with an open stream.
     pub fn open_daux_safe(&self, new_config: JsDauxConfig) -> Result<(), SphereAudioError> {
+        let attempted_backend_name = BackendKind::from_id(&new_config.backend_id).display_name();
         // Save the previous working config before closing.
         let previous_config = {
             let prev = self.daux_config.lock().clone();
@@ -2011,7 +2051,7 @@ impl EngineInner {
                         Ok(()) => {
                             eprintln!("[DAUx] open_daux_safe: previous backend restored");
                             let restore_msg = format!(
-                                "Exclusive mode failed: {err_msg}. Reverted to previous backend."
+                                "{attempted_backend_name} backend switch failed: {err_msg}. Reverted to previous backend."
                             );
                             self.status.lock().last_daux_error = Some(restore_msg.clone());
                             Err(SphereAudioError::StreamOpenFailed(restore_msg))
@@ -2019,7 +2059,7 @@ impl EngineInner {
                         Err(restore_err) => {
                             eprintln!("[DAUx] open_daux_safe: fallback also failed: {restore_err}");
                             let combined = format!(
-                                "Exclusive failed: {err_msg}. Fallback also failed: {restore_err}"
+                                "{attempted_backend_name} backend switch failed: {err_msg}. Fallback also failed: {restore_err}"
                             );
                             self.status.lock().last_daux_error = Some(combined.clone());
                             Err(SphereAudioError::StreamOpenFailed(combined))

@@ -173,6 +173,9 @@ pub struct SettingsDialogState {
     pub is_open: bool,
     pub active_tab: SettingsTab,
     pub search_query: String,
+    /// Whether the full (possibly long) Driver Status diagnostic text is
+    /// expanded. Collapsed by default so the row only shows a concise summary.
+    pub driver_status_details_open: bool,
 }
 
 impl SettingsDialogState {
@@ -181,6 +184,7 @@ impl SettingsDialogState {
             is_open: false,
             active_tab: SettingsTab::General,
             search_query: String::new(),
+            driver_status_details_open: false,
         }
     }
 
@@ -189,6 +193,7 @@ impl SettingsDialogState {
             is_open: true,
             active_tab: SettingsTab::General,
             search_query: String::new(),
+            driver_status_details_open: false,
         }
     }
 }
@@ -198,6 +203,127 @@ pub type InputTestStartFn =
     Arc<dyn Fn(Option<String>) -> Result<(), String> + Send + Sync + 'static>;
 pub type InputTestStopFn = Arc<dyn Fn() + Send + Sync + 'static>;
 pub type InputTestLevelFn = Arc<dyn Fn() -> f32 + Send + Sync + 'static>;
+pub type AudioDeviceListsProvider =
+    Arc<dyn Fn(&str) -> SettingsAudioDeviceLists + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, Default)]
+pub struct SettingsAudioDeviceLists {
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub input_channels: Vec<(String, u32)>,
+    pub output_channels: Vec<(String, u32)>,
+}
+
+/// `FUTUREBOARD_SETTINGS_PERF_DEBUG=1` — gates Settings-panel timing diagnostics
+/// (open time, audio device refresh time, WDM-KS probe time, UI-thread blocking
+/// duration, and re-render count per backend change).
+pub(crate) fn settings_perf_debug_enabled() -> bool {
+    std::env::var("FUTUREBOARD_SETTINGS_PERF_DEBUG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Maximum characters rendered in the Driver Status row badge. The full text is
+/// available behind the Details toggle.
+pub(crate) const DRIVER_STATUS_SUMMARY_MAX: usize = 80;
+
+/// Collapse a possibly-huge driver-status string (e.g. a multi-paragraph WDM-KS
+/// / Intel-SST diagnostic) into a single bounded line that is cheap to lay out.
+/// Rendering the full text in the row forces an expensive per-render text
+/// relayout — far worse at 150–200% DPI — so the row always uses this summary.
+pub(crate) fn concise_driver_status(full: &str) -> String {
+    let first_line = full.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let first_line = first_line.trim();
+    if first_line.chars().count() <= DRIVER_STATUS_SUMMARY_MAX {
+        first_line.to_string()
+    } else {
+        let truncated: String = first_line.chars().take(DRIVER_STATUS_SUMMARY_MAX).collect();
+        format!("{}…", truncated.trim_end())
+    }
+}
+
+/// Full (untruncated) driver-status text for the Details panel / tooltip.
+fn driver_status_full(i18n: &I18n, latency: &SettingsAudioLatencySnapshot) -> String {
+    if let Some(error) = latency
+        .last_error
+        .as_ref()
+        .filter(|error| !error.is_empty())
+    {
+        error.clone()
+    } else if latency.engine_open && !latency.backend_name.is_empty() {
+        format!("{} · {}", latency.device_state, latency.backend_name)
+    } else if latency.engine_open && !latency.device_state.is_empty() {
+        latency.device_state.clone()
+    } else if latency.engine_open {
+        i18n.tr("settings.driver-status.ready")
+    } else {
+        i18n.tr("settings.latency.engine-closed")
+    }
+}
+
+/// Driver Status row: a concise one-line badge plus a `Details` toggle that
+/// expands the full diagnostic text into a height-capped scroll box. Keeping the
+/// long text out of the row prevents a per-render relayout explosion when a
+/// backend reports a multi-paragraph error (e.g. WDM-KS on an Intel-SST system).
+pub(crate) fn driver_status_row(
+    i18n: &I18n,
+    latency: &SettingsAudioLatencySnapshot,
+    state: &SettingsDialogState,
+    callbacks: &SettingsDialogCallbacks,
+) -> impl IntoElement {
+    let full = driver_status_full(i18n, latency);
+    let summary = concise_driver_status(&full);
+    let ok = latency.last_error.is_none()
+        && (!latency.engine_open || latency.device_state != "DeviceLost");
+    // There is "more" to show only when the summary actually elided something.
+    let has_more = full.chars().count() > summary.chars().count()
+        || full.lines().filter(|l| !l.trim().is_empty()).count() > 1;
+    let details_open = state.driver_status_details_open && has_more;
+
+    let mut control = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .min_w(px(0.0))
+        .child(settings_status_badge(summary, ok));
+    if has_more {
+        if let Some(toggle) = callbacks.on_toggle_driver_details.clone() {
+            control = control.child(fb_button(
+                "settings-driver-status-details",
+                if details_open { "Hide" } else { "Details" },
+                FbButtonKind::Default,
+                true,
+                move |_, w, cx| toggle(w, cx),
+            ));
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(settings_daw_row(
+            i18n.tr("settings.field.driver-status"),
+            control,
+        ))
+        .when(details_open, |col| {
+            col.child(
+                div()
+                    .id("settings-driver-status-details-text")
+                    .max_h(px(120.0))
+                    .overflow_y_scroll()
+                    .p(px(8.0))
+                    .rounded_md()
+                    .border(px(1.0))
+                    .border_color(Colors::border_subtle())
+                    .bg(Colors::surface_input())
+                    .text_size(px(10.5))
+                    .text_color(Colors::text_secondary())
+                    .child(full),
+            )
+        })
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct InputTestMeterState {
@@ -232,6 +358,9 @@ pub struct SettingsDialogCallbacks {
     pub open_hardware_combo: Option<HardwareCombo>,
     pub on_toggle_hardware_combo:
         Arc<dyn Fn(HardwareCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>,
+    /// Toggle expansion of the full Driver Status diagnostic text. `None` for
+    /// surfaces that don't expose a live driver status (legacy embedded dialog).
+    pub on_toggle_driver_details: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,8 +370,8 @@ fn build_settings_content(
     callbacks: &SettingsDialogCallbacks,
     latency: &SettingsAudioLatencySnapshot,
     input_test: &InputTestMeterState,
-    _available_inputs: &[String],
-    _available_outputs: &[String],
+    available_inputs: &[String],
+    available_outputs: &[String],
     _available_backends: &[String],
     available_input_channels: &[(String, u32)],
     available_output_channels: &[(String, u32)],
@@ -586,18 +715,32 @@ fn build_settings_content(
             on_toggle.clone(),
         );
 
+        let input_label = if schema.hardware.audio.device_in.trim().is_empty()
+            || !available_inputs.contains(&schema.hardware.audio.device_in)
+        {
+            "Default".to_string()
+        } else {
+            schema.hardware.audio.device_in.clone()
+        };
         let input_select = hardware_select(
             HardwareCombo::InputDevice,
             "settings-audio-input",
-            &schema.hardware.audio.device_in,
+            &input_label,
             open_combo,
             on_toggle.clone(),
         );
 
+        let output_label = if schema.hardware.audio.device_out.trim().is_empty()
+            || !available_outputs.contains(&schema.hardware.audio.device_out)
+        {
+            "Default".to_string()
+        } else {
+            schema.hardware.audio.device_out.clone()
+        };
         let output_select = hardware_select(
             HardwareCombo::OutputDevice,
             "settings-audio-output",
-            &schema.hardware.audio.device_out,
+            &output_label,
             open_combo,
             on_toggle.clone(),
         );
@@ -627,28 +770,7 @@ fn build_settings_content(
                     i18n.tr("settings.field.output-device"),
                     output_select,
                 ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.driver-status"),
-                    settings_status_badge(
-                        if let Some(error) = latency
-                            .last_error
-                            .as_ref()
-                            .filter(|error| !error.is_empty())
-                        {
-                            error.clone()
-                        } else if latency.engine_open && !latency.backend_name.is_empty() {
-                            format!("{} · {}", latency.device_state, latency.backend_name)
-                        } else if latency.engine_open && !latency.device_state.is_empty() {
-                            latency.device_state.clone()
-                        } else if latency.engine_open {
-                            i18n.tr("settings.driver-status.ready")
-                        } else {
-                            i18n.tr("settings.latency.engine-closed")
-                        },
-                        latency.last_error.is_none()
-                            && (!latency.engine_open || latency.device_state != "DeviceLost"),
-                    ),
-                ))
+                .child(driver_status_row(&i18n, latency, state, &callbacks))
                 .into_any_element(),
         );
 
@@ -660,7 +782,7 @@ fn build_settings_content(
             .unwrap_or(0);
         sections.push(audio_channel_section(
             "Input Channels",
-            &schema.hardware.audio.device_in,
+            &input_label,
             &crate::audio_routing::build_input_channel_options(in_count),
         ));
         let out_count = available_output_channels
@@ -670,7 +792,7 @@ fn build_settings_content(
             .unwrap_or(0);
         sections.push(audio_channel_section(
             "Output Channels",
-            &schema.hardware.audio.device_out,
+            &output_label,
             &crate::audio_routing::build_output_channel_options(out_count),
         ));
 
@@ -2127,14 +2249,27 @@ pub struct SettingsWindow {
     settings: Entity<SettingsModel>,
     active_tab: SettingsTab,
     search_input: TextInputState,
-    available_inputs: Vec<String>,
-    available_outputs: Vec<String>,
     available_backends: Vec<String>,
-    /// `(device name, input channel count)` for every enumerated input device —
-    /// drives the read-only Input Channels list (roadmap Phase C).
-    available_input_channels: Vec<(String, u32)>,
-    /// `(device name, output channel count)` for every enumerated output device.
-    available_output_channels: Vec<(String, u32)>,
+    /// Backend-scoped device lists shown by the dropdowns. This is a *cache*:
+    /// `render` only ever reads it. It is repopulated off the UI thread by
+    /// [`SettingsWindow::refresh_audio_devices`] on open and when the backend
+    /// changes — never by enumerating/probing on the render path.
+    device_lists: SettingsAudioDeviceLists,
+    /// `driver_type` the cached `device_lists` were built for, or `None` until
+    /// the first refresh completes. A mismatch with the current backend triggers
+    /// exactly one off-thread refresh (coalesced via `device_refresh_in_flight`).
+    device_lists_backend: Option<String>,
+    /// True while an off-thread device refresh is running, so concurrent renders
+    /// don't kick duplicate refreshes.
+    device_refresh_in_flight: bool,
+    /// Cached Driver Status / latency snapshot. Refreshed alongside the device
+    /// lists so the badge updates at most once per refresh result.
+    latency: SettingsAudioLatencySnapshot,
+    /// Whether the full Driver Status diagnostic text is expanded.
+    driver_status_details_open: bool,
+    /// Diagnostics: renders observed since the last backend change settled.
+    renders_since_backend_change: u32,
+    device_lists_provider: Option<AudioDeviceListsProvider>,
     latency_provider: AudioLatencySnapshotProvider,
     input_test_start: Option<InputTestStartFn>,
     input_test_stop: Option<InputTestStopFn>,
@@ -2147,4 +2282,50 @@ pub struct SettingsWindow {
     midi_refresh_nonce: u64,
     on_update: OnSettingUpdate,
     focus_handle: FocusHandle,
+}
+
+#[cfg(test)]
+mod driver_status_tests {
+    use super::{concise_driver_status, DRIVER_STATUS_SUMMARY_MAX};
+
+    /// The Driver Status row must stay bounded so a long backend diagnostic
+    /// can't force an expensive relayout. A multi-paragraph WDM-KS/Intel-SST
+    /// error collapses to a single short line; the full text lives behind the
+    /// Details toggle.
+    #[test]
+    fn long_driver_status_collapses_to_bounded_single_line() {
+        let huge = "This system does not expose user-mode WDM-KS streaming pins: \
+            every audio filter rejected the KS pin property set (0x80070492 \
+            ERROR_SET_NOT_FOUND).\nThis is normal on Intel Smart Sound (SST) / \
+            SoundWire / \"Universal Audio\" driver stacks.\n"
+            .repeat(40);
+        assert!(huge.len() > 4000, "fixture should be large");
+
+        let summary = concise_driver_status(&huge);
+
+        // Single line, no embedded newlines.
+        assert!(!summary.contains('\n'));
+        // Bounded length (chars), regardless of input size. Allow +1 for the
+        // appended ellipsis.
+        assert!(
+            summary.chars().count() <= DRIVER_STATUS_SUMMARY_MAX + 1,
+            "summary too long: {} chars",
+            summary.chars().count()
+        );
+        assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn short_status_is_passed_through_unchanged() {
+        assert_eq!(
+            concise_driver_status("Active · WASAPI Exclusive"),
+            "Active · WASAPI Exclusive"
+        );
+        assert_eq!(concise_driver_status(""), "");
+    }
+
+    #[test]
+    fn first_nonblank_line_is_used() {
+        assert_eq!(concise_driver_status("\n\n  Ready  \nmore text"), "Ready");
+    }
 }

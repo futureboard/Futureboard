@@ -11,6 +11,7 @@ impl SettingsWindow {
         available_backends: Vec<String>,
         available_input_channels: Vec<(String, u32)>,
         available_output_channels: Vec<(String, u32)>,
+        device_lists_provider: Option<AudioDeviceListsProvider>,
         latency_provider: AudioLatencySnapshotProvider,
         input_test_start: Option<InputTestStartFn>,
         input_test_stop: Option<InputTestStopFn>,
@@ -20,15 +21,37 @@ impl SettingsWindow {
     ) -> Self {
         let search_input = TextInputState::new("settings-search", cx.focus_handle())
             .with_placeholder("Search settings...");
-        Self {
+        // Seed the device-list cache from whatever the caller pre-supplied
+        // (placeholder lists when there is no engine). With an engine present the
+        // caller passes empty lists and `device_lists_backend = None` forces the
+        // first render to kick an off-thread refresh, so opening Settings never
+        // blocks on hardware enumeration / WDM-KS probing.
+        let device_lists = SettingsAudioDeviceLists {
+            inputs: available_inputs,
+            outputs: available_outputs,
+            input_channels: available_input_channels,
+            output_channels: available_output_channels,
+        };
+        // No provider ⇒ static placeholder lists are final; mark the cache valid
+        // for any backend so render never tries to refresh.
+        let device_lists_backend = if device_lists_provider.is_none() {
+            Some(String::new())
+        } else {
+            None
+        };
+        let latency = latency_provider();
+        let mut this = Self {
             settings,
             active_tab: SettingsTab::General,
             search_input,
-            available_inputs,
-            available_outputs,
             available_backends,
-            available_input_channels,
-            available_output_channels,
+            device_lists,
+            device_lists_backend,
+            device_refresh_in_flight: false,
+            latency,
+            driver_status_details_open: false,
+            renders_since_backend_change: 0,
+            device_lists_provider,
             latency_provider,
             input_test_start,
             input_test_stop,
@@ -41,7 +64,65 @@ impl SettingsWindow {
             midi_refresh_nonce: 0,
             on_update,
             focus_handle: cx.focus_handle(),
+        };
+        // Keep Driver Status live without per-frame polling.
+        this.schedule_latency_poll(cx);
+        this
+    }
+
+    /// Refresh the backend-scoped device list (and the Driver Status snapshot)
+    /// for the current draft backend **off the UI thread**. Coalesced: while one
+    /// refresh is in flight, callers are ignored; the next render re-checks and
+    /// re-kicks if the backend changed again. On completion a single `notify`
+    /// updates the dropdowns and Driver Status at once.
+    pub(super) fn refresh_audio_devices(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = self.device_lists_provider.clone() else {
+            return;
+        };
+        if self.device_refresh_in_flight {
+            return;
         }
+        let driver_type = self
+            .settings
+            .read(cx)
+            .current
+            .hardware
+            .audio
+            .driver_type
+            .clone();
+        let latency_provider = self.latency_provider.clone();
+        let debug = settings_perf_debug_enabled();
+        self.device_refresh_in_flight = true;
+
+        cx.spawn(async move |this, cx| {
+            let probe_driver = driver_type.clone();
+            // Hardware enumeration / WDM-KS probing runs on a background thread.
+            let (lists, latency, probe_ms) = cx
+                .background_executor()
+                .spawn(async move {
+                    let started = std::time::Instant::now();
+                    let lists = provider(&probe_driver);
+                    let latency = latency_provider();
+                    (lists, latency, started.elapsed().as_secs_f64() * 1000.0)
+                })
+                .await;
+            let _ = this.update(cx, |window, cx| {
+                window.device_lists = lists;
+                window.latency = latency;
+                window.device_lists_backend = Some(driver_type.clone());
+                window.device_refresh_in_flight = false;
+                if debug {
+                    eprintln!(
+                        "[settings-perf] audio device refresh backend='{driver_type}' \
+                         probe={probe_ms:.1}ms renders_during_change={}",
+                        window.renders_since_backend_change
+                    );
+                }
+                window.renders_since_backend_change = 0;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn start_input_test(&mut self, cx: &mut Context<Self>) {
@@ -81,6 +162,34 @@ impl SettingsWindow {
         self.input_test_active = false;
         self.input_test_level_value = 0.0;
         cx.notify();
+    }
+
+    /// Poll the (cheap, stats-only) Driver Status snapshot on a slow cadence
+    /// while the window is open, re-rendering **only when it actually changes**.
+    /// This replaces the old per-render `latency_provider()` call: status stays
+    /// live (e.g. `DeviceLost`, post-Apply backend name) without shaping the
+    /// badge on every frame. Stops automatically when the entity is dropped.
+    pub(super) fn schedule_latency_poll(&mut self, cx: &mut Context<Self>) {
+        let provider = self.latency_provider.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(750))
+                .await;
+            let _ = this.update(cx, |window, cx| {
+                let next = provider();
+                let changed = next.engine_open != window.latency.engine_open
+                    || next.device_state != window.latency.device_state
+                    || next.backend_name != window.latency.backend_name
+                    || next.last_error != window.latency.last_error
+                    || next.buffer_ms != window.latency.buffer_ms;
+                window.latency = next;
+                if changed {
+                    cx.notify();
+                }
+                window.schedule_latency_poll(cx);
+            });
+        })
+        .detach();
     }
 
     pub(super) fn schedule_input_test_poll(&mut self, cx: &mut Context<Self>) {
@@ -151,6 +260,8 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_started = std::time::Instant::now();
+        let perf_debug = settings_perf_debug_enabled();
         let schema = self.settings.read(cx).current.clone();
         let i18n = I18n::new(&schema.general.language);
         self.search_input.placeholder = Some(i18n.tr("search.settings.placeholder"));
@@ -158,10 +269,24 @@ impl Render for SettingsWindow {
         let on_update = self.on_update.clone();
         let search_focused = self.search_input.is_focused(window);
 
+        // Device enumeration / WDM-KS probing must NOT run on the render path.
+        // If the cached lists are for a different backend than the current draft,
+        // kick exactly one off-thread refresh; render keeps using the (stale)
+        // cache until it completes. `device_refresh_in_flight` coalesces repeats.
+        let cache_stale = self.device_lists_backend.as_deref()
+            != Some(schema.hardware.audio.driver_type.as_str());
+        if cache_stale && self.device_lists_provider.is_some() {
+            self.renders_since_backend_change = self.renders_since_backend_change.saturating_add(1);
+            if !self.device_refresh_in_flight {
+                self.refresh_audio_devices(cx);
+            }
+        }
+
         let state = SettingsDialogState {
             is_open: true,
             active_tab: self.active_tab,
             search_query: self.search_input.value.clone(),
+            driver_status_details_open: self.driver_status_details_open,
         };
 
         let callbacks = SettingsDialogCallbacks {
@@ -244,6 +369,15 @@ impl Render for SettingsWindow {
                     });
                 }
             }),
+            on_toggle_driver_details: Some(Arc::new({
+                let target = target.clone();
+                move |_w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.driver_status_details_open = !this.driver_status_details_open;
+                        cx.notify();
+                    });
+                }
+            })),
         };
 
         let search_callbacks = TextInputCallbacks {
@@ -251,13 +385,15 @@ impl Render for SettingsWindow {
             on_mouse: None,
         };
 
-        let latency = (self.latency_provider)();
+        // Read cached snapshots only — no provider calls, no enumeration here.
+        let latency = self.latency.clone();
         let input_test = InputTestMeterState {
             active: self.input_test_active,
             level: self.input_test_level_value,
             error: self.input_test_error.clone(),
         };
         let _midi_refresh = self.midi_refresh_nonce;
+        let device_lists = self.device_lists.clone();
 
         let (sidebar_items, sections) = build_settings_content(
             &state,
@@ -265,11 +401,11 @@ impl Render for SettingsWindow {
             &callbacks,
             &latency,
             &input_test,
-            &self.available_inputs,
-            &self.available_outputs,
+            &device_lists.inputs,
+            &device_lists.outputs,
             &self.available_backends,
-            &self.available_input_channels,
-            &self.available_output_channels,
+            &device_lists.input_channels,
+            &device_lists.output_channels,
         );
 
         let sw_target = target.clone();
@@ -300,8 +436,8 @@ impl Render for SettingsWindow {
                     anchor,
                     window,
                     &schema,
-                    &self.available_inputs,
-                    &self.available_outputs,
+                    &device_lists.inputs,
+                    &device_lists.outputs,
                     &self.available_backends,
                     overlay_update,
                     close_target,
@@ -311,7 +447,7 @@ impl Render for SettingsWindow {
             None
         };
 
-        div()
+        let root = div()
             .flex()
             .flex_col()
             .size_full()
@@ -424,7 +560,21 @@ impl Render for SettingsWindow {
                             }),
                     ),
             )
-            .children(combo_overlay)
+            .children(combo_overlay);
+
+        if perf_debug {
+            let blocked_ms = render_started.elapsed().as_secs_f64() * 1000.0;
+            // Flag any UI-thread render that blocks long enough to drop a frame.
+            if blocked_ms >= 4.0 {
+                eprintln!(
+                    "[settings-perf] render blocked UI thread {blocked_ms:.1}ms \
+                     (tab={:?} refresh_in_flight={})",
+                    self.active_tab, self.device_refresh_in_flight
+                );
+            }
+        }
+
+        root
     }
 }
 
@@ -437,6 +587,7 @@ pub fn open_settings_window(
     available_backends: Vec<String>,
     available_input_channels: Vec<(String, u32)>,
     available_output_channels: Vec<(String, u32)>,
+    device_lists_provider: Option<AudioDeviceListsProvider>,
     latency_provider: AudioLatencySnapshotProvider,
     input_test_start: Option<InputTestStartFn>,
     input_test_stop: Option<InputTestStopFn>,
@@ -468,6 +619,7 @@ pub fn open_settings_window(
                 available_backends,
                 available_input_channels,
                 available_output_channels,
+                device_lists_provider,
                 latency_provider,
                 input_test_start,
                 input_test_stop,

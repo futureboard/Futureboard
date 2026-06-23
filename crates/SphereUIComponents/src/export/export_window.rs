@@ -163,32 +163,42 @@ impl ExportArrangementWindow {
     }
 
     fn browse_output(&mut self, cx: &mut Context<Self>) {
-        let entity = cx.entity().clone();
-        let format = self.settings.format;
-        let start = self
-            .settings
-            .output_path
-            .clone()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(std::env::temp_dir);
-        let file = ExportSettings::default_file_name(&self.project_name, format);
-        cx.spawn(async move |_this, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Export Arrangement")
-                .set_directory(&start)
-                .set_file_name(&file)
-                .add_filter(format.as_str().to_uppercase(), &[format.extension()])
-                .save_file()
-                .await;
-            if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
-                let _ = entity.update(cx, |this, cx| {
-                    this.settings.output_path = Some(path);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        #[cfg(feature = "native-dialogs")]
+        {
+            let entity = cx.entity().clone();
+            let format = self.settings.format;
+            let start = self
+                .settings
+                .output_path
+                .clone()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(std::env::temp_dir);
+            let file = ExportSettings::default_file_name(&self.project_name, format);
+            cx.spawn(async move |_this, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Export Arrangement")
+                    .set_directory(&start)
+                    .set_file_name(&file)
+                    .add_filter(format.as_str().to_uppercase(), &[format.extension()])
+                    .save_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = handle.path().to_path_buf();
+                    let _ = entity.update(cx, |this, cx| {
+                        this.settings.output_path = Some(path);
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            self.state =
+                ExportJobState::Failed("Native file dialogs are unavailable in this build.".into());
+            cx.notify();
+        }
     }
 
     fn start_export(&mut self, cx: &mut Context<Self>) {

@@ -93,6 +93,8 @@ extern "system" {
 
 // ks.h: KSCATEGORY_AUDIO = {6994AD04-93EF-11D0-A3CC-00A0C9223196}
 const KSCATEGORY_AUDIO: GUID = GUID::from_u128(0x6994ad04_93ef_11d0_a3cc_00a0c9223196);
+// ks.h: KSCATEGORY_RENDER = {65E8773E-8F56-11D0-A3B9-00A0C9223196}
+const KSCATEGORY_RENDER: GUID = GUID::from_u128(0x65e8773e_8f56_11d0_a3b9_00a0c9223196);
 // ks.h: KSPROPSETID_Pin = {8C134960-51AD-11CF-878A-00AA003EEF17}
 const KSPROPSETID_PIN: GUID = GUID::from_u128(0x8c134960_51ad_11cf_878a_00aa003eef17);
 // ks.h: KSINTERFACESETID_Standard / KSMEDIUMSETID_Standard share this value:
@@ -698,7 +700,11 @@ unsafe fn run_rt_stream(
     }
 
     shared.sample_rate.store(sample_rate, Ordering::Relaxed);
-    let _ = info_tx.send(Ok((sample_rate, stream.period_frames as u32, device_name.clone())));
+    let _ = info_tx.send(Ok((
+        sample_rate,
+        stream.period_frames as u32,
+        device_name.clone(),
+    )));
 
     // Monotonic reconstruction of the wrapping hardware play offset.
     let mut play_base: u64 = 0;
@@ -997,12 +1003,20 @@ unsafe fn map_rt_buffer(
         )
         .is_ok();
         if reg_ok {
-            return Ok((out.buffer_address.cast(), out.actual_buffer_size as u64, Some(event)));
+            return Ok((
+                out.buffer_address.cast(),
+                out.actual_buffer_size as u64,
+                Some(event),
+            ));
         }
         // Buffer mapped but notification registration failed — fall back to
         // polling on the already-mapped buffer.
         let _ = CloseHandle(event);
-        return Ok((out.buffer_address.cast(), out.actual_buffer_size as u64, None));
+        return Ok((
+            out.buffer_address.cast(),
+            out.actual_buffer_size as u64,
+            None,
+        ));
     }
 
     let _ = CloseHandle(event);
@@ -1028,7 +1042,11 @@ unsafe fn map_rt_buffer(
     if out.buffer_address.is_null() {
         return Err("RTAUDIO_BUFFER returned a null mapping".into());
     }
-    Ok((out.buffer_address.cast(), out.actual_buffer_size as u64, None))
+    Ok((
+        out.buffer_address.cast(),
+        out.actual_buffer_size as u64,
+        None,
+    ))
 }
 
 unsafe fn set_pin_state(pin: HANDLE, state: u32) -> Result<(), String> {
@@ -1118,10 +1136,8 @@ fn build_format_candidates(
                 );
             }
             AudioRangeSubtype::Pcm => {
-                let fmt = pick_pcm_fmt(
-                    range.minimum_bits_per_sample,
-                    range.maximum_bits_per_sample,
-                );
+                let fmt =
+                    pick_pcm_fmt(range.minimum_bits_per_sample, range.maximum_bits_per_sample);
                 push(
                     FormatCandidate {
                         fmt,
@@ -1188,38 +1204,120 @@ fn pick_pcm_fmt(min_bits: u32, max_bits: u32) -> SampleFmt {
 
 fn select_render_target(preferred_path: Option<&str>) -> Result<RenderTarget, SphereAudioError> {
     let filters = enumerate_audio_filters()?;
-    let selected = if let Some(preferred) = preferred_path.filter(|s| !s.is_empty()) {
-        filters
+    if let Some(preferred) = preferred_path.filter(|s| !s.is_empty()) {
+        let selected = filters
             .into_iter()
             .find(|path| path.eq_ignore_ascii_case(preferred))
             .ok_or_else(|| {
-                SphereAudioError::DeviceNotFound(format!("WDM-KS filter path not found: {preferred}"))
-            })?
-    } else {
-        filters.into_iter().next().ok_or_else(|| {
-            SphereAudioError::BackendUnavailable(
-                "No WDM-KS audio filter device interfaces were found".into(),
-            )
-        })?
-    };
+                SphereAudioError::DeviceNotFound(format!(
+                    "WDM-KS filter path not found: {preferred}"
+                ))
+            })?;
+        let pins = probe_filter_pins(&selected)?;
+        return render_target_from_pins(selected, &pins);
+    }
 
-    let handle = open_filter_handle(&selected)?;
-    let pin_count = query_pin_count(handle)?;
-    let pins = query_pin_probes(handle, pin_count);
+    if filters.is_empty() {
+        return Err(SphereAudioError::BackendUnavailable(
+            "No WDM-KS audio filter device interfaces were found".into(),
+        ));
+    }
+
+    // Probe every interface; on failure, classify why.  Many drivers register
+    // several KS interfaces per physical device (wave + topology, AUDIO + RENDER
+    // categories), so dedupe the reasons by device label to avoid a wall of
+    // identical errors in the driver-status badge.
+    let mut reasons: Vec<String> = Vec::new();
+    let mut had_failure = false;
+    let mut all_propset_missing = true;
+    for filter_path in filters {
+        match probe_filter_pins(&filter_path)
+            .and_then(|pins| render_target_from_pins(filter_path.clone(), &pins))
+        {
+            Ok(target) => return Ok(target),
+            Err(error) => {
+                had_failure = true;
+                let text = error.to_string();
+                if !is_pin_propset_missing(&text) {
+                    all_propset_missing = false;
+                }
+                let entry = format!(
+                    "{}: {}",
+                    short_device_label(&filter_path),
+                    concise_reason(&text)
+                );
+                if !reasons.contains(&entry) {
+                    reasons.push(entry);
+                }
+            }
+        }
+    }
+
+    // When *every* interface rejects the KS pin property set (0x80070492
+    // ERROR_SET_NOT_FOUND), the machine simply does not expose user-mode kernel
+    // streaming — typical of Intel Smart Sound (SST) / SoundWire / "Universal
+    // Audio" stacks where only the Windows audio engine may stream.  Say so
+    // plainly and point at the backend that does work, instead of dumping a raw
+    // IOCTL error the user can't act on.
+    if had_failure && all_propset_missing {
+        return Err(SphereAudioError::BackendUnavailable(
+            "This system does not expose user-mode WDM-KS streaming pins: every audio \
+             filter rejected the KS pin property set (0x80070492 ERROR_SET_NOT_FOUND). \
+             This is normal on Intel Smart Sound (SST) / SoundWire / \"Universal Audio\" \
+             driver stacks, which only allow streaming through the Windows audio engine. \
+             Use WASAPI Exclusive for low latency on this device."
+                .into(),
+        ));
+    }
+
+    Err(SphereAudioError::BackendUnavailable(format!(
+        "No render-capable WDM-KS filter was found ({} device(s) probed): {}",
+        reasons.len(),
+        reasons.join("; ")
+    )))
+}
+
+/// True when a probe error is the "KS pin property set is not present" failure
+/// (Win32 1170 `ERROR_SET_NOT_FOUND`, surfaced as HRESULT `0x80070492`).
+fn is_pin_propset_missing(error: &str) -> bool {
+    error.contains("0x80070492") || error.contains("property set specified does not exist")
+}
+
+/// Collapse a verbose probe error into a short, badge-friendly reason.
+fn concise_reason(error: &str) -> &str {
+    if is_pin_propset_missing(error) {
+        "no KS pin property set (0x80070492)"
+    } else {
+        error
+    }
+}
+
+fn probe_filter_pins(filter_path: &str) -> Result<Vec<KsPinProbe>, SphereAudioError> {
+    let handle = open_filter_handle(filter_path)?;
+    let result = (|| {
+        let pin_count = query_pin_count(handle)?;
+        Ok(query_pin_probes(handle, pin_count))
+    })();
     unsafe {
         let _ = CloseHandle(handle);
     }
+    result
+}
 
-    let chosen = choose_render_pin(&pins).ok_or_else(|| {
+fn render_target_from_pins(
+    filter_path: String,
+    pins: &[KsPinProbe],
+) -> Result<RenderTarget, SphereAudioError> {
+    let chosen = choose_render_pin(pins).ok_or_else(|| {
         SphereAudioError::StreamOpenFailed(format!(
             "DAUx WDM-KS filter '{}' has no render-capable pin (pins={})",
-            selected,
-            format_pin_summary(&pins)
+            filter_path,
+            format_pin_summary(pins)
         ))
     })?;
 
     Ok(RenderTarget {
-        path: selected,
+        path: filter_path,
         pin_id: chosen.pin_id,
         audio_ranges: chosen.audio_ranges.clone(),
     })
@@ -1231,8 +1329,18 @@ fn choose_render_pin(pins: &[KsPinProbe]) -> Option<&KsPinProbe> {
     pins.iter()
         .filter(|p| p.render_candidate)
         .max_by(|a, b| {
-            let am = a.audio_ranges.iter().map(|r| r.maximum_channels).max().unwrap_or(0);
-            let bm = b.audio_ranges.iter().map(|r| r.maximum_channels).max().unwrap_or(0);
+            let am = a
+                .audio_ranges
+                .iter()
+                .map(|r| r.maximum_channels)
+                .max()
+                .unwrap_or(0);
+            let bm = b
+                .audio_ranges
+                .iter()
+                .map(|r| r.maximum_channels)
+                .max()
+                .unwrap_or(0);
             am.cmp(&bm).then(b.pin_id.cmp(&a.pin_id))
         })
         .or_else(|| {
@@ -1259,12 +1367,7 @@ pub fn list_output_devices() -> Vec<WdmKsDeviceInfo> {
     filters
         .into_iter()
         .filter_map(|filter_path| {
-            let handle = open_filter_handle(&filter_path).ok()?;
-            let pin_count = query_pin_count(handle).ok()?;
-            let pins = query_pin_probes(handle, pin_count);
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
+            let pins = probe_filter_pins(&filter_path).ok()?;
             let pin = choose_render_pin(&pins)?;
             let channels = pin
                 .audio_ranges
@@ -1280,7 +1383,11 @@ pub fn list_output_devices() -> Vec<WdmKsDeviceInfo> {
                         && range.maximum_sample_frequency >= 48_000)
                         .then_some(48_000)
                 })
-                .or_else(|| pin.audio_ranges.first().map(|range| range.maximum_sample_frequency))
+                .or_else(|| {
+                    pin.audio_ranges
+                        .first()
+                        .map(|range| range.maximum_sample_frequency)
+                })
                 .unwrap_or(0);
             Some(WdmKsDeviceInfo {
                 name: format!("{} (pin {})", short_device_label(&filter_path), pin.pin_id),
@@ -1293,19 +1400,115 @@ pub fn list_output_devices() -> Vec<WdmKsDeviceInfo> {
         .collect()
 }
 
+// ── Diagnostics (control thread) ───────────────────────────────────────────────
+
+/// Enumerate every KS audio/render interface and report, per interface, whether
+/// the KS pin property set (`KSPROPSETID_Pin`) is reachable and what pins it
+/// exposes.  Control-thread only; surfaced by the `ks-probe` CLI command so we
+/// can see real hardware topology instead of guessing.
+pub fn diagnose_report() -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for (label, category) in [
+        ("KSCATEGORY_AUDIO", KSCATEGORY_AUDIO),
+        ("KSCATEGORY_RENDER", KSCATEGORY_RENDER),
+    ] {
+        let _ = writeln!(out, "== {label} ==");
+        match enumerate_filter_category(label, &category) {
+            Ok(paths) if paths.is_empty() => {
+                let _ = writeln!(out, "  (no interfaces)");
+            }
+            Ok(paths) => {
+                for path in paths {
+                    let _ = writeln!(out, "  interface: {path}");
+                    match open_filter_handle(&path) {
+                        Ok(handle) => {
+                            match query_pin_count(handle) {
+                                Ok(n) => {
+                                    let pins = query_pin_probes(handle, n);
+                                    let _ =
+                                        writeln!(out, "    pins={n} {}", format_pin_summary(&pins));
+                                }
+                                Err(e) => {
+                                    let _ = writeln!(out, "    CTYPES failed: {e}");
+                                }
+                            }
+                            unsafe {
+                                let _ = CloseHandle(handle);
+                            }
+                        }
+                        Err(e) => {
+                            let _ = writeln!(out, "    open failed: {e}");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(out, "  enumerate failed: {e}");
+            }
+        }
+    }
+
+    let _ = writeln!(out, "== select_render_target(None) ==");
+    match select_render_target(None) {
+        Ok(t) => {
+            let _ = writeln!(out, "  OK: pin {} on {}", t.pin_id, t.path);
+        }
+        Err(e) => {
+            let _ = writeln!(out, "  Err: {e}");
+        }
+    }
+    out
+}
+
 // ── SetupAPI enumeration + pin probing (control thread) ─────────────────────────
 
 fn enumerate_audio_filters() -> Result<Vec<String>, SphereAudioError> {
+    let mut paths = Vec::new();
+    let mut errors = Vec::new();
+    for (label, category) in [
+        ("KSCATEGORY_RENDER", KSCATEGORY_RENDER),
+        ("KSCATEGORY_AUDIO", KSCATEGORY_AUDIO),
+    ] {
+        match enumerate_filter_category(label, &category) {
+            Ok(category_paths) => {
+                for path in category_paths {
+                    if !paths
+                        .iter()
+                        .any(|existing: &String| existing.eq_ignore_ascii_case(&path))
+                    {
+                        paths.push(path);
+                    }
+                }
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+
+    if !paths.is_empty() {
+        return Ok(paths);
+    }
+
+    Err(SphereAudioError::BackendUnavailable(format!(
+        "No WDM-KS audio/render filter device interfaces were found ({})",
+        errors.join("; ")
+    )))
+}
+
+fn enumerate_filter_category(
+    label: &str,
+    category: &GUID,
+) -> Result<Vec<String>, SphereAudioError> {
     unsafe {
         let info = SetupDiGetClassDevsW(
-            Some(&KSCATEGORY_AUDIO),
+            Some(category),
             PCWSTR::null(),
             None,
             DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
         )
         .map_err(|e| {
             SphereAudioError::BackendUnavailable(format!(
-                "SetupDiGetClassDevsW(KSCATEGORY_AUDIO) failed: {e}"
+                "SetupDiGetClassDevsW({label}) failed: {e}"
             ))
         })?;
 
@@ -1315,9 +1518,7 @@ fn enumerate_audio_filters() -> Result<Vec<String>, SphereAudioError> {
             let mut iface: SP_DEVICE_INTERFACE_DATA = zeroed();
             iface.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
 
-            if SetupDiEnumDeviceInterfaces(info, None, &KSCATEGORY_AUDIO, index, &mut iface)
-                .is_err()
-            {
+            if SetupDiEnumDeviceInterfaces(info, None, category, index, &mut iface).is_err() {
                 break;
             }
 

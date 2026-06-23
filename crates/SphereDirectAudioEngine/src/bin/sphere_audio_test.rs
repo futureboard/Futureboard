@@ -24,6 +24,7 @@ fn main() {
         Some("list-devices") => cmd_list_devices(),
         Some("test-tone") => cmd_test_tone(&args[2..]),
         Some("status") => cmd_status(),
+        Some("ks-probe") => cmd_ks_probe(),
         Some(unknown) => {
             eprintln!("Unknown command: {unknown}");
             print_usage();
@@ -201,6 +202,18 @@ fn cmd_status() {
     }
 }
 
+fn cmd_ks_probe() {
+    #[cfg(target_os = "windows")]
+    {
+        println!("=== WDM-KS interface probe ===");
+        print!("{}", DAUx::backend::wdm_ks::diagnose_report());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("ks-probe is Windows-only.");
+    }
+}
+
 fn print_usage() {
     println!(
         r#"sphere-audio-test — SphereDirectAudioEngine CLI test harness
@@ -224,6 +237,11 @@ COMMANDS:
 
     status
         Print engine version, backend info, and default device list.
+
+    ks-probe   (Windows only)
+        Enumerate every WDM-KS audio/render interface and report whether its
+        KS pin property set is reachable. Useful for diagnosing why WDM-KS
+        cannot open a device on a given machine.
 
 EXAMPLES:
     sphere-audio-test list-devices

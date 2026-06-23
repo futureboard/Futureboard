@@ -70,7 +70,15 @@ pub(crate) fn hardware_combo_overlay(
                 &filtered_backends,
                 Arc::new(move |value, window, cx| {
                     up(
-                        Arc::new(move |s| s.hardware.audio.driver_type = value.clone()),
+                        Arc::new(move |s| {
+                            if s.hardware.audio.driver_type != value {
+                                s.hardware.audio.driver_type = value.clone();
+                                s.hardware.audio.device_in.clear();
+                                s.hardware.audio.device_out.clear();
+                                s.hardware.audio.active_inputs.clear();
+                                s.hardware.audio.active_outputs.clear();
+                            }
+                        }),
                         window,
                         cx,
                     );

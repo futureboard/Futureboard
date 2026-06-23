@@ -21,7 +21,7 @@ path = "src/main.rs"
 gpui.workspace = true
 
 
-sphere_ui_components.workspace = true
+sphere_ui_components = { workspace = true, features = ["gpu-renderer", "native-dialogs"] }
 
 # Native audio engine.
 #

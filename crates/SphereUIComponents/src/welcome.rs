@@ -213,30 +213,41 @@ impl WelcomeWindow {
     /// the choice to settings on success. If the picker is unavailable or the
     /// user cancels, nothing changes (no faked success).
     fn change_default_dir(&mut self, cx: &mut Context<Self>) {
-        let start_dir = self.default_project_dir.clone();
-        let entity = cx.entity().clone();
-        cx.spawn(async move |_this, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Choose Default Project Location")
-                .set_directory(&start_dir)
-                .pick_folder()
-                .await;
-            let Some(handle) = result else {
-                welcome_debug!("default project path change cancelled");
-                return;
-            };
-            let path = handle.path().to_path_buf();
-            // Best-effort: create the folder now so it is ready for new projects.
-            let _ = std::fs::create_dir_all(&path);
-            SettingsSchema::persist_default_project_directory(Some(path.clone()));
-            welcome_debug!("default project path changed -> {}", path.display());
-            let _ = entity.update(cx, |this, cx| {
-                this.default_project_dir = path;
-                this.default_dir_configured = true;
-                cx.notify();
-            });
-        })
-        .detach();
+        #[cfg(feature = "native-dialogs")]
+        {
+            let start_dir = self.default_project_dir.clone();
+            let entity = cx.entity().clone();
+            cx.spawn(async move |_this, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Choose Default Project Location")
+                    .set_directory(&start_dir)
+                    .pick_folder()
+                    .await;
+                let Some(handle) = result else {
+                    welcome_debug!("default project path change cancelled");
+                    return;
+                };
+                let path = handle.path().to_path_buf();
+                // Best-effort: create the folder now so it is ready for new projects.
+                let _ = std::fs::create_dir_all(&path);
+                SettingsSchema::persist_default_project_directory(Some(path.clone()));
+                welcome_debug!("default project path changed -> {}", path.display());
+                let _ = entity.update(cx, |this, cx| {
+                    this.default_project_dir = path;
+                    this.default_dir_configured = true;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            self.open_error = Some(SharedString::from(
+                "Native file dialogs are unavailable in this build.",
+            ));
+            cx.notify();
+        }
     }
 
     /// Open Project flow (Part B): browse for a `.fbproj` via the native picker,
@@ -246,47 +257,60 @@ impl WelcomeWindow {
     fn browse_and_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_error = None;
         cx.notify();
-        let start_dir = self.default_project_dir.clone();
-        let on_action = self.callbacks.on_action.clone();
-        // `spawn_in` keeps a window handle across the async picker await, so the
-        // validated path can be handed to `on_action` (which needs a Window to
-        // close Welcome) once the picker resolves.
-        cx.spawn_in(window, async move |this, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Open Project")
-                .set_directory(&start_dir)
-                .add_filter(
-                    "Futureboard Project",
-                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
-                )
-                .pick_file()
-                .await;
-            let Some(handle) = result else {
-                welcome_debug!("open project cancelled");
-                return;
-            };
-            let path = handle.path().to_path_buf();
-            match crate::project::validate_project_file(&path) {
-                Ok(version) => {
-                    welcome_debug!("open project validated (v{version}) -> {}", path.display());
-                    // Hand off to the app: opens the studio loading `path` and
-                    // closes Welcome (see the on_action callback in app.rs).
-                    let _ = cx.update(|window, app| {
-                        on_action(WelcomeAction::OpenProjectFile(path), window, app);
-                    });
+        #[cfg(feature = "native-dialogs")]
+        {
+            let start_dir = self.default_project_dir.clone();
+            let on_action = self.callbacks.on_action.clone();
+            // `spawn_in` keeps a window handle across the async picker await, so the
+            // validated path can be handed to `on_action` (which needs a Window to
+            // close Welcome) once the picker resolves.
+            cx.spawn_in(window, async move |this, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Open Project")
+                    .set_directory(&start_dir)
+                    .add_filter(
+                        "Futureboard Project",
+                        crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
+                    )
+                    .pick_file()
+                    .await;
+                let Some(handle) = result else {
+                    welcome_debug!("open project cancelled");
+                    return;
+                };
+                let path = handle.path().to_path_buf();
+                match crate::project::validate_project_file(&path) {
+                    Ok(version) => {
+                        welcome_debug!("open project validated (v{version}) -> {}", path.display());
+                        // Hand off to the app: opens the studio loading `path` and
+                        // closes Welcome (see the on_action callback in app.rs).
+                        let _ = cx.update(|window, app| {
+                            on_action(WelcomeAction::OpenProjectFile(path), window, app);
+                        });
+                    }
+                    Err(e) => {
+                        let msg = format!("{} Details: {}", e.user_message(), e.technical_detail());
+                        welcome_debug!("open project rejected -> {msg}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.open_error = Some(SharedString::from(msg));
+                            this.active_nav = StartupNav::OpenProject;
+                            cx.notify();
+                        });
+                    }
                 }
-                Err(e) => {
-                    let msg = format!("{} Details: {}", e.user_message(), e.technical_detail());
-                    welcome_debug!("open project rejected -> {msg}");
-                    let _ = this.update(cx, |this, cx| {
-                        this.open_error = Some(SharedString::from(msg));
-                        this.active_nav = StartupNav::OpenProject;
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            let _ = window;
+            self.open_error = Some(SharedString::from(
+                "Native file dialogs are unavailable in this build.",
+            ));
+            self.active_nav = StartupNav::OpenProject;
+            cx.notify();
+        }
     }
 }
 

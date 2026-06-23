@@ -235,6 +235,22 @@ fn native_audio_backend_from_driver_type(driver_type: &str) -> DAUx::AudioBacken
     }
 }
 
+fn resolve_output_device_for_backend(
+    engine: &DAUx::AudioEngine,
+    backend: DAUx::AudioBackend,
+    wanted: &str,
+) -> Option<DAUx::AudioDeviceId> {
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return None;
+    }
+    engine
+        .list_output_devices_for_backend(backend)
+        .into_iter()
+        .find(|device| device.name == wanted || device.id == wanted)
+        .map(|device| device.device_id)
+}
+
 pub(crate) fn build_and_warm_audio_engine(
     schema: crate::settings::SettingsSchema,
 ) -> Result<(DAUx::AudioEngine, DAUx::EngineStats), String> {
@@ -1844,16 +1860,22 @@ impl StudioLayout {
 
     fn sync_audio_engine_settings(&mut self, cx: &mut Context<Self>) {
         let schema = self.settings.read(cx).current.clone();
-        let desired_config = DAUx::EngineConfig {
-            sample_rate: schema.general.project_defaults.sample_rate,
-            buffer_size: schema.general.project_defaults.buffer_size,
-            channels: 2,
-            backend: native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type),
-            input_device: None,
-            output_device: None,
-        };
+        let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
 
         if let Some(engine) = self.audio_bridge.engine.as_mut() {
+            let output_device = resolve_output_device_for_backend(
+                engine,
+                backend,
+                &schema.hardware.audio.device_out,
+            );
+            let desired_config = DAUx::EngineConfig {
+                sample_rate: schema.general.project_defaults.sample_rate,
+                buffer_size: schema.general.project_defaults.buffer_size,
+                channels: 2,
+                backend,
+                input_device: None,
+                output_device,
+            };
             let stats_before = engine.stats();
             let needs_reopen = engine.requires_restart(&desired_config)
                 || stats_before.device_state.eq_ignore_ascii_case("DeviceLost");
@@ -1897,7 +1919,6 @@ impl StudioLayout {
             }
 
             // Construct new config
-            let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
             let config = DAUx::EngineConfig {
                 sample_rate: schema.general.project_defaults.sample_rate,
                 buffer_size: schema.general.project_defaults.buffer_size,

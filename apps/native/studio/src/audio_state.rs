@@ -323,7 +323,9 @@ mod tests {
         state.set_backend(AudioBackend::WasapiExclusive);
         state.set_output_device(Some(wasapi_id()));
         let result = state.apply_audio_settings_with(|_, _| {
-            Err(SphereAudioError::StreamOpenFailed("simulated open failure".into()))
+            Err(SphereAudioError::StreamOpenFailed(
+                "simulated open failure".into(),
+            ))
         });
 
         assert!(result.is_err());
@@ -344,7 +346,10 @@ mod tests {
 
         state.apply_audio_settings_with(|_, _| Ok(())).unwrap();
 
-        assert_eq!(state.active_settings.config.backend, AudioBackend::WasapiExclusive);
+        assert_eq!(
+            state.active_settings.config.backend,
+            AudioBackend::WasapiExclusive
+        );
         assert_eq!(state.draft_settings, state.active_settings);
         assert_eq!(state.config, state.active_settings.config);
         assert_eq!(state.last_error, None);

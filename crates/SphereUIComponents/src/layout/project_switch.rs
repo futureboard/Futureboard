@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::components::message_box_dialog::{
     open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
 };
+#[cfg(feature = "native-dialogs")]
 use crate::project::now_secs;
 
 use super::project_ops::ProjectOpenOptions;
@@ -379,48 +380,57 @@ impl StudioLayout {
         missing_name: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let default_dir = missing_path
-            .parent()
-            .map(PathBuf::from)
-            .or_else(|| self.project_session.folder_path.clone())
-            .unwrap_or_else(|| self.default_projects_dir(cx));
-        let fallback_name = missing_name.unwrap_or_else(|| {
-            missing_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("Project")
-                .to_string()
-        });
-        let entity = cx.entity().clone();
-        cx.spawn(async move |_this, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Locate Project")
-                .set_directory(&default_dir)
-                .add_filter(
-                    "Futureboard Project",
-                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
-                )
-                .pick_file()
-                .await;
-            if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
-                let _ = entity.update(cx, |this, cx| {
-                    this.recent_projects.remove(&missing_path);
-                    this.recent_projects
-                        .push(&fallback_name, path.clone(), now_secs());
-                    this.sync_recent_to_switcher();
-                    this.request_switch_project(
-                        ProjectSwitchRequest {
-                            target_path: path,
-                            target_name: Some(fallback_name),
-                            source: ProjectSwitchSource::ProjectSwitcher,
-                        },
-                        None,
-                        cx,
-                    );
-                });
-            }
-        })
-        .detach();
+        #[cfg(feature = "native-dialogs")]
+        {
+            let default_dir = missing_path
+                .parent()
+                .map(PathBuf::from)
+                .or_else(|| self.project_session.folder_path.clone())
+                .unwrap_or_else(|| self.default_projects_dir(cx));
+            let fallback_name = missing_name.unwrap_or_else(|| {
+                missing_path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("Project")
+                    .to_string()
+            });
+            let entity = cx.entity().clone();
+            cx.spawn(async move |_this, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Locate Project")
+                    .set_directory(&default_dir)
+                    .add_filter(
+                        "Futureboard Project",
+                        crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
+                    )
+                    .pick_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = handle.path().to_path_buf();
+                    let _ = entity.update(cx, |this, cx| {
+                        this.recent_projects.remove(&missing_path);
+                        this.recent_projects
+                            .push(&fallback_name, path.clone(), now_secs());
+                        this.sync_recent_to_switcher();
+                        this.request_switch_project(
+                            ProjectSwitchRequest {
+                                target_path: path,
+                                target_name: Some(fallback_name),
+                                source: ProjectSwitchSource::ProjectSwitcher,
+                            },
+                            None,
+                            cx,
+                        );
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            let _ = (missing_path, missing_name, cx);
+            eprintln!("[Project] Locate Project unavailable: native file dialogs disabled");
+        }
     }
 }

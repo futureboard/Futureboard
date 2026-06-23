@@ -1797,8 +1797,8 @@ fn schedule_unified_editor_attach(
     // FUTUREBOARD_PLUGIN_EDITOR_MODE (default "detached" = host-owned top-level
     // window). `parent_hwnd` is only a DPI/position reference in detached mode,
     // never a real parent — log the real mode instead of a hardcoded string.
-    let editor_mode = std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE")
-        .unwrap_or_else(|_| "detached".to_string());
+    let editor_mode =
+        std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE").unwrap_or_else(|_| "detached".to_string());
     eprintln!("[plugin-host] editor_mode={editor_mode} parent_hwnd=0x{parent_hwnd:x} (DPI/position reference)");
     eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
     eprintln!(
@@ -1821,8 +1821,12 @@ fn schedule_unified_editor_attach(
         return;
     }
     if !loaded.contains_key(plugin_instance_id) {
-            emit_attach_failed(out, plugin_instance_id, "plugin runtime instance is not loaded");
-            return;
+        emit_attach_failed(
+            out,
+            plugin_instance_id,
+            "plugin runtime instance is not loaded",
+        );
+        return;
     }
     if !preview.lock().has_instance(plugin_instance_id) {
         emit_attach_failed(

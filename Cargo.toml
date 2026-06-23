@@ -51,7 +51,7 @@ publish = false
 # =============================================================================
 
 [workspace.dependencies]
-sphere_ui_components = { path = "crates/SphereUIComponents" }
+sphere_ui_components = { path = "crates/SphereUIComponents", default-features = false }
 sphere-direct-audio-engine = { path = "crates/SphereDirectAudioEngine", default-features = false }
 sphere-audio-processor = { path = "crates/SphereAudioProcessor" }
 sphere-audio-editor = { path = "crates/SphereAudioEditor" }
@@ -384,6 +384,12 @@ unicode-segmentation = "1.10"
 # =============================================================================
 
 rusqlite = { version = "0.31", features = ["bundled"] }
+aes-gcm = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+lzma-rs = "0.3"
+pbkdf2 = "0.12"
+tar = "0.4"
+toml = "0.8"
 
 
 # =============================================================================

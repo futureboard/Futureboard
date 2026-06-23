@@ -345,7 +345,9 @@ impl StudioLayout {
                     self.plugin_editors
                         .deferred_opens
                         .retain(|(_, _, id)| id != &plugin_instance_id);
-                    self.plugin_editors.flush_attempts.remove(&plugin_instance_id);
+                    self.plugin_editors
+                        .flush_attempts
+                        .remove(&plugin_instance_id);
                     for session in self.plugin_editors.bridge.values_mut() {
                         if session.instance_id == plugin_instance_id
                             && !bridge_editor_is_terminal(&session.state)
@@ -435,10 +437,8 @@ impl StudioLayout {
                                     &plugin_instance_id,
                                     output_channels,
                                 );
-                            if let Some((index, true)) = timeline
-                                .state
-                                .insert_slots(&track_id)
-                                .and_then(|slots| {
+                            if let Some((index, true)) =
+                                timeline.state.insert_slots(&track_id).and_then(|slots| {
                                     slots
                                         .iter()
                                         .enumerate()
@@ -653,7 +653,11 @@ impl StudioLayout {
                     }
                     let content_hwnd = session.shell.content_hwnd();
                     let (cw, ch) = session.shell.content_size();
-                    transition_bridge_editor_state(session, BridgeEditorState::Sized, "preferred_size");
+                    transition_bridge_editor_state(
+                        session,
+                        BridgeEditorState::Sized,
+                        "preferred_size",
+                    );
                     if let Some(rt) = runtime.as_ref() {
                         if let Ok(mut r) = rt.lock() {
                             let confirm = r.confirm_editor_content_ready(
@@ -785,9 +789,9 @@ impl StudioLayout {
             return;
         }
         for session in self.plugin_editors.bridge.values_mut() {
-                session
-                    .shell
-                    .set_status("Plugin host disconnected (crashed or exited).", true);
+            session
+                .shell
+                .set_status("Plugin host disconnected (crashed or exited).", true);
             transition_bridge_editor_state(
                 session,
                 BridgeEditorState::Failed(
@@ -818,7 +822,11 @@ impl StudioLayout {
         );
         eprintln!(
             "[plugin-editor-window] ownership={} forced=true",
-            if host_owned { "host_owned" } else { "main_owned" }
+            if host_owned {
+                "host_owned"
+            } else {
+                "main_owned"
+            }
         );
         // Spec freeze guard: opening the editor must never block the GPUI main
         // thread. In host-owned mode this is structural — the main app neither
@@ -1056,8 +1064,7 @@ impl StudioLayout {
                 .bridge
                 .get(&key)
                 .map(|session| &session.state),
-            Some(BridgeEditorState::Failed(_))
-                | Some(BridgeEditorState::TimedOut(_))
+            Some(BridgeEditorState::Failed(_)) | Some(BridgeEditorState::TimedOut(_))
         ) {
             self.close_bridge_editor(cx, track_id, instance_id);
         }
@@ -1217,9 +1224,9 @@ impl StudioLayout {
                     );
                     changed = true;
                 } else if !session.first_paint_logged
-                    && session
-                        .attached_at
-                        .is_some_and(|attached_at| attached_at.elapsed() >= EDITOR_FIRST_PAINT_TIMEOUT)
+                    && session.attached_at.is_some_and(|attached_at| {
+                        attached_at.elapsed() >= EDITOR_FIRST_PAINT_TIMEOUT
+                    })
                 {
                     eprintln!(
                         "[EDITOR HANG WATCHDOG]\nplugin_instance_id={}\nstage=first_paint\nelapsed_ms={}\ntimeout_ms={}\nui_thread_responsive=true\nhost_process_alive=true",
@@ -2693,10 +2700,7 @@ impl StudioLayout {
                 // user can retry deliberately; the plugin/audio instance is left
                 // untouched.
                 self.timeline.update(cx, |timeline, _cx| {
-                    for track in timeline
-                        .state
-                        .insert_owner_ids_containing(&instance_id)
-                    {
+                    for track in timeline.state.insert_owner_ids_containing(&instance_id) {
                         timeline
                             .state
                             .set_insert_pending_editor_open(&track, &instance_id, false);

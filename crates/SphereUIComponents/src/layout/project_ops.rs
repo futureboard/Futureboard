@@ -457,44 +457,55 @@ impl StudioLayout {
             }
         }
 
-        let default_dir = self.default_projects_dir(cx);
-        let name = self.project_session.name.clone();
-        let entity = cx.entity().clone();
-        cx.spawn(async move |_this, cx| {
-            if crate::shutdown::ShutdownState::global().is_shutting_down() {
-                return;
-            }
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Save Project As")
-                .set_directory(&default_dir)
-                .set_file_name(&format!(
-                    "{}.{}",
-                    crate::project::io::sanitize_project_name(&name),
-                    crate::project::io::PROJECT_FILE_EXT
-                ))
-                .add_filter(
-                    "Futureboard Project",
-                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
-                )
-                .save_file()
-                .await;
-            if let Some(handle) = result {
-                let path = project_save_path_from_picker(handle.path().to_path_buf());
-                let _ = entity.update(cx, |this, cx| {
-                    if crate::shutdown::ShutdownState::global().is_shutting_down() {
-                        return;
-                    }
-                    this.save_project_in_background_then(path, Some(after_save), cx);
-                });
-            } else {
-                let _ = entity.update(cx, |this, _cx| {
-                    this.lifecycle_guard.pending_close_action = None;
-                    this.lifecycle_guard.pending_lifecycle_action = None;
-                    this.clear_project_switch_pending();
-                });
-            }
-        })
-        .detach();
+        #[cfg(feature = "native-dialogs")]
+        {
+            let default_dir = self.default_projects_dir(cx);
+            let name = self.project_session.name.clone();
+            let entity = cx.entity().clone();
+            cx.spawn(async move |_this, cx| {
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    return;
+                }
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Save Project As")
+                    .set_directory(&default_dir)
+                    .set_file_name(&format!(
+                        "{}.{}",
+                        crate::project::io::sanitize_project_name(&name),
+                        crate::project::io::PROJECT_FILE_EXT
+                    ))
+                    .add_filter(
+                        "Futureboard Project",
+                        crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
+                    )
+                    .save_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = project_save_path_from_picker(handle.path().to_path_buf());
+                    let _ = entity.update(cx, |this, cx| {
+                        if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                            return;
+                        }
+                        this.save_project_in_background_then(path, Some(after_save), cx);
+                    });
+                } else {
+                    let _ = entity.update(cx, |this, _cx| {
+                        this.lifecycle_guard.pending_close_action = None;
+                        this.lifecycle_guard.pending_lifecycle_action = None;
+                        this.clear_project_switch_pending();
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            self.lifecycle_guard.pending_close_action = None;
+            self.lifecycle_guard.pending_lifecycle_action = None;
+            self.clear_project_switch_pending();
+            eprintln!("[Project] Save Project As unavailable: native file dialogs disabled");
+        }
     }
 
     fn apply_save_then(&mut self, after_save: SaveThenAction, cx: &mut Context<Self>) {
@@ -582,81 +593,102 @@ impl StudioLayout {
     }
 
     pub(super) fn cmd_save_project_as(&mut self, cx: &mut Context<Self>) {
-        let default_dir = self
-            .project_session
-            .project_file_path
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .or_else(|| self.project_session.folder_path.clone())
-            .unwrap_or_else(|| self.default_projects_dir(cx));
-        let name = self.project_session.name.clone();
-        let entity = cx.entity().clone();
-        cx.spawn(async move |_this, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Save Project As")
-                .set_directory(&default_dir)
-                .set_file_name(&format!(
-                    "{}.{}",
-                    crate::project::io::sanitize_project_name(&name),
-                    crate::project::io::PROJECT_FILE_EXT
-                ))
-                .add_filter(
-                    "Futureboard Project",
-                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
-                )
-                .save_file()
-                .await;
-            if let Some(handle) = result {
-                let path = project_save_path_from_picker(handle.path().to_path_buf());
-                let _ = entity.update(cx, |this, cx| {
-                    project_lifecycle_log!("save requested: mode=save_as path={}", path.display());
-                    this.save_project_in_background(path, cx);
-                });
-            }
-        })
-        .detach();
+        #[cfg(feature = "native-dialogs")]
+        {
+            let default_dir = self
+                .project_session
+                .project_file_path
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .or_else(|| self.project_session.folder_path.clone())
+                .unwrap_or_else(|| self.default_projects_dir(cx));
+            let name = self.project_session.name.clone();
+            let entity = cx.entity().clone();
+            cx.spawn(async move |_this, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Save Project As")
+                    .set_directory(&default_dir)
+                    .set_file_name(&format!(
+                        "{}.{}",
+                        crate::project::io::sanitize_project_name(&name),
+                        crate::project::io::PROJECT_FILE_EXT
+                    ))
+                    .add_filter(
+                        "Futureboard Project",
+                        crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
+                    )
+                    .save_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = project_save_path_from_picker(handle.path().to_path_buf());
+                    let _ = entity.update(cx, |this, cx| {
+                        project_lifecycle_log!(
+                            "save requested: mode=save_as path={}",
+                            path.display()
+                        );
+                        this.save_project_in_background(path, cx);
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            let _ = cx;
+            eprintln!("[Project] Save Project As unavailable: native file dialogs disabled");
+        }
     }
 
     pub(super) fn cmd_save_project_copy(&mut self, cx: &mut Context<Self>) {
-        let default_dir = self
-            .project_session
-            .project_file_path
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .or_else(|| self.project_session.folder_path.clone())
-            .unwrap_or_else(|| self.default_projects_dir(cx));
-        let name = self.project_session.name.clone();
-        let entity = cx.entity().clone();
-        self.refresh_bridge_plugin_states(cx);
-        let tl_state = self.timeline.read(cx).state.clone();
-        let sample_rate = self.current_audio_sample_rate();
-        cx.spawn(async move |_this, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Save Copy")
-                .set_directory(&default_dir)
-                .set_file_name(&format!(
-                    "{} Copy.{}",
-                    crate::project::io::sanitize_project_name(&name),
-                    crate::project::io::PROJECT_FILE_EXT
-                ))
-                .add_filter(
-                    "Futureboard Project",
-                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
-                )
-                .save_file()
-                .await;
-            if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
-                let mut project = FutureboardProject::from(&tl_state);
-                project.settings.sample_rate = sample_rate;
-                let _ = entity.update(cx, |_this, _cx| {
-                    if let Err(e) = save_project(&mut project, &path) {
-                        eprintln!("[Project] save copy failed: {e}");
-                    }
-                });
-            }
-        })
-        .detach();
+        #[cfg(feature = "native-dialogs")]
+        {
+            let default_dir = self
+                .project_session
+                .project_file_path
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .or_else(|| self.project_session.folder_path.clone())
+                .unwrap_or_else(|| self.default_projects_dir(cx));
+            let name = self.project_session.name.clone();
+            let entity = cx.entity().clone();
+            self.refresh_bridge_plugin_states(cx);
+            let tl_state = self.timeline.read(cx).state.clone();
+            let sample_rate = self.current_audio_sample_rate();
+            cx.spawn(async move |_this, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Save Copy")
+                    .set_directory(&default_dir)
+                    .set_file_name(&format!(
+                        "{} Copy.{}",
+                        crate::project::io::sanitize_project_name(&name),
+                        crate::project::io::PROJECT_FILE_EXT
+                    ))
+                    .add_filter(
+                        "Futureboard Project",
+                        crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
+                    )
+                    .save_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = handle.path().to_path_buf();
+                    let mut project = FutureboardProject::from(&tl_state);
+                    project.settings.sample_rate = sample_rate;
+                    let _ = entity.update(cx, |_this, _cx| {
+                        if let Err(e) = save_project(&mut project, &path) {
+                            eprintln!("[Project] save copy failed: {e}");
+                        }
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            let _ = cx;
+            eprintln!("[Project] Save Copy unavailable: native file dialogs disabled");
+        }
     }
 
     /// Persist the project to `path`. Returns `true` on success so callers
@@ -908,32 +940,41 @@ impl StudioLayout {
     }
 
     pub(super) fn cmd_open_project(&mut self, cx: &mut Context<Self>) {
-        let default_dir = self
-            .project_session
-            .project_file_path
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .or_else(|| self.project_session.folder_path.clone())
-            .unwrap_or_else(|| self.default_projects_dir(cx));
-        let entity = cx.entity().clone();
-        cx.spawn(async move |_this, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Open Project")
-                .set_directory(&default_dir)
-                .add_filter(
-                    "Futureboard Project",
-                    crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
-                )
-                .pick_file()
-                .await;
-            if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
-                let _ = entity.update(cx, |this, cx| {
-                    this.load_project_from_path(path, cx);
-                });
-            }
-        })
-        .detach();
+        #[cfg(feature = "native-dialogs")]
+        {
+            let default_dir = self
+                .project_session
+                .project_file_path
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .or_else(|| self.project_session.folder_path.clone())
+                .unwrap_or_else(|| self.default_projects_dir(cx));
+            let entity = cx.entity().clone();
+            cx.spawn(async move |_this, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Open Project")
+                    .set_directory(&default_dir)
+                    .add_filter(
+                        "Futureboard Project",
+                        crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
+                    )
+                    .pick_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = handle.path().to_path_buf();
+                    let _ = entity.update(cx, |this, cx| {
+                        this.load_project_from_path(path, cx);
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            let _ = cx;
+            eprintln!("[Project] Open Project unavailable: native file dialogs disabled");
+        }
     }
 
     // `load_project_from_path_with_options` lives in `super::session_load`.

@@ -899,11 +899,7 @@ fn decode_insert(r: &mut FbReader, version: u32) -> Result<ProjectInsert, Projec
     } else {
         Vec::new()
     };
-    let multiout_collapsed = if version >= 19 {
-        r.read_bool()?
-    } else {
-        false
-    };
+    let multiout_collapsed = if version >= 19 { r.read_bool()? } else { false };
     let plugin = match r.read_u8()? {
         0 => None,
         1 => Some(decode_plugin_instance(r)?),

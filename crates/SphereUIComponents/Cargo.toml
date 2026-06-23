@@ -10,8 +10,9 @@ name = "sphere_ui_components"
 path = "src/lib.rs"
 
 [features]
-default = ["gpu-renderer"]
+default = ["gpu-renderer", "native-dialogs"]
 gpu-renderer = ["dep:pollster", "dep:raw-window-handle", "dep:wgpu"]
+native-dialogs = ["dep:rfd"]
 plugin-host-bin = ["sphere-plugin-host/plugin-host-bin"]
 
 [dependencies]
@@ -45,7 +46,7 @@ pollster = { workspace = true, optional = true }
 raw-window-handle = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 # Native file dialogs (open/save/folder picker).
-rfd.workspace = true
+rfd = { workspace = true, optional = true }
 # CRC-32/ISO-HDLC checksum for .fbproj binary format.
 crc32fast.workspace = true
 sphere-encoder.workspace = true

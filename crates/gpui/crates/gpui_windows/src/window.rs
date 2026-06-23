@@ -23,7 +23,7 @@ use windows::{
         System::{
             Com::*, Diagnostics::Debug::MessageBeep, LibraryLoader::*, Ole::*, SystemServices::*,
         },
-        UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
+        UI::{HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
 };
@@ -684,65 +684,42 @@ impl PlatformWindow for WindowsWindow {
             .executor
             .spawn(async move {
                 unsafe {
-                    let mut config = TASKDIALOGCONFIG::default();
-                    config.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as _;
-                    config.hwndParent = handle;
-                    let title;
-                    let main_icon;
-                    match level {
-                        PromptLevel::Info => {
-                            title = windows::core::w!("Info");
-                            main_icon = TD_INFORMATION_ICON;
-                        }
-                        PromptLevel::Warning => {
-                            title = windows::core::w!("Warning");
-                            main_icon = TD_WARNING_ICON;
-                        }
-                        PromptLevel::Critical => {
-                            title = windows::core::w!("Critical");
-                            main_icon = TD_ERROR_ICON;
-                        }
+                    let title = match level {
+                        PromptLevel::Info => windows::core::w!("Info"),
+                        PromptLevel::Warning => windows::core::w!("Warning"),
+                        PromptLevel::Critical => windows::core::w!("Critical"),
                     };
-                    config.pszWindowTitle = title;
-                    config.Anonymous1.pszMainIcon = main_icon;
-                    let instruction = HSTRING::from(msg);
-                    config.pszMainInstruction = PCWSTR::from_raw(instruction.as_ptr());
-                    let hints_encoded;
-                    if let Some(ref hints) = detail_string {
-                        hints_encoded = HSTRING::from(hints);
-                        config.pszContent = PCWSTR::from_raw(hints_encoded.as_ptr());
+                    let icon = match level {
+                        PromptLevel::Info => MB_ICONINFORMATION,
+                        PromptLevel::Warning => MB_ICONWARNING,
+                        PromptLevel::Critical => MB_ICONERROR,
                     };
-                    let mut button_id_map = Vec::with_capacity(answers.len());
-                    let mut buttons = Vec::new();
-                    let mut btn_encoded = Vec::new();
-                    for (index, btn) in answers.iter().enumerate() {
-                        let encoded = HSTRING::from(btn.label().as_ref());
-                        let button_id = match btn {
-                            PromptButton::Ok(_) => IDOK.0,
-                            PromptButton::Cancel(_) => IDCANCEL.0,
-                            // the first few low integer values are reserved for known buttons
-                            // so for simplicity we just go backwards from -1
-                            PromptButton::Other(_) => -(index as i32) - 1,
-                        };
-                        button_id_map.push(button_id);
-                        buttons.push(TASKDIALOG_BUTTON {
-                            nButtonID: button_id,
-                            pszButtonText: PCWSTR::from_raw(encoded.as_ptr()),
-                        });
-                        btn_encoded.push(encoded);
-                    }
-                    config.cButtons = buttons.len() as _;
-                    config.pButtons = buttons.as_ptr();
-
-                    config.pfCallback = None;
-                    let mut res = std::mem::zeroed();
-                    let _ = TaskDialogIndirect(&config, Some(&mut res), None, None)
-                        .context("unable to create task dialog")
-                        .log_err();
-
-                    if let Some(clicked) =
-                        button_id_map.iter().position(|&button_id| button_id == res)
-                    {
+                    let text = match detail_string {
+                        Some(detail) if !detail.is_empty() => format!("{msg}\n\n{detail}"),
+                        _ => msg,
+                    };
+                    let text = HSTRING::from(text);
+                    let has_cancel = answers
+                        .iter()
+                        .any(|answer| matches!(answer, PromptButton::Cancel(_)));
+                    let buttons = if has_cancel { MB_OKCANCEL } else { MB_OK };
+                    let res = MessageBoxW(
+                        Some(handle),
+                        PCWSTR::from_raw(text.as_ptr()),
+                        title,
+                        buttons | icon,
+                    );
+                    let clicked = if res == IDCANCEL {
+                        answers
+                            .iter()
+                            .position(|answer| matches!(answer, PromptButton::Cancel(_)))
+                    } else {
+                        answers
+                            .iter()
+                            .position(|answer| matches!(answer, PromptButton::Ok(_)))
+                            .or(Some(0))
+                    };
+                    if let Some(clicked) = clicked {
                         let _ = done_tx.send(clicked);
                     }
                 }

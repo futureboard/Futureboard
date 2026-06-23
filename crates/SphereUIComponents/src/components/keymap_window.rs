@@ -203,57 +203,76 @@ impl KeymapWindow {
     }
 
     fn import_profile(&mut self, cx: &mut Context<Self>) {
-        let entity = cx.entity().clone();
-        cx.spawn(async move |_, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Import Keymap")
-                .add_filter("JSON", &["json"])
-                .pick_file()
-                .await;
-            if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
-                let _ = entity.update(cx, |this, cx| {
-                    match this.manager.import_profile(&path) {
-                        Ok(()) => {
-                            let _ = this.manager.save_changes();
-                            this.json_input
-                                .set_value(this.manager.json_text().unwrap_or_default());
-                            this.publish_changes(cx);
-                            this.status_message = Some(format!("Imported {}", path.display()));
+        #[cfg(feature = "native-dialogs")]
+        {
+            let entity = cx.entity().clone();
+            cx.spawn(async move |_, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Import Keymap")
+                    .add_filter("JSON", &["json"])
+                    .pick_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = handle.path().to_path_buf();
+                    let _ = entity.update(cx, |this, cx| {
+                        match this.manager.import_profile(&path) {
+                            Ok(()) => {
+                                let _ = this.manager.save_changes();
+                                this.json_input
+                                    .set_value(this.manager.json_text().unwrap_or_default());
+                                this.publish_changes(cx);
+                                this.status_message = Some(format!("Imported {}", path.display()));
+                            }
+                            Err(error) => this.status_message = Some(error),
                         }
-                        Err(error) => this.status_message = Some(error),
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            self.status_message = Some("Native file dialogs are unavailable in this build.".into());
+            cx.notify();
+        }
     }
 
     fn export_profile(&mut self, cx: &mut Context<Self>) {
-        let entity = cx.entity().clone();
-        let default_name = format!("{}.json", self.manager.active_profile_id());
-        cx.spawn(async move |_, cx| {
-            let result = rfd::AsyncFileDialog::new()
-                .set_title("Export Keymap")
-                .set_file_name(&default_name)
-                .add_filter("JSON", &["json"])
-                .save_file()
-                .await;
-            if let Some(handle) = result {
-                let path = handle.path().to_path_buf();
-                let _ = entity.update(cx, |this, cx| {
-                    match this.manager.export_active_profile(&path) {
-                        Ok(()) => {
-                            this.status_message = Some(format!("Exported to {}", path.display()))
+        #[cfg(feature = "native-dialogs")]
+        {
+            let entity = cx.entity().clone();
+            let default_name = format!("{}.json", self.manager.active_profile_id());
+            cx.spawn(async move |_, cx| {
+                let result = rfd::AsyncFileDialog::new()
+                    .set_title("Export Keymap")
+                    .set_file_name(&default_name)
+                    .add_filter("JSON", &["json"])
+                    .save_file()
+                    .await;
+                if let Some(handle) = result {
+                    let path = handle.path().to_path_buf();
+                    let _ = entity.update(cx, |this, cx| {
+                        match this.manager.export_active_profile(&path) {
+                            Ok(()) => {
+                                this.status_message =
+                                    Some(format!("Exported to {}", path.display()))
+                            }
+                            Err(error) => this.status_message = Some(error),
                         }
-                        Err(error) => this.status_message = Some(error),
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(feature = "native-dialogs"))]
+        {
+            self.status_message = Some("Native file dialogs are unavailable in this build.".into());
+            cx.notify();
+        }
     }
 
     fn apply_json(&mut self, cx: &mut Context<Self>) {

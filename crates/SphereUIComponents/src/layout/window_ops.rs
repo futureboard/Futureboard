@@ -9,7 +9,9 @@ use crate::components::add_track_dialog::{
 use crate::components::combo_box::dedupe_preserve_order;
 use crate::components::keymap_window::{open_keymap_window, KeymapChangedCb};
 use crate::components::midi_editor_window::{midi_editor_debug, open_midi_editor_window};
-use crate::components::settings_dialog::{open_settings_window, OnSettingUpdate};
+use crate::components::settings_dialog::{
+    open_settings_window, AudioDeviceListsProvider, OnSettingUpdate, SettingsAudioDeviceLists,
+};
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackAudioFormat, TrackInputRouting,
     TrackOutputRouting, TrackType,
@@ -407,6 +409,7 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
+        let open_started = std::time::Instant::now();
         // If window is already open, activate it
         if let Some(handle) = self.external_windows.settings.clone() {
             if handle
@@ -428,71 +431,72 @@ impl StudioLayout {
             resolve_owner_bounds_with_preferred(owner_bounds, self.studio_window_bounds(cx), cx);
         let settings = self.settings.clone();
         let owner = cx.entity().clone();
-
-        let mut available_inputs = if let Some(ref engine) = self.audio_bridge.engine {
-            engine
-                .list_input_devices()
-                .into_iter()
-                .map(|d| d.name)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
         let schema = self.settings.read(cx).current.clone();
+
+        let device_lists_provider: Option<AudioDeviceListsProvider> =
+            self.audio_bridge.engine.clone().map(|engine| {
+                Arc::new(move |driver_type: &str| {
+                    let backend = super::native_audio_backend_from_driver_type(driver_type);
+                    let input_devices = engine.list_input_devices_for_backend(backend);
+                    let output_devices = engine.list_output_devices_for_backend(backend);
+                    SettingsAudioDeviceLists {
+                        inputs: dedupe_preserve_order(
+                            &input_devices
+                                .iter()
+                                .map(|d| d.name.clone())
+                                .collect::<Vec<_>>(),
+                        ),
+                        outputs: dedupe_preserve_order(
+                            &output_devices
+                                .iter()
+                                .map(|d| d.name.clone())
+                                .collect::<Vec<_>>(),
+                        ),
+                        input_channels: input_devices
+                            .into_iter()
+                            .map(|d| (d.name, d.channels))
+                            .collect(),
+                        output_channels: output_devices
+                            .into_iter()
+                            .map(|d| (d.name, d.channels))
+                            .collect(),
+                    }
+                }) as AudioDeviceListsProvider
+            });
+        // Do NOT enumerate/probe synchronously here when a live engine provider
+        // exists — that would block opening Settings on hardware enumeration /
+        // WDM-KS probing. The window populates backend-scoped lists off the UI
+        // thread on its first render. The no-engine path still builds cheap
+        // placeholder lists below.
+        let initial_device_lists = SettingsAudioDeviceLists::default();
+
+        let mut available_inputs = initial_device_lists.inputs.clone();
         if !available_inputs.contains(&schema.hardware.audio.device_in)
             && !schema.hardware.audio.device_in.is_empty()
+            && device_lists_provider.is_none()
         {
             available_inputs.push(schema.hardware.audio.device_in.clone());
         }
-        if available_inputs.is_empty() {
+        if available_inputs.is_empty() && device_lists_provider.is_none() {
             available_inputs.push("Built-in Microphone".to_string());
         }
         available_inputs = dedupe_preserve_order(&available_inputs);
 
-        let mut available_outputs = if let Some(ref engine) = self.audio_bridge.engine {
-            engine
-                .list_output_devices()
-                .into_iter()
-                .map(|d| d.name)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let mut available_outputs = initial_device_lists.outputs.clone();
         if !available_outputs.contains(&schema.hardware.audio.device_out)
             && !schema.hardware.audio.device_out.is_empty()
+            && device_lists_provider.is_none()
         {
             available_outputs.push(schema.hardware.audio.device_out.clone());
         }
-        if available_outputs.is_empty() {
+        if available_outputs.is_empty() && device_lists_provider.is_none() {
             available_outputs.push("Speakers (Realtek)".to_string());
         }
         available_outputs = dedupe_preserve_order(&available_outputs);
 
         // (device name, channel count) for the read-only channel lists (Phase C).
-        let available_input_channels: Vec<(String, u32)> = self
-            .audio_bridge
-            .engine
-            .as_ref()
-            .map(|engine| {
-                engine
-                    .list_input_devices()
-                    .into_iter()
-                    .map(|d| (d.name, d.channels))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let available_output_channels: Vec<(String, u32)> = self
-            .audio_bridge
-            .engine
-            .as_ref()
-            .map(|engine| {
-                engine
-                    .list_output_devices()
-                    .into_iter()
-                    .map(|d| (d.name, d.channels))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let available_input_channels = initial_device_lists.input_channels.clone();
+        let available_output_channels = initial_device_lists.output_channels.clone();
 
         let available_backends = vec![
             "WASAPI Shared".to_string(),
@@ -549,6 +553,7 @@ impl StudioLayout {
             available_backends,
             available_input_channels,
             available_output_channels,
+            device_lists_provider,
             latency_provider,
             input_test_start,
             input_test_stop,
@@ -558,6 +563,13 @@ impl StudioLayout {
         ) {
             Ok(handle) => self.external_windows.settings = Some(handle),
             Err(err) => eprintln!("[settings] failed to open settings window: {err}"),
+        }
+
+        if crate::components::settings_dialog::settings_perf_debug_enabled() {
+            eprintln!(
+                "[settings-perf] open_settings_dialog took {:.1}ms (synchronous; device probing deferred off-thread)",
+                open_started.elapsed().as_secs_f64() * 1000.0
+            );
         }
     }
 

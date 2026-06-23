@@ -70,9 +70,14 @@ impl AudioBackend {
     fn accepts_device_id(self, device_id: &AudioDeviceId) -> bool {
         matches!(
             (self, device_id),
-            (AudioBackend::WasapiExclusive, AudioDeviceId::WasapiEndpoint(_))
-                | (AudioBackend::WdmKs, AudioDeviceId::WdmKsFilterPin { .. })
-                | (AudioBackend::Auto | AudioBackend::Cpal, AudioDeviceId::DauxEndpoint(_))
+            (
+                AudioBackend::WasapiExclusive,
+                AudioDeviceId::WasapiEndpoint(_)
+            ) | (AudioBackend::WdmKs, AudioDeviceId::WdmKsFilterPin { .. })
+                | (
+                    AudioBackend::Auto | AudioBackend::Cpal,
+                    AudioDeviceId::DauxEndpoint(_)
+                )
         )
     }
 }
@@ -277,11 +282,16 @@ impl AudioEngine {
         self.inner.engine_state()
     }
 
-    fn daux_config_from_engine_config(config: &EngineConfig) -> Result<JsDauxConfig, SphereAudioError> {
+    fn daux_config_from_engine_config(
+        config: &EngineConfig,
+    ) -> Result<JsDauxConfig, SphereAudioError> {
         Self::validate_config(config)?;
         Ok(JsDauxConfig {
             backend_id: config.backend.backend_id().to_string(),
-            output_device_id: config.output_device.as_ref().map(|id| id.raw_id().to_string()),
+            output_device_id: config
+                .output_device
+                .as_ref()
+                .map(|id| id.raw_id().to_string()),
             sample_rate: if config.sample_rate > 0 {
                 Some(config.sample_rate)
             } else {

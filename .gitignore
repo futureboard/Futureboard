@@ -28,6 +28,9 @@ out/
 .vite/
 .turbo/
 *.local
+.apak.secret
+*.apak.secret
+apps/native/apakinstaller/.apak.secret
 
 # Rust / Cargo
 target/**

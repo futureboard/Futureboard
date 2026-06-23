@@ -9,7 +9,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
 };
 
 /// Job object that terminates assigned plugin-host children when the handle closes.
@@ -35,7 +35,18 @@ impl PluginHostJob {
                 }
             };
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // KILL_ON_JOB_CLOSE: the host process is terminated when the main app
+            // exits (no orphan hosts). SILENT_BREAKAWAY_OK: child processes the
+            // host spawns are NOT confined to this job. Browser/Chromium-backed
+            // plugin editors (CEF/WebView2) launch sandboxed helper subprocesses
+            // that create their OWN nested sandbox job objects; trapping them in
+            // a restrictive parent job can make the editor's `attached()` hang
+            // forever while it waits for a renderer that never finishes starting.
+            // Breakaway lets the plugin's browser subprocesses run normally. The
+            // host itself stays in the job (it is assigned directly), so cleanup
+            // is unaffected. Generic — no plug-in/vendor branch.
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
             if let Err(error) = SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
@@ -49,7 +60,9 @@ impl PluginHostJob {
                 let _ = CloseHandle(job);
                 return Self { handle: None };
             }
-            eprintln!("[PluginHost] job_object created kill_on_job_close=true");
+            eprintln!(
+                "[PluginHost] job_object created kill_on_job_close=true silent_breakaway_ok=true"
+            );
             Self { handle: Some(job) }
         }
     }

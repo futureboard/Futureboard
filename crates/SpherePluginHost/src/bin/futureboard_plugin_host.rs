@@ -1138,6 +1138,51 @@ fn dispatch(
                     plugin_instance_id: plugin_instance_id.clone(),
                 },
             );
+            // Default: create the controller on THIS persistent, message-pumped
+            // main thread (not an ephemeral worker that dies). The editor attach
+            // runs on this same thread, so a native editor's `attached()` send to
+            // its controller-time window is a direct same-thread call — the fix
+            // for the live AD2 `attached()` deadlock. See
+            // `plugin_lifecycle_on_main_thread`.
+            if plugin_lifecycle_on_main_thread() {
+                let request_id = NEXT_PLUGIN_LOAD_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "[plugin-host] LoadPlugin mode=main_thread instance={plugin_instance_id} thread_id={} name={name}",
+                    platform::current_thread_id()
+                );
+                let started = Instant::now();
+                let processor = DAUx::vst3_processor::Vst3RuntimeProcessor::new(
+                    &plugin_path,
+                    &class_id,
+                    sample_rate,
+                );
+                let elapsed = started.elapsed();
+                let error = if processor.is_some() {
+                    None
+                } else {
+                    Some(format!(
+                        "Plugin failed to load. It may require a newer CPU instruction set or a missing runtime dependency. path={plugin_path}"
+                    ))
+                };
+                finalize_plugin_load(
+                    PluginLoadResult {
+                        request_id,
+                        plugin_instance_id,
+                        plugin_path,
+                        class_id,
+                        name,
+                        processor,
+                        error,
+                        elapsed,
+                    },
+                    sample_rate,
+                    max_block_size,
+                    loaded,
+                    preview,
+                    out,
+                );
+                return;
+            }
             schedule_plugin_load(
                 plugin_instance_id,
                 plugin_path,
@@ -1653,64 +1698,81 @@ fn drain_plugin_load_results(
             drop(result.processor);
             continue;
         }
-        let Some(processor) = result.processor else {
-            let error = result
-                .error
-                .unwrap_or_else(|| "plugin load failed".to_string());
-            eprintln!(
-                "[PLUGIN LOAD FAILURE]\nrequest_id={}\nplugin_name={}\nfailure_stage=create_instance\nreason={error}\ntimed_out = false\nplugin_instance_created=false\ncomponent_created=false\ncontroller_created=false\nroutes_created=false\nrollback_completed = true\napp_alive = true",
-                result.request_id,
-                result.name
-            );
-            let _ = ipc::write_frame(
-                out,
-                &HostEvent::PluginLoadFailed {
-                    plugin_instance_id: result.plugin_instance_id,
-                    error,
-                },
-            );
-            continue;
-        };
-        let inserted = preview
-            .lock()
-            .insert_loaded_instance(&result.plugin_instance_id, processor);
-        if !inserted {
-            let error = "plugin instance already exists".to_string();
-            let _ = ipc::write_frame(
-                out,
-                &HostEvent::PluginLoadFailed {
-                    plugin_instance_id: result.plugin_instance_id,
-                    error,
-                },
-            );
-            continue;
-        }
-        loaded.insert(
-            result.plugin_instance_id.clone(),
-            LoadedPlugin {
-                plugin_path: result.plugin_path,
-                class_id: result.class_id,
-                name: result.name.clone(),
-                sample_rate: pending.sample_rate,
-                max_block_size: pending.max_block_size,
-                processing_ready: false,
-            },
+        finalize_plugin_load(
+            result,
+            pending.sample_rate,
+            pending.max_block_size,
+            loaded,
+            preview,
+            out,
         );
+    }
+}
+
+/// Register a completed plugin load (insert into the engine + `loaded`) and emit
+/// `PluginLoaded`/`PluginLoadFailed`. Shared by the inline (main-thread) load
+/// path and the legacy worker-thread drain so both report identically.
+fn finalize_plugin_load(
+    result: PluginLoadResult,
+    sample_rate: u32,
+    max_block_size: u32,
+    loaded: &mut LoadedRegistry,
+    preview: &SharedPluginHostPreview,
+    out: &mut io::Stdout,
+) {
+    let Some(processor) = result.processor else {
+        let error = result
+            .error
+            .unwrap_or_else(|| "plugin load failed".to_string());
         eprintln!(
-            "[PLUGIN LOAD READY]\nrequest_id={}\nplugin_instance_id={}\nplugin_name={}\nload_duration_ms={}\naudio_ready = true\neditor_created = false\nroute_ready = true\nmixer_channels_created=0\nselected_bus_mode=capability_detected\nui_responsive = true",
-            result.request_id,
-            result.plugin_instance_id,
-            result.name,
-            result.elapsed.as_millis()
+            "[PLUGIN LOAD FAILURE]\nrequest_id={}\nplugin_name={}\nfailure_stage=create_instance\nreason={error}\ntimed_out = false\nplugin_instance_created=false\ncomponent_created=false\ncontroller_created=false\nroutes_created=false\nrollback_completed = true\napp_alive = true",
+            result.request_id, result.name
         );
         let _ = ipc::write_frame(
             out,
-            &HostEvent::PluginLoaded {
+            &HostEvent::PluginLoadFailed {
                 plugin_instance_id: result.plugin_instance_id,
-                name: result.name,
+                error,
             },
         );
+        return;
+    };
+    let inserted = preview
+        .lock()
+        .insert_loaded_instance(&result.plugin_instance_id, processor);
+    if !inserted {
+        let error = "plugin instance already exists".to_string();
+        let _ = ipc::write_frame(
+            out,
+            &HostEvent::PluginLoadFailed {
+                plugin_instance_id: result.plugin_instance_id,
+                error,
+            },
+        );
+        return;
     }
+    loaded.insert(
+        result.plugin_instance_id.clone(),
+        LoadedPlugin {
+            plugin_path: result.plugin_path,
+            class_id: result.class_id,
+            name: result.name.clone(),
+            sample_rate,
+            max_block_size,
+            processing_ready: false,
+        },
+    );
+    eprintln!(
+        "[PLUGIN LOAD READY]\nrequest_id={}\nplugin_instance_id={}\nplugin_name={}\nload_duration_ms={}\naudio_ready = true\neditor_created = false\nroute_ready = true\nmixer_channels_created=0\nselected_bus_mode=capability_detected\nui_responsive = true",
+        result.request_id, result.plugin_instance_id, result.name, result.elapsed.as_millis()
+    );
+    let _ = ipc::write_frame(
+        out,
+        &HostEvent::PluginLoaded {
+            plugin_instance_id: result.plugin_instance_id,
+            name: result.name,
+        },
+    );
 }
 
 fn expire_plugin_load_requests(
@@ -1779,6 +1841,27 @@ fn expire_plugin_load_requests(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Whether the whole plugin UI lifecycle — controller creation (LoadPlugin) AND
+/// editor attach (createView / `attached()` / onSize) — runs INLINE on the host's
+/// single, persistent, message-pumped main STA thread, instead of on ephemeral
+/// per-request worker threads. Default = MAIN thread.
+///
+/// Live diagnosis (AD2, a NATIVE VST3 editor): `attached()` hard-blocks at the
+/// very start with ZERO child windows created, and works in other DAWs. Root
+/// cause = thread affinity. The controller was created on a `plugin-load-N`
+/// worker that immediately DIED; native editors routinely `SendMessage()` from
+/// `attached()` to a hidden window the plug-in created at controller-construction
+/// time. With the controller's thread dead, that synchronous send blocks forever
+/// (a dead thread never pumps). Every real host (and the VST3 SDK `editorhost`
+/// sample) creates the controller and attaches the editor on the SAME living UI
+/// thread, so the send is a direct same-thread call. Keeping the whole lifecycle
+/// on the host main thread reproduces that. The audio `process()` stays on the
+/// separate producer thread regardless. Set `FUTUREBOARD_PLUGIN_HOST_WORKER_THREADS=1`
+/// to restore the legacy split-worker behavior for A/B testing.
+fn plugin_lifecycle_on_main_thread() -> bool {
+    std::env::var_os("FUTUREBOARD_PLUGIN_HOST_WORKER_THREADS").is_none()
+}
+
 fn schedule_unified_editor_attach(
     plugin_instance_id: &str,
     parent_hwnd: u64,
@@ -1787,7 +1870,7 @@ fn schedule_unified_editor_attach(
     dpi: u32,
     registry: &mut Registry,
     loaded: &LoadedRegistry,
-    _delayed_redraws: &mut Vec<DelayedGpuRedraw>,
+    delayed_redraws: &mut Vec<DelayedGpuRedraw>,
     pending_editor_attaches: &mut HashMap<String, PendingEditorAttach>,
     attach_result_tx: &crossbeam_channel::Sender<EditorAttachResult>,
     preview: &SharedPluginHostPreview,
@@ -1866,6 +1949,69 @@ fn schedule_unified_editor_attach(
         return;
     };
     let request_id = NEXT_EDITOR_ATTACH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+
+    // Default path: attach on THIS thread — the host's main STA UI thread, the
+    // SAME thread that created the controller (see plugin_lifecycle_on_main_thread).
+    // Native editors `SendMessage()` from `attached()` to a window the plug-in
+    // created at controller time; keeping both on this one living, pumped thread
+    // makes that send a direct same-thread call instead of a send to a dead
+    // worker (the live AD2 hang). The whole open stays crash-isolated (separate
+    // process); the main app is never coupled to it.
+    if plugin_lifecycle_on_main_thread() {
+        let thread_id = platform::current_thread_id();
+        eprintln!(
+            "[plugin-host] editor attach mode=main_thread instance={plugin_instance_id} thread_id={thread_id} message_loop=main_ipc_loop"
+        );
+        eprintln!(
+            "[EDITOR THREAD CHECK]\nplugin_instance_id={plugin_instance_id}\nrequested_thread_id={thread_id}\ncurrent_thread_id={thread_id}\nis_audio_thread=false\nis_ui_thread=true\nis_plugin_host_thread=true\nmessage_loop_running=true\ncom_initialized=true\ndpi_awareness_context=per_monitor_v2"
+        );
+        processor.embed_set_instance_label(plugin_instance_id);
+        eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
+        eprintln!(
+            "[VST3 ATTACH VIEW]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nsize={w}x{h}\nresult=begin"
+        );
+        let started = Instant::now();
+        let handle = processor.embed_editor(parent_hwnd, 0, 0, w, h);
+        let elapsed = started.elapsed();
+        let attach_hwnd = processor.embed_attach_hwnd();
+        let (preferred_width, preferred_height) = processor
+            .embed_content_size()
+            .map(|(cw, ch)| (cw.max(1) as u32, ch.max(1) as u32))
+            .unwrap_or((width.max(1), height.max(1)));
+        let resizable = processor.editor_resizable().unwrap_or(true);
+        let error = if handle.is_some() {
+            None
+        } else {
+            Some("embed_editor failed on existing runtime instance".to_string())
+        };
+        eprintln!(
+            "[VST3 ATTACH VIEW]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nsize={w}x{h}\nresult={}\nduration_ms={}",
+            if handle.is_some() { "ok" } else { "failed" },
+            elapsed.as_millis()
+        );
+        // Emit EditorAttached / EditorAttachFailed and register the editor so the
+        // main loop keeps pumping + refreshing it (shared with the worker drain).
+        finalize_editor_attach(
+            EditorAttachResult {
+                request_id,
+                plugin_instance_id: plugin_instance_id.to_string(),
+                processor,
+                handle,
+                attach_hwnd,
+                preferred_width,
+                preferred_height,
+                resizable,
+                error,
+                elapsed,
+            },
+            registry,
+            delayed_redraws,
+            preview,
+            out,
+        );
+        return;
+    }
+
     pending_editor_attaches.insert(
         plugin_instance_id.to_string(),
         PendingEditorAttach {
@@ -2000,95 +2146,106 @@ fn drain_editor_attach_results(
             }
             continue;
         }
-        if let Some(error) = result.error {
-            emit_attach_failed(out, &result.plugin_instance_id, &error);
-            eprintln!(
-                "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage=attach_view\nplugin_audio_kept_alive = true\neditor_state = failed\napp_frozen = false",
-                result.plugin_instance_id
-            );
-            continue;
-        }
-        let Some(handle) = result.handle else {
-            emit_attach_failed(
-                out,
-                &result.plugin_instance_id,
-                "embed_editor failed on existing runtime instance",
-            );
-            continue;
-        };
-        let attach_hwnd = result.attach_hwnd;
-        if attach_hwnd == 0 {
-            eprintln!(
-                "[PluginEditorHWND] WARNING attach_hwnd unavailable instance={} handle={handle}",
-                result.plugin_instance_id
-            );
-        }
-        registry.insert(
-            result.plugin_instance_id.clone(),
-            if attach_hwnd != 0 {
-                attach_hwnd
-            } else {
-                handle
-            },
-        );
-        preview.lock().set_continuous_mode(true);
-        if platform::editor_safe_mode() {
-            eprintln!("[PluginEditorSafe] attach: skipped focus walk and attach-time pump");
-        } else {
-            platform::focus_plugin_editor_child(attach_hwnd);
-            platform::pump_editor_messages(attach_hwnd);
-        }
-        platform::log_capture_on_open(attach_hwnd);
-        platform::set_editor_roots(registry.values().copied().collect());
-        platform::plugin_editor_snapshot("editor_open");
+        finalize_editor_attach(result, registry, delayed_redraws, preview, out);
+    }
+}
+
+/// Register a completed editor attach and emit `EditorAttached`/`EditorAttachFailed`
+/// to the main app. Shared by the inline (main-thread) attach path and the
+/// legacy worker-thread drain so both report identically. The `attach_hwnd`
+/// goes into `registry` so the host main loop pumps + refreshes the editor.
+fn finalize_editor_attach(
+    result: EditorAttachResult,
+    registry: &mut Registry,
+    delayed_redraws: &mut Vec<DelayedGpuRedraw>,
+    preview: &SharedPluginHostPreview,
+    out: &mut io::Stdout,
+) {
+    if let Some(error) = result.error {
+        emit_attach_failed(out, &result.plugin_instance_id, &error);
         eprintln!(
-            "[PluginEditorResize] instance={} canResize={} preferred={}x{}",
-            result.plugin_instance_id,
-            result.resizable,
-            result.preferred_width,
-            result.preferred_height
-        );
-        eprintln!(
-            "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={}",
+            "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage=attach_view\nplugin_audio_kept_alive = true\neditor_state = failed\napp_frozen = false",
             result.plugin_instance_id
         );
-        SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
-            &result.plugin_instance_id,
-            &result.plugin_instance_id,
-            &result.plugin_instance_id,
-            &result.plugin_instance_id,
-            &result.plugin_instance_id,
-            &result.plugin_instance_id,
-            &result.plugin_instance_id,
-            &result.plugin_instance_id,
-        );
-        eprintln!(
-            "[plugin-host] attached result=ok instance={} handle=0x{handle:x} unified=true elapsed_ms={}",
-            result.plugin_instance_id,
-            result.elapsed.as_millis()
-        );
-        eprintln!(
-            "[EDITOR MESSAGE PUMP]\nplugin_instance_id={}\nhost_window_hwnd=0x{:x}\nthread_id={}\npump_active=true\nlast_message_time_ms=0\nblocked_wait_detected=false\nipc_responsive=true\nwindow_responsive=true",
-            result.plugin_instance_id,
-            attach_hwnd,
-            platform::current_thread_id()
-        );
-        delayed_redraws.push(DelayedGpuRedraw {
-            instance_id: result.plugin_instance_id.clone(),
-            deadline: Instant::now() + Duration::from_millis(100),
-        });
-        let _ = ipc::write_frame(
+        return;
+    }
+    let Some(handle) = result.handle else {
+        emit_attach_failed(
             out,
-            &HostEvent::EditorAttached {
-                plugin_instance_id: result.plugin_instance_id,
-                result: 0,
-                preferred_width: result.preferred_width,
-                preferred_height: result.preferred_height,
-                resizable: result.resizable,
-                host_hwnd: attach_hwnd,
-            },
+            &result.plugin_instance_id,
+            "embed_editor failed on existing runtime instance",
+        );
+        return;
+    };
+    let attach_hwnd = result.attach_hwnd;
+    if attach_hwnd == 0 {
+        eprintln!(
+            "[PluginEditorHWND] WARNING attach_hwnd unavailable instance={} handle={handle}",
+            result.plugin_instance_id
         );
     }
+    registry.insert(
+        result.plugin_instance_id.clone(),
+        if attach_hwnd != 0 {
+            attach_hwnd
+        } else {
+            handle
+        },
+    );
+    preview.lock().set_continuous_mode(true);
+    if platform::editor_safe_mode() {
+        eprintln!("[PluginEditorSafe] attach: skipped focus walk and attach-time pump");
+    } else {
+        platform::focus_plugin_editor_child(attach_hwnd);
+        platform::pump_editor_messages(attach_hwnd);
+    }
+    platform::log_capture_on_open(attach_hwnd);
+    platform::set_editor_roots(registry.values().copied().collect());
+    platform::plugin_editor_snapshot("editor_open");
+    eprintln!(
+        "[PluginEditorResize] instance={} canResize={} preferred={}x{}",
+        result.plugin_instance_id, result.resizable, result.preferred_width, result.preferred_height
+    );
+    eprintln!(
+        "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={}",
+        result.plugin_instance_id
+    );
+    SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
+        &result.plugin_instance_id,
+        &result.plugin_instance_id,
+        &result.plugin_instance_id,
+        &result.plugin_instance_id,
+        &result.plugin_instance_id,
+        &result.plugin_instance_id,
+        &result.plugin_instance_id,
+        &result.plugin_instance_id,
+    );
+    eprintln!(
+        "[plugin-host] attached result=ok instance={} handle=0x{handle:x} unified=true elapsed_ms={}",
+        result.plugin_instance_id,
+        result.elapsed.as_millis()
+    );
+    eprintln!(
+        "[EDITOR MESSAGE PUMP]\nplugin_instance_id={}\nhost_window_hwnd=0x{:x}\nthread_id={}\npump_active=true\nlast_message_time_ms=0\nblocked_wait_detected=false\nipc_responsive=true\nwindow_responsive=true",
+        result.plugin_instance_id,
+        attach_hwnd,
+        platform::current_thread_id()
+    );
+    delayed_redraws.push(DelayedGpuRedraw {
+        instance_id: result.plugin_instance_id.clone(),
+        deadline: Instant::now() + Duration::from_millis(100),
+    });
+    let _ = ipc::write_frame(
+        out,
+        &HostEvent::EditorAttached {
+            plugin_instance_id: result.plugin_instance_id,
+            result: 0,
+            preferred_width: result.preferred_width,
+            preferred_height: result.preferred_height,
+            resizable: result.resizable,
+            host_hwnd: attach_hwnd,
+        },
+    );
 }
 
 fn expire_editor_attach_requests(

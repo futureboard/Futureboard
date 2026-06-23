@@ -2461,6 +2461,12 @@ bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
 
   const DauxEditorRuntimeDetection det = daux_detect_editor_runtime(processor->plugin_path);
   processor->plugin_browser_runtime_kind = static_cast<int>(det.kind);
+  // Always log the detected editor runtime (Native vs WebView2 vs CEF/Chromium):
+  // it decides whether a hung `attached()` is a browser-subprocess issue or a
+  // native-GUI one, without needing a debug flag set.
+  std::fprintf(stderr, "[plugin-view] editor_runtime_kind=%s path=%s\n",
+               daux_editor_runtime_kind_name(det.kind),
+               processor->plugin_path.c_str());
   const bool debug = daux_plugin_webview_based_debug() || daux_embed_debug();
 
   if (det.kind == DauxEditorRuntimeKind::Native) {
@@ -2824,6 +2830,47 @@ HWND daux_embed_create_top(HWND parent, int kind, int x, int y, int w, int h) {
     if (kind == 1) daux_embed_apply_tool_styles(top, parent);
   }
   return top;
+}
+
+// Pump THIS thread's message queue until it stays idle or `max_ms` elapses, so a
+// just-shown editor window finishes its initial realization (WM_NCPAINT /
+// WM_PAINT / WM_SIZE / activation) BEFORE IPlugView::attached() runs. Many
+// slow-UI editors — Qt/QML (e.g. sampler instruments), VSTGUI, and
+// Chromium/WebView-backed views — only composite correctly when attached into a
+// window that is already live and pumping; attaching into a shown-but-never-
+// pumped window can stall the attach or come up blank. Generic settle: NO
+// plug-in/vendor branch. Strictly bounded — an idle queue exits after a short
+// grace and the whole call can never exceed `max_ms`, so it can never hang the
+// editor thread. Runs on the dedicated per-attach editor thread (the only
+// thread that owns these windows), so it dispatches only this editor's messages.
+void daux_settle_pump_editor_thread(DWORD max_ms) {
+  const ULONGLONG start = GetTickCount64();
+  // Consecutive idle polls before we treat the window as settled, so a fast
+  // editor returns in a few ms while a slow one keeps draining up to the cap.
+  constexpr int kIdlePollsToSettle = 6; // ~6ms of quiet (1ms yield per poll)
+  int idle_polls = 0;
+  int dispatched = 0;
+  while (GetTickCount64() - start < max_ms) {
+    MSG m;
+    bool any = false;
+    while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+      TranslateMessage(&m);
+      DispatchMessageW(&m);
+      any = true;
+      ++dispatched;
+      if (GetTickCount64() - start >= max_ms) break;
+    }
+    if (any) {
+      idle_polls = 0;
+    } else if (++idle_polls >= kIdlePollsToSettle) {
+      break; // queue has stayed empty — the window is realized
+    }
+    Sleep(1); // let DWM / the window manager post follow-up messages
+  }
+  std::fprintf(stderr,
+               "[vst3-editor] settle_pump dispatched=%d elapsed_ms=%llu\n",
+               dispatched,
+               static_cast<unsigned long long>(GetTickCount64() - start));
 }
 
 // Reposition/resize the host window to the requested region. Returns true only
@@ -4321,17 +4368,52 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   std::fprintf(stderr, "[vst3-editor] shown_before_attach top=0x%p content=0x%p\n",
                static_cast<void*>(top), static_cast<void*>(content));
 
+  // Bring the detached editor to the front at show time so it isn't buried
+  // behind the DAW. A background process can't keep stealing foreground, but
+  // this initial bring-to-top on show is permitted and is what makes the editor
+  // actually appear on top when the user opens it.
+  if (kind == 2) {
+    SetWindowPos(top, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    BringWindowToTop(top);
+    SetForegroundWindow(top);
+  }
+
+  // Settle the freshly-shown window (initial paint/size/activation) before the
+  // plug-in attaches into it. Slow-UI editors (Qt/QML, VSTGUI, Chromium/WebView)
+  // expect a live, pumping, realized window at attach time; attaching into a
+  // shown-but-unpumped window can stall the attach or leave it blank. Bounded —
+  // returns as soon as the queue goes quiet, never blocks past the cap.
+  daux_settle_pump_editor_thread(250);
+
   const ULONGLONG attach_start_ms = GetTickCount64();
   auto attach_returned = std::make_shared<std::atomic<bool>>(false);
   auto attach_watchdog = attach_returned;
-  std::thread([attach_watchdog, attach_start_ms, content] {
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    if (!attach_watchdog->load(std::memory_order_acquire)) {
-      std::fprintf(stderr,
-                   "[vst3-editor] attached still_blocked elapsed_ms=%llu parent=0x%p watchdog_tid=%lu\n",
-                   static_cast<unsigned long long>(GetTickCount64() - attach_start_ms),
-                   static_cast<void*>(content),
-                   GetCurrentThreadId());
+  // Detached watchdog: if attached() does not return, report every 5s (up to
+  // 20s) AND enumerate the content child's windows. A Chromium/CEF editor that
+  // got far enough to create its widget will show content_children>0 even while
+  // attached() is still blocked — that distinguishes "stuck before creating any
+  // UI" from "created UI but blocked waiting on a renderer/subprocess".
+  std::thread([attach_watchdog, attach_start_ms, content, top] {
+    for (int i = 0; i < 4; ++i) {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+      if (attach_watchdog->load(std::memory_order_acquire)) return;
+      int child_count = 0;
+      EnumChildWindows(
+          content,
+          [](HWND, LPARAM lp) -> BOOL {
+            (*reinterpret_cast<int*>(lp))++;
+            return TRUE;
+          },
+          reinterpret_cast<LPARAM>(&child_count));
+      std::fprintf(
+          stderr,
+          "[vst3-editor] attached still_blocked elapsed_ms=%llu content=0x%p top_visible=%d content_children=%d watchdog_tid=%lu\n",
+          static_cast<unsigned long long>(GetTickCount64() - attach_start_ms),
+          static_cast<void*>(content),
+          IsWindowVisible(top) ? 1 : 0,
+          child_count,
+          GetCurrentThreadId());
     }
   }).detach();
   std::fprintf(stderr,

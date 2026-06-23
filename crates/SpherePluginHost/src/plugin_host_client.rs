@@ -295,14 +295,24 @@ impl PluginHostClient {
             "[PluginHost] spawn hidden={hidden} path={}",
             binary.display()
         );
+        // When hidden, the host's stderr would normally be discarded
+        // (`Stdio::null()`) — which throws away every host-side editor
+        // diagnostic (`[vst3-editor] …`, `[EDITOR …]`, the C++ fprintf lines).
+        // If host-log forwarding is opted in, pipe it instead and forward it
+        // inline to the parent's stderr below, so the host's editor lifecycle
+        // shows up in the same out.log the user already captures — no console
+        // window. `inherit` (non-hidden) is unchanged.
+        let forward_host_stderr = hidden && plugin_host_logging::host_stderr_forward_enabled();
         let mut command = Command::new(binary);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(if hidden {
-                Stdio::null()
-            } else {
+            .stderr(if !hidden {
                 Stdio::inherit()
+            } else if forward_host_stderr {
+                Stdio::piped()
+            } else {
+                Stdio::null()
             })
             .arg("--parent-pid")
             .arg(parent_pid.to_string());
@@ -325,6 +335,27 @@ impl PluginHostClient {
             .stdout
             .take()
             .expect("child configured with piped stdout");
+
+        // Forward the hidden host's stderr inline into our own stderr (out.log),
+        // line by line, prefixed `[host]`. Lets the host's editor lifecycle be
+        // read straight from the main log when debugging a stuck/blank editor.
+        if forward_host_stderr {
+            if let Some(host_stderr) = child.stderr.take() {
+                let _ = std::thread::Builder::new()
+                    .name("plugin-host-stderr".into())
+                    .spawn(move || {
+                        use std::io::BufRead;
+                        let reader = BufReader::new(host_stderr);
+                        for line in reader.lines() {
+                            match line {
+                                Ok(line) => eprintln!("[host] {line}"),
+                                Err(_) => break, // pipe closed / host gone
+                            }
+                        }
+                    });
+                eprintln!("[plugin-bridge] host stderr forwarding enabled (prefix=[host])");
+            }
+        }
 
         let (tx, rx) = crossbeam_channel::unbounded::<ClientEvent>();
         let reader = std::thread::Builder::new()

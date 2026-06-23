@@ -13,6 +13,21 @@ pub fn host_console_enabled() -> bool {
         || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
 }
 
+/// Whether the spawning (main) process should capture the hidden host's stderr
+/// and forward it inline into its OWN stderr/log, prefixed `[host]`. This makes
+/// the host's editor lifecycle (`[vst3-editor] attach begin`, `attached result`,
+/// `settle_pump`, `[EDITOR …]`, and the C++ `fprintf(stderr, …)` lines) visible
+/// in the same out.log the user already captures — WITHOUT un-hiding the host or
+/// popping a console window. Without this, a hidden host's stderr goes to
+/// `Stdio::null()` and every host-side diagnostic is lost, leaving the editor
+/// open path undebuggable from the main log. Off by default (the host stream is
+/// chatty); opt in to debug a stuck/blank editor.
+pub fn host_stderr_forward_enabled() -> bool {
+    std::env::var_os("FUTUREBOARD_PLUGIN_HOST_LOG").is_some()
+        || std::env::var_os("FUTUREBOARD_PLUGIN_EDITOR_DEBUG").is_some()
+        || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+}
+
 /// Default directory for plugin-host log files.
 pub fn default_log_dir() -> PathBuf {
     std::env::current_exe()

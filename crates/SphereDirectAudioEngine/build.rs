@@ -11,7 +11,9 @@ fn main() {
     for name in &[
         "include/sphere_daux_vst3_processor.h",
         "include/sphere_daux_editor_bridge.h",
+        "include/editor_windows.hpp",
         "src/vst3_processor.cpp",
+        "src/editor_windows.cpp",
         "src/editor_mac.mm",
         "src/editor_linux.cpp",
     ] {
@@ -33,6 +35,7 @@ fn main() {
         .include(sdk_root.join("pluginterfaces"))
         .include(sdk_root.join("public.sdk/source"))
         .file(bridge_root.join("src/vst3_processor.cpp"))
+        .file(bridge_root.join("src/editor_windows.cpp"))
         .file(sdk_root.join("pluginterfaces/base/coreiids.cpp"))
         .file(sdk_root.join("pluginterfaces/base/funknown.cpp"))
         .file(sdk_root.join("pluginterfaces/base/ustring.cpp"))
@@ -62,6 +65,9 @@ fn apply_vst3_platform_config(
             build.define("SMTG_OS_WINDOWS", "1");
             build.file(sdk_root.join("public.sdk/source/vst/hosting/module_win32.cpp"));
             println!("cargo:rustc-link-lib=ole32");
+            println!("cargo:rustc-link-lib=user32");
+            println!("cargo:rustc-link-lib=gdi32");
+            println!("cargo:rustc-link-lib=dwmapi");
             println!("cargo:rustc-link-lib=dwrite");
         }
         "macos" => {

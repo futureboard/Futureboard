@@ -45,6 +45,7 @@
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/utility/uid.h"
 #include "sphere_daux_editor_bridge.h"
+#include "editor_windows.hpp"
 
 // IPlugFrame is a GUI-layer interface whose class IID is not emitted by the
 // SDK IID TUs we compile (coreiids.cpp / vstinitiids.cpp). Our IPlugFrame
@@ -708,6 +709,7 @@ struct SphereDauxVst3Processor {
   // existing `controller` — never a new component/controller.
   HWND editor_parent_hwnd{nullptr};
   HWND editor_embed_top_hwnd{nullptr};
+  DauxEditorWindow editor_window{};
   int  embed_host_kind{1};        // 0 = WS_CHILD, 1 = owned tool window, 2 = detached top-level
   bool embed_mode{false};
   bool embed_geometry_valid{false};
@@ -730,14 +732,6 @@ struct SphereDauxVst3Processor {
   // Detached mode (kind==2): set by the detached window's WM_CLOSE so the Rust
   // shell can tear the editor down. Consumed (and reset) via the take accessor.
   std::atomic<bool> embed_user_closed{false};
-  // Borderless custom-chrome titlebar state (kind==2 only): which caption button
-  // the mouse is over / pressed (-1 none, 0 pin, 1 min, 2 max, 3 close), and whether
-  // WM_MOUSELEAVE tracking is armed. Transient UI state for the host-owned editor
-  // window; reset on each editor open.
-  int  titlebar_hover_btn{-1};
-  int  titlebar_press_btn{-1};
-  bool titlebar_pin_to_top{false};
-  bool titlebar_mouse_tracking{false};
   // Bundled browser/WebView runtime — active only while an editor is open.
   // One DLL-directory cookie per native runtime dir we added to the search path.
   std::vector<DLL_DIRECTORY_COOKIE> plugin_browser_dll_cookies;
@@ -1977,6 +1971,83 @@ void resize_editor_view(SphereDauxVst3Processor* processor) {
   }
 }
 
+bool daux_editor_window_live(void* user_data) {
+  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+  return p && p->processor_valid.load(std::memory_order_acquire);
+}
+
+bool daux_editor_window_attached(void* user_data) {
+  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+  return p && p->editor_attached;
+}
+
+bool daux_editor_window_resize_in_progress(void* user_data) {
+  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+  return p && p->embed_resize_in_progress;
+}
+
+void daux_editor_window_set_resize_in_progress(void* user_data, bool value) {
+  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+  if (p) p->embed_resize_in_progress = value;
+}
+
+bool daux_editor_window_can_resize(void* user_data) {
+  return daux_editor_view_resizable(static_cast<SphereDauxVst3Processor*>(user_data));
+}
+
+bool daux_editor_window_constrain_size(void* user_data, int* width, int* height) {
+  return daux_constrain_content_size(static_cast<SphereDauxVst3Processor*>(user_data), width, height);
+}
+
+void daux_editor_window_content_resized(void* user_data, void* content_hwnd, int width, int height) {
+  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+  if (!p) return;
+  p->editor_attach_hwnd = reinterpret_cast<HWND>(content_hwnd);
+  p->embed_content_w = width;
+  p->embed_content_h = height;
+  resize_editor_view(p);
+}
+
+void daux_editor_window_dpi_changed(void* user_data,
+                                    void* shell_hwnd,
+                                    void* content_hwnd,
+                                    int width,
+                                    int height) {
+  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+  HWND shell = reinterpret_cast<HWND>(shell_hwnd);
+  HWND content = reinterpret_cast<HWND>(content_hwnd);
+  if (!p || !p->editor_view || !content || !IsWindow(content)) return;
+  daux_editor_set_content_scale(p, shell, "WM_DPICHANGED");
+  daux_resize_child_client(content, width, height);
+  auto local = daux_local_view_rect(width, height);
+  const auto on_size_res = p->editor_view->onSize(&local);
+  std::fprintf(stderr,
+               "[PluginEditor] WM_DPICHANGED onSize result=0x%x client=%dx%d\n",
+               static_cast<unsigned>(on_size_res),
+               width,
+               height);
+}
+
+void daux_editor_window_close_requested(void* user_data) {
+  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+  if (p) p->embed_user_closed.store(true, std::memory_order_release);
+}
+
+DauxEditorWindowCallbacks daux_editor_window_callbacks(SphereDauxVst3Processor* p) {
+  DauxEditorWindowCallbacks callbacks{};
+  callbacks.user_data = p;
+  callbacks.is_live = daux_editor_window_live;
+  callbacks.is_attached = daux_editor_window_attached;
+  callbacks.is_resize_in_progress = daux_editor_window_resize_in_progress;
+  callbacks.set_resize_in_progress = daux_editor_window_set_resize_in_progress;
+  callbacks.can_resize = daux_editor_window_can_resize;
+  callbacks.constrain_content_size = daux_editor_window_constrain_size;
+  callbacks.on_content_resized = daux_editor_window_content_resized;
+  callbacks.on_dpi_changed = daux_editor_window_dpi_changed;
+  callbacks.on_close_requested = daux_editor_window_close_requested;
+  return callbacks;
+}
+
 void layout_attach_or_fallback(SphereDauxVst3Processor* processor, HWND hwnd) {
   if (!processor || !hwnd) return;
   RECT rc{};
@@ -2159,10 +2230,17 @@ void SphereDauxVst3Processor::close_editor_window() {
   if (hwnd && IsWindow(hwnd)) {
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
   }
-  if (embed_top && IsWindow(embed_top)) {
+  const bool editor_window_owns_embed_top =
+      embed_top && IsWindow(embed_top) && editor_window.shell_hwnd == embed_top;
+  if (embed_top && IsWindow(embed_top) && !editor_window_owns_embed_top) {
     SetWindowLongPtrW(embed_top, GWLP_USERDATA, 0);
   }
   detach_editor_view(this);
+  if (editor_window_owns_embed_top) {
+    daux_editor_destroy_window(&editor_window);
+    embed_top = nullptr;
+    child = nullptr;
+  }
   if (child && IsWindow(child)) {
     DestroyWindow(child);
   }
@@ -2172,6 +2250,7 @@ void SphereDauxVst3Processor::close_editor_window() {
   destroy_fallback_controls(this);
   editor_attach_hwnd = nullptr;
   editor_embed_top_hwnd = nullptr;
+  editor_window = DauxEditorWindow{};
   editor_parent_hwnd = nullptr;
   embed_mode = false;
   embed_geometry_valid = false;
@@ -2225,40 +2304,6 @@ bool daux_embed_debug() {
   static const bool enabled = std::getenv("FUTUREBOARD_PLUGIN_VIEW_DEBUG") != nullptr ||
                               std::getenv("FUTUREBOARD_PLUGIN_DEBUG") != nullptr;
   return enabled;
-}
-
-// 0 = WS_CHILD embed, 1 = owned tool window, 2 = detached top-level window.
-// GPUI's D3D swap chain paints over WS_CHILD hosts, so an owned
-// WS_POPUP|WS_EX_TOOLWINDOW overlay is the default. `detached` opts into a
-// standalone OS window modeled on the VST3 SDK editorhost sample — a generic
-// escape hatch for editors that won't render under the GPUI-composited shell.
-// Selected per-run via FUTUREBOARD_PLUGIN_EDITOR_MODE; never plugin-hardcoded.
-int daux_embed_resolve_host_kind() {
-  const char* mode = std::getenv("FUTUREBOARD_PLUGIN_EDITOR_MODE");
-  if (mode && *mode) {
-    if (_stricmp(mode, "child") == 0 || _stricmp(mode, "ws_child") == 0) return 0;
-    if (_stricmp(mode, "tool") == 0 || _stricmp(mode, "owned") == 0 ||
-        _stricmp(mode, "popup") == 0 || _stricmp(mode, "default") == 0 ||
-        _stricmp(mode, "embedded") == 0) return 1;
-    if (_stricmp(mode, "detached") == 0 || _stricmp(mode, "external") == 0 ||
-        _stricmp(mode, "window") == 0) return 2;
-  }
-  return 1;
-}
-
-const char* daux_embed_host_kind_name(int kind) {
-  if (kind == 2) return "DetachedNativeWindow";
-  return kind == 1 ? "EmbeddedOwnedToolWindow" : "ChildHwndEmbed";
-}
-
-const char* daux_embed_selected_mode_label(int kind) {
-  const char* mode = std::getenv("FUTUREBOARD_PLUGIN_EDITOR_MODE");
-  if (mode && *mode) {
-    if (kind == 2) return "detached";
-    if (_stricmp(mode, "embedded") == 0) return "embedded";
-    if (_stricmp(mode, "child") == 0 || _stricmp(mode, "ws_child") == 0) return "child";
-  }
-  return kind == 2 ? "detached" : "default";
 }
 
 // Initialize COM as STA on the editor (GPUI UI) thread before any IPlugView::
@@ -2600,916 +2645,6 @@ void daux_plugin_browser_runtime_release(SphereDauxVst3Processor* processor) {
   processor->plugin_browser_dll_cookies.clear();
 }
 
-bool daux_embed_content_screen_rect(HWND parent, int x, int y, int w, int h, RECT* out) {
-  if (!parent || !IsWindow(parent) || !out || w <= 0 || h <= 0) return false;
-  POINT tl{x, y};
-  POINT br{x + w, y + h};
-  if (!ClientToScreen(parent, &tl) || !ClientToScreen(parent, &br)) return false;
-  out->left = tl.x; out->top = tl.y; out->right = br.x; out->bottom = br.y;
-  return true;
-}
-
-void daux_embed_apply_tool_styles(HWND overlay, HWND owner) {
-  if (!overlay || !IsWindow(overlay)) return;
-  LONG_PTR ex = GetWindowLongPtr(overlay, GWL_EXSTYLE);
-  ex &= ~WS_EX_APPWINDOW;
-  ex |= WS_EX_TOOLWINDOW;
-  SetWindowLongPtr(overlay, GWL_EXSTYLE, ex);
-  if (owner && IsWindow(owner)) {
-    SetWindowLongPtrW(overlay, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
-  }
-}
-
-void daux_apply_owned_popup_styles(HWND editor, HWND owner) {
-  if (!editor || !IsWindow(editor)) return;
-  const bool owner_valid = owner && IsWindow(owner);
-  LONG_PTR ex = GetWindowLongPtrW(editor, GWL_EXSTYLE);
-  ex &= ~WS_EX_APPWINDOW;
-  ex |= WS_EX_TOOLWINDOW;
-  SetWindowLongPtrW(editor, GWL_EXSTYLE, ex);
-  if (owner_valid) {
-    SetWindowLongPtrW(editor, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
-  }
-  SetWindowPos(editor,
-               nullptr,
-               0,
-               0,
-               0,
-               0,
-               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-  const LONG_PTR applied_ex = GetWindowLongPtrW(editor, GWL_EXSTYLE);
-  std::fprintf(stderr,
-               "[NativeEditorShell] owner_hwnd=0x%p\n",
-               static_cast<void*>(owner));
-  std::fprintf(stderr,
-               "[NativeEditorShell] owner valid=%s\n",
-               owner_valid ? "true" : "false");
-  std::fprintf(stderr,
-               "[NativeEditorShell] exstyle toolwindow=%s appwindow=%s\n",
-               (applied_ex & WS_EX_TOOLWINDOW) ? "true" : "false",
-               (applied_ex & WS_EX_APPWINDOW) ? "true" : "false");
-  std::fprintf(stderr,
-               "[NativeEditorShell] taskbar_hidden=%s\n",
-               ((applied_ex & WS_EX_TOOLWINDOW) && !(applied_ex & WS_EX_APPWINDOW)) ? "true"
-                                                                                    : "false");
-}
-
-bool daux_show_and_focus_editor(HWND editor, HWND content) {
-  if (!editor || !IsWindow(editor)) return false;
-  std::fprintf(stderr, "[NativeEditorShell] show/focus requested\n");
-  ShowWindow(editor, SW_SHOWNORMAL);
-  SetWindowPos(editor,
-               HWND_TOP,
-               0,
-               0,
-               0,
-               0,
-               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-  BringWindowToTop(editor);
-  BOOL foreground = SetForegroundWindow(editor);
-  if (!foreground) {
-    HWND current = GetForegroundWindow();
-    DWORD current_thread = current ? GetWindowThreadProcessId(current, nullptr) : 0;
-    DWORD editor_thread = GetWindowThreadProcessId(editor, nullptr);
-    DWORD this_thread = GetCurrentThreadId();
-    if (current_thread && editor_thread) {
-      AttachThreadInput(this_thread, current_thread, TRUE);
-      AttachThreadInput(this_thread, editor_thread, TRUE);
-      foreground = SetForegroundWindow(editor);
-      AttachThreadInput(this_thread, editor_thread, FALSE);
-      AttachThreadInput(this_thread, current_thread, FALSE);
-    }
-  }
-  if (content && IsWindow(content)) {
-    SetFocus(content);
-  } else {
-    SetFocus(editor);
-  }
-  std::fprintf(stderr,
-               "[NativeEditorShell] foreground result=%s\n",
-               foreground ? "true" : "false");
-  return foreground ? true : false;
-}
-
-void daux_embed_raise(HWND host) {
-  if (!host || !IsWindow(host)) return;
-  EnumChildWindows(
-      host,
-      [](HWND hwnd, LPARAM) -> BOOL {
-        ShowWindow(hwnd, SW_SHOW);
-        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        return TRUE;
-      },
-      0);
-}
-
-// Native editor top window proc. VST3 editor hosting follows
-// public.sdk/samples/vst-hosting/editorhost lifecycle: the host does not paint
-// over the editor, resize is forwarded to IPlugView::onSize, and close detaches
-// ── Borderless custom-chrome titlebar (kind==2 detached editor window) ───────
-// A flat dark Futureboard titlebar painted into the top strip of the borderless
-// host-owned editor window: title + minimize / maximize / close buttons. Colors
-// mirror the main-app NativeEditorShell theme so host-owned and main-owned
-// editors look identical; the plug-in content child sits below this strip.
-constexpr int kDauxTitlebarLogicalH = 32;     // logical px, DPI-scaled at use
-constexpr int kDauxTitleButtonLogicalW = 46;
-enum DauxTitleButton {
-  DAUX_BTN_NONE = -1, DAUX_BTN_PIN = 0, DAUX_BTN_MIN = 1, DAUX_BTN_MAX = 2, DAUX_BTN_CLOSE = 3
-};
-
-int daux_titlebar_h(HWND top) {
-  return MulDiv(kDauxTitlebarLogicalH, static_cast<int>(daux_hwnd_dpi(top)), 96);
-}
-int daux_title_button_w(HWND top) {
-  return MulDiv(kDauxTitleButtonLogicalW, static_cast<int>(daux_hwnd_dpi(top)), 96);
-}
-
-// Which caption button (if any) the client point (x,y) is over.
-int daux_titlebar_button_at(HWND top, int x, int y) {
-  const int th = daux_titlebar_h(top);
-  if (y < 0 || y >= th) return DAUX_BTN_NONE;
-  RECT rc{};
-  GetClientRect(top, &rc);
-  const int cw = rc.right - rc.left;
-  const int bw = daux_title_button_w(top);
-  if (x >= cw - bw) return DAUX_BTN_CLOSE;
-  if (x >= cw - 2 * bw) return DAUX_BTN_MAX;
-  if (x >= cw - 3 * bw) return DAUX_BTN_MIN;
-  if (x >= cw - 4 * bw) return DAUX_BTN_PIN;
-  return DAUX_BTN_NONE;
-}
-
-bool daux_env_truthy(const char* name) {
-  const char* value = std::getenv(name);
-  return value && (_stricmp(value, "1") == 0 || _stricmp(value, "true") == 0 ||
-                   _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0);
-}
-
-RECT daux_titlebar_button_rect(int client_w, int button_w, int button) {
-  const int slot_from_right = DAUX_BTN_CLOSE - button;
-  return RECT{client_w - button_w * (slot_from_right + 1),
-              0,
-              client_w - button_w * slot_from_right,
-              0};
-}
-
-const char* daux_editor_renderer_name() {
-  const char* renderer = std::getenv("FUTUREBOARD_EDITOR_RENDERER");
-  if (!renderer || !*renderer) return "gdi_dwrite";
-  if (_stricmp(renderer, "gdi") == 0) return "gdi";
-  if (_stricmp(renderer, "gdi_dwrite") == 0) return "gdi_dwrite";
-  if (_stricmp(renderer, "dx11_dwrite") == 0) return "dx11_dwrite";
-  return "gdi_dwrite";
-}
-
-class DauxDWriteGdiTextRenderer final : public IDWriteTextRenderer {
- public:
-  DauxDWriteGdiTextRenderer(IDWriteBitmapRenderTarget* target,
-                            IDWriteRenderingParams* params,
-                            COLORREF color,
-                            FLOAT pixels_per_dip)
-      : target_(target),
-        params_(params),
-        color_(color),
-        pixels_per_dip_(pixels_per_dip) {}
-
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** obj) override {
-    if (!obj) return E_POINTER;
-    if (iid == __uuidof(IUnknown) || iid == __uuidof(IDWritePixelSnapping) ||
-        iid == __uuidof(IDWriteTextRenderer)) {
-      *obj = static_cast<IDWriteTextRenderer*>(this);
-      AddRef();
-      return S_OK;
-    }
-    *obj = nullptr;
-    return E_NOINTERFACE;
-  }
-
-  ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
-  ULONG STDMETHODCALLTYPE Release() override { return 1; }
-
-  HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* disabled) override {
-    if (!disabled) return E_POINTER;
-    *disabled = FALSE;
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* transform) override {
-    if (!transform) return E_POINTER;
-    *transform = DWRITE_MATRIX{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* pixels_per_dip) override {
-    if (!pixels_per_dip) return E_POINTER;
-    *pixels_per_dip = pixels_per_dip_;
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*,
-                                         FLOAT baseline_origin_x,
-                                         FLOAT baseline_origin_y,
-                                         DWRITE_MEASURING_MODE measuring_mode,
-                                         const DWRITE_GLYPH_RUN* glyph_run,
-                                         const DWRITE_GLYPH_RUN_DESCRIPTION*,
-                                         IUnknown*) override {
-    return target_->DrawGlyphRun(
-        baseline_origin_x, baseline_origin_y, measuring_mode, glyph_run, params_, color_, nullptr);
-  }
-
-  HRESULT STDMETHODCALLTYPE DrawUnderline(
-      void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override {
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE DrawStrikethrough(
-      void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override {
-    return S_OK;
-  }
-
-  HRESULT STDMETHODCALLTYPE DrawInlineObject(
-      void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override {
-    return S_OK;
-  }
-
- private:
-  IDWriteBitmapRenderTarget* target_;
-  IDWriteRenderingParams* params_;
-  COLORREF color_;
-  FLOAT pixels_per_dip_;
-};
-
-void daux_dwrite_log_once(const char* status, HRESULT hr) {
-  static std::once_flag once;
-  std::call_once(once, [status, hr] {
-    std::fprintf(stderr,
-                 "[NativeEditorShell] dwrite=%s hr=0x%08lx path=gdi_interop d2d=false\n",
-                 status,
-                 static_cast<unsigned long>(hr));
-  });
-}
-
-template <typename T>
-void daux_release(T*& ptr) {
-  if (ptr) {
-    ptr->Release();
-    ptr = nullptr;
-  }
-}
-
-bool daux_dwrite_draw_text_gdi(HDC dest,
-                               RECT rect,
-                               const wchar_t* text,
-                               COLORREF bg,
-                               COLORREF fg,
-                               int dpi) {
-  const int width = std::max<LONG>(1, rect.right - rect.left);
-  const int height = std::max<LONG>(1, rect.bottom - rect.top);
-  HRESULT hr = S_OK;
-  IDWriteFactory* factory = nullptr;
-  IDWriteGdiInterop* gdi = nullptr;
-  IDWriteBitmapRenderTarget* target = nullptr;
-  IDWriteRenderingParams* params = nullptr;
-  IDWriteTextFormat* format = nullptr;
-  IDWriteTextLayout* layout = nullptr;
-  IDWriteInlineObject* ellipsis = nullptr;
-
-  hr = DWriteCreateFactory(
-      DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&factory));
-  if (SUCCEEDED(hr)) hr = factory->GetGdiInterop(&gdi);
-  if (SUCCEEDED(hr)) hr = gdi->CreateBitmapRenderTarget(dest, width, height, &target);
-  if (SUCCEEDED(hr)) hr = factory->CreateRenderingParams(&params);
-  if (SUCCEEDED(hr)) {
-    hr = factory->CreateTextFormat(L"Segoe UI",
-                                   nullptr,
-                                   DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                   DWRITE_FONT_STYLE_NORMAL,
-                                   DWRITE_FONT_STRETCH_NORMAL,
-                                   12.0f,
-                                   L"",
-                                   &format);
-  }
-  if (SUCCEEDED(hr)) {
-    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    const UINT32 len = text ? static_cast<UINT32>(wcsnlen_s(text, 1024)) : 0;
-    hr = factory->CreateTextLayout(text ? text : L"", len, format, static_cast<FLOAT>(width),
-                                   static_cast<FLOAT>(height), &layout);
-  }
-  if (SUCCEEDED(hr)) {
-    hr = factory->CreateEllipsisTrimmingSign(format, &ellipsis);
-    if (SUCCEEDED(hr)) {
-      DWRITE_TRIMMING trimming{};
-      trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
-      layout->SetTrimming(&trimming, ellipsis);
-    }
-  }
-  if (SUCCEEDED(hr)) {
-    HDC mem = target->GetMemoryDC();
-    RECT local{0, 0, width, height};
-    HBRUSH b = CreateSolidBrush(bg);
-    FillRect(mem, &local, b);
-    DeleteObject(b);
-    target->SetPixelsPerDip(static_cast<FLOAT>(dpi > 0 ? dpi : 96) / 96.0f);
-    DauxDWriteGdiTextRenderer renderer(
-        target, params, fg, static_cast<FLOAT>(dpi > 0 ? dpi : 96) / 96.0f);
-    hr = layout->Draw(nullptr, &renderer, 0.0f, 0.0f);
-    if (SUCCEEDED(hr)) {
-      BitBlt(dest, rect.left, rect.top, width, height, mem, 0, 0, SRCCOPY);
-    }
-  }
-
-  daux_release(ellipsis);
-  daux_release(layout);
-  daux_release(format);
-  daux_release(params);
-  daux_release(target);
-  daux_release(gdi);
-  daux_release(factory);
-  daux_dwrite_log_once(SUCCEEDED(hr) ? "ok" : "fail", hr);
-  return SUCCEEDED(hr);
-}
-
-void daux_set_pin_to_top(HWND hwnd, SphereDauxVst3Processor* p, bool pinned) {
-  if (!hwnd || !IsWindow(hwnd) || !p) return;
-  p->titlebar_pin_to_top = pinned;
-  SetWindowPos(hwnd,
-               pinned ? HWND_TOPMOST : HWND_NOTOPMOST,
-               0,
-               0,
-               0,
-               0,
-               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-  std::fprintf(stderr, "[NativeEditorShell] pin_to_top=%s\n", pinned ? "true" : "false");
-  RECT tb{};
-  GetClientRect(hwnd, &tb);
-  tb.bottom = daux_titlebar_h(hwnd);
-  InvalidateRect(hwnd, &tb, FALSE);
-}
-
-void daux_paint_detached_titlebar(HWND top, SphereDauxVst3Processor* p) {
-  PAINTSTRUCT ps{};
-  HDC dc = BeginPaint(top, &ps);
-  if (!dc) return;
-  const int sdpi = static_cast<int>(daux_hwnd_dpi(top));
-  const int th = daux_titlebar_h(top);
-  RECT rc{};
-  GetClientRect(top, &rc);
-  const int cw = rc.right - rc.left;
-  if (cw <= 0 || th <= 0) {
-    EndPaint(top, &ps);
-    return;
-  }
-
-  const COLORREF bg         = RGB(24, 25, 28);
-  const COLORREF border     = RGB(44, 46, 51);
-  const COLORREF title_text = RGB(220, 221, 225);
-  const COLORREF glyph      = RGB(205, 206, 210);
-  const COLORREF glyph_hot  = RGB(245, 246, 248);
-  const COLORREF button_hot = RGB(45, 47, 53);
-  const COLORREF close_hot  = RGB(196, 43, 43);
-  const int bw = daux_title_button_w(top);
-  const int hover = p ? p->titlebar_hover_btn : DAUX_BTN_NONE;
-
-  // Double-buffer the strip so hover repaints never flicker.
-  HDC mem = CreateCompatibleDC(dc);
-  HBITMAP bmp = CreateCompatibleBitmap(dc, cw, th);
-  HGDIOBJ old_bmp = SelectObject(mem, bmp);
-
-  RECT strip{0, 0, cw, th};
-  HBRUSH bgb = CreateSolidBrush(bg);
-  FillRect(mem, &strip, bgb);
-  DeleteObject(bgb);
-
-  for (int b = DAUX_BTN_PIN; b <= DAUX_BTN_CLOSE; ++b) {
-    if (b != hover && !(b == DAUX_BTN_PIN && p && p->titlebar_pin_to_top)) continue;
-    RECT br = daux_titlebar_button_rect(cw, bw, b);
-    br.bottom = th;
-    HBRUSH hb = CreateSolidBrush(b == DAUX_BTN_CLOSE ? close_hot : button_hot);
-    FillRect(mem, &br, hb);
-    DeleteObject(hb);
-  }
-
-  wchar_t title[256] = {0};
-  if (GetWindowTextW(top, title, 255) <= 0) {
-    wcscpy_s(title, 256, L"Plugin Editor");
-  }
-  const int pad = MulDiv(12, sdpi, 96);
-  RECT tr{pad, 0, cw - 4 * bw - pad, th};
-  if (!daux_dwrite_draw_text_gdi(mem, tr, title, bg, title_text, sdpi)) {
-    SetBkMode(mem, TRANSPARENT);
-    SetTextColor(mem, title_text);
-    HFONT font = CreateFontW(-MulDiv(12, sdpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HGDIOBJ old_font = SelectObject(mem, font);
-    DrawTextW(mem, title, -1, &tr,
-              DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-    SelectObject(mem, old_font);
-    DeleteObject(font);
-  }
-
-  const int pw = std::max<int>(1, MulDiv(1, sdpi, 96));
-  const int g = std::max<int>(3, MulDiv(5, sdpi, 96));
-  for (int b = DAUX_BTN_PIN; b <= DAUX_BTN_CLOSE; ++b) {
-    const RECT br = daux_titlebar_button_rect(cw, bw, b);
-    const int bx = br.left;
-    const int cx = bx + bw / 2;
-    const int cy = th / 2;
-    const bool active_pin = b == DAUX_BTN_PIN && p && p->titlebar_pin_to_top;
-    HPEN pen = CreatePen(PS_SOLID, pw, (b == hover || active_pin) ? glyph_hot : glyph);
-    HGDIOBJ old_pen = SelectObject(mem, pen);
-    HGDIOBJ old_br = SelectObject(mem, GetStockObject(NULL_BRUSH));
-    if (b == DAUX_BTN_PIN) {
-      MoveToEx(mem, cx, cy - g - 2, nullptr);
-      LineTo(mem, cx, cy + g + 2);
-      MoveToEx(mem, cx - g, cy - g + 1, nullptr);
-      LineTo(mem, cx + g + 1, cy - g + 1);
-      MoveToEx(mem, cx - g + 2, cy - g + 1, nullptr);
-      LineTo(mem, cx - g + 2, cy + 1);
-      MoveToEx(mem, cx + g - 1, cy - g + 1, nullptr);
-      LineTo(mem, cx + g - 1, cy + 1);
-    } else if (b == DAUX_BTN_MIN) {
-      MoveToEx(mem, cx - g, cy, nullptr);
-      LineTo(mem, cx + g + 1, cy);
-    } else if (b == DAUX_BTN_MAX) {
-      Rectangle(mem, cx - g, cy - g, cx + g + 1, cy + g + 1);
-    } else {  // close (X)
-      MoveToEx(mem, cx - g, cy - g, nullptr);
-      LineTo(mem, cx + g + 1, cy + g + 1);
-      MoveToEx(mem, cx - g, cy + g, nullptr);
-      LineTo(mem, cx + g + 1, cy - g - 1);
-    }
-    SelectObject(mem, old_br);
-    SelectObject(mem, old_pen);
-    DeleteObject(pen);
-  }
-
-  HPEN bpen = CreatePen(PS_SOLID, 1, border);
-  HGDIOBJ old_bpen = SelectObject(mem, bpen);
-  MoveToEx(mem, 0, th - 1, nullptr);
-  LineTo(mem, cw, th - 1);
-  SelectObject(mem, old_bpen);
-  DeleteObject(bpen);
-
-  BitBlt(dc, 0, 0, cw, th, mem, 0, 0, SRCCOPY);
-
-  SelectObject(mem, old_bmp);
-  DeleteObject(bmp);
-  DeleteDC(mem);
-  EndPaint(top, &ps);
-}
-
-// the view. Futureboard adds one dedicated child content HWND; attached() is
-// called with that child, never with this top HWND or a GPUI shell HWND.
-LRESULT CALLBACK daux_detached_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-  auto* processor = reinterpret_cast<SphereDauxVst3Processor*>(
-      static_cast<LONG_PTR>(GetWindowLongPtrW(hwnd, GWLP_USERDATA)));
-  const bool live = processor && processor->processor_valid.load(std::memory_order_acquire);
-  const bool kind2 = live && processor->embed_host_kind == 2;
-  // Borderless detached window identified by STYLE (works even before the
-  // processor pointer is stored in GWLP_USERDATA, e.g. during CreateWindowEx):
-  // WS_THICKFRAME without WS_CAPTION is unique to the kind==2 custom-chrome window.
-  const LONG_PTR style_bits = GetWindowLongPtrW(hwnd, GWL_STYLE);
-  const bool kind2_style = (style_bits & WS_THICKFRAME) && !(style_bits & WS_CAPTION);
-  daux_log_window_message("plugin-top-hwnd", hwnd, msg);
-  switch (msg) {
-    case WM_NCCALCSIZE:
-      if (wparam && kind2_style) return 0; // borderless: client fills the window
-      break;
-    case WM_NCACTIVATE:
-      if (kind2_style) {
-        RECT tb{};
-        GetClientRect(hwnd, &tb);
-        tb.bottom = daux_titlebar_h(hwnd);
-        InvalidateRect(hwnd, &tb, FALSE);
-        return 1; // no OS caption to (de)activate; keep our chrome
-      }
-      break;
-    case WM_NCHITTEST:
-      if (kind2) {
-        POINT pt{static_cast<int>(static_cast<short>(LOWORD(lparam))),
-                 static_cast<int>(static_cast<short>(HIWORD(lparam)))};
-        ScreenToClient(hwnd, &pt);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        const int cw = rc.right, ch = rc.bottom;
-        const int th = daux_titlebar_h(hwnd);
-        const bool resizable =
-            processor->editor_view && daux_editor_view_resizable(processor);
-        if (resizable && !IsZoomed(hwnd)) {
-          const int grab =
-              std::max<int>(4, MulDiv(6, static_cast<int>(daux_hwnd_dpi(hwnd)), 96));
-          const bool l = pt.x < grab, r = pt.x >= cw - grab;
-          const bool t = pt.y < grab, b = pt.y >= ch - grab;
-          if (t && l) return HTTOPLEFT;
-          if (t && r) return HTTOPRIGHT;
-          if (b && l) return HTBOTTOMLEFT;
-          if (b && r) return HTBOTTOMRIGHT;
-          if (l) return HTLEFT;
-          if (r) return HTRIGHT;
-          if (t) return HTTOP;
-          if (b) return HTBOTTOM;
-        }
-        if (pt.y >= 0 && pt.y < th) {
-          if (daux_titlebar_button_at(hwnd, pt.x, pt.y) != DAUX_BTN_NONE) return HTCLIENT;
-          return HTCAPTION; // drag (+ double-click maximize)
-        }
-        return HTCLIENT;
-      }
-      break;
-    case WM_LBUTTONDOWN:
-      if (kind2) {
-        const int x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
-        const int y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
-        const int b = daux_titlebar_button_at(hwnd, x, y);
-        if (b != DAUX_BTN_NONE) {
-          processor->titlebar_press_btn = b;
-          SetCapture(hwnd);
-          return 0;
-        }
-      }
-      break;
-    case WM_LBUTTONUP:
-      if (kind2) {
-        const int x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
-        const int y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
-        const int pressed = processor->titlebar_press_btn;
-        processor->titlebar_press_btn = DAUX_BTN_NONE;
-        if (pressed != DAUX_BTN_NONE) {
-          ReleaseCapture();
-          if (daux_titlebar_button_at(hwnd, x, y) == pressed) {
-            if (pressed == DAUX_BTN_PIN) {
-              daux_set_pin_to_top(hwnd, processor, !processor->titlebar_pin_to_top);
-            } else if (pressed == DAUX_BTN_MIN) {
-              ShowWindow(hwnd, SW_MINIMIZE);
-            } else if (pressed == DAUX_BTN_MAX) {
-              ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
-            } else {
-              SendMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
-          }
-          return 0;
-        }
-      }
-      break;
-    case WM_MOUSEMOVE:
-      if (kind2) {
-        const int x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
-        const int y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
-        const int b = daux_titlebar_button_at(hwnd, x, y);
-        if (b != processor->titlebar_hover_btn) {
-          processor->titlebar_hover_btn = b;
-          RECT tb{};
-          GetClientRect(hwnd, &tb);
-          tb.bottom = daux_titlebar_h(hwnd);
-          InvalidateRect(hwnd, &tb, FALSE);
-        }
-        if (!processor->titlebar_mouse_tracking) {
-          TRACKMOUSEEVENT tme{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
-          TrackMouseEvent(&tme);
-          processor->titlebar_mouse_tracking = true;
-        }
-      }
-      break;
-    case WM_MOUSELEAVE:
-      if (kind2) {
-        processor->titlebar_mouse_tracking = false;
-        if (processor->titlebar_hover_btn != DAUX_BTN_NONE) {
-          processor->titlebar_hover_btn = DAUX_BTN_NONE;
-          RECT tb{};
-          GetClientRect(hwnd, &tb);
-          tb.bottom = daux_titlebar_h(hwnd);
-          InvalidateRect(hwnd, &tb, FALSE);
-        }
-        return 0;
-      }
-      break;
-    case WM_ERASEBKGND:
-      return 1; // never fill — the plug-in paints the whole client area
-    case WM_TIMER:
-      if (wparam == kDauxWakeTimerTop || wparam == kDauxWakeTimerContent) {
-        KillTimer(hwnd, wparam);
-        return 0;
-      }
-      break; // plugin-installed timer — keep it alive (see content proc note)
-    case WM_PAINT: {
-      if (kind2) {
-        daux_paint_detached_titlebar(hwnd, processor);
-        return 0;
-      }
-      PAINTSTRUCT ps{};
-      BeginPaint(hwnd, &ps);
-      EndPaint(hwnd, &ps);
-      return 0;
-    }
-    case WM_SIZE:
-      if (wparam == SIZE_MINIMIZED) return 0;
-      if (live && processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd) &&
-          !processor->embed_resize_in_progress) {
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        // Borderless: reserve the custom titlebar; the content child fills below it.
-        const int th = kind2 ? daux_titlebar_h(hwnd) : 0;
-        const int content_w = std::max<LONG>(0, rc.right - rc.left);
-        const int content_h = std::max<LONG>(0, (rc.bottom - rc.top) - th);
-        if (content_w <= 0 || content_h <= 0) return 0;
-        processor->embed_resize_in_progress = true;
-        SetWindowPos(processor->editor_attach_hwnd, nullptr, 0, th, content_w, content_h,
-                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        processor->embed_resize_in_progress = false;
-        std::fprintf(stderr,
-                     "[plugin-view] resize top=(%d,%d) content=(%d,%d)\n",
-                     content_w, content_h, content_w, content_h);
-        if (processor->editor_attached) resize_editor_view(processor);
-      }
-      if (kind2) {
-        RECT tb{};
-        GetClientRect(hwnd, &tb);
-        tb.bottom = daux_titlebar_h(hwnd);
-        InvalidateRect(hwnd, &tb, FALSE);
-      }
-      return 0;
-    case WM_GETMINMAXINFO:
-      // Fixed-size contract for the user-resizable detached window (spec
-      // items 1/8): lock min = max = current outer size so dragging edges
-      // can never open blank/garbage area. Programmatic resizes (plugin
-      // resizeView) run under embed_resize_in_progress and stay exempt.
-      if (live && processor->embed_host_kind == 2 && processor->editor_attached &&
-          processor->editor_view && !processor->embed_resize_in_progress &&
-          !daux_editor_view_resizable(processor) && lparam) {
-        RECT wr{};
-        if (GetWindowRect(hwnd, &wr)) {
-          auto* mmi = reinterpret_cast<MINMAXINFO*>(lparam);
-          const POINT size{wr.right - wr.left, wr.bottom - wr.top};
-          mmi->ptMinTrackSize = size;
-          mmi->ptMaxTrackSize = size;
-          mmi->ptMaxSize = size;
-          return 0;
-        }
-      }
-      break;
-    case WM_SIZING:
-      // Resizable contract for the detached window (spec item 2): constrain
-      // the in-drag rect through checkSizeConstraint so the user can only
-      // reach sizes the plugin accepts.
-      if (live && processor->embed_host_kind == 2 && processor->editor_attached &&
-          processor->editor_view && lparam && daux_editor_view_resizable(processor)) {
-        RECT* drag = reinterpret_cast<RECT*>(lparam);
-        int nc_w = 0;
-        int nc_h = 0;
-        if (kind2_style) {
-          // Borderless: the only non-client reservation is our titlebar height.
-          nc_h = daux_titlebar_h(hwnd);
-        } else {
-          RECT frame{0, 0, 0, 0};
-          const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-          const DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
-          if (!daux_adjust_window_rect_for_dpi(hwnd, &frame, style, ex_style)) {
-            AdjustWindowRectEx(&frame, style, FALSE, ex_style);
-          }
-          nc_w = static_cast<int>((frame.right - frame.left));
-          nc_h = static_cast<int>((frame.bottom - frame.top));
-        }
-        int content_w = static_cast<int>(drag->right - drag->left) - nc_w;
-        int content_h = static_cast<int>(drag->bottom - drag->top) - nc_h;
-        if (content_w > 0 && content_h > 0 &&
-            daux_constrain_content_size(processor, &content_w, &content_h)) {
-          const int outer_w = content_w + nc_w;
-          const int outer_h = content_h + nc_h;
-          // Keep the anchored edges: move only the side(s) being dragged.
-          switch (wparam) {
-            case WMSZ_LEFT:
-            case WMSZ_TOPLEFT:
-            case WMSZ_BOTTOMLEFT:
-              drag->left = drag->right - outer_w;
-              break;
-            default:
-              drag->right = drag->left + outer_w;
-              break;
-          }
-          switch (wparam) {
-            case WMSZ_TOP:
-            case WMSZ_TOPLEFT:
-            case WMSZ_TOPRIGHT:
-              drag->top = drag->bottom - outer_h;
-              break;
-            default:
-              drag->bottom = drag->top + outer_h;
-              break;
-          }
-          return TRUE;
-        }
-      }
-      break;
-    case WM_DPICHANGED: {
-      if (!live || !lparam) break;
-      const RECT* const suggested = reinterpret_cast<RECT*>(lparam);
-      SetWindowPos(hwnd,
-                   nullptr,
-                   suggested->left,
-                   suggested->top,
-                   suggested->right - suggested->left,
-                   suggested->bottom - suggested->top,
-                   SWP_NOZORDER | SWP_NOACTIVATE);
-      daux_log_editor_dpi(hwnd, "WM_DPICHANGED");
-      if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd) &&
-          processor->editor_attached) {
-        daux_editor_set_content_scale(processor, hwnd, "WM_DPICHANGED");
-        RECT rc{};
-        GetClientRect(processor->editor_attach_hwnd, &rc);
-        const int content_w = static_cast<int>(rc.right - rc.left);
-        const int content_h = static_cast<int>(rc.bottom - rc.top);
-        if (content_w > 0 && content_h > 0) {
-          daux_resize_child_client(processor->editor_attach_hwnd, content_w, content_h);
-          auto local = daux_local_view_rect(content_w, content_h);
-          const auto on_size_res = processor->editor_view->onSize(&local);
-          std::fprintf(stderr,
-                       "[PluginEditor] WM_DPICHANGED onSize result=0x%x client=%dx%d\n",
-                       static_cast<unsigned>(on_size_res),
-                       content_w,
-                       content_h);
-        }
-      }
-      return 0;
-    }
-    case WM_CLOSE:
-      if (live) {
-        processor->embed_user_closed.store(true, std::memory_order_release);
-      }
-      ShowWindow(hwnd, SW_HIDE); // Rust drains the flag and removes the shell
-      return 0;
-    case WM_MOUSEACTIVATE:
-      // Never refuse activation for plugin content — clicks must reach the
-      // plugin child / dialog tree, not bounce to the wrapper or DAW surfaces.
-      return MA_ACTIVATE;
-    default:
-      break;
-  }
-  return DefWindowProcW(hwnd, msg, wparam, lparam);
-}
-
-void register_detached_editor_class() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(WNDCLASSEXW);
-    wc.lpfnWndProc = daux_detached_wnd_proc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-    wc.hbrBackground = nullptr; // editorhost: no background — plug-in owns paint
-    wc.lpszClassName = kDauxEditorDetachedClass;
-    RegisterClassExW(&wc);
-  });
-}
-
-HWND daux_embed_create_content_child(HWND top, int w, int h, int y_off) {
-  if (!top || !IsWindow(top)) return nullptr;
-  // WS_EX_NOPARENTNOTIFY: never send synchronous WM_PARENTNOTIFY up a
-  // cross-process parent chain (main-app shell) on child create/destroy/click.
-  // `y_off` reserves the borderless custom titlebar (kind==2); 0 otherwise.
-  return CreateWindowExW(
-      WS_EX_NOPARENTNOTIFY,
-      kDauxEditorContentClass,
-      L"",
-      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-      0, y_off, w > 0 ? w : 640, h > 0 ? h : 480,
-      top, nullptr, GetModuleHandleW(nullptr), nullptr);
-}
-
-// Create the native top editor HWND. The dedicated child content HWND is created
-// separately and is the only HWND passed to IPlugView::attached().
-HWND daux_embed_create_top(HWND parent, int kind, int x, int y, int w, int h) {
-  register_detached_editor_class();
-  DWORD style = WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-  // WS_EX_NOPARENTNOTIFY: in embedded (WS_CHILD) mode the parent is the
-  // main-app content HWND in another process; WM_PARENTNOTIFY would be a
-  // synchronous cross-process send. Harmless for owned/top-level kinds.
-  DWORD ex_style = WS_EX_NOPARENTNOTIFY;
-  HWND hwnd_parent = nullptr;
-  if (kind == 2) {
-    // Borderless custom-chrome: WS_POPUP + WS_THICKFRAME (enables edge resize via
-    // WM_NCHITTEST) + min/max boxes, but NO WS_CAPTION/WS_SYSMENU — the dark
-    // Futureboard titlebar is painted by daux_detached_wnd_proc and WM_NCCALCSIZE
-    // returns 0 so the client fills the whole window.
-    style |= WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-    ex_style |= WS_EX_TOOLWINDOW;
-    hwnd_parent = (parent && IsWindow(parent)) ? parent : nullptr; // popup owner, not WS_CHILD
-  } else if (kind == 1) {
-    style |= WS_POPUP;
-    ex_style |= WS_EX_TOOLWINDOW;
-    hwnd_parent = parent; // owner
-  } else {
-    style |= WS_CHILD | WS_VISIBLE;
-    hwnd_parent = parent;
-  }
-  RECT rect{0, 0, w > 0 ? w : 640, h > 0 ? h : 480};
-  HWND dpi_ref = nullptr;
-  if (parent && IsWindow(parent)) {
-    dpi_ref = parent;
-  }
-  if (kind == 2) {
-    // Borderless: client == window (WM_NCCALCSIZE returns 0). Reserve the custom
-    // titlebar above the plug-in content; there is no OS frame to add.
-    const UINT dpi = dpi_ref ? daux_hwnd_dpi(dpi_ref) : 96;
-    rect.bottom += MulDiv(kDauxTitlebarLogicalH, static_cast<int>(dpi), 96);
-  } else if (dpi_ref) {
-    const UINT dpi = daux_hwnd_dpi(dpi_ref);
-    if (!AdjustWindowRectExForDpi(&rect, style, FALSE, ex_style, dpi)) {
-      AdjustWindowRectEx(&rect, style, FALSE, ex_style);
-    }
-  } else {
-    AdjustWindowRectEx(&rect, style, FALSE, ex_style);
-  }
-  int px = x, py = y;
-  if (kind == 2) {
-    px = CW_USEDEFAULT;
-    py = CW_USEDEFAULT;
-  }
-  if (kind == 1 && parent && IsWindow(parent)) {
-    RECT screen{};
-    if (daux_embed_content_screen_rect(parent, x, y, w, h, &screen)) {
-      px = screen.left;
-      py = screen.top;
-    }
-  } else if (kind == 2 && parent && IsWindow(parent)) {
-    RECT pr{};
-    if (GetWindowRect(parent, &pr)) {
-      px = pr.left + 48;
-      py = pr.top + 48;
-    }
-  }
-  HWND top = CreateWindowExW(
-      ex_style, kDauxEditorDetachedClass, L"Plugin Editor", style,
-      px, py, rect.right - rect.left, rect.bottom - rect.top,
-      hwnd_parent, nullptr, GetModuleHandleW(nullptr), nullptr);
-  if (top) {
-    std::fprintf(stderr, "[NativeEditorShell] backend=cpp_shell\n");
-    std::fprintf(stderr,
-                 "[NativeEditorShell] create hwnd=0x%p\n",
-                 static_cast<void*>(top));
-    std::fprintf(stderr,
-                 "[NativeEditorShell] style=0x%08lx exstyle=0x%08lx\n",
-                 static_cast<unsigned long>(style),
-                 static_cast<unsigned long>(ex_style));
-    std::fprintf(stderr,
-                 "[NativeEditorShell] renderer=%s%s\n",
-                 daux_editor_renderer_name(),
-                 _stricmp(daux_editor_renderer_name(), "dx11_dwrite") == 0
-                     ? "|fallback=gdi"
-                     : "");
-    std::fprintf(stderr,
-                 "[NativeEditorShell] dwrite=forced gdi_fallback=true d2d=false\n");
-    set_daux_dark_titlebar(top);
-    if (kind == 1) daux_embed_apply_tool_styles(top, parent);
-    if (kind == 2) daux_apply_owned_popup_styles(top, parent);
-  }
-  return top;
-}
-
-// Pump THIS thread's message queue until it stays idle or `max_ms` elapses, so a
-// just-shown editor window finishes its initial realization (WM_NCPAINT /
-// WM_PAINT / WM_SIZE / activation) BEFORE IPlugView::attached() runs. Many
-// slow-UI editors — Qt/QML (e.g. sampler instruments), VSTGUI, and
-// Chromium/WebView-backed views — only composite correctly when attached into a
-// window that is already live and pumping; attaching into a shown-but-never-
-// pumped window can stall the attach or come up blank. Generic settle: NO
-// plug-in/vendor branch. Strictly bounded — an idle queue exits after a short
-// grace and the whole call can never exceed `max_ms`, so it can never hang the
-// editor thread. Runs on the dedicated per-attach editor thread (the only
-// thread that owns these windows), so it dispatches only this editor's messages.
-void daux_settle_pump_editor_thread(DWORD max_ms) {
-  const ULONGLONG start = GetTickCount64();
-  // Consecutive idle polls before we treat the window as settled, so a fast
-  // editor returns in a few ms while a slow one keeps draining up to the cap.
-  constexpr int kIdlePollsToSettle = 6; // ~6ms of quiet (1ms yield per poll)
-  int idle_polls = 0;
-  int dispatched = 0;
-  while (GetTickCount64() - start < max_ms) {
-    MSG m;
-    bool any = false;
-    while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
-      TranslateMessage(&m);
-      DispatchMessageW(&m);
-      any = true;
-      ++dispatched;
-      if (GetTickCount64() - start >= max_ms) break;
-    }
-    if (any) {
-      idle_polls = 0;
-    } else if (++idle_polls >= kIdlePollsToSettle) {
-      break; // queue has stayed empty — the window is realized
-    }
-    Sleep(1); // let DWM / the window manager post follow-up messages
-  }
-  std::fprintf(stderr,
-               "[vst3-editor] settle_pump dispatched=%d elapsed_ms=%llu\n",
-               dispatched,
-               static_cast<unsigned long long>(GetTickCount64() - start));
-}
-
 // Reposition/resize the host window to the requested region. Returns true only
 // when the applied rect actually changed, so idle frames do no SetWindowPos /
 // onSize / raise work (mirrors the SpherePluginHost anti-flicker fix).
@@ -3527,7 +2662,10 @@ bool daux_embed_sync_geometry(SphereDauxVst3Processor* p, int x, int y, int w, i
         IsWindowVisible(p->editor_parent_hwnd) && !IsIconic(p->editor_parent_hwnd);
     ShowWindow(top, parent_visible ? SW_SHOWNA : SW_HIDE);
     RECT screen{};
-    if (!daux_embed_content_screen_rect(p->editor_parent_hwnd, x, y, w, h, &screen)) return false;
+    if (!daux_editor_content_screen_rect(p->editor_parent_hwnd, x, y, w, h,
+                                         &screen.left, &screen.top, &screen.right, &screen.bottom)) {
+      return false;
+    }
     if (p->embed_geometry_valid && EqualRect(&screen, &p->embed_last_applied)) return false;
     p->embed_last_applied = screen;
     p->embed_geometry_valid = true;
@@ -3535,7 +2673,7 @@ bool daux_embed_sync_geometry(SphereDauxVst3Processor* p, int x, int y, int w, i
                  screen.left, screen.top,
                  screen.right - screen.left, screen.bottom - screen.top,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    daux_embed_apply_tool_styles(top, p->editor_parent_hwnd);
+    daux_editor_apply_tool_styles(top, p->editor_parent_hwnd);
   } else {
     RECT want{x, y, x + w, y + h};
     if (p->embed_geometry_valid && EqualRect(&want, &p->embed_last_applied)) return false;
@@ -3550,13 +2688,13 @@ bool daux_embed_sync_geometry(SphereDauxVst3Processor* p, int x, int y, int w, i
     SetWindowPos(p->editor_attach_hwnd, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
   }
-  daux_embed_raise(top);
+  daux_editor_raise_children(top);
   if (log_reposition && daux_embed_debug()) {
     std::fprintf(stderr,
                  "[plugin-view] daux reposition top=0x%p content=0x%p mode=%s\n",
                  static_cast<void*>(top),
                  static_cast<void*>(p->editor_attach_hwnd),
-                 daux_embed_host_kind_name(p->embed_host_kind));
+                 daux_editor_host_kind_name(p->embed_host_kind));
   }
   return true;
 }
@@ -3579,23 +2717,13 @@ bool daux_embed_apply_content_size(SphereDauxVst3Processor* p,
       // Borderless (WM_NCCALCSIZE==0): the window outer == its client. Size it to
       // the plug-in content plus the reserved custom titlebar; the content child
       // sits below the titlebar.
-      const int th = daux_titlebar_h(top);
+      const int th = daux_editor_titlebar_height(top);
       const int win_w = content_w;
       const int win_h = content_h + th;
       RECT cur{};
       GetWindowRect(top, &cur);
       if ((cur.right - cur.left) != win_w || (cur.bottom - cur.top) != win_h) {
-        p->embed_resize_in_progress = true;
-        SetWindowPos(top, nullptr, 0, 0, win_w, win_h,
-                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        if (p->editor_attach_hwnd && IsWindow(p->editor_attach_hwnd)) {
-          SetWindowPos(p->editor_attach_hwnd, nullptr, 0, th, content_w, content_h,
-                       SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        }
-        p->embed_resize_in_progress = false;
-        RECT tb{0, 0, win_w, th}; // button positions track window width
-        InvalidateRect(top, &tb, FALSE);
-        changed = true;
+        changed = daux_editor_resize_content(&p->editor_window, content_w, content_h);
       }
     }
     p->embed_content_w = content_w;
@@ -3734,7 +2862,9 @@ bool daux_embed_has_visible_ui(SphereDauxVst3Processor* p) {
 
 void SphereDauxVst3Processor::close_embed_editor(const char* reason) {
   detach_editor_view(this); // IPlugView::removed(); keeps controller/processor
-  if (editor_attach_hwnd && IsWindow(editor_attach_hwnd)) {
+  if (editor_window.shell_hwnd && editor_window.shell_hwnd == editor_embed_top_hwnd) {
+    daux_editor_destroy_window(&editor_window);
+  } else if (editor_attach_hwnd && IsWindow(editor_attach_hwnd)) {
     DestroyWindow(editor_attach_hwnd);
   }
   if (editor_embed_top_hwnd && IsWindow(editor_embed_top_hwnd)) {
@@ -3745,6 +2875,7 @@ void SphereDauxVst3Processor::close_embed_editor(const char* reason) {
   embed_user_closed.store(false, std::memory_order_release);
   editor_attach_hwnd = nullptr;
   editor_embed_top_hwnd = nullptr;
+  editor_window = DauxEditorWindow{};
   editor_parent_hwnd = nullptr;
   embed_mode = false;
   embed_geometry_valid = false;
@@ -4834,8 +3965,8 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
       processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
     processor->editor_parent_hwnd = parent;
     if (processor->embed_host_kind == 2) {
-      daux_apply_owned_popup_styles(processor->editor_embed_top_hwnd, parent);
-      daux_show_and_focus_editor(processor->editor_embed_top_hwnd, processor->editor_attach_hwnd);
+      daux_editor_apply_owner(&processor->editor_window, parent);
+      daux_editor_show_and_focus(&processor->editor_window);
     }
     processor->embed_geometry_valid = false; // force re-apply against new parent
     daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug());
@@ -4845,7 +3976,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     return processor->editor_handle;
   }
 
-  const int kind = daux_embed_resolve_host_kind();
+  const int kind = daux_editor_resolve_host_kind();
   register_editor_window_classes();
   daux_log_editor_dpi(parent, "attach parent");
 
@@ -4933,32 +4064,33 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
       preferred.right,
       preferred.bottom);
 
-  HWND top = daux_embed_create_top(parent, kind, x, y, editor_w, editor_h);
-  if (!top) {
-    set_last_error("embed editor: top window creation failed");
+  DauxEditorWindowConfig window_config{};
+  window_config.owner_hwnd = parent;
+  window_config.title = L"Plugin Editor";
+  window_config.host_kind = kind;
+  window_config.x = x;
+  window_config.y = y;
+  window_config.content_width = editor_w;
+  window_config.content_height = editor_h;
+  window_config.pin_default = daux_editor_env_truthy("FUTUREBOARD_EDITOR_PIN_DEFAULT");
+  window_config.callbacks = daux_editor_window_callbacks(processor);
+  processor->editor_window = DauxEditorWindow{};
+  if (!daux_editor_create_window(&window_config, &processor->editor_window)) {
+    set_last_error("embed editor: native editor window creation failed");
+    return 0;
+  }
+  HWND top = reinterpret_cast<HWND>(processor->editor_window.shell_hwnd);
+  HWND content = reinterpret_cast<HWND>(processor->editor_window.content_hwnd);
+  if (!top || !content) {
+    daux_editor_destroy_window(&processor->editor_window);
+    set_last_error("embed editor: native editor window returned invalid HWNDs");
     return 0;
   }
   processor->embed_user_closed.store(false, std::memory_order_release);
-  SetWindowLongPtrW(top, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(processor));
-  if (kind == 2) {
-    processor->titlebar_hover_btn = DAUX_BTN_NONE;
-    processor->titlebar_press_btn = DAUX_BTN_NONE;
-    processor->titlebar_mouse_tracking = false;
-    daux_set_pin_to_top(top, processor, daux_env_truthy("FUTUREBOARD_EDITOR_PIN_DEFAULT"));
-  }
-  // Borderless (kind==2): the content child sits below the custom titlebar.
-  const int content_y_off = (kind == 2) ? daux_titlebar_h(top) : 0;
-  HWND content = daux_embed_create_content_child(top, editor_w, editor_h, content_y_off);
-  if (!content) {
-    DestroyWindow(top);
-    set_last_error("embed editor: content child HWND creation failed");
-    return 0;
-  }
+  const int content_y_off = processor->editor_window.titlebar_height;
   const HWND content_parent = GetParent(content);
   const bool content_is_child = content_parent == top;
-  SetTimer(top, kDauxWakeTimerTop, 250, nullptr);
-  SetTimer(content, kDauxWakeTimerContent, 250, nullptr);
-  std::fprintf(stderr, "[plugin-view] selected_host_mode=%s\n", daux_embed_selected_mode_label(kind));
+  std::fprintf(stderr, "[plugin-view] selected_host_mode=%s\n", daux_editor_selected_mode_label(kind));
   std::fprintf(stderr, "[plugin-view] top_hwnd=0x%p\n", static_cast<void*>(top));
   std::fprintf(stderr, "[plugin-view] content_hwnd=0x%p\n", static_cast<void*>(content));
   std::fprintf(stderr, "[plugin-view] content_is_child=%s\n", content_is_child ? "true" : "false");
@@ -4976,8 +4108,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
                  static_cast<void*>(top),
                  static_cast<void*>(content),
                  static_cast<void*>(content_parent));
-    DestroyWindow(content);
-    DestroyWindow(top);
+    daux_editor_destroy_window(&processor->editor_window);
     set_last_error("embed editor: content HWND must be a child and must differ from top HWND");
     return 0;
   }
@@ -5030,7 +4161,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   // this initial bring-to-top on show is permitted and is what makes the editor
   // actually appear on top when the user opens it.
   if (kind == 2) {
-    daux_show_and_focus_editor(top, content);
+    daux_editor_show_and_focus(&processor->editor_window);
   }
 
   // Settle the freshly-shown window (initial paint/size/activation) before the
@@ -5038,7 +4169,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   // expect a live, pumping, realized window at attach time; attaching into a
   // shown-but-unpumped window can stall the attach or leave it blank. Bounded —
   // returns as soon as the queue goes quiet, never blocks past the cap.
-  daux_settle_pump_editor_thread(250);
+  daux_editor_settle_pump_thread(250);
 
   const ULONGLONG attach_start_ms = GetTickCount64();
   auto attach_returned = std::make_shared<std::atomic<bool>>(false);
@@ -5101,8 +4232,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     processor->embed_content_w = 0;
     processor->embed_content_h = 0;
     daux_plugin_browser_runtime_release(processor);
-    DestroyWindow(content);
-    DestroyWindow(top);
+    daux_editor_destroy_window(&processor->editor_window);
     if (daux_plugin_is_browser_based(processor->plugin_path)) {
       char msg[160];
       std::snprintf(msg, sizeof(msg),
@@ -5173,7 +4303,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     }
   }
   daux_log_hwnd_state("after_attach_onSize", top, content);
-  if (kind == 1) daux_embed_apply_tool_styles(top, parent);
+  if (kind == 1) daux_editor_apply_tool_styles(top, parent);
 
   ShowWindow(top, kind == 2 ? SW_SHOWNORMAL : SW_SHOWNA);
   ShowWindow(content, SW_SHOW);
@@ -5256,7 +4386,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     std::fprintf(stderr,
                  "[SphereVST3] embed editor attached but no visible UI yet handle=%llu mode=%s "
                  "(deferring to delayed-ready poller)\n",
-                 processor->editor_handle, daux_embed_host_kind_name(kind));
+                 processor->editor_handle, daux_editor_host_kind_name(kind));
     // Leave it attached — Rust will poll embed_has_visible_ui at 100/500/1000/
     // 3000/5000 ms (Phase 6) before declaring the editor blank.
   }
@@ -5265,7 +4395,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
                "[SphereVST3] embed editor ok handle=%llu mode=%s parent=0x%p content=0x%p "
                "region=(%d,%d,%d,%d) (reused runtime instance)\n",
                processor->editor_handle,
-               daux_embed_host_kind_name(kind),
+               daux_editor_host_kind_name(kind),
                static_cast<void*>(parent),
                static_cast<void*>(content),
                x, y, width, height);

@@ -1,10 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::platform::{ELEVATED_WARNING_GUI, is_process_elevated, show_startup_error};
-use apak::{InstallOptions, InstallRoots, default_secret_file, install_package, read_package_info};
+use apak::{
+    InstallOptions, InstallRoots, default_secret_file, ensure_secret_file, install_package,
+    read_package_info,
+};
 use gpui::{
-    App, AppContext, Bounds, Context, IntoElement, ParentElement, Point, Render, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, div, px, size,
+    App, AppContext, Bounds, Context, IntoElement, ParentElement, PathPromptOptions, Point, Render,
+    Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, div, px, size,
 };
 use sphere_ui_components::components::title_bar::external_window_titlebar_compact;
 use sphere_ui_components::components::{
@@ -116,12 +119,31 @@ impl ApakInstallerWindow {
     }
 
     fn load_package(&mut self, path: PathBuf) {
-        match read_package_info(&path, &default_secret_file()) {
+        let secret_file = default_secret_file();
+        let secret_generated = match ensure_secret_file(&secret_file) {
+            Ok(generated) => generated,
+            Err(error) => {
+                self.package_path = Some(path);
+                self.summary = None;
+                self.status = InstallStatus::Error;
+                self.detail = error.to_string();
+                return;
+            }
+        };
+
+        match read_package_info(&path, &secret_file) {
             Ok(summary) => {
                 self.package_path = Some(path);
                 self.summary = Some(summary);
                 self.status = InstallStatus::Ready;
-                self.detail = "Package is ready to install.".to_string();
+                self.detail = if secret_generated {
+                    format!(
+                        "Generated local APAK secret at {}. Package is ready to install.",
+                        secret_file.display()
+                    )
+                } else {
+                    "Package is ready to install.".to_string()
+                };
             }
             Err(error) => {
                 self.package_path = Some(path);
@@ -134,8 +156,60 @@ impl ApakInstallerWindow {
 
     fn choose_package(&mut self, cx: &mut Context<Self>) {
         self.status = InstallStatus::Idle;
-        self.detail = "Native file dialogs are disabled for APAK Installer. Open a .apak file from Explorer or run apakinstaller.exe <package.apak>.".to_string();
+        self.detail = "Choose a .apak package...".to_string();
         cx.notify();
+
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(paths))) => {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = this.update(cx, |this, cx| {
+                        if path
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("apak"))
+                        {
+                            this.load_package(path);
+                        } else {
+                            this.package_path = Some(path);
+                            this.summary = None;
+                            this.status = InstallStatus::Error;
+                            this.detail = "Selected file is not a .apak package.".to_string();
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+            Ok(Ok(None)) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.detail = "No package selected.".to_string();
+                    cx.notify();
+                });
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.summary = None;
+                    this.status = InstallStatus::Error;
+                    this.detail = format!("Could not open file picker: {error}");
+                    cx.notify();
+                });
+            }
+            Err(_) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.summary = None;
+                    this.status = InstallStatus::Error;
+                    this.detail =
+                        "File picker was closed before a package was selected.".to_string();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn install_selected(&mut self, cx: &mut Context<Self>) {
@@ -147,11 +221,14 @@ impl ApakInstallerWindow {
         self.detail = "Installing package...".to_string();
         cx.notify();
 
-        let result = InstallRoots::default_user().and_then(|roots| {
-            install_package(InstallOptions {
-                package_path: path,
-                secret_file: default_secret_file(),
-                roots,
+        let secret_file = default_secret_file();
+        let result = ensure_secret_file(&secret_file).and_then(|_| {
+            InstallRoots::default_user().and_then(|roots| {
+                install_package(InstallOptions {
+                    package_path: path,
+                    secret_file,
+                    roots,
+                })
             })
         });
 

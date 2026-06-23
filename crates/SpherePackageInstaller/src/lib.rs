@@ -187,6 +187,25 @@ pub fn default_secret_file() -> PathBuf {
         .join(".apak.secret")
 }
 
+pub fn generate_secret_value() -> String {
+    let mut secret = [0u8; KEY_LEN];
+    OsRng.fill_bytes(&mut secret);
+    base64::engine::general_purpose::STANDARD.encode(secret)
+}
+
+pub fn ensure_secret_file(path: &Path) -> Result<bool> {
+    if path.exists() {
+        let _ = read_secret_file(path)?;
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, format!("APAK_SECRET={}\n", generate_secret_value()))?;
+    Ok(true)
+}
+
 pub fn pack_template(options: PackOptions) -> Result<PackReport> {
     let install_path = options.source_dir.join("install.toml");
     let metadata_path = options.source_dir.join("metadata.toml");
@@ -659,13 +678,15 @@ license = "MIT"
         )
         .expect("metadata");
         fs::write(template.join("assets/Drums/kick.txt"), "kick").expect("asset");
-        fs::write(temp.path().join(".apak.secret"), "APAK_SECRET=test-secret").expect("secret");
+        let secret_file = temp.path().join(".apak.secret");
+        assert!(ensure_secret_file(&secret_file).expect("secret generated"));
+        assert!(!ensure_secret_file(&secret_file).expect("secret reused"));
 
         let package_path = temp.path().join("test.apak");
         let report = pack_template(PackOptions {
             source_dir: template,
             output_path: package_path.clone(),
-            secret_file: temp.path().join(".apak.secret"),
+            secret_file: secret_file.clone(),
         })
         .expect("pack");
         assert_eq!(report.asset_count, 1);
@@ -677,7 +698,7 @@ license = "MIT"
         };
         let install = install_package(InstallOptions {
             package_path,
-            secret_file: temp.path().join(".apak.secret"),
+            secret_file,
             roots,
         })
         .expect("install");

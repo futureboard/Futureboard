@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use apak::{
-    InstallOptions, InstallRoots, PackOptions, default_secret_file, install_package, pack_template,
-    read_package_info, write_template,
+    InstallOptions, InstallRoots, PackOptions, default_secret_file, ensure_secret_file,
+    install_package, pack_template, read_package_info, write_template,
 };
 use clap::{Parser, Subcommand};
 
@@ -119,10 +119,15 @@ fn run_makeapak_command(args: MakeApakArgs) -> apak::Result<()> {
 }
 
 fn pack(source: PathBuf, output: PathBuf, secret_file: Option<PathBuf>) -> apak::Result<()> {
+    let secret_file = secret_file.unwrap_or_else(default_secret_file);
+    if ensure_secret_file(&secret_file)? {
+        println!("Generated APAK secret: {}", secret_file.display());
+    }
+
     let report = pack_template(PackOptions {
         source_dir: source,
         output_path: output,
-        secret_file: secret_file.unwrap_or_else(default_secret_file),
+        secret_file,
     })?;
     print_summary(&report.summary);
     println!("Assets: {}", report.asset_count);

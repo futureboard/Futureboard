@@ -16,14 +16,29 @@ use crate::components::inspector_debug;
 use crate::components::panel::{InspectorCallbacks, InspectorRoutingCombo};
 use crate::components::plugin_picker::PluginInsertKind;
 use crate::components::timeline::timeline_state::{
-    clip_output_local_to_source_sample, vsti_output_bus_strip_indices, AudioClipStretchState,
-    TimelineState, TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
-    WarpMarker,
+    clip_output_local_to_source_sample, vsti_output_bus_strip_indices,
+    vsti_output_child_channels_for_bus_layout, AudioClipStretchState, TimelineState,
+    TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting, WarpMarker,
 };
 use crate::overlay::OverlayAnchor;
 
 use super::engine_snapshot::volume_norm_to_linear;
 use super::StudioLayout;
+
+/// Stereo channel pair (1-based) of the VSTi output bus that owns `channel`,
+/// from the real per-bus channel counts. A mono bus reports `(ch, ch)` so it is
+/// routed as a duplicated stereo pair. Falls back to `(channel, channel)` when
+/// the layout is unknown so a single tick still routes both sides.
+fn vsti_output_bus_pair_for_channel(bus_counts: &[u8], channel: u8) -> (u8, u8) {
+    for bus_index in vsti_output_bus_strip_indices(bus_counts) {
+        if let Some((l, r)) = vsti_output_child_channels_for_bus_layout(bus_counts, bus_index) {
+            if channel == l || channel == r {
+                return (l, r);
+            }
+        }
+    }
+    (channel, channel)
+}
 
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 type StrF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
@@ -787,10 +802,25 @@ impl StudioLayout {
                             } else {
                                 slot.enabled_audio_output_channels.clone()
                             };
+                            // Route per OUTPUT BUS, not per single channel: enabling
+                            // an output sends its whole stereo pair so one tick gives
+                            // full (left+right) sound. A mono bus reports (ch, ch),
+                            // so it routes as a duplicated stereo pair. This is the
+                            // auto-detect the user expects instead of having to tick
+                            // both channels of every pair.
+                            let (pair_l, pair_r) = vsti_output_bus_pair_for_channel(
+                                &slot.output_bus_channel_counts,
+                                channel,
+                            );
                             if enabled {
-                                channels.push(channel);
-                            } else if channel > 2 {
-                                channels.retain(|ch| *ch != channel);
+                                channels.push(pair_l);
+                                channels.push(pair_r);
+                            } else {
+                                for ch in [pair_l, pair_r] {
+                                    if ch > 2 {
+                                        channels.retain(|c| *c != ch);
+                                    }
+                                }
                             }
                             if !channels.contains(&1) {
                                 channels.push(1);

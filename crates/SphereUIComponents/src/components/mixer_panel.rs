@@ -37,7 +37,8 @@ use crate::components::panel::FxSlotDrag;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
-    is_vsti_output_child_track_id, volume, vsti_output_child_insert_id, InsertLoadStatus,
+    is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range, vsti_output_bus_strip_indices,
+    vsti_output_child_channels_for_bus_layout, vsti_output_child_insert_id, InsertLoadStatus,
     InsertSlotState, MasterBusState, SendSlotState, TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
@@ -633,29 +634,50 @@ fn strip_header(
         )
 }
 
-fn normalized_vsti_output_channels(slot: &InsertSlotState) -> Vec<u8> {
-    let mut channels = if slot.enabled_audio_output_channels.is_empty() {
-        vec![1, 2]
-    } else {
-        slot.enabled_audio_output_channels.clone()
-    };
-    if !channels.contains(&1) {
-        channels.push(1);
-    }
-    if !channels.contains(&2) {
-        channels.push(2);
-    }
-    channels.retain(|channel| (1..=32).contains(channel));
-    channels.sort_unstable();
-    channels.dedup();
-    channels
+/// Output bus indices that get their own mixer sub-strip for this instrument
+/// insert, derived from the plugin's REAL per-bus output layout (never by
+/// blindly pairing channels two-by-two). One strip per real output bus:
+/// a mono bus is one strip, a stereo bus is one strip, a multi-channel bus is
+/// one strip. Mirrors `vsti_output_bus_strip_indices` / `ensure_vsti_output_child_tracks`
+/// so the visible sub-strips line up 1:1 with the model child tracks and the
+/// engine routes.
+fn vsti_output_bus_strips(slot: &InsertSlotState) -> Vec<u8> {
+    vsti_output_bus_strip_indices(&slot.output_bus_channel_counts)
 }
 
-fn vsti_output_subchannels(slot: &InsertSlotState) -> Vec<u8> {
-    normalized_vsti_output_channels(slot)
-        .into_iter()
-        .filter(|channel| *channel > 2)
-        .collect()
+/// Human-readable label for a VSTi output bus strip, reflecting the real bus
+/// layout: `"Out 1 (Mono / Ch 1)"`, `"Out 2 (Mono / Ch 2)"`,
+/// `"Out 3 (Stereo / Ch 3/4)"`, or `"Out N (Multi / Ch X-Y)"` for buses with
+/// more than two channels. Falls back to a plain channel-pair label when the
+/// host has not reported a layout yet.
+fn vsti_output_bus_label(bus_counts: &[u8], bus_index: u8) -> String {
+    let n = (bus_index as u16).saturating_add(1);
+    // A single multichannel bus is split into flat stereo pairs; describe each
+    // pair from its mapped flat channels rather than the (single) bus range.
+    if bus_counts.len() == 1 && bus_counts[0] > 2 {
+        if let Some((l, r)) = vsti_output_child_channels_for_bus_layout(bus_counts, bus_index) {
+            return if l == r {
+                format!("Out {n} (Mono / Ch {l})")
+            } else {
+                format!("Out {n} (Stereo / Ch {l}/{r})")
+            };
+        }
+    }
+    if let Some((start, count)) = vsti_output_bus_flat_range(bus_counts, bus_index as usize) {
+        return match count {
+            0 | 1 => format!("Out {n} (Mono / Ch {start})"),
+            2 => format!("Out {n} (Stereo / Ch {start}/{})", start.saturating_add(1)),
+            c => {
+                let end = (start as u16).saturating_add(c as u16).saturating_sub(1);
+                format!("Out {n} (Multi / Ch {start}-{end})")
+            }
+        };
+    }
+    // Unknown layout (host hasn't reported): legacy consecutive pair label.
+    if let Some((l, r)) = vsti_output_child_channels_for_bus_layout(bus_counts, bus_index) {
+        return format!("Out {n} (Ch {l}/{r})");
+    }
+    format!("Out {n}")
 }
 
 fn log_vsti_child_meter_subscribe_once(track: &TrackState) {
@@ -1566,7 +1588,7 @@ fn channel_strip(
         .map(|slot| {
             let group_key = vsti_output_group_key(&track.id, &slot.id);
             let expanded = vsti_group_expanded.unwrap_or(true);
-            let count = vsti_output_subchannels(slot).len();
+            let count = vsti_output_bus_strips(slot).len();
             (group_key, expanded, count)
         });
 
@@ -1632,11 +1654,15 @@ fn channel_strip(
         .child(strip_footer(&track.name))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn vsti_output_sub_strip(
-    track: &TrackState,
+    parent_track: &TrackState,
+    child_track: &TrackState,
     track_index: usize,
     insert_id: &str,
-    channel: u8,
+    bus_index: u8,
+    bus_counts: &[u8],
+    selected_track_id: Option<&str>,
     vsti_output_meters: &std::collections::HashMap<String, VstiOutputMeterState>,
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
@@ -1645,39 +1671,47 @@ fn vsti_output_sub_strip(
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        track.id.hash(&mut hasher);
-        channel.hash(&mut hasher);
+        child_track.id.hash(&mut hasher);
         hasher.finish() as usize
     };
-    let output_label = format!("Ch {channel}");
-    let mut sub_track = track.clone();
-    sub_track.id = format!("{}::vsti-output-{channel}", track.id);
-    sub_track.name = format!("Out {output_label}");
+    let bus_label = vsti_output_bus_label(bus_counts, bus_index);
+    // Render the backing per-bus child track so its mute/solo/fader/pan and VU
+    // are the real, engine-routed per-output-bus state — never the parent's.
+    let mut sub_track = child_track.clone();
+    sub_track.name = bus_label.clone();
     sub_track.inserts.clear();
     sub_track.sends.clear();
-    if let Some(meter) =
-        vsti_output_meters.get(&vsti_output_meter_key(&track.id, insert_id, channel))
-    {
-        sub_track.meter_level_l = meter.level;
-        sub_track.meter_level_r = meter.level;
-        sub_track.meter_peak_hold_l = meter.peak_hold;
-        sub_track.meter_peak_hold_r = meter.peak_hold;
-        sub_track.meter_clip = meter.clip;
-    } else {
-        sub_track.meter_level_l = 0.0;
-        sub_track.meter_level_r = 0.0;
-        sub_track.meter_peak_hold_l = 0.0;
-        sub_track.meter_peak_hold_r = 0.0;
-        sub_track.meter_clip = false;
+    // Per-output-bus VU: the child track already carries engine pass-2 L/R
+    // peaks. Fall back to the dedicated per-channel meter map for this bus's
+    // flat channels when the child track meter has not been populated yet.
+    if sub_track.meter_level_l <= 0.0 && sub_track.meter_level_r <= 0.0 {
+        if let Some((channel_l, channel_r)) =
+            vsti_output_child_channels_for_bus_layout(bus_counts, bus_index)
+        {
+            let meter_l =
+                vsti_output_meters.get(&vsti_output_meter_key(&parent_track.id, insert_id, channel_l));
+            let meter_r =
+                vsti_output_meters.get(&vsti_output_meter_key(&parent_track.id, insert_id, channel_r));
+            if let Some(meter) = meter_l {
+                sub_track.meter_level_l = meter.level;
+                sub_track.meter_peak_hold_l = meter.peak_hold;
+                sub_track.meter_clip |= meter.clip;
+            }
+            if let Some(meter) = meter_r {
+                sub_track.meter_level_r = meter.level;
+                sub_track.meter_peak_hold_r = meter.peak_hold;
+                sub_track.meter_clip |= meter.clip;
+            }
+        }
     }
-    let sub_callbacks = noop_mixer_callbacks();
-    let select_id = track.id.clone();
+    let is_selected = selected_track_id == Some(child_track.id.as_str());
+    let select_id = child_track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =
         move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
             select_cb(&select_id, w, cx);
         };
-    let context_id = track.id.clone();
+    let context_id = child_track.id.clone();
     let on_context = callbacks.on_context_menu.clone();
     let (insert_h, send_h) = clamp_mixer_section_heights_for_strip(
         split.insert_px,
@@ -1708,15 +1742,18 @@ fn vsti_output_sub_strip(
                 },
             )
         })
-        .child(div().w_full().h(px(2.0)).bg(track.color))
+        .child(div().w_full().h(px(2.0)).bg(parent_track.color))
+        // Real callbacks: mute / solo / volume / pan all target the child track
+        // id (via button_row / pan_section / fader_area below), so S/M and the
+        // fader operate per output bus.
         .child(strip_header(&sub_track, track_index, None))
-        .child(inert_rack_section("INSERTS", track.color, insert_h))
+        .child(inert_rack_section("INSERTS", parent_track.color, insert_h))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::InsertSend,
             split,
         ))
-        .child(inert_rack_section("SENDS", track.color, send_h))
+        .child(inert_rack_section("SENDS", parent_track.color, send_h))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::SendFader,
@@ -1730,11 +1767,11 @@ fn vsti_output_sub_strip(
                 .min_h(px(LOWER_CONTROL_MIN_H))
                 .overflow_hidden()
                 .w_full()
-                .child(pan_section(&sub_track, &sub_callbacks, false))
-                .child(fader_area(&sub_track, &sub_callbacks, false))
-                .child(button_row(&sub_track, &sub_callbacks, id_num)),
+                .child(pan_section(&sub_track, callbacks, is_selected))
+                .child(fader_area(&sub_track, callbacks, is_selected))
+                .child(button_row(&sub_track, callbacks, id_num)),
         )
-        .child(strip_footer(&format!("{} {}", track.name, output_label)))
+        .child(strip_footer(&bus_label))
 }
 
 // ─── Master block ───────────────────────────────────────────────────────────
@@ -1975,10 +2012,14 @@ enum MixerRenderItem {
     Track {
         track_index: usize,
     },
+    /// One mixer sub-strip per REAL plugin output bus. `child_index` points at
+    /// the backing `vsti-out:{insert}:bus:{bus_index}` model track that owns the
+    /// per-bus mute/solo/fader/meter state; `bus_index` is the plugin output bus.
     VstiOutput {
-        track_index: usize,
+        parent_index: usize,
         insert_index: usize,
-        channel: u8,
+        bus_index: u8,
+        child_index: usize,
     },
 }
 
@@ -2003,13 +2044,33 @@ fn collect_mixer_render_items(
         if collapsed_vsti_output_groups.contains(&group_key) {
             continue;
         }
-        items.extend(vsti_output_subchannels(slot).into_iter().map(|channel| {
-            MixerRenderItem::VstiOutput {
-                track_index,
+        // One sub-strip per backing child track (real output bus). Iterating the
+        // model child tracks — rather than re-deriving channel pairs here — keeps
+        // the visible strips, the engine routes, and per-bus mute/solo/meters in
+        // perfect 1:1 lockstep with `ensure_vsti_output_child_tracks`.
+        let mut children: Vec<(u8, usize)> = tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(child_index, child)| {
+                if vsti_output_child_insert_id(&child.id) != Some(slot.id.as_str()) {
+                    return None;
+                }
+                let bus_index = child
+                    .id
+                    .rsplit_once(":bus:")
+                    .and_then(|(_, bus)| bus.parse::<u8>().ok())?;
+                Some((bus_index, child_index))
+            })
+            .collect();
+        children.sort_by_key(|(bus_index, _)| *bus_index);
+        for (bus_index, child_index) in children {
+            items.push(MixerRenderItem::VstiOutput {
+                parent_index: track_index,
                 insert_index: 0,
-                channel,
-            }
-        }));
+                bus_index,
+                child_index,
+            });
+        }
     }
     items
 }
@@ -2115,20 +2176,30 @@ pub fn mixer_panel(
                 .into_any_element()
             }
             MixerRenderItem::VstiOutput {
-                track_index,
+                parent_index,
                 insert_index,
-                channel,
-            } => vsti_output_sub_strip(
-                &tracks[track_index],
-                track_index,
-                &tracks[track_index].inserts[insert_index].id,
-                channel,
-                vsti_output_meters,
-                &callbacks,
-                &split,
-                strip_available_px,
-            )
-            .into_any_element(),
+                bus_index,
+                child_index,
+            } => {
+                let parent = &tracks[parent_index];
+                let bus_counts = parent.inserts[insert_index]
+                    .output_bus_channel_counts
+                    .clone();
+                vsti_output_sub_strip(
+                    parent,
+                    &tracks[child_index],
+                    parent_index,
+                    &parent.inserts[insert_index].id,
+                    bus_index,
+                    &bus_counts,
+                    selected_track_id,
+                    vsti_output_meters,
+                    &callbacks,
+                    &split,
+                    strip_available_px,
+                )
+                .into_any_element()
+            }
         })
         .collect();
 
@@ -2236,6 +2307,33 @@ pub fn mixer_panel(
 }
 
 #[cfg(test)]
+mod vsti_output_label_tests {
+    use super::vsti_output_bus_label;
+
+    #[test]
+    fn mixed_mono_and_stereo_buses_get_real_layout_labels() {
+        // bus0 mono (ch1), bus1 mono (ch2), bus2 stereo (ch3/4).
+        let counts = [1u8, 1, 2];
+        assert_eq!(vsti_output_bus_label(&counts, 0), "Out 1 (Mono / Ch 1)");
+        assert_eq!(vsti_output_bus_label(&counts, 1), "Out 2 (Mono / Ch 2)");
+        assert_eq!(vsti_output_bus_label(&counts, 2), "Out 3 (Stereo / Ch 3/4)");
+    }
+
+    #[test]
+    fn multichannel_bus_label_shows_full_channel_range() {
+        // bus0 stereo (ch1/2), bus1 quad (ch3-6).
+        let counts = [2u8, 4];
+        assert_eq!(vsti_output_bus_label(&counts, 1), "Out 2 (Multi / Ch 3-6)");
+    }
+
+    #[test]
+    fn single_multichannel_bus_labels_each_flat_pair() {
+        assert_eq!(vsti_output_bus_label(&[8u8], 0), "Out 1 (Stereo / Ch 1/2)");
+        assert_eq!(vsti_output_bus_label(&[8u8], 1), "Out 2 (Stereo / Ch 3/4)");
+    }
+}
+
+#[cfg(test)]
 mod collapse_filter_tests {
     use super::{collect_mixer_render_items, vsti_output_group_key, MixerRenderItem};
     use crate::components::timeline::timeline_state::{
@@ -2273,15 +2371,16 @@ mod collapse_filter_tests {
     fn expanded_includes_children_collapsed_hides_only_children() {
         let (state, track_id, slot) = drum_scenario(&[2, 2, 2]);
 
-        // Expanded (empty collapsed set): parent + Ch 3/4/5/6 sub-strips.
+        // Expanded (empty collapsed set): parent + one sub-strip per REAL output
+        // bus (bus 0/1/2), never split per channel into 4 strips.
         let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
-        assert_eq!(expanded.len(), 5);
+        assert_eq!(expanded.len(), 4);
         assert_eq!(
             expanded
                 .iter()
                 .filter(|item| matches!(item, MixerRenderItem::VstiOutput { .. }))
                 .count(),
-            4
+            3
         );
 
         // Collapsed: child strips filtered out, only the parent strip remains.
@@ -2299,18 +2398,34 @@ mod collapse_filter_tests {
     }
 
     #[test]
-    fn expanded_single_multichannel_bus_includes_flat_pair_children() {
-        let (state, track_id, slot) = drum_scenario(&[8]);
-
-        // Expanded: one parent strip + Ch 3/4/5/6/7/8 sub-strips.
+    fn mixed_mono_and_stereo_buses_show_one_strip_per_bus() {
+        // Acceptance: outputs 1: mono, 2: mono, 3/4: stereo → THREE output
+        // strips (one per bus), never two blindly-paired stereo strips.
+        let (state, _track_id, _slot) = drum_scenario(&[1, 1, 2]);
         let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
-        assert_eq!(expanded.len(), 7);
         assert_eq!(
             expanded
                 .iter()
                 .filter(|item| matches!(item, MixerRenderItem::VstiOutput { .. }))
                 .count(),
-            6
+            3
+        );
+    }
+
+    #[test]
+    fn expanded_single_multichannel_bus_includes_flat_pair_children() {
+        let (state, track_id, slot) = drum_scenario(&[8]);
+
+        // Expanded: one parent strip + one sub-strip per flat stereo pair of the
+        // single 8-channel bus (Ch 1/2, 3/4, 5/6, 7/8).
+        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
+        assert_eq!(expanded.len(), 5);
+        assert_eq!(
+            expanded
+                .iter()
+                .filter(|item| matches!(item, MixerRenderItem::VstiOutput { .. }))
+                .count(),
+            4
         );
 
         // Collapsed: only the view list hides the children; the state still keeps

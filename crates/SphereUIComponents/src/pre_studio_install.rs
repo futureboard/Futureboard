@@ -361,7 +361,10 @@ fn poll_bridge_events(runtime: &SharedPluginBridgeRuntime, timeline_state: &mut 
                 }
             }
             ClientEvent::Host(HostEvent::ProcessingPrepared {
-                plugin_instance_id, ..
+                plugin_instance_id,
+                output_channels,
+                output_bus_channels,
+                ..
             }) => {
                 for track_id in timeline_state.insert_owner_ids_containing(&plugin_instance_id) {
                     let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
@@ -371,6 +374,23 @@ fn poll_bridge_events(runtime: &SharedPluginBridgeRuntime, timeline_state: &mut 
                         PluginRuntimeBackend::ExternalBridge,
                         PluginRuntimeState::Active,
                         host_pid,
+                    );
+                    // Capture the real per-bus output layout from the restored
+                    // plugin. This event is drained HERE during project restore,
+                    // so the studio event pump never sees it — without recording
+                    // the layout now, multi-out plugins loaded from a saved
+                    // project would show only "Main 1/2" and never build their
+                    // per-bus child strips. Layout must be set before
+                    // auto_enable so child-strip creation sees the bus counts.
+                    timeline_state.set_insert_output_bus_layout(
+                        &track_id,
+                        &plugin_instance_id,
+                        &output_bus_channels,
+                    );
+                    timeline_state.auto_enable_detected_insert_outputs(
+                        &track_id,
+                        &plugin_instance_id,
+                        output_channels,
                     );
                 }
             }

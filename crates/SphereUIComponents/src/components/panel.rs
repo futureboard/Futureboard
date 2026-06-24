@@ -32,7 +32,8 @@ use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::slider::slider;
 use crate::components::text_input::{text_field, TextInputState};
 use crate::components::timeline::timeline_state::{
-    volume, AudioClipStretchState, ClipType, InsertLoadStatus, InsertSlotState, StretchAlgorithm,
+    volume, vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
+    AudioClipStretchState, ClipType, InsertLoadStatus, InsertSlotState, StretchAlgorithm,
     StretchMode, TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
     TrackState, TrackType,
 };
@@ -664,19 +665,34 @@ fn vsti_output_dropdown(
         |_, _, _| {},
     ));
 
-    for channel in 3u8..=32 {
+    // One row per OUTPUT BUS (stereo pair) beyond Main: ticking it routes the
+    // whole pair, so a single tick gives full left+right sound (a mono bus
+    // reports a duplicated pair). Bus 0 is Main 1/2, already shown above.
+    let bus_counts = &slot.output_bus_channel_counts;
+    for bus_index in vsti_output_bus_strip_indices(bus_counts) {
+        if bus_index == 0 {
+            continue;
+        }
+        let Some((l, r)) = vsti_output_child_channels_for_bus_layout(bus_counts, bus_index) else {
+            continue;
+        };
         let track_id = track.id.clone();
         let insert_id = slot.id.clone();
-        let checked = selected.contains(&channel);
+        let checked = selected.contains(&l) && selected.contains(&r);
+        let label = if l == r {
+            format!("Output {} (Ch {l})", bus_index + 1)
+        } else {
+            format!("Output {} (Ch {l}/{r})", bus_index + 1)
+        };
         let toggle = callbacks.on_toggle_insert_output_channel.clone();
         menu = menu.child(fb_checkbox(
-            ("vsti-output-channel", channel as u32),
-            format!("Channel {channel}"),
+            ("vsti-output-bus", bus_index as u32),
+            label,
             checked,
             true,
             move |_, window, cx| {
                 toggle(
-                    &(track_id.clone(), insert_id.clone(), channel, !checked),
+                    &(track_id.clone(), insert_id.clone(), l, !checked),
                     window,
                     cx,
                 )

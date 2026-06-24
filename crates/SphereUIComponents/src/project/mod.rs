@@ -663,6 +663,13 @@ impl From<&TimelineState> for FutureboardProject {
         let tracks = tl
             .tracks
             .iter()
+            // VSTi multi-out child strips (`vsti-out:*`) are runtime-derived from
+            // the plugin's reported output bus layout and re-created on load; they
+            // must never be persisted, or they would accumulate and inflate the
+            // saved track count on every save/load cycle.
+            .filter(|t| {
+                !crate::components::timeline::timeline_state::is_vsti_output_child_track_id(&t.id)
+            })
             .map(|t| {
                 let track_type = match t.track_type {
                     TlTrackType::Audio => ProjectTrackType::Audio,

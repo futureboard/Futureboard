@@ -31,6 +31,20 @@ macro_rules! session_log {
     };
 }
 
+/// Number of persisted project tracks in the live timeline, excluding runtime
+/// VSTi multi-out child strips (`vsti-out:*`). Those are derived from a plugin's
+/// reported output bus layout after load and are not part of the saved project,
+/// so the post-restore track-count integrity check must ignore them.
+fn persisted_track_count(
+    tracks: &[crate::components::timeline::timeline_state::TrackState],
+) -> usize {
+    use crate::components::timeline::timeline_state::is_vsti_output_child_track_id;
+    tracks
+        .iter()
+        .filter(|track| !is_vsti_output_child_track_id(&track.id))
+        .count()
+}
+
 impl StudioLayout {
     /// Capture the live session for rollback before an in-studio project swap.
     pub fn capture_session_rollback_snapshot(
@@ -175,7 +189,12 @@ impl StudioLayout {
             .push(&project.name, path.clone(), now_secs());
         self.sync_recent_to_switcher();
 
-        let restored_tracks = self.timeline.read(cx).state.tracks.len();
+        // Count only persisted project tracks. VSTi multi-out child strips
+        // (`vsti-out:*`) are runtime-derived from the plugin's output bus layout
+        // and are NOT part of the saved project, so they must never count toward
+        // the integrity check — otherwise restoring a multi-out instrument fails
+        // the check and the studio never mounts (blank screen).
+        let restored_tracks = persisted_track_count(&self.timeline.read(cx).state.tracks);
         if restored_tracks != expected_tracks {
             session_log!(
                 "integrity check failed: expected {expected_tracks} tracks, restored {restored_tracks}"
@@ -535,7 +554,7 @@ impl StudioLayout {
             timeline.reset_input_state();
             apply_to_timeline(project, &mut timeline.state);
             cx.notify();
-            timeline.state.tracks.len()
+            persisted_track_count(&timeline.state.tracks)
         });
 
         if restored_tracks != expected_tracks {

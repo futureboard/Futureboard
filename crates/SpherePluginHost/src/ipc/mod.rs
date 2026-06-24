@@ -60,9 +60,23 @@ pub enum HostCommand {
     /// travel as a `u64`. The main app must keep the HWND alive until the host
     /// reports [`HostEvent::EditorClosed`].
     OpenEditorWithParentHwnd {
+        #[serde(default)]
+        track_id: Option<String>,
+        #[serde(default)]
+        track_index: Option<u32>,
+        #[serde(default)]
+        track_name: Option<String>,
+        #[serde(default)]
+        plugin_slot_id: Option<String>,
         plugin_instance_id: String,
         plugin_path: String,
         class_id: String,
+        #[serde(default)]
+        plugin_uid: Option<String>,
+        #[serde(default)]
+        plugin_display_name: Option<String>,
+        #[serde(default)]
+        owner_hwnd: Option<u64>,
         parent_hwnd: u64,
         width: u32,
         height: u32,

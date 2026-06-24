@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -23,8 +24,19 @@ constexpr UINT_PTR kWakeTimerTop = 0xDA01;
 constexpr UINT_PTR kWakeTimerContent = 0xDA02;
 constexpr int kTitlebarLogicalH = 32;
 constexpr int kTitleButtonLogicalW = 46;
+constexpr int kTitleTextLeftLogical = 12;
+constexpr int kTitleTextRightGapLogical = 8;
 
 enum Button { kBtnNone = -1, kBtnPin = 0, kBtnMin = 1, kBtnMax = 2, kBtnClose = 3 };
+
+struct TitlebarLayout {
+  int dpi = 96;
+  int client_w = 0;
+  int titlebar_h = 0;
+  int button_w = 0;
+  RECT title_text_rect{0, 0, 0, 0};
+  RECT buttons[4]{};
+};
 
 struct Context {
   DauxEditorWindow window{};
@@ -32,6 +44,14 @@ struct Context {
   int hover{kBtnNone};
   int press{kBtnNone};
   bool tracking{false};
+  int logged_layout_dpi{0};
+  int logged_layout_w{0};
+  // Content "Loading Plugin" overlay, drawn until the plug-in's IPlugView
+  // attaches (or, on failure, replaced by an error line). `plugin_name` is the
+  // display name; `load_failed`/`error_text` drive the failure state.
+  std::wstring plugin_name;
+  std::wstring error_text;
+  bool load_failed{false};
 };
 
 HWND hwnd(void* p) { return reinterpret_cast<HWND>(p); }
@@ -49,6 +69,61 @@ int titlebar_h(HWND h) {
 
 int button_w(HWND h) {
   return MulDiv(kTitleButtonLogicalW, static_cast<int>(dpi(h)), 96);
+}
+
+int daux_dpi_scale(int value, int sdpi) {
+  return MulDiv(value, sdpi > 0 ? sdpi : 96, 96);
+}
+
+float daux_dpi_scale_f(float value, int sdpi) {
+  return value * static_cast<float>(sdpi > 0 ? sdpi : 96) / 96.0f;
+}
+
+RECT button_rect_px(int client_w, int bw, int th, int button) {
+  const int slot = kBtnClose - button;
+  return RECT{client_w - bw * (slot + 1), 0, client_w - bw * slot, th};
+}
+
+TitlebarLayout compute_titlebar_layout(int client_w, int sdpi) {
+  TitlebarLayout layout{};
+  layout.dpi = sdpi > 0 ? sdpi : 96;
+  layout.client_w = std::max(0, client_w);
+  layout.titlebar_h = daux_dpi_scale(kTitlebarLogicalH, layout.dpi);
+  layout.button_w = daux_dpi_scale(kTitleButtonLogicalW, layout.dpi);
+  for (int b = kBtnPin; b <= kBtnClose; ++b) {
+    layout.buttons[b] = button_rect_px(layout.client_w, layout.button_w, layout.titlebar_h, b);
+  }
+  const int left = daux_dpi_scale(kTitleTextLeftLogical, layout.dpi);
+  const int gap = daux_dpi_scale(kTitleTextRightGapLogical, layout.dpi);
+  const int first_button_left = layout.buttons[kBtnPin].left;
+  layout.title_text_rect = RECT{
+      left,
+      0,
+      std::max(left, first_button_left - gap),
+      layout.titlebar_h,
+  };
+  return layout;
+}
+
+void log_titlebar_layout_if_needed(HWND h, Context* c, const TitlebarLayout& layout) {
+  if (!c) return;
+  if (c->logged_layout_dpi == layout.dpi && c->logged_layout_w == layout.client_w) return;
+  c->logged_layout_dpi = layout.dpi;
+  c->logged_layout_w = layout.client_w;
+  std::fprintf(stderr, "[NativeEditorShell] dpi=%d\n", layout.dpi);
+  std::fprintf(stderr, "[NativeEditorShell] titlebar_h=%d\n", layout.titlebar_h);
+  std::fprintf(stderr, "[NativeEditorShell] title_rect=(%ld,%ld,%ld,%ld)\n",
+               layout.title_text_rect.left, layout.title_text_rect.top,
+               layout.title_text_rect.right, layout.title_text_rect.bottom);
+  const char* names[4] = {"pin", "min", "max", "close"};
+  for (int b = kBtnPin; b <= kBtnClose; ++b) {
+    const RECT& r = layout.buttons[b];
+    std::fprintf(stderr, "[NativeEditorShell] button_rect %s=(%ld,%ld,%ld,%ld)\n",
+                 names[b], r.left, r.top, r.right, r.bottom);
+  }
+  std::fprintf(stderr, "[NativeEditorShell] dwrite_font_size=12.00dip %.2fpx\n",
+               daux_dpi_scale_f(12.0f, layout.dpi));
+  (void)h;
 }
 
 bool live(Context* c) {
@@ -197,6 +272,9 @@ void dwrite_log_once(const char* status, HRESULT hr) {
 bool draw_dwrite_text(HDC dest, RECT rect, const wchar_t* text, COLORREF bg, COLORREF fg, int sdpi) {
   const int w = std::max<LONG>(1, rect.right - rect.left);
   const int h = std::max<LONG>(1, rect.bottom - rect.top);
+  const FLOAT ppd = static_cast<FLOAT>(sdpi > 0 ? sdpi : 96) / 96.0f;
+  const FLOAT layout_w_dip = std::max<FLOAT>(1.0f, static_cast<FLOAT>(w) / ppd);
+  const FLOAT layout_h_dip = std::max<FLOAT>(1.0f, static_cast<FLOAT>(h) / ppd);
   HRESULT hr = S_OK;
   IDWriteFactory* factory = nullptr;
   IDWriteGdiInterop* gdi = nullptr;
@@ -221,7 +299,7 @@ bool draw_dwrite_text(HDC dest, RECT rect, const wchar_t* text, COLORREF bg, COL
     format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     const UINT32 len = text ? static_cast<UINT32>(wcsnlen_s(text, 1024)) : 0;
     hr = factory->CreateTextLayout(text ? text : L"", len, format,
-                                   static_cast<FLOAT>(w), static_cast<FLOAT>(h), &layout);
+                                   layout_w_dip, layout_h_dip, &layout);
   }
   if (SUCCEEDED(hr)) {
     hr = factory->CreateEllipsisTrimmingSign(format, &ellipsis);
@@ -237,7 +315,6 @@ bool draw_dwrite_text(HDC dest, RECT rect, const wchar_t* text, COLORREF bg, COL
     HBRUSH b = CreateSolidBrush(bg);
     FillRect(mem, &local, b);
     DeleteObject(b);
-    const FLOAT ppd = static_cast<FLOAT>(sdpi > 0 ? sdpi : 96) / 96.0f;
     target->SetPixelsPerDip(ppd);
     GdiDWriteRenderer renderer(target, params, fg, ppd);
     hr = layout->Draw(nullptr, &renderer, 0.0f, 0.0f);
@@ -254,6 +331,155 @@ bool draw_dwrite_text(HDC dest, RECT rect, const wchar_t* text, COLORREF bg, COL
   return SUCCEEDED(hr);
 }
 
+// Centered single-line text (DirectWrite via GDI interop). Used for the content
+// "Loading Plugin" overlay. Mirrors `draw_dwrite_text` but center-aligns the
+// run both horizontally and vertically inside `rect`. Returns false so callers
+// can fall back to a GDI `DrawTextW`.
+bool draw_dwrite_centered(HDC dest, RECT rect, const wchar_t* text, float size_dip,
+                          DWRITE_FONT_WEIGHT weight, COLORREF bg, COLORREF fg, int sdpi) {
+  const int w = std::max<LONG>(1, rect.right - rect.left);
+  const int h = std::max<LONG>(1, rect.bottom - rect.top);
+  const FLOAT ppd = static_cast<FLOAT>(sdpi > 0 ? sdpi : 96) / 96.0f;
+  const FLOAT layout_w_dip = std::max<FLOAT>(1.0f, static_cast<FLOAT>(w) / ppd);
+  const FLOAT layout_h_dip = std::max<FLOAT>(1.0f, static_cast<FLOAT>(h) / ppd);
+  HRESULT hr = S_OK;
+  IDWriteFactory* factory = nullptr;
+  IDWriteGdiInterop* gdi = nullptr;
+  IDWriteBitmapRenderTarget* target = nullptr;
+  IDWriteRenderingParams* params = nullptr;
+  IDWriteTextFormat* format = nullptr;
+  IDWriteTextLayout* layout = nullptr;
+  IDWriteInlineObject* ellipsis = nullptr;
+  hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                           reinterpret_cast<IUnknown**>(&factory));
+  if (SUCCEEDED(hr)) hr = factory->GetGdiInterop(&gdi);
+  if (SUCCEEDED(hr)) hr = gdi->CreateBitmapRenderTarget(dest, w, h, &target);
+  if (SUCCEEDED(hr)) hr = factory->CreateRenderingParams(&params);
+  if (SUCCEEDED(hr)) {
+    hr = factory->CreateTextFormat(L"Segoe UI", nullptr, weight,
+                                   DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                   size_dip, L"", &format);
+  }
+  if (SUCCEEDED(hr)) {
+    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    const UINT32 len = text ? static_cast<UINT32>(wcsnlen_s(text, 1024)) : 0;
+    hr = factory->CreateTextLayout(text ? text : L"", len, format,
+                                   layout_w_dip, layout_h_dip, &layout);
+  }
+  if (SUCCEEDED(hr)) {
+    hr = factory->CreateEllipsisTrimmingSign(format, &ellipsis);
+    if (SUCCEEDED(hr)) {
+      DWRITE_TRIMMING trimming{};
+      trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
+      layout->SetTrimming(&trimming, ellipsis);
+    }
+  }
+  if (SUCCEEDED(hr)) {
+    HDC mem = target->GetMemoryDC();
+    RECT local{0, 0, w, h};
+    HBRUSH b = CreateSolidBrush(bg);
+    FillRect(mem, &local, b);
+    DeleteObject(b);
+    target->SetPixelsPerDip(ppd);
+    GdiDWriteRenderer renderer(target, params, fg, ppd);
+    hr = layout->Draw(nullptr, &renderer, 0.0f, 0.0f);
+    if (SUCCEEDED(hr)) BitBlt(dest, rect.left, rect.top, w, h, mem, 0, 0, SRCCOPY);
+  }
+  release(ellipsis);
+  release(layout);
+  release(format);
+  release(params);
+  release(target);
+  release(gdi);
+  release(factory);
+  return SUCCEEDED(hr);
+}
+
+void draw_centered_line(HDC dc, RECT rect, const wchar_t* text, float size_dip,
+                        DWRITE_FONT_WEIGHT weight, COLORREF bg, COLORREF fg, int sdpi) {
+  if (!text || !*text) return;
+  if (draw_dwrite_centered(dc, rect, text, size_dip, weight, bg, fg, sdpi)) return;
+  // GDI fallback: same rect, horizontally + vertically centered, ellipsized.
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, fg);
+  HFONT font = CreateFontW(-MulDiv(static_cast<int>(size_dip), sdpi, 96), 0, 0, 0,
+                           weight >= DWRITE_FONT_WEIGHT_SEMI_BOLD ? FW_SEMIBOLD : FW_NORMAL,
+                           FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                           L"Segoe UI");
+  HGDIOBJ old_font = SelectObject(dc, font);
+  RECT r = rect;
+  DrawTextW(dc, text, -1, &r,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+  SelectObject(dc, old_font);
+  DeleteObject(font);
+}
+
+// Paint the content child's "Loading Plugin" / failure overlay. Drawn only
+// before the plug-in's IPlugView attaches (afterwards the plug-in's own child
+// HWNDs cover the content). `c` may be null during early window creation.
+void paint_content_overlay(HWND content, Context* c) {
+  PAINTSTRUCT ps{};
+  HDC dc = BeginPaint(content, &ps);
+  if (!dc) return;
+  RECT rc{};
+  GetClientRect(content, &rc);
+  const int cw = rc.right - rc.left;
+  const int ch = rc.bottom - rc.top;
+  const int sdpi = static_cast<int>(dpi(content));
+
+  const COLORREF bg = RGB(16, 17, 20);
+  const COLORREF label = RGB(150, 152, 158);
+  const COLORREF name = RGB(220, 221, 225);
+  const COLORREF error = RGB(229, 115, 115);
+
+  // Double-buffer the whole content into a memory bitmap to avoid flicker.
+  HDC mem = CreateCompatibleDC(dc);
+  HBITMAP bmp = CreateCompatibleBitmap(dc, std::max(1, cw), std::max(1, ch));
+  HGDIOBJ old_bmp = SelectObject(mem, bmp);
+  RECT full{0, 0, cw, ch};
+  HBRUSH bgb = CreateSolidBrush(bg);
+  FillRect(mem, &full, bgb);
+  DeleteObject(bgb);
+
+  // Only draw the overlay while the editor view has not attached yet (or has
+  // failed). Once attached, the plug-in owns the content area.
+  const bool show_overlay = !c || c->load_failed || !attached(c);
+  if (show_overlay && cw > 0 && ch > 0) {
+    const int line1_h = std::max(1, MulDiv(20, sdpi, 96));
+    const int gap = std::max(1, MulDiv(6, sdpi, 96));
+    const int line2_h = std::max(1, MulDiv(26, sdpi, 96));
+    const int pad = std::max(1, MulDiv(16, sdpi, 96));
+    const int block_h = line1_h + gap + line2_h;
+    const int top = rc.top + std::max(0, (ch - block_h) / 2);
+    RECT r1{rc.left + pad, top, rc.right - pad, top + line1_h};
+    RECT r2{rc.left + pad, top + line1_h + gap, rc.right - pad, top + line1_h + gap + line2_h};
+
+    std::wstring secondary =
+        c && !c->plugin_name.empty() ? c->plugin_name : std::wstring(L"Unknown Plugin");
+    if (c && c->load_failed) {
+      draw_centered_line(mem, r1, L"Plugin Failed to Load", 12.0f,
+                         DWRITE_FONT_WEIGHT_SEMI_BOLD, bg, error, sdpi);
+      const std::wstring detail = !c->error_text.empty() ? c->error_text : secondary;
+      draw_centered_line(mem, r2, detail.c_str(), 13.0f, DWRITE_FONT_WEIGHT_NORMAL, bg,
+                         label, sdpi);
+    } else {
+      draw_centered_line(mem, r1, L"Loading Plugin", 12.0f, DWRITE_FONT_WEIGHT_NORMAL, bg,
+                         label, sdpi);
+      draw_centered_line(mem, r2, secondary.c_str(), 15.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, bg,
+                         name, sdpi);
+    }
+  }
+
+  BitBlt(dc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
+  SelectObject(mem, old_bmp);
+  DeleteObject(bmp);
+  DeleteDC(mem);
+  EndPaint(content, &ps);
+}
+
 int button_at(HWND h, int x, int y) {
   const int th = titlebar_h(h);
   if (y < 0 || y >= th) return kBtnNone;
@@ -268,11 +494,6 @@ int button_at(HWND h, int x, int y) {
   return kBtnNone;
 }
 
-RECT button_rect(int client_w, int bw, int button) {
-  const int slot = kBtnClose - button;
-  return RECT{client_w - bw * (slot + 1), 0, client_w - bw * slot, 0};
-}
-
 void invalidate_titlebar(HWND h) {
   RECT tb{};
   GetClientRect(h, &tb);
@@ -285,10 +506,12 @@ void paint_titlebar(HWND h, Context* c) {
   HDC dc = BeginPaint(h, &ps);
   if (!dc) return;
   const int sdpi = static_cast<int>(dpi(h));
-  const int th = titlebar_h(h);
   RECT rc{};
   GetClientRect(h, &rc);
   const int cw = rc.right - rc.left;
+  const TitlebarLayout layout = compute_titlebar_layout(cw, sdpi);
+  log_titlebar_layout_if_needed(h, c, layout);
+  const int th = layout.titlebar_h;
   if (cw <= 0 || th <= 0) {
     EndPaint(h, &ps);
     return;
@@ -301,7 +524,7 @@ void paint_titlebar(HWND h, Context* c) {
   const COLORREF glyph_hot = RGB(245, 246, 248);
   const COLORREF button_hot = RGB(45, 47, 53);
   const COLORREF close_hot = RGB(196, 43, 43);
-  const int bw = button_w(h);
+  const int bw = layout.button_w;
   const int hover = c ? c->hover : kBtnNone;
 
   HDC mem = CreateCompatibleDC(dc);
@@ -314,8 +537,7 @@ void paint_titlebar(HWND h, Context* c) {
 
   for (int b = kBtnPin; b <= kBtnClose; ++b) {
     if (b != hover && !(b == kBtnPin && c && c->window.pinned)) continue;
-    RECT br = button_rect(cw, bw, b);
-    br.bottom = th;
+    RECT br = layout.buttons[b];
     HBRUSH hb = CreateSolidBrush(b == kBtnClose ? close_hot : button_hot);
     FillRect(mem, &br, hb);
     DeleteObject(hb);
@@ -323,8 +545,7 @@ void paint_titlebar(HWND h, Context* c) {
 
   wchar_t title[256] = {0};
   if (GetWindowTextW(h, title, 255) <= 0) wcscpy_s(title, 256, L"Plugin Editor");
-  const int pad = MulDiv(12, sdpi, 96);
-  RECT tr{pad, 0, cw - 4 * bw - pad, th};
+  RECT tr = layout.title_text_rect;
   if (!draw_dwrite_text(mem, tr, title, bg, title_text, sdpi)) {
     SetBkMode(mem, TRANSPARENT);
     SetTextColor(mem, title_text);
@@ -340,7 +561,7 @@ void paint_titlebar(HWND h, Context* c) {
   const int pw = std::max<int>(1, MulDiv(1, sdpi, 96));
   const int g = std::max<int>(3, MulDiv(5, sdpi, 96));
   for (int b = kBtnPin; b <= kBtnClose; ++b) {
-    const RECT br = button_rect(cw, bw, b);
+    const RECT br = layout.buttons[b];
     const int cx = br.left + bw / 2;
     const int cy = th / 2;
     const bool active_pin = b == kBtnPin && c && c->window.pinned;
@@ -503,11 +724,10 @@ LRESULT CALLBACK content_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       break;
-    case WM_ERASEBKGND: return 1;
+    case WM_ERASEBKGND: return 1;  // fully repainted in WM_PAINT (no flicker)
     case WM_PAINT: {
-      PAINTSTRUCT ps{};
-      BeginPaint(h, &ps);
-      EndPaint(h, &ps);
+      auto* c = reinterpret_cast<Context*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+      paint_content_overlay(h, c);
       return 0;
     }
     case WM_MOUSEACTIVATE: return MA_ACTIVATE;
@@ -654,11 +874,17 @@ LRESULT CALLBACK top_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     case WM_DPICHANGED:
       if (ok && c && lp) {
+        const unsigned old_dpi = dpi(h);
+        const unsigned new_dpi = LOWORD(wp) ? LOWORD(wp) : old_dpi;
         const RECT* suggested = reinterpret_cast<RECT*>(lp);
         SetWindowPos(h, nullptr, suggested->left, suggested->top,
                      suggested->right - suggested->left, suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+        std::fprintf(stderr, "[NativeEditorShell] wm_dpichanged old=%u new=%u\n",
+                     old_dpi, new_dpi);
         std::fprintf(stderr, "[PluginEditor] WM_DPICHANGED dpi=%u\n", dpi(h));
+        resize_content(h, c);
+        invalidate_titlebar(h);
         HWND content = hwnd(c->window.content_hwnd);
         if (content && IsWindow(content) && attached(c) && c->cb.on_dpi_changed) {
           RECT rc{};
@@ -943,6 +1169,12 @@ bool daux_editor_create_window(const DauxEditorWindowConfig* cfg, DauxEditorWind
   c->window.host_kind = cfg->host_kind;
   c->window.content_width = cfg->content_width > 0 ? cfg->content_width : 640;
   c->window.content_height = cfg->content_height > 0 ? cfg->content_height : 480;
+  // Name shown in the content "Loading Plugin" overlay (falls back to title).
+  if (cfg->plugin_name && *cfg->plugin_name) {
+    c->plugin_name = cfg->plugin_name;
+  } else if (cfg->title && *cfg->title) {
+    c->plugin_name = cfg->title;
+  }
   HWND top = create_top(*cfg, c);
   if (!top) {
     delete c;
@@ -960,6 +1192,9 @@ bool daux_editor_create_window(const DauxEditorWindowConfig* cfg, DauxEditorWind
   }
   c->window.content_hwnd = ptr(content);
   c->window.internal = c;
+  // Let `content_proc` reach the Context (loading/attached state + plugin name)
+  // so it can paint the "Loading Plugin" overlay until the view attaches.
+  SetWindowLongPtrW(content, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(c));
   *out = c->window;
   SetTimer(top, kWakeTimerTop, 250, nullptr);
   SetTimer(content, kWakeTimerContent, 250, nullptr);
@@ -980,7 +1215,10 @@ void daux_editor_destroy_window(DauxEditorWindow* window) {
   auto* c = reinterpret_cast<Context*>(window->internal);
   HWND content = hwnd(window->content_hwnd);
   HWND shell = hwnd(window->shell_hwnd);
-  if (content && IsWindow(content)) DestroyWindow(content);
+  if (content && IsWindow(content)) {
+    SetWindowLongPtrW(content, GWLP_USERDATA, 0);
+    DestroyWindow(content);
+  }
   if (shell && IsWindow(shell)) {
     SetWindowLongPtrW(shell, GWLP_USERDATA, 0);
     DestroyWindow(shell);
@@ -989,6 +1227,26 @@ void daux_editor_destroy_window(DauxEditorWindow* window) {
   *window = DauxEditorWindow{};
 #else
   (void)window;
+#endif
+}
+
+void daux_editor_set_load_state(DauxEditorWindow* window, bool failed, const wchar_t* message) {
+#if defined(_WIN32)
+  if (!window) return;
+  auto* c = reinterpret_cast<Context*>(window->internal);
+  if (!c) return;
+  c->load_failed = failed;
+  c->error_text = (failed && message) ? std::wstring(message) : std::wstring();
+  HWND content = hwnd(window->content_hwnd);
+  if (content && IsWindow(content)) {
+    InvalidateRect(content, nullptr, FALSE);
+    UpdateWindow(content);
+  }
+  std::fprintf(stderr, "[NativeEditorShell] load_state=%s\n", failed ? "failed" : "loading");
+#else
+  (void)window;
+  (void)failed;
+  (void)message;
 #endif
 }
 

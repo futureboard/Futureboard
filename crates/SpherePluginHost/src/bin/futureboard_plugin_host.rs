@@ -204,9 +204,18 @@ fn log_renderer_env() {
     }
 }
 
-/// Editor handles keyed by `plugin_instance_id` — the in-process
+/// Editor states keyed by `plugin_instance_id` — the in-process
 /// `PluginEditorRegistry` role, living inside the host process.
-type Registry = HashMap<String, u64>;
+#[derive(Debug, Clone)]
+struct EditorState {
+    plugin_instance_id: String,
+    host_hwnd: u64,
+    owner_hwnd: u64,
+    display_title: String,
+    state: &'static str,
+}
+
+type Registry = HashMap<String, EditorState>;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -253,6 +262,7 @@ struct PendingEditorAttach {
     request_id: u64,
     plugin_instance_id: String,
     parent_hwnd: u64,
+    display_title: String,
     started_at: Instant,
     stage: &'static str,
 }
@@ -263,6 +273,8 @@ struct EditorAttachResult {
     processor: DAUx::vst3_processor::Vst3RuntimeProcessor,
     handle: Option<u64>,
     attach_hwnd: u64,
+    owner_hwnd: u64,
+    display_title: String,
     preferred_width: u32,
     preferred_height: u32,
     resizable: bool,
@@ -856,7 +868,9 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     // Safe mode: no extra per-editor pump here — the main
                     // `pump_messages` below drains the whole thread queue.
                     if !platform::editor_safe_mode() {
-                        if let Some(host_hwnd) = registry.get(&instance_id).copied() {
+                        if let Some(host_hwnd) =
+                            registry.get(&instance_id).map(|state| state.host_hwnd)
+                        {
                             platform::pump_editor_messages(host_hwnd);
                         }
                     }
@@ -916,7 +930,10 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     };
                     processor.embed_refresh();
                     if !platform::editor_safe_mode() {
-                        if let Some(host_hwnd) = registry.get(&entry.instance_id).copied() {
+                        if let Some(host_hwnd) = registry
+                            .get(&entry.instance_id)
+                            .map(|state| state.host_hwnd)
+                        {
                             platform::pump_editor_messages(host_hwnd);
                         }
                     }
@@ -926,7 +943,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                 }
             });
         });
-        platform::set_editor_roots(registry.values().copied().collect());
+        platform::set_editor_roots(registry.values().map(|state| state.host_hwnd).collect());
         let dispatched = platform::pump_messages();
         // Freeze watchdog tiers (spec item 10):
         //  >50ms   name the slow section,
@@ -974,7 +991,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         {
             // Track plugin-created child/popup/dialog windows. Throttled to
             // ~1/sec (spec item 2); fully disabled in safe mode.
-            let roots: Vec<u64> = registry.values().copied().collect();
+            let roots: Vec<u64> = registry.values().map(|state| state.host_hwnd).collect();
             platform::log_window_tree_changes(&roots, &mut window_tree);
         }
         if tick.is_multiple_of(60) {
@@ -1195,16 +1212,42 @@ fn dispatch(
             );
         }
         HostCommand::OpenEditorWithParentHwnd {
+            track_id,
+            track_index,
+            track_name,
+            plugin_slot_id,
             plugin_instance_id,
+            class_id,
+            plugin_uid,
+            plugin_display_name,
+            owner_hwnd,
             parent_hwnd,
             width,
             height,
             dpi,
             ..
         } => {
+            let display_title = plugin_display_name
+                .clone()
+                .unwrap_or_else(|| plugin_instance_id.clone());
+            eprintln!(
+                "[OpenEditor/IPC] track_id={} track_index={} track_name={} slot_id={} instance_id={} class_id={} plugin_uid={} plugin={} owner_hwnd=0x{:x}",
+                track_id.as_deref().unwrap_or("<unknown>"),
+                track_index
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                track_name.as_deref().unwrap_or("<unknown>"),
+                plugin_slot_id.as_deref().unwrap_or("<unknown>"),
+                plugin_instance_id,
+                class_id,
+                plugin_uid.as_deref().unwrap_or("<unknown>"),
+                display_title,
+                owner_hwnd.unwrap_or(parent_hwnd),
+            );
             schedule_unified_editor_attach(
                 &plugin_instance_id,
-                parent_hwnd,
+                owner_hwnd.unwrap_or(parent_hwnd),
+                &display_title,
                 width,
                 height,
                 dpi,
@@ -1263,6 +1306,7 @@ fn dispatch(
             schedule_unified_editor_attach(
                 &plugin_instance_id,
                 parent_hwnd,
+                &plugin_instance_id,
                 width,
                 height,
                 dpi,
@@ -1865,6 +1909,7 @@ fn plugin_lifecycle_on_main_thread() -> bool {
 fn schedule_unified_editor_attach(
     plugin_instance_id: &str,
     parent_hwnd: u64,
+    display_title: &str,
     width: u32,
     height: u32,
     dpi: u32,
@@ -1884,6 +1929,7 @@ fn schedule_unified_editor_attach(
         std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE").unwrap_or_else(|_| "detached".to_string());
     eprintln!("[plugin-host] editor_mode={editor_mode} owner_hwnd=0x{parent_hwnd:x}");
     eprintln!("[VST3Editor] owner_hwnd=0x{parent_hwnd:x}");
+    eprintln!("[PluginHost] open_editor requested instance_id={plugin_instance_id}");
     eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
     eprintln!(
         "[EDITOR OPEN START]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nrequested_size={}x{}\ndpi={dpi}",
@@ -1896,10 +1942,27 @@ fn schedule_unified_editor_attach(
         std::process::id(),
         registry.contains_key(plugin_instance_id)
     );
-    if registry.contains_key(plugin_instance_id) {
+    if let Some(existing) = registry.get(plugin_instance_id) {
+        eprintln!(
+            "[PluginHost] editor_state instance_id={} state={}",
+            existing.plugin_instance_id, existing.state
+        );
         eprintln!("[plugin-host] editor already attached instance={plugin_instance_id}");
-        if let Some(hwnd) = registry.get(plugin_instance_id).copied() {
-            let focused = platform::focus_editor_window(hwnd);
+        if existing.plugin_instance_id != plugin_instance_id {
+            eprintln!(
+                "[VST3Editor] refusing to focus mismatched editor requested={plugin_instance_id} existing={}",
+                existing.plugin_instance_id
+            );
+        } else {
+            eprintln!(
+                "[PluginHost] focusing existing editor requested_instance_id={plugin_instance_id} existing_editor_instance_id={}",
+                existing.plugin_instance_id
+            );
+            eprintln!(
+                "[NativeEditorShell] title=\"{}\" owner_hwnd=0x{:x}",
+                existing.display_title, existing.owner_hwnd
+            );
+            let focused = platform::focus_editor_window(existing.host_hwnd);
             eprintln!("[NativeEditorShell] focus_existing result={focused}");
         }
         return;
@@ -1909,6 +1972,7 @@ fn schedule_unified_editor_attach(
         return;
     }
     if !loaded.contains_key(plugin_instance_id) {
+        eprintln!("[PluginHost] instance lookup result=not_found instance_id={plugin_instance_id}");
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -1917,6 +1981,7 @@ fn schedule_unified_editor_attach(
         return;
     }
     if !preview.lock().has_instance(plugin_instance_id) {
+        eprintln!("[PluginHost] instance lookup result=not_found instance_id={plugin_instance_id}");
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -1924,6 +1989,7 @@ fn schedule_unified_editor_attach(
         );
         return;
     }
+    eprintln!("[PluginHost] instance lookup result=found instance_id={plugin_instance_id}");
     if !platform::is_window(parent_hwnd) {
         emit_attach_failed(out, plugin_instance_id, "parent_hwnd is not a valid window");
         return;
@@ -1971,6 +2037,9 @@ fn schedule_unified_editor_attach(
             "[EDITOR THREAD CHECK]\nplugin_instance_id={plugin_instance_id}\nrequested_thread_id={thread_id}\ncurrent_thread_id={thread_id}\nis_audio_thread=false\nis_ui_thread=true\nis_plugin_host_thread=true\nmessage_loop_running=true\ncom_initialized=true\ndpi_awareness_context=per_monitor_v2"
         );
         processor.embed_set_instance_label(plugin_instance_id);
+        // Real plug-in name for the "Loading Plugin <name>" shell overlay.
+        processor.set_editor_title(display_title);
+        eprintln!("[VST3Editor] createView instance_id={plugin_instance_id}");
         eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
         eprintln!(
             "[VST3 ATTACH VIEW]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nsize={w}x{h}\nresult=begin"
@@ -2003,6 +2072,8 @@ fn schedule_unified_editor_attach(
                 processor,
                 handle,
                 attach_hwnd,
+                owner_hwnd: parent_hwnd,
+                display_title: display_title.to_string(),
                 preferred_width,
                 preferred_height,
                 resizable,
@@ -2023,6 +2094,7 @@ fn schedule_unified_editor_attach(
             request_id,
             plugin_instance_id: plugin_instance_id.to_string(),
             parent_hwnd,
+            display_title: display_title.to_string(),
             started_at: Instant::now(),
             stage: "attach_view",
         },
@@ -2038,6 +2110,7 @@ fn schedule_unified_editor_attach(
     );
     let tx = attach_result_tx.clone();
     let instance = plugin_instance_id.to_string();
+    let display_title = display_title.to_string();
     std::thread::Builder::new()
         .name(format!("plugin-editor-attach-{request_id}"))
         .spawn(move || {
@@ -2051,6 +2124,9 @@ fn schedule_unified_editor_attach(
                 "[plugin-host-ui-thread] editor_attach_thread_ready=true thread_id={thread_id} message_loop_running=true"
             );
             processor.embed_set_instance_label(&instance);
+            // Real plug-in name for the "Loading Plugin <name>" shell overlay.
+            processor.set_editor_title(&display_title);
+            eprintln!("[VST3Editor] createView instance_id={instance}");
             eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
             eprintln!(
                 "[VST3 CREATE VIEW]\nplugin_instance_id={instance}\nthread_id={thread_id}\nresult=begin"
@@ -2103,6 +2179,8 @@ fn schedule_unified_editor_attach(
                 processor: processor.clone(),
                 handle,
                 attach_hwnd,
+                owner_hwnd: parent_hwnd,
+                display_title,
                 preferred_width,
                 preferred_height,
                 resizable,
@@ -2189,13 +2267,28 @@ fn finalize_editor_attach(
             result.plugin_instance_id
         );
     }
+    let host_hwnd = if attach_hwnd != 0 {
+        attach_hwnd
+    } else {
+        handle
+    };
     registry.insert(
         result.plugin_instance_id.clone(),
-        if attach_hwnd != 0 {
-            attach_hwnd
-        } else {
-            handle
+        EditorState {
+            plugin_instance_id: result.plugin_instance_id.clone(),
+            host_hwnd,
+            owner_hwnd: result.owner_hwnd,
+            display_title: result.display_title.clone(),
+            state: "Open",
         },
+    );
+    eprintln!(
+        "[PluginHost] editor_state instance_id={} state=Open owner_hwnd=0x{:x} host_hwnd=0x{host_hwnd:x}",
+        result.plugin_instance_id, result.owner_hwnd
+    );
+    eprintln!(
+        "[VST3Editor] attached instance_id={} title=\"{}\"",
+        result.plugin_instance_id, result.display_title
     );
     preview.lock().set_continuous_mode(true);
     if platform::editor_safe_mode() {
@@ -2205,11 +2298,14 @@ fn finalize_editor_attach(
         platform::pump_editor_messages(attach_hwnd);
     }
     platform::log_capture_on_open(attach_hwnd);
-    platform::set_editor_roots(registry.values().copied().collect());
+    platform::set_editor_roots(registry.values().map(|state| state.host_hwnd).collect());
     platform::plugin_editor_snapshot("editor_open");
     eprintln!(
         "[PluginEditorResize] instance={} canResize={} preferred={}x{}",
-        result.plugin_instance_id, result.resizable, result.preferred_width, result.preferred_height
+        result.plugin_instance_id,
+        result.resizable,
+        result.preferred_width,
+        result.preferred_height
     );
     eprintln!(
         "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={}",
@@ -2278,6 +2374,10 @@ fn expire_editor_attach_requests(
             "[EDITOR HANG DETECTED]\nplugin_instance_id={}\nplugin_name=(unknown)\nstage={}\nelapsed_ms={elapsed_ms}\nui_thread_blocked=false\nipc_thread_blocked=false\naudio_thread_blocked=false\nlast_successful_step=resolve_instance\nlast_vst3_result=(pending)\nhost_process_alive=true",
             pending.plugin_instance_id,
             pending.stage
+        );
+        eprintln!(
+            "[PluginHost] editor_state instance_id={} state=Failed title=\"{}\"",
+            pending.plugin_instance_id, pending.display_title
         );
         eprintln!(
             "[EDITOR HANG WATCHDOG]\nplugin_instance_id={}\nstage={}\nelapsed_ms={elapsed_ms}\ntimeout_ms={}\nui_thread_responsive=true\nipc_thread_responsive=true\naudio_thread_responsive=true\nhost_process_alive=true",
@@ -2406,17 +2506,16 @@ mod platform {
         GetCapture, GetFocus, IsWindowEnabled, ReleaseCapture, SetFocus,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow,
-        DispatchMessageW, EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW,
-        GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-        IsChild, IsDialogMessageW, IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx,
-        PeekMessageW, PostThreadMessageW, SetForegroundWindow, SetWindowPos, ShowWindow,
-        TranslateMessage, WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT,
-        GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_OWNER, HWND_TOP, MSG,
-        MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-        SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
-        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        BringWindowToTop, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
+        EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW, GetParent, GetWindow,
+        GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsChild, IsDialogMessageW,
+        IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
+        SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint, CWP_ALL,
+        CW_USEDEFAULT, GA_PARENT, GA_ROOT, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD,
+        GW_OWNER, HWND_TOP, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+        WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
     /// End-to-end plugin debug switch (`FUTUREBOARD_PLUGIN_DEBUG=1`), shared
@@ -2604,7 +2703,15 @@ mod platform {
             }
             eprintln!("[NativeEditorShell] show/focus requested existing=0x{handle:x}");
             let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-            let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
             let _ = BringWindowToTop(hwnd);
             let ok = SetForegroundWindow(hwnd).as_bool();
             let _ = SetFocus(Some(hwnd));

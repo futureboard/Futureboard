@@ -1579,20 +1579,31 @@ mod imp {
                                 scale,
                             );
                             if !drew {
-                                let mut buf: Vec<u16> = text.encode_utf16().collect();
-                                let mut g = rc;
+                                let lines: Vec<&str> = text.lines().collect();
+                                let line_h = (em * scale * 1.45).round().max(16.0) as i32;
+                                let total_h = line_h * lines.len().max(1) as i32;
+                                let start_y = rc.top + ((rc.bottom - rc.top) - total_h) / 2;
                                 unsafe {
                                     SetBkMode(hdc, TRANSPARENT);
                                     SetTextColor(hdc, fg);
-                                    let _ = DrawTextW(
-                                        hdc,
-                                        &mut buf,
-                                        &mut g,
-                                        DT_SINGLELINE
-                                            | DT_VCENTER
-                                            | DT_NOPREFIX
-                                            | windows::Win32::Graphics::Gdi::DT_CENTER,
-                                    );
+                                    for (line_index, line) in lines.iter().enumerate() {
+                                        let mut buf: Vec<u16> = line.encode_utf16().collect();
+                                        let mut g = RECT {
+                                            left: rc.left,
+                                            top: start_y + line_h * line_index as i32,
+                                            right: rc.right,
+                                            bottom: start_y + line_h * (line_index as i32 + 1),
+                                        };
+                                        let _ = DrawTextW(
+                                            hdc,
+                                            &mut buf,
+                                            &mut g,
+                                            DT_SINGLELINE
+                                                | DT_VCENTER
+                                                | DT_NOPREFIX
+                                                | windows::Win32::Graphics::Gdi::DT_CENTER,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1680,7 +1691,7 @@ mod imp {
             owner_hwnd: Option<u64>,
         ) -> Option<Self> {
             ensure_classes();
-            let status = format!("Loading: {title}");
+            let status = format!("Loading Plugin\n{title}");
             let inner = ShellInner::new(title.to_string(), status, owner_hwnd);
             let scale = owner_hwnd.map(hwnd_from).map(dpi_scale).unwrap_or(1.0);
             let th = (theme().titlebar_h as f32 * scale).round() as i32;

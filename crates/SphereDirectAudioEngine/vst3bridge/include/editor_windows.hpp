@@ -28,6 +28,9 @@ struct DauxEditorWindowCallbacks {
 struct DauxEditorWindowConfig {
   void* owner_hwnd = nullptr;
   const wchar_t* title = nullptr;
+  // Human-readable plug-in name shown in the content "Loading Plugin" overlay
+  // while the editor view is still attaching. Falls back to `title` when null.
+  const wchar_t* plugin_name = nullptr;
   int host_kind = static_cast<int>(DauxEditorKind::OwnedToolWindow);
   int x = 0;
   int y = 0;
@@ -62,6 +65,10 @@ bool daux_editor_show_and_focus(DauxEditorWindow* window);
 void daux_editor_raise_children(void* shell_hwnd);
 bool daux_editor_create_window(const DauxEditorWindowConfig* config, DauxEditorWindow* out_window);
 void daux_editor_destroy_window(DauxEditorWindow* window);
+// Loading/error overlay state for the content area (drawn until the plug-in's
+// IPlugView attaches). `failed=false` shows "Loading Plugin <name>";
+// `failed=true` shows an error state with `message` (UTF-16, may be null).
+void daux_editor_set_load_state(DauxEditorWindow* window, bool failed, const wchar_t* message);
 bool daux_editor_resize_content(DauxEditorWindow* window, int content_width, int content_height);
 void daux_editor_set_pin_to_top(DauxEditorWindow* window, bool pinned);
 bool daux_editor_is_window_valid(const DauxEditorWindow* window);

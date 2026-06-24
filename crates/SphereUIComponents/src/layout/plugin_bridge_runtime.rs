@@ -332,6 +332,45 @@ impl PluginBridgeRuntime {
         height: u32,
         dpi: u32,
     ) -> Result<(), PluginHostClientError> {
+        let loaded = self.loaded.get(&plugin_instance_id).cloned();
+        let (path, class_id) = loaded
+            .as_ref()
+            .map(|plugin| {
+                (
+                    plugin.descriptor.plugin_path.clone(),
+                    plugin.descriptor.class_id.clone(),
+                )
+            })
+            .unwrap_or_else(|| (String::new(), String::new()));
+        if let Some(plugin) = loaded {
+            let display_title = format!(
+                "{} - {}",
+                plugin.descriptor.display_name, plugin.descriptor.track_id
+            );
+            eprintln!(
+                "[OpenEditor/IPC] track_id={} slot_id={} instance_id={} owner_hwnd=0x{parent_hwnd:x} plugin={}",
+                plugin.descriptor.track_id,
+                plugin.descriptor.insert_id,
+                plugin_instance_id,
+                plugin.descriptor.display_name
+            );
+            return self.client.open_editor_with_metadata(
+                plugin.descriptor.track_id,
+                None,
+                None,
+                plugin.descriptor.insert_id.clone(),
+                plugin_instance_id,
+                path,
+                class_id.clone(),
+                Some(class_id),
+                display_title,
+                parent_hwnd,
+                parent_hwnd,
+                width,
+                height,
+                dpi,
+            );
+        }
         let (path, class_id) = self
             .loaded
             .get(&plugin_instance_id)

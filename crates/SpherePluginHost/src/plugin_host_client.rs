@@ -182,7 +182,9 @@ pub fn log_bridge_env() {
         eprintln!("[plugin-runtime] deprecated_env_ignored FUTUREBOARD_PLUGIN_HOST_BRIDGE={raw}");
     }
     if disabled {
-        eprintln!("[plugin-runtime] backend=disabled reason=FUTUREBOARD_VST3_EDITOR_BACKEND=disabled");
+        eprintln!(
+            "[plugin-runtime] backend=disabled reason=FUTUREBOARD_VST3_EDITOR_BACKEND=disabled"
+        );
     } else if legacy {
         eprintln!("[VST3Editor] backend=rust_legacy");
         eprintln!(
@@ -463,9 +465,52 @@ impl PluginHostClient {
         dpi: u32,
     ) -> Result<(), PluginHostClientError> {
         self.send(&HostCommand::OpenEditorWithParentHwnd {
+            track_id: None,
+            track_index: None,
+            track_name: None,
+            plugin_slot_id: None,
             plugin_instance_id: plugin_instance_id.into(),
             plugin_path: plugin_path.into(),
             class_id: class_id.into(),
+            plugin_uid: None,
+            plugin_display_name: None,
+            owner_hwnd: Some(parent_hwnd),
+            parent_hwnd,
+            width,
+            height,
+            dpi,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_editor_with_metadata(
+        &mut self,
+        track_id: impl Into<String>,
+        track_index: Option<u32>,
+        track_name: Option<String>,
+        plugin_slot_id: impl Into<String>,
+        plugin_instance_id: impl Into<String>,
+        plugin_path: impl Into<String>,
+        class_id: impl Into<String>,
+        plugin_uid: Option<String>,
+        plugin_display_name: impl Into<String>,
+        owner_hwnd: u64,
+        parent_hwnd: u64,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::OpenEditorWithParentHwnd {
+            track_id: Some(track_id.into()),
+            track_index,
+            track_name,
+            plugin_slot_id: Some(plugin_slot_id.into()),
+            plugin_instance_id: plugin_instance_id.into(),
+            plugin_path: plugin_path.into(),
+            class_id: class_id.into(),
+            plugin_uid,
+            plugin_display_name: Some(plugin_display_name.into()),
+            owner_hwnd: Some(owner_hwnd),
             parent_hwnd,
             width,
             height,

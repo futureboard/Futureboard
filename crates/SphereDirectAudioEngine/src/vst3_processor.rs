@@ -254,6 +254,10 @@ extern "C" {
         processor: *mut SphereDauxVst3Processor,
         instance_id: *const c_char,
     );
+    fn sphere_daux_vst3_set_editor_title(
+        processor: *mut SphereDauxVst3Processor,
+        title: *const c_char,
+    );
     fn sphere_daux_vst3_prepare_editor_view(
         processor: *mut SphereDauxVst3Processor,
         out_width: *mut i32,
@@ -1043,6 +1047,20 @@ impl Vst3RuntimeProcessor {
         if let Ok(label) = CString::new(instance_id) {
             unsafe {
                 sphere_daux_vst3_embed_set_instance_label(self.inner.raw, label.as_ptr());
+            }
+        }
+    }
+
+    /// Set the editor display name shown in the shell titlebar and the content
+    /// "Loading Plugin <name>" overlay. Call before [`embed_editor`] so the
+    /// loading shell shows the real plug-in name immediately.
+    pub fn set_editor_title(&self, title: &str) {
+        if self.inner.raw.is_null() {
+            return;
+        }
+        if let Ok(title) = CString::new(title) {
+            unsafe {
+                sphere_daux_vst3_set_editor_title(self.inner.raw, title.as_ptr());
             }
         }
     }

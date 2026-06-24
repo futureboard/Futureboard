@@ -3981,8 +3981,125 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   daux_log_editor_dpi(parent, "attach parent");
 
   std::fprintf(stderr, "[vst3-editor] create_tid=%lu\n", GetCurrentThreadId());
+  // ── Phase A: open the editor shell with the "Loading Plugin <name>" overlay
+  // BEFORE createView()/attached(). A slow or hanging plug-in (browser/CEF
+  // editors block in attached(); some instruments stall in createView()) must
+  // still show the editor window with a loading state instead of nothing. The
+  // shell opens at the host-requested region size and is resized to the plug-in
+  // preferred size once getSize() is known (Phase C). The content overlay stays
+  // until the plug-in's IPlugView attaches and its child HWNDs cover it.
+  int editor_w = width > 0 ? width : 640;
+  int editor_h = height > 0 ? height : 480;
+
+  // Real plug-in display name for the titlebar + content "Loading Plugin"
+  // overlay (set via sphere_daux_vst3_set_editor_title before this call).
+  // Falls back to "Unknown Plugin". Kept in a local so the wide buffers outlive
+  // daux_editor_create_window.
+  const std::wstring editor_title_w =
+      processor->editor_title.empty() ? std::wstring(L"Unknown Plugin")
+                                      : widen_utf8(processor->editor_title.c_str());
+  DauxEditorWindowConfig window_config{};
+  window_config.owner_hwnd = parent;
+  window_config.title = editor_title_w.c_str();
+  window_config.plugin_name = editor_title_w.c_str();
+  window_config.host_kind = kind;
+  window_config.x = x;
+  window_config.y = y;
+  window_config.content_width = editor_w;
+  window_config.content_height = editor_h;
+  window_config.pin_default = daux_editor_env_truthy("FUTUREBOARD_EDITOR_PIN_DEFAULT");
+  window_config.callbacks = daux_editor_window_callbacks(processor);
+  // Reclaim any stale shell left over from a previous failed open (we keep the
+  // shell on failure to show an error, so a re-open must reclaim it before
+  // overwriting editor_window). DestroyWindow is only valid on the creating
+  // thread — true on the default main-thread editor path. In the opt-in
+  // worker-thread mode the re-open may run elsewhere, so we skip the destroy
+  // there (the stale window is reclaimed by close_editor_window at teardown)
+  // rather than issue an invalid cross-thread DestroyWindow.
+  if (daux_editor_is_window_valid(&processor->editor_window)) {
+    HWND stale = reinterpret_cast<HWND>(processor->editor_window.shell_hwnd);
+    if (stale && GetWindowThreadProcessId(stale, nullptr) == GetCurrentThreadId()) {
+      daux_editor_destroy_window(&processor->editor_window);
+    }
+  }
+  processor->editor_window = DauxEditorWindow{};
+  if (!daux_editor_create_window(&window_config, &processor->editor_window)) {
+    set_last_error("embed editor: native editor window creation failed");
+    return 0;
+  }
+  HWND top = reinterpret_cast<HWND>(processor->editor_window.shell_hwnd);
+  HWND content = reinterpret_cast<HWND>(processor->editor_window.content_hwnd);
+  if (!top || !content) {
+    daux_editor_destroy_window(&processor->editor_window);
+    set_last_error("embed editor: native editor window returned invalid HWNDs");
+    return 0;
+  }
+  processor->embed_user_closed.store(false, std::memory_order_release);
+  const int content_y_off = processor->editor_window.titlebar_height;
+  const HWND content_parent = GetParent(content);
+  const bool content_is_child = content_parent == top;
+  std::fprintf(stderr, "[plugin-view] selected_host_mode=%s\n", daux_editor_selected_mode_label(kind));
+  std::fprintf(stderr, "[plugin-view] top_hwnd=0x%p\n", static_cast<void*>(top));
+  std::fprintf(stderr, "[plugin-view] content_hwnd=0x%p\n", static_cast<void*>(content));
+  std::fprintf(stderr, "[plugin-view] content_is_child=%s\n", content_is_child ? "true" : "false");
+  std::fprintf(stderr, "[plugin-view] content_parent=0x%p\n", static_cast<void*>(content_parent));
+  std::fprintf(stderr, "[NativeEditorShell] dpi=%u\n", daux_hwnd_dpi(top));
+  std::fprintf(stderr, "[NativeEditorShell] titlebar_h=%d\n", content_y_off);
+  if (content == top || !content_is_child) {
+    std::fprintf(stderr,
+                 "[plugin-view] ERROR invalid HWND hierarchy top=0x%p content=0x%p parent=0x%p\n",
+                 static_cast<void*>(top),
+                 static_cast<void*>(content),
+                 static_cast<void*>(content_parent));
+    daux_editor_destroy_window(&processor->editor_window);
+    set_last_error("embed editor: content HWND must be a child and must differ from top HWND");
+    return 0;
+  }
+  std::fprintf(stderr,
+               "[PluginEditor] created top hwnd=0x%p dpi=%u\n",
+               static_cast<void*>(top),
+               daux_hwnd_dpi(top));
+  daux_log_hwnd_state("created", top, content);
+
+  // Publish the host HWNDs now so the loading shell is addressable and the
+  // Phase B/D failure paths can show an error in it. The IPlugFrame is installed
+  // in Phase C (it needs the view).
+  processor->editor_embed_top_hwnd = top;
+  processor->editor_attach_hwnd = content;
+  processor->editor_parent_hwnd = parent;
+  processor->embed_host_kind = kind;
+  processor->embed_mode = true;
+  // Not attached yet: the content WndProc paints the "Loading Plugin <name>"
+  // overlay until IPlugView::attached() completes (Phase D). The forced
+  // UpdateWindow(content) below renders it before any blocking plug-in call.
+  processor->editor_attached = false;
+  processor->embed_host_x = x;
+  processor->embed_host_y = y;
+  processor->embed_host_w = width;
+  processor->embed_host_h = height;
+
+  // Show + force the loading overlay to paint synchronously, BEFORE the
+  // potentially-blocking createView()/attached() below. Browser/WebView editors
+  // also need a visible window to composite into during attached().
+  ShowWindow(top, kind == 2 ? SW_SHOWNORMAL : SW_SHOWNA);
+  ShowWindow(content, SW_SHOW);
+  UpdateWindow(content);
+  UpdateWindow(top);
+  if (kind == 2) {
+    // Bring the detached editor to the front at show time so it isn't buried
+    // behind the DAW (initial bring-to-top on show is permitted).
+    daux_editor_show_and_focus(&processor->editor_window);
+  }
+  std::fprintf(stderr, "[vst3-editor] loading_shell_shown top=0x%p content=0x%p name=%s\n",
+               static_cast<void*>(top), static_cast<void*>(content),
+               processor->editor_title.empty() ? "Unknown Plugin" : processor->editor_title.c_str());
+
+  // ── Phase B: createView (may block / fail). The loading shell is already on
+  // screen; on failure it stays and shows an error instead of vanishing.
   if (!processor->editor_view) {
     if (!daux_plugin_browser_runtime_prepare(processor)) {
+      set_last_error("embed editor: plugin browser/web runtime failed to start");
+      daux_editor_set_load_state(&processor->editor_window, true, L"Editor runtime failed to start");
       return 0;
     }
     processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
@@ -4004,6 +4121,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     } else {
       set_last_error("embed editor: controller did not create view");
     }
+    daux_editor_set_load_state(&processor->editor_window, true, L"Editor view could not be created");
     return 0;
   }
   if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
@@ -4012,9 +4130,12 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     daux_plugin_browser_runtime_release(processor);
     std::fprintf(stderr, "[vst3-editor] attach failed error=view does not support HWND\n");
     set_last_error("embed editor: view does not support HWND");
+    daux_editor_set_load_state(&processor->editor_window, true, L"Editor is not supported on this platform");
     return 0;
   }
 
+  // ── Phase C: getSize → preferred content size, resize the open shell to match,
+  // then install the IPlugFrame before attached().
   daux_editor_set_content_scale(processor, parent, "before_getSize");
 
   Steinberg::ViewRect preferred{};
@@ -4025,11 +4146,10 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     preferred_w = daux_view_rect_width(preferred);
     preferred_h = daux_view_rect_height(preferred);
   }
-  // IPlugView::getSize is the content/client size source of truth.
-  int editor_w =
-      (preferred_w > 0) ? preferred_w : (width > 0 ? width : 640);
-  int editor_h =
-      (preferred_h > 0) ? preferred_h : (height > 0 ? height : 480);
+  // IPlugView::getSize is the content/client size source of truth; otherwise we
+  // keep the provisional host-region size used to open the shell.
+  if (preferred_w > 0) editor_w = preferred_w;
+  if (preferred_h > 0) editor_h = preferred_h;
   const UINT dpi = daux_hwnd_dpi(parent);
   daux_log_editor_dpi(parent, "embed");
   std::fprintf(stderr,
@@ -4063,112 +4183,41 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
       preferred.top,
       preferred.right,
       preferred.bottom);
-
-  DauxEditorWindowConfig window_config{};
-  window_config.owner_hwnd = parent;
-  window_config.title = L"Plugin Editor";
-  window_config.host_kind = kind;
-  window_config.x = x;
-  window_config.y = y;
-  window_config.content_width = editor_w;
-  window_config.content_height = editor_h;
-  window_config.pin_default = daux_editor_env_truthy("FUTUREBOARD_EDITOR_PIN_DEFAULT");
-  window_config.callbacks = daux_editor_window_callbacks(processor);
-  processor->editor_window = DauxEditorWindow{};
-  if (!daux_editor_create_window(&window_config, &processor->editor_window)) {
-    set_last_error("embed editor: native editor window creation failed");
-    return 0;
-  }
-  HWND top = reinterpret_cast<HWND>(processor->editor_window.shell_hwnd);
-  HWND content = reinterpret_cast<HWND>(processor->editor_window.content_hwnd);
-  if (!top || !content) {
-    daux_editor_destroy_window(&processor->editor_window);
-    set_last_error("embed editor: native editor window returned invalid HWNDs");
-    return 0;
-  }
-  processor->embed_user_closed.store(false, std::memory_order_release);
-  const int content_y_off = processor->editor_window.titlebar_height;
-  const HWND content_parent = GetParent(content);
-  const bool content_is_child = content_parent == top;
-  std::fprintf(stderr, "[plugin-view] selected_host_mode=%s\n", daux_editor_selected_mode_label(kind));
-  std::fprintf(stderr, "[plugin-view] top_hwnd=0x%p\n", static_cast<void*>(top));
-  std::fprintf(stderr, "[plugin-view] content_hwnd=0x%p\n", static_cast<void*>(content));
-  std::fprintf(stderr, "[plugin-view] content_is_child=%s\n", content_is_child ? "true" : "false");
-  std::fprintf(stderr, "[plugin-view] content_parent=0x%p\n", static_cast<void*>(content_parent));
-  std::fprintf(stderr, "[NativeEditorShell] dpi=%u\n", daux_hwnd_dpi(top));
-  std::fprintf(stderr, "[NativeEditorShell] titlebar_h=%d\n", content_y_off);
   std::fprintf(stderr,
                "[NativeEditorShell] content_rect=(0,%d,%d,%d)\n",
                content_y_off,
                editor_w,
                editor_h);
-  if (content == top || !content_is_child) {
-    std::fprintf(stderr,
-                 "[plugin-view] ERROR invalid HWND hierarchy top=0x%p content=0x%p parent=0x%p\n",
-                 static_cast<void*>(top),
-                 static_cast<void*>(content),
-                 static_cast<void*>(content_parent));
-    daux_editor_destroy_window(&processor->editor_window);
-    set_last_error("embed editor: content HWND must be a child and must differ from top HWND");
-    return 0;
-  }
-  std::fprintf(stderr,
-               "[PluginEditor] created top hwnd=0x%p dpi=%u\n",
-               static_cast<void*>(top),
-               daux_hwnd_dpi(top));
   std::fprintf(stderr,
                "[PluginEditor] created child hwnd=0x%p client=%dx%d\n",
                static_cast<void*>(content),
                editor_w,
                editor_h);
-  daux_log_hwnd_state("created", top, content);
 
-  // Publish the host HWND and set the frame BEFORE attached() so the editor's
-  // synchronous resizeView() calls (common for WebView/CEF editors) land on a
-  // valid window. Cleared on the failure path below.
-  processor->editor_embed_top_hwnd = top;
-  processor->editor_attach_hwnd = content;
-  processor->editor_parent_hwnd = parent;
-  processor->embed_host_kind = kind;
-  processor->embed_mode = true;
-  processor->embed_host_x = x;
-  processor->embed_host_y = y;
-  processor->embed_host_w = width;
-  processor->embed_host_h = height;
+  // Resize the already-open shell (top + content) to the plug-in's preferred
+  // size now that getSize() is known: daux_embed_apply_content_size sizes the
+  // top window (kind-aware), daux_resize_child_client sizes the content child
+  // in place (SWP_NOMOVE preserves its titlebar offset).
   daux_embed_apply_content_size(processor, editor_w, editor_h, "createView.getSize");
   daux_resize_child_client(content, editor_w, editor_h);
   daux_editor_install_frame(processor);
   std::fprintf(stderr, "[PluginEditor] setFrame ok\n");
   daux_log_hwnd_state("sized_before_attach", top, content);
 
-  // Show the host window + content child BEFORE attached(). Browser/WebView
-  // based editors (any plug-in whose editor embeds a web runtime) block inside
-  // IPlugView::attached() until they can composite into a *visible* window; and
-  // because attached() blocks the very thread that owns these windows, the
-  // post-attach ShowWindow below would never run, so the editor would hang
-  // forever. Showing first lets DWM composite the surface while the plug-in
-  // initializes. Generic — no plug-in/vendor branch; non-browser editors simply
-  // attach into an already-visible window, which is also valid.
+  // Keep the loading overlay visible at the new size until attached().
   ShowWindow(top, kind == 2 ? SW_SHOWNORMAL : SW_SHOWNA);
   ShowWindow(content, SW_SHOW);
+  InvalidateRect(content, nullptr, FALSE);
   UpdateWindow(content);
   UpdateWindow(top);
   std::fprintf(stderr, "[vst3-editor] shown_before_attach top=0x%p content=0x%p\n",
                static_cast<void*>(top), static_cast<void*>(content));
 
-  // Bring the detached editor to the front at show time so it isn't buried
-  // behind the DAW. A background process can't keep stealing foreground, but
-  // this initial bring-to-top on show is permitted and is what makes the editor
-  // actually appear on top when the user opens it.
-  if (kind == 2) {
-    daux_editor_show_and_focus(&processor->editor_window);
-  }
-
-  // Settle the freshly-shown window (initial paint/size/activation) before the
-  // plug-in attaches into it. Slow-UI editors (Qt/QML, VSTGUI, Chromium/WebView)
-  // expect a live, pumping, realized window at attach time; attaching into a
-  // shown-but-unpumped window can stall the attach or leave it blank. Bounded —
-  // returns as soon as the queue goes quiet, never blocks past the cap.
+  // ── Phase D: settle the freshly-shown window (initial paint/size/activation)
+  // before the plug-in attaches into it. Slow-UI editors (Qt/QML, VSTGUI,
+  // Chromium/WebView) expect a live, pumping, realized window at attach time;
+  // attaching into a shown-but-unpumped window can stall the attach or leave it
+  // blank. Bounded — returns as soon as the queue goes quiet, never past the cap.
   daux_editor_settle_pump_thread(250);
 
   const ULONGLONG attach_start_ms = GetTickCount64();
@@ -4224,15 +4273,17 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   if (attach_res != Steinberg::kResultTrue && attach_res != Steinberg::kResultOk) {
     daux_editor_clear_frame(processor);
     processor->editor_view = nullptr;
-    processor->editor_attach_hwnd = nullptr;
-    processor->editor_embed_top_hwnd = nullptr;
-    processor->editor_parent_hwnd = nullptr;
+    processor->editor_attached = false;
     processor->embed_mode = false;
     processor->embed_geometry_valid = false;
     processor->embed_content_w = 0;
     processor->embed_content_h = 0;
     daux_plugin_browser_runtime_release(processor);
-    daux_editor_destroy_window(&processor->editor_window);
+    // Keep the shell window (editor_window / editor_embed_top_hwnd /
+    // editor_attach_hwnd) so the failure is visible instead of the editor
+    // silently vanishing. The content WndProc now paints a failure state; the
+    // window is reclaimed by close_editor_window() or a later re-open. The
+    // host still receives handle=0 → EditorAttachFailed.
     if (daux_plugin_is_browser_based(processor->plugin_path)) {
       char msg[160];
       std::snprintf(msg, sizeof(msg),
@@ -4242,6 +4293,7 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     } else {
       set_last_error("embed editor: IPlugView::attached(HWND) failed");
     }
+    daux_editor_set_load_state(&processor->editor_window, true, L"Editor failed to attach");
     return 0;
   }
 
@@ -4578,6 +4630,20 @@ extern "C" void sphere_daux_vst3_embed_set_instance_label(
 #else
   (void)processor;
   (void)instance_id;
+#endif
+}
+
+// Human-readable editor title / plug-in name (UTF-8). Used for the shell
+// titlebar and the content "Loading Plugin <name>" overlay. Set before
+// embed_editor so the loading shell shows the real name immediately.
+extern "C" void sphere_daux_vst3_set_editor_title(
+    SphereDauxVst3Processor* processor, const char* title) {
+#ifdef _WIN32
+  if (!processor) return;
+  processor->editor_title = title ? title : "";
+#else
+  (void)processor;
+  (void)title;
 #endif
 }
 

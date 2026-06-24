@@ -87,6 +87,10 @@ macro_rules! ped_log {
 const EDITOR_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 const EDITOR_FIRST_PAINT_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn loading_plugin_status(display_name: &str) -> String {
+    format!("Loading Plugin\n{display_name}")
+}
+
 /// Whether bridge editors are host-owned (default). In host-owned mode the
 /// plugin-host process owns a detached top-level editor window and the GPUI
 /// main app creates NO plugin window — nothing the foreign plugin view is ever
@@ -893,17 +897,18 @@ impl StudioLayout {
         let defaults = shell_defaults();
         let content_w = defaults.default_content_width;
         let content_h = defaults.default_content_height;
-        let shell = if let Some(session) = loading_session {
+        let shell = if host_owned {
+            // Host-owned: the temporary loading shell is main-owned and visible
+            // only while the plugin loads. Once the host can open the real
+            // editor, drop that shell and return to a proxy session so the
+            // plugin view remains fully owned by the host process.
+            drop(loading_session);
+            NativeEditorShell::host_owned_proxy(&display_name)
+        } else if let Some(session) = loading_session {
             session
                 .shell
                 .set_status("Attaching plugin editor...", false);
             session.shell
-        } else if host_owned {
-            // Host-owned: create NO main-thread window. The host process owns
-            // the real top-level editor window; this proxy only carries session
-            // state. There is no content HWND for the plugin to parent under,
-            // which is precisely what keeps the GPUI main thread decoupled.
-            NativeEditorShell::host_owned_proxy(&display_name)
         } else {
             let Some(shell) =
                 NativeEditorShell::create(&display_name, content_w, content_h, owner_hwnd)
@@ -1055,7 +1060,9 @@ impl StudioLayout {
         if let Some(session) = self.plugin_editors.bridge.get(&key) {
             if !bridge_editor_is_terminal(&session.state) {
                 session.shell.focus();
-                session.shell.set_status("Loading plugin editor...", false);
+                session
+                    .shell
+                    .set_status(&loading_plugin_status(&display_name), false);
                 return;
             }
         }
@@ -1070,26 +1077,27 @@ impl StudioLayout {
         }
 
         let defaults = shell_defaults();
-        let shell = if bridge_editor_host_owned() {
-            // Host-owned: no main window while the plugin loads. The session
-            // only tracks state (the inspector shows EditorOpening); the host
-            // shows its own window once the editor attaches.
-            NativeEditorShell::host_owned_proxy(&display_name)
-        } else {
-            let Some(shell) = NativeEditorShell::create(
-                &display_name,
-                defaults.default_content_width,
-                defaults.default_content_height,
-                owner_hwnd,
-            ) else {
+        let shell = match NativeEditorShell::create(
+            &display_name,
+            defaults.default_content_width,
+            defaults.default_content_height,
+            owner_hwnd,
+        ) {
+            Some(shell) => shell,
+            None if bridge_editor_host_owned() => {
+                eprintln!(
+                    "[plugin-editor-window] native loading shell create FAILED instance={instance_id}; falling back to host-owned proxy"
+                );
+                NativeEditorShell::host_owned_proxy(&display_name)
+            }
+            None => {
                 eprintln!(
                     "[plugin-editor-window] native loading shell create FAILED instance={instance_id}"
                 );
                 return;
-            };
-            shell
+            }
         };
-        shell.set_status("Loading plugin editor...", false);
+        shell.set_status(&loading_plugin_status(&display_name), false);
         let (cw, ch) = shell.content_size();
         eprintln!("[plugin-editor-window] loading shell visible instance={instance_id}");
         self.plugin_editors.bridge.insert(
@@ -1110,6 +1118,31 @@ impl StudioLayout {
             },
         );
         cx.notify();
+    }
+
+    fn open_loading_editor_for_bound_insert(
+        &mut self,
+        track_id: &str,
+        slot_id: &str,
+        display_name: &str,
+        owner_hwnd: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if !super::plugin_bridge_runtime::bridge_enabled() {
+            return;
+        }
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            timeline
+                .state
+                .set_insert_pending_editor_open(track_id, slot_id, true)
+        });
+        self.open_bridge_loading_editor(
+            track_id,
+            slot_id,
+            display_name.to_string(),
+            owner_hwnd,
+            cx,
+        );
     }
 
     /// Per-tick driver for native editor shells: honor OS close requests and
@@ -1376,12 +1409,28 @@ impl StudioLayout {
 
         let resolved = {
             let timeline = self.timeline.read(cx);
+            let track_info = timeline
+                .state
+                .tracks
+                .iter()
+                .enumerate()
+                .find(|(_, track)| track.id == track_id)
+                .map(|(index, track)| (Some(index as u32), Some(track.name.clone())))
+                .unwrap_or_else(|| {
+                    if track_id == crate::components::timeline::timeline_state::MASTER_TRACK_ID {
+                        (None, Some("Master".to_string()))
+                    } else {
+                        (None, None)
+                    }
+                });
             timeline
                 .state
                 .insert_slot_at(track_id, insert_index)
                 .map(|slot| {
                     let insert_found = slot.id == plugin_instance_id;
                     (
+                        track_info.0,
+                        track_info.1,
                         insert_found,
                         slot.id.clone(),
                         slot.plugin_id.clone(),
@@ -1397,6 +1446,8 @@ impl StudioLayout {
                 })
         };
         let Some((
+            track_index,
+            track_name,
             insert_found,
             resolved_plugin_instance_id,
             plugin_id,
@@ -1415,6 +1466,13 @@ impl StudioLayout {
             return;
         };
 
+        eprintln!(
+            "[OpenEditor/UI] track_id={track_id} track_index={} track_name={} slot_id={resolved_plugin_instance_id} instance_id={resolved_plugin_instance_id} plugin={display_name}",
+            track_index
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            track_name.as_deref().unwrap_or("<unknown>"),
+        );
         eprintln!(
             "[PluginEditor] open requested track={track_id} slot={insert_index} instance={resolved_plugin_instance_id}"
         );
@@ -1647,9 +1705,7 @@ impl StudioLayout {
             return;
         }
         if SpherePluginHost::plugin_host_client::vst3_editor_backend_disabled() {
-            eprintln!(
-                "[VST3Editor] backend=disabled action=skip_open instance={insert_id}"
-            );
+            eprintln!("[VST3Editor] backend=disabled action=skip_open instance={insert_id}");
             return;
         }
 
@@ -2307,6 +2363,13 @@ impl StudioLayout {
                     PluginRuntimeBackend, PluginRuntimeState,
                 };
                 eprintln!("[plugin-runtime] backend=external_bridge reason=forced_default");
+                self.open_loading_editor_for_bound_insert(
+                    &track_id,
+                    &slot_id,
+                    &log_display_name,
+                    None,
+                    cx,
+                );
                 let path = self
                     .timeline
                     .read(cx)
@@ -2641,9 +2704,18 @@ impl StudioLayout {
     ) {
         if plugin_format == crate::components::timeline::timeline_state::InsertPluginFormat::Vst3
             && super::plugin_bridge_runtime::bridge_enabled()
-            && self.load_bridge_insert_for_slot(track_id, slot_id, cx)
         {
-            return;
+            let display_name = self
+                .timeline
+                .read(cx)
+                .state
+                .find_insert_slot(track_id, slot_id)
+                .map(|slot| slot.display_name.clone())
+                .unwrap_or_else(|| "Plugin".to_string());
+            self.open_loading_editor_for_bound_insert(track_id, slot_id, &display_name, None, cx);
+            if self.load_bridge_insert_for_slot(track_id, slot_id, cx) {
+                return;
+            }
         }
         self.mark_dirty();
         self.audio_bridge.project_dirty = true;
@@ -2739,7 +2811,57 @@ impl StudioLayout {
                 "[EDITOR_QUEUE_FLUSH]\nplugin_instance_id={instance_id}\nflush_attempt={}\nsent_open_editor=true",
                 *attempts
             );
-            self.open_insert_editor(&track_id, insert_index, &instance_id, window, cx);
+            let resolved = {
+                let timeline = self.timeline.read(cx);
+                timeline
+                    .state
+                    .insert_slots(&track_id)
+                    .and_then(|slots| {
+                        slots
+                            .iter()
+                            .enumerate()
+                            .find(|(_, slot)| slot.id == instance_id)
+                            .map(|(index, _)| (track_id.clone(), index))
+                    })
+                    .or_else(|| {
+                        timeline.state.tracks.iter().find_map(|track| {
+                            track
+                                .inserts
+                                .iter()
+                                .enumerate()
+                                .find(|(_, slot)| slot.id == instance_id)
+                                .map(|(index, _)| (track.id.clone(), index))
+                        })
+                    })
+                    .or_else(|| {
+                        timeline
+                            .state
+                            .master
+                            .inserts
+                            .iter()
+                            .enumerate()
+                            .find(|(_, slot)| slot.id == instance_id)
+                            .map(|(index, _)| {
+                                (
+                                    crate::components::timeline::timeline_state::MASTER_TRACK_ID
+                                        .to_string(),
+                                    index,
+                                )
+                            })
+                    })
+            };
+            let Some((resolved_track_id, resolved_index)) = resolved else {
+                eprintln!(
+                    "[EDITOR_QUEUE_FLUSH]\nplugin_instance_id={instance_id}\nreason=instance_not_found action=drop"
+                );
+                continue;
+            };
+            if resolved_track_id != track_id || resolved_index != insert_index {
+                eprintln!(
+                    "[EDITOR_QUEUE_FLUSH]\nplugin_instance_id={instance_id}\nstale_track_id={track_id}\nstale_slot_index={insert_index}\nresolved_track_id={resolved_track_id}\nresolved_slot_index={resolved_index}"
+                );
+            }
+            self.open_insert_editor(&resolved_track_id, resolved_index, &instance_id, window, cx);
         }
         // Drop counters for instances that were not re-queued this frame.
         self.plugin_editors

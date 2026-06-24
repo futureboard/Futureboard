@@ -356,6 +356,22 @@ impl StudioLayout {
                                                 reg.name.clone(),
                                             );
                                             if format == InsertPluginFormat::Vst3 {
+                                                // Auto-open the editor for a freshly
+                                                // added instrument: mark the slot
+                                                // pending so the host editor shell
+                                                // opens (with its "Loading Plugin"
+                                                // overlay) as soon as the runtime
+                                                // instance is ready — matching the
+                                                // insert picker (apply_picked_insert).
+                                                // Skip for batch creation (count > 1)
+                                                // to avoid opening many windows at once.
+                                                if count == 1
+                                                    && super::plugin_bridge_runtime::bridge_enabled()
+                                                {
+                                                    timeline.state.set_insert_pending_editor_open(
+                                                        &id, &slot_id, true,
+                                                    );
+                                                }
                                                 bridge_inserts.push((id.clone(), slot_id));
                                             }
                                         }

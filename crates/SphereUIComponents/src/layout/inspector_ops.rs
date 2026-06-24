@@ -16,8 +16,9 @@ use crate::components::inspector_debug;
 use crate::components::panel::{InspectorCallbacks, InspectorRoutingCombo};
 use crate::components::plugin_picker::PluginInsertKind;
 use crate::components::timeline::timeline_state::{
-    clip_output_local_to_source_sample, AudioClipStretchState, TimelineState, TrackAudioFormat,
-    TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting, WarpMarker,
+    clip_output_local_to_source_sample, vsti_output_bus_strip_indices, AudioClipStretchState,
+    TimelineState, TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
+    WarpMarker,
 };
 use crate::overlay::OverlayAnchor;
 
@@ -812,7 +813,9 @@ impl StudioLayout {
                                     .copied()
                                     .max()
                                     .unwrap_or(2) as u32;
-                            let multiout_capable = slot.output_bus_channel_counts.len() > 1;
+                            let multiout_capable =
+                                !vsti_output_bus_strip_indices(&slot.output_bus_channel_counts)
+                                    .is_empty();
                             Some((plugin_name, output_channels, multiout_capable))
                         };
                         let Some((plugin_name, output_channels, multiout_capable)) = ensure_args

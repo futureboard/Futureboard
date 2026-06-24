@@ -81,14 +81,28 @@ pub fn vsti_output_bus_flat_range(bus_counts: &[u8], bus_index: usize) -> Option
 /// for `bus_index`. With a real per-bus layout: a **mono** bus maps to
 /// `(ch, ch)` so the engine duplicates it to both L and R (never paired with the
 /// next bus); a **stereo+** bus maps to `(start, start+1)` preserving L/R (first
-/// two channels of a multichannel bus). With an empty layout (unknown) it falls
-/// back to the legacy "every bus is a consecutive stereo pair" assumption.
+/// two channels of a multichannel bus). Some VST3 drum instruments expose
+/// multi-out as one multichannel output bus instead of many buses; in that case
+/// the flat channels are split into stereo child strips. With an empty layout
+/// (unknown) it falls back to the legacy "every bus is a consecutive stereo
+/// pair" assumption.
 pub fn vsti_output_child_channels_for_bus_layout(
     bus_counts: &[u8],
     bus_index: u8,
 ) -> Option<(u8, u8)> {
     if bus_counts.is_empty() {
         return Some(vsti_output_child_channels_for_bus(bus_index));
+    }
+    if bus_counts.len() == 1 && bus_counts[0] > 2 {
+        let left = bus_index.saturating_mul(2).saturating_add(1);
+        if left > bus_counts[0] || left > VSTI_MAX_BRIDGE_CHANNELS {
+            return None;
+        }
+        let right = left
+            .saturating_add(1)
+            .min(bus_counts[0])
+            .min(VSTI_MAX_BRIDGE_CHANNELS);
+        return Some((left, right));
     }
     let (start, count) = vsti_output_bus_flat_range(bus_counts, bus_index as usize)?;
     let r = if count >= 2 {
@@ -99,14 +113,23 @@ pub fn vsti_output_child_channels_for_bus_layout(
     Some((start, r))
 }
 
-/// Output bus indices that should become child mixer strips, given the real
-/// per-bus layout. Every bus whose flat channels fit within the bridge cap gets
-/// a strip, but only when the plugin declares more than one output bus. A
-/// normal single-bus instrument keeps playing on its parent instrument track.
-/// Returns empty for single-bus / unknown layouts.
+/// Output indices that should become child mixer strips, given the reported
+/// output layout. Multi-bus plugins get one strip per bus. Single-bus
+/// multichannel plugins get one strip per stereo flat-channel pair because
+/// several drum VST3s expose outputs that way. A normal mono/stereo single-bus
+/// instrument keeps playing on its parent instrument track. Returns empty for
+/// mono/stereo single-bus or unknown layouts.
 pub fn vsti_output_bus_strip_indices(bus_counts: &[u8]) -> Vec<u8> {
-    if bus_counts.len() <= 1 {
+    if bus_counts.is_empty() {
         return Vec::new();
+    }
+    if bus_counts.len() == 1 {
+        let channels = bus_counts[0].min(VSTI_MAX_BRIDGE_CHANNELS);
+        if channels <= 2 {
+            return Vec::new();
+        }
+        let pair_count = channels.div_ceil(2);
+        return (0..pair_count).collect();
     }
     let mut indices = Vec::new();
     for bus_index in 0..bus_counts.len() {
@@ -870,7 +893,8 @@ impl TimelineState {
             }
         }
         let plugin_name = slot.display_name.clone();
-        let can_create_child_strips = slot.output_bus_channel_counts.len() > 1;
+        let can_create_child_strips =
+            !vsti_output_bus_strip_indices(&slot.output_bus_channel_counts).is_empty();
         changed |= self.ensure_vsti_output_child_tracks(
             track_id,
             insert_id,
@@ -904,7 +928,8 @@ impl TimelineState {
             return false;
         };
         let output_bus_channel_counts = slot.output_bus_channel_counts.clone();
-        let multiout_capable = output_bus_channel_counts.len() > 1;
+        let bus_indices_for_layout = vsti_output_bus_strip_indices(&output_bus_channel_counts);
+        let multiout_capable = !bus_indices_for_layout.is_empty();
         let selected_path = if multiout_capable && user_multiout_enabled {
             "multiout_child_channels"
         } else {
@@ -919,8 +944,9 @@ impl TimelineState {
         let mut bus_indices: Vec<u8> = if multiout_capable && user_multiout_enabled {
             // Real per-bus layout: one strip per genuine output bus. A mono bus
             // becomes its own stereo strip (duplicated L/R) instead of being
-            // paired with the next bus's channel.
-            vsti_output_bus_strip_indices(&output_bus_channel_counts)
+            // paired with the next bus's channel. Single-bus multichannel VST3s
+            // are split into flat stereo pairs.
+            bus_indices_for_layout
         } else {
             Vec::new()
         };
@@ -977,17 +1003,27 @@ impl TimelineState {
                     *bus_index,
                 )
                 .unwrap_or_else(|| vsti_output_child_channels_for_bus(*bus_index));
-                let source_kind = output_bus_channel_counts
-                    .get(*bus_index as usize)
-                    .map(|count| match *count {
-                        0 | 1 => "mono",
-                        2 => "stereo",
-                        _ => "multichannel",
-                    })
-                    .unwrap_or("stereo");
+                let source_kind =
+                    if output_bus_channel_counts.len() == 1 && output_bus_channel_counts[0] > 2 {
+                        if channel_l == channel_r {
+                            "flat_mono_tail"
+                        } else {
+                            "flat_stereo_pair"
+                        }
+                    } else {
+                        output_bus_channel_counts
+                            .get(*bus_index as usize)
+                            .map(|count| match *count {
+                                0 | 1 => "mono",
+                                2 => "stereo",
+                                _ => "multichannel",
+                            })
+                            .unwrap_or("stereo")
+                    };
                 let normalization = match source_kind {
                     "mono" => "mono_duplicate",
-                    "stereo" => "preserve_stereo",
+                    "stereo" | "flat_stereo_pair" => "preserve_stereo",
+                    "flat_mono_tail" => "mono_duplicate",
                     _ => "downmix_to_stereo",
                 };
                 eprintln!(
@@ -1164,6 +1200,38 @@ mod vsti_output_bus_layout_tests {
         // A normal stereo VSTi keeps playing on its instrument track (criteria #28).
         assert!(vsti_output_bus_strip_indices(&[2u8]).is_empty());
         assert!(vsti_output_bus_strip_indices(&[1u8]).is_empty());
+    }
+
+    #[test]
+    fn single_multichannel_bus_splits_into_flat_stereo_pairs() {
+        // Some drum VST3s expose multi-out as one 8-channel bus instead of four
+        // stereo buses. The mixer still needs one child strip per audible pair.
+        assert_eq!(vsti_output_bus_strip_indices(&[8u8]), vec![0, 1, 2, 3]);
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[8u8], 0),
+            Some((1, 2))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[8u8], 1),
+            Some((3, 4))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[8u8], 2),
+            Some((5, 6))
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[8u8], 3),
+            Some((7, 8))
+        );
+    }
+
+    #[test]
+    fn odd_single_multichannel_bus_duplicates_tail_channel() {
+        assert_eq!(vsti_output_bus_strip_indices(&[7u8]), vec![0, 1, 2, 3]);
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[7u8], 3),
+            Some((7, 7))
+        );
     }
 
     #[test]

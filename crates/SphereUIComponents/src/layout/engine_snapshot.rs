@@ -347,12 +347,8 @@ fn normalized_enabled_audio_outputs(slot: &InsertSlotState) -> Vec<u8> {
 fn vsti_output_children_json(slot: &InsertSlotState) -> serde_json::Value {
     let bus_counts = &slot.output_bus_channel_counts;
     // Mirror `ensure_vsti_output_child_tracks` exactly so child track ids line up:
-    // child routes are created only from declared multi-bus capability data.
-    let bus_indices: Vec<u8> = if bus_counts.len() > 1 {
-        vsti_output_bus_strip_indices(bus_counts)
-    } else {
-        Vec::new()
-    };
+    // child routes are created only from declared multi-output capability data.
+    let bus_indices = vsti_output_bus_strip_indices(bus_counts);
     serde_json::Value::Array(
         bus_indices
             .into_iter()
@@ -361,7 +357,13 @@ fn vsti_output_children_json(slot: &InsertSlotState) -> serde_json::Value {
                 // engine duplicates it to L/R; stereo → (l, r) preserved.
                 let (channel_l, channel_r) =
                     vsti_output_child_channels_for_bus_layout(bus_counts, bus_index)?;
-                let channel_count = if bus_counts.is_empty() {
+                let channel_count = if bus_counts.len() == 1 && bus_counts[0] > 2 {
+                    if channel_l == channel_r {
+                        1
+                    } else {
+                        2
+                    }
+                } else if bus_counts.is_empty() {
                     2
                 } else {
                     vsti_output_bus_flat_range(bus_counts, bus_index as usize)
@@ -1063,6 +1065,69 @@ mod tests {
                 && child.get("channelCount").and_then(|v| v.as_u64()) == Some(2)
                 && child.get("channelL").and_then(|v| v.as_u64()) == Some(7)
                 && child.get("channelR").and_then(|v| v.as_u64()) == Some(8)
+        }));
+    }
+
+    #[test]
+    fn single_multichannel_vsti_bus_exports_flat_pair_children() {
+        use crate::components::timeline::timeline_state::{
+            vsti_output_child_track_id, InsertPluginFormat,
+        };
+
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "MT Power".to_string(),
+            color: gpui::Rgba {
+                r: 0.2,
+                g: 0.3,
+                b: 0.4,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "single-bus-multiout-class".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/MTPower.vst3")),
+            InsertPluginFormat::Vst3,
+            "MT Power".to_string(),
+        );
+
+        assert!(state.set_insert_output_bus_layout(&track_id, &slot, &[8]));
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let parent = snap
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .expect("parent track");
+        let insert = parent
+            .inserts
+            .iter()
+            .find(|insert| insert.id == slot)
+            .expect("parent insert");
+        let children = insert
+            .params
+            .get("vstiOutputChildren")
+            .and_then(|value| value.as_array())
+            .expect("vsti children");
+        assert_eq!(children.len(), 4);
+
+        let bus_1_id = vsti_output_child_track_id(&slot, 1);
+        assert!(children.iter().any(|child| {
+            child.get("busIndex").and_then(|v| v.as_u64()) == Some(1)
+                && child.get("trackId").and_then(|v| v.as_str()) == Some(bus_1_id.as_str())
+                && child.get("channelCount").and_then(|v| v.as_u64()) == Some(2)
+                && child.get("channelL").and_then(|v| v.as_u64()) == Some(3)
+                && child.get("channelR").and_then(|v| v.as_u64()) == Some(4)
         }));
     }
 

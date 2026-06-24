@@ -182,6 +182,38 @@ mod instrument_lifecycle_tests {
         );
     }
 
+    #[test]
+    fn single_multichannel_bus_layout_creates_child_channels() {
+        let mut state = TimelineState::default();
+        let track_id = instrument_track(&mut state);
+        let slot = load_vsti(&mut state, &track_id, 0, "mt-power", "C:/p/mt-power.vst3");
+
+        state.set_insert_output_bus_layout(&track_id, &slot, &[8]);
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 8));
+
+        let child_ids: Vec<_> = state
+            .tracks
+            .iter()
+            .filter(|track| is_vsti_output_child_track_id(&track.id))
+            .map(|track| track.id.clone())
+            .collect();
+        assert_eq!(
+            child_ids,
+            vec![
+                vsti_output_child_track_id(&slot, 0),
+                vsti_output_child_track_id(&slot, 1),
+                vsti_output_child_track_id(&slot, 2),
+                vsti_output_child_track_id(&slot, 3),
+            ],
+            "one mixer-only strip per flat stereo output pair"
+        );
+        assert_eq!(
+            vsti_output_child_channels_for_bus_layout(&[8], 1),
+            Some((3, 4)),
+            "second child strip must read channels 3/4"
+        );
+    }
+
     /// Collapse/expand of a VSTi multi-out group is a VIEW concern: it flips the
     /// instrument insert's `multiout_collapsed` flag and changes which group keys
     /// are reported as collapsed, but it NEVER removes/recreates child mixer

@@ -1988,22 +1988,28 @@ fn collect_mixer_render_items(
 ) -> Vec<MixerRenderItem> {
     let mut items = Vec::with_capacity(tracks.len());
     for (track_index, track) in tracks.iter().enumerate() {
-        // VSTi multi-out child channels are mixer-only strips. Collapse/expand is
-        // purely a VIEW concern: when the parent instrument's group is collapsed we
-        // simply omit the child's render item. The child track and its route stay
-        // in the model and the engine snapshot, so audio routing, meters, and
-        // mute/solo state are completely untouched while hidden.
-        if let Some(insert_id) = vsti_output_child_insert_id(&track.id) {
-            let parent_group_collapsed = tracks
-                .iter()
-                .find(|parent| parent.inserts.iter().any(|slot| slot.id == insert_id))
-                .map(|parent| vsti_output_group_key(&parent.id, insert_id))
-                .is_some_and(|key| collapsed_vsti_output_groups.contains(&key));
-            if parent_group_collapsed {
-                continue;
-            }
+        // VSTi multi-out child tracks are model/engine route nodes. The visible
+        // mixer sub-strips are injected from the parent insert below, so these
+        // backing tracks should never render as ordinary BUS channel strips.
+        if vsti_output_child_insert_id(&track.id).is_some() {
+            continue;
         }
         items.push(MixerRenderItem::Track { track_index });
+
+        let Some(slot) = track.instrument_insert().filter(|slot| !slot.is_empty()) else {
+            continue;
+        };
+        let group_key = vsti_output_group_key(&track.id, &slot.id);
+        if collapsed_vsti_output_groups.contains(&group_key) {
+            continue;
+        }
+        items.extend(vsti_output_subchannels(slot).into_iter().map(|channel| {
+            MixerRenderItem::VstiOutput {
+                track_index,
+                insert_index: 0,
+                channel,
+            }
+        }));
     }
     items
 }
@@ -2231,13 +2237,13 @@ pub fn mixer_panel(
 
 #[cfg(test)]
 mod collapse_filter_tests {
-    use super::{collect_mixer_render_items, vsti_output_group_key};
+    use super::{collect_mixer_render_items, vsti_output_group_key, MixerRenderItem};
     use crate::components::timeline::timeline_state::{
         CreateTrackOptions, InputMonitorMode, InsertPluginFormat, TimelineState, TrackType,
     };
     use std::collections::HashSet;
 
-    fn drum_scenario() -> (TimelineState, String, String) {
+    fn drum_scenario(output_bus_layout: &[u32]) -> (TimelineState, String, String) {
         let mut state = TimelineState::default();
         let track_id = state.create_track(CreateTrackOptions {
             name: "Drums".to_string(),
@@ -2257,19 +2263,26 @@ mod collapse_filter_tests {
             InsertPluginFormat::Vst3,
             "drums".to_string(),
         );
-        // 3 stereo output buses → 3 child mixer strips.
-        state.set_insert_output_bus_layout(&track_id, &slot, &[2, 2, 2]);
-        state.auto_enable_detected_insert_outputs(&track_id, &slot, 6);
+        state.set_insert_output_bus_layout(&track_id, &slot, output_bus_layout);
+        let output_channels = output_bus_layout.iter().copied().sum::<u32>().max(2);
+        state.auto_enable_detected_insert_outputs(&track_id, &slot, output_channels);
         (state, track_id, slot)
     }
 
     #[test]
     fn expanded_includes_children_collapsed_hides_only_children() {
-        let (state, track_id, slot) = drum_scenario();
+        let (state, track_id, slot) = drum_scenario(&[2, 2, 2]);
 
-        // Expanded (empty collapsed set): parent + 3 child strips = 4 items.
+        // Expanded (empty collapsed set): parent + Ch 3/4/5/6 sub-strips.
         let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
-        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded.len(), 5);
+        assert_eq!(
+            expanded
+                .iter()
+                .filter(|item| matches!(item, MixerRenderItem::VstiOutput { .. }))
+                .count(),
+            4
+        );
 
         // Collapsed: child strips filtered out, only the parent strip remains.
         let mut collapsed = HashSet::new();
@@ -2283,5 +2296,29 @@ mod collapse_filter_tests {
 
         // The model still holds every track — collapse changed the VIEW only.
         assert_eq!(state.tracks.len(), 4);
+    }
+
+    #[test]
+    fn expanded_single_multichannel_bus_includes_flat_pair_children() {
+        let (state, track_id, slot) = drum_scenario(&[8]);
+
+        // Expanded: one parent strip + Ch 3/4/5/6/7/8 sub-strips.
+        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
+        assert_eq!(expanded.len(), 7);
+        assert_eq!(
+            expanded
+                .iter()
+                .filter(|item| matches!(item, MixerRenderItem::VstiOutput { .. }))
+                .count(),
+            6
+        );
+
+        // Collapsed: only the view list hides the children; the state still keeps
+        // every child track for routing and meters.
+        let mut collapsed = HashSet::new();
+        collapsed.insert(vsti_output_group_key(&track_id, &slot));
+        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed);
+        assert_eq!(collapsed_items.len(), 1);
+        assert_eq!(state.tracks.len(), 5);
     }
 }

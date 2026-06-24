@@ -284,6 +284,52 @@ extern "C" {
         controller_len: i32,
     ) -> i32;
     fn sphere_daux_vst3_state_free(data: *mut u8);
+    fn sphere_daux_vst3_list_parameters_json(
+        processor: *mut SphereDauxVst3Processor,
+    ) -> *mut c_char;
+    fn sphere_daux_vst3_parameters_json_free(data: *mut c_char);
+}
+
+/// Metadata for one VST3 parameter returned by [`Vst3RuntimeProcessor::list_parameters`].
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct Vst3ParameterDescriptor {
+    pub id: u32,
+    pub title: String,
+    #[serde(default)]
+    pub short_title: String,
+    #[serde(default)]
+    pub unit: String,
+    pub automatable: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub value_normalized: f64,
+}
+
+impl Vst3ParameterDescriptor {
+    /// Best display label — prefers `title`, falls back to `short_title`.
+    pub fn display_name(&self) -> &str {
+        if !self.title.is_empty() {
+            &self.title
+        } else if !self.short_title.is_empty() {
+            &self.short_title
+        } else {
+            "Parameter"
+        }
+    }
+
+    /// Whether this parameter should appear in the automation picker.
+    pub fn picker_visible(&self, debug: bool) -> bool {
+        if self.hidden && !debug {
+            return false;
+        }
+        if !self.automatable && !debug {
+            return false;
+        }
+        true
+    }
 }
 
 /// Captured VST3 plugin state: the raw component (processor) stream plus the
@@ -862,6 +908,25 @@ impl Vst3RuntimeProcessor {
             sphere_daux_vst3_state_free(controller_ptr);
         }
         Some(state)
+    }
+
+    /// Enumerate VST3 parameters from `IEditController`. Call from a control
+    /// thread — `getParameterInfo` may touch plugin internals.
+    pub fn list_parameters(&self) -> Option<Vec<Vst3ParameterDescriptor>> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        let json_ptr = unsafe { sphere_daux_vst3_list_parameters_json(self.inner.raw) };
+        if json_ptr.is_null() {
+            return None;
+        }
+        let json = unsafe {
+            let cstr = std::ffi::CStr::from_ptr(json_ptr);
+            let owned = cstr.to_string_lossy().into_owned();
+            sphere_daux_vst3_parameters_json_free(json_ptr);
+            owned
+        };
+        serde_json::from_str(&json).ok()
     }
 
     /// Restore a previously captured state. Returns `true` when the component

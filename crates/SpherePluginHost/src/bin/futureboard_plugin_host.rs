@@ -1598,6 +1598,35 @@ fn dispatch(
                 },
             );
         }
+        HostCommand::GetPluginParameters { plugin_instance_id } => {
+            let params = preview.lock().list_parameters_for_instance(&plugin_instance_id);
+            let ok = params.is_some();
+            let parameters: Vec<ipc::HostPluginParameter> = params
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| ipc::HostPluginParameter {
+                    id: p.id,
+                    title: p.title,
+                    short_title: p.short_title,
+                    unit: p.unit,
+                    automatable: p.automatable,
+                    hidden: p.hidden,
+                    read_only: p.read_only,
+                })
+                .collect();
+            eprintln!(
+                "[plugin-host-params] get_parameters instance={plugin_instance_id} ok={ok} count={}",
+                parameters.len()
+            );
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginParameters {
+                    plugin_instance_id,
+                    ok,
+                    parameters,
+                },
+            );
+        }
         HostCommand::SetPluginState {
             plugin_instance_id,
             component_b64,

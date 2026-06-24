@@ -218,4 +218,14 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_set_state(
 /// Release a buffer returned by sphere_daux_vst3_get_state.
 SPHERE_DAUX_VST3_API void sphere_daux_vst3_state_free(unsigned char* data);
 
+/// Enumerate automatable VST3 parameters via IEditController::getParameterInfo.
+/// Returns a malloc-owned UTF-8 JSON array:
+/// `[{"id":1,"title":"Cutoff","short_title":"","unit":"","automatable":true,"hidden":false,"read_only":false,"value_normalized":0.5},...]`
+/// Returns nullptr when the processor or controller is unavailable.
+SPHERE_DAUX_VST3_API char* sphere_daux_vst3_list_parameters_json(
+    SphereDauxVst3Processor* processor);
+
+/// Release a buffer returned by sphere_daux_vst3_list_parameters_json.
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_parameters_json_free(char* data);
+
 }

@@ -19,6 +19,12 @@ use super::context_menu_ops::ContextMenuRequest;
 #[derive(Debug, Clone)]
 pub enum OpenPopover {
     Context { request: ContextMenuRequest },
+    /// Searchable automation target picker (instrument → effects → track).
+    AutomationTargetPicker {
+        track_id: String,
+        x: f32,
+        y: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +33,7 @@ pub(super) enum TextMenuTarget {
     ProjectSwitcherSearch,
     BrowserSearch,
     PluginPickerSearch,
+    AutomationPickerSearch,
     /// The Inspector's track-name edit field.
     InspectorName,
     /// The Inspector's clip-name edit field.

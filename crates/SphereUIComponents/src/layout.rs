@@ -372,6 +372,9 @@ pub struct StudioLayout {
     plugin_search_index: Option<PluginSearchIndex>,
     plugin_picker_au_error: Option<String>,
     plugin_picker_window: Option<WindowHandle<plugin_picker_window::InsertPickerWindow>>,
+    /// Automation target picker search query + input state.
+    automation_picker_query: String,
+    automation_picker_search_input: TextInputState,
     /// Detached / external window handles (settings, mixer, add-track,
     /// plugin-manager, export) + deferred external-mixer open bounds. Grouped
     /// into [`window_ops::ExternalWindows`] (decomposition slice).
@@ -771,6 +774,12 @@ impl StudioLayout {
             plugin_search_index: None,
             plugin_picker_au_error: load_au_cache_state().last_error,
             plugin_picker_window: None,
+            automation_picker_query: String::new(),
+            automation_picker_search_input: TextInputState::new(
+                "automation-picker-search-input",
+                cx.focus_handle(),
+            )
+            .with_placeholder("Search parameters…"),
             external_windows: window_ops::ExternalWindows::default(),
             plugin_catalog: plugin_ops::PluginCatalogState::default(),
             plugin_editors: plugin_ops::PluginEditorWindows::default(),

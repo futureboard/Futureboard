@@ -4899,3 +4899,93 @@ extern "C" int sphere_daux_vst3_set_state(
 extern "C" void sphere_daux_vst3_state_free(unsigned char* data) {
   std::free(data);
 }
+
+namespace {
+
+std::string daux_json_escape(const std::string& value) {
+  std::string out;
+  out.reserve(value.size() + 8);
+  out.push_back('"');
+  for (const char ch : value) {
+    switch (ch) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(ch) < 0x20) {
+          char buf[7];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(ch));
+          out += buf;
+        } else {
+          out.push_back(ch);
+        }
+        break;
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+std::string daux_append_parameter_json(
+    Steinberg::Vst::IEditController* controller,
+    const Steinberg::Vst::ParameterInfo& info) {
+  const std::string title = vst3_tchar_to_utf8(info.title);
+  const std::string short_title = vst3_tchar_to_utf8(info.shortTitle);
+  const std::string unit = vst3_tchar_to_utf8(info.units);
+  const bool automatable =
+      (info.flags & Steinberg::Vst::ParameterInfo::kCanAutomate) != 0;
+  const bool hidden =
+      (info.flags & Steinberg::Vst::ParameterInfo::kIsHidden) != 0;
+  const bool read_only =
+      (info.flags & Steinberg::Vst::ParameterInfo::kIsReadOnly) != 0;
+  const double value_normalized = controller->getParamNormalized(info.id);
+
+  std::string json = "{";
+  json += "\"id\":" + std::to_string(info.id) + ",";
+  json += "\"title\":" + daux_json_escape(title) + ",";
+  json += "\"short_title\":" + daux_json_escape(short_title) + ",";
+  json += "\"unit\":" + daux_json_escape(unit) + ",";
+  json += std::string("\"automatable\":") + (automatable ? "true" : "false") + ",";
+  json += std::string("\"hidden\":") + (hidden ? "true" : "false") + ",";
+  json += std::string("\"read_only\":") + (read_only ? "true" : "false") + ",";
+  json += "\"value_normalized\":" + std::to_string(value_normalized);
+  json += "}";
+  return json;
+}
+
+}  // namespace
+
+extern "C" char* sphere_daux_vst3_list_parameters_json(
+    SphereDauxVst3Processor* processor) {
+  if (!processor || !processor->controller) {
+    return nullptr;
+  }
+  Steinberg::Vst::IEditController* controller = processor->controller;
+  const Steinberg::int32 count = controller->getParameterCount();
+  std::string json = "[";
+  bool first = true;
+  for (Steinberg::int32 i = 0; i < count; ++i) {
+    Steinberg::Vst::ParameterInfo info{};
+    if (controller->getParameterInfo(i, info) != Steinberg::kResultOk) {
+      continue;
+    }
+    if (!first) {
+      json += ",";
+    }
+    first = false;
+    json += daux_append_parameter_json(controller, info);
+  }
+  json += "]";
+  char* out = static_cast<char*>(std::malloc(json.size() + 1));
+  if (!out) {
+    return nullptr;
+  }
+  std::memcpy(out, json.c_str(), json.size() + 1);
+  return out;
+}
+
+extern "C" void sphere_daux_vst3_parameters_json_free(char* data) {
+  std::free(data);
+}

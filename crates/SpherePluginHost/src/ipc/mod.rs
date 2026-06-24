@@ -191,6 +191,11 @@ pub enum HostCommand {
         component_b64: String,
         controller_b64: String,
     },
+    /// Request the automatable VST3 parameter list for a loaded instance.
+    /// The host replies [`HostEvent::PluginParameters`].
+    GetPluginParameters {
+        plugin_instance_id: String,
+    },
     /// Graceful host shutdown: detach everything and exit 0.
     Shutdown,
 }
@@ -327,6 +332,28 @@ pub enum HostEvent {
         plugin_instance_id: String,
         ok: bool,
     },
+    /// Reply to [`HostCommand::GetPluginParameters`].
+    PluginParameters {
+        plugin_instance_id: String,
+        ok: bool,
+        parameters: Vec<HostPluginParameter>,
+    },
+}
+
+/// One VST3 parameter entry returned by the plugin host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostPluginParameter {
+    pub id: u32,
+    pub title: String,
+    #[serde(default)]
+    pub short_title: String,
+    #[serde(default)]
+    pub unit: String,
+    pub automatable: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 fn default_editor_resizable() -> bool {

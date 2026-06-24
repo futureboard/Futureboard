@@ -600,6 +600,7 @@ impl StudioLayout {
             TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &mut self.plugin_picker_search_input,
+            TextMenuTarget::AutomationPickerSearch => &mut self.automation_picker_search_input,
             TextMenuTarget::InspectorName => &mut self.inspector_name_edit.name_input,
             TextMenuTarget::InspectorClipName => &mut self.inspector_name_edit.clip_name_input,
         }
@@ -611,6 +612,7 @@ impl StudioLayout {
             TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &self.browser_search_input,
             TextMenuTarget::PluginPickerSearch => &self.plugin_picker_search_input,
+            TextMenuTarget::AutomationPickerSearch => &self.automation_picker_search_input,
             TextMenuTarget::InspectorName => &self.inspector_name_edit.name_input,
             TextMenuTarget::InspectorClipName => &self.inspector_name_edit.clip_name_input,
         }
@@ -651,6 +653,9 @@ impl StudioLayout {
                     );
                 }
             }
+            TextMenuTarget::AutomationPickerSearch => {
+                self.automation_picker_query = self.automation_picker_search_input.value.clone();
+            }
         }
     }
 
@@ -659,6 +664,7 @@ impl StudioLayout {
             || self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
             || self.plugin_picker_search_input.is_focused(window)
+            || self.automation_picker_search_input.is_focused(window)
             || self.inspector_name_edit.name_input.is_focused(window)
             || self.inspector_name_edit.clip_name_input.is_focused(window)
     }
@@ -1410,10 +1416,11 @@ impl StudioLayout {
         // the separate InsertPickerWindow, which can't share this bridge, so it
         // stays on the key_char insertion path in both hosts (see
         // `handle_plugin_picker_text_input`).
-        const TARGETS: [TextMenuTarget; 5] = [
+        const TARGETS: [TextMenuTarget; 6] = [
             TextMenuTarget::CommandPalette,
             TextMenuTarget::ProjectSwitcherSearch,
             TextMenuTarget::BrowserSearch,
+            TextMenuTarget::AutomationPickerSearch,
             TextMenuTarget::InspectorName,
             TextMenuTarget::InspectorClipName,
         ];

@@ -53,9 +53,40 @@ impl LastTouchedPluginParam {
         AutomationTarget::PluginParameter {
             insert_id: self.insert_id.clone(),
             parameter_id: self.parameter_id.clone(),
-            parameter_name: self.parameter_name.clone(),
+            parameter_name: self.display_label(),
         }
     }
+}
+
+/// Display label for a plugin parameter automation lane / picker row.
+pub fn plugin_automation_display_name(plugin_name: &str, param_title: &str) -> String {
+    format!("{plugin_name} > {param_title}")
+}
+
+/// One parameter row in the automation target picker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutomationPickerParameter {
+    pub target: AutomationTarget,
+    /// Parameter title only (for per-plugin search).
+    pub param_title: String,
+    pub already_added: bool,
+}
+
+/// One plugin group in the automation target picker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutomationPickerPluginGroup {
+    pub insert_id: String,
+    pub plugin_name: String,
+    pub parameters: Vec<AutomationPickerParameter>,
+}
+
+/// Structured picker model: instrument → effects → track controls.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AutomationPickerModel {
+    pub last_touched: Option<LastTouchedPluginParam>,
+    pub instrument: Option<AutomationPickerPluginGroup>,
+    pub effects: Vec<AutomationPickerPluginGroup>,
+    pub track_targets: Vec<(AutomationTarget, bool)>,
 }
 
 /// Interpolation shape between an automation point and the next one.
@@ -341,25 +372,108 @@ impl TimelineState {
             .unwrap_or(AutomationTarget::TrackVolume)
     }
 
-    /// Targets offered by the picker for a track: Volume, Pan, then one entry
-    /// per insert plugin parameter (when metadata is available).
+    /// Targets offered by the picker for a track: Volume, Pan, Mute, then plugin
+    /// parameters (when metadata is available from the plugin host).
     pub fn available_automation_targets(&self, track_id: &str) -> Vec<AutomationTarget> {
-        let mut out = vec![AutomationTarget::TrackVolume, AutomationTarget::TrackPan];
+        let mut out = vec![
+            AutomationTarget::TrackVolume,
+            AutomationTarget::TrackPan,
+            AutomationTarget::TrackMute,
+        ];
         if let Some(track) = self.find_track(track_id) {
             for insert in &track.inserts {
                 if insert.is_empty() {
                     continue;
                 }
                 for param in &insert.parameters {
+                    if !Self::plugin_parameter_picker_visible(param) {
+                        continue;
+                    }
                     out.push(AutomationTarget::PluginParameter {
                         insert_id: insert.id.clone(),
                         parameter_id: param.id.to_string(),
-                        parameter_name: format!("{}: {}", insert.display_name, param.name),
+                        parameter_name: plugin_automation_display_name(
+                            &insert.display_name,
+                            &param.name,
+                        ),
                     });
                 }
             }
         }
         out
+    }
+
+    fn plugin_parameter_picker_visible(param: &PluginParameterState) -> bool {
+        if param.hidden && !automation_debug_enabled() {
+            return false;
+        }
+        if !param.automatable && !automation_debug_enabled() {
+            return false;
+        }
+        true
+    }
+
+    fn plugin_group_for_insert(
+        &self,
+        insert: &InsertSlotState,
+        existing: &std::collections::HashSet<AutomationTarget>,
+    ) -> Option<AutomationPickerPluginGroup> {
+        if insert.is_empty() {
+            return None;
+        }
+        let mut parameters = Vec::new();
+        for param in &insert.parameters {
+            if !Self::plugin_parameter_picker_visible(param) {
+                continue;
+            }
+            let target = AutomationTarget::PluginParameter {
+                insert_id: insert.id.clone(),
+                parameter_id: param.id.to_string(),
+                parameter_name: plugin_automation_display_name(&insert.display_name, &param.name),
+            };
+            parameters.push(AutomationPickerParameter {
+                already_added: existing.contains(&target),
+                param_title: param.name.clone(),
+                target,
+            });
+        }
+        Some(AutomationPickerPluginGroup {
+            insert_id: insert.id.clone(),
+            plugin_name: insert.display_name.clone(),
+            parameters,
+        })
+    }
+
+    /// Build grouped automation picker content for `track_id`.
+    pub fn automation_picker_model(&self, track_id: &str) -> Option<AutomationPickerModel> {
+        let track = self.find_track(track_id)?;
+        let existing: std::collections::HashSet<_> = track
+            .automation_lanes
+            .iter()
+            .map(|lane| lane.target.clone())
+            .collect();
+        let track_targets = [
+            AutomationTarget::TrackVolume,
+            AutomationTarget::TrackPan,
+            AutomationTarget::TrackMute,
+        ]
+        .into_iter()
+        .map(|target| (target.clone(), existing.contains(&target)))
+        .collect();
+        let instrument = track
+            .instrument_insert()
+            .and_then(|insert| self.plugin_group_for_insert(insert, &existing));
+        let effects = track
+            .effect_inserts()
+            .iter()
+            .filter_map(|insert| self.plugin_group_for_insert(insert, &existing))
+            .collect();
+        Some(AutomationPickerModel {
+            last_touched: self.last_touched_plugin_param_for_track(track_id).cloned(),
+            instrument,
+            effects,
+            track_targets,
+        })
     }
 
     /// Point the lane editor at `target`, creating its lane if needed. Committed

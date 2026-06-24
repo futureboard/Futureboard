@@ -1139,7 +1139,8 @@ impl PluginEditorWindow {
             // Plugin-state replies are consumed by the save/restore flow in
             // PluginBridgeRuntime; nothing to fold into editor status.
             ClientEvent::Host(HostEvent::PluginState { .. })
-            | ClientEvent::Host(HostEvent::PluginStateSet { .. }) => {}
+            | ClientEvent::Host(HostEvent::PluginStateSet { .. })
+            | ClientEvent::Host(HostEvent::PluginParameters { .. }) => {}
             ClientEvent::Host(HostEvent::Log { level, message }) => {
                 eprintln!("[plugin-view][host][{level}] {message}");
             }

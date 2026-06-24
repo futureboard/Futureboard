@@ -601,6 +601,16 @@ impl PluginHostPreviewEngine {
             .and_then(|instance| instance.processor.get_state())
     }
 
+    /// Enumerate VST3 parameters for automation picker / metadata cache.
+    pub fn list_parameters_for_instance(
+        &self,
+        plugin_instance_id: &str,
+    ) -> Option<Vec<DAUx::vst3_processor::Vst3ParameterDescriptor>> {
+        self.instances
+            .get(plugin_instance_id)
+            .and_then(|instance| instance.processor.list_parameters())
+    }
+
     /// Restore a previously captured VST3 state. Holds the voice MIDI mutex
     /// across `setState` so it is serialized against the audio producer's
     /// `process()` (the same mutex `render_voice` holds per block) — the

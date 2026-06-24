@@ -161,12 +161,13 @@ impl StudioLayout {
     pub(super) fn context_target_for_open_menu(&self) -> Option<ContextTarget> {
         match self.overlay.open_popover.as_ref()? {
             OpenPopover::Context { request } => Some(request.target.to_context_target()),
+            OpenPopover::AutomationTargetPicker { .. } => None,
         }
     }
 
     pub(super) fn validate_open_context_menu_action(&self, cx: &Context<Self>) -> bool {
         let Some(OpenPopover::Context { request }) = self.overlay.open_popover.as_ref() else {
-            return false;
+            return true;
         };
         self.validate_context_menu_target(&request.target, cx)
     }

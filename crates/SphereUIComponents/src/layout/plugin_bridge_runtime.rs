@@ -617,6 +617,17 @@ impl PluginBridgeRuntime {
         )
     }
 
+    /// Ask the host to enumerate VST3 parameters for a loaded instance.
+    pub fn request_plugin_parameters(
+        &mut self,
+        plugin_instance_id: &str,
+    ) -> Result<(), PluginHostClientError> {
+        if !self.loaded.contains_key(plugin_instance_id) {
+            return Ok(());
+        }
+        self.client.get_plugin_parameters(plugin_instance_id)
+    }
+
     pub fn poll(&mut self) {
         while let Some(event) = self.client.try_recv_event() {
             match &event {

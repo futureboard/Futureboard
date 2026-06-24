@@ -707,6 +707,17 @@ impl PluginHostClient {
         })
     }
 
+    /// Request the VST3 parameter list for a loaded instance. Reply:
+    /// [`crate::ipc::HostEvent::PluginParameters`] (poll via [`Self::try_recv_event`]).
+    pub fn get_plugin_parameters(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::GetPluginParameters {
+            plugin_instance_id: plugin_instance_id.into(),
+        })
+    }
+
     pub fn close_editor(
         &mut self,
         plugin_instance_id: impl Into<String>,

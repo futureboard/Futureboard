@@ -925,6 +925,39 @@ impl Render for StudioLayout {
                         .into_any_element(),
                     )
                 }
+                Some(OpenPopover::AutomationTargetPicker { track_id, x, y }) => {
+                    use crate::components::timeline::automation_target_picker::automation_target_picker_overlay;
+                    use crate::components::text_input::TextInputCallbacks;
+
+                    self.automation_picker_query = self.automation_picker_search_input.value.clone();
+                    let model = self
+                        .timeline
+                        .read(cx)
+                        .state
+                        .automation_picker_model(&track_id)
+                        .unwrap_or_default();
+                    let search_callbacks = TextInputCallbacks {
+                        on_context_menu: None,
+                        on_mouse: None,
+                    };
+                    Some(
+                        automation_target_picker_overlay(
+                            &model,
+                            &track_id,
+                            &self.automation_picker_query,
+                            &self.automation_picker_search_input,
+                            self.automation_picker_search_input.is_focused(window),
+                            x,
+                            y,
+                            viewport_width,
+                            viewport_height,
+                            on_popover_command.clone(),
+                            on_close_popover.clone(),
+                            search_callbacks,
+                        )
+                        .into_any_element(),
+                    )
+                }
                 None => None,
             }
         };

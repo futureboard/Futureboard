@@ -231,13 +231,16 @@ impl Default for InsertLoadStatus {
     }
 }
 
-/// Read-only parameter snapshot — populated in Phase 5 by the param
-/// event drain pump. Phase 1 keeps the vec empty.
+/// Read-only parameter snapshot populated from the plugin host on load.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginParameterState {
     pub id: u32,
     pub name: String,
     pub value_normalized: f32,
+    pub automatable: bool,
+    pub hidden: bool,
+    pub read_only: bool,
+    pub unit: String,
 }
 
 /// UI-side mirror of `project::ProjectInsert`. The runtime owns the
@@ -831,6 +834,35 @@ impl TimelineState {
             );
         }
         slot.output_bus_channel_counts = sanitized;
+        true
+    }
+
+    /// Replace the cached VST3 parameter list for an insert. Returns `true` when
+    /// the stored list changed.
+    pub fn set_insert_parameters(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        parameters: Vec<PluginParameterState>,
+    ) -> bool {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
+            return false;
+        };
+        let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
+            return false;
+        };
+        if slot.parameters == parameters {
+            return false;
+        }
+        if plugin_debug_enabled() {
+            eprintln!(
+                "[plugin] set_parameters track={} slot={} count={}",
+                track_id,
+                insert_id,
+                parameters.len()
+            );
+        }
+        slot.parameters = parameters;
         true
     }
 

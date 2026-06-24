@@ -6,8 +6,7 @@ use crate::components::timeline::timeline_state::TrackType;
 use crate::components::timeline::timeline_state::{self};
 
 use super::StudioLayout;
-use super::context_menu_ops::{ContextMenuRequest, ContextMenuTarget};
-use super::studio_state::ContextTarget;
+
 impl StudioLayout {
     /// Dev-only: bulk-create `count` tracks for scalability stress testing.
     /// Tracks cycle through Audio/MIDI/Instrument types. Does not add clips.
@@ -413,7 +412,10 @@ impl StudioLayout {
         AutomationTarget::PluginParameter {
             insert_id: insert_id.clone(),
             parameter_id: parameter_id.clone(),
-            parameter_name: format!("{}: {}", insert.display_name, param.name),
+            parameter_name: crate::components::timeline::timeline_state::plugin_automation_display_name(
+                &insert.display_name,
+                &param.name,
+            ),
         }
     }
 
@@ -432,22 +434,27 @@ impl StudioLayout {
 
         match action {
             AutomationControlAction::OpenTargetPicker => {
-                let window_id = window.window_handle().window_id();
                 self.timeline.update(cx, |timeline, cx| {
                     timeline.state.select_track(track_id);
                     cx.notify();
                 });
-                self.try_open_context_menu(
-                    ContextMenuRequest::new(
-                        window_id,
+                self.menu_bar.open_menu_id = None;
+                self.menu_bar.submenu_path.clear();
+                self.project_switcher.is_open = false;
+                self.automation_picker_query.clear();
+                self.automation_picker_search_input.set_value("");
+                self.request_track_insert_parameters(track_id, cx);
+                self.automation_picker_search_input
+                    .focus_handle
+                    .focus(window, cx);
+                self.overlay.open_popover = Some(
+                    super::studio_state::OpenPopover::AutomationTargetPicker {
+                        track_id: track_id.to_string(),
                         x,
                         y,
-                        ContextMenuTarget::Extended(ContextTarget::AutomationTargetPicker {
-                            track_id: track_id.to_string(),
-                        }),
-                    ),
-                    cx,
+                    },
                 );
+                cx.notify();
             }
             AutomationControlAction::HideAutomation => {
                 let collapsed = self.timeline.update(cx, |timeline, cx| {

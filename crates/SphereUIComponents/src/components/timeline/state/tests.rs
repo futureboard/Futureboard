@@ -1289,6 +1289,10 @@ mod fx_reorder_tests {
                 id: 7,
                 name: "Cutoff".to_string(),
                 value_normalized: 0.5,
+                automatable: true,
+                hidden: false,
+                read_only: false,
+                unit: String::new(),
             });
         }
 

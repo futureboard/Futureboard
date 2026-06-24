@@ -471,6 +471,21 @@ impl StudioLayout {
                         self.audio_bridge.project_dirty = true;
                         self.schedule_audio_project_sync(cx, true, "bridge_processing_prepared");
                     }
+                    self.request_bridge_insert_parameters(&plugin_instance_id);
+                }
+                ClientEvent::Host(HostEvent::PluginParameters {
+                    plugin_instance_id,
+                    ok,
+                    parameters,
+                }) => {
+                    if ok {
+                        changed |=
+                            self.apply_bridge_insert_parameters(&plugin_instance_id, parameters, cx);
+                    } else {
+                        eprintln!(
+                            "[plugin-bridge] event PluginParameters failed instance={plugin_instance_id}"
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -3085,7 +3100,84 @@ impl StudioLayout {
             self.audio_bridge.project_dirty = true;
             self.schedule_audio_project_sync(cx, true, source);
         }
+        self.request_bridge_insert_parameters(plugin_instance_id);
         slot_changed
+    }
+
+    fn host_plugin_parameter_to_ui(
+        param: &SpherePluginHost::ipc::HostPluginParameter,
+    ) -> crate::components::timeline::timeline_state::PluginParameterState {
+        use crate::components::timeline::timeline_state::PluginParameterState;
+        let name = if !param.title.is_empty() {
+            param.title.clone()
+        } else {
+            param.short_title.clone()
+        };
+        PluginParameterState {
+            id: param.id,
+            name,
+            value_normalized: 0.5,
+            automatable: param.automatable,
+            hidden: param.hidden,
+            read_only: param.read_only,
+            unit: param.unit.clone(),
+        }
+    }
+
+    pub(super) fn request_bridge_insert_parameters(&self, plugin_instance_id: &str) {
+        let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() else {
+            return;
+        };
+        if let Ok(mut bridge) = runtime.lock() {
+            if let Err(error) = bridge.request_plugin_parameters(plugin_instance_id) {
+                eprintln!(
+                    "[plugin-bridge] GetPluginParameters send failed instance={plugin_instance_id}: {error}"
+                );
+            }
+        }
+    }
+
+    pub(super) fn request_track_insert_parameters(&self, track_id: &str, cx: &Context<Self>) {
+        let instance_ids: Vec<String> = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(track_id)
+            .map(|track| {
+                track
+                    .inserts
+                    .iter()
+                    .filter(|insert| !insert.is_empty())
+                    .map(|insert| insert.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for instance_id in instance_ids {
+            self.request_bridge_insert_parameters(&instance_id);
+        }
+    }
+
+    fn apply_bridge_insert_parameters(
+        &mut self,
+        plugin_instance_id: &str,
+        parameters: Vec<SpherePluginHost::ipc::HostPluginParameter>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::components::timeline::timeline_state::PluginParameterState;
+        let ui_params: Vec<PluginParameterState> = parameters
+            .iter()
+            .map(Self::host_plugin_parameter_to_ui)
+            .collect();
+        self.timeline.update(cx, |timeline, _cx| {
+            let track_ids = timeline
+                .state
+                .insert_owner_ids_containing(plugin_instance_id);
+            track_ids.into_iter().any(|track_id| {
+                timeline
+                    .state
+                    .set_insert_parameters(&track_id, plugin_instance_id, ui_params.clone())
+            })
+        })
     }
 
     /// Load one external-bridge insert slot into the plugin host (shared by

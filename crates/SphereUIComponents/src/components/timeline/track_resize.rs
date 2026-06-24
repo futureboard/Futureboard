@@ -87,7 +87,7 @@ pub fn visible_track_row_range(
     let visible_start = row_layout
         .rows
         .iter()
-        .position(|row| row.y + row.height > scroll_y)
+        .position(|row| row.y + row.block_height() > scroll_y)
         .unwrap_or(track_count)
         .saturating_sub(overscan);
     let visible_end = row_layout
@@ -104,7 +104,7 @@ pub fn visible_track_row_range(
         .unwrap_or(0.0);
     let bottom_spacer = if visible_end < track_count {
         let last = &row_layout.rows[visible_end - 1];
-        (row_layout.total_height - last.y - last.height).max(0.0)
+        (row_layout.total_height - last.y - last.block_height()).max(0.0)
     } else {
         0.0
     };

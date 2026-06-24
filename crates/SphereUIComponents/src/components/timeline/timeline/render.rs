@@ -628,24 +628,68 @@ impl Render for Timeline {
         });
 
         let on_automation_down =
-            cx.listener(|this, payload: &(String, f32, f32, bool), _window, cx| {
-                let (track_id, beat, value, additive) =
-                    (payload.0.clone(), payload.1, payload.2, payload.3);
-                this.begin_automation_interaction(&track_id, beat, value, additive, cx);
+            cx.listener(|this, payload: &(String, String, f32, f32, bool), _window, cx| {
+                let (track_id, lane_id, beat, value, additive) = (
+                    payload.0.clone(),
+                    payload.1.clone(),
+                    payload.2,
+                    payload.3,
+                    payload.4,
+                );
+                this.begin_automation_interaction(&track_id, &lane_id, beat, value, additive, cx);
             });
-        let on_automation_down: crate::components::timeline::track_lane::AutomationDownCallback =
+        let on_automation_down: crate::components::timeline::automation_lane::AutomationDownCallback =
             std::sync::Arc::new(on_automation_down);
 
-        // Cycle the automation target (in-lane target chip). Committed edit —
-        // changes the focused lane and which lane persists.
-        let on_automation_cycle = cx.listener(|this, track_id: &String, _window, cx| {
-            if this.state.cycle_automation_target(track_id).is_some() {
-                this.mark_project_changed(cx);
-                cx.notify();
-            }
-        });
-        let on_automation_cycle: crate::components::timeline::track_lane::AutomationCycleCallback =
-            std::sync::Arc::new(on_automation_cycle);
+        // Sub-lane header controls: activate / enable / clear / hide. Activation
+        // is UI-only; enable/clear/hide are committed edits.
+        let on_automation_lane_action = cx.listener(
+            |this,
+             payload: &(
+                String,
+                String,
+                crate::components::timeline::automation_lane::AutomationLaneAction,
+            ),
+             _window,
+             cx| {
+                use crate::components::timeline::automation_lane::AutomationLaneAction;
+                let (track_id, lane_id, action) =
+                    (payload.0.clone(), payload.1.clone(), payload.2);
+                match action {
+                    AutomationLaneAction::Activate => {
+                        this.state.activate_automation_lane(&track_id, &lane_id);
+                        this.state.select_track(&track_id);
+                        cx.notify();
+                    }
+                    AutomationLaneAction::ToggleEnable => {
+                        if this
+                            .state
+                            .toggle_automation_lane_enabled(&track_id, &lane_id)
+                            .is_some()
+                        {
+                            this.mark_project_changed(cx);
+                            cx.notify();
+                        }
+                    }
+                    AutomationLaneAction::Clear => {
+                        if this.state.clear_automation_lane(&track_id, &lane_id) > 0 {
+                            this.mark_project_changed(cx);
+                            cx.notify();
+                        }
+                    }
+                    AutomationLaneAction::Hide => {
+                        if this.state.remove_automation_lane(&track_id, &lane_id) {
+                            this.mark_project_changed(cx);
+                            cx.notify();
+                        }
+                    }
+                }
+            },
+        );
+        let on_automation_lane_action: crate::components::timeline::automation_lane::AutomationLaneActionCallback =
+            std::sync::Arc::new(on_automation_lane_action);
+
+        let on_automation_control = self.on_automation_control.clone();
 
         let on_tempo_down = cx.listener(
             |this, payload: &(f64, f64, Option<String>, bool, u32), _window, cx| {
@@ -1263,7 +1307,8 @@ impl Render for Timeline {
                 Some(on_erase_clip.clone()),
                 Some(&self.erase_preview_ids),
                 Some(on_automation_down.clone()),
-                Some(on_automation_cycle.clone()),
+                Some(on_automation_lane_action.clone()),
+                on_automation_control.clone(),
                 self.automation_marquee.as_ref(),
             )))
             .children(timeline_marker_region_overlay(state).map(|overlay| {

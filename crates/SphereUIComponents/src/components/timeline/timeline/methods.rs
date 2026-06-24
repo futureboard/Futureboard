@@ -175,6 +175,7 @@ impl Timeline {
             erase_preview_ids: HashSet::new(),
             automation_drag: None,
             automation_marquee: None,
+            on_automation_control: None,
             tempo_drag: None,
             ts_drag: None,
             pan_last_position: None,
@@ -213,6 +214,7 @@ impl Timeline {
             erase_preview_ids: HashSet::new(),
             automation_drag: None,
             automation_marquee: None,
+            on_automation_control: None,
             tempo_drag: None,
             ts_drag: None,
             pan_last_position: None,
@@ -295,6 +297,15 @@ impl Timeline {
 
     pub fn set_context_menu_callback(&mut self, callback: Option<TimelineContextMenuCb>) {
         self.on_context_menu = callback;
+    }
+
+    pub fn set_automation_control_callback(
+        &mut self,
+        callback: Option<
+            crate::components::timeline::automation_control_lane::AutomationControlCallback,
+        >,
+    ) {
+        self.on_automation_control = callback;
     }
 
     pub fn set_open_editor_callback(&mut self, callback: Option<TimelineOpenEditorCb>) {
@@ -520,18 +531,25 @@ impl Timeline {
     // are UI-only; point add/move commit dirty exactly once on mouse release.
 
     /// Map a window-space y to a lane-local automation value for `track_id`.
-    pub(super) fn automation_value_from_window_y(&self, track_id: &str, window_y: f32) -> f32 {
+    pub(super) fn automation_value_from_window_y(
+        &self,
+        track_id: &str,
+        lane_id: &str,
+        window_y: f32,
+    ) -> f32 {
         use crate::components::timeline::timeline_state::{
-            automation_y_to_value, DEFAULT_TRACK_HEIGHT,
+            automation_y_to_value, AUTOMATION_SUBLANE_HEIGHT,
         };
-        let row_layout = self.state.track_row_layout();
-        let row = row_layout.row_for_track(track_id);
-        let row_y = row.map(|r| r.y).unwrap_or(0.0);
-        let row_h = row.map(|r| r.height).unwrap_or(DEFAULT_TRACK_HEIGHT);
+        // Map against the lane's own sub-row bounds so a drag stays anchored to
+        // the lane the gesture started in.
+        let (lane_y, lane_h) = self
+            .state
+            .automation_sublane_geometry(track_id, lane_id)
+            .unwrap_or((0.0, AUTOMATION_SUBLANE_HEIGHT));
         let local_y = (window_y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()
             + self.state.viewport.scroll_y)
-            - row_y;
-        automation_y_to_value(local_y, row_h)
+            - lane_y;
+        automation_y_to_value(local_y, lane_h)
     }
 
     pub(super) fn tempo_bpm_from_window_y(&self, window_y: f32) -> f64 {
@@ -722,6 +740,7 @@ impl Timeline {
     pub(super) fn begin_automation_interaction(
         &mut self,
         track_id: &str,
+        lane_id: &str,
         beat: f32,
         value: f32,
         additive: bool,
@@ -729,19 +748,21 @@ impl Timeline {
     ) {
         use crate::components::timeline::timeline_state::{
             AutomationMarquee, AutomationPointDrag, TrackLaneMode, AUTOMATION_LANE_PAD,
+            AUTOMATION_SUBLANE_HEIGHT,
         };
         self.state.select_track(track_id);
         if self.state.track_lane_mode(track_id) != TrackLaneMode::Automation {
             return;
         }
-        let target = self.state.active_automation_target(track_id);
-        let Some(lane_id) = self.state.ensure_automation_lane(track_id, target) else {
+        // Focus the editor on the clicked lane and make sure it exists.
+        self.state.activate_automation_lane(track_id, lane_id);
+        if self.state.automation_lane(track_id, lane_id).is_none() {
             return;
-        };
+        }
+        let lane_id = lane_id.to_string();
 
         let ppb = self.state.viewport.pixels_per_beat.max(1.0);
-        let row_h = self.state.track_row_height_for_id(track_id);
-        let usable = (row_h - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
+        let usable = (AUTOMATION_SUBLANE_HEIGHT - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
         let beat_tol = 8.0 / ppb;
         let value_tol = 8.0 / usable;
 
@@ -813,7 +834,8 @@ impl Timeline {
     ) -> bool {
         if let Some(drag) = self.automation_drag.clone() {
             let beat = self.snap_beat(self.beat_from_window_x(window_x)).max(0.0);
-            let value = self.automation_value_from_window_y(&drag.track_id, window_y);
+            let value =
+                self.automation_value_from_window_y(&drag.track_id, &drag.lane_id, window_y);
             self.state.move_automation_point(
                 &drag.track_id,
                 &drag.lane_id,
@@ -829,7 +851,7 @@ impl Timeline {
         }
         if let Some(mut m) = self.automation_marquee.clone() {
             let beat = self.beat_from_window_x(window_x).max(0.0);
-            let value = self.automation_value_from_window_y(&m.track_id, window_y);
+            let value = self.automation_value_from_window_y(&m.track_id, &m.lane_id, window_y);
             m.cur_beat = beat;
             m.cur_value = value;
             self.state.marquee_select_automation(

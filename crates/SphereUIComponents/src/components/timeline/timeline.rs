@@ -136,6 +136,11 @@ pub struct Timeline {
     automation_drag: Option<crate::components::timeline::timeline_state::AutomationPointDrag>,
     /// In-flight automation marquee (rubber-band) selection. UI-only.
     automation_marquee: Option<crate::components::timeline::timeline_state::AutomationMarquee>,
+    /// Automation control-lane actions that need studio-level handling (picker,
+    /// clear-all confirmation, last-touched). Set by `StudioLayout`.
+    on_automation_control: Option<
+        crate::components::timeline::automation_control_lane::AutomationControlCallback,
+    >,
     /// In-flight tempo-point drag on the global Tempo Track lane.
     tempo_drag: Option<TempoPointDrag>,
     /// In-flight time-signature marker drag on the global Time Signature lane.
@@ -206,6 +211,10 @@ pub enum TimelineContextTarget {
     TempoLaneHeader,
     /// Lane header menu button on the Time Signature track.
     TimeSignatureLaneHeader,
+    /// Automation target picker opened from the control lane "+ Add" button.
+    AutomationTargetPicker {
+        track_id: String,
+    },
 }
 
 pub type TimelineContextMenuCb = std::sync::Arc<

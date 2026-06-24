@@ -168,13 +168,16 @@ pub fn track_header(
     } else {
         Colors::surface_panel()
     };
-    // In automation mode the sub-label shows the active target instead of the
-    // clip count so the user can see what they are editing at a glance.
+    // The parent header stays clean: it never names a single automation target.
+    // When the automation section is expanded it shows only a compact lane count
+    // indicator; the lane names live on the sub-lane headers below the track.
     let sub_label = if is_automation {
-        format!(
-            "AUTO · {}",
-            state.active_automation_target(&track.id).display_name()
-        )
+        let lane_count = track.automation_lanes.iter().filter(|l| l.visible).count();
+        if lane_count == 1 {
+            "1 automation lane".to_string()
+        } else {
+            format!("{lane_count} automation lanes")
+        }
     } else {
         format!("CH {:02} · {} clips", index + 1, track.clips.len())
     };

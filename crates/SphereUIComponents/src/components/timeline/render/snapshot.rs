@@ -256,6 +256,7 @@ fn build_lanes(state: &TimelineState, range: &VisibleTrackRange) -> Vec<RenderLa
                     index,
                     y: index as f32 * DEFAULT_TRACK_HEIGHT,
                     height: DEFAULT_TRACK_HEIGHT,
+                    automation_height: 0.0,
                 });
             let y = row.y - state.viewport.scroll_y;
             RenderLaneSnapshot {
@@ -297,6 +298,7 @@ fn build_clips(
                 index: track_index,
                 y: track_index as f32 * DEFAULT_TRACK_HEIGHT,
                 height: DEFAULT_TRACK_HEIGHT,
+                automation_height: 0.0,
             });
         let clip_h = row.height - pad * 2.0;
         for clip in &track.clips {

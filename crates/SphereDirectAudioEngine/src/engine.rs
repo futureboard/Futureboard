@@ -3660,6 +3660,7 @@ mod bridge_insert_tests {
             }],
             sends: Vec::new(),
             automation_lanes: Vec::new(),
+            plugin_param_automation: Vec::new(),
             meter: Arc::new(Default::default()),
             meter_peak_l: 0.0,
             meter_peak_r: 0.0,
@@ -3692,6 +3693,116 @@ mod bridge_insert_tests {
         apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
         assert!((track.block_l[0] - 0.25).abs() < 1e-6);
         assert!((track.block_r[0] - 0.25).abs() < 1e-6);
+    }
+
+    #[derive(Debug, Default)]
+    struct ParamCaptureSink {
+        last_param_id: AtomicU64,
+        last_value_bits: AtomicU64,
+        pushes: AtomicU64,
+    }
+
+    impl PluginBridgeSink for ParamCaptureSink {
+        fn dsp_ready(&self) -> bool {
+            true
+        }
+        fn read_output(&self, _l: &mut [f32], _r: &mut [f32], _frames: usize) -> usize {
+            0
+        }
+        fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+        fn push_param(&self, param_id: u32, value: f32, _sample_offset: u32) {
+            self.last_param_id.store(param_id as u64, Ordering::Release);
+            self.last_value_bits
+                .store(value.to_bits() as u64, Ordering::Release);
+            self.pushes.fetch_add(1, Ordering::Release);
+        }
+        fn write_input(&self, _: &[f32], _: &[f32], _: usize) {}
+        fn request_block(&self, _: u32) {}
+    }
+
+    fn plugin_param_lane(insert_id: &str, param_id: &str) -> crate::runtime::RuntimeAutomationLane {
+        crate::runtime::RuntimeAutomationLane {
+            id: "lane-1".to_string(),
+            name: "Cutoff".to_string(),
+            target: crate::runtime::RuntimeAutomationTarget::PluginParameter {
+                insert_id: insert_id.to_string(),
+                parameter_id: param_id.to_string(),
+            },
+            enabled: true,
+            points: vec![
+                crate::runtime::RuntimeAutomationPoint {
+                    beat: 0.0,
+                    value: 0.0,
+                    curve: crate::runtime::RuntimeAutomationCurve::Linear,
+                },
+                crate::runtime::RuntimeAutomationPoint {
+                    beat: 4.0,
+                    value: 1.0,
+                    curve: crate::runtime::RuntimeAutomationCurve::Linear,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn plugin_param_automation_pushes_value_to_bridge_sink_during_playback() {
+        let mut track = bridge_effect_track(0.0);
+        // Bridge plugin param automation: lane targets insert-1 / param 42.
+        track.automation_lanes = vec![plugin_param_lane("insert-1", "42")];
+        track.plugin_param_automation = vec![crate::runtime::RuntimePluginParamBinding {
+            insert_ix: 0,
+            lane_ix: 0,
+            param_id: 42,
+            last_value: f32::NAN,
+        }];
+        let sink = std::sync::Arc::new(ParamCaptureSink::default());
+        track.inserts[0].bridge_sink = Some(sink.clone());
+
+        // Block at beat 2.0 → linear midpoint between 0.0 and 1.0 = 0.5.
+        let transport = RuntimeTransportContext {
+            playing: true,
+            ppq_position: 2.0,
+            ..RuntimeTransportContext::default()
+        };
+        apply_track_chain_block(&mut track, 4, true, transport);
+
+        assert_eq!(sink.pushes.load(Ordering::Acquire), 1);
+        assert_eq!(sink.last_param_id.load(Ordering::Acquire), 42);
+        let pushed = f32::from_bits(sink.last_value_bits.load(Ordering::Acquire) as u32);
+        assert!((pushed - 0.5).abs() < 1e-4, "pushed={pushed}");
+    }
+
+    #[test]
+    fn plugin_param_automation_dedupes_unchanged_value_and_is_idle_when_stopped() {
+        let mut track = bridge_effect_track(0.0);
+        track.automation_lanes = vec![plugin_param_lane("insert-1", "42")];
+        track.plugin_param_automation = vec![crate::runtime::RuntimePluginParamBinding {
+            insert_ix: 0,
+            lane_ix: 0,
+            param_id: 42,
+            last_value: f32::NAN,
+        }];
+        let sink = std::sync::Arc::new(ParamCaptureSink::default());
+        track.inserts[0].bridge_sink = Some(sink.clone());
+
+        let transport = RuntimeTransportContext {
+            playing: true,
+            ppq_position: 2.0,
+            ..RuntimeTransportContext::default()
+        };
+        // Same beat twice → second block must not re-push the identical value.
+        apply_track_chain_block(&mut track, 4, true, transport);
+        apply_track_chain_block(&mut track, 4, true, transport);
+        assert_eq!(sink.pushes.load(Ordering::Acquire), 1);
+
+        // Stopped transport must not drive parameter automation at all.
+        let stopped = RuntimeTransportContext {
+            playing: false,
+            ppq_position: 3.5,
+            ..RuntimeTransportContext::default()
+        };
+        apply_track_chain_block(&mut track, 4, true, stopped);
+        assert_eq!(sink.pushes.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -3821,6 +3932,7 @@ mod bridge_insert_tests {
             ],
             sends: Vec::new(),
             automation_lanes: Vec::new(),
+            plugin_param_automation: Vec::new(),
             meter: Arc::new(Default::default()),
             meter_peak_l: 0.0,
             meter_peak_r: 0.0,
@@ -3936,6 +4048,7 @@ mod bridge_insert_tests {
             ],
             sends: Vec::new(),
             automation_lanes: Vec::new(),
+            plugin_param_automation: Vec::new(),
             meter: Arc::new(Default::default()),
             meter_peak_l: 0.0,
             meter_peak_r: 0.0,
@@ -4009,6 +4122,7 @@ mod routing_tests {
             inserts: Vec::new(),
             sends,
             automation_lanes: Vec::new(),
+            plugin_param_automation: Vec::new(),
             meter: Arc::new(Default::default()),
             meter_peak_l: 0.0,
             meter_peak_r: 0.0,

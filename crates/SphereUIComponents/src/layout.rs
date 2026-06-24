@@ -1158,6 +1158,14 @@ impl StudioLayout {
             }
             return;
         }
+        if let Some((track_id, target)) =
+            crate::components::timeline::timeline_state::parse_automation_target_menu_command(
+                command_id,
+            )
+        {
+            self.add_automation_target_for_track(&track_id, target, cx);
+            return;
+        }
         if let Some(track_id) = command_id.strip_prefix("mixer:create-return-send:") {
             let added = self.timeline.update(cx, |timeline, _cx| {
                 timeline.state.create_return_and_send(track_id)

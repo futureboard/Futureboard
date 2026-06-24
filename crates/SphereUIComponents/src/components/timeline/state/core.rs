@@ -80,6 +80,8 @@ pub struct TimelineState {
     /// Armed at pointer-down on a resize handle; promoted to
     /// [`Self::track_height_resize`] on the first drag-move delta.
     pub track_height_resize_arm: Option<(String, f32, bool, bool)>,
+    /// Last VST3 parameter touched inside a plugin editor (UI-only, not saved).
+    pub last_touched_plugin_param: Option<LastTouchedPluginParam>,
 }
 
 impl Default for TimelineState {
@@ -149,6 +151,7 @@ impl Default for TimelineState {
             track_view_layout: TrackViewLayout::default(),
             track_height_resize: None,
             track_height_resize_arm: None,
+            last_touched_plugin_param: None,
         }
     }
 }

@@ -1,15 +1,18 @@
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 
-use crate::components::timeline::automation_lane::automation_lane;
+use crate::components::timeline::automation_control_lane::{
+    automation_control_lane, AutomationControlCallback,
+};
+use crate::components::timeline::automation_lane::{
+    automation_lane, AutomationDownCallback, AutomationLaneActionCallback,
+};
 use crate::components::timeline::timeline_state::{
-    is_vsti_output_child_track_id, AutomationMarquee, TimelineState, DEFAULT_TRACK_HEIGHT,
-    HEADER_WIDTH,
+    is_vsti_output_child_track_id, AutomationMarquee, TimelineState, AUTOMATION_CONTROL_LANE_HEIGHT,
+    AUTOMATION_SUBLANE_HEIGHT, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
-use crate::components::timeline::track_lane::{
-    track_lane, AutomationCycleCallback, AutomationDownCallback,
-};
+use crate::components::timeline::track_lane::track_lane;
 use crate::components::timeline::track_resize::{
     track_row_resize_handle, visible_track_row_range, TrackHeightResizeArmCb,
     TrackHeightResizeResetCb,
@@ -50,7 +53,8 @@ pub fn track_list(
     >,
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
     on_automation_down: Option<AutomationDownCallback>,
-    on_automation_cycle: Option<AutomationCycleCallback>,
+    on_automation_lane_action: Option<AutomationLaneActionCallback>,
+    on_automation_control: Option<AutomationControlCallback>,
     automation_marquee: Option<&AutomationMarquee>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackList");
@@ -119,59 +123,104 @@ pub fn track_list(
                     index,
                     y: 0.0,
                     height: DEFAULT_TRACK_HEIGHT,
+                    automation_height: 0.0,
                 },
             );
         let row_height = row_entry.height;
         let row_y = row_entry.y;
+        let automation_height = state.track_automation_height(track);
+        let total_row_height = row_height + automation_height;
+
+        // Build the expandable automation sub-lane rows that stack directly
+        // below the parent track. Each one owns its full row bounds so point
+        // hit-testing maps into the correct lane, and is highlighted when it is
+        // the active (focused) lane.
+        let active_target = state.active_automation_target(&track.id);
+        let mut sub_lanes: Vec<gpui::AnyElement> = Vec::new();
+        if state.track_automation_expanded(track) {
+            sub_lanes.push(
+                automation_control_lane(
+                    &track.id,
+                    track.color,
+                    AUTOMATION_CONTROL_LANE_HEIGHT,
+                    state,
+                    on_automation_control.clone(),
+                )
+                .into_any_element(),
+            );
+            let mut lane_y = row_y + row_height + AUTOMATION_CONTROL_LANE_HEIGHT;
+            for lane in track.automation_lanes.iter().filter(|l| l.visible) {
+                let is_active = lane.target == active_target;
+                sub_lanes.push(
+                    automation_lane(
+                        &track.id,
+                        lane,
+                        track.color,
+                        is_active,
+                        lane_y,
+                        AUTOMATION_SUBLANE_HEIGHT,
+                        state,
+                        on_automation_down.clone(),
+                        on_automation_lane_action.clone(),
+                        automation_marquee,
+                    )
+                    .into_any_element(),
+                );
+                lane_y += AUTOMATION_SUBLANE_HEIGHT;
+            }
+        }
+
         let row = div()
             .relative()
             .w_full()
-            .h(px(row_height))
+            .h(px(total_row_height))
+            .flex()
+            .flex_col()
             .child(
+                // Parent track block (header + clip lane). The resize handle
+                // sits at its bottom so it grows only the parent row, not the
+                // automation lanes below.
                 div()
-                    .flex()
-                    .flex_row()
-                    .size_full()
-                    .child(track_header(
-                        track,
-                        index,
-                        state,
-                        row_height,
-                        header_callbacks.clone(),
-                    ))
-                    .child(track_lane(
-                        track,
-                        index,
-                        state,
-                        row_height,
-                        row_y,
-                        on_select_track.clone(),
-                        on_select_clip.clone(),
-                        on_add_clip.clone(),
-                        on_track_context_menu.clone(),
-                        on_clip_context_menu.clone(),
-                        on_open_editor.clone(),
-                        on_range_start.clone(),
-                        on_erase_start.clone(),
-                        on_erase_clip.clone(),
-                        erase_preview_ids,
-                        on_automation_down.clone(),
-                        on_automation_cycle.clone(),
-                        automation_marquee,
+                    .relative()
+                    .w_full()
+                    .h(px(row_height))
+                    .flex_none()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .size_full()
+                            .child(track_header(
+                                track,
+                                index,
+                                state,
+                                row_height,
+                                header_callbacks.clone(),
+                            ))
+                            .child(track_lane(
+                                track,
+                                index,
+                                state,
+                                row_height,
+                                on_select_track.clone(),
+                                on_select_clip.clone(),
+                                on_add_clip.clone(),
+                                on_track_context_menu.clone(),
+                                on_clip_context_menu.clone(),
+                                on_open_editor.clone(),
+                                on_range_start.clone(),
+                                on_erase_start.clone(),
+                                on_erase_clip.clone(),
+                                erase_preview_ids,
+                            )),
+                    )
+                    .child(track_row_resize_handle(
+                        &row_entry,
+                        on_resize_arm.clone(),
+                        on_resize_reset.clone(),
                     )),
             )
-            .child(track_row_resize_handle(
-                &row_entry,
-                on_resize_arm.clone(),
-                on_resize_reset.clone(),
-            ))
-            .children(
-                track
-                    .automation_lanes
-                    .iter()
-                    .filter(|l| l.visible)
-                    .map(|lane| automation_lane(lane, track.color, state)),
-            );
+            .children(sub_lanes);
         rows.push(row.into_any_element());
     }
 

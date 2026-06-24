@@ -310,6 +310,7 @@ mod tests {
             inserts: Vec::new(),
             sends,
             automation_lanes: Vec::new(),
+            plugin_param_automation: Vec::new(),
             meter: std::sync::Arc::new(crate::runtime::RuntimeTrackMeter::default()),
             meter_peak_l: 0.0,
             meter_peak_r: 0.0,

@@ -20,6 +20,16 @@ pub const TRACK_HEIGHT_HUGE: f32 = 180.0;
 
 pub const TRACK_RESIZE_HANDLE_HITBOX: f32 = 5.0;
 
+/// Fixed height (px) of a single expanded automation sub-lane row rendered
+/// below its parent track. Compact DAW density; parent track height and lane
+/// height are tracked independently.
+pub const AUTOMATION_SUBLANE_HEIGHT: f32 = 58.0;
+
+/// Fixed height (px) of the UI-only automation control row shown directly below
+/// the parent track when automation is expanded. Not an audio track or envelope
+/// lane — reconstructed from parent track automation state.
+pub const AUTOMATION_CONTROL_LANE_HEIGHT: f32 = 32.0;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackViewLayout {
     /// Per-track row height overrides (px). Missing ids use [`DEFAULT_TRACK_HEIGHT`].
@@ -58,7 +68,22 @@ pub struct TrackRowLayoutEntry {
     pub track_id: TrackId,
     pub index: usize,
     pub y: f32,
+    /// Height of the parent track row (clip lane), excluding any expanded
+    /// automation sub-lanes below it.
     pub height: f32,
+    /// Combined height (px) of the track's expanded automation sub-lanes,
+    /// stacked directly below the parent row. `0.0` when the track's automation
+    /// section is collapsed. The full block a track occupies vertically is
+    /// `height + automation_height`.
+    pub automation_height: f32,
+}
+
+impl TrackRowLayoutEntry {
+    /// Total vertical space the track occupies: parent row + automation lanes.
+    #[inline]
+    pub fn block_height(&self) -> f32 {
+        self.height + self.automation_height
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,18 +106,19 @@ impl TrackRowLayout {
             // `row.index == state.tracks position` invariant the timeline relies
             // on stays intact) but collapse them to zero height: they emit no lane,
             // no clip, no header, and never match `track_at_content_y`.
-            let height = if is_vsti_output_child_track_id(&track.id) {
-                0.0
+            let (height, automation_height) = if is_vsti_output_child_track_id(&track.id) {
+                (0.0, 0.0)
             } else {
-                state.track_row_height(track)
+                (state.track_row_height(track), state.track_automation_height(track))
             };
             rows.push(TrackRowLayoutEntry {
                 track_id: track.id.clone(),
                 index,
                 y,
                 height,
+                automation_height,
             });
-            y += height;
+            y += height + automation_height;
         }
         Self {
             rows,
@@ -114,7 +140,10 @@ impl TrackRowLayout {
             return None;
         }
         self.rows.iter().find(|row| {
-            let bottom = row.y + row.height;
+            // The whole vertical block (parent row + its automation sub-lanes)
+            // resolves to the same track, so selecting / dragging over a sub-lane
+            // still targets the owning track.
+            let bottom = row.y + row.block_height();
             content_y >= row.y && content_y < bottom
         })
     }
@@ -125,7 +154,7 @@ impl TrackRowLayout {
         }
         let content_y = content_y.max(0.0);
         for (i, row) in self.rows.iter().enumerate() {
-            let mid = row.y + row.height * 0.5;
+            let mid = row.y + row.block_height() * 0.5;
             if content_y < mid {
                 return i;
             }
@@ -220,6 +249,73 @@ impl TimelineState {
 
     pub fn track_row_layout(&self) -> TrackRowLayout {
         TrackRowLayout::build(self)
+    }
+
+    /// True when the track's automation section is expanded (sub-lanes shown).
+    /// Reuses [`TrackLaneMode::Automation`] as the expanded flag so the existing
+    /// header toggle and persistence keep working.
+    pub fn track_automation_expanded(&self, track: &TrackState) -> bool {
+        track.lane_mode == TrackLaneMode::Automation
+    }
+
+    /// The automation lanes shown as sub-rows for a track: only when the
+    /// automation section is expanded, and only lanes whose own show/hide flag
+    /// is on. Order matches `track.automation_lanes`.
+    pub fn visible_automation_lanes<'a>(
+        &self,
+        track: &'a TrackState,
+    ) -> impl Iterator<Item = &'a AutomationLaneState> + 'a {
+        let expanded = track.lane_mode == TrackLaneMode::Automation;
+        track
+            .automation_lanes
+            .iter()
+            .filter(move |lane| expanded && lane.visible)
+    }
+
+    /// Combined height of a track's expanded automation sub-lanes (0 collapsed).
+    pub fn track_automation_height(&self, track: &TrackState) -> f32 {
+        if !self.track_automation_expanded(track) {
+            return 0.0;
+        }
+        let lane_count = self.visible_automation_lanes(track).count();
+        AUTOMATION_CONTROL_LANE_HEIGHT + lane_count as f32 * AUTOMATION_SUBLANE_HEIGHT
+    }
+
+    /// Content-space y of the automation control row for `track_id`, or `None`
+    /// when automation is collapsed.
+    pub fn automation_control_lane_y(&self, track_id: &str) -> Option<f32> {
+        let layout = self.track_row_layout();
+        let row = layout.row_for_track(track_id)?;
+        let track = self.find_track(track_id)?;
+        if !self.track_automation_expanded(track) {
+            return None;
+        }
+        Some(row.y + row.height)
+    }
+
+    /// Absolute content-space `(y, height)` of one automation sub-lane row, or
+    /// `None` when the lane is not currently shown. Used by both the renderer
+    /// (to place the row) and the interaction code (to map a window-y back to a
+    /// normalized value within the correct sub-lane).
+    pub fn automation_sublane_geometry(
+        &self,
+        track_id: &str,
+        lane_id: &str,
+    ) -> Option<(f32, f32)> {
+        let layout = self.track_row_layout();
+        let row = layout.row_for_track(track_id)?;
+        let track = self.find_track(track_id)?;
+        if !self.track_automation_expanded(track) {
+            return None;
+        }
+        let mut y = row.y + row.height + AUTOMATION_CONTROL_LANE_HEIGHT;
+        for lane in track.automation_lanes.iter().filter(|l| l.visible) {
+            if lane.id == lane_id {
+                return Some((y, AUTOMATION_SUBLANE_HEIGHT));
+            }
+            y += AUTOMATION_SUBLANE_HEIGHT;
+        }
+        None
     }
 
     pub fn total_track_rows_height(&self) -> f32 {

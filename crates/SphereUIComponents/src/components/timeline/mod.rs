@@ -1,5 +1,6 @@
 pub mod audio_clip;
 pub mod audio_import;
+pub mod automation_control_lane;
 pub mod automation_lane;
 pub mod floating_tools_bar;
 pub mod global_lane_header;

@@ -541,6 +541,9 @@ impl Render for StudioLayout {
                             TimelineContextTarget::TimeSignatureLaneHeader => {
                                 ContextTarget::TimeSignature
                             }
+                            TimelineContextTarget::AutomationTargetPicker { track_id } => {
+                                ContextTarget::AutomationTargetPicker { track_id }
+                            }
                         };
                         this.try_open_context_menu(
                             ContextMenuRequest::new(
@@ -558,6 +561,32 @@ impl Render for StudioLayout {
         let _ = self.timeline.update(cx, |timeline, _cx| {
             timeline.set_context_menu_callback(Some(on_timeline_context));
         });
+
+        let on_automation_control: components::timeline::automation_control_lane::AutomationControlCallback = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(
+                move |(track_id, action, x, y): &(
+                    String,
+                    components::timeline::automation_control_lane::AutomationControlAction,
+                    f32,
+                    f32,
+                ),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    let track_id = track_id.clone();
+                    let action = *action;
+                    let x = *x;
+                    let y = *y;
+                    StudioLayout::defer_update_in_window(&this, window, cx, move |this, window, cx| {
+                        this.handle_automation_control_action(&track_id, action, x, y, window, cx);
+                    });
+                },
+            )
+        };
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            timeline.set_automation_control_callback(Some(on_automation_control));
+        });
+
         let on_add_track: components::timeline::timeline::TimelineAddTrackCb = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |request, _w, cx| {

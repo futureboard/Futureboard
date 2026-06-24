@@ -233,6 +233,7 @@ impl TimelineState {
             track_view_layout: TrackViewLayout::default(),
             track_height_resize: None,
             track_height_resize_arm: None,
+            last_touched_plugin_param: None,
         }
     }
 

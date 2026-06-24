@@ -6,6 +6,8 @@ use crate::components::timeline::timeline_state::TrackType;
 use crate::components::timeline::timeline_state::{self};
 
 use super::StudioLayout;
+use super::context_menu_ops::{ContextMenuRequest, ContextMenuTarget};
+use super::studio_state::ContextTarget;
 impl StudioLayout {
     /// Dev-only: bulk-create `count` tracks for scalability stress testing.
     /// Tracks cycle through Audio/MIDI/Instrument types. Does not add clips.
@@ -341,6 +343,207 @@ impl StudioLayout {
             }
         });
         self.mark_dirty();
+    }
+
+    /// Add (or focus) an automation lane for `target` on `track_id`.
+    pub(super) fn add_automation_target_for_track(
+        &mut self,
+        track_id: &str,
+        target: crate::components::timeline::timeline_state::AutomationTarget,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::timeline::timeline_state::TrackLaneMode;
+        let target = self.enrich_automation_target_name(track_id, target, cx);
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            timeline.state.select_track(track_id);
+            if timeline.state.track_lane_mode(track_id) != TrackLaneMode::Automation {
+                timeline.state.toggle_track_lane_mode(track_id);
+            }
+            if timeline
+                .state
+                .set_track_automation_target(track_id, target)
+                .is_some()
+            {
+                timeline.mark_project_changed(cx);
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        self.overlay.open_popover = None;
+        if changed {
+            self.mark_dirty();
+            self.audio_bridge.project_dirty = true;
+            self.schedule_audio_project_sync(cx, false, "automation_add_target");
+        }
+        cx.notify();
+    }
+
+    /// Resolve plugin-parameter display names from live insert metadata when the
+    /// target came from a menu command id (which only carries ids).
+    fn enrich_automation_target_name(
+        &self,
+        track_id: &str,
+        target: crate::components::timeline::timeline_state::AutomationTarget,
+        cx: &Context<Self>,
+    ) -> crate::components::timeline::timeline_state::AutomationTarget {
+        use crate::components::timeline::timeline_state::AutomationTarget;
+        let AutomationTarget::PluginParameter {
+            insert_id,
+            parameter_id,
+            ..
+        } = &target
+        else {
+            return target;
+        };
+        let Some(track) = self.timeline.read(cx).state.find_track(track_id) else {
+            return target;
+        };
+        let Some(insert) = track.inserts.iter().find(|i| i.id == *insert_id) else {
+            return target;
+        };
+        let Some(param) = insert
+            .parameters
+            .iter()
+            .find(|p| p.id.to_string() == *parameter_id)
+        else {
+            return target;
+        };
+        AutomationTarget::PluginParameter {
+            insert_id: insert_id.clone(),
+            parameter_id: parameter_id.clone(),
+            parameter_name: format!("{}: {}", insert.display_name, param.name),
+        }
+    }
+
+    /// Handle automation control-lane button actions.
+    pub(super) fn handle_automation_control_action(
+        &mut self,
+        track_id: &str,
+        action: crate::components::timeline::automation_control_lane::AutomationControlAction,
+        x: f32,
+        y: f32,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::timeline::automation_control_lane::AutomationControlAction;
+        use crate::components::timeline::timeline_state::TrackLaneMode;
+
+        match action {
+            AutomationControlAction::OpenTargetPicker => {
+                let window_id = window.window_handle().window_id();
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.select_track(track_id);
+                    cx.notify();
+                });
+                self.try_open_context_menu(
+                    ContextMenuRequest::new(
+                        window_id,
+                        x,
+                        y,
+                        ContextMenuTarget::Extended(ContextTarget::AutomationTargetPicker {
+                            track_id: track_id.to_string(),
+                        }),
+                    ),
+                    cx,
+                );
+            }
+            AutomationControlAction::HideAutomation => {
+                let collapsed = self.timeline.update(cx, |timeline, cx| {
+                    if timeline.state.track_lane_mode(track_id) == TrackLaneMode::Automation {
+                        timeline.state.toggle_track_lane_mode(track_id);
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if collapsed {
+                    cx.notify();
+                }
+            }
+            AutomationControlAction::AddLastTouched => {
+                let target = self.timeline.read(cx).state.last_touched_plugin_param_for_track(
+                    track_id,
+                ).map(|p| p.automation_target());
+                if let Some(target) = target {
+                    self.add_automation_target_for_track(track_id, target, cx);
+                }
+            }
+            AutomationControlAction::RequestClearAll => {
+                self.request_clear_all_automation(track_id, window, cx);
+            }
+        }
+    }
+
+    /// Ask for confirmation before removing every automation lane on a track.
+    pub(super) fn request_clear_all_automation(
+        &mut self,
+        track_id: &str,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::message_box_dialog::{
+            open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
+        };
+
+        let lane_count = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(track_id)
+            .map(|t| t.automation_lanes.len())
+            .unwrap_or(0);
+        if lane_count == 0 {
+            return;
+        }
+
+        let track_name = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(track_id)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "Track".to_string());
+        let track_id = track_id.to_string();
+        let owner_bounds = window.bounds();
+        let owner = cx.entity().clone();
+
+        let options = MessageBoxOptions {
+            kind: MessageBoxKind::Warning,
+            title: "Clear All Automation".to_string(),
+            message: format!("Remove all automation lanes from \"{track_name}\"?"),
+            detail: Some(format!(
+                "This deletes {lane_count} automation lane(s) and all automation points. This cannot be undone."
+            )),
+            buttons: vec!["Cancel".to_string(), "Clear All".to_string()],
+            default_id: 0,
+            cancel_id: Some(0),
+        };
+
+        let on_response: std::sync::Arc<
+            dyn Fn(MessageBoxResult, &mut gpui::Window, &mut gpui::App) + Send + Sync,
+        > = std::sync::Arc::new(move |result, _window, cx| {
+            if result.response != 1 {
+                return;
+            }
+            let _ = owner.update(cx, |this, cx| {
+                let removed = this.timeline.update(cx, |timeline, _cx| {
+                    timeline
+                        .state
+                        .clear_all_automation_lanes(&track_id)
+                });
+                if removed > 0 {
+                    this.mark_dirty();
+                    this.audio_bridge.project_dirty = true;
+                    this.schedule_audio_project_sync(cx, false, "automation_clear_all");
+                    cx.notify();
+                }
+            });
+        });
+
+        let _ = open_message_box_window(Some(owner_bounds), options, on_response, cx);
     }
 
     pub(super) fn duplicate_selected_clip(&mut self, cx: &mut Context<Self>) {

@@ -1076,6 +1076,76 @@ impl StudioLayout {
                 ));
                 entries
             }
+            ContextTarget::AutomationTargetPicker { track_id } => {
+                use crate::components::timeline::timeline_state::{
+                    automation_target_menu_command, AutomationTarget,
+                };
+                let state = &self.timeline.read(cx).state;
+                let Some(track) = state.find_track(track_id) else {
+                    return vec![ContextMenuEntry::disabled_item("Track unavailable", "noop")];
+                };
+                let existing: std::collections::HashSet<_> = track
+                    .automation_lanes
+                    .iter()
+                    .map(|lane| lane.target.clone())
+                    .collect();
+                let mut entries = vec![ContextMenuEntry::Header("Add Automation".to_string())];
+
+                let push_group = |entries: &mut Vec<ContextMenuEntry>,
+                                      header: &str,
+                                      targets: &[AutomationTarget]| {
+                    if targets.is_empty() {
+                        return;
+                    }
+                    entries.push(ContextMenuEntry::Header(header.to_string()));
+                    for target in targets {
+                        let label = target.display_name();
+                        if existing.contains(target) {
+                            entries.push(ContextMenuEntry::disabled_item(
+                                format!("{label} (already added)"),
+                                "noop",
+                            ));
+                        } else {
+                            entries.push(ContextMenuEntry::item(
+                                label,
+                                automation_target_menu_command(track_id, target),
+                            ));
+                        }
+                    }
+                };
+
+                push_group(
+                    &mut entries,
+                    "Track",
+                    &[
+                        AutomationTarget::TrackVolume,
+                        AutomationTarget::TrackPan,
+                        AutomationTarget::TrackMute,
+                    ],
+                );
+
+                let plugin_targets: Vec<AutomationTarget> = state
+                    .available_automation_targets(track_id)
+                    .into_iter()
+                    .filter(|t| matches!(t, AutomationTarget::PluginParameter { .. }))
+                    .collect();
+                push_group(&mut entries, "Plugins", &plugin_targets);
+
+                let send_targets: Vec<AutomationTarget> = state
+                    .available_automation_targets(track_id)
+                    .into_iter()
+                    .filter(|t| matches!(t, AutomationTarget::SendLevel { .. }))
+                    .collect();
+                push_group(&mut entries, "Sends", &send_targets);
+
+                if entries.len() == 1 {
+                    entries.push(ContextMenuEntry::disabled_item(
+                        "No automation targets available",
+                        "noop",
+                    ));
+                }
+                entries
+            }
             ContextTarget::TimeSignature => {
                 let state = &self.timeline.read(cx).state;
                 let pt = state.time_signature_at_playhead();

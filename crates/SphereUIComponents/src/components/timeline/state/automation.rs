@@ -32,6 +32,32 @@ pub struct AutomationMarquee {
     pub additive: bool,
 }
 
+/// VST3 parameter the user last moved inside a plugin editor. UI-only runtime
+/// state (not serialized) used by the automation control lane quick-action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LastTouchedPluginParam {
+    pub track_id: String,
+    pub insert_id: String,
+    pub parameter_id: String,
+    pub parameter_name: String,
+    pub plugin_name: String,
+    pub normalized_value: f32,
+}
+
+impl LastTouchedPluginParam {
+    pub fn display_label(&self) -> String {
+        format!("{} > {}", self.plugin_name, self.parameter_name)
+    }
+
+    pub fn automation_target(&self) -> AutomationTarget {
+        AutomationTarget::PluginParameter {
+            insert_id: self.insert_id.clone(),
+            parameter_id: self.parameter_id.clone(),
+            parameter_name: self.parameter_name.clone(),
+        }
+    }
+}
+
 /// Interpolation shape between an automation point and the next one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomationCurve {
@@ -77,7 +103,7 @@ impl AutomationCurve {
 /// What a single automation lane controls. `TrackVolume`/`TrackPan` are wired
 /// first; `PluginParameter`/`SendLevel` carry their descriptor so they can be
 /// persisted and shown in the picker even before runtime application lands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AutomationTarget {
     TrackVolume,
     TrackPan,
@@ -386,9 +412,11 @@ impl TimelineState {
             return Some(track.automation_lanes[idx].id.clone());
         }
         let lane_id = format!("autolane-{}-{}", track.id, track.automation_lanes.len() + 1);
-        track
-            .automation_lanes
-            .push(AutomationLaneState::new(lane_id.clone(), target));
+        let mut lane = AutomationLaneState::new(lane_id.clone(), target);
+        // New lanes are shown as sub-rows immediately so creating a target (via
+        // the picker / toggle) reveals its lane under the parent track.
+        lane.visible = true;
+        track.automation_lanes.push(lane);
         if automation_debug_enabled() {
             eprintln!(
                 "[automation] create_lane track={} lane={}",
@@ -653,5 +681,163 @@ impl TimelineState {
             );
         }
         removed
+    }
+
+    // ── Automation sub-lane actions (lane header controls) ────────────────────
+
+    /// Focus the editor on `lane_id` (sets the active automation target to that
+    /// lane's target). UI-only. Called when a sub-lane header is clicked.
+    pub fn activate_automation_lane(&mut self, track_id: &str, lane_id: &str) {
+        let target = self
+            .automation_lane(track_id, lane_id)
+            .map(|l| l.target.clone());
+        if let (Some(target), Some(track)) = (
+            target,
+            self.tracks.iter_mut().find(|t| t.id == track_id),
+        ) {
+            track.selected_automation_target = Some(target);
+        }
+    }
+
+    /// Toggle a lane's enabled flag (read on/off). Committed edit — when off the
+    /// lane keeps its points but stops driving the target. Returns the new state.
+    pub fn toggle_automation_lane_enabled(&mut self, track_id: &str, lane_id: &str) -> Option<bool> {
+        let lane = self.lane_mut(track_id, lane_id)?;
+        lane.enabled = !lane.enabled;
+        let enabled = lane.enabled;
+        let playhead = self.transport.playhead_beats;
+        self.recompute_effective_volumes(playhead, "lane_enable_toggle");
+        Some(enabled)
+    }
+
+    /// Hide a lane's sub-row (does not delete it). UI-only.
+    pub fn hide_automation_lane(&mut self, track_id: &str, lane_id: &str) -> bool {
+        let Some(lane) = self.lane_mut(track_id, lane_id) else {
+            return false;
+        };
+        if !lane.visible {
+            return false;
+        }
+        lane.visible = false;
+        true
+    }
+
+    /// Remove every point from a lane (keeps the lane). Committed edit. Returns
+    /// how many points were removed.
+    pub fn clear_automation_lane(&mut self, track_id: &str, lane_id: &str) -> usize {
+        let Some(lane) = self.lane_mut(track_id, lane_id) else {
+            return 0;
+        };
+        let removed = lane.points.len();
+        lane.points.clear();
+        if removed > 0 {
+            let playhead = self.transport.playhead_beats;
+            self.recompute_effective_volumes(playhead, "lane_clear");
+        }
+        removed
+    }
+
+    /// Remove one automation lane from a track. Committed edit. Returns true
+    /// when the lane existed and was removed.
+    pub fn remove_automation_lane(&mut self, track_id: &str, lane_id: &str) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return false;
+        };
+        let before = track.automation_lanes.len();
+        track.automation_lanes.retain(|l| l.id != lane_id);
+        if track.automation_lanes.len() == before {
+            return false;
+        }
+        if track
+            .selected_automation_target
+            .as_ref()
+            .is_some_and(|t| !track.automation_lanes.iter().any(|l| l.target == *t))
+        {
+            track.selected_automation_target = track
+                .automation_lanes
+                .first()
+                .map(|l| l.target.clone());
+        }
+        let playhead = self.transport.playhead_beats;
+        self.recompute_effective_volumes(playhead, "lane_remove");
+        true
+    }
+
+    /// Remove every automation lane on a track. Committed edit. Returns how
+    /// many lanes were removed.
+    pub fn clear_all_automation_lanes(&mut self, track_id: &str) -> usize {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return 0;
+        };
+        let removed = track.automation_lanes.len();
+        if removed == 0 {
+            return 0;
+        }
+        track.automation_lanes.clear();
+        track.selected_automation_target = None;
+        let playhead = self.transport.playhead_beats;
+        self.recompute_effective_volumes(playhead, "lanes_clear_all");
+        removed
+    }
+
+    /// Last touched VST3 parameter for `track_id`, if any.
+    pub fn last_touched_plugin_param_for_track(
+        &self,
+        track_id: &str,
+    ) -> Option<&LastTouchedPluginParam> {
+        self.last_touched_plugin_param
+            .as_ref()
+            .filter(|p| p.track_id == track_id)
+    }
+}
+
+/// Build a context-menu command id that selects `target` on `track_id`.
+pub fn automation_target_menu_command(track_id: &str, target: &AutomationTarget) -> String {
+    match target {
+        AutomationTarget::TrackVolume => format!("automation:add-target:{track_id}:volume"),
+        AutomationTarget::TrackPan => format!("automation:add-target:{track_id}:pan"),
+        AutomationTarget::TrackMute => format!("automation:add-target:{track_id}:mute"),
+        AutomationTarget::PluginParameter {
+            insert_id,
+            parameter_id,
+            ..
+        } => format!("automation:add-target:{track_id}:plugin:{insert_id}:{parameter_id}"),
+        AutomationTarget::SendLevel { send_id } => {
+            format!("automation:add-target:{track_id}:send:{send_id}")
+        }
+    }
+}
+
+/// Decode [`automation_target_menu_command`].
+pub fn parse_automation_target_menu_command(command: &str) -> Option<(String, AutomationTarget)> {
+    let rest = command.strip_prefix("automation:add-target:")?;
+    let (track_id, kind) = rest.split_once(':')?;
+    match kind {
+        "volume" => Some((track_id.to_string(), AutomationTarget::TrackVolume)),
+        "pan" => Some((track_id.to_string(), AutomationTarget::TrackPan)),
+        "mute" => Some((track_id.to_string(), AutomationTarget::TrackMute)),
+        _ if kind.starts_with("plugin:") => {
+            let parts = kind.strip_prefix("plugin:")?;
+            let (insert_id, parameter_id) = parts.split_once(':')?;
+            let parameter_name = parameter_id.to_string();
+            Some((
+                track_id.to_string(),
+                AutomationTarget::PluginParameter {
+                    insert_id: insert_id.to_string(),
+                    parameter_id: parameter_id.to_string(),
+                    parameter_name,
+                },
+            ))
+        }
+        _ if kind.starts_with("send:") => {
+            let send_id = kind.strip_prefix("send:")?;
+            Some((
+                track_id.to_string(),
+                AutomationTarget::SendLevel {
+                    send_id: send_id.to_string(),
+                },
+            ))
+        }
+        _ => None,
     }
 }

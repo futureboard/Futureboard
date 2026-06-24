@@ -67,6 +67,10 @@ pub struct RuntimeTrack {
     pub inserts: Vec<RuntimeInsert>,
     pub sends: Vec<RuntimeSend>,
     pub automation_lanes: Vec<RuntimeAutomationLane>,
+    /// Resolved plugin-parameter automation routes for this track, rebuilt by
+    /// [`RuntimeProject::resolve_indices`]. Empty for tracks with no plugin
+    /// parameter lanes, so the common render path bails immediately.
+    pub plugin_param_automation: Vec<RuntimePluginParamBinding>,
     pub meter: Arc<RuntimeTrackMeter>,
     pub meter_peak_l: f32,
     pub meter_peak_r: f32,
@@ -225,6 +229,26 @@ pub struct RuntimeTrackAutomationValues {
     pub muted: Option<bool>,
 }
 
+/// One resolved plugin-parameter automation route, built off the audio thread
+/// by [`RuntimeProject::resolve_indices`] so the render path never parses a
+/// string param id or searches for an insert by id per block. `lane_ix` /
+/// `insert_ix` index into the owning track's `automation_lanes` / `inserts`.
+#[derive(Debug, Clone)]
+pub struct RuntimePluginParamBinding {
+    pub insert_ix: usize,
+    pub lane_ix: usize,
+    /// Real VST3 `ParamID`.
+    pub param_id: u32,
+    /// Last normalized value pushed to the plugin; starts `NaN` so the first
+    /// block after a (re)build always emits. Dedupe avoids flooding the param
+    /// ring with identical values every block.
+    pub last_value: f32,
+}
+
+/// Values that differ by less than this are treated as unchanged for plugin
+/// parameter automation dedupe (well below VST3's typical step resolution).
+pub const PLUGIN_PARAM_AUTOMATION_EPS: f32 = 1e-5;
+
 impl RuntimeAutomationLane {
     fn from_snapshot(lane: &EngineAutomationLaneSnapshot) -> Self {
         let mut points: Vec<RuntimeAutomationPoint> = lane
@@ -282,6 +306,39 @@ impl RuntimeTrack {
         }
         values
     }
+}
+
+/// Resolve a track's plugin-parameter automation lanes into compact bindings.
+/// Runs off the audio thread (LoadProject / SetPluginBridgeSink) so allocation
+/// and string parsing here are fine. Lanes with no points are skipped so a
+/// freshly added empty lane never forces the parameter to its default value.
+fn build_plugin_param_bindings(track: &RuntimeTrack) -> Vec<RuntimePluginParamBinding> {
+    let mut out: Vec<RuntimePluginParamBinding> = Vec::new();
+    for (lane_ix, lane) in track.automation_lanes.iter().enumerate() {
+        if !lane.enabled || lane.points.is_empty() {
+            continue;
+        }
+        let RuntimeAutomationTarget::PluginParameter {
+            insert_id,
+            parameter_id,
+        } = &lane.target
+        else {
+            continue;
+        };
+        let Some(insert_ix) = track.inserts.iter().position(|i| &i.id == insert_id) else {
+            continue;
+        };
+        let Ok(param_id) = parameter_id.parse::<u32>() else {
+            continue;
+        };
+        out.push(RuntimePluginParamBinding {
+            insert_ix,
+            lane_ix,
+            param_id,
+            last_value: f32::NAN,
+        });
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -809,6 +866,11 @@ impl RuntimeProject {
                     self.tracks[i].inserts[n].vsti_output_children[c].dest_track_index = dest_ix;
                 }
             }
+            // Pre-resolve plugin-parameter automation lanes to compact index +
+            // numeric-param-id bindings so the audio callback never parses a
+            // string param id or searches inserts by id per block.
+            let bindings = build_plugin_param_bindings(&self.tracks[i]);
+            self.tracks[i].plugin_param_automation = bindings;
         }
         self.resolve_bridge_sinks();
     }
@@ -1159,6 +1221,8 @@ impl RuntimeProject {
                     .iter()
                     .map(RuntimeAutomationLane::from_snapshot)
                     .collect(),
+                // Resolved below in resolve_indices once insert ids are known.
+                plugin_param_automation: Vec::new(),
                 meter: Arc::new(RuntimeTrackMeter::default()),
                 meter_peak_l: 0.0,
                 meter_peak_r: 0.0,
@@ -3497,6 +3561,47 @@ mod midi_tests {
         assert!(lane.evaluate_normalized(0.0).is_none());
     }
 
+    #[test]
+    fn build_plugin_param_bindings_resolves_only_valid_lanes() {
+        let point = || RuntimeAutomationPoint {
+            beat: 0.0,
+            value: 0.5,
+            curve: RuntimeAutomationCurve::Linear,
+        };
+        let lane = |id: &str, insert: &str, param: &str, enabled: bool, points: Vec<RuntimeAutomationPoint>| {
+            RuntimeAutomationLane {
+                id: id.to_string(),
+                name: "p".to_string(),
+                target: RuntimeAutomationTarget::PluginParameter {
+                    insert_id: insert.to_string(),
+                    parameter_id: param.to_string(),
+                },
+                enabled,
+                points,
+            }
+        };
+        let mut track = bridged_instrument_track("track-1");
+        track.automation_lanes = vec![
+            // valid → resolves to insert_ix 0, param 42
+            lane("l0", "insert-1", "42", true, vec![point()]),
+            // missing insert → skipped
+            lane("l1", "insert-missing", "7", true, vec![point()]),
+            // disabled → skipped
+            lane("l2", "insert-1", "8", false, vec![point()]),
+            // empty points → skipped (would otherwise force the default value)
+            lane("l3", "insert-1", "9", true, Vec::new()),
+            // non-numeric param id → skipped
+            lane("l4", "insert-1", "cutoff", true, vec![point()]),
+        ];
+
+        let bindings = build_plugin_param_bindings(&track);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].insert_ix, 0);
+        assert_eq!(bindings[0].lane_ix, 0);
+        assert_eq!(bindings[0].param_id, 42);
+        assert!(bindings[0].last_value.is_nan());
+    }
+
     // ── VSTi bridge MIDI tests ───────────────────────────────────────────────
 
     /// Test sink recording every `push_midi` call as (status, data1, data2, offset).
@@ -3563,6 +3668,7 @@ mod midi_tests {
             }],
             sends: Vec::new(),
             automation_lanes: Vec::new(),
+            plugin_param_automation: Vec::new(),
             meter: Arc::new(Default::default()),
             meter_peak_l: 0.0,
             meter_peak_r: 0.0,

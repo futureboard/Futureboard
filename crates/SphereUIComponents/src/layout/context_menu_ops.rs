@@ -144,6 +144,9 @@ impl StudioLayout {
                 ContextTarget::Browser(_) => true,
                 ContextTarget::Mixer(track_id) => state.find_track(track_id).is_some(),
                 ContextTarget::SendPicker { track_id } => state.find_track(track_id).is_some(),
+                ContextTarget::AutomationTargetPicker { track_id } => {
+                    state.find_track(track_id).is_some()
+                }
                 ContextTarget::Tempo
                 | ContextTarget::TapTempo
                 | ContextTarget::TimeSignature

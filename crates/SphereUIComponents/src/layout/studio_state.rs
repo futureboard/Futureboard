@@ -82,6 +82,10 @@ pub enum ContextTarget {
     SendPicker {
         track_id: String,
     },
+    /// Automation target picker opened from a track's automation control lane.
+    AutomationTargetPicker {
+        track_id: String,
+    },
     /// The compact tempo menu opened from the transport BPM display.
     Tempo,
     /// Tap Tempo control menu (apply / add marker / reset).

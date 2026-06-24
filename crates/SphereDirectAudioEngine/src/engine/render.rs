@@ -1161,6 +1161,62 @@ pub fn apply_track_chain_at_beat(
     (l * volume * pan_l, r * volume * pan_r)
 }
 
+/// Evaluate this track's resolved plugin-parameter automation lanes at `beat`
+/// and push changed normalized values to the matching inserts.
+///
+/// Realtime-safe: `plugin_param_automation` is pre-resolved off the audio
+/// thread, so this does no allocation, no string parsing, and no id lookups.
+/// Each binding holds the last value it emitted and only pushes on change, so
+/// the lock-free param ring is not flooded with identical values every block.
+/// Bridged inserts use the wait-free `push_param` ring; in-process VST3 inserts
+/// queue the value via `set_param`.
+#[inline]
+fn apply_plugin_param_automation(track: &mut RuntimeTrack, beat: f64, bridge_enabled: bool) {
+    if track.plugin_param_automation.is_empty() {
+        return;
+    }
+    // Disjoint field borrows: bindings (mut) + lanes (read) + inserts (mut).
+    let crate::runtime::RuntimeTrack {
+        automation_lanes,
+        inserts,
+        plugin_param_automation,
+        ..
+    } = track;
+    for binding in plugin_param_automation.iter_mut() {
+        let Some(lane) = automation_lanes.get(binding.lane_ix) else {
+            continue;
+        };
+        let Some(value) = lane.evaluate_normalized(beat) else {
+            continue;
+        };
+        let value = value.clamp(0.0, 1.0);
+        if (value - binding.last_value).abs() <= crate::runtime::PLUGIN_PARAM_AUTOMATION_EPS {
+            continue;
+        }
+        binding.last_value = value;
+        let Some(insert) = inserts.get_mut(binding.insert_ix) else {
+            continue;
+        };
+        if !insert.enabled {
+            continue;
+        }
+        match insert.kind_tag {
+            crate::runtime::RuntimeInsertKind::ExternalBridge => {
+                if bridge_enabled {
+                    if let Some(sink) = insert.bridge_sink.as_ref() {
+                        sink.push_param(binding.param_id, value, 0);
+                    }
+                }
+            }
+            _ => {
+                if let Some(vst3) = insert.vst3.as_mut() {
+                    vst3.set_param(binding.param_id, value as f64);
+                }
+            }
+        }
+    }
+}
+
 /// `bridge_enabled` — false on the master-bus chain, which has never routed
 /// external-bridge inserts (parity with the old empty sink-map call); true for
 /// regular track strips, where each bridge insert uses its build/command-time
@@ -1182,6 +1238,16 @@ pub fn apply_track_chain_block(
             );
         }
     }
+    // Sample plugin-parameter automation for this block and push the resolved
+    // normalized values to the matching inserts before they process, so the
+    // bridged host applies them on the same block it renders. Realtime-safe:
+    // pre-resolved bindings, ring push / set_param only, no allocation. Only
+    // while playing so manual edits / the plugin editor own the value when the
+    // transport is stopped.
+    if transport.playing {
+        apply_plugin_param_automation(track, transport.ppq_position, bridge_enabled);
+    }
+
     let instrument_ix = track.midi_instrument_insert_ix;
     let midi_events = &track.midi_block_events;
     for (ix, insert) in track.inserts.iter_mut().enumerate() {

@@ -84,6 +84,7 @@ impl TrackLayout {
                         index,
                         y: *y,
                         height: DEFAULT_TRACK_HEIGHT,
+                        automation_height: 0.0,
                     };
                     *y += DEFAULT_TRACK_HEIGHT;
                     Some(entry)

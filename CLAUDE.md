@@ -753,9 +753,9 @@ cargo clippy -p sphere_ui_components -- -D warnings
 Audio:
 
 ```bash
-cargo check -p sphere-direct-audio-engine
-cargo test -p sphere-direct-audio-engine
-cargo build -p sphere-direct-audio-engine
+cargo check -p sphere_directaudioengine
+cargo test -p sphere_directaudioengine
+cargo build -p sphere_directaudioengine
 ```
 
 Plugin host:

@@ -97,7 +97,7 @@ pub fn midi_revision() -> u64 {
 
 // ── Audio ───────────────────────────────────────────────────────────────────
 
-fn to_entry(info: DAUx::types::JsAudioDeviceInfo) -> AudioDeviceEntry {
+fn to_entry(info: DirectAudio::types::JsAudioDeviceInfo) -> AudioDeviceEntry {
     AudioDeviceEntry {
         id: info.id,
         name: info.name,
@@ -110,7 +110,7 @@ fn to_entry(info: DAUx::types::JsAudioDeviceInfo) -> AudioDeviceEntry {
 /// Run a real audio device scan via the engine's cpal enumeration, replace the
 /// cache, bump the revision, and return the new revision.
 pub fn scan_audio() -> u64 {
-    use DAUx::device::{list_input_devices, list_output_devices};
+    use DirectAudio::device::{list_input_devices, list_output_devices};
     let start = Instant::now();
     let raw_in = list_input_devices();
     let raw_out = list_output_devices();

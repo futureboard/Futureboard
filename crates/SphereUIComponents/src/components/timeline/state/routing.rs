@@ -4,7 +4,7 @@ pub use crate::project::InputMonitorMode;
 
 /// A single aux send from this track to a Bus/Return track (Phase 3). The
 /// runtime sums `gain_db`-scaled signal into the target's input. UI stores the
-/// descriptor; DAUx owns the realtime accumulation.
+/// descriptor; DirectAudio owns the realtime accumulation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SendSlotState {
     pub id: String,

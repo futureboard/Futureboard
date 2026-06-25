@@ -1,5 +1,5 @@
 [package]
-name = "sphere-direct-audio-engine"
+name = "sphere_directaudioengine"
 version = "0.1.0"
 edition = "2021"
 description = "SphereDirectAudioEngine — native Rust audio backend for Futureboard Studio"
@@ -22,12 +22,12 @@ description = "SphereDirectAudioEngine — native Rust audio backend for Futureb
 license.workspace = true
 
 [lib]
-name = "DAUx"
+name = "DirectAudio"
 crate-type = ["rlib", "cdylib"]
 
 # ── Main native executable ───────────────────────────────────────────────────
 # Output: SphereDirectAudioEngine.exe (explicit bin name; the package keeps its
-# `sphere-direct-audio-engine` name so dependency references are unaffected).
+# `sphere_directaudioengine` name so dependency references are unaffected).
 [[bin]]
 name = "SphereDirectAudioEngine"
 path = "src/main.rs"
@@ -36,7 +36,7 @@ path = "src/main.rs"
 #
 # Build manually with:
 #
-#   cargo run -p sphere-direct-audio-engine --bin sphere-audio-test --features audio-test-bin
+#   cargo run -p sphere_directaudioengine --bin sphere-audio-test --features audio-test-bin
 #
 [[bin]]
 name = "sphere-audio-test"
@@ -103,7 +103,7 @@ default = []
 # Enable Electron / Node.js native addon surface.
 #
 # Build example:
-#   cargo build -p sphere-direct-audio-engine --features napi
+#   cargo build -p sphere_directaudioengine --features napi
 napi = [
     "dep:napi",
     "dep:napi-derive",
@@ -112,5 +112,5 @@ napi = [
 # Enable local CLI test binary.
 #
 # Build example:
-#   cargo run -p sphere-direct-audio-engine --bin sphere-audio-test --features audio-test-bin
+#   cargo run -p sphere_directaudioengine --bin sphere-audio-test --features audio-test-bin
 audio-test-bin = []

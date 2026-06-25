@@ -17,7 +17,7 @@
 
 #![deny(clippy::all)]
 #![allow(clippy::needless_pass_by_value)] // napi-rs requires owned String args
-#![allow(non_snake_case)] // lib name "DAUx" is intentional branding
+#![allow(non_snake_case)] // lib name "DirectAudio" is intentional branding
 
 mod audio_file;
 mod audio_graph;
@@ -49,7 +49,7 @@ pub mod vst3_processor;
 //
 // Re-exports so the Rust-Native shell can write:
 //
-//     use sphere_direct_audio_engine::{AudioEngine, EngineConfig, AudioBackend, EngineStats};
+//     use sphere_directaudioengine::{AudioEngine, EngineConfig, AudioBackend, EngineStats};
 //
 // without reaching into the NAPI-flavored modules. Both this facade and
 // the `SphereDirectAudioEngine` NAPI class wrap the same `EngineInner`.

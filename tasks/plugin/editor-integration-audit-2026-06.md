@@ -124,7 +124,7 @@ blocks; `ipc_dispatch` pump gaps stop starving the producer. (Keep the freshness
 
 **Commit 5 — audio state verification (no behavior hack).**
 With Commit 3 in, re-test "add/open effect during playback": the dropout window should disappear. Add a regression
-test in `sphere-direct-audio-engine`: simulate a sink that returns 0 for N blocks then resumes; assert effect output
+test in `sphere_directaudioengine`: simulate a sink that returns 0 for N blocks then resumes; assert effect output
 is dry during the gap and wet after, and that transport state never changes across `LoadProject` while playing.
 
 **Commit 6 — editor isolation mode (`PluginEditorMode`).**
@@ -142,7 +142,7 @@ Arc + NVIDIA + iGPU (this is the riskiest change; it is last and independently r
 
 ```
 cargo check -p sphere_plugin_host && cargo build -p sphere_plugin_host --release
-cargo check -p sphere-direct-audio-engine && cargo test -p sphere-direct-audio-engine
+cargo check -p sphere_directaudioengine && cargo test -p sphere_directaudioengine
 cargo check -p sphere_ui_components
 cargo build --release   # workspace, rebuilds FutureboardNative + FutureboardPluginHostX64
 target/release/FutureboardPluginHostX64.exe --selftest

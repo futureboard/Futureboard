@@ -15,7 +15,7 @@
 use std::thread;
 use std::time::Duration;
 
-use DAUx::{device, engine::EngineInner, types::JsDeviceOpenConfig};
+use DirectAudio::{device, engine::EngineInner, types::JsDeviceOpenConfig};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -206,7 +206,7 @@ fn cmd_ks_probe() {
     #[cfg(target_os = "windows")]
     {
         println!("=== WDM-KS interface probe ===");
-        print!("{}", DAUx::backend::wdm_ks::diagnose_report());
+        print!("{}", DirectAudio::backend::wdm_ks::diagnose_report());
     }
     #[cfg(not(target_os = "windows"))]
     {

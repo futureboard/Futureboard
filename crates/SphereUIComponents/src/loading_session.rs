@@ -43,8 +43,8 @@ macro_rules! session_log {
 
 /// Audio/plugin runtime prepared before [`crate::layout::StudioLayout`] mounts.
 pub struct SessionInstallHandoff {
-    pub engine: DAUx::AudioEngine,
-    pub engine_stats: DAUx::EngineStats,
+    pub engine: DirectAudio::AudioEngine,
+    pub engine_stats: DirectAudio::EngineStats,
     pub(crate) bridge_runtime:
         Option<crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime>,
     pub timeline_state: TimelineState,

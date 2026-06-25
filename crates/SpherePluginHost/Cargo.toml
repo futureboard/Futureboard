@@ -32,7 +32,7 @@ rusqlite.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 cpal.workspace = true
-sphere-direct-audio-engine = { path = "../SphereDirectAudioEngine", default-features = false }
+sphere_directaudioengine = { path = "../SphereDirectAudioEngine", default-features = false }
 
 # Win32 (COM STA, message pump, HWND validation, self-test windows) for the
 # host binary. The main app already pulls the same workspace `windows` version

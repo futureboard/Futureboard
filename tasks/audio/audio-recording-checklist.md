@@ -204,7 +204,7 @@ Legend: `[x]` done · `[~]` partial · `[ ]` not started.
 - [x] `cargo check -p sphere_ui_components`
 - [x] `cargo check --manifest-path apps/native/Cargo.toml`
 - [ ] `cargo clippy -p sphere_ui_components -- -D warnings`
-- [ ] Engine: `cargo check -p sphere-direct-audio-engine`
+- [ ] Engine: `cargo check -p sphere_directaudioengine`
 
 ## Recommended order
 

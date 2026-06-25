@@ -11,8 +11,8 @@ use sphere_encoder::{
     AudioEncodeOptions, AudioFileFormat, AudioSampleFormat, FlacEncodeOptions, Mp3Bitrate,
     Mp3EncodeOptions,
 };
-use DAUx::types::EngineProjectSnapshot;
-use DAUx::{
+use DirectAudio::types::EngineProjectSnapshot;
+use DirectAudio::{
     arrangement_bounds_samples, beats_to_samples, ArrangementExportRequest, ExportNormalizeMode,
     ExportTailMode, OfflineRenderRequest,
 };

@@ -6,7 +6,7 @@ pub fn plugin_debug_enabled() -> bool {
 }
 
 /// `FUTUREBOARD_ROUTING_DEBUG=1` enables eprintln traces for send/routing
-/// mutations (mirrors the DAUx-side flag). Cached on first read.
+/// mutations (mirrors the DirectAudio-side flag). Cached on first read.
 pub fn routing_debug_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some())

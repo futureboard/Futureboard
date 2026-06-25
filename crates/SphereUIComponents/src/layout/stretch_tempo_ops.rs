@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use gpui::Context;
-use DAUx::{open_clip_audio_source, read_frame_stereo};
+use DirectAudio::{open_clip_audio_source, read_frame_stereo};
 
 use crate::components::panel::StretchTempoUiSnapshot;
 use crate::components::timeline::timeline_state::{

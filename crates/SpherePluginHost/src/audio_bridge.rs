@@ -603,7 +603,7 @@ impl SharedAudioBridge {
 }
 
 /// Transport snapshot exchanged through the shared region (engine → host).
-/// Mirrors `DAUx::RuntimeTransportContext` but lives here so the bridge crate
+/// Mirrors `DirectAudio::RuntimeTransportContext` but lives here so the bridge crate
 /// has no dependency direction problem; the host maps it onto the plugin's VST3
 /// ProcessContext.
 #[derive(Clone, Copy, Debug, PartialEq)]

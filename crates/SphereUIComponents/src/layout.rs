@@ -227,19 +227,19 @@ pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &
     }
 }
 
-fn native_audio_backend_from_driver_type(driver_type: &str) -> DAUx::AudioBackend {
+fn native_audio_backend_from_driver_type(driver_type: &str) -> DirectAudio::AudioBackend {
     match driver_type {
-        "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
-        "WDM-KS" => DAUx::AudioBackend::WdmKs,
-        _ => DAUx::AudioBackend::Auto,
+        "WASAPI Exclusive" => DirectAudio::AudioBackend::WasapiExclusive,
+        "WDM-KS" => DirectAudio::AudioBackend::WdmKs,
+        _ => DirectAudio::AudioBackend::Auto,
     }
 }
 
 fn resolve_output_device_for_backend(
-    engine: &DAUx::AudioEngine,
-    backend: DAUx::AudioBackend,
+    engine: &DirectAudio::AudioEngine,
+    backend: DirectAudio::AudioBackend,
     wanted: &str,
-) -> Option<DAUx::AudioDeviceId> {
+) -> Option<DirectAudio::AudioDeviceId> {
     let wanted = wanted.trim();
     if wanted.is_empty() {
         return None;
@@ -253,9 +253,9 @@ fn resolve_output_device_for_backend(
 
 pub(crate) fn build_and_warm_audio_engine(
     schema: crate::settings::SettingsSchema,
-) -> Result<(DAUx::AudioEngine, DAUx::EngineStats), String> {
+) -> Result<(DirectAudio::AudioEngine, DirectAudio::EngineStats), String> {
     let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
-    let audio_config = DAUx::EngineConfig {
+    let audio_config = DirectAudio::EngineConfig {
         sample_rate: schema.general.project_defaults.sample_rate,
         buffer_size: schema.general.project_defaults.buffer_size,
         channels: 2,
@@ -264,9 +264,9 @@ pub(crate) fn build_and_warm_audio_engine(
         output_device: None,
     };
 
-    let mut engine = DAUx::AudioEngine::new(audio_config).map_err(|error| error.to_string())?;
+    let mut engine = DirectAudio::AudioEngine::new(audio_config).map_err(|error| error.to_string())?;
     eprintln!(
-        "[audio] sphere-direct-audio-engine v{} ready (backend={:?}, sr={}, buf={})",
+        "[audio] sphere_directaudioengine v{} ready (backend={:?}, sr={}, buf={})",
         engine.version(),
         engine.config().backend,
         engine.config().sample_rate,
@@ -858,7 +858,7 @@ impl StudioLayout {
         .detach();
     }
 
-    fn install_audio_callbacks(&mut self, engine: &DAUx::AudioEngine, cx: &mut Context<Self>) {
+    fn install_audio_callbacks(&mut self, engine: &DirectAudio::AudioEngine, cx: &mut Context<Self>) {
         let seek_engine = engine.clone();
         let param_engine = engine.clone();
         let owner = cx.entity().clone();
@@ -894,7 +894,7 @@ impl StudioLayout {
                     if let Err(error) =
                         param_engine.update_track_param(&track_id, &param_id, engine_value)
                     {
-                        if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                        if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                             eprintln!(
                                 "[audio] track param update failed: track={} param={} error={}",
                                 track_id, param_id, error
@@ -1885,7 +1885,7 @@ impl StudioLayout {
                 backend,
                 &schema.hardware.audio.device_out,
             );
-            let desired_config = DAUx::EngineConfig {
+            let desired_config = DirectAudio::EngineConfig {
                 sample_rate: schema.general.project_defaults.sample_rate,
                 buffer_size: schema.general.project_defaults.buffer_size,
                 channels: 2,
@@ -1898,7 +1898,7 @@ impl StudioLayout {
                 || stats_before.device_state.eq_ignore_ascii_case("DeviceLost");
             if needs_reopen {
                 eprintln!(
-                    "[audio] settings changed, reopening DAUx stream backend={:?} sr={} buf={}",
+                    "[audio] settings changed, reopening DirectAudio stream backend={:?} sr={} buf={}",
                     desired_config.backend, desired_config.sample_rate, desired_config.buffer_size
                 );
                 match engine.reopen_with_config(desired_config) {
@@ -1936,7 +1936,7 @@ impl StudioLayout {
             }
 
             // Construct new config
-            let config = DAUx::EngineConfig {
+            let config = DirectAudio::EngineConfig {
                 sample_rate: schema.general.project_defaults.sample_rate,
                 buffer_size: schema.general.project_defaults.buffer_size,
                 channels: 2,
@@ -1946,7 +1946,7 @@ impl StudioLayout {
             };
 
             // Build new engine
-            match DAUx::AudioEngine::new(config) {
+            match DirectAudio::AudioEngine::new(config) {
                 Ok(mut engine) => {
                     match engine.start() {
                         Ok(()) => {
@@ -1995,7 +1995,7 @@ impl StudioLayout {
                                             &param_id,
                                             engine_value,
                                         ) {
-                                            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen)
+                                            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen)
                                             {
                                                 eprintln!(
                                                     "[audio] track param update failed: track={} param={} error={}",

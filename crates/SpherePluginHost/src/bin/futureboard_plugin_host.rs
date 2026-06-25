@@ -270,7 +270,7 @@ struct PendingEditorAttach {
 struct EditorAttachResult {
     request_id: u64,
     plugin_instance_id: String,
-    processor: DAUx::vst3_processor::Vst3RuntimeProcessor,
+    processor: DirectAudio::vst3_processor::Vst3RuntimeProcessor,
     handle: Option<u64>,
     attach_hwnd: u64,
     owner_hwnd: u64,
@@ -301,7 +301,7 @@ struct PluginLoadResult {
     plugin_path: String,
     class_id: String,
     name: String,
-    processor: Option<DAUx::vst3_processor::Vst3RuntimeProcessor>,
+    processor: Option<DirectAudio::vst3_processor::Vst3RuntimeProcessor>,
     error: Option<String>,
     elapsed: Duration,
 }
@@ -415,7 +415,7 @@ fn service_audio_bridge(
     let len = (frames * output_channels).min(AUDIO_BUF_LEN);
     // Real transport ProcessContext published by the engine for this block.
     let bt = bridge.load_transport();
-    let transport = DAUx::RuntimeTransportContext {
+    let transport = DirectAudio::RuntimeTransportContext {
         tempo_bpm: bt.tempo_bpm,
         time_sig_num: bt.time_sig_num,
         time_sig_den: bt.time_sig_den,
@@ -796,7 +796,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     u32,
                     u32,
                     u32,
-                    DAUx::vst3_processor::Vst3RuntimeProcessor,
+                    DirectAudio::vst3_processor::Vst3RuntimeProcessor,
                 );
                 let jobs: Option<(Vec<ResizeJob>, Vec<String>)> = preview
                     .try_lock_for(Duration::from_millis(2))
@@ -841,7 +841,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         //    short bounded try-locks and skip the tick when the lock is busy.
         let user_closed_editors: Vec<String> = timed_section!("editor_refresh", {
             let mut user_closed: Vec<String> = Vec::new();
-            let refresh_targets: Option<Vec<(String, DAUx::vst3_processor::Vst3RuntimeProcessor)>> =
+            let refresh_targets: Option<Vec<(String, DirectAudio::vst3_processor::Vst3RuntimeProcessor)>> =
                 preview
                     .try_lock_for(Duration::from_millis(2))
                     .map(|engine| {
@@ -1168,7 +1168,7 @@ fn dispatch(
                     platform::current_thread_id()
                 );
                 let started = Instant::now();
-                let processor = DAUx::vst3_processor::Vst3RuntimeProcessor::new(
+                let processor = DirectAudio::vst3_processor::Vst3RuntimeProcessor::new(
                     &plugin_path,
                     &class_id,
                     sample_rate,
@@ -1643,7 +1643,7 @@ fn dispatch(
                         Vec::new()
                     })
             };
-            let state = DAUx::vst3_processor::Vst3PluginState {
+            let state = DirectAudio::vst3_processor::Vst3PluginState {
                 component: decode("component", &component_b64),
                 controller: decode("controller", &controller_b64),
             };
@@ -1717,7 +1717,7 @@ fn schedule_plugin_load(
                 CREATE_INSTANCE_TIMEOUT.as_millis()
             );
             let processor =
-                DAUx::vst3_processor::Vst3RuntimeProcessor::new(&plugin_path, &class_id, sample_rate);
+                DirectAudio::vst3_processor::Vst3RuntimeProcessor::new(&plugin_path, &class_id, sample_rate);
             let elapsed = stage_started.elapsed();
             let error = if processor.is_some() {
                 None

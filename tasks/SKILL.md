@@ -270,9 +270,9 @@ cargo clippy -p sphere_ui_components -- -D warnings
 Native audio:
 
 ```bash
-cargo check -p sphere-direct-audio-engine
-cargo build -p sphere-direct-audio-engine
-cargo test -p sphere-direct-audio-engine
+cargo check -p sphere_directaudioengine
+cargo build -p sphere_directaudioengine
+cargo test -p sphere_directaudioengine
 ```
 
 Plugin host:
@@ -2256,8 +2256,8 @@ plugin host, run the smallest relevant commands and report failures honestly.
 Minimum command candidates:
 
 ```bash
-cargo check -p sphere-direct-audio-engine
-cargo test -p sphere-direct-audio-engine
+cargo check -p sphere_directaudioengine
+cargo test -p sphere_directaudioengine
 cargo check -p sphere_plugin_host
 cargo test -p sphere_plugin_host
 cargo check --manifest-path apps/native/Cargo.toml

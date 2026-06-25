@@ -516,7 +516,7 @@ impl Default for PlaybackSettings {
     }
 }
 
-/// Live latency readout shown in Settings → Audio (polled from DAUx).
+/// Live latency readout shown in Settings → Audio (polled from DirectAudio).
 #[derive(Debug, Clone, Default)]
 pub struct SettingsAudioLatencySnapshot {
     pub engine_open: bool,
@@ -628,7 +628,7 @@ impl SettingsSchema {
 }
 
 impl SettingsAudioLatencySnapshot {
-    pub fn from_engine(engine: &DAUx::AudioEngine) -> Self {
+    pub fn from_engine(engine: &DirectAudio::AudioEngine) -> Self {
         let stats = engine.stats();
         let info = engine.latency_info();
         let mut track_lines: Vec<SettingsTrackLatencyLine> = info

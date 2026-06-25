@@ -147,7 +147,7 @@ impl StudioLayout {
                 });
                 if let (enabled, Some(engine)) = (enabled, self.audio_bridge.engine.as_ref()) {
                     if let Err(error) = engine.set_metronome_enabled(enabled) {
-                        if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                        if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                             eprintln!("[audio] set metronome failed: {error}");
                         }
                     }

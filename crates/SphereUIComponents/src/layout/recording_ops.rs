@@ -11,7 +11,7 @@ use crate::components::timeline::waveform_cache::{self, WaveformPeak};
 use sphere_midi_service::MidiInputEvent;
 
 use super::{RecordingPreviewUi, RecordingUiState, StudioLayout, RECORDING_PREVIEW_CLIP_ID};
-use DAUx::types::{JsRecordingTrackConfig, JsStartRecordingConfig};
+use DirectAudio::types::{JsRecordingTrackConfig, JsStartRecordingConfig};
 
 /// Active recording-session UI state — the take's start position, the UI phase,
 /// and the live growing-waveform preview. `StudioLayout` decomposition slice;
@@ -497,7 +497,7 @@ impl StudioLayout {
     fn commit_recording_results(
         &mut self,
         cx: &mut Context<Self>,
-        results: Vec<DAUx::types::JsRecordingResult>,
+        results: Vec<DirectAudio::types::JsRecordingResult>,
     ) {
         let bpm = self.timeline.read(cx).state.bpm;
         let timeline = self.timeline.clone();
@@ -928,7 +928,7 @@ fn find_recording_input_device<'a>(
         .find(|device| device.id == id_or_name || device.name == id_or_name)
 }
 
-fn resolve_input_device_id(engine: &DAUx::AudioEngine, device_name: &str) -> Option<String> {
+fn resolve_input_device_id(engine: &DirectAudio::AudioEngine, device_name: &str) -> Option<String> {
     if device_name.trim().is_empty() {
         return None;
     }

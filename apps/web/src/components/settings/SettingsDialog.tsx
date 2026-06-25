@@ -602,7 +602,7 @@ function AudioTab({
         }
       >
         <span className="inline-flex items-center h-[22px] px-2.5 rounded text-[11px] font-medium bg-[rgba(114,215,215,0.1)] border border-[rgba(114,215,215,0.2)] text-[rgba(114,215,215,0.9)]">
-          {isElectron ? "DAUx" : "WASM"}
+          {isElectron ? "DirectAudioEngine" : "WASM"}
         </span>
       </SettingsRow>
 

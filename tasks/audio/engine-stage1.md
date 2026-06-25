@@ -951,8 +951,8 @@ Audio engine shuts down cleanly.
 Run:
 
 ```bash
-cargo check -p sphere-direct-audio-engine
-cargo test -p sphere-direct-audio-engine
+cargo check -p sphere_directaudioengine
+cargo test -p sphere_directaudioengine
 cargo check -p sphere_ui_components
 cargo check --manifest-path apps/native/Cargo.toml
 ```
@@ -1268,8 +1268,8 @@ Then stop.
 ## Build
 
 ```bash
-cargo check -p sphere-direct-audio-engine
-cargo test -p sphere-direct-audio-engine
+cargo check -p sphere_directaudioengine
+cargo test -p sphere_directaudioengine
 cargo check -p sphere_ui_components
 cargo check --manifest-path apps/native/Cargo.toml
 ```

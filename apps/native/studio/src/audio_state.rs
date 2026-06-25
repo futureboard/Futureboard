@@ -9,10 +9,10 @@
 //! Failures never panic — errors are captured into `last_error` so the
 //! status bar / inspector can surface them.
 
-// The crate is published with `[lib] name = "DAUx"` so the N-API output
-// is `DAUx.node`. Rust consumers import its symbols through that same
+// The crate is published with `[lib] name = "DirectAudio"` so the N-API output
+// is `DirectAudio.node`. Rust consumers import its symbols through that same
 // name — alias it locally for readability.
-use DAUx::{
+use DirectAudio::{
     AudioBackend, AudioDeviceId, AudioEngine, EngineConfig, EngineDeviceInfo, EngineStats,
     SphereAudioError,
 };
@@ -291,7 +291,7 @@ mod tests {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("DAUx WDM-KS Apply failed"));
+            .contains("DirectAudio WDM-KS Apply failed"));
     }
 
     #[test]
@@ -309,7 +309,7 @@ mod tests {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("DAUx WASAPI Exclusive Apply failed"));
+            .contains("DirectAudio WASAPI Exclusive Apply failed"));
     }
 
     #[test]
@@ -335,7 +335,7 @@ mod tests {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("DAUx WASAPI Exclusive Apply failed"));
+            .contains("DirectAudio WASAPI Exclusive Apply failed"));
     }
 
     #[test]

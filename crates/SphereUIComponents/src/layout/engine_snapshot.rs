@@ -6,7 +6,7 @@ use crate::components::timeline::timeline_state::{
     MASTER_TRACK_ID,
 };
 
-use DAUx::types::{
+use DirectAudio::types::{
     EngineAutomationLaneSnapshot, EngineAutomationPointSnapshot, EngineAutomationTargetSnapshot,
     EngineClipAudioProcess, EngineClipSnapshot, EngineFadeSnapshot, EngineInsertSnapshot,
     EngineMidiClipSnapshot, EngineMidiControllerLane, EngineMidiControllerPoint,
@@ -163,9 +163,9 @@ fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapsh
     }
 }
 
-/// Build the DAUx insert descriptors for one track's mixer insert chain
+/// Build the DirectAudio insert descriptors for one track's mixer insert chain
 /// (Phase 2b). Only real, instantiable VST3 plugins are emitted as
-/// `native-plugin` descriptors — DAUx then instantiates a
+/// `native-plugin` descriptors — DirectAudio then instantiates a
 /// `Vst3RuntimeProcessor` on its worker and routes audio through it. The
 /// documented stub (`STUB_PLUGIN_ID`) and any slot without a usable path are
 /// skipped so the realtime runtime keeps no-op'ing on placeholders rather than
@@ -390,8 +390,8 @@ fn build_engine_inserts(track: &TrackState, export_mode: bool) -> Vec<EngineInse
     build_engine_inserts_for(&track.id, track.track_type, &track.inserts, export_mode)
 }
 
-/// Build the DAUx send descriptors for one track (Phase 3). Each send carries
-/// a linear level (from `gain_db`) and its target Bus/Return track id; DAUx
+/// Build the DirectAudio send descriptors for one track (Phase 3). Each send carries
+/// a linear level (from `gain_db`) and its target Bus/Return track id; DirectAudio
 /// accumulates the scaled signal into the target's receive buffer. Sends with
 /// no target are skipped. Pre-fader is persisted but the runtime currently taps
 /// post-fader only. Runs on the UI thread during snapshot construction.
@@ -782,7 +782,7 @@ pub(super) fn log_engine_sync_snapshot(
         .count();
     let insert_count: usize = snapshot.tracks.iter().map(|t| t.inserts.len()).sum();
     let midi_note_count: usize = snapshot.midi_clips.iter().map(|c| c.notes.len()).sum();
-    DAUx::forensic_trace::log_engine_sync_midi(snapshot);
+    DirectAudio::forensic_trace::log_engine_sync_midi(snapshot);
     eprintln!(
         "[engine-sync] reason={} tracks={} clips={} clips_with_path={} inserts={} midi_clips={} midi_notes={} dirty={}",
         reason,

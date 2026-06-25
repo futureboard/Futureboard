@@ -18,10 +18,10 @@ pub use export_window::{
 mod tests {
     use super::*;
     use sphere_encoder::{AudioFileFormat, AudioSampleFormat};
-    use DAUx::types::{EngineProjectSnapshot, EngineRoutingSnapshot, EngineTrackSnapshot};
+    use DirectAudio::types::{EngineProjectSnapshot, EngineRoutingSnapshot, EngineTrackSnapshot};
 
     fn snapshot_with_content(end_beat: f64) -> EngineProjectSnapshot {
-        use DAUx::types::EngineClipSnapshot;
+        use DirectAudio::types::EngineClipSnapshot;
         let clips = if end_beat > 0.0 {
             vec![EngineClipSnapshot {
                 id: "clip-1".to_string(),

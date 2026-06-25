@@ -18,8 +18,8 @@ use gpui::{
 };
 
 use sphere_encoder::AudioFileFormat;
-use DAUx::types::EngineProjectSnapshot;
-use DAUx::{
+use DirectAudio::types::EngineProjectSnapshot;
+use DirectAudio::{
     export_arrangement, ArrangementExportSummary, ExportCancelToken, ExportProgress, ExportStage,
 };
 

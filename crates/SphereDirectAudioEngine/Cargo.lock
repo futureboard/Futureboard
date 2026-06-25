@@ -842,7 +842,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sphere-direct-audio-engine"
+name = "sphere_directaudioengine"
 version = "0.1.0"
 dependencies = [
  "cc",

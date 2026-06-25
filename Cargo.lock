@@ -2406,7 +2406,7 @@ dependencies = [
  "gpui_linux",
  "gpui_macos",
  "gpui_windows",
- "sphere-direct-audio-engine",
+ "sphere_directaudioengine",
  "sphere_ui_components",
 ]
 
@@ -6098,28 +6098,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sphere-direct-audio-engine"
-version = "0.1.0"
-dependencies = [
- "cc",
- "cpal",
- "crossbeam-channel",
- "memmap2",
- "napi",
- "napi-build",
- "napi-derive",
- "parking_lot",
- "pkg-config",
- "serde",
- "serde_json",
- "sphere-audio-plugins",
- "sphere-audio-processor",
- "sphere-encoder",
- "symphonia",
- "windows 0.61.3",
-]
-
-[[package]]
 name = "sphere-encoder"
 version = "0.1.0"
 dependencies = [
@@ -6153,7 +6131,29 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sphere-direct-audio-engine",
+ "sphere_directaudioengine",
+ "windows 0.61.3",
+]
+
+[[package]]
+name = "sphere_directaudioengine"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "cpal",
+ "crossbeam-channel",
+ "memmap2",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "parking_lot",
+ "pkg-config",
+ "serde",
+ "serde_json",
+ "sphere-audio-plugins",
+ "sphere-audio-processor",
+ "sphere-encoder",
+ "symphonia",
  "windows 0.61.3",
 ]
 
@@ -6174,10 +6174,10 @@ dependencies = [
  "serde_json",
  "sphere-audio-editor",
  "sphere-audio-processor",
- "sphere-direct-audio-engine",
  "sphere-encoder",
  "sphere-graphic-engine",
  "sphere-plugin-host",
+ "sphere_directaudioengine",
  "unicode-segmentation",
  "wgpu",
  "windows 0.61.3",

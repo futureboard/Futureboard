@@ -417,7 +417,7 @@ fn terminal_state(timeline_state: &TimelineState, track_id: &str, slot_id: &str)
 }
 
 fn sync_bridge_sinks(
-    engine: &DAUx::AudioEngine,
+    engine: &DirectAudio::AudioEngine,
     runtime: &SharedPluginBridgeRuntime,
     timeline_state: &TimelineState,
     reason: &'static str,

@@ -5,7 +5,7 @@ use crate::components::timeline::timeline_state::TrackState;
 
 use super::studio_state::TransportCommand;
 
-/// Keep in sync with `DAUx::probe_audio_file`,
+/// Keep in sync with `DirectAudio::probe_audio_file`,
 /// `waveform_cache::decode_file_uncached`, and
 /// `file_browser::FileBrowserEntry::is_audio` — any divergence between
 /// these lists creates "imports but never plays" or "looks pending

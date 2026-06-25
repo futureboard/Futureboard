@@ -21,7 +21,7 @@ pub mod ipc;
 /// binary can drive the IPlugView lifecycle without N-API.
 pub mod native_editor;
 pub mod platform;
-/// Stage 3b engine-facing realtime sink: implements DAUx's `PluginBridgeSink`
+/// Stage 3b engine-facing realtime sink: implements DirectAudio's `PluginBridgeSink`
 /// over the shared-memory audio region.
 pub mod plugin_bridge_sink;
 pub mod plugin_db;

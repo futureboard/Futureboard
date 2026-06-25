@@ -52,7 +52,7 @@ publish = false
 
 [workspace.dependencies]
 sphere_ui_components = { path = "crates/SphereUIComponents", default-features = false }
-sphere-direct-audio-engine = { path = "crates/SphereDirectAudioEngine", default-features = false }
+sphere_directaudioengine = { path = "crates/SphereDirectAudioEngine", default-features = false }
 sphere-audio-processor = { path = "crates/SphereAudioProcessor" }
 sphere-audio-editor = { path = "crates/SphereAudioEditor" }
 sphere-audio-plugins = { path = "crates/SphereAudioPlugins" }

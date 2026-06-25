@@ -1,7 +1,7 @@
-//! Engine-facing realtime sink (Stage 3b): implements DAUx's
+//! Engine-facing realtime sink (Stage 3b): implements DirectAudio's
 //! [`PluginBridgeSink`] over the shared-memory [`SharedAudioRegion`].
 //!
-//! The main app's audio callback (in `DAUx`) holds an `Arc<dyn PluginBridgeSink>`
+//! The main app's audio callback (in `DirectAudio`) holds an `Arc<dyn PluginBridgeSink>`
 //! and calls these methods per block to read the host's produced output and
 //! request the next one. All methods are wait-free — they only touch the
 //! lock-free shared region (atomics + raw buffer copies), never allocate or lock.
@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use DAUx::plugin_bridge::{PluginBridgeSink, SharedPluginBridgeSink};
+use DirectAudio::plugin_bridge::{PluginBridgeSink, SharedPluginBridgeSink};
 
 use crate::audio_bridge::{
     BridgeKickEvent, SharedAudioRegion, SharedMidiEvent, MAX_BLOCK_FRAMES, MAX_CHANNELS,
@@ -248,7 +248,7 @@ impl PluginBridgeSink for SharedRegionSink {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn set_transport(&self, ctx: &DAUx::vst3_processor::RuntimeTransportContext) {
+    fn set_transport(&self, ctx: &DirectAudio::vst3_processor::RuntimeTransportContext) {
         self.region
             .bridge()
             .store_transport(&crate::audio_bridge::BridgeTransport {

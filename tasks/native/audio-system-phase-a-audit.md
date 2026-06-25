@@ -179,7 +179,7 @@ Then Phase D (handle-based snapshot, fixes A.2.4/A.2.5) and Phase O (real cycle
 validation, fixes A.3.2).
 
 Do **not** bundle these into one patch — each is its own scoped task with a
-`cargo check -p sphere-direct-audio-engine` gate.
+`cargo check -p sphere_directaudioengine` gate.
 
 ---
 

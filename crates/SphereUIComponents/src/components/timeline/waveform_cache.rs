@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::timeline_state::AudioImportState;
-use DAUx::{generate_audio_peaks, AudioPeak as EnginePeak, AudioPeakFile, PEAK_LOD_LEVELS};
+use DirectAudio::{generate_audio_peaks, AudioPeak as EnginePeak, AudioPeakFile, PEAK_LOD_LEVELS};
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct WaveformPeak {
@@ -115,7 +115,7 @@ pub(crate) fn entry_revision(entry: &FileEntry) -> u64 {
     entry.revision
 }
 
-/// LOD levels — mirrors `DAUx::PEAK_LOD_LEVELS`.
+/// LOD levels — mirrors `DirectAudio::PEAK_LOD_LEVELS`.
 pub const LOD_LEVELS: [usize; 9] = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
 
 const _: () = {

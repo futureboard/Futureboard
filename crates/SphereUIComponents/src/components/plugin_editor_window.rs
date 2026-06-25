@@ -36,7 +36,7 @@ use SpherePluginHost::plugin_host_client::{
 };
 
 /// Physical-pixel host region under the GPUI window. (Local mirror of the
-/// backend's region struct — the editor is now driven by the DAUx runtime
+/// backend's region struct — the editor is now driven by the DirectAudio runtime
 /// instance, not SpherePluginHost.)
 #[derive(Debug, Clone, Copy, Default)]
 struct EmbedRegion {
@@ -46,7 +46,7 @@ struct EmbedRegion {
     height: i32,
 }
 
-/// Map the DAUx embed host-kind code (0 = WS_CHILD, 1 = owned tool window,
+/// Map the DirectAudio embed host-kind code (0 = WS_CHILD, 1 = owned tool window,
 /// 2 = detached top-level) to the shared presentation-mode enum. Exactly one
 /// mode is active per editor.
 fn presentation_mode_from_host_kind(kind: i32) -> PluginEditorPresentationMode {
@@ -80,7 +80,7 @@ struct HostEditorBackend {
 /// the in-process editor path unless the explicit legacy override is enabled.
 /// `[plugin-bridge]` diagnostics are emitted throughout.
 fn build_host_backend(
-    processor: Option<&DAUx::Vst3RuntimeProcessor>,
+    processor: Option<&DirectAudio::Vst3RuntimeProcessor>,
     _display_name: &str,
     shared: Option<SharedPluginBridgeRuntime>,
 ) -> Option<HostEditorBackend> {
@@ -206,7 +206,7 @@ pub struct PluginEditorWindow {
     /// is created from THIS instance's controller — never a new one — so GUI
     /// edits drive the actual audio processor. Holding the clone keeps the C++
     /// instance alive while the editor is open.
-    processor: Option<DAUx::Vst3RuntimeProcessor>,
+    processor: Option<DirectAudio::Vst3RuntimeProcessor>,
     /// Editor handle from the embed attach; `None` until first attach.
     embed_handle: Option<u64>,
     status: PluginEditorStatus,
@@ -242,7 +242,7 @@ impl PluginEditorWindow {
         track_id: String,
         insert_id: String,
         display_name: String,
-        processor: Option<DAUx::Vst3RuntimeProcessor>,
+        processor: Option<DirectAudio::Vst3RuntimeProcessor>,
         shared_bridge: Option<SharedPluginBridgeRuntime>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1524,7 +1524,7 @@ pub(crate) fn open_plugin_editor_window(
     track_id: String,
     insert_id: String,
     display_name: String,
-    processor: Option<DAUx::Vst3RuntimeProcessor>,
+    processor: Option<DirectAudio::Vst3RuntimeProcessor>,
     shared_bridge: Option<SharedPluginBridgeRuntime>,
     cx: &mut App,
 ) -> Result<WindowHandle<PluginEditorWindow>, String> {

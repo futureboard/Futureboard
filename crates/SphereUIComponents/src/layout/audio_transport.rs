@@ -101,13 +101,13 @@ impl Default for EngineSyncState {
 /// sync runs).
 pub(crate) struct AudioBridgeState {
     /// Live native audio engine handle; `None` until opened.
-    pub engine: Option<DAUx::AudioEngine>,
+    pub engine: Option<DirectAudio::AudioEngine>,
     /// Whether the engine is currently running.
     pub running: bool,
     /// Last audio error surfaced to the UI.
     pub last_error: Option<String>,
     /// Latest engine transport/stats snapshot.
-    pub stats: Option<DAUx::EngineStats>,
+    pub stats: Option<DirectAudio::EngineStats>,
     /// Signature of the last project synced to the engine (skips redundant syncs).
     pub last_project_signature: Option<String>,
     /// Project graph changed and needs re-sync to the engine.
@@ -928,11 +928,11 @@ impl StudioLayout {
                 .spawn(move || engine.load_project(snapshot));
             let result = match join {
                 Ok(handle) => handle.join().unwrap_or_else(|_| {
-                    Err(DAUx::SphereAudioError::NativeError(
+                    Err(DirectAudio::SphereAudioError::NativeError(
                         "audio project load thread panicked".to_string(),
                     ))
                 }),
-                Err(error) => Err(DAUx::SphereAudioError::NativeError(format!(
+                Err(error) => Err(DirectAudio::SphereAudioError::NativeError(format!(
                     "failed to spawn audio project load thread: {error}"
                 ))),
             };
@@ -950,7 +950,7 @@ impl StudioLayout {
     pub(super) fn complete_audio_project_sync(
         &mut self,
         cx: &mut Context<Self>,
-        result: Result<(), DAUx::SphereAudioError>,
+        result: Result<(), DirectAudio::SphereAudioError>,
         signature: String,
     ) {
         self.audio_bridge.sync_in_flight = false;
@@ -1191,7 +1191,7 @@ impl StudioLayout {
                 .tempo_map
                 .points
                 .iter()
-                .map(|p| DAUx::types::EngineTempoPointSnapshot {
+                .map(|p| DirectAudio::types::EngineTempoPointSnapshot {
                     beat: p.beat,
                     bpm: p.bpm,
                 })
@@ -1202,7 +1202,7 @@ impl StudioLayout {
                 .points
                 .iter()
                 .map(
-                    |p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                    |p| DirectAudio::time_signature_map::RuntimeTimeSignaturePointSnapshot {
                         beat: p.beat,
                         numerator: p.numerator,
                         denominator: p.denominator,
@@ -1229,17 +1229,17 @@ impl StudioLayout {
 
         transport_freeze_debug::log("before engine transport sync");
         if let Err(error) = engine.set_tempo_map(bpm as f64, tempo_points) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set tempo map failed: {error}");
             }
         }
         if let Err(error) = engine.set_time_signature_map(ts_points) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set time signature map failed: {error}");
             }
         }
         if let Err(error) = engine.set_metronome_enabled(metronome_enabled) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set metronome failed: {error}");
             }
         }
@@ -1257,7 +1257,7 @@ impl StudioLayout {
             )
         };
         if let Err(error) = engine.set_loop(loop_enabled, loop_start_seconds, loop_end_seconds) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set loop failed: {error}");
             }
         }
@@ -1350,12 +1350,12 @@ impl StudioLayout {
             )
         };
         if let Err(error) = engine.set_bpm(bpm) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set BPM failed: {error}");
             }
         }
         if let Err(error) = engine.set_metronome_enabled(enabled) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set metronome failed: {error}");
             }
         }
@@ -1380,7 +1380,7 @@ impl StudioLayout {
         let start_seconds = start_beats as f64 * 60.0 / bpm;
         let end_seconds = end_beats as f64 * 60.0 / bpm;
         if let Err(error) = engine.set_loop(enabled, start_seconds, end_seconds) {
-            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set loop failed: {error}");
             }
         }
@@ -1595,7 +1595,7 @@ impl StudioLayout {
         if commit_to_engine {
             if let Some(engine) = self.audio_bridge.engine.as_ref() {
                 if let Err(error) = engine.set_bpm(bpm as f64) {
-                    if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                    if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                         eprintln!("[audio] set BPM failed: {error}");
                     }
                 }
@@ -1918,7 +1918,7 @@ impl StudioLayout {
                     .tempo_map
                     .points
                     .iter()
-                    .map(|p| DAUx::types::EngineTempoPointSnapshot {
+                    .map(|p| DirectAudio::types::EngineTempoPointSnapshot {
                         beat: p.beat,
                         bpm: p.bpm,
                     })
@@ -1927,7 +1927,7 @@ impl StudioLayout {
         };
         if let Some(engine) = self.audio_bridge.engine.as_ref() {
             if let Err(error) = engine.set_tempo_map(default_bpm, points) {
-                if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                     eprintln!("[audio] sync tempo map failed: {error}");
                 }
             }
@@ -1942,7 +1942,7 @@ impl StudioLayout {
                 .points
                 .iter()
                 .map(
-                    |p| DAUx::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                    |p| DirectAudio::time_signature_map::RuntimeTimeSignaturePointSnapshot {
                         beat: p.beat,
                         numerator: p.numerator,
                         denominator: p.denominator,
@@ -1953,7 +1953,7 @@ impl StudioLayout {
         };
         if let Some(engine) = self.audio_bridge.engine.as_ref() {
             if let Err(error) = engine.set_time_signature_map(points) {
-                if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                     eprintln!("[audio] sync time signature map failed: {error}");
                 }
             }

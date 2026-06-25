@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use DAUx::vst3_processor::{Vst3MidiEvent, Vst3PluginState, Vst3RuntimeProcessor};
+use DirectAudio::vst3_processor::{Vst3MidiEvent, Vst3PluginState, Vst3RuntimeProcessor};
 
 use crate::audio_bridge::{SharedMidiEvent, MAX_CHANNELS};
 
@@ -188,7 +188,7 @@ fn render_voice(
     in_r: &[f32],
     out_l: &mut [f32],
     out_r: &mut [f32],
-    transport: DAUx::vst3_processor::RuntimeTransportContext,
+    transport: DirectAudio::vst3_processor::RuntimeTransportContext,
 ) {
     let mut state = midi.lock();
     let events = std::mem::take(&mut state.pending_events);
@@ -211,7 +211,7 @@ fn render_voice_interleaved(
     in_r: &[f32],
     out_interleaved: &mut [f32],
     output_channels: usize,
-    transport: DAUx::vst3_processor::RuntimeTransportContext,
+    transport: DirectAudio::vst3_processor::RuntimeTransportContext,
 ) -> usize {
     let mut state = midi.lock();
     let events = std::mem::take(&mut state.pending_events);
@@ -367,7 +367,7 @@ impl BridgeAudioShared {
         in_r: &[f32],
         out_l: &mut [f32],
         out_r: &mut [f32],
-        transport: DAUx::vst3_processor::RuntimeTransportContext,
+        transport: DirectAudio::vst3_processor::RuntimeTransportContext,
     ) {
         let n = frames.min(out_l.len()).min(out_r.len());
         out_l[..n].fill(0.0);
@@ -397,7 +397,7 @@ impl BridgeAudioShared {
         in_r: &[f32],
         out_interleaved: &mut [f32],
         output_channels: usize,
-        transport: DAUx::vst3_processor::RuntimeTransportContext,
+        transport: DirectAudio::vst3_processor::RuntimeTransportContext,
     ) -> usize {
         let channels = output_channels.clamp(1, MAX_CHANNELS);
         let n = frames
@@ -441,7 +441,7 @@ impl BridgeAudioShared {
         let mut out_r = vec![0.0f32; frames];
         // Legacy debug mixer path (CPAL preview): no engine transport available,
         // so use defaults. The shared-bridge path supplies real transport.
-        let transport = DAUx::vst3_processor::RuntimeTransportContext::default();
+        let transport = DirectAudio::vst3_processor::RuntimeTransportContext::default();
         for voice in voices.iter() {
             render_voice(
                 &voice.processor,
@@ -605,7 +605,7 @@ impl PluginHostPreviewEngine {
     pub fn list_parameters_for_instance(
         &self,
         plugin_instance_id: &str,
-    ) -> Option<Vec<DAUx::vst3_processor::Vst3ParameterDescriptor>> {
+    ) -> Option<Vec<DirectAudio::vst3_processor::Vst3ParameterDescriptor>> {
         self.instances
             .get(plugin_instance_id)
             .and_then(|instance| instance.processor.list_parameters())
@@ -1016,7 +1016,7 @@ impl PluginHostPreviewEngine {
         let mut out_l = vec![0.0f32; frames];
         let mut out_r = vec![0.0f32; frames];
         // Legacy in-engine debug mixer: no shared-bridge transport here.
-        let transport = DAUx::vst3_processor::RuntimeTransportContext::default();
+        let transport = DirectAudio::vst3_processor::RuntimeTransportContext::default();
         for instance in self.instances.values() {
             render_voice(
                 &instance.processor,

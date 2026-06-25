@@ -135,7 +135,7 @@ impl PluginBridgeRuntime {
     pub fn audio_sink_for(
         &self,
         instance_id: &str,
-    ) -> Option<DAUx::plugin_bridge::SharedPluginBridgeSink> {
+    ) -> Option<DirectAudio::plugin_bridge::SharedPluginBridgeSink> {
         let region = self.shared_audio.get(instance_id)?;
         Some(
             SpherePluginHost::plugin_bridge_sink::SharedRegionSink::into_shared(
@@ -559,7 +559,7 @@ impl PluginBridgeRuntime {
                             .decode(b64)
                             .unwrap_or_default()
                     };
-                    let state = DAUx::Vst3PluginState {
+                    let state = DirectAudio::Vst3PluginState {
                         component: decode(&component_b64),
                         controller: decode(&controller_b64),
                     };
@@ -598,7 +598,7 @@ impl PluginBridgeRuntime {
         packed: &[u8],
     ) -> Result<(), PluginHostClientError> {
         use base64::Engine as _;
-        let Some(state) = DAUx::Vst3PluginState::from_packed_bytes(packed) else {
+        let Some(state) = DirectAudio::Vst3PluginState::from_packed_bytes(packed) else {
             eprintln!(
                 "[plugin-bridge] SetPluginState skipped instance={instance_id}: unrecognized packed state ({} bytes)",
                 packed.len()

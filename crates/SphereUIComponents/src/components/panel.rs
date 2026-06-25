@@ -979,7 +979,7 @@ pub fn inspector_routing_combo_overlay(
 ) -> impl IntoElement {
     let position =
         inspector_combo_menu_position(anchor, INSPECTOR_WIDTH, ROUTING_COMBO_MENU_HEIGHT, window);
-    // Placeholder until DAUx exposes MIDI device lists to the UI shell.
+    // Placeholder until DirectAudio exposes MIDI device lists to the UI shell.
     let detected_midi_inputs: Vec<String> = Vec::new();
     let detected_midi_outputs: Vec<String> = Vec::new();
 

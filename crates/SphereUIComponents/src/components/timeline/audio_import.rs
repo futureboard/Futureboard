@@ -222,7 +222,7 @@ fn run_peak_job(
         AudioImportState::GeneratingPeaks { progress: 0.0 },
     );
 
-    let peaks = DAUx::generate_audio_peaks(path).map_err(|e| e.to_string())?;
+    let peaks = DirectAudio::generate_audio_peaks(path).map_err(|e| e.to_string())?;
     let preview: WaveformPreview = peaks.into();
     let preview = Arc::new(preview);
 
@@ -427,7 +427,7 @@ pub async fn run_import_pipeline(
     let meta_path = path_for_job.clone();
     let probe = cx
         .background_executor()
-        .spawn(async move { DAUx::probe_audio_file(&meta_path) })
+        .spawn(async move { DirectAudio::probe_audio_file(&meta_path) })
         .await;
 
     match probe {

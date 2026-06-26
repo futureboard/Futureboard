@@ -25,8 +25,9 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, AppContext, ClickEvent, DragMoveEvent, Empty, InteractiveElement,
-    IntoElement, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    div, px, svg, App, AppContext, ClickEvent, DragMoveEvent, Empty, Entity,
+    InteractiveElement, IntoElement, MouseDownEvent, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window,
 };
 use std::collections::HashSet;
 
@@ -42,10 +43,13 @@ use crate::components::timeline::timeline_state::{
     InsertSlotState, MasterBusState, SendSlotState, TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
+use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
+use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
+use crate::components::mixer_surface::{mixer_gpu_primitives_active, render_mixer_primitives};
 use crate::theme::Colors;
 
 // ── Section dimensions ─────────────────────────────────────────────────────
-const STRIP_WIDTH: f32 = 88.0;
+pub const STRIP_WIDTH: f32 = 88.0;
 /// Minimum height for a channel strip. Below this the mixer should scroll/clip
 /// as a whole rather than compressing the pan/fader controls into unusability.
 const STRIP_MIN_HEIGHT: f32 = 320.0;
@@ -650,7 +654,7 @@ fn vsti_output_bus_strips(slot: &InsertSlotState) -> Vec<u8> {
 /// `"Out 3 (Stereo / Ch 3/4)"`, or `"Out N (Multi / Ch X-Y)"` for buses with
 /// more than two channels. Falls back to a plain channel-pair label when the
 /// host has not reported a layout yet.
-fn vsti_output_bus_label(bus_counts: &[u8], bus_index: u8) -> String {
+pub fn vsti_output_bus_label(bus_counts: &[u8], bus_index: u8) -> String {
     let n = (bus_index as u16).saturating_add(1);
     // A single multichannel bus is split into flat stereo pairs; describe each
     // pair from its mapped flat channels rather than the (single) bus range.
@@ -1537,6 +1541,7 @@ fn vertical_split_handle(
 
 // ─── Channel strip ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn channel_strip(
     track: &TrackState,
     all_tracks: &[TrackState],
@@ -1546,6 +1551,10 @@ fn channel_strip(
     split: &MixerSplit,
     strip_available_px: f32,
     vsti_group_expanded: Option<bool>,
+    // When true the GPU primitive layer owns the strip background, top accent
+    // bar, and right separator — the strip container omits them so the batched
+    // canvas behind shows through. Inner sections keep their native styling.
+    gpu_decor: bool,
 ) -> impl IntoElement {
     log_vsti_child_meter_subscribe_once(track);
     log_vsti_child_strip_state(track);
@@ -1600,9 +1609,9 @@ fn channel_strip(
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
         .overflow_hidden()
-        .bg(strip_bg)
-        .border_r(px(1.0))
-        .border_color(border_col)
+        .when(!gpu_decor, |s| {
+            s.bg(strip_bg).border_r(px(1.0)).border_color(border_col)
+        })
         .id(("mix-strip", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
         .when_some(on_context, |this, cb| {
@@ -1615,8 +1624,10 @@ fn channel_strip(
                 },
             )
         })
-        // Top accent line
-        .child(div().w_full().h(px(2.0)).bg(track.color))
+        // Top accent line (GPU layer paints it when gpu_decor is on)
+        .when(!gpu_decor, |s| {
+            s.child(div().w_full().h(px(2.0)).bg(track.color))
+        })
         .child(strip_header(
             track,
             index,
@@ -1663,10 +1674,12 @@ fn vsti_output_sub_strip(
     bus_index: u8,
     bus_counts: &[u8],
     selected_track_id: Option<&str>,
+    focus_highlight: bool,
     vsti_output_meters: &std::collections::HashMap<String, VstiOutputMeterState>,
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
     strip_available_px: f32,
+    gpu_decor: bool,
 ) -> impl IntoElement {
     let id_num = {
         use std::hash::{Hash, Hasher};
@@ -1704,7 +1717,8 @@ fn vsti_output_sub_strip(
             }
         }
     }
-    let is_selected = selected_track_id == Some(child_track.id.as_str());
+    let is_selected =
+        selected_track_id == Some(child_track.id.as_str()) || focus_highlight;
     let select_id = child_track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =
@@ -1727,9 +1741,11 @@ fn vsti_output_sub_strip(
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
         .overflow_hidden()
-        .bg(Colors::mixer_strip_bg_alt())
-        .border_r(px(1.0))
-        .border_color(Colors::strip_border_subtle())
+        .when(!gpu_decor, |s| {
+            s.bg(Colors::mixer_strip_bg_alt())
+                .border_r(px(1.0))
+                .border_color(Colors::strip_border_subtle())
+        })
         .id(("mix-vsti-sub-strip", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
         .when_some(on_context, |this, cb| {
@@ -1742,7 +1758,9 @@ fn vsti_output_sub_strip(
                 },
             )
         })
-        .child(div().w_full().h(px(2.0)).bg(parent_track.color))
+        .when(!gpu_decor, |s| {
+            s.child(div().w_full().h(px(2.0)).bg(parent_track.color))
+        })
         // Real callbacks: mute / solo / volume / pan all target the child track
         // id (via button_row / pan_section / fader_area below), so S/M and the
         // fader operate per output bus.
@@ -2023,9 +2041,47 @@ enum MixerRenderItem {
     },
 }
 
+pub fn mixer_render_item_count(
+    tracks: &[TrackState],
+    collapsed_vsti_output_groups: &HashSet<String>,
+    hidden_channels: &HashSet<String>,
+) -> usize {
+    collect_mixer_render_items(tracks, collapsed_vsti_output_groups, hidden_channels).len()
+}
+
+fn channel_id_for_render_item(tracks: &[TrackState], item: &MixerRenderItem) -> String {
+    match item {
+        MixerRenderItem::Track { track_index } => tracks[*track_index].id.clone(),
+        MixerRenderItem::VstiOutput { child_index, .. } => tracks[*child_index].id.clone(),
+    }
+}
+
+pub fn mixer_strip_index_for_channel(
+    tracks: &[TrackState],
+    collapsed_vsti_output_groups: &HashSet<String>,
+    hidden_channels: &HashSet<String>,
+    channel_id: &str,
+) -> Option<usize> {
+    let items = collect_mixer_render_items(tracks, collapsed_vsti_output_groups, hidden_channels);
+    items.iter().position(|item| channel_id_for_render_item(tracks, item) == channel_id)
+}
+
+pub fn mixer_scroll_x_for_strip_index(
+    strip_index: usize,
+    viewport_width: f32,
+    strip_count: usize,
+) -> f32 {
+    let total_content_w = strip_count as f32 * STRIP_WIDTH;
+    let max_scroll_x = (total_content_w - viewport_width).max(0.0);
+    let strip_x = strip_index as f32 * STRIP_WIDTH;
+    let target = strip_x - (viewport_width - STRIP_WIDTH) * 0.5;
+    target.clamp(0.0, max_scroll_x.max(0.0))
+}
+
 fn collect_mixer_render_items(
     tracks: &[TrackState],
     collapsed_vsti_output_groups: &HashSet<String>,
+    hidden_channels: &HashSet<String>,
 ) -> Vec<MixerRenderItem> {
     let mut items = Vec::with_capacity(tracks.len());
     for (track_index, track) in tracks.iter().enumerate() {
@@ -2033,6 +2089,9 @@ fn collect_mixer_render_items(
         // mixer sub-strips are injected from the parent insert below, so these
         // backing tracks should never render as ordinary BUS channel strips.
         if vsti_output_child_insert_id(&track.id).is_some() {
+            continue;
+        }
+        if hidden_channels.contains(&track.id) {
             continue;
         }
         items.push(MixerRenderItem::Track { track_index });
@@ -2064,6 +2123,10 @@ fn collect_mixer_render_items(
             .collect();
         children.sort_by_key(|(bus_index, _)| *bus_index);
         for (bus_index, child_index) in children {
+            let child_id = &tracks[child_index].id;
+            if hidden_channels.contains(child_id) {
+                continue;
+            }
             items.push(MixerRenderItem::VstiOutput {
                 parent_index: track_index,
                 insert_index: 0,
@@ -2100,42 +2163,234 @@ fn mixer_empty_bay(spare_w: f32) -> impl IntoElement {
         .children(stripes)
 }
 
+/// Build the draw-only mixer primitive snapshot for the GPU layer. Mirrors the
+/// virtualized strip order in [`mixer_strip_scroller`] (strip *render position* ×
+/// `STRIP_WIDTH`), and reproduces each strip's background / accent / separator so
+/// the batched canvas paints exactly what the legacy `div` strips would. Reads
+/// only cloned UI state — never the audio engine, project, or routing.
+fn build_mixer_render_snapshot(
+    tracks: &[TrackState],
+    collapsed_vsti_output_groups: &HashSet<String>,
+    hidden_mixer_channels: &HashSet<String>,
+    selected_track_id: Option<&str>,
+    scroll_x: f32,
+    channel_area_width: f32,
+    strip_height: f32,
+) -> MixerRenderSnapshot {
+    let _s = crate::perf::PerfScope::enter("MixerSnapshotBuild");
+    let render_items =
+        collect_mixer_render_items(tracks, collapsed_vsti_output_groups, hidden_mixer_channels);
+    let mut strips = Vec::with_capacity(render_items.len());
+    for (pos, item) in render_items.iter().enumerate() {
+        let x = pos as f32 * STRIP_WIDTH;
+        let geom = match *item {
+            MixerRenderItem::Track { track_index } => {
+                let track = &tracks[track_index];
+                let selected = selected_track_id == Some(track.id.as_str());
+                let bg = if selected {
+                    Colors::mixer_strip_selected_bg()
+                } else if track_index % 2 == 0 {
+                    Colors::mixer_strip_bg()
+                } else {
+                    Colors::mixer_strip_bg_alt()
+                };
+                let separator = if selected {
+                    Colors::strip_border()
+                } else {
+                    Colors::strip_border_subtle()
+                };
+                MixerStripGeom {
+                    x,
+                    width: STRIP_WIDTH,
+                    height: strip_height,
+                    bg,
+                    accent: track.color,
+                    separator,
+                    selected,
+                    is_master: false,
+                    meter_l: track.meter_level_l,
+                    meter_r: track.meter_level_r,
+                    hovered: false,
+                }
+            }
+            MixerRenderItem::VstiOutput {
+                parent_index,
+                child_index,
+                ..
+            } => {
+                let parent = &tracks[parent_index];
+                let child = &tracks[child_index];
+                let selected = selected_track_id == Some(child.id.as_str());
+                MixerStripGeom {
+                    x,
+                    width: STRIP_WIDTH,
+                    height: strip_height,
+                    bg: Colors::mixer_strip_bg_alt(),
+                    accent: parent.color,
+                    separator: Colors::strip_border_subtle(),
+                    selected,
+                    is_master: false,
+                    meter_l: child.meter_level_l,
+                    meter_r: child.meter_level_r,
+                    hovered: false,
+                }
+            }
+        };
+        strips.push(geom);
+    }
+    let viewport = MixerRenderViewport {
+        channel_area_width,
+        height: strip_height,
+        scroll_x,
+        master_x: None,
+    };
+    // accent bar = 2px (matches the strip top accent line); separator = 1px.
+    MixerRenderSnapshot::new(viewport, strips, None, 2.0, 1.0)
+}
+
 pub fn mixer_panel(
     tracks: &[TrackState],
     master: &MasterBusState,
     selected_track_id: Option<&str>,
     callbacks: MixerCallbacks,
     collapsed_vsti_output_groups: &HashSet<String>,
+    hidden_mixer_channels: &HashSet<String>,
     vsti_output_meters: &std::collections::HashMap<String, VstiOutputMeterState>,
-    // Current horizontal scroll offset in pixels.
     scroll_x: f32,
-    // Width of the scrollable channel area in pixels (for computing visibility).
     viewport_width: f32,
-    // Height of this mixer panel in pixels; used to keep the lower strip controls usable.
     viewport_height: f32,
-    // Called with the new clamped scroll_x whenever the user scrolls the mixer.
     on_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
-    // Shared Upper Rack ↔ Lower Control split (height + drag routing).
     split: MixerSplit,
+    tree_sidebar: Option<Entity<MixerTreeSidebar>>,
+    tree_sidebar_enabled: bool,
 ) -> impl IntoElement {
-    let _s = crate::perf::PerfScope::enter("MixerPanel");
-    let track_count = tracks.len();
-    crate::perf::count("mixer_strips", track_count as u64);
-    let render_items = collect_mixer_render_items(tracks, collapsed_vsti_output_groups);
-    let strip_count = render_items.len();
+    let _shell = crate::perf::PerfScope::enter("MixerShell");
+    crate::perf::count("mixer_shell_layout_count", 1);
 
+    let track_count = tracks.len();
     let accent = Colors::accent_primary();
     let on_master = callbacks.on_master_volume_change.clone();
+    let strip_available_px = (viewport_height - 30.0).max(STRIP_MIN_HEIGHT);
 
-    // ── Virtual strip window ────────────────────────────────────────────────
-    // Only strips whose screen-space X overlaps [0, viewport_width] are built.
-    // The rest are represented by opaque spacer divs so the total scroll width
-    // stays correct even though individual strip elements don't exist.
+    // Optional GPU primitive layer: when active, the channel strips drop their
+    // background / accent bar / separator and a single batched `canvas` paints
+    // them behind the strip row. The master stays a native pinned strip (its
+    // exact pinned x is not known until layout). Opt-in / reversible.
+    let gpu_active = mixer_gpu_primitives_active();
+
+    let strip_row = mixer_strip_scroller(
+        tracks,
+        selected_track_id,
+        callbacks.clone(),
+        collapsed_vsti_output_groups,
+        hidden_mixer_channels,
+        vsti_output_meters,
+        scroll_x,
+        viewport_width,
+        strip_available_px,
+        &split,
+        on_scroll,
+        gpu_active,
+    );
+
+    let master_block = mixer_master_strip_pinned(
+        accent,
+        master,
+        on_master,
+        &callbacks,
+        &split,
+        strip_available_px,
+    );
+
+    let mut channel_row = div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_h_0()
+        .child(strip_row)
+        .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
+        .child(master_block);
+
+    if gpu_active {
+        let snapshot = build_mixer_render_snapshot(
+            tracks,
+            collapsed_vsti_output_groups,
+            hidden_mixer_channels,
+            selected_track_id,
+            scroll_x,
+            viewport_width,
+            strip_available_px,
+        );
+        let primitives = render_mixer_primitives(&snapshot);
+        // Wrap so the batched canvas paints behind the strip/gutter/master row.
+        channel_row = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(primitives)
+            .child(channel_row.size_full());
+    }
+
+    let content_row = if tree_sidebar_enabled {
+        let mut row = div().flex().flex_row().flex_1().min_h_0();
+        if let Some(sidebar) = tree_sidebar {
+            row = row.child(sidebar);
+        }
+        row.child(channel_row)
+    } else {
+        channel_row
+    };
+
+    let split_for_move = split.clone();
+    let split_for_end = split.clone();
+
+    div()
+        .flex()
+        .flex_col()
+        .size_full()
+        .bg(Colors::mixer_bg())
+        .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
+            let y: f32 = event.event.position.y.into();
+            (split_for_move.on_action)(MixerSplitAction::ResizeMove(y), w, cx);
+        })
+        .on_mouse_up(gpui::MouseButton::Left, move |_e, w, cx| {
+            (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
+        })
+        .child(mixer_sub_header(track_count))
+        .child(content_row)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mixer_strip_scroller(
+    tracks: &[TrackState],
+    selected_track_id: Option<&str>,
+    callbacks: MixerCallbacks,
+    collapsed_vsti_output_groups: &HashSet<String>,
+    hidden_mixer_channels: &HashSet<String>,
+    vsti_output_meters: &std::collections::HashMap<String, VstiOutputMeterState>,
+    scroll_x: f32,
+    viewport_width: f32,
+    strip_available_px: f32,
+    split: &MixerSplit,
+    on_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    gpu_decor: bool,
+) -> impl IntoElement {
+    let _scope = crate::perf::PerfScope::enter("MixerStripScroller");
+    crate::perf::count("mixer_strip_layout_count", 1);
+    crate::perf::count("strip_paint_count", 1);
+
+    let render_items = collect_mixer_render_items(
+        tracks,
+        collapsed_vsti_output_groups,
+        hidden_mixer_channels,
+    );
+    let strip_count = render_items.len();
+    crate::perf::count("mixer_strips", tracks.len() as u64);
+
     let total_content_w = strip_count as f32 * STRIP_WIDTH;
     let max_scroll_x = (total_content_w - viewport_width).max(0.0);
     let scroll_x = scroll_x.clamp(0.0, max_scroll_x.max(0.0));
     let spare_channel_w = (viewport_width - total_content_w).max(0.0);
-    let strip_available_px = (viewport_height - 30.0).max(STRIP_MIN_HEIGHT);
 
     let first_visible = (scroll_x / STRIP_WIDTH).floor() as usize;
     let visible_start = first_visible.saturating_sub(MIXER_OVERSCAN);
@@ -2169,9 +2424,10 @@ pub fn mixer_panel(
                     track_index,
                     is_sel,
                     &callbacks,
-                    &split,
+                    split,
                     strip_available_px,
                     vsti_group_expanded,
+                    gpu_decor,
                 )
                 .into_any_element()
             }
@@ -2193,17 +2449,18 @@ pub fn mixer_panel(
                     bus_index,
                     &bus_counts,
                     selected_track_id,
+                    false,
                     vsti_output_meters,
                     &callbacks,
-                    &split,
+                    split,
                     strip_available_px,
+                    gpu_decor,
                 )
                 .into_any_element()
             }
         })
         .collect();
 
-    // Scroll-wheel handler: translate wheel delta into scroll_x updates.
     let on_scroll_wheel = {
         let on_scroll = on_scroll.clone();
         move |event: &gpui::ScrollWheelEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
@@ -2211,99 +2468,62 @@ pub fn mixer_panel(
                 gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
                 gpui::ScrollDelta::Lines(l) => (l.x * STRIP_WIDTH, l.y * STRIP_WIDTH * 0.5),
             };
-            // Prefer horizontal delta; fall back to vertical (mouse-wheel-only users).
             let delta = if dx.abs() >= dy.abs() { dx } else { dy };
             let new_x = (scroll_x + delta).clamp(0.0, max_scroll_x.max(0.0));
             on_scroll(new_x, window, cx);
         }
     };
 
-    // Splitter drag capture: any strip's handle starts the drag (records the
-    // anchor via ResizeStart); the move/up events land on this root so the
-    // pointer stays captured across the whole mixer surface (bottom-panel
-    // resize pattern). ResizeEnd is a cheap no-op unless a drag is live.
-    let split_for_move = split.clone();
-    let split_for_end = split.clone();
-
     div()
-        .flex()
-        .flex_col()
-        .size_full()
-        .bg(Colors::mixer_bg())
-        .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
-            let y: f32 = event.event.position.y.into();
-            (split_for_move.on_action)(MixerSplitAction::ResizeMove(y), w, cx);
-        })
-        .on_mouse_up(gpui::MouseButton::Left, move |_e, w, cx| {
-            (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
-        })
-        .child(mixer_sub_header(track_count))
-        // Content row: scrollable channels (flex_1) + master block (fixed).
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .relative()
+        .overflow_hidden()
+        .on_scroll_wheel(on_scroll_wheel)
+        .when(spare_channel_w > 0.0, |d| d.child(mixer_empty_bay(spare_channel_w)))
         .child(
             div()
+                .absolute()
+                .left(px(-scroll_x))
+                .top_0()
+                .bottom_0()
                 .flex()
                 .flex_row()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    // Channel scroll area — manually virtualized in the x axis.
-                    // The outer div clips overflow; the inner absolute div is
-                    // shifted left by scroll_x so only visible strips appear.
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .h_full()
-                        .relative()
-                        .overflow_hidden()
-                        .on_scroll_wheel(on_scroll_wheel)
-                        .when(spare_channel_w > 0.0, |d| {
-                            d.child(mixer_empty_bay(spare_channel_w))
-                        })
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(-scroll_x))
-                                .top_0()
-                                .bottom_0()
-                                .flex()
-                                .flex_row()
-                                .h_full()
-                                .min_h(px(STRIP_MIN_HEIGHT))
-                                // Left spacer for off-screen strips.
-                                .when(left_spacer_w > 0.0, |d| {
-                                    d.child(
-                                        div()
-                                            .w(px(left_spacer_w))
-                                            .h_full()
-                                            .flex_none()
-                                            .bg(Colors::mixer_bg()),
-                                    )
-                                })
-                                .children(visible_strips)
-                                // Right spacer for off-screen strips.
-                                .when(right_spacer_w > 0.0, |d| {
-                                    d.child(
-                                        div()
-                                            .w(px(right_spacer_w))
-                                            .h_full()
-                                            .flex_none()
-                                            .bg(Colors::mixer_bg()),
-                                    )
-                                }),
-                        ),
-                )
-                // Gutter separating channels from the master block.
-                .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
-                // Pinned master block
-                .child(master_strip(
-                    accent,
-                    master,
-                    on_master,
-                    &callbacks,
-                    &split,
-                    strip_available_px,
-                )),
+                .h_full()
+                .min_h(px(STRIP_MIN_HEIGHT))
+                .when(left_spacer_w > 0.0, |d| {
+                    d.child(
+                        div()
+                            .w(px(left_spacer_w))
+                            .h_full()
+                            .flex_none()
+                            .bg(Colors::mixer_bg()),
+                    )
+                })
+                .children(visible_strips)
+                .when(right_spacer_w > 0.0, |d| {
+                    d.child(
+                        div()
+                            .w(px(right_spacer_w))
+                            .h_full()
+                            .flex_none()
+                            .bg(Colors::mixer_bg()),
+                    )
+                }),
         )
+}
+
+fn mixer_master_strip_pinned(
+    accent: gpui::Rgba,
+    master: &MasterBusState,
+    on_master: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    callbacks: &MixerCallbacks,
+    split: &MixerSplit,
+    strip_available_px: f32,
+) -> impl IntoElement {
+    let _scope = crate::perf::PerfScope::enter("MixerMasterStrip");
+    master_strip(accent, master, on_master, callbacks, split, strip_available_px)
 }
 
 #[cfg(test)]
@@ -2373,7 +2593,7 @@ mod collapse_filter_tests {
 
         // Expanded (empty collapsed set): parent + one sub-strip per REAL output
         // bus (bus 0/1/2), never split per channel into 4 strips.
-        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
+        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new(), &HashSet::new());
         assert_eq!(expanded.len(), 4);
         assert_eq!(
             expanded
@@ -2386,7 +2606,7 @@ mod collapse_filter_tests {
         // Collapsed: child strips filtered out, only the parent strip remains.
         let mut collapsed = HashSet::new();
         collapsed.insert(vsti_output_group_key(&track_id, &slot));
-        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed);
+        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed, &HashSet::new());
         assert_eq!(
             collapsed_items.len(),
             1,
@@ -2402,7 +2622,7 @@ mod collapse_filter_tests {
         // Acceptance: outputs 1: mono, 2: mono, 3/4: stereo → THREE output
         // strips (one per bus), never two blindly-paired stereo strips.
         let (state, _track_id, _slot) = drum_scenario(&[1, 1, 2]);
-        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
+        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new(), &HashSet::new());
         assert_eq!(
             expanded
                 .iter()
@@ -2418,7 +2638,7 @@ mod collapse_filter_tests {
 
         // Expanded: one parent strip + one sub-strip per flat stereo pair of the
         // single 8-channel bus (Ch 1/2, 3/4, 5/6, 7/8).
-        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new());
+        let expanded = collect_mixer_render_items(&state.tracks, &HashSet::new(), &HashSet::new());
         assert_eq!(expanded.len(), 5);
         assert_eq!(
             expanded
@@ -2432,7 +2652,7 @@ mod collapse_filter_tests {
         // every child track for routing and meters.
         let mut collapsed = HashSet::new();
         collapsed.insert(vsti_output_group_key(&track_id, &slot));
-        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed);
+        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed, &HashSet::new());
         assert_eq!(collapsed_items.len(), 1);
         assert_eq!(state.tracks.len(), 5);
     }

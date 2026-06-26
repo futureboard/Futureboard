@@ -226,6 +226,17 @@ impl StudioLayout {
         self.audio_bridge.engine = Some(handoff.engine);
         self.sync_plugin_bridge_sinks_to_engine(cx, "pre_studio_handoff");
         self.mark_engine_media_dirty();
+
+        let output_channels = self.mixer_tree_output_channels(cx);
+        self.timeline.update(cx, |timeline, _cx| {
+            crate::components::mixer_tree_model::ensure_timeline_mixer_tree_defaults(
+                &mut timeline.state,
+                output_channels,
+            );
+        });
+        self.mixer_view.tree_defaults_applied = true;
+        self.invalidate_mixer_tree_model_cache();
+        self.refresh_mixer_tree_sidebar_entity(cx);
     }
 
     pub fn load_project_from_path_with_options(

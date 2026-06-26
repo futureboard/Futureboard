@@ -31,7 +31,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// preserve_pitch false).
 /// v18 persists enabled VSTi output channels per insert.
 /// v19 persists the per-instrument VSTi multi-out mixer collapse flag.
-pub const PROJECT_VERSION: u32 = 19;
+/// v20 persists mixer tree expanded/pinned/hidden channel state.
+pub const PROJECT_VERSION: u32 = 20;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -822,6 +823,20 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         w.write_str(&region.color_hex);
     }
 
+    // Mixer tree UI state (v20+).
+    w.write_u32(project.mixer.tree_expanded_node_ids.len() as u32);
+    for id in &project.mixer.tree_expanded_node_ids {
+        w.write_str(id);
+    }
+    w.write_u32(project.mixer.tree_pinned_channel_ids.len() as u32);
+    for id in &project.mixer.tree_pinned_channel_ids {
+        w.write_str(id);
+    }
+    w.write_u32(project.mixer.tree_hidden_channel_ids.len() as u32);
+    for id in &project.mixer.tree_hidden_channel_ids {
+        w.write_str(id);
+    }
+
     w.into_bytes()
 }
 
@@ -1501,6 +1516,32 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         (Vec::new(), Vec::new())
     };
 
+    let (tree_expanded_node_ids, tree_pinned_channel_ids, tree_hidden_channel_ids) = if version >= 20
+    {
+        let expanded_count = r.read_u32()? as usize;
+        let mut tree_expanded_node_ids = Vec::with_capacity(expanded_count);
+        for _ in 0..expanded_count {
+            tree_expanded_node_ids.push(r.read_str()?);
+        }
+        let pinned_count = r.read_u32()? as usize;
+        let mut tree_pinned_channel_ids = Vec::with_capacity(pinned_count);
+        for _ in 0..pinned_count {
+            tree_pinned_channel_ids.push(r.read_str()?);
+        }
+        let hidden_count = r.read_u32()? as usize;
+        let mut tree_hidden_channel_ids = Vec::with_capacity(hidden_count);
+        for _ in 0..hidden_count {
+            tree_hidden_channel_ids.push(r.read_str()?);
+        }
+        (
+            tree_expanded_node_ids,
+            tree_pinned_channel_ids,
+            tree_hidden_channel_ids,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+
     Ok(FutureboardProject {
         id,
         name,
@@ -1521,6 +1562,9 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         mixer: ProjectMixer {
             master_volume_norm,
             master_inserts,
+            tree_expanded_node_ids,
+            tree_pinned_channel_ids,
+            tree_hidden_channel_ids,
         },
         assets,
     })

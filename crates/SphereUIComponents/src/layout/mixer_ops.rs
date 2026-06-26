@@ -1,12 +1,21 @@
-use gpui::{Context, Entity, Window, WindowHandle};
+use gpui::{Context, Entity, UniformListScrollHandle, Window, WindowHandle};
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::components::edit::EditCommand;
 use crate::components::mixer_panel::{
-    clamp_mixer_section_height_px, MixerCallbacks, MixerSplitAction, MixerSplitTarget,
+    clamp_mixer_section_height_px, mixer_render_item_count, mixer_scroll_x_for_strip_index,
+    mixer_strip_index_for_channel, MixerCallbacks, MixerSplitAction, MixerSplitTarget,
     VstiOutputMeterState, MIXER_INSERT_SECTION_DEFAULT_PX, MIXER_SEND_SECTION_DEFAULT_PX,
+    STRIP_WIDTH,
 };
-use crate::components::timeline::timeline_state::{self, TrackState};
+use crate::components::mixer_tree_model::{
+    ensure_timeline_mixer_tree_defaults, expand_ancestors_for_channel, MixerTreeModel,
+};
+use crate::components::mixer_tree_sidebar::{
+    clamp_mixer_tree_sidebar_width, MixerTreeCallbacks, MIXER_TREE_SIDEBAR_DEFAULT_WIDTH,
+    MIXER_TREE_COLLAPSED_RAIL_WIDTH,
+};
+use crate::components::timeline::timeline_state::{self, collapsed_vsti_output_group_keys_from_tracks, TrackState};
 use crate::components::{external_mixer_debug, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
@@ -31,6 +40,35 @@ pub(crate) struct MixerViewState {
     /// Active splitter-drag target, if a drag is in progress.
     pub split_active_target: Option<MixerSplitTarget>,
     pub vsti_output_meters: HashMap<String, VstiOutputMeterState>,
+    /// Mixer tree sidebar enabled (session-only).
+    pub tree_sidebar_enabled: bool,
+    /// Collapsed to icon rail.
+    pub tree_sidebar_collapsed: bool,
+    pub tree_sidebar_width_px: f32,
+    pub tree_show_only_selected_group: bool,
+    pub tree_resize_start_x: f32,
+    pub tree_resize_start_width_px: f32,
+    pub tree_resizing: bool,
+    /// Transient strip highlight after tree double-click focus.
+    pub focus_channel_id: Option<String>,
+    pub tree_scroll: UniformListScrollHandle,
+    /// Cached tree model — rebuilt only when tracks/filter/output routing changes.
+    pub cached_tree_model: Option<MixerTreeModel>,
+    pub tree_cache_filter: String,
+    pub tree_cache_output_ch: u32,
+    pub tree_cache_tracks_gen: u64,
+    pub tree_cache_show_only: bool,
+    pub tree_cache_selected_id: Option<String>,
+    /// One-shot fallback when session install did not seed tree defaults.
+    pub tree_defaults_applied: bool,
+}
+
+/// Stable mixer-tree UI hooks built once per studio layout (not per frame).
+pub(crate) struct MixerTreeUiHooks {
+    pub callbacks: MixerTreeCallbacks,
+    pub on_resize_start: std::sync::Arc<dyn Fn(f32, &mut Window, &mut gpui::App) + 'static>,
+    pub on_resize_move: std::sync::Arc<dyn Fn(f32, &mut Window, &mut gpui::App) + 'static>,
+    pub on_resize_end: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
 }
 
 impl Default for MixerViewState {
@@ -44,6 +82,22 @@ impl Default for MixerViewState {
             split_resize_start_send_px: 0.0,
             split_active_target: None,
             vsti_output_meters: HashMap::new(),
+            tree_sidebar_enabled: true,
+            tree_sidebar_collapsed: false,
+            tree_sidebar_width_px: MIXER_TREE_SIDEBAR_DEFAULT_WIDTH,
+            tree_show_only_selected_group: false,
+            tree_resize_start_x: 0.0,
+            tree_resize_start_width_px: MIXER_TREE_SIDEBAR_DEFAULT_WIDTH,
+            tree_resizing: false,
+            focus_channel_id: None,
+            tree_scroll: UniformListScrollHandle::new(),
+            cached_tree_model: None,
+            tree_cache_filter: String::new(),
+            tree_cache_output_ch: 0,
+            tree_cache_tracks_gen: 0,
+            tree_cache_show_only: false,
+            tree_cache_selected_id: None,
+            tree_defaults_applied: false,
         }
     }
 }
@@ -110,6 +164,441 @@ impl StudioLayout {
         }
     }
 
+    pub(crate) fn mixer_tree_sidebar_width(&self) -> f32 {
+        if self.mixer_view.tree_sidebar_collapsed {
+            MIXER_TREE_COLLAPSED_RAIL_WIDTH
+        } else if self.mixer_view.tree_sidebar_enabled {
+            clamp_mixer_tree_sidebar_width(self.mixer_view.tree_sidebar_width_px)
+        } else {
+            0.0
+        }
+    }
+
+    pub(crate) fn mixer_tree_output_channels(&self, cx: &Context<Self>) -> u32 {
+        self.selected_output_device_channels(cx)
+            .map(|(_, ch)| ch)
+            .unwrap_or(2)
+    }
+
+    pub(crate) fn invalidate_mixer_tree_model_cache(&mut self) {
+        self.mixer_view.cached_tree_model = None;
+    }
+
+    pub(crate) fn refresh_mixer_tree_sidebar_entity(&self, cx: &mut Context<Self>) {
+        let routing_gen = self.audio_bridge.route_graph_version;
+        let output_ch = self.mixer_tree_output_channels(cx);
+        let collapsed = self.mixer_view.tree_sidebar_collapsed;
+        let width = self.mixer_view.tree_sidebar_width_px;
+        let show_only = self.mixer_view.tree_show_only_selected_group;
+        let _ = self.mixer_tree_sidebar.update(cx, |sidebar, cx| {
+            sidebar.sync_chrome(collapsed, width, show_only);
+            if sidebar.sync_routing_from_layout(cx, routing_gen, output_ch) {
+                cx.notify();
+            }
+        });
+    }
+
+    pub(crate) fn notify_mixer_tree_sidebar_only(&self, cx: &mut Context<Self>) {
+        let _ = self.mixer_tree_sidebar.update(cx, |sidebar, cx| {
+            sidebar.recompute_expansion(cx);
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn notify_mixer_tree_selection_only(&self, cx: &mut Context<Self>) {
+        let _ = self.mixer_tree_sidebar.update(cx, |sidebar, cx| {
+            sidebar.recompute_selection(cx);
+            cx.notify();
+        });
+    }
+
+    /// Seed default expanded groups once when session install did not run (e.g. empty project).
+    pub(crate) fn ensure_mixer_tree_defaults_once(&mut self, cx: &mut Context<Self>) {
+        if self.mixer_view.tree_defaults_applied {
+            return;
+        }
+        if !self
+            .timeline
+            .read(cx)
+            .state
+            .mixer_tree
+            .expanded_node_ids
+            .is_empty()
+        {
+            self.mixer_view.tree_defaults_applied = true;
+            return;
+        }
+        let output_channels = self.mixer_tree_output_channels(cx);
+        self.timeline.update(cx, |timeline, _cx| {
+            ensure_timeline_mixer_tree_defaults(&mut timeline.state, output_channels);
+        });
+        self.mixer_view.tree_defaults_applied = true;
+        self.invalidate_mixer_tree_model_cache();
+    }
+
+    pub(crate) fn mixer_tree_model_for_render(&mut self, cx: &mut Context<Self>) -> MixerTreeModel {
+        let output_channels = self.mixer_tree_output_channels(cx);
+        let filter = self.mixer_tree_filter_input.value.clone();
+        let tracks_gen = self.audio_bridge.route_graph_version;
+        let show_only = self.mixer_view.tree_show_only_selected_group;
+        let selected_id = self
+            .timeline
+            .read(cx)
+            .state
+            .selection
+            .selected_track_id
+            .clone();
+
+        let needs_rebuild = self.mixer_view.cached_tree_model.is_none()
+            || self.mixer_view.tree_cache_filter != filter
+            || self.mixer_view.tree_cache_output_ch != output_channels
+            || self.mixer_view.tree_cache_tracks_gen != tracks_gen
+            || self.mixer_view.tree_cache_show_only != show_only
+            || (show_only && self.mixer_view.tree_cache_selected_id != selected_id);
+
+        if needs_rebuild {
+            let model = {
+                let timeline = self.timeline.read(cx);
+                MixerTreeModel::build(
+                    &timeline.state.tracks,
+                    output_channels,
+                    &timeline.state.mixer_tree,
+                    &filter,
+                    show_only,
+                    selected_id.as_deref(),
+                )
+            };
+            self.mixer_view.cached_tree_model = Some(model);
+            self.mixer_view.tree_cache_filter = filter;
+            self.mixer_view.tree_cache_output_ch = output_channels;
+            self.mixer_view.tree_cache_tracks_gen = tracks_gen;
+            self.mixer_view.tree_cache_show_only = show_only;
+            self.mixer_view.tree_cache_selected_id = selected_id;
+        }
+
+        self.mixer_view
+            .cached_tree_model
+            .as_ref()
+            .expect("mixer tree cache populated above")
+            .clone()
+    }
+
+    pub(crate) fn ensure_mixer_tree_ui_hooks(&mut self, owner: Entity<Self>, cx: &mut Context<Self>) {
+        if self.mixer_tree_ui_hooks.is_some() {
+            return;
+        }
+
+        let callbacks = self.build_mixer_tree_callbacks(owner.clone());
+
+        let owner_tree_resize = owner.clone();
+        let on_resize_start: std::sync::Arc<dyn Fn(f32, &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |x, _w, cx| {
+                let _ = owner_tree_resize.update(cx, |layout, _cx| {
+                    layout.apply_mixer_tree_resize_start(x);
+                });
+            });
+        let owner_tree_resize_move = owner.clone();
+        let on_resize_move: std::sync::Arc<dyn Fn(f32, &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |x, _w, cx| {
+                let _ = owner_tree_resize_move.update(cx, |layout, cx| {
+                    layout.apply_mixer_tree_resize_move(x, cx);
+                });
+            });
+        let owner_tree_resize_end = owner.clone();
+        let on_resize_end: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = owner_tree_resize_end.update(cx, |layout, cx| {
+                    layout.apply_mixer_tree_resize_end(cx);
+                });
+            });
+
+        self.mixer_tree_ui_hooks = Some(MixerTreeUiHooks {
+            callbacks,
+            on_resize_start,
+            on_resize_move,
+            on_resize_end,
+        });
+        let hooks = self.mixer_tree_ui_hooks.as_ref().unwrap();
+        let _ = self.mixer_tree_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.set_session_hooks(
+                hooks.callbacks.clone(),
+                Some(hooks.on_resize_start.clone()),
+                Some(hooks.on_resize_move.clone()),
+                Some(hooks.on_resize_end.clone()),
+            );
+        });
+    }
+
+    pub(crate) fn build_mixer_tree_model(
+        &self,
+        cx: &gpui::App,
+        output_device_channels: u32,
+    ) -> MixerTreeModel {
+        let timeline = self.timeline.read(cx);
+        let filter = self.mixer_tree_filter_input.value.clone();
+        MixerTreeModel::build(
+            &timeline.state.tracks,
+            output_device_channels,
+            &timeline.state.mixer_tree,
+            &filter,
+            self.mixer_view.tree_show_only_selected_group,
+            timeline.state.selection.selected_track_id.as_deref(),
+        )
+    }
+
+    pub(crate) fn mixer_focus_channel(&mut self, channel_id: &str, viewport_width: f32, cx: &mut Context<Self>) {
+        let collapsed = collapsed_vsti_output_group_keys_from_tracks(
+            &self.timeline.read(cx).state.tracks,
+        );
+        let hidden = self.timeline.read(cx).state.mixer_tree.hidden_channel_ids.clone();
+        let tracks = self.timeline.read(cx).state.tracks.clone();
+        if let Some(index) = mixer_strip_index_for_channel(&tracks, &collapsed, &hidden, channel_id)
+        {
+            let strip_count = mixer_render_item_count(&tracks, &collapsed, &hidden);
+            self.mixer_view.scroll_x =
+                mixer_scroll_x_for_strip_index(index, viewport_width, strip_count);
+        }
+        let model = self.build_mixer_tree_model(cx, self.mixer_tree_output_channels(cx));
+        self.timeline.update(cx, |timeline, _cx| {
+            expand_ancestors_for_channel(&mut timeline.state.mixer_tree, &model, channel_id);
+            timeline.state.select_track(channel_id);
+        });
+        self.mixer_view.focus_channel_id = Some(channel_id.to_string());
+        self.mark_dirty_view_only();
+        self.push_mixer_snapshot_to_window(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn mixer_toggle_channel_visibility(
+        &mut self,
+        channel_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.timeline.update(cx, |timeline, _cx| {
+            timeline.state.mixer_tree.toggle_channel_visibility(channel_id);
+        });
+        self.mark_dirty_view_only();
+        self.push_mixer_snapshot_to_window(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn mixer_pin_channel(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |timeline, _cx| {
+            timeline.state.mixer_tree.toggle_pin(channel_id);
+        });
+        self.mark_dirty_view_only();
+        self.notify_mixer_tree_sidebar_only(cx);
+    }
+
+    pub(crate) fn mixer_expand_all_tree(&mut self, cx: &mut Context<Self>) {
+        let model = self.build_mixer_tree_model(cx, self.mixer_tree_output_channels(cx));
+        self.timeline.update(cx, |timeline, _cx| {
+            timeline
+                .state
+                .mixer_tree
+                .expand_all(model.all_expandable_ids.clone());
+            timeline.state.mixer_tree.set_expanded(
+                crate::components::mixer_tree_model::MIXER_TREE_ROOT_ID,
+                true,
+            );
+        });
+        self.mark_dirty_view_only();
+        self.notify_mixer_tree_sidebar_only(cx);
+    }
+
+    pub(crate) fn mixer_collapse_all_tree(&mut self, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |timeline, _cx| {
+            timeline.state.mixer_tree.collapse_all();
+        });
+        self.mark_dirty_view_only();
+        self.notify_mixer_tree_sidebar_only(cx);
+    }
+
+    pub(crate) fn mixer_reset_tree_visibility(&mut self, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |timeline, _cx| {
+            timeline.state.mixer_tree.reset_visibility();
+        });
+        self.mark_dirty_view_only();
+        self.push_mixer_snapshot_to_window(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn sync_mixer_tree_to_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self
+            .timeline
+            .read(cx)
+            .state
+            .selection
+            .selected_track_id
+            .clone()
+        else {
+            return;
+        };
+        let model = self.build_mixer_tree_model(cx, self.mixer_tree_output_channels(cx));
+        self.timeline.update(cx, |timeline, _cx| {
+            expand_ancestors_for_channel(&mut timeline.state.mixer_tree, &model, &channel_id);
+        });
+        self.notify_mixer_tree_sidebar_only(cx);
+    }
+
+    pub(crate) fn apply_mixer_tree_resize_start(&mut self, x: f32) {
+        self.mixer_view.tree_resize_start_x = x;
+        self.mixer_view.tree_resize_start_width_px =
+            clamp_mixer_tree_sidebar_width(self.mixer_view.tree_sidebar_width_px);
+        self.mixer_view.tree_resizing = true;
+    }
+
+    pub(crate) fn apply_mixer_tree_resize_move(&mut self, x: f32, cx: &mut Context<Self>) {
+        if !self.mixer_view.tree_resizing {
+            return;
+        }
+        let delta = x - self.mixer_view.tree_resize_start_x;
+        let new_w = clamp_mixer_tree_sidebar_width(self.mixer_view.tree_resize_start_width_px + delta);
+        if (new_w - self.mixer_view.tree_sidebar_width_px).abs() > 0.25 {
+            self.mixer_view.tree_sidebar_width_px = new_w;
+            self.refresh_mixer_tree_sidebar_entity(cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn apply_mixer_tree_resize_end(&mut self, cx: &mut Context<Self>) {
+        self.mixer_view.tree_resizing = false;
+        cx.notify();
+    }
+
+    pub(crate) fn build_mixer_tree_callbacks(&self, owner: Entity<Self>) -> MixerTreeCallbacks {
+        let owner_select = owner.clone();
+        let on_select_channel: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            let id = id.clone();
+            StudioLayout::defer_update(&owner_select, cx, move |layout, cx| {
+                let already = layout
+                    .timeline
+                    .read(cx)
+                    .state
+                    .selection
+                    .selected_track_id
+                    .as_deref()
+                    == Some(id.as_str());
+                layout.timeline.update(cx, |timeline, _cx| {
+                    timeline.state.select_track(&id);
+                });
+                layout.sync_mixer_tree_to_selection(cx);
+                if !already {
+                    layout.push_mixer_snapshot_to_window(cx);
+                    cx.notify();
+                } else {
+                    layout.notify_mixer_tree_selection_only(cx);
+                }
+            });
+        });
+
+        let owner_focus = owner.clone();
+        let on_focus_channel: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, window, cx| {
+            let id = id.clone();
+            let window_w: f32 = window.bounds().size.width.into();
+            StudioLayout::defer_update(&owner_focus, cx, move |layout, cx| {
+                let tree_w = layout.mixer_tree_sidebar_width();
+                let viewport = (window_w - tree_w - 90.0).max(STRIP_WIDTH);
+                layout.mixer_focus_channel(&id, viewport, cx);
+            });
+        });
+
+        let owner_expand = owner.clone();
+        let on_toggle_expand: std::sync::Arc<
+            dyn Fn(&(String, bool), &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |(node_id, expanded): &(String, bool), _w, cx| {
+            let node_id = node_id.clone();
+            let expanded = *expanded;
+            StudioLayout::defer_update(&owner_expand, cx, move |layout, cx| {
+                layout.timeline.update(cx, |timeline, _cx| {
+                    timeline.state.mixer_tree.set_expanded(node_id, expanded);
+                });
+                layout.mark_dirty_view_only();
+                layout.notify_mixer_tree_sidebar_only(cx);
+            });
+        });
+
+        let owner_vis = owner.clone();
+        let on_toggle_visibility: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            let id = id.clone();
+            StudioLayout::defer_update(&owner_vis, cx, move |layout, cx| {
+                layout.mixer_toggle_channel_visibility(&id, cx);
+            });
+        });
+
+        let owner_pin = owner.clone();
+        let on_toggle_pin: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            let id = id.clone();
+            StudioLayout::defer_update(&owner_pin, cx, move |layout, cx| {
+                layout.mixer_pin_channel(&id, cx);
+            });
+        });
+
+        let owner_collapse = owner.clone();
+        let on_collapse_all: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = owner_collapse.update(cx, |layout, cx| layout.mixer_collapse_all_tree(cx));
+            });
+
+        let owner_expand_all = owner.clone();
+        let on_expand_all: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = owner_expand_all.update(cx, |layout, cx| layout.mixer_expand_all_tree(cx));
+            });
+
+        let owner_filter_group = owner.clone();
+        let on_show_only_selected_group: std::sync::Arc<
+            dyn Fn(&mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |_w, cx| {
+            let _ = owner_filter_group.update(cx, |layout, cx| {
+                layout.mixer_view.tree_show_only_selected_group =
+                    !layout.mixer_view.tree_show_only_selected_group;
+                layout.invalidate_mixer_tree_model_cache();
+                layout.refresh_mixer_tree_sidebar_entity(cx);
+            });
+        });
+
+        let owner_reset = owner.clone();
+        let on_reset_visibility: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = owner_reset.update(cx, |layout, cx| {
+                    layout.mixer_reset_tree_visibility(cx)
+                });
+            });
+
+        let owner_toggle_sidebar = owner.clone();
+        let on_toggle_sidebar: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |_w, cx| {
+            let _ = owner_toggle_sidebar.update(cx, |layout, cx| {
+                layout.mixer_view.tree_sidebar_collapsed =
+                    !layout.mixer_view.tree_sidebar_collapsed;
+                layout.refresh_mixer_tree_sidebar_entity(cx);
+                cx.notify();
+            });
+            });
+
+        MixerTreeCallbacks {
+            on_select_channel,
+            on_focus_channel,
+            on_toggle_expand,
+            on_toggle_visibility,
+            on_toggle_pin,
+            on_collapse_all,
+            on_expand_all,
+            on_show_only_selected_group,
+            on_reset_visibility,
+            on_toggle_sidebar,
+        }
+    }
+
     /// Current shared insert/send viewport heights, clamped to the supported range.
     pub(crate) fn mixer_insert_section_px(&self) -> f32 {
         clamp_mixer_section_height_px(self.mixer_view.insert_section_px)
@@ -145,8 +634,10 @@ impl StudioLayout {
 
         // Persist the new view state (so save/restore keeps it) WITHOUT rebuilding
         // the audio graph: the collapse flag is not part of the engine snapshot, so
-        // the next dedup'd sync is a no-op and `route_graph_version` is unchanged.
-        self.mark_dirty();
+        // marking only the project session dirty (never the engine) keeps the next
+        // poll from building/serializing a redundant snapshot. `route_graph_version`
+        // is unchanged.
+        self.mark_dirty_view_only();
         self.push_mixer_snapshot_to_window(cx);
         cx.notify();
     }
@@ -274,6 +765,7 @@ impl StudioLayout {
                 cx.notify();
             });
             StudioLayout::defer_update(&owner_select, cx, |layout, cx| {
+                layout.sync_mixer_tree_to_selection(cx);
                 layout.push_mixer_snapshot_to_window(cx);
             });
         });

@@ -125,6 +125,18 @@ pub(crate) struct AudioBridgeState {
     pub route_graph_in_flight_version: u64,
     pub route_graph_in_flight_child_channels: usize,
     pub route_graph_in_flight_master_routes: usize,
+    /// Fingerprint (cheap hash of the engine snapshot) of the last graph actually
+    /// published to the audio thread. `None` until the first publish. Used to skip
+    /// a redundant route-graph rebuild / `load_project` when the graph is unchanged
+    /// — drives the `engine_dirty_poll` and `audio_sync_pending` dedup.
+    pub graph_fingerprint: Option<u64>,
+    /// Diagnostics counters (drained via `FUTUREBOARD_PERF_DEBUG` / perf HUD).
+    /// `engine_sync` = background syncs actually started; `audio_load_project` =
+    /// `engine.load_project` calls dispatched; `route_graph_rebuild` = route graph
+    /// version bumps. A deduped (unchanged-graph) sync increments none of these.
+    pub engine_sync_count: u64,
+    pub audio_load_project_count: u64,
+    pub route_graph_rebuild_count: u64,
     /// Start transport once the current background sync completes.
     pub play_after_sync: bool,
 }
@@ -146,9 +158,23 @@ impl Default for AudioBridgeState {
             route_graph_in_flight_version: 0,
             route_graph_in_flight_child_channels: 0,
             route_graph_in_flight_master_routes: 0,
+            graph_fingerprint: None,
+            engine_sync_count: 0,
+            audio_load_project_count: 0,
+            route_graph_rebuild_count: 0,
             play_after_sync: false,
         }
     }
+}
+
+/// Cheap, stable fingerprint of a serialized engine snapshot. Identical graphs
+/// hash identically, so a re-sync of an unchanged graph can be skipped without a
+/// full string compare. Control-thread only (never the audio callback).
+pub(crate) fn graph_fingerprint_of(signature: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    signature.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl StudioLayout {
@@ -882,7 +908,16 @@ impl StudioLayout {
             reason,
         );
         let signature = serde_json::to_string(&snapshot).unwrap_or_default();
-        if !force && self.audio_bridge.last_project_signature.as_deref() == Some(signature.as_str())
+        let fingerprint = graph_fingerprint_of(&signature);
+        // Graph-unchanged dedup. The same graph was already published to the audio
+        // thread, so skip the route-graph rebuild and `load_project` entirely. This
+        // covers `engine_dirty_poll` re-firing after `audio_project_sync_complete`
+        // published this graph, and a queued `audio_sync_pending` whose graph did
+        // not change. Fingerprint is the documented key; the exact signature check
+        // guards against an (astronomically unlikely) hash collision.
+        if !force
+            && self.audio_bridge.graph_fingerprint == Some(fingerprint)
+            && self.audio_bridge.last_project_signature.as_deref() == Some(signature.as_str())
         {
             self.audio_bridge.project_dirty = false;
             self.audio_bridge.media_dirty = false;
@@ -894,8 +929,17 @@ impl StudioLayout {
         }
 
         self.audio_bridge.sync_in_flight = true;
+        self.audio_bridge.engine_sync_count =
+            self.audio_bridge.engine_sync_count.saturating_add(1);
+        crate::perf::count("engine_sync_count", self.audio_bridge.engine_sync_count);
         self.audio_bridge.route_graph_version =
             self.audio_bridge.route_graph_version.saturating_add(1);
+        self.audio_bridge.route_graph_rebuild_count =
+            self.audio_bridge.route_graph_rebuild_count.saturating_add(1);
+        crate::perf::count(
+            "route_graph_rebuild_count",
+            self.audio_bridge.route_graph_rebuild_count,
+        );
         let graph_version_after = self.audio_bridge.route_graph_version;
         let num_plugin_child_channels = snapshot
             .tracks
@@ -920,6 +964,12 @@ impl StudioLayout {
             Some(reason.to_string()),
             None,
             false,
+        );
+        self.audio_bridge.audio_load_project_count =
+            self.audio_bridge.audio_load_project_count.saturating_add(1);
+        crate::perf::count(
+            "audio_load_project_count",
+            self.audio_bridge.audio_load_project_count,
         );
         let owner = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
@@ -966,6 +1016,10 @@ impl StudioLayout {
                     self.audio_bridge.route_graph_in_flight_child_channels,
                     self.audio_bridge.route_graph_in_flight_master_routes
                 );
+                // Record the published graph's fingerprint so a later
+                // engine_dirty_poll / audio_sync_pending for the identical graph is
+                // deduped in `schedule_audio_project_sync` (no second rebuild).
+                self.audio_bridge.graph_fingerprint = Some(graph_fingerprint_of(&signature));
                 self.audio_bridge.last_project_signature = Some(signature);
                 if !pending_sync_queued {
                     self.audio_bridge.project_dirty = false;

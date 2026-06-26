@@ -1,0 +1,226 @@
+//! Cached mixer tree rows — rebuilt only when dirty flags require it.
+
+use crate::assets;
+use crate::components::mixer_tree_model::{MixerTreeModel, MixerTreeNodeKind, MixerTreeRow};
+use crate::components::timeline::timeline_state::MixerTreeViewState;
+
+/// Lightweight row for sidebar paint — no nested node hierarchy.
+#[derive(Clone, Debug)]
+pub struct MixerTreeVisibleRow {
+    pub node_id: String,
+    pub depth: u8,
+    pub label: String,
+    pub kind: MixerTreeNodeKind,
+    pub channel_id: Option<String>,
+    pub icon_path: Option<&'static str>,
+    pub accent: gpui::Rgba,
+    pub track_color: Option<gpui::Rgba>,
+    pub expanded: bool,
+    pub has_children: bool,
+    pub visible_in_mixer: bool,
+    pub pinned: bool,
+    pub selected: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MixerTreeDirty {
+    pub routing: bool,
+    pub filter: bool,
+    pub expansion: bool,
+    pub selection: bool,
+    pub hover: bool,
+}
+
+impl MixerTreeDirty {
+    pub fn any(&self) -> bool {
+        self.routing || self.filter || self.expansion || self.selection || self.hover
+    }
+
+    pub fn needs_visible_rows(&self) -> bool {
+        self.routing || self.filter || self.expansion || self.selection
+    }
+
+    pub fn clear_after_visible_rebuild(&mut self) {
+        self.routing = false;
+        self.filter = false;
+        self.expansion = false;
+        self.selection = false;
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MixerTreeRenderCache {
+    pub model: Option<MixerTreeModel>,
+    pub visible_rows: Vec<MixerTreeVisibleRow>,
+    pub dirty: MixerTreeDirty,
+    pub routing_gen: u64,
+    pub output_channels: u32,
+    pub filter: String,
+    pub show_only_selected_group: bool,
+    pub selected_channel_id: Option<String>,
+    pub hovered_row: Option<usize>,
+    pub model_rebuild_count: u64,
+    pub visible_rows_rebuild_count: u64,
+}
+
+impl MixerTreeRenderCache {
+    pub fn mark_routing_dirty(&mut self) {
+        self.dirty.routing = true;
+    }
+
+    pub fn mark_filter_dirty(&mut self) {
+        self.dirty.filter = true;
+    }
+
+    pub fn mark_expansion_dirty(&mut self) {
+        self.dirty.expansion = true;
+    }
+
+    pub fn mark_selection_dirty(&mut self) {
+        self.dirty.selection = true;
+    }
+
+    pub fn set_hovered_row(&mut self, row: Option<usize>) -> bool {
+        if self.hovered_row == row {
+            return false;
+        }
+        self.hovered_row = row;
+        self.dirty.hover = true;
+        true
+    }
+
+    pub fn clear_hover_dirty(&mut self) {
+        self.dirty.hover = false;
+    }
+
+    pub fn sync_routing_key(
+        &mut self,
+        routing_gen: u64,
+        output_channels: u32,
+        filter: &str,
+        show_only: bool,
+        selected_id: Option<&str>,
+    ) {
+        let selected = selected_id.map(str::to_string);
+        if self.routing_gen != routing_gen
+            || self.output_channels != output_channels
+            || self.show_only_selected_group != show_only
+            || (show_only && self.selected_channel_id != selected)
+        {
+            self.routing_gen = routing_gen;
+            self.output_channels = output_channels;
+            self.show_only_selected_group = show_only;
+            self.selected_channel_id = selected;
+            self.dirty.routing = true;
+        }
+        if self.filter != filter {
+            self.filter = filter.to_string();
+            self.dirty.filter = true;
+        }
+        if self.selected_channel_id.as_deref() != selected_id {
+            self.selected_channel_id = selected_id.map(str::to_string);
+            self.dirty.selection = true;
+        }
+    }
+
+    pub fn rebuild_model_if_needed(
+        &mut self,
+        tracks: &[crate::components::timeline::timeline_state::TrackState],
+        view: &MixerTreeViewState,
+    ) {
+        if !self.dirty.routing && !self.dirty.filter {
+            return;
+        }
+        let model = MixerTreeModel::build(
+            tracks,
+            self.output_channels,
+            view,
+            &self.filter,
+            self.show_only_selected_group,
+            self.selected_channel_id.as_deref(),
+        );
+        self.model = Some(model);
+        self.dirty.expansion = true;
+        self.dirty.selection = true;
+        self.model_rebuild_count = self.model_rebuild_count.saturating_add(1);
+        crate::perf::count("mixer_tree_model_rebuild_count", self.model_rebuild_count);
+        if crate::perf::mixer_tree_debug_enabled() {
+            eprintln!(
+                "[mixer-tree] model rebuild routing_gen={} filter={:?}",
+                self.routing_gen, self.filter
+            );
+        }
+    }
+
+    pub fn rebuild_visible_rows_if_needed(&mut self, view: &MixerTreeViewState) {
+        if !self.dirty.needs_visible_rows() {
+            return;
+        }
+        let Some(model) = self.model.as_ref() else {
+            self.visible_rows.clear();
+            self.dirty.clear_after_visible_rebuild();
+            return;
+        };
+        let flat = model.flatten(view, self.selected_channel_id.as_deref());
+        self.visible_rows = flat.into_iter().map(visible_row_from_flat).collect();
+        self.visible_rows_rebuild_count = self.visible_rows_rebuild_count.saturating_add(1);
+        crate::perf::count(
+            "visible_rows_rebuild_count",
+            self.visible_rows_rebuild_count,
+        );
+        if crate::perf::mixer_tree_debug_enabled() {
+            eprintln!(
+                "[mixer-tree] visible rows rebuild count={}",
+                self.visible_rows.len()
+            );
+        }
+        self.dirty.clear_after_visible_rebuild();
+    }
+
+    pub fn recompute(
+        &mut self,
+        tracks: &[crate::components::timeline::timeline_state::TrackState],
+        view: &MixerTreeViewState,
+    ) {
+        if !self.dirty.any() {
+            return;
+        }
+        self.rebuild_model_if_needed(tracks, view);
+        self.rebuild_visible_rows_if_needed(view);
+    }
+}
+
+fn visible_row_from_flat(row: MixerTreeRow) -> MixerTreeVisibleRow {
+    let node = row.node;
+    MixerTreeVisibleRow {
+        node_id: node.id,
+        depth: row.depth.min(255) as u8,
+        label: node.display_name,
+        kind: node.kind,
+        channel_id: node.channel_id,
+        icon_path: icon_for_kind(node.kind),
+        accent: node.kind.accent_color(),
+        track_color: node.track_color,
+        expanded: row.expanded,
+        has_children: row.has_children,
+        visible_in_mixer: row.visible_in_mixer,
+        pinned: row.pinned,
+        selected: row.selected,
+    }
+}
+
+fn icon_for_kind(kind: MixerTreeNodeKind) -> Option<&'static str> {
+    match kind {
+        MixerTreeNodeKind::AudioTrack => Some(assets::ICON_VOLUME_2_PATH),
+        MixerTreeNodeKind::InstrumentTrack | MixerTreeNodeKind::Plugin => {
+            Some(assets::ICON_SLIDERS_HORIZONTAL_PATH)
+        }
+        MixerTreeNodeKind::Bus => Some(assets::ICON_SLIDERS_HORIZONTAL_PATH),
+        MixerTreeNodeKind::FxReturn => Some(assets::ICON_VOLUME_2_PATH),
+        MixerTreeNodeKind::HardwareOutput | MixerTreeNodeKind::BusOutput => {
+            Some(assets::ICON_VOLUME_2_PATH)
+        }
+        MixerTreeNodeKind::MidiTrack => Some(assets::ICON_SLIDERS_HORIZONTAL_PATH),
+        MixerTreeNodeKind::Root | MixerTreeNodeKind::Group => None,
+    }
+}

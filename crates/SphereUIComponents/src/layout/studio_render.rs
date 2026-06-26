@@ -45,10 +45,14 @@ impl Render for StudioLayout {
 
         // Mixer scroll — updated by the mixer scroll-wheel handler.
         let mixer_scroll_x = self.mixer_view.scroll_x;
-        // Approximate the scrollable channel area width: full window minus the
-        // master strip (STRIP_WIDTH) plus gutter (1px) and a small margin.
         let window_w: f32 = window.bounds().size.width.into();
-        let mixer_viewport_width = (window_w - 90.0).max(100.0);
+        let tree_sidebar_w = if self.mixer_view.tree_sidebar_enabled {
+            self.mixer_tree_sidebar_width()
+        } else {
+            0.0
+        };
+        // Scrollable channel area: window minus tree sidebar, master strip, gutter.
+        let mixer_viewport_width = (window_w - tree_sidebar_w - 90.0).max(100.0);
         let on_mixer_scroll: std::sync::Arc<
             dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static,
         > = {
@@ -1595,6 +1599,23 @@ impl Render for StudioLayout {
             })
             .children(if show_mixer_docked {
                 let _s = crate::perf::PerfScope::enter("BottomPanel");
+                self.ensure_mixer_tree_defaults_once(cx);
+                self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
+                if self.mixer_view.tree_sidebar_enabled {
+                    self.refresh_mixer_tree_sidebar_entity(cx);
+                }
+                let hidden_mixer_channels = self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .mixer_tree
+                    .hidden_channel_ids
+                    .clone();
+                let tree_sidebar = if self.mixer_view.tree_sidebar_enabled {
+                    Some(self.mixer_tree_sidebar.clone())
+                } else {
+                    None
+                };
                 Some(
                     components::bottom_panel(
                         self.active_bottom_tab,
@@ -1603,14 +1624,15 @@ impl Render for StudioLayout {
                         &master,
                         selected_track_id.as_deref(),
                         mixer_callbacks,
-                        // Derived from the persisted per-insert collapse flag — the
-                        // same single source of truth the floating mixer uses.
                         &crate::components::timeline::timeline_state::collapsed_vsti_output_group_keys_from_tracks(&tracks),
+                        &hidden_mixer_channels,
                         &self.mixer_view.vsti_output_meters,
                         mixer_scroll_x,
                         mixer_viewport_width,
                         on_mixer_scroll,
                         mixer_split,
+                        tree_sidebar,
+                        self.mixer_view.tree_sidebar_enabled,
                         Some(self.clip_editor_panel.clone().into_any_element()),
                         on_tab_click,
                         on_resize_start,

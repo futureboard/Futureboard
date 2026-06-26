@@ -579,6 +579,20 @@ impl StudioLayout {
         self.mark_engine_project_dirty();
     }
 
+    /// Mark the project session dirty for save/restore WITHOUT marking the audio
+    /// engine dirty. Used by view-only state that is persisted in the project file
+    /// but is not part of the engine graph snapshot — e.g. mixer-tree sidebar
+    /// expand/collapse/pin/visibility/selection and the VSTi multi-out collapse
+    /// flag. Routing these through [`Self::mark_dirty`] used to set
+    /// `audio_bridge.project_dirty`, which forced the next poll to rebuild a full
+    /// engine snapshot (serialize + dedup) on every tree interaction — pure waste
+    /// because the snapshot never changes. See [`Self::mark_engine_project_dirty`].
+    pub(crate) fn mark_dirty_view_only(&mut self) {
+        self.project_session.mark_dirty();
+        self.project_switcher.current_project.is_dirty = true;
+        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+    }
+
     pub(super) fn cmd_save_project(&mut self, cx: &mut Context<Self>) {
         if self.project_session.needs_save_as() {
             project_lifecycle_log!("save requested: mode=save_as path=<none>");

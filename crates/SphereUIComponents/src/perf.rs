@@ -600,6 +600,19 @@ impl Drop for PerfScope {
     }
 }
 
+/// `FUTUREBOARD_MIXER_TREE_DEBUG=1` — log tree cache rebuilds.
+pub fn mixer_tree_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIXER_TREE_DEBUG").is_some())
+}
+
+/// `FUTUREBOARD_MIXER_GPU_DEBUG=1` — log mixer GPU primitive static-batch
+/// rebuilds and backend selection.
+pub fn mixer_gpu_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIXER_GPU_DEBUG").is_some())
+}
+
 /// Called from the root render once per frame. `reason` is a short
 /// label (e.g. "transport", "menu", "idle/interaction"). Returns the
 /// formatted HUD string and flushes the per-second log when the

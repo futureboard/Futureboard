@@ -74,6 +74,14 @@ pub(crate) struct EngineSyncState {
     /// Last time engine meter levels were pushed into timeline state (PowerMode
     /// throttle so low-end GPUs don't repaint 60 Hz for sub-perceptual wiggles).
     pub meter_applied_at: Instant,
+    /// Quantised meter signature last pushed to meter-isolated UI regions.
+    pub last_meter_notify_sig: u64,
+    /// Last rendered footer signature (left/audio/perf pill).
+    pub last_status_sig: u64,
+    /// Left+audio footer signature for perf-only coalescing.
+    pub last_status_left_audio_sig: u64,
+    /// Last time footer text was pushed to the status entity.
+    pub last_status_poll_at: Instant,
     /// Last time `engine.set_bpm` was sent during a live BPM drag (~30 Hz cap).
     pub bpm_committed_at: Option<Instant>,
     /// Last time the heavy plugin-editor / bridge reconciliation ran. The poll
@@ -88,6 +96,10 @@ impl Default for EngineSyncState {
             playhead_beat: 0.0,
             synced_at: Instant::now(),
             meter_applied_at: Instant::now(),
+            last_meter_notify_sig: u64::MAX,
+            last_status_sig: u64::MAX,
+            last_status_left_audio_sig: u64::MAX,
+            last_status_poll_at: Instant::now() - Duration::from_secs(1),
             bpm_committed_at: None,
             bridge_reconciled_at: Instant::now() - Duration::from_secs(1),
         }
@@ -626,11 +638,22 @@ impl StudioLayout {
 
         let was_playing = stats.transport_playing;
         self.audio_bridge.stats = Some(stats);
+
+        if meter_changed {
+            self.notify_mixer_meter_regions(cx);
+        }
+
+        let status_due = state_changed
+            || self.engine_sync.last_status_poll_at.elapsed() >= Duration::from_millis(250);
+        if status_due {
+            self.notify_status_bar_if_changed(cx);
+        }
+
         // While playing the root layout must repaint every tick so the
         // transport chrome (bar:beat:tick, status line) tracks the
-        // playhead. Otherwise we'd be limited to engine-snapshot cadence
-        // and the readout would stutter at ~10-20 Hz.
-        state_changed || was_playing || meter_changed
+        // playhead. Meter-only changes route to isolated mixer/timeline
+        // entities and must not invalidate the full studio shell when idle.
+        state_changed || was_playing
     }
 
     /// Block-rate automation evaluation scaffolding. Evaluates each track's

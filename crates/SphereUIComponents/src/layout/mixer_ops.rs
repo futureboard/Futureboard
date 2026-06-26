@@ -102,9 +102,79 @@ impl Default for MixerViewState {
     }
 }
 
+/// Read-only mixer chrome snapshot for the docked panel entity.
+pub(crate) struct DockedMixerPanelState<'a> {
+    pub scroll_x: f32,
+    pub vsti_output_meters: &'a HashMap<String, VstiOutputMeterState>,
+    pub tree_sidebar_enabled: bool,
+    pub viewport_width: f32,
+    pub strip_available_px: f32,
+}
+
 impl StudioLayout {
     pub(crate) fn notify_mixer_window(&mut self, cx: &mut Context<Self>) {
         self.push_mixer_snapshot_to_window(cx);
+    }
+
+    /// Viewport metrics for the docked mixer panel entity (width, body height, strip height).
+    pub(crate) fn mixer_panel_viewport_metrics(&self, cx: &gpui::App) -> (f32, f32, f32) {
+        let tree_w = self.mixer_tree_sidebar_width();
+        let window_w = self
+            .window_hooks
+            .cached_bounds
+            .map(|b| f32::from(b.size.width))
+            .unwrap_or(1280.0);
+        let mixer_viewport_width = (window_w - tree_w - 90.0).max(100.0);
+        let mixer_viewport_height =
+            (self.bottom_panel_state.height_px - 28.0 - 30.0).max(0.0);
+        let strip_available_px = mixer_viewport_height.max(STRIP_WIDTH);
+        let _ = cx;
+        (
+            mixer_viewport_width,
+            mixer_viewport_height,
+            strip_available_px,
+        )
+    }
+
+    /// Snapshot for the docked mixer panel entity (read-only view of mixer chrome).
+    pub(crate) fn docked_mixer_panel_state(&self, cx: &gpui::App) -> DockedMixerPanelState<'_> {
+        let (viewport_width, _viewport_height, strip_available_px) =
+            self.mixer_panel_viewport_metrics(cx);
+        DockedMixerPanelState {
+            scroll_x: self.mixer_view.scroll_x,
+            vsti_output_meters: &self.mixer_view.vsti_output_meters,
+            tree_sidebar_enabled: self.mixer_view.tree_sidebar_enabled,
+            viewport_width,
+            strip_available_px,
+        }
+    }
+
+    /// Meter-only UI refresh — isolated regions, never the StudioLayout root.
+    pub(crate) fn notify_mixer_meter_regions(&mut self, cx: &mut Context<Self>) {
+        let timeline = self.timeline.read(cx);
+        let master_sig =
+            crate::components::mixer_master_strip_view::mixer_master_meter_signature(
+                &timeline.state.master,
+            );
+        let channel_sig = mixer_channel_meter_signature(&timeline.state.tracks);
+        let sig = master_sig ^ channel_sig.rotate_left(17);
+        if sig == self.engine_sync.last_meter_notify_sig {
+            return;
+        }
+        self.engine_sync.last_meter_notify_sig = sig;
+
+        // Track headers show meters — notify timeline only, not the studio shell.
+        let _ = self.timeline.update(cx, |_, cx| cx.notify());
+
+        if self.mixer_panel_chrome_visible() {
+            let _ = self.mixer_panel.update(cx, |panel, cx| panel.on_meter_tick(cx));
+            if self.external_windows.mixer.is_some() {
+                self.push_mixer_snapshot_to_window(cx);
+            }
+        } else {
+            crate::perf::count("mixer_repaint_while_inactive_count", 1);
+            crate::perf::count("inactive_tab_repaint_count", 1);
+        }
     }
 
     pub(crate) fn build_mixer_snapshot(&self, cx: &gpui::App) -> MixerSnapshot {
@@ -737,7 +807,7 @@ impl StudioLayout {
             }
         }
         self.push_mixer_snapshot_to_window(cx);
-        cx.notify();
+        let _ = self.mixer_panel.update(cx, |_, cx| cx.notify());
     }
 
     pub(crate) fn mixer_window_handle(&self) -> Option<WindowHandle<MixerWindow>> {
@@ -745,7 +815,11 @@ impl StudioLayout {
     }
 
     pub(super) fn mixer_panel_chrome_visible(&self) -> bool {
-        self.panels.mixer_docked || self.external_windows.mixer.is_some()
+        if self.external_windows.mixer.is_some() {
+            return true;
+        }
+        self.panels.mixer_docked
+            && self.active_bottom_tab == crate::components::BottomTab::Mixer
     }
 
     /// Build the callback bundle used by the mixer. Every mutation lands in
@@ -1244,4 +1318,17 @@ impl StudioLayout {
             on_remove_send,
         }
     }
+}
+
+fn mixer_channel_meter_signature(
+    tracks: &[crate::components::timeline::timeline_state::TrackState],
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+    for track in tracks {
+        q(track.meter_level_l).hash(&mut hasher);
+        q(track.meter_level_r).hash(&mut hasher);
+    }
+    hasher.finish()
 }

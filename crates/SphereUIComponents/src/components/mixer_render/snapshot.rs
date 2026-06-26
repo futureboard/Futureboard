@@ -15,6 +15,33 @@ use std::hash::{Hash, Hasher};
 
 use gpui::Rgba;
 
+/// Per-strip static+dynamic draw description (alias for the geometry record).
+pub type MixerStripSnapshot = MixerStripGeom;
+
+/// Master strip draw description.
+pub type MixerMasterSnapshot = MixerStripGeom;
+
+/// Tree sidebar is cached separately in [`crate::components::mixer_tree_cache`].
+#[derive(Clone, Debug, Default)]
+pub struct MixerTreeSnapshot {
+    pub visible_row_count: usize,
+    pub routing_gen: u64,
+}
+
+/// Cached static primitive batch key + quad count (owned by the GPUI paint backend).
+#[derive(Clone, Debug, Default)]
+pub struct MixerStaticBatch {
+    pub static_key: u64,
+    pub quad_count: usize,
+}
+
+/// Per-frame dynamic primitive batch (meters, hover).
+#[derive(Clone, Debug, Default)]
+pub struct MixerDynamicBatch {
+    pub meter_signature: u64,
+    pub hover_quad_count: usize,
+}
+
 /// Scroll / size bounds for the mixer body (the row beneath the sub-header).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixerRenderViewport {

@@ -21,6 +21,15 @@ impl Render for StudioLayout {
         };
         self.frame_diag.tick(reason);
         crate::perf::tick_root_frame(reason_static);
+        if self
+            .settings
+            .read(cx)
+            .current
+            .performance
+            .show_status_performance_metrics
+        {
+            self.notify_status_bar_if_changed(cx);
+        }
         // Re-resolve the frame-pacing mode from settings (env override still
         // wins) and republish the poll cadence. Cheap; applies a Settings change
         // on the next frame without a dedicated observer.
@@ -38,91 +47,10 @@ impl Render for StudioLayout {
             self.last_window_title = Some(title);
         }
 
-        let on_tab_click = cx.listener(|this, tab: &components::BottomTab, _window, cx| {
-            this.active_bottom_tab = *tab;
-            cx.notify();
-        });
-
-        // Mixer scroll — updated by the mixer scroll-wheel handler.
-        let mixer_scroll_x = self.mixer_view.scroll_x;
-        let window_w: f32 = window.bounds().size.width.into();
-        let tree_sidebar_w = if self.mixer_view.tree_sidebar_enabled {
-            self.mixer_tree_sidebar_width()
-        } else {
-            0.0
-        };
-        // Scrollable channel area: window minus tree sidebar, master strip, gutter.
-        let mixer_viewport_width = (window_w - tree_sidebar_w - 90.0).max(100.0);
-        let on_mixer_scroll: std::sync::Arc<
-            dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |new_x: f32, _w, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    if this.set_mixer_scroll_x(new_x, cx) {
-                        this.push_mixer_snapshot_to_window(cx);
-                        cx.notify();
-                    }
-                });
-            })
-        };
-
-        // Shared insert/send section split for the docked mixer. The splitter
-        // handles route every intent through one owner method so all strips
-        // resize together.
-        let mixer_split = {
-            let this = cx.entity().clone();
-            let on_action: std::sync::Arc<
-                dyn Fn(
-                        crate::components::mixer_panel::MixerSplitAction,
-                        &mut gpui::Window,
-                        &mut gpui::App,
-                    ) + 'static,
-            > = std::sync::Arc::new(move |action, _w, cx| {
-                let _ = this.update(cx, |this, cx| this.apply_mixer_split_action(action, cx));
-            });
-            crate::components::mixer_panel::MixerSplit {
-                insert_px: self.mixer_insert_section_px(),
-                send_px: self.mixer_send_section_px(),
-                active_target: self.mixer_split_active_target(),
-                on_action,
-            }
-        };
-
-        let on_resize_start = cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-            let bs = &mut this.bottom_panel_state;
-            bs.is_resizing = true;
-            bs.resize_start_y = f32::from(event.position.y);
-            bs.resize_start_height = bs.height_px;
-            let window_h: f32 = window.bounds().size.height.into();
-            bs.max_height_px = (window_h * 0.70).max(bs.min_height_px + 40.0);
-            cx.notify();
-        });
-
-        let on_resize_move = cx.listener(
-            |this, event: &gpui::DragMoveEvent<BottomPanelResizeDrag>, _window, cx| {
-                let bs = &mut this.bottom_panel_state;
-                let cur_y: f32 = event.event.position.y.into();
-                let delta = bs.resize_start_y - cur_y;
-                let new_h =
-                    (bs.resize_start_height + delta).clamp(bs.min_height_px, bs.max_height_px);
-                if (new_h - bs.height_px).abs() > 0.5 {
-                    bs.height_px = new_h;
-                    cx.notify();
-                }
-            },
-        );
-        let on_resize_end = cx.listener(|this, _event: &gpui::MouseUpEvent, _window, cx| {
-            if this.bottom_panel_state.is_resizing {
-                this.bottom_panel_state.is_resizing = false;
-                cx.notify();
-            }
-        });
-
         // Pull the live track list and current selection out of the Timeline so
         // the Mixer and Inspector render against the same data the TrackHeader
         // sees. Cloning the Vec is cheap relative to a full render.
-        let (tracks, master, selected_track_id, selected_clip_id, project_bpm) = {
+        let (tracks, _master, selected_track_id, selected_clip_id, project_bpm) = {
             let t = self.timeline.read(cx);
             (
                 t.state.tracks.clone(),
@@ -133,8 +61,6 @@ impl Render for StudioLayout {
             )
         };
 
-        let panel_state = self.bottom_panel_state;
-        let mixer_callbacks = self.build_mixer_callbacks(cx.entity().clone());
         let inspector_callbacks = self.build_inspector_callbacks(cx.entity().clone());
 
         // Enumerate the selected input device's channels only while the audio-input
@@ -1206,79 +1132,10 @@ impl Render for StudioLayout {
         let show_inspector = self.panels.inspector;
         let show_mixer_docked = self.panels.mixer_docked;
 
-        // Push the real chrome metrics into Timeline so its scroll/grid
-        // math knows the actual available body rect — accounts for the
-        // current bottom panel height (vs. a hardcoded 220), and the
-        // visibility of the browser/inspector side panels. Without this
-        // the timeline grid stays at its old size after resize/maximize
-        // and leaves blank space on the right or bottom.
-        {
-            const SIDEBAR_WIDTH: f32 = 272.0; // matches sidebar::SIDEBAR_WIDTH
-            const INSPECTOR_WIDTH: f32 = 292.0; // matches inspector_shell().w(px(292.0))
-            const STATUS_BAR_HEIGHT: f32 = 22.0; // matches title_bar::STATUSBAR_HEIGHT
-            let metrics = components::timeline::TimelineChromeMetrics {
-                browser_width: if show_browser { SIDEBAR_WIDTH } else { 0.0 },
-                inspector_width: if show_inspector { INSPECTOR_WIDTH } else { 0.0 },
-                bottom_panel_height: if show_mixer_docked {
-                    self.bottom_panel_state.height_px
-                } else {
-                    0.0
-                },
-                status_bar_height: STATUS_BAR_HEIGHT,
-            };
-            let project_root = self.project_session.folder_path.clone();
-            let _ = self.timeline.update(cx, |timeline, _cx| {
-                timeline.set_chrome_metrics(metrics);
-                timeline.set_project_root(project_root);
-            });
-        }
         let project_chrome = components::ProjectChromeState {
             name: self.project_session.display_name().to_string(),
             is_dirty: self.project_session.is_dirty,
             on_open_project_menu: on_project_open,
-        };
-        let show_perf_metrics = self
-            .settings
-            .read(cx)
-            .current
-            .performance
-            .show_status_performance_metrics;
-        let status_content = self.status_bar_content(show_perf_metrics);
-        let perf_popover_open = self.overlay.perf_metrics_popover_open;
-        let on_toggle_perf_popover: Option<components::PerfMetricsToggleCb> = if show_perf_metrics {
-            let this = cx.entity().clone();
-            Some(std::sync::Arc::new(move |_: &(), _w, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    this.overlay.perf_metrics_popover_open =
-                        !this.overlay.perf_metrics_popover_open;
-                    cx.notify();
-                });
-            }))
-        } else {
-            None
-        };
-        let on_toggle_background_tasks: std::sync::Arc<
-            dyn Fn(&(), &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |_: &(), _w, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    this.background_tasks.toggle_panel();
-                    cx.notify();
-                });
-            })
-        };
-        let on_cancel_background_task: std::sync::Arc<
-            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |task_id: &String, _w, cx| {
-                let task_id = task_id.clone();
-                let _ = this.update(cx, |this, cx| {
-                    this.background_tasks.cancel(&task_id);
-                    cx.notify();
-                });
-            })
         };
         let shortcut_target = cx.entity().clone();
         // Docked MIDI editor — consulted in the key handler so Ctrl+A/C/V/X and
@@ -1599,61 +1456,13 @@ impl Render for StudioLayout {
             })
             .children(if show_mixer_docked {
                 let _s = crate::perf::PerfScope::enter("BottomPanel");
-                self.ensure_mixer_tree_defaults_once(cx);
-                self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
-                if self.mixer_view.tree_sidebar_enabled {
-                    self.refresh_mixer_tree_sidebar_entity(cx);
-                }
-                let hidden_mixer_channels = self
-                    .timeline
-                    .read(cx)
-                    .state
-                    .mixer_tree
-                    .hidden_channel_ids
-                    .clone();
-                let tree_sidebar = if self.mixer_view.tree_sidebar_enabled {
-                    Some(self.mixer_tree_sidebar.clone())
-                } else {
-                    None
-                };
-                Some(
-                    components::bottom_panel(
-                        self.active_bottom_tab,
-                        panel_state,
-                        &tracks,
-                        &master,
-                        selected_track_id.as_deref(),
-                        mixer_callbacks,
-                        &crate::components::timeline::timeline_state::collapsed_vsti_output_group_keys_from_tracks(&tracks),
-                        &hidden_mixer_channels,
-                        &self.mixer_view.vsti_output_meters,
-                        mixer_scroll_x,
-                        mixer_viewport_width,
-                        on_mixer_scroll,
-                        mixer_split,
-                        tree_sidebar,
-                        self.mixer_view.tree_sidebar_enabled,
-                        Some(self.clip_editor_panel.clone().into_any_element()),
-                        on_tab_click,
-                        on_resize_start,
-                        on_resize_move,
-                        on_resize_end,
-                    )
-                    .into_any_element(),
-                )
+                Some(self.bottom_panel_shell.clone().into_any_element())
             } else {
                 None
             })
             .child({
                 let _s = crate::perf::PerfScope::enter("StatusBar");
-                components::status_bar_with_background_tasks(
-                    status_content,
-                    &self.background_tasks,
-                    on_toggle_background_tasks,
-                    on_cancel_background_task,
-                    perf_popover_open,
-                    on_toggle_perf_popover,
-                )
+                self.status_bar.clone()
             })
             // Dropdown overlay — rendered last so it sits above every other
             // panel. The dropdown's own backdrop captures click-outside.

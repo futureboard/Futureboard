@@ -105,7 +105,7 @@ impl MixerRenderer for GpuiPaintMixerRenderer {
 
         self.rebuild_dynamic(snapshot);
         self.dynamic_update_count = self.dynamic_update_count.saturating_add(1);
-        crate::perf::count("mixer_dynamic_batch_update_count", self.dynamic_update_count);
+        crate::perf::count("mixer_dynamic_snapshot_update_count", self.dynamic_update_count);
 
         let meter_sig = snapshot.meter_signature();
         if meter_sig != self.last_meter_sig {

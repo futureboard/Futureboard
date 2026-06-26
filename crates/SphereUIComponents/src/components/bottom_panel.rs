@@ -1,14 +1,11 @@
-use super::mixer_panel::{mixer_panel as render_mixer_panel, MixerCallbacks, MixerSplit};
-use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::assets;
-use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 use crate::theme::Colors;
 use gpui::{
     div, px, svg, App, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BottomTab {
     Mixer,
     Editor,
@@ -241,22 +238,7 @@ fn tab_button(
 pub fn bottom_panel(
     active_tab: BottomTab,
     panel_state: BottomPanelState,
-    tracks: &[TrackState],
-    master: &MasterBusState,
-    selected_track_id: Option<&str>,
-    mixer_callbacks: MixerCallbacks,
-    collapsed_vsti_output_groups: &std::collections::HashSet<String>,
-    hidden_mixer_channels: &std::collections::HashSet<String>,
-    vsti_output_meters: &std::collections::HashMap<
-        String,
-        crate::components::mixer_panel::VstiOutputMeterState,
-    >,
-    mixer_scroll_x: f32,
-    mixer_viewport_width: f32,
-    on_mixer_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
-    mixer_split: MixerSplit,
-    mixer_tree_sidebar: Option<gpui::Entity<MixerTreeSidebar>>,
-    mixer_tree_enabled: bool,
+    mixer_tab: gpui::AnyElement,
     editor_content: Option<gpui::AnyElement>,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
     on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -266,7 +248,6 @@ pub fn bottom_panel(
 ) -> impl IntoElement {
     let on_tab_click = std::sync::Arc::new(on_tab_click);
     let mut editor_content = editor_content;
-    let mixer_viewport_height = (panel_state.height_px - 28.0).max(0.0);
     div()
         .flex()
         .flex_col()
@@ -340,23 +321,7 @@ pub fn bottom_panel(
                 .min_h_0()
                 .w_full()
                 .child(match active_tab {
-                    BottomTab::Mixer => render_mixer_panel(
-                        tracks,
-                        master,
-                        selected_track_id,
-                        mixer_callbacks,
-                        collapsed_vsti_output_groups,
-                        hidden_mixer_channels,
-                        vsti_output_meters,
-                        mixer_scroll_x,
-                        mixer_viewport_width,
-                        mixer_viewport_height,
-                        on_mixer_scroll,
-                        mixer_split,
-                        mixer_tree_sidebar,
-                        mixer_tree_enabled,
-                    )
-                    .into_any_element(),
+                    BottomTab::Mixer => mixer_tab,
                     BottomTab::Editor => editor_content
                         .take()
                         .unwrap_or_else(|| editor_panel().into_any_element()),

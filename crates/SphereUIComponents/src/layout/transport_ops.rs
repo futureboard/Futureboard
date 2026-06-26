@@ -537,7 +537,10 @@ impl StudioLayout {
         if !stats.backend_name.is_empty() {
             parts.push(stats.backend_name.clone());
         }
-        parts.push(format!("Latency {:.1} ms", stats.estimated_latency_ms));
+        parts.push(format!(
+            "Latency {:.1} ms",
+            (stats.estimated_latency_ms * 10.0).round() / 10.0
+        ));
         if stats.buffer_size > 0 {
             parts.push(format!("Buffer {}", stats.buffer_size));
         }

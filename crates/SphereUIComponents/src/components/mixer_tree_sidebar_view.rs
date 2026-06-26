@@ -168,8 +168,8 @@ impl MixerTreeSidebar {
 impl Render for MixerTreeSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _scope = crate::perf::PerfScope::enter("MixerTreeSidebar");
-        crate::perf::count("tree_layout_count", 1);
-        crate::perf::count("tree_paint_count", 1);
+        crate::perf::count("mixer_tree_layout_count", 1);
+        crate::perf::count("mixer_tree_paint_count", 1);
 
         self.filter_focused = self.filter_input.is_focused(window);
         self.apply_filter_debounce(cx);

@@ -27,7 +27,7 @@ use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{ClipType, TempoCurve};
 use crate::components::MixerWindow;
 use crate::components::{BackgroundTaskStore, CommandPaletteState};
-use crate::components::{BottomPanelResizeDrag, BottomPanelState};
+use crate::components::{BottomPanelState};
 use crate::overlay::{project_title_anchor, titlebar_label_anchor};
 use crate::paths::FutureboardPaths;
 use crate::project::recent::RecentProjectsStore;
@@ -36,6 +36,7 @@ use crate::theme::{self, Colors};
 use SpherePluginHost::load_au_cache_state;
 
 mod audio_transport;
+mod bottom_panel_ops;
 mod browser_ops;
 mod close_ops;
 mod context_menu_ops;
@@ -464,6 +465,11 @@ pub struct StudioLayout {
     /// Stable mixer-tree callbacks + resize hooks (built once per layout).
     mixer_tree_ui_hooks: Option<mixer_ops::MixerTreeUiHooks>,
     mixer_tree_sidebar: gpui::Entity<components::MixerTreeSidebar>,
+    mixer_master_strip: gpui::Entity<components::MixerMasterStripView>,
+    mixer_panel: gpui::Entity<components::MixerPanelView>,
+    bottom_panel_shell: gpui::Entity<components::BottomPanelShell>,
+    status_bar: gpui::Entity<components::StatusBarView>,
+    effect_editor_tab: gpui::Entity<components::EffectEditorTabView>,
 
     // ── Project file system ───────────────────────────────────────────────────
     /// Centralized filesystem paths for the entire application.
@@ -588,6 +594,34 @@ impl StudioLayout {
                 timeline.clone(),
                 cx.focus_handle(),
                 cx,
+            )
+        });
+        let mixer_callbacks = components::mixer_panel::noop_mixer_callbacks();
+        let mixer_split = components::mixer_panel::MixerSplit::inert();
+        let mixer_master_strip = cx.new(|_cx| {
+            components::MixerMasterStripView::new(
+                timeline.clone(),
+                mixer_callbacks,
+                mixer_split,
+                components::mixer_panel::STRIP_MIN_HEIGHT,
+            )
+        });
+        let mixer_panel = cx.new(|_cx| {
+            components::MixerPanelView::new(
+                studio_entity.clone(),
+                timeline.clone(),
+                mixer_master_strip.clone(),
+            )
+        });
+        let effect_editor_tab = cx.new(|_| components::EffectEditorTabView::new());
+        let status_bar = cx.new(|_| components::StatusBarView::new(studio_entity.clone()));
+        let bottom_panel_shell = cx.new(|_| {
+            components::BottomPanelShell::new(
+                studio_entity.clone(),
+                mixer_panel.clone(),
+                mixer_tree_sidebar.clone(),
+                clip_editor_panel.clone(),
+                effect_editor_tab.clone(),
             )
         });
         let virtual_keyboard = cx.new(components::VirtualKeyboardPanel::new);
@@ -839,6 +873,11 @@ impl StudioLayout {
             mixer_view: mixer_ops::MixerViewState::default(),
             mixer_tree_ui_hooks: None,
             mixer_tree_sidebar,
+            mixer_master_strip,
+            mixer_panel,
+            bottom_panel_shell,
+            status_bar,
+            effect_editor_tab,
             paths,
             project_session: crate::project::ProjectSession::default(),
             project_path: None,
@@ -860,6 +899,7 @@ impl StudioLayout {
         };
 
         layout.spawn_audio_engine_warmup(cx);
+        layout.sync_timeline_chrome_metrics(cx);
 
         layout
     }
@@ -1783,11 +1823,13 @@ impl StudioLayout {
 
     pub(crate) fn toggle_browser_panel(&mut self, cx: &mut Context<Self>) {
         self.panels.browser = !self.panels.browser;
+        self.sync_timeline_chrome_metrics(cx);
         cx.notify();
     }
 
     pub(crate) fn toggle_inspector_panel(&mut self, cx: &mut Context<Self>) {
         self.panels.inspector = !self.panels.inspector;
+        self.sync_timeline_chrome_metrics(cx);
         cx.notify();
     }
 
@@ -1798,6 +1840,12 @@ impl StudioLayout {
         } else {
             self.panels.mixer_docked = !self.panels.mixer_docked;
         }
+        if self.panels.mixer_docked {
+            self.ensure_mixer_tree_defaults_once(cx);
+            self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
+        }
+        self.sync_timeline_chrome_metrics(cx);
+        self.notify_bottom_panel_shell(cx);
         cx.notify();
     }
 
@@ -1820,6 +1868,7 @@ impl StudioLayout {
         {
             self.overlay.perf_metrics_popover_open = false;
         }
+        self.notify_status_bar_if_changed(cx);
         cx.notify();
     }
 
@@ -1853,8 +1902,9 @@ impl StudioLayout {
     }
 
     pub(crate) fn open_editor_bottom_panel(&mut self, cx: &mut Context<Self>) {
-        self.active_bottom_tab = components::BottomTab::Editor;
         self.panels.mixer_docked = true;
+        self.sync_timeline_chrome_metrics(cx);
+        self.set_active_bottom_tab(components::BottomTab::Editor, cx);
         cx.notify();
     }
 

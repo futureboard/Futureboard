@@ -19,4 +19,7 @@ pub use renderer::{
     create_mixer_renderer, create_mixer_renderer_with_fallback, set_preferred_mixer_backend,
     MixerRenderOutput, MixerRenderer, MixerRendererBackend,
 };
-pub use snapshot::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
+pub use snapshot::{
+    MixerDynamicBatch, MixerMasterSnapshot, MixerRenderSnapshot, MixerRenderViewport,
+    MixerStaticBatch, MixerStripGeom, MixerStripSnapshot, MixerTreeSnapshot,
+};

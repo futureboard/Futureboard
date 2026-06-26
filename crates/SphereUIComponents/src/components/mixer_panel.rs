@@ -52,7 +52,7 @@ use crate::theme::Colors;
 pub const STRIP_WIDTH: f32 = 88.0;
 /// Minimum height for a channel strip. Below this the mixer should scroll/clip
 /// as a whole rather than compressing the pan/fader controls into unusability.
-const STRIP_MIN_HEIGHT: f32 = 320.0;
+pub const STRIP_MIN_HEIGHT: f32 = 320.0;
 
 const SEC_HEADER_H: f32 = 40.0;
 const SEC_SECTION_HEADER_H: f32 = 20.0;
@@ -109,7 +109,7 @@ pub fn clamp_mixer_section_heights_for_strip(
     (insert_px, send_px)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MixerSplitTarget {
     InsertSend,
     SendFader,
@@ -277,7 +277,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
 
-fn mixer_sub_header(track_count: usize) -> impl IntoElement {
+pub fn mixer_sub_header(track_count: usize) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -1794,7 +1794,7 @@ fn vsti_output_sub_strip(
 
 // ─── Master block ───────────────────────────────────────────────────────────
 
-fn master_strip(
+pub(crate) fn master_strip(
     accent: gpui::Rgba,
     master: &MasterBusState,
     on_master_vol_change: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -2078,7 +2078,7 @@ pub fn mixer_scroll_x_for_strip_index(
     target.clamp(0.0, max_scroll_x.max(0.0))
 }
 
-fn collect_mixer_render_items(
+pub(crate) fn collect_mixer_render_items(
     tracks: &[TrackState],
     collapsed_vsti_output_groups: &HashSet<String>,
     hidden_channels: &HashSet<String>,
@@ -2138,29 +2138,92 @@ fn collect_mixer_render_items(
     items
 }
 
-fn mixer_empty_bay(spare_w: f32) -> impl IntoElement {
-    let stripe_count = (spare_w / STRIP_WIDTH).ceil().clamp(0.0, 64.0) as usize;
-    let stripes: Vec<gpui::AnyElement> = (0..stripe_count)
-        .map(|i| {
-            div()
-                .absolute()
-                .left(px(i as f32 * STRIP_WIDTH))
-                .top_0()
-                .bottom_0()
-                .w(px(1.0))
-                .bg(Colors::strip_border_subtle())
-                .into_any_element()
-        })
-        .collect();
+/// Cached center background for the empty mixer bay. Grid geometry is rebuilt
+/// only when width/height changes — never during paint from routing/session data.
+#[derive(Clone, Copy, Debug, Default)]
+struct MixerCenterGridCache {
+    width_q: i64,
+    height_q: i64,
+    rebuild_count: u64,
+}
+
+thread_local! {
+    static MIXER_CENTER_GRID: std::cell::RefCell<MixerCenterGridCache> =
+        std::cell::RefCell::new(MixerCenterGridCache {
+            width_q: 0,
+            height_q: 0,
+            rebuild_count: 0,
+        });
+}
+
+/// Lightweight empty mixer center: solid background + optional batched vertical
+/// grid lines. No strip layout nodes, no per-frame Vec allocation.
+pub fn mixer_center_lightweight(width: f32, height: f32) -> impl IntoElement {
+    use gpui::canvas;
+
+    let width = width.max(0.0);
+    let height = height.max(STRIP_MIN_HEIGHT);
+    let width_q = (width * 4.0).round() as i64;
+    let height_q = (height * 4.0).round() as i64;
+
+    MIXER_CENTER_GRID.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.width_q != width_q || cache.height_q != height_q {
+            cache.width_q = width_q;
+            cache.height_q = height_q;
+            cache.rebuild_count = cache.rebuild_count.saturating_add(1);
+            crate::perf::count("mixer_grid_rebuild_count", cache.rebuild_count);
+        }
+    });
 
     div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left(px(0.0))
-        .w(px(spare_w.max(0.0)))
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .relative()
         .bg(Colors::mixer_bg())
-        .children(stripes)
+        .child(
+            canvas(
+                move |bounds, _window, _cx| {
+                    let _ = bounds;
+                },
+                move |bounds, (), window, _cx| {
+                    let _scope = crate::perf::PerfScope::enter("MixerCenter");
+                    crate::perf::count("mixer_center_paint_count", 1);
+                    paint_mixer_center_grid(bounds, width, window);
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+}
+
+fn paint_mixer_center_grid(bounds: gpui::Bounds<gpui::Pixels>, width: f32, window: &mut gpui::Window) {
+    use gpui::{fill, point, px, size, Bounds};
+
+    let origin_x = f32::from(bounds.origin.x);
+    let origin_y = f32::from(bounds.origin.y);
+    let h = f32::from(bounds.size.height).max(0.0);
+    if h <= 0.0 || width <= 0.0 {
+        return;
+    }
+    let stripe_count = (width / STRIP_WIDTH).ceil().clamp(0.0, 64.0) as usize;
+    let color = Colors::strip_border_subtle();
+    for i in 0..stripe_count {
+        let x = i as f32 * STRIP_WIDTH;
+        if x > width {
+            break;
+        }
+        let rect = Bounds::new(
+            point(px(origin_x + x), px(origin_y)),
+            size(px(1.0), px(h)),
+        );
+        window.paint_quad(fill(rect, color));
+    }
+}
+
+fn mixer_empty_bay(spare_w: f32, height: f32) -> impl IntoElement {
+    mixer_center_lightweight(spare_w, height)
 }
 
 /// Build the draw-only mixer primitive snapshot for the GPU layer. Mirrors the
@@ -2278,6 +2341,59 @@ pub fn mixer_panel(
     // exact pinned x is not known until layout). Opt-in / reversible.
     let gpu_active = mixer_gpu_primitives_active();
 
+    let strip_count = mixer_render_item_count(
+        tracks,
+        collapsed_vsti_output_groups,
+        hidden_mixer_channels,
+    );
+
+    // Empty mixer fast path — shell + tree (external) + cheap center + isolated master.
+    if strip_count == 0 {
+        crate::perf::count("mixer_shell_layout_count", 1);
+        let channel_row = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0()
+            .child(mixer_center_lightweight(viewport_width, strip_available_px))
+            .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
+            .child(mixer_master_strip_pinned(
+                accent,
+                master,
+                on_master,
+                &callbacks,
+                &split,
+                strip_available_px,
+            ));
+
+        let content_row = if tree_sidebar_enabled {
+            let mut row = div().flex().flex_row().flex_1().min_h_0();
+            if let Some(sidebar) = tree_sidebar {
+                row = row.child(sidebar);
+            }
+            row.child(channel_row)
+        } else {
+            channel_row
+        };
+
+        let split_for_move = split.clone();
+        let split_for_end = split.clone();
+        return div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(Colors::mixer_bg())
+            .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
+                let y: f32 = event.event.position.y.into();
+                (split_for_move.on_action)(MixerSplitAction::ResizeMove(y), w, cx);
+            })
+            .on_mouse_up(gpui::MouseButton::Left, move |_e, w, cx| {
+                (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
+            })
+            .child(mixer_sub_header(track_count))
+            .child(content_row);
+    }
+
     let strip_row = mixer_strip_scroller(
         tracks,
         selected_track_id,
@@ -2361,7 +2477,7 @@ pub fn mixer_panel(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn mixer_strip_scroller(
+pub(crate) fn mixer_strip_scroller(
     tracks: &[TrackState],
     selected_track_id: Option<&str>,
     callbacks: MixerCallbacks,
@@ -2377,7 +2493,7 @@ fn mixer_strip_scroller(
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("MixerStripScroller");
     crate::perf::count("mixer_strip_layout_count", 1);
-    crate::perf::count("strip_paint_count", 1);
+    crate::perf::count("mixer_strip_paint_count", 1);
 
     let render_items = collect_mixer_render_items(
         tracks,
@@ -2481,7 +2597,9 @@ fn mixer_strip_scroller(
         .relative()
         .overflow_hidden()
         .on_scroll_wheel(on_scroll_wheel)
-        .when(spare_channel_w > 0.0, |d| d.child(mixer_empty_bay(spare_channel_w)))
+        .when(spare_channel_w > 0.0, |d| {
+            d.child(mixer_empty_bay(spare_channel_w, strip_available_px))
+        })
         .child(
             div()
                 .absolute()

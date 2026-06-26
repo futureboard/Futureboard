@@ -323,6 +323,10 @@ pub(crate) fn performance_section(
     );
 
     let (status_text, status_color) = match (render_mode, detected_count) {
+        (RenderMode::Auto, _) => (
+            "Auto — accelerated GPUI paint; experimental GPU layers stay off until verified.".to_string(),
+            Colors::text_secondary(),
+        ),
         (RenderMode::CpuRender, _) => (
             "CPU Render active (GPUI paint fallback).".to_string(),
             Colors::text_secondary(),
@@ -332,7 +336,7 @@ pub(crate) fn performance_section(
             Colors::status_warning(),
         ),
         (RenderMode::GpuAcceleration, n) => (
-            format!("GPU Acceleration ready — {n} adapter(s) detected."),
+            format!("GPU (Experimental) — mixer primitive layer on; {n} adapter(s) detected."),
             Colors::status_success(),
         ),
     };

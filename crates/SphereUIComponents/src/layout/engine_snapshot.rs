@@ -1334,4 +1334,60 @@ mod tests {
             "empty CC7 lane and unmapped poly-pressure lane must be omitted"
         );
     }
+
+    fn snapshot_signature(state: &TimelineState, input_device: Option<&str>) -> String {
+        let snapshot = build_engine_project_snapshot(state, 48_000, None, input_device);
+        serde_json::to_string(&snapshot).unwrap()
+    }
+
+    /// R4: `None` and `""` (and whitespace) for the input device must normalize to
+    /// the same graph, so re-opening AudioSettings with an unchanged/empty device
+    /// never produces a different signature → never forces an engine resync.
+    #[test]
+    fn input_device_none_and_empty_produce_identical_graph() {
+        let (state, _clip) = audio_state_with_clip();
+        let sig_none = snapshot_signature(&state, None);
+        let sig_empty = snapshot_signature(&state, Some(""));
+        let sig_ws = snapshot_signature(&state, Some("   "));
+        assert_eq!(sig_none, sig_empty, "None and \"\" must normalize equal");
+        assert_eq!(sig_none, sig_ws, "None and whitespace must normalize equal");
+
+        use crate::layout::audio_transport::graph_fingerprint_of;
+        assert_eq!(
+            graph_fingerprint_of(&sig_none),
+            graph_fingerprint_of(&sig_empty),
+            "equal graphs must share a fingerprint → deduped, no second rebuild"
+        );
+    }
+
+    /// R9 (unit-level): the graph fingerprint is deterministic and equal for an
+    /// unchanged graph, which is what lets `schedule_audio_project_sync` skip a
+    /// duplicate route-graph rebuild / `load_project` for the same graph. A real
+    /// change (a new track) must change the fingerprint so the rebuild still runs.
+    #[test]
+    fn graph_fingerprint_is_stable_and_change_sensitive() {
+        use crate::layout::audio_transport::graph_fingerprint_of;
+        let (mut state, _clip) = audio_state_with_clip();
+
+        let fp1 = graph_fingerprint_of(&snapshot_signature(&state, None));
+        let fp2 = graph_fingerprint_of(&snapshot_signature(&state, None));
+        assert_eq!(fp1, fp2, "identical graph must fingerprint identically");
+
+        state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Added".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let fp3 = graph_fingerprint_of(&snapshot_signature(&state, None));
+        assert_ne!(fp1, fp3, "a real graph change must change the fingerprint");
+    }
 }

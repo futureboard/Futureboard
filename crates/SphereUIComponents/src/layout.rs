@@ -89,14 +89,34 @@ fn apply_renderer_preference(schema: &crate::settings::SettingsSchema) {
     use crate::components::timeline::render::{
         set_preferred_backend, set_preferred_gpu_device_id, TimelineRendererBackend,
     };
+    use crate::settings::RenderMode;
     let chosen = match schema.performance.render_mode {
-        crate::settings::RenderMode::CpuRender => TimelineRendererBackend::GpuiPaint,
+        RenderMode::Auto | RenderMode::CpuRender => TimelineRendererBackend::GpuiPaint,
         #[cfg(feature = "gpu-renderer")]
-        crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::Wgpu,
+        RenderMode::GpuAcceleration => TimelineRendererBackend::Wgpu,
         #[cfg(not(feature = "gpu-renderer"))]
-        crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::GpuiPaint,
+        RenderMode::GpuAcceleration => TimelineRendererBackend::GpuiPaint,
     };
     set_preferred_backend(chosen);
+
+    // Mixer primitive layer. Slice 1: only the explicit "GPU (Experimental)"
+    // choice turns the batched-`canvas` path on; Auto stays on the legacy `div`
+    // mixer until the GPU path is visually verified. The backend itself is always
+    // GPUI-paint today (offscreen WGPU is parked / falls back).
+    {
+        use crate::components::mixer_render::{set_preferred_mixer_backend, MixerRendererBackend};
+        use crate::components::mixer_surface::set_mixer_gpu_primitives_enabled;
+        let mixer_backend = match schema.performance.render_mode {
+            #[cfg(feature = "gpu-renderer")]
+            RenderMode::GpuAcceleration => MixerRendererBackend::Wgpu,
+            _ => MixerRendererBackend::GpuiPaint,
+        };
+        set_preferred_mixer_backend(mixer_backend);
+        set_mixer_gpu_primitives_enabled(matches!(
+            schema.performance.render_mode,
+            RenderMode::GpuAcceleration
+        ));
+    }
     // Saved GPU device id (empty string == Auto).
     let device_id = match &schema.performance.gpu_device {
         crate::settings::GpuDevicePreference::Auto => "",
@@ -356,6 +376,7 @@ pub struct StudioLayout {
     project_switcher: ProjectSwitcherState,
     project_switcher_search_input: TextInputState,
     browser_search_input: TextInputState,
+    mixer_tree_filter_input: TextInputState,
     /// Inspector track-name + clip-name inline edit fields (focus-handle-backed
     /// so keys route through the main-window text machinery) and the ids they
     /// are currently bound to. Grouped into
@@ -440,6 +461,9 @@ pub struct StudioLayout {
     /// Mixer-panel view state (scroll, insert/send section heights, splitter-drag
     /// anchors). Grouped into [`mixer_ops::MixerViewState`] (decomposition slice).
     mixer_view: mixer_ops::MixerViewState,
+    /// Stable mixer-tree callbacks + resize hooks (built once per layout).
+    mixer_tree_ui_hooks: Option<mixer_ops::MixerTreeUiHooks>,
+    mixer_tree_sidebar: gpui::Entity<components::MixerTreeSidebar>,
 
     // ── Project file system ───────────────────────────────────────────────────
     /// Centralized filesystem paths for the entire application.
@@ -555,6 +579,15 @@ impl StudioLayout {
                 timeline.clone(),
                 piano_roll.clone(),
                 audio_editor.clone(),
+            )
+        });
+        let studio_entity = cx.entity();
+        let mixer_tree_sidebar = cx.new(|cx| {
+            components::MixerTreeSidebar::new(
+                studio_entity.clone(),
+                timeline.clone(),
+                cx.focus_handle(),
+                cx,
             )
         });
         let virtual_keyboard = cx.new(components::VirtualKeyboardPanel::new);
@@ -761,6 +794,11 @@ impl StudioLayout {
             browser_search_input: TextInputState::new("browser-search-input", cx.focus_handle())
                 .with_placeholder("Search...")
                 .blur_on_outside_click(true),
+            mixer_tree_filter_input: TextInputState::new(
+                "mixer-tree-filter",
+                cx.focus_handle(),
+            )
+            .with_placeholder("Filter channels…"),
             inspector_name_edit: input_ops::InspectorNameEditState::new(cx),
             selected_insert: None,
             plugin_picker: PluginPickerState::closed(),
@@ -799,6 +837,8 @@ impl StudioLayout {
             frame_diag: FrameDiagnostics::new(),
             frame_scheduler: crate::frame_scheduler::FrameScheduler::new(frame_rate_mode),
             mixer_view: mixer_ops::MixerViewState::default(),
+            mixer_tree_ui_hooks: None,
+            mixer_tree_sidebar,
             paths,
             project_session: crate::project::ProjectSession::default(),
             project_path: None,

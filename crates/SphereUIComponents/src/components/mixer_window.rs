@@ -140,12 +140,15 @@ impl Render for MixerWindow {
                         selected_track_id.as_deref(),
                         mixer_callbacks,
                         &collapsed_vsti_output_groups,
+                        &std::collections::HashSet::new(),
                         &vsti_output_meters,
                         mixer_scroll_x,
                         mixer_viewport_width,
                         mixer_viewport_height,
                         on_mixer_scroll,
                         mixer_split,
+                        None,
+                        false,
                     )),
             )
     }

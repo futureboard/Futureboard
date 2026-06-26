@@ -388,6 +388,10 @@ pub struct ProjectTrack {
 pub struct ProjectMixer {
     pub master_volume_norm: f32,
     pub master_inserts: Vec<ProjectInsert>,
+    /// v20: persisted mixer tree expanded node ids.
+    pub tree_expanded_node_ids: Vec<String>,
+    pub tree_pinned_channel_ids: Vec<String>,
+    pub tree_hidden_channel_ids: Vec<String>,
 }
 
 impl Default for ProjectMixer {
@@ -397,6 +401,9 @@ impl Default for ProjectMixer {
                 0.0,
             ),
             master_inserts: Vec::new(),
+            tree_expanded_node_ids: Vec::new(),
+            tree_pinned_channel_ids: Vec::new(),
+            tree_hidden_channel_ids: Vec::new(),
         }
     }
 }
@@ -885,6 +892,9 @@ impl From<&TimelineState> for FutureboardProject {
             .enumerate()
             .map(|(idx, slot)| timeline_insert_to_project(idx, slot))
             .collect();
+        project.mixer.tree_expanded_node_ids = tl.mixer_tree.expanded_list();
+        project.mixer.tree_pinned_channel_ids = tl.mixer_tree.pinned_list();
+        project.mixer.tree_hidden_channel_ids = tl.mixer_tree.hidden_list();
         project
     }
 }
@@ -983,6 +993,11 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
         .iter()
         .map(project_insert_to_timeline)
         .collect();
+    tl.mixer_tree = crate::components::timeline::timeline_state::MixerTreeViewState::from_project_lists(
+        &project.mixer.tree_expanded_node_ids,
+        &project.mixer.tree_pinned_channel_ids,
+        &project.mixer.tree_hidden_channel_ids,
+    );
 
     tl.tracks = project
         .tracks

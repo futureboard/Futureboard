@@ -440,20 +440,25 @@ pub struct PluginsSettings {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RenderMode {
+    /// Let Futureboard choose the safe accelerated default per surface.
+    Auto,
+    /// Opt into the experimental GPU primitive layer (batched `canvas` paint).
     GpuAcceleration,
+    /// Force the legacy CPU/`div` rendering path everywhere.
     CpuRender,
 }
 
 impl Default for RenderMode {
     fn default() -> Self {
-        RenderMode::GpuAcceleration
+        RenderMode::Auto
     }
 }
 
 impl RenderMode {
     pub fn label(self) -> &'static str {
         match self {
-            RenderMode::GpuAcceleration => "GPU Acceleration",
+            RenderMode::Auto => "Auto",
+            RenderMode::GpuAcceleration => "GPU (Experimental)",
             RenderMode::CpuRender => "CPU Render",
         }
     }

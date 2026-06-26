@@ -55,6 +55,7 @@ pub fn run_pre_studio_session_install(
     progress("Preparing session", ProgressBarValue::value(0.15));
 
     let schema = SettingsSchema::load_from_disk();
+    let output_device_name = schema.hardware.audio.device_out.clone();
     let (engine, stats) = crate::layout::build_and_warm_audio_engine(schema)?;
 
     let mut timeline_state = TimelineState::default();
@@ -150,6 +151,14 @@ pub fn run_pre_studio_session_install(
     engine
         .load_project(snapshot)
         .map_err(|error| format!("engine load_project failed: {error}"))?;
+
+    progress("Preparing mixer navigator", ProgressBarValue::value(0.92));
+
+    let output_channels = default_output_channels(&engine, &output_device_name);
+    crate::components::mixer_tree_model::ensure_timeline_mixer_tree_defaults(
+        &mut timeline_state,
+        output_channels,
+    );
 
     progress("Finalizing session", ProgressBarValue::value(0.95));
     eprintln!("[SessionLoad] ready");
@@ -476,4 +485,20 @@ fn bridge_vst3_slots(state: &TimelineState) -> Vec<(String, String)> {
             .map(|slot| (MASTER_TRACK_ID.to_string(), slot.id.clone())),
     );
     slots
+}
+
+fn default_output_channels(engine: &DirectAudio::AudioEngine, wanted_device: &str) -> u32 {
+    let wanted = wanted_device.trim();
+    let devices = engine.list_output_devices();
+    if !wanted.is_empty() {
+        if let Some(device) = devices.iter().find(|d| d.name == wanted || d.id == wanted) {
+            return device.channels;
+        }
+    }
+    devices
+        .iter()
+        .find(|d| d.is_default)
+        .or_else(|| devices.first())
+        .map(|d| d.channels)
+        .unwrap_or(2)
 }

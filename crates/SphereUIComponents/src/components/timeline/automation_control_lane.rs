@@ -46,48 +46,65 @@ pub fn automation_control_lane(
 
     let header = control_header(&track_id, track_color, last_touched.as_ref(), id_num, on_action);
 
+    // Right-side management strip stays on the neutral timeline canvas, not a
+    // tinted block — only the left header carries any tint.
     let timeline_bg = div()
         .flex_1()
         .h_full()
-        .bg(Colors::with_alpha(Colors::surface_base(), 0.22))
+        .bg(Colors::automation_canvas_bg())
         .border_b(px(1.0))
-        .border_color(Colors::with_alpha(Colors::border_subtle(), 0.7));
+        .border_color(Colors::with_alpha(Colors::automation_separator(), 0.7));
 
     div()
         .flex()
         .flex_row()
         .w_full()
         .h(px(lane_height))
-        .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.65))
+        // No row-level fill: the header paints its own (opaque) label surface and
+        // the right strip is translucent so the timeline grid shows through.
         .border_b(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(Colors::with_alpha(Colors::automation_separator(), 0.7))
         .child(header)
         .child(timeline_bg)
+}
+
+/// Visual weight for a control-row button. Only the primary action carries the
+/// accent; destructive actions stay neutral until hovered.
+#[derive(Clone, Copy)]
+enum ControlButtonStyle {
+    Primary,
+    Neutral,
+    Ghost,
+    Danger,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn control_header(
     track_id: &str,
-    track_color: gpui::Rgba,
+    _track_color: gpui::Rgba,
     last_touched: Option<&LastTouchedPluginParam>,
     id_num: usize,
     on_action: Option<AutomationControlCallback>,
 ) -> impl IntoElement {
-    let mut rail = track_color;
-    rail.a = 0.4;
-
     let label_row = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(5.0))
         .min_w(px(0.0))
-        .child(div().w(px(2.0)).h(px(8.0)).rounded_full().bg(rail))
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(8.0))
+                .rounded_full()
+                .bg(Colors::automation_rail_active()),
+        )
         .child(
             div()
                 .text_size(px(9.0))
+                .truncate()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_muted())
+                .text_color(Colors::text_secondary())
                 .child("Automation"),
         );
 
@@ -99,8 +116,8 @@ fn control_header(
         .flex_none()
         .child(control_button(
             ("automation-ctrl-add", id_num).into(),
-            "+ Add",
-            true,
+            "+ Parameter",
+            ControlButtonStyle::Primary,
             track_id,
             AutomationControlAction::OpenTargetPicker,
             on_action.clone(),
@@ -110,7 +127,7 @@ fn control_header(
             control_button(
                 ("automation-ctrl-last", id_num).into(),
                 &format!("Last: {short}"),
-                false,
+                ControlButtonStyle::Neutral,
                 track_id,
                 AutomationControlAction::AddLastTouched,
                 on_action.clone(),
@@ -119,15 +136,17 @@ fn control_header(
         .child(control_button(
             ("automation-ctrl-hide", id_num).into(),
             "Hide",
-            false,
+            ControlButtonStyle::Ghost,
             track_id,
             AutomationControlAction::HideAutomation,
             on_action.clone(),
         ))
+        // Destructive — kept quiet by default, only reads red on hover so it
+        // doesn't compete with the primary "+ Parameter" action.
         .child(control_button(
             ("automation-ctrl-clear", id_num).into(),
             "Clear All",
-            false,
+            ControlButtonStyle::Danger,
             track_id,
             AutomationControlAction::RequestClearAll,
             on_action,
@@ -138,6 +157,9 @@ fn control_header(
         .w(px(HEADER_WIDTH))
         .h(px(AUTOMATION_CONTROL_LANE_HEIGHT))
         .flex_none()
+        // Opaque label surface so the left header reads as a header column, not
+        // the translucent canvas used for the right strip.
+        .bg(Colors::automation_lane_header_bg())
         .border_r(px(1.0))
         .border_color(Colors::border_subtle())
         .child(
@@ -156,7 +178,7 @@ fn control_header(
                 .top(px(6.0))
                 .bottom(px(6.0))
                 .w(px(1.0))
-                .bg(Colors::with_alpha(track_color, 0.35)),
+                .bg(Colors::automation_rail()),
         )
         .child(
             div()
@@ -185,7 +207,7 @@ fn truncate_label(label: &str, max_chars: usize) -> String {
 fn control_button(
     id: gpui::ElementId,
     label: &str,
-    primary: bool,
+    style: ControlButtonStyle,
     track_id: &str,
     action: AutomationControlAction,
     cb: Option<AutomationControlCallback>,
@@ -197,26 +219,39 @@ fn control_button(
         .items_center()
         .justify_center()
         .h(px(18.0))
-        .px(px(6.0))
-        .rounded_sm()
+        .px(px(7.0))
+        .rounded(px(6.0))
         .text_size(px(8.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .cursor(gpui::CursorStyle::PointingHand)
         .id(id);
 
-    if primary {
-        btn = btn
-            .bg(Colors::with_alpha(Colors::accent_primary(), 0.18))
+    btn = match style {
+        ControlButtonStyle::Primary => btn
+            .bg(Colors::with_alpha(Colors::accent_primary(), 0.16))
             .text_color(Colors::accent_primary())
             .border(px(1.0))
-            .border_color(Colors::with_alpha(Colors::accent_primary(), 0.45))
-            .hover(|s| s.bg(Colors::with_alpha(Colors::accent_primary(), 0.28)));
-    } else {
-        btn = btn
-            .bg(Colors::with_alpha(Colors::text_primary(), 0.05))
-            .text_color(Colors::text_secondary())
-            .hover(|s| s.bg(Colors::surface_hover()));
-    }
+            .border_color(Colors::with_alpha(Colors::accent_primary(), 0.40))
+            .hover(|s| s.bg(Colors::with_alpha(Colors::accent_primary(), 0.26))),
+        ControlButtonStyle::Neutral => btn
+            .bg(Colors::button_bg())
+            .text_color(Colors::button_text())
+            .border(px(1.0))
+            .border_color(Colors::button_border())
+            .hover(|s| s.bg(Colors::button_bg_hover())),
+        ControlButtonStyle::Ghost => btn
+            .text_color(Colors::button_text_muted())
+            .hover(|s| {
+                s.bg(Colors::button_bg_hover())
+                    .text_color(Colors::text_secondary())
+            }),
+        ControlButtonStyle::Danger => btn
+            .text_color(Colors::text_dim())
+            .hover(|s| {
+                s.bg(Colors::with_alpha(Colors::status_error(), 0.16))
+                    .text_color(Colors::status_error())
+            }),
+    };
 
     if let Some(cb) = cb {
         btn = btn.on_mouse_down(

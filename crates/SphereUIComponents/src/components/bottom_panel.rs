@@ -1,4 +1,5 @@
 use super::mixer_panel::{mixer_panel as render_mixer_panel, MixerCallbacks, MixerSplit};
+use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::assets;
 use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 use crate::theme::Colors;
@@ -245,6 +246,7 @@ pub fn bottom_panel(
     selected_track_id: Option<&str>,
     mixer_callbacks: MixerCallbacks,
     collapsed_vsti_output_groups: &std::collections::HashSet<String>,
+    hidden_mixer_channels: &std::collections::HashSet<String>,
     vsti_output_meters: &std::collections::HashMap<
         String,
         crate::components::mixer_panel::VstiOutputMeterState,
@@ -253,6 +255,8 @@ pub fn bottom_panel(
     mixer_viewport_width: f32,
     on_mixer_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     mixer_split: MixerSplit,
+    mixer_tree_sidebar: Option<gpui::Entity<MixerTreeSidebar>>,
+    mixer_tree_enabled: bool,
     editor_content: Option<gpui::AnyElement>,
     on_tab_click: impl Fn(&BottomTab, &mut Window, &mut App) + 'static,
     on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -342,12 +346,15 @@ pub fn bottom_panel(
                         selected_track_id,
                         mixer_callbacks,
                         collapsed_vsti_output_groups,
+                        hidden_mixer_channels,
                         vsti_output_meters,
                         mixer_scroll_x,
                         mixer_viewport_width,
                         mixer_viewport_height,
                         on_mixer_scroll,
                         mixer_split,
+                        mixer_tree_sidebar,
+                        mixer_tree_enabled,
                     )
                     .into_any_element(),
                     BottomTab::Editor => editor_content

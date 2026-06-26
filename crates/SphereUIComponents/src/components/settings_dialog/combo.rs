@@ -273,6 +273,7 @@ pub(crate) fn hardware_combo_overlay(
         HardwareCombo::Renderer => {
             let selected = schema.performance.render_mode.label().to_string();
             let options: Vec<String> = vec![
+                RenderMode::Auto.label().to_string(),
                 RenderMode::GpuAcceleration.label().to_string(),
                 RenderMode::CpuRender.label().to_string(),
             ];
@@ -285,8 +286,10 @@ pub(crate) fn hardware_combo_overlay(
                 Arc::new(move |value, window, cx| {
                     let mode = if value == RenderMode::CpuRender.label() {
                         RenderMode::CpuRender
-                    } else {
+                    } else if value == RenderMode::GpuAcceleration.label() {
                         RenderMode::GpuAcceleration
+                    } else {
+                        RenderMode::Auto
                     };
                     up(
                         Arc::new(move |s| s.performance.render_mode = mode),

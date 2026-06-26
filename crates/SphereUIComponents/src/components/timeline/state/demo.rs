@@ -234,6 +234,7 @@ impl TimelineState {
             track_height_resize: None,
             track_height_resize_arm: None,
             last_touched_plugin_param: None,
+            mixer_tree: MixerTreeViewState::default(),
         }
     }
 

@@ -5,9 +5,33 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::theme::Colors;
 use gpui::{
-    canvas, div, fill, point, px, size, Bounds, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Styled,
+    canvas, div, fill, point, px, size, AnyView, App, AppContext, Bounds, Context,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, StatefulInteractiveElement,
+    Styled, Window,
 };
+
+/// Tiny tooltip surface for sub-lane control buttons. Matches the global lane
+/// header tooltip styling so hover hints read consistently across the timeline.
+struct LaneTooltipText(&'static str);
+
+impl Render for LaneTooltipText {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded_sm()
+            .bg(Colors::surface_raised())
+            .border(px(1.0))
+            .border_color(Colors::border_subtle())
+            .text_size(px(10.0))
+            .text_color(Colors::text_secondary())
+            .child(self.0)
+    }
+}
+
+fn lane_tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_window, cx| cx.new(|_| LaneTooltipText(text)).into()
+}
 
 /// Top chrome height above the timeline ruler — mirrors `timeline.rs` so a
 /// window-space click can be mapped into a sub-lane-local value.
@@ -83,8 +107,10 @@ pub fn automation_lane(
     };
 
     let category = target_category(&lane.target);
+    // Source/category text stays in the muted ramp — never bright accent — so
+    // the only saturated element in the lane is the envelope curve itself.
     let category_color = if is_active {
-        Colors::with_alpha(Colors::accent_primary(), 0.72)
+        Colors::text_secondary()
     } else {
         Colors::with_alpha(Colors::text_muted(), 0.62)
     };
@@ -101,9 +127,9 @@ pub fn automation_lane(
         .border_r(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(if is_active {
-            Colors::with_alpha(Colors::accent_primary(), 0.07)
+            Colors::automation_lane_bg_selected()
         } else {
-            Colors::surface_panel()
+            Colors::automation_lane_header_bg()
         })
         .id(("automation-lane-header", id_num))
         .cursor(gpui::CursorStyle::PointingHand);
@@ -125,10 +151,11 @@ pub fn automation_lane(
             .top_0()
             .bottom_0()
             .w(px(AUTOMATION_SUBLANE_HEADER_INDENT))
-            .bg(Colors::with_alpha(Colors::surface_base(), 0.35)),
+            .bg(Colors::with_alpha(Colors::surface_muted(), 0.5)),
     );
 
-    // Vertical child-lane guide shared by every automation sub-row.
+    // Vertical child-lane guide shared by every automation sub-row. Active lanes
+    // light the rail with the automation accent; idle lanes stay quiet graphite.
     header = header.child(
         div()
             .absolute()
@@ -136,7 +163,11 @@ pub fn automation_lane(
             .top(px(9.0))
             .bottom(px(9.0))
             .w(px(1.0))
-            .bg(Colors::with_alpha(track_color, if is_active { 0.55 } else { 0.28 })),
+            .bg(if is_active {
+                Colors::automation_rail_active()
+            } else {
+                Colors::automation_rail()
+            }),
     );
 
     // Accent bar + title — indented, smaller than the parent track name.
@@ -148,15 +179,19 @@ pub fn automation_lane(
         .min_w(px(0.0))
         .child(div().w(px(2.0)).h(px(9.0)).rounded_full().bg(accent))
         .child(
+            // Parameter name must stay on a single line — `truncate` applies
+            // nowrap + ellipsis so "Volume" can never wrap to "Volu / me".
             div()
-                .text_size(px(9.5))
+                .flex_1()
+                .min_w(px(0.0))
+                .text_size(px(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(if lane.enabled {
-                    Colors::text_secondary()
+                    Colors::text_primary()
                 } else {
                     Colors::text_muted()
                 })
-                .overflow_hidden()
+                .truncate()
                 .child(lane.name.clone()),
         );
 
@@ -164,6 +199,7 @@ pub fn automation_lane(
         .text_size(px(8.0))
         .text_color(category_color)
         .pl(px(6.0))
+        .truncate()
         .child(category);
 
     // Lane controls stay flush to the right edge of the header column.
@@ -171,19 +207,25 @@ pub fn automation_lane(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(4.0))
         .child(lane_button(
             ("automation-lane-enable", id_num).into(),
             "E",
+            "Enable automation lane",
+            LaneButtonStyle::Toggle,
             lane.enabled,
             track_id.clone(),
             lane_id.clone(),
             AutomationLaneAction::ToggleEnable,
             on_lane_action.clone(),
         ))
+        // Clear is the destructive action here (removes every point), so it is
+        // the one that reads danger on hover.
         .child(lane_button(
             ("automation-lane-clear", id_num).into(),
             "C",
+            "Clear automation points",
+            LaneButtonStyle::Danger,
             false,
             track_id.clone(),
             lane_id.clone(),
@@ -193,6 +235,8 @@ pub fn automation_lane(
         .child(lane_button(
             ("automation-lane-hide", id_num).into(),
             "x",
+            "Hide lane",
+            LaneButtonStyle::Neutral,
             false,
             track_id.clone(),
             lane_id.clone(),
@@ -255,11 +299,20 @@ pub fn automation_lane(
             )
     });
 
+    // Right-side lane body: a TRANSLUCENT overlay so the timeline grid behind
+    // the rows stays visible. The lane reads as a sublane overlay on the
+    // arrangement canvas, never an opaque dark block. The selected lane only
+    // gets a whisper of purple — the rail/curve/label carry the selection.
     let lane_area = div()
         .flex_1()
         .h_full()
         .relative()
         .overflow_hidden()
+        .bg(if is_active {
+            Colors::automation_canvas_bg_selected()
+        } else {
+            Colors::automation_canvas_bg()
+        })
         .child(envelope)
         .children(interaction);
 
@@ -268,17 +321,24 @@ pub fn automation_lane(
         .flex_row()
         .w_full()
         .h(px(lane_height))
-        // Sub-lane rows stay flatter than parent tracks so the arrangement
-        // lane remains visually dominant.
-        .bg(if is_active {
-            Colors::with_alpha(Colors::accent_primary(), 0.03)
-        } else {
-            Colors::with_alpha(Colors::surface_base(), 0.45)
-        })
+        // No row-level fill — the header paints the left label, the lane_area
+        // paints a translucent right body. Only a subtle separator hairline.
         .border_b(px(1.0))
-        .border_color(Colors::with_alpha(Colors::border_subtle(), 0.85))
+        .border_color(Colors::with_alpha(Colors::automation_separator(), 0.7))
         .child(header)
         .child(lane_area)
+}
+
+/// Visual weight for a sub-lane control. Only the active toggle carries the
+/// accent; the destructive action stays neutral until hovered.
+#[derive(Clone, Copy)]
+enum LaneButtonStyle {
+    /// Accent when `active`, neutral otherwise (Enable).
+    Toggle,
+    /// Always neutral with a quiet hover (Hide).
+    Neutral,
+    /// Neutral by default, danger/red only on hover (Clear).
+    Danger,
 }
 
 /// Small square control button used in the sub-lane header.
@@ -286,6 +346,8 @@ pub fn automation_lane(
 fn lane_button(
     id: gpui::ElementId,
     label: &'static str,
+    tooltip: &'static str,
+    style: LaneButtonStyle,
     active: bool,
     track_id: String,
     lane_id: String,
@@ -296,22 +358,39 @@ fn lane_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(14.0))
-        .h(px(14.0))
-        .rounded_sm()
-        .text_size(px(8.0))
+        .w(px(20.0))
+        .h(px(20.0))
+        .rounded(px(6.0))
+        .text_size(px(9.0))
         .font_weight(gpui::FontWeight::BOLD)
         .id(id)
-        .cursor(gpui::CursorStyle::PointingHand);
-    if active {
-        btn = btn
-            .bg(Colors::accent_primary())
-            .text_color(Colors::text_inverse());
-    } else {
-        btn = btn
-            .bg(Colors::with_alpha(Colors::text_primary(), 0.05))
-            .text_color(Colors::text_secondary())
-            .hover(|s| s.bg(Colors::surface_hover()));
+        .cursor(gpui::CursorStyle::PointingHand)
+        .tooltip(lane_tooltip(tooltip));
+    match style {
+        LaneButtonStyle::Toggle if active => {
+            // Active enable is the one place the accent shows.
+            btn = btn
+                .bg(Colors::accent_primary())
+                .text_color(Colors::text_inverse());
+        }
+        LaneButtonStyle::Danger => {
+            btn = btn
+                .bg(Colors::button_bg())
+                .text_color(Colors::button_text_muted())
+                .hover(|s| {
+                    s.bg(Colors::with_alpha(Colors::status_error(), 0.18))
+                        .text_color(Colors::status_error())
+                });
+        }
+        LaneButtonStyle::Toggle | LaneButtonStyle::Neutral => {
+            btn = btn
+                .bg(Colors::button_bg())
+                .text_color(Colors::button_text_muted())
+                .hover(|s| {
+                    s.bg(Colors::button_bg_hover())
+                        .text_color(Colors::button_text())
+                });
+        }
     }
     if let Some(cb) = cb {
         btn = btn.on_mouse_down(gpui::MouseButton::Left, move |_e, window, cx| {
@@ -346,16 +425,28 @@ fn lane_envelope(
     let baseline_y = automation_value_to_y(default_value, lane_height);
 
     let enabled = lane.enabled;
+    // Curve at ~0.85 so it stays clearly readable without the razor-sharp edge.
     let line_color = if enabled {
-        Colors::accent_primary()
+        Colors::with_alpha(Colors::automation_curve(), 0.85)
     } else {
-        Colors::with_alpha(Colors::accent_primary(), 0.35)
+        Colors::with_alpha(Colors::automation_curve(), 0.32)
     };
-    let baseline_color = Colors::with_alpha(Colors::text_primary(), 0.10);
+    // Center/value reference line + a soft band behind the curve so the lane has
+    // a quiet value guide rather than a single sharp line on a flat block.
+    let baseline_color = Colors::automation_center_line();
+    let band_color = Colors::automation_center_band();
+    let band_h = (lane_height * 0.5).clamp(10.0, 30.0);
 
     let line = canvas(
         |_b, _w, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
+            // Soft center band behind everything.
+            let band = Bounds::new(
+                bounds.origin + point(px(0.0), px((baseline_y - band_h / 2.0).max(0.0))),
+                size(px(lane_w), px(band_h)),
+            );
+            window.paint_quad(fill(band, band_color));
+            // Center/value guide line.
             let bl = Bounds::new(
                 bounds.origin + point(px(0.0), px(baseline_y)),
                 size(px(lane_w), px(1.0)),
@@ -386,9 +477,9 @@ fn lane_envelope(
             }
             let y = automation_value_to_y(p.value, lane_height);
             let (fill_color, ring) = if p.selected {
-                (Colors::text_primary(), Colors::accent_primary())
+                (Colors::text_primary(), Colors::automation_curve())
             } else {
-                (Colors::accent_primary(), Colors::text_primary())
+                (Colors::automation_point(), Colors::automation_curve())
             };
             let size_px = if p.selected { 9.0 } else { 7.0 };
             Some(

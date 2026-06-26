@@ -454,7 +454,8 @@ impl Colors {
     theme_color!(surface_overlay, "surface.overlay", "#00000085");
 
     // Borders
-    theme_color!(border_subtle, "border.subtle", "#FFFFFF14");
+    theme_color!(border_subtle, "border.subtle", "#292D36");
+    theme_color!(border_normal, "border.normal", "#343946");
     theme_color!(border_default, "border.default", "#FFFFFF1F");
     theme_color!(border_strong, "border.strong", "#4C505C");
     theme_color!(border_focus, "border.focus", "#7B61FFB8");
@@ -504,9 +505,9 @@ impl Colors {
     theme_color!(statusbar_text, "statusbar.text", "#8E96A3");
     theme_color!(mixer_bg, "mixer.background", "#111418");
     theme_color!(master_strip_bg, "mixer.masterStripBackground", "#181A1F");
-    theme_color!(timeline_grid_major, "timeline.gridMajor", "#FFFFFF12");
-    theme_color!(timeline_grid_minor, "timeline.gridMinor", "#FFFFFF08");
-    theme_color!(timeline_grid_bar, "timeline.gridBar", "#FFFFFF1A");
+    theme_color!(timeline_grid_major, "timeline.gridMajor", "#303642");
+    theme_color!(timeline_grid_minor, "timeline.gridMinor", "#242832");
+    theme_color!(timeline_grid_bar, "timeline.gridBar", "#3C4351");
     theme_color!(timeline_playhead, "timeline.playhead", "#FF6B68");
     theme_color!(timeline_background, "timeline.background", "#1E1F22");
     theme_color!(
@@ -554,12 +555,80 @@ impl Colors {
     theme_color!(timeline_selection, "timeline.selection", "#7B61FF30");
 
     // Track colors (fallbacks)
-    theme_color!(track_audio, "track.audio", "#5FCED0");
+    theme_color!(track_audio, "track.audio", "#48D4D0");
     theme_color!(track_midi, "track.midi", "#E5C07B");
-    theme_color!(track_instrument, "track.instrument", "#BB86FC");
+    theme_color!(track_instrument, "track.instrument", "#78D88F");
     theme_color!(track_bus, "track.bus", "#7B61FF");
     theme_color!(track_return, "track.return", "#6FCF97");
     theme_color!(track_master, "track.master", "#DFE1E5");
+    // Subdued overlays for track row states — graphite-leaning so the selected
+    // track reads as elevated without flooding the header with accent hue.
+    theme_color!(track_selected_overlay, "track.selectedOverlay", "#222532");
+    theme_color!(track_muted_overlay, "track.mutedOverlay", "#17191F");
+
+    // Surface selection states (used by rows/lanes that shouldn't get the full
+    // accent treatment — sublanes, list selections).
+    theme_color!(surface_selected, "surface.selected", "#272536");
+    theme_color!(surface_selected_soft, "surface.selectedSoft", "#232230");
+    theme_color!(surface_pressed, "surface.pressed", "#2A2E39");
+    theme_color!(surface_muted, "surface.muted", "#191B21");
+
+    // Extra named accents kept distinct from the purple primary.
+    theme_color!(accent_cyan, "accent.cyan", "#48D4D0");
+    theme_color!(accent_green, "accent.green", "#78D88F");
+
+    // Automation sublane tokens — quiet graphite lanes with a purple curve so the
+    // envelope is the only saturated element in the section.
+    theme_color!(automation_curve, "automation.curve", "#7C5CFF");
+    theme_color!(automation_curve_hover, "automation.curveHover", "#9A82FF");
+    // Left header/label tint (opaque — sits over the header column, not the grid).
+    theme_color!(automation_lane_bg, "automation.laneBg", "#181A21");
+    theme_color!(
+        automation_lane_bg_selected,
+        "automation.laneBgSelected",
+        "#1B1926"
+    );
+    theme_color!(
+        automation_lane_header_bg,
+        "automation.laneHeaderBg",
+        "#1A1C23"
+    );
+    // Right-side lane body. TRANSLUCENT overlays (8-digit RGBA) so the timeline
+    // grid drawn behind the rows stays visible — never an opaque dark block.
+    // Selected ≈ rgba(124,92,255,0.05) over the timeline canvas.
+    theme_color!(automation_canvas_bg, "automation.canvasBg", "#0E0F1417");
+    theme_color!(
+        automation_canvas_bg_selected,
+        "automation.canvasBgSelected",
+        "#7C5CFF0D"
+    );
+    // Faint value/center guides drawn behind the curve.
+    theme_color!(
+        automation_value_region_bg,
+        "automation.valueRegionBg",
+        "#7C5CFF08"
+    );
+    theme_color!(automation_center_line, "automation.centerLine", "#7C5CFF2E");
+    theme_color!(automation_center_band, "automation.centerBand", "#7C5CFF06");
+    theme_color!(automation_separator, "automation.separator", "#272B35");
+    theme_color!(
+        automation_separator_strong,
+        "automation.separatorStrong",
+        "#323746"
+    );
+    theme_color!(automation_rail, "automation.rail", "#4D4380");
+    theme_color!(automation_rail_active, "automation.railActive", "#8A6CFF");
+    theme_color!(automation_point, "automation.point", "#B9A8FF");
+
+    // Compact button surface tokens shared by chrome controls.
+    theme_color!(button_bg, "button.bg", "#20232A");
+    theme_color!(button_bg_hover, "button.bgHover", "#292D38");
+    theme_color!(button_bg_pressed, "button.bgPressed", "#303543");
+    theme_color!(button_bg_active, "button.bgActive", "#3A2E70");
+    theme_color!(button_border, "button.border", "#333846");
+    theme_color!(button_border_hover, "button.borderHover", "#454B5C");
+    theme_color!(button_text, "button.text", "#DDE2EC");
+    theme_color!(button_text_muted, "button.textMuted", "#9AA3B2");
 
     // Surfaces
     theme_color!(bottom_panel_bg, "surface.bottomPanel", "#25262B");

@@ -18,6 +18,10 @@
       "panelRaised": "#2B2D33",
       "canvas": "#15161A",
       "raised": "#2B2D33",
+      "selected": "#272536",
+      "selectedSoft": "#232230",
+      "pressed": "#2A2E39",
+      "muted": "#191B21",
       "input": "#181A1F",
       "window": "#15161A",
       "titlebar": "#1B1C20",
@@ -36,7 +40,8 @@
     "border": {
       "startup": "#33363D",
       "startupSoft": "#25272D",
-      "subtle": "#FFFFFF14",
+      "subtle": "#292D36",
+      "normal": "#343946",
       "default": "#FFFFFF1F",
       "strong": "#4C505C",
       "focus": "#7B61FFB8",
@@ -72,7 +77,36 @@
       "success": "#6FCF97",
       "warning": "#E5C07B",
       "danger": "#FF6B68",
-      "purple": "#BB86FC"
+      "purple": "#BB86FC",
+      "cyan": "#48D4D0",
+      "green": "#78D88F"
+    },
+    "automation": {
+      "curve": "#7C5CFF",
+      "curveHover": "#9A82FF",
+      "laneBg": "#181A21",
+      "laneBgSelected": "#1B1926",
+      "laneHeaderBg": "#1A1C23",
+      "canvasBg": "#0E0F1417",
+      "canvasBgSelected": "#7C5CFF0D",
+      "valueRegionBg": "#7C5CFF08",
+      "centerLine": "#7C5CFF2E",
+      "centerBand": "#7C5CFF06",
+      "separator": "#272B35",
+      "separatorStrong": "#323746",
+      "rail": "#4D4380",
+      "railActive": "#8A6CFF",
+      "point": "#B9A8FF"
+    },
+    "button": {
+      "bg": "#20232A",
+      "bgHover": "#292D38",
+      "bgPressed": "#303543",
+      "bgActive": "#3A2E70",
+      "border": "#333846",
+      "borderHover": "#454B5C",
+      "text": "#DDE2EC",
+      "textMuted": "#9AA3B2"
     },
     "status": {
       "error": "#FF6B68",
@@ -122,9 +156,9 @@
       "masterStripBackground": "#181A1F"
     },
     "timeline": {
-      "gridMajor": "#FFFFFF12",
-      "gridMinor": "#FFFFFF08",
-      "gridBar": "#FFFFFF1A",
+      "gridMajor": "#303642",
+      "gridMinor": "#242832",
+      "gridBar": "#3C4351",
       "playhead": "#FF6B68",
       "background": "#1E1F22",
       "contentBackground": "#1E1F22",
@@ -140,12 +174,14 @@
       "selection": "#7B61FF30"
     },
     "track": {
-      "audio": "#5FCED0",
+      "audio": "#48D4D0",
       "midi": "#E5C07B",
-      "instrument": "#BB86FC",
+      "instrument": "#78D88F",
       "bus": "#7B61FF",
       "return": "#6FCF97",
-      "master": "#DFE1E5"
+      "master": "#DFE1E5",
+      "selectedOverlay": "#222532",
+      "mutedOverlay": "#17191F"
     }
   },
   "trackColors": [

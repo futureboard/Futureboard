@@ -276,6 +276,20 @@ fn track_type_badge(t: TrackType) -> &'static str {
     }
 }
 
+/// Semantic hue per track type — drives the inspector title rail/badge so the
+/// header reads by type at a glance, independent of the per-track identity color
+/// (which the user still edits via the Color row).
+fn track_type_color(t: TrackType) -> gpui::Rgba {
+    match t {
+        TrackType::Audio => Colors::accent_cyan(),
+        TrackType::Instrument => Colors::accent_green(),
+        TrackType::Midi => Colors::track_midi(),
+        TrackType::Bus => Colors::track_bus(),
+        TrackType::Return => Colors::track_return(),
+        TrackType::Master => Colors::track_master(),
+    }
+}
+
 /// Legacy entry point — kept so any existing call sites still compile. Returns
 /// an empty placeholder identical to the pre-state version.
 pub fn right_panel() -> impl IntoElement {
@@ -428,7 +442,7 @@ fn kv_row(key: impl Into<String>, value: impl Into<String>) -> impl IntoElement 
 /// Header strip shown at the top of every populated inspector: color chip,
 /// title, and a type badge.
 fn inspector_header(
-    color: gpui::Rgba,
+    accent: gpui::Rgba,
     title: impl Into<String>,
     badge: &'static str,
 ) -> impl IntoElement {
@@ -437,7 +451,8 @@ fn inspector_header(
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .child(div().w(px(4.0)).h(px(22.0)).rounded_sm().bg(color))
+        // Left accent rail carries the type/identity hue.
+        .child(div().w(px(3.0)).h(px(22.0)).rounded_full().bg(accent))
         .child(
             div()
                 .flex_1()
@@ -455,10 +470,10 @@ fn inspector_header(
                 .px(px(7.0))
                 .py(px(2.0))
                 .rounded_sm()
-                .bg(Colors::with_alpha(Colors::accent_primary(), 0.16))
+                .bg(Colors::with_alpha(accent, 0.14))
                 .text_size(px(9.0))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(Colors::accent_primary())
+                .text_color(Colors::with_alpha(accent, 0.92))
                 .child(badge),
         );
     }
@@ -1703,7 +1718,7 @@ fn track_inspector(
 
     scroll_body()
         .child(inspector_header(
-            track.color,
+            track_type_color(track.track_type),
             track.name.clone(),
             track_type_badge(track.track_type),
         ))

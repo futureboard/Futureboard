@@ -71,7 +71,20 @@ impl Render for TrackDragPreview {
     }
 }
 
-fn type_badge(kind: TrackType, color: gpui::Rgba) -> impl IntoElement {
+/// Semantic hue for a track type — keeps badges readable by type at a glance,
+/// independent of the per-track identity color used for the accent strip.
+fn track_type_color(kind: TrackType) -> gpui::Rgba {
+    match kind {
+        TrackType::Audio => Colors::accent_cyan(),
+        TrackType::Instrument => Colors::accent_green(),
+        TrackType::Midi => Colors::track_midi(),
+        TrackType::Bus => Colors::track_bus(),
+        TrackType::Return => Colors::track_return(),
+        TrackType::Master => Colors::track_master(),
+    }
+}
+
+fn type_badge(kind: TrackType) -> impl IntoElement {
     let label = match kind {
         TrackType::Audio => "AUD",
         TrackType::Midi => "MID",
@@ -80,14 +93,14 @@ fn type_badge(kind: TrackType, color: gpui::Rgba) -> impl IntoElement {
         TrackType::Return => "RTN",
         TrackType::Master => "MAS",
     };
-    let mut bg = color;
-    bg.a = 0.16;
+    let color = track_type_color(kind);
+    // Readable, not neon: muted tinted chip with a slightly dimmed label.
     div()
         .px(px(3.0))
         .py(px(0.5))
         .rounded_sm()
-        .bg(bg)
-        .text_color(color)
+        .bg(Colors::with_alpha(color, 0.14))
+        .text_color(Colors::with_alpha(color, 0.92))
         .text_size(px(8.0))
         .font_weight(gpui::FontWeight::BOLD)
         .child(label)
@@ -158,11 +171,11 @@ pub fn track_header(
     let header_bg = if is_dragging {
         Colors::with_alpha(Colors::text_primary(), 0.07)
     } else if is_automation {
-        // Subtle accent tint so the active automation track is obvious even
-        // when it isn't the selected track.
-        Colors::with_alpha(Colors::accent_primary(), 0.10)
+        // Quiet graphite tint so the active automation track reads as active
+        // without flooding the header with accent hue.
+        Colors::surface_selected_soft()
     } else if is_selected {
-        Colors::surface_raised()
+        Colors::track_selected_overlay()
     } else if is_drop_target && state.dragging_track_id.is_some() {
         Colors::with_alpha(Colors::text_primary(), 0.05)
     } else {
@@ -365,18 +378,24 @@ pub fn track_header(
                                                 .gap(px(4.0))
                                                 .child(
                                                     div()
+                                                        .min_w(px(0.0))
+                                                        .truncate()
                                                         .text_size(px(11.0))
                                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                                         .text_color(Colors::text_primary())
                                                         .child(track.name.clone()),
                                                 )
-                                                .child(type_badge(track.track_type, track.color)),
+                                                .child(type_badge(track.track_type)),
                                         )
                                         .child(
+                                            // Metadata stays in the muted text
+                                            // ramp — never bright accent — so it
+                                            // reads as secondary info, not a link.
                                             div()
                                                 .text_size(px(8.5))
+                                                .truncate()
                                                 .text_color(if is_automation {
-                                                    Colors::accent_primary()
+                                                    Colors::text_secondary()
                                                 } else {
                                                     Colors::text_muted()
                                                 })

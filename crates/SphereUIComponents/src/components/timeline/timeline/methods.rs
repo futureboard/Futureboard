@@ -134,6 +134,7 @@ impl Timeline {
         self.erase_clip_drag = None;
         self.erase_preview_ids.clear();
         self.automation_drag = None;
+        self.automation_curve_drag = None;
         self.automation_marquee = None;
         self.tempo_drag = None;
         self.ts_drag = None;
@@ -174,6 +175,7 @@ impl Timeline {
             erase_clip_drag: None,
             erase_preview_ids: HashSet::new(),
             automation_drag: None,
+            automation_curve_drag: None,
             automation_marquee: None,
             on_automation_control: None,
             tempo_drag: None,
@@ -213,6 +215,7 @@ impl Timeline {
             erase_clip_drag: None,
             erase_preview_ids: HashSet::new(),
             automation_drag: None,
+            automation_curve_drag: None,
             automation_marquee: None,
             on_automation_control: None,
             tempo_drag: None,
@@ -737,6 +740,7 @@ impl Timeline {
 
     /// Mouse-down inside an automation lane: hit-test a point (select + begin
     /// move), else add a point (Pen) or start a marquee (Pointer).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn begin_automation_interaction(
         &mut self,
         track_id: &str,
@@ -744,11 +748,13 @@ impl Timeline {
         beat: f32,
         value: f32,
         additive: bool,
+        alt: bool,
+        double_click: bool,
         cx: &mut Context<Self>,
     ) {
         use crate::components::timeline::timeline_state::{
-            AutomationMarquee, AutomationPointDrag, TrackLaneMode, AUTOMATION_LANE_PAD,
-            AUTOMATION_SUBLANE_HEIGHT,
+            AutomationCurveDrag, AutomationMarquee, AutomationPointDrag, TrackLaneMode,
+            AUTOMATION_LANE_PAD, AUTOMATION_SUBLANE_HEIGHT,
         };
         self.state.select_track(track_id);
         if self.state.track_lane_mode(track_id) != TrackLaneMode::Automation {
@@ -781,6 +787,39 @@ impl Timeline {
             });
             cx.notify();
             return;
+        }
+
+        // Alt is the curve-edit modifier: Alt+drag on a segment line shapes its
+        // tension; Alt+double-click resets it to a straight line. Only fires when
+        // the cursor is on the curve line (not a point, checked above), so it
+        // never disturbs point add / move / marquee selection.
+        if alt {
+            if let Some(left_id) = self.state.automation_segment_left_point_at(
+                track_id, &lane_id, beat, value, value_tol * 1.5,
+            ) {
+                if double_click {
+                    if self
+                        .state
+                        .reset_automation_segment_curve(track_id, &lane_id, left_id)
+                    {
+                        self.mark_project_changed(cx);
+                    }
+                } else {
+                    let start_tension =
+                        self.state
+                            .automation_segment_tension(track_id, &lane_id, left_id);
+                    self.automation_curve_drag = Some(AutomationCurveDrag {
+                        track_id: track_id.to_string(),
+                        lane_id,
+                        left_point_id: left_id,
+                        start_tension,
+                        start_value: value,
+                        changed: false,
+                    });
+                }
+                cx.notify();
+                return;
+            }
         }
 
         match self.state.active_tool {
@@ -849,6 +888,27 @@ impl Timeline {
             cx.notify();
             return true;
         }
+        if let Some(drag) = self.automation_curve_drag.clone() {
+            // Vertical drag distance from the grab point maps to a tension delta;
+            // the points never move. Dragging up raises tension (ease-in), down
+            // lowers it (ease-out); clamped to the safe range by the setter.
+            let value =
+                self.automation_value_from_window_y(&drag.track_id, &drag.lane_id, window_y);
+            const TENSION_GAIN: f32 = 2.4;
+            let tension = (drag.start_tension + (value - drag.start_value) * TENSION_GAIN)
+                .clamp(-1.0, 1.0);
+            self.state.set_automation_segment_tension(
+                &drag.track_id,
+                &drag.lane_id,
+                drag.left_point_id,
+                tension,
+            );
+            if let Some(d) = self.automation_curve_drag.as_mut() {
+                d.changed = true;
+            }
+            cx.notify();
+            return true;
+        }
         if let Some(mut m) = self.automation_marquee.clone() {
             let beat = self.beat_from_window_x(window_x).max(0.0);
             let value = self.automation_value_from_window_y(&m.track_id, &m.lane_id, window_y);
@@ -877,6 +937,12 @@ impl Timeline {
         let mut handled = false;
         if let Some(drag) = self.automation_drag.take() {
             if drag.moved {
+                self.mark_project_changed(cx);
+            }
+            handled = true;
+        }
+        if let Some(drag) = self.automation_curve_drag.take() {
+            if drag.changed {
                 self.mark_project_changed(cx);
             }
             handled = true;

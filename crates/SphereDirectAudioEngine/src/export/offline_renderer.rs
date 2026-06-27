@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::audio_source::ClipAudioSource;
 use crate::engine::{render_project_block_interleaved, schedule_midi_render_block};
+use crate::latency_graph::RuntimeLatencyGraph;
 use crate::runtime::{clip_dsp_debug_enabled, describe_clip_dsp_state, RuntimeProject};
 use crate::types::EngineProjectSnapshot;
 
@@ -46,22 +47,78 @@ pub fn render_offline(
     ));
 
     // Build the runtime graph from the snapshot. Fresh audio-source cache and no
-    // VST3 reuse — this is an isolated offline graph.
+    // VST3 reuse — this is an isolated offline graph. PDC is taken from the
+    // snapshot (stamped from the live engine), NOT hardcoded, so the offline
+    // graph applies the *same* plugin-delay compensation as realtime playback.
     let mut audio_cache: HashMap<String, Arc<ClipAudioSource>> = HashMap::new();
-    let mut runtime =
-        RuntimeProject::build(snapshot, request.sample_rate, &mut audio_cache, None, false)
-            .map_err(|e| ExportError::Build(e.to_string()))?;
+    let mut runtime = RuntimeProject::build(
+        snapshot,
+        request.sample_rate,
+        &mut audio_cache,
+        None,
+        snapshot.pdc_enabled,
+    )
+    .map_err(|e| ExportError::Build(e.to_string()))?;
     runtime.sample_rate = request.sample_rate;
     // Restore each in-process VST3 insert's saved state before any process() call
     // so instruments/effects render with the user's current tweaks. Runs once on
     // this worker thread, never the audio callback.
     restore_offline_plugin_states(snapshot, &mut runtime);
-    runtime.reset_midi_playback(request.start_sample);
 
     let channels = request.channels.max(1) as usize;
     let block = request.block_size.max(1);
     let ts_num = snapshot.time_signature[0].max(1);
     let ts_den = snapshot.time_signature[1].max(1);
+
+    // Recompute the latency graph now that saved plugin state is restored: a
+    // plugin may report a different latency after `setState` (e.g. a linear-phase
+    // / oversampling mode toggled on). The realtime callback refreshes per block;
+    // we refresh once up front so the warmup below reflects the real latency.
+    runtime.refresh_runtime_latency_graph(block as u32);
+
+    // Pre-roll / warmup: when Global Latency Sync (PDC) is on, the realtime graph
+    // delays every path to the master bus by `max_path_latency` (+ master insert
+    // latency). Render that many frames FIRST and discard them so the written
+    // file starts with fully-settled bar-1 content — PDC delay lines primed and
+    // plugin latency flushed — instead of a latency ramp. This mirrors playback
+    // exactly (same graph, same per-track delays); it only strips the constant
+    // output latency so the bounce stays sample-aligned to the timeline.
+    let warmup_frames = export_warmup_frames(&runtime.latency_graph, runtime.pdc_enabled);
+
+    runtime.reset_midi_playback(request.start_sample);
+
+    if export_latency_debug_enabled() {
+        let lg = &runtime.latency_graph;
+        eprintln!(
+            "[export-latency] export_latency_sync_enabled={} graph_max_latency_samples={} \
+             master_insert_latency_samples={} export_preroll_samples={} export_tail_samples={} \
+             export_graph_version={} sample_rate={} block_size={}",
+            runtime.pdc_enabled,
+            lg.max_path_latency_samples,
+            lg.master_plugin_latency,
+            warmup_frames,
+            request.max_tail_frames(),
+            snapshot.latency_graph_version,
+            request.sample_rate,
+            block,
+        );
+        for (idx, track) in runtime.tracks.iter().enumerate() {
+            eprintln!(
+                "[export-latency] track={} plugin_reported_latency_samples={} \
+                 track_total_latency_samples={} pdc_delay_samples={}",
+                track.id,
+                lg.track_plugin_latency.get(idx).copied().unwrap_or(0),
+                lg.track_output_latency.get(idx).copied().unwrap_or(0),
+                lg.track_pdc_delay.get(idx).copied().unwrap_or(0),
+            );
+        }
+        if snapshot.latency_graph_version == 0 {
+            eprintln!(
+                "[export-latency] WARNING: snapshot graph version is unstamped (0); export may \
+                 not match the live realtime graph version"
+            );
+        }
+    }
 
     if clip_dsp_debug_enabled() {
         for clip in &snapshot.clips {
@@ -80,16 +137,23 @@ pub fn render_offline(
     let mut out = vec![0.0f32; block * channels];
 
     let content_frames = request.content_frames();
-    let total_with_tail = content_frames.saturating_add(request.max_tail_frames());
+    let tail_cap = request.max_tail_frames();
+    let total_with_tail = content_frames.saturating_add(tail_cap);
+
+    // Phase boundaries by `produced` (total frames produced, incl. warmup):
+    //   [0, write_start)        warmup / pre-roll → rendered then DISCARDED
+    //   [write_start, content_end)  content        → written
+    //   [content_end, produce_cap)  tail           → written (rings out)
+    let write_start = warmup_frames;
+    let content_end = warmup_frames.saturating_add(content_frames);
+    let produce_cap = content_end.saturating_add(tail_cap);
 
     let mut pos = request.start_sample;
-    let mut rendered = 0u64;
+    let mut produced = 0u64; // total frames produced, including discarded warmup
+    let mut written = 0u64; // frames actually emitted (content + tail)
     let mut peak = 0.0f32;
     let mut progress_throttle = 0u32;
 
-    // Phase 1: content. Phase 2: tail (rendered past content end so plugin /
-    // instrument tails ring out).
-    let mut tail_remaining = request.max_tail_frames();
     let until_silence = matches!(request.tail, ExportTailMode::UntilSilence { .. });
     let silence_threshold = match request.tail {
         ExportTailMode::UntilSilence { threshold_db, .. } => {
@@ -103,26 +167,30 @@ pub fn render_offline(
             return Err(ExportError::Cancelled);
         }
 
-        let in_content = rendered < content_frames;
-        if !in_content {
-            // Tail handling.
+        // Past content: stop now if there is no tail, else stop at the tail cap.
+        if produced >= content_end {
             match request.tail {
                 ExportTailMode::None => break,
                 _ => {
-                    if tail_remaining == 0 {
+                    if produced >= produce_cap {
                         break;
                     }
                 }
             }
         }
 
-        // Frames to render this block: clamp the content phase to the content
-        // boundary so we don't over-render the body.
-        let this_block = if in_content {
-            block.min((content_frames - rendered) as usize).max(1)
+        let in_warmup = produced < write_start;
+
+        // Clamp this block to the next phase boundary so warmup / content / tail
+        // never straddle a single block (keeps discard + tail logic exact).
+        let boundary = if in_warmup {
+            write_start
+        } else if produced < content_end {
+            content_end
         } else {
-            block.min(tail_remaining as usize).max(1)
+            produce_cap
         };
+        let this_block = block.min((boundary - produced) as usize).max(1);
 
         let stereo_slice = &mut stereo[..this_block * 2];
         for s in stereo_slice.iter_mut() {
@@ -153,45 +221,47 @@ pub fn render_offline(
             // Defensive: avoid an infinite loop if the kernel returns nothing.
             break;
         }
+        let frames_u64 = frames as u64;
 
-        // Fold to the requested channel layout, apply normalization gain, and
-        // measure peak.
-        let mut block_peak = 0.0f32;
-        let out_slice = &mut out[..frames * channels];
-        for f in 0..frames {
-            let l = stereo_slice[f * 2] * gain;
-            let r = stereo_slice[f * 2 + 1] * gain;
-            block_peak = block_peak.max(l.abs()).max(r.abs());
-            if channels == 1 {
-                out_slice[f] = (l + r) * 0.5;
-            } else {
-                out_slice[f * channels] = l;
-                out_slice[f * channels + 1] = r;
-                for c in 2..channels {
-                    out_slice[f * channels + c] = 0.0;
+        if !in_warmup {
+            // Fold to the requested channel layout, apply normalization gain, and
+            // measure peak. Warmup frames are dropped: they hold the latency ramp,
+            // not audible content.
+            let mut block_peak = 0.0f32;
+            let out_slice = &mut out[..frames * channels];
+            for f in 0..frames {
+                let l = stereo_slice[f * 2] * gain;
+                let r = stereo_slice[f * 2 + 1] * gain;
+                block_peak = block_peak.max(l.abs()).max(r.abs());
+                if channels == 1 {
+                    out_slice[f] = (l + r) * 0.5;
+                } else {
+                    out_slice[f * channels] = l;
+                    out_slice[f * channels + 1] = r;
+                    for c in 2..channels {
+                        out_slice[f * channels + c] = 0.0;
+                    }
                 }
             }
-        }
-        peak = peak.max(block_peak);
-        on_block(out_slice)?;
+            peak = peak.max(block_peak);
+            on_block(out_slice)?;
+            written = written.saturating_add(frames_u64);
 
-        let frames_u64 = frames as u64;
-        rendered = rendered.saturating_add(frames_u64);
-        pos = pos.saturating_add(frames_u64);
-        if !in_content {
-            tail_remaining = tail_remaining.saturating_sub(frames_u64);
-            // UntilSilence: stop early once the block has decayed below threshold.
-            if until_silence && block_peak < silence_threshold {
+            // UntilSilence: stop early once a tail block has decayed below threshold.
+            if produced >= content_end && until_silence && block_peak < silence_threshold {
                 break;
             }
         }
+
+        produced = produced.saturating_add(frames_u64);
+        pos = pos.saturating_add(frames_u64);
 
         // Throttle progress callbacks (~ every 16 blocks) to avoid flooding.
         progress_throttle = progress_throttle.wrapping_add(1);
         if progress_throttle.is_multiple_of(16) {
             on_progress(ExportProgress::new(
                 ExportStage::Rendering,
-                rendered.min(total_with_tail.max(1)),
+                written.min(total_with_tail.max(1)),
                 total_with_tail.max(1),
             ));
         }
@@ -202,9 +272,35 @@ pub fn render_offline(
     }
 
     Ok(OfflineRenderSummary {
-        frames_rendered: rendered,
+        frames_rendered: written,
         peak,
     })
+}
+
+/// Pre-roll / warmup frames the offline render must produce-and-discard so the
+/// written file starts with fully-settled content rather than the latency ramp.
+///
+/// Equals the total constant latency the engine introduces from clip read to the
+/// final master output when Global Latency Sync (PDC) is active:
+/// `max_path_latency` (longest path to the master summing bus, which the PDC
+/// delay lines align every other path to) + `master_plugin_latency` (master-bus
+/// insert latency added after summing). When PDC is off the export reproduces
+/// playback's uncompensated graph exactly, so no frames are stripped.
+#[inline]
+pub(crate) fn export_warmup_frames(latency_graph: &RuntimeLatencyGraph, pdc_enabled: bool) -> u64 {
+    if !pdc_enabled {
+        return 0;
+    }
+    latency_graph
+        .max_path_latency_samples
+        .saturating_add(latency_graph.master_plugin_latency) as u64
+}
+
+#[inline]
+fn export_latency_debug_enabled() -> bool {
+    std::env::var("FUTUREBOARD_PDC_DEBUG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 #[inline]
@@ -302,6 +398,8 @@ pub(crate) fn silence_snapshot(sample_rate: u32) -> EngineProjectSnapshot {
         }],
         clips: Vec::new(),
         midi_clips: Vec::new(),
+        pdc_enabled: true,
+        latency_graph_version: 1,
         routing: EngineRoutingSnapshot {
             master_output_device: None,
             sample_rate,
@@ -325,6 +423,45 @@ mod tests {
             block_size: 256,
             tail: ExportTailMode::None,
             normalize: ExportNormalizeMode::None,
+        }
+    }
+
+    #[test]
+    fn warmup_is_max_path_plus_master_when_pdc_on() {
+        let lg = RuntimeLatencyGraph {
+            max_path_latency_samples: 512,
+            master_plugin_latency: 128,
+            ..Default::default()
+        };
+        // PDC on → strip the full constant latency (path + master insert).
+        assert_eq!(export_warmup_frames(&lg, true), 640);
+        // PDC off → reproduce playback's uncompensated graph, strip nothing.
+        assert_eq!(export_warmup_frames(&lg, false), 0);
+    }
+
+    #[test]
+    fn warmup_is_zero_without_latency() {
+        let lg = RuntimeLatencyGraph::default();
+        assert_eq!(export_warmup_frames(&lg, true), 0);
+        assert_eq!(export_warmup_frames(&lg, false), 0);
+    }
+
+    #[test]
+    fn export_snapshot_pdc_flag_reaches_runtime_graph() {
+        // The offline build must honor the snapshot's `pdc_enabled` (stamped from
+        // the live engine), not a hardcoded value: this is what kept export from
+        // matching playback. Verify both states build a graph with the flag.
+        use std::collections::HashMap;
+        for pdc in [true, false] {
+            let mut snapshot = silence_snapshot(48_000);
+            snapshot.pdc_enabled = pdc;
+            let mut cache = HashMap::new();
+            let runtime = RuntimeProject::build(&snapshot, 48_000, &mut cache, None, snapshot.pdc_enabled)
+                .expect("build");
+            assert_eq!(
+                runtime.pdc_enabled, pdc,
+                "runtime graph must adopt the snapshot's PDC state"
+            );
         }
     }
 

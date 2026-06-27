@@ -977,6 +977,13 @@ impl StudioLayout {
         self.audio_bridge.route_graph_in_flight_version = graph_version_after;
         self.audio_bridge.route_graph_in_flight_child_channels = num_plugin_child_channels;
         self.audio_bridge.route_graph_in_flight_master_routes = num_routes_to_master;
+        // The routing graph just advanced (tracks/buses/sends/plugin child outputs
+        // changed). Push the new version to the Mixer Tree Sidebar so it rebuilds
+        // once, now — this is what makes the tree appear on first Studio open: the
+        // handoff built the cache before the real graph was ready, and nothing else
+        // re-triggered it. Meter/fader updates don't reach here (graph unchanged →
+        // deduped above), so this does not rebuild the tree on transient updates.
+        self.refresh_mixer_tree_sidebar_entity(cx);
         eprintln!(
             "[ROUTE GRAPH REBUILD]\nreason={reason}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nnum_plugin_child_channels={num_plugin_child_channels}\nnum_routes_to_master={num_routes_to_master}\npublished_to_audio_thread=false"
         );

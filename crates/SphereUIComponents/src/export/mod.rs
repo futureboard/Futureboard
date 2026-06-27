@@ -66,6 +66,8 @@ mod tests {
             }],
             clips,
             midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
             routing: EngineRoutingSnapshot {
                 master_output_device: None,
                 sample_rate: 48_000,

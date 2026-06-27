@@ -459,6 +459,7 @@ fn build_engine_automation_lanes(track: &TrackState) -> Vec<EngineAutomationLane
                         beat: point.beat.max(0.0) as f64,
                         value: point.value.clamp(0.0, 1.0),
                         curve: point.curve.to_tag(),
+                        tension: point.tension.clamp(-1.0, 1.0),
                     })
                     .collect(),
             }
@@ -474,23 +475,31 @@ pub(crate) fn build_engine_project_snapshot(
     project_root: Option<&str>,
     preferred_input_device: Option<&str>,
 ) -> EngineProjectSnapshot {
+    // Live path: realtime PDC is governed by the engine's own atomic, so the
+    // snapshot's `pdc_enabled` is unused here — default it to the engine default.
     build_engine_project_snapshot_inner(
         state,
         sample_rate,
         project_root,
         preferred_input_device,
         false,
+        true,
+        0,
     )
 }
 
 /// Offline-export snapshot: plugin inserts are forced in-process and carry their
 /// saved VST3 state so the isolated offline graph renders instruments/effects the
-/// out-of-process bridge would otherwise own. See `export_ops` / `offline_renderer`.
+/// out-of-process bridge would otherwise own. `pdc_enabled` / `latency_graph_version`
+/// are stamped from the live engine so the offline render uses the *same*
+/// latency-compensated graph as playback. See `export_ops` / `offline_renderer`.
 pub(super) fn build_engine_project_snapshot_for_export(
     state: &TimelineState,
     sample_rate: u32,
     project_root: Option<&str>,
     preferred_input_device: Option<&str>,
+    pdc_enabled: bool,
+    latency_graph_version: u64,
 ) -> EngineProjectSnapshot {
     build_engine_project_snapshot_inner(
         state,
@@ -498,6 +507,8 @@ pub(super) fn build_engine_project_snapshot_for_export(
         project_root,
         preferred_input_device,
         true,
+        pdc_enabled,
+        latency_graph_version,
     )
 }
 
@@ -507,6 +518,8 @@ fn build_engine_project_snapshot_inner(
     project_root: Option<&str>,
     preferred_input_device: Option<&str>,
     export_mode: bool,
+    pdc_enabled: bool,
+    latency_graph_version: u64,
 ) -> EngineProjectSnapshot {
     let mut tracks: Vec<EngineTrackSnapshot> = state
         .tracks
@@ -757,6 +770,8 @@ fn build_engine_project_snapshot_inner(
         tracks,
         clips,
         midi_clips,
+        pdc_enabled,
+        latency_graph_version,
         routing: EngineRoutingSnapshot {
             master_output_device: None,
             sample_rate: sample_rate.max(1),
@@ -1240,7 +1255,7 @@ mod tests {
 
         // Export snapshot: in-process kind + carried state, regardless of the
         // live bridge setting.
-        let exported = build_engine_project_snapshot_for_export(&state, 48_000, None, None);
+        let exported = build_engine_project_snapshot_for_export(&state, 48_000, None, None, true, 0);
         let insert = exported
             .tracks
             .iter()

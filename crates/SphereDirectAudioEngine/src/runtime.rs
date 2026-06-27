@@ -157,6 +157,15 @@ impl RuntimeAutomationCurve {
             _ => Self::Linear,
         }
     }
+
+    #[inline]
+    pub fn to_tag(self) -> u8 {
+        match self {
+            Self::Linear => 0,
+            Self::Hold => 1,
+            Self::Smooth => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +220,8 @@ pub struct RuntimeAutomationPoint {
     pub beat: f64,
     pub value: f32,
     pub curve: RuntimeAutomationCurve,
+    /// Per-segment tension in `-1.0..=1.0` (see [`automation_curve_factor`]).
+    pub tension: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +269,7 @@ impl RuntimeAutomationLane {
                 beat: point.beat.max(0.0),
                 value: point.value.clamp(0.0, 1.0),
                 curve: RuntimeAutomationCurve::from_tag(point.curve),
+                tension: point.tension.clamp(-1.0, 1.0),
             })
             .collect();
         points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
@@ -3212,8 +3224,43 @@ fn build_clip_runtime(
     })
 }
 
+/// Shape factor for one automation segment — the single source of truth for
+/// curve math. Maps a normalized position `t` in `[0, 1]` between a segment's
+/// left point and right point to an eased interpolation factor in `[0, 1]`, so
+/// the value is `a.value + (b.value - a.value) * factor`. Realtime playback, the
+/// offline exporter, and the UI lane renderer all call this, so the heard curve,
+/// the bounced curve, and the drawn curve agree exactly (no visual-only curves).
+///
+/// `curve_tag`: `1` = Hold (stepped, holds the left value), `2` = Smooth
+/// (S-curve / smoothstep), anything else = Linear shaped by `tension`.
+/// `tension` in `[-1, 1]`: `0` = straight line; `> 0` eases in (exponential,
+/// slow start); `< 0` eases out (logarithmic, fast start).
+#[inline]
+pub fn automation_curve_factor(curve_tag: u8, tension: f32, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match curve_tag {
+        // Hold: stay at the left value for the whole segment (stepped).
+        1 => 0.0,
+        // Smooth: symmetric S-curve.
+        2 => t * t * (3.0 - 2.0 * t),
+        // Linear / curved: a power curve driven by tension.
+        _ => {
+            let k = tension.clamp(-1.0, 1.0);
+            if k.abs() < 1.0e-4 {
+                t
+            } else {
+                // exponent > 1 for k > 0 (ease-in), < 1 for k < 0 (ease-out);
+                // symmetric in log space, so +k and -k are mirror curves.
+                t.powf(2f32.powf(k * 2.5))
+            }
+        }
+    }
+}
+
 /// Evaluate a sorted automation point list without allocating. Empty lanes use
-/// `default`; before/after the authored range, the nearest point is held.
+/// `default`; before/after the authored range, the nearest point is held. The
+/// segment shape comes from the left point's curve/tension via
+/// [`automation_curve_factor`].
 pub fn evaluate_automation_points(
     points: &[RuntimeAutomationPoint],
     beat: f64,
@@ -3235,14 +3282,10 @@ pub fn evaluate_automation_points(
         let a = &points[i];
         let b = &points[i + 1];
         if beat >= a.beat && beat <= b.beat {
-            return match a.curve {
-                RuntimeAutomationCurve::Hold => a.value,
-                RuntimeAutomationCurve::Linear | RuntimeAutomationCurve::Smooth => {
-                    let span = (b.beat - a.beat).max(f64::EPSILON);
-                    let t = ((beat - a.beat) / span).clamp(0.0, 1.0) as f32;
-                    a.value + (b.value - a.value) * t
-                }
-            };
+            let span = (b.beat - a.beat).max(f64::EPSILON);
+            let t = ((beat - a.beat) / span).clamp(0.0, 1.0) as f32;
+            let factor = automation_curve_factor(a.curve.to_tag(), a.tension, t);
+            return a.value + (b.value - a.value) * factor;
         }
     }
     points[last].value
@@ -3497,11 +3540,13 @@ mod midi_tests {
                     beat: 4.0,
                     value: 2.0,
                     curve: 0,
+                    tension: 0.0,
                 },
                 crate::types::EngineAutomationPointSnapshot {
                     beat: -1.0,
                     value: -0.5,
                     curve: 1,
+                    tension: 0.0,
                 },
             ],
         });
@@ -3519,16 +3564,19 @@ mod midi_tests {
                 beat: 0.0,
                 value: 0.0,
                 curve: RuntimeAutomationCurve::Linear,
+                tension: 0.0,
             },
             RuntimeAutomationPoint {
                 beat: 4.0,
                 value: 1.0,
                 curve: RuntimeAutomationCurve::Hold,
+                tension: 0.0,
             },
             RuntimeAutomationPoint {
                 beat: 8.0,
                 value: 0.25,
                 curve: RuntimeAutomationCurve::Linear,
+                tension: 0.0,
             },
         ];
 
@@ -3536,6 +3584,68 @@ mod midi_tests {
         assert!((evaluate_automation_points(&points, 2.0, 0.5) - 0.5).abs() < 1e-6);
         assert!((evaluate_automation_points(&points, 6.0, 0.5) - 1.0).abs() < 1e-6);
         assert!((evaluate_automation_points(&points, 10.0, 0.5) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn automation_curve_factor_shapes_match_spec() {
+        // Linear (tension 0): identity.
+        assert!((automation_curve_factor(0, 0.0, 0.5) - 0.5).abs() < 1e-6);
+        // Hold: always 0 (value stays at the left point).
+        assert_eq!(automation_curve_factor(1, 0.0, 0.5), 0.0);
+        assert_eq!(automation_curve_factor(1, 0.0, 0.99), 0.0);
+        // Smooth S-curve: symmetric about the midpoint, passes through 0.5 at t=0.5.
+        assert!((automation_curve_factor(2, 0.0, 0.5) - 0.5).abs() < 1e-6);
+        let lo = automation_curve_factor(2, 0.0, 0.25);
+        let hi = automation_curve_factor(2, 0.0, 0.75);
+        assert!(lo < 0.25 && hi > 0.75, "smoothstep eases both ends");
+        assert!((lo + hi - 1.0).abs() < 1e-6, "smoothstep is symmetric");
+        // Positive tension eases in (below the linear line mid-segment); negative
+        // tension eases out (above it). They mirror around the linear line.
+        let ease_in = automation_curve_factor(0, 1.0, 0.5);
+        let ease_out = automation_curve_factor(0, -1.0, 0.5);
+        assert!(ease_in < 0.5, "positive tension is exponential/ease-in");
+        assert!(ease_out > 0.5, "negative tension is logarithmic/ease-out");
+        // +k and -k are reflections across the diagonal (inverse power curves):
+        // ease_out(ease_in(t)) == t.
+        let reflected = automation_curve_factor(0, -1.0, automation_curve_factor(0, 1.0, 0.3));
+        assert!((reflected - 0.3).abs() < 1e-5, "ease-in/out are mirror curves");
+        // Endpoints are always pinned regardless of shape/tension.
+        for tag in [0u8, 1, 2] {
+            for tension in [-1.0f32, -0.3, 0.0, 0.6, 1.0] {
+                assert_eq!(automation_curve_factor(tag, tension, 0.0), 0.0);
+                if tag != 1 {
+                    assert!((automation_curve_factor(tag, tension, 1.0) - 1.0).abs() < 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn automation_evaluator_applies_tension() {
+        // A single curved segment 0→1 over beats [0, 4]. With ease-in tension the
+        // mid-segment value sits below the linear midpoint; ease-out sits above.
+        let curved = |tension: f32| {
+            vec![
+                RuntimeAutomationPoint {
+                    beat: 0.0,
+                    value: 0.0,
+                    curve: RuntimeAutomationCurve::Linear,
+                    tension,
+                },
+                RuntimeAutomationPoint {
+                    beat: 4.0,
+                    value: 1.0,
+                    curve: RuntimeAutomationCurve::Linear,
+                    tension: 0.0,
+                },
+            ]
+        };
+        let mid_linear = evaluate_automation_points(&curved(0.0), 2.0, 0.0);
+        let mid_ease_in = evaluate_automation_points(&curved(1.0), 2.0, 0.0);
+        let mid_ease_out = evaluate_automation_points(&curved(-1.0), 2.0, 0.0);
+        assert!((mid_linear - 0.5).abs() < 1e-6);
+        assert!(mid_ease_in < mid_linear);
+        assert!(mid_ease_out > mid_linear);
     }
 
     #[test]
@@ -3552,6 +3662,7 @@ mod midi_tests {
                 beat: 0.0,
                 value: 0.25,
                 curve: 0,
+                tension: 0.0,
             }],
         });
         assert!(lane.evaluate_normalized(0.0).is_none());
@@ -3567,6 +3678,7 @@ mod midi_tests {
             beat: 0.0,
             value: 0.5,
             curve: RuntimeAutomationCurve::Linear,
+            tension: 0.0,
         };
         let lane = |id: &str, insert: &str, param: &str, enabled: bool, points: Vec<RuntimeAutomationPoint>| {
             RuntimeAutomationLane {

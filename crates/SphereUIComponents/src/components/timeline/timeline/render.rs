@@ -627,17 +627,29 @@ impl Render for Timeline {
                 >
         });
 
-        let on_automation_down =
-            cx.listener(|this, payload: &(String, String, f32, f32, bool), _window, cx| {
-                let (track_id, lane_id, beat, value, additive) = (
+        let on_automation_down = cx.listener(
+            |this, payload: &(String, String, f32, f32, bool, bool, u32), _window, cx| {
+                let (track_id, lane_id, beat, value, additive, alt, click_count) = (
                     payload.0.clone(),
                     payload.1.clone(),
                     payload.2,
                     payload.3,
                     payload.4,
+                    payload.5,
+                    payload.6,
                 );
-                this.begin_automation_interaction(&track_id, &lane_id, beat, value, additive, cx);
-            });
+                this.begin_automation_interaction(
+                    &track_id,
+                    &lane_id,
+                    beat,
+                    value,
+                    additive,
+                    alt,
+                    click_count >= 2,
+                    cx,
+                );
+            },
+        );
         let on_automation_down: crate::components::timeline::automation_lane::AutomationDownCallback =
             std::sync::Arc::new(on_automation_down);
 

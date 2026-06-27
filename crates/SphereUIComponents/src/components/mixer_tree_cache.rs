@@ -102,7 +102,12 @@ impl MixerTreeRenderCache {
         selected_id: Option<&str>,
     ) {
         let selected = selected_id.map(str::to_string);
-        if self.routing_gen != routing_gen
+        // `self.model.is_none()` forces the very first sync to build even when the
+        // routing version still matches the cache default (0 == 0) — i.e. the graph
+        // became ready without the version advancing past what this cache last saw.
+        // The spec's "if local version is missing or older, schedule one rebuild".
+        if self.model.is_none()
+            || self.routing_gen != routing_gen
             || self.output_channels != output_channels
             || self.show_only_selected_group != show_only
             || (show_only && self.selected_channel_id != selected)
@@ -206,6 +211,42 @@ fn visible_row_from_flat(row: MixerTreeRow) -> MixerTreeVisibleRow {
         visible_in_mixer: row.visible_in_mixer,
         pinned: row.pinned,
         selected: row.selected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{MixerTreeViewState, TrackState};
+
+    #[test]
+    fn first_sync_builds_model_then_only_rebuilds_on_version_change() {
+        let mut cache = MixerTreeRenderCache::default();
+        let view = MixerTreeViewState::default();
+        let tracks: Vec<TrackState> = Vec::new();
+
+        // First Studio open: the routing version still matches the cache default
+        // (0 == 0), but no model exists yet. This must still build (the first-open
+        // bug was that the equal versions skipped the build → blank sidebar).
+        cache.sync_routing_key(0, 2, "", false, None);
+        assert!(cache.dirty.routing, "first sync must mark routing dirty");
+        cache.recompute(&tracks, &view);
+        assert!(cache.model.is_some(), "tree model must build on first sync");
+        assert_eq!(cache.model_rebuild_count, 1);
+
+        // A no-op re-sync (the shape of a meter / fader repaint): nothing changed,
+        // so the tree must NOT rebuild.
+        cache.sync_routing_key(0, 2, "", false, None);
+        cache.recompute(&tracks, &view);
+        assert_eq!(
+            cache.model_rebuild_count, 1,
+            "no-op sync must not rebuild the tree"
+        );
+
+        // Routing graph advances (tracks ready / added / renamed): rebuild once.
+        cache.sync_routing_key(1, 2, "", false, None);
+        cache.recompute(&tracks, &view);
+        assert_eq!(cache.model_rebuild_count, 2);
     }
 }
 

@@ -250,6 +250,18 @@ pub struct EngineProjectSnapshot {
     /// runtime converts them to absolute project beats/samples at build time.
     #[serde(default)]
     pub midi_clips: Vec<EngineMidiClipSnapshot>,
+    /// Whether playback plug-in delay compensation (Global Latency Sync / PDC)
+    /// is active. Carried in the snapshot so the offline exporter consumes the
+    /// *same* latency-compensated graph as realtime playback instead of a
+    /// separate behavior (see `export::offline_renderer`). Defaults to `true`
+    /// (the engine default) for snapshots that predate the field.
+    #[serde(default = "default_true")]
+    pub pdc_enabled: bool,
+    /// Realtime latency-graph generation this snapshot was stamped against.
+    /// Set by the export snapshot builder from the live engine; used only for
+    /// export diagnostics (graph-version parity warning). `0` = unstamped.
+    #[serde(default)]
+    pub latency_graph_version: u64,
     pub routing: EngineRoutingSnapshot,
 }
 
@@ -387,9 +399,15 @@ pub struct EngineAutomationPointSnapshot {
     pub beat: f64,
     /// Normalized lane value in `0.0..=1.0`.
     pub value: f32,
-    /// 0 linear, 1 hold, 2 smooth placeholder.
+    /// 0 linear, 1 hold, 2 smooth (S-curve). Stored on the left point of a
+    /// segment; controls the shape toward the next point.
     #[serde(default)]
     pub curve: u8,
+    /// Per-segment curve tension in `-1.0..=1.0` for the linear/curved kind:
+    /// `0` = straight, `> 0` eases in (exponential), `< 0` eases out
+    /// (logarithmic). Defaulted so curve-less projects load as straight lines.
+    #[serde(default)]
+    pub tension: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

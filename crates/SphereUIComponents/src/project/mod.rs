@@ -317,6 +317,9 @@ pub struct AutomationPoint {
     /// tag. Persisted from project version 2 onward; defaults to Linear (0)
     /// when loading older files.
     pub curve: u8,
+    /// Per-segment curve tension in `-1.0..=1.0`. Persisted from project version
+    /// 21 onward; defaults to `0.0` (straight) for older files.
+    pub tension: f32,
 }
 
 /// Flattened automation target descriptor for persistence. `tag` matches
@@ -785,6 +788,7 @@ impl From<&TimelineState> for FutureboardProject {
                                 beat: p.beat,
                                 value: p.value,
                                 curve: p.curve.to_tag(),
+                                tension: p.tension,
                             })
                             .collect(),
                         visible: al.visible,
@@ -1099,13 +1103,17 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                     points: al
                         .points
                         .iter()
-                        .map(|p| TlAutoPoint::with_curve(
-                            p.beat,
-                            p.value,
-                            crate::components::timeline::timeline_state::AutomationCurve::from_tag(
-                                p.curve,
-                            ),
-                        ))
+                        .map(|p| {
+                            let mut point = TlAutoPoint::with_curve(
+                                p.beat,
+                                p.value,
+                                crate::components::timeline::timeline_state::AutomationCurve::from_tag(
+                                    p.curve,
+                                ),
+                            );
+                            point.set_tension(p.tension);
+                            point
+                        })
                         .collect(),
                 })
                 .collect();

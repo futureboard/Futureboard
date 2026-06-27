@@ -58,9 +58,13 @@ pub enum AutomationLaneAction {
     Hide,
 }
 
-/// Sub-lane mouse-down payload: `(track_id, lane_id, beat, value_norm, additive)`.
+/// Sub-lane mouse-down payload:
+/// `(track_id, lane_id, beat, value_norm, additive, alt, click_count)`.
+/// `alt` enables the curve-tension edit; `click_count` distinguishes a double
+/// click (Alt+double-click resets a segment to linear).
 pub type AutomationDownCallback = std::sync::Arc<
-    dyn Fn(&(String, String, f32, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static,
+    dyn Fn(&(String, String, f32, f32, bool, bool, u32), &mut gpui::Window, &mut gpui::App)
+        + 'static,
 >;
 
 /// Sub-lane header action payload: `(track_id, lane_id, action)`.
@@ -294,7 +298,13 @@ pub fn automation_lane(
                     let local_y = content_y - lane_y_abs;
                     let value = automation_y_to_value(local_y, lane_height);
                     let additive = event.modifiers.shift || event.modifiers.control;
-                    cb(&(tid.clone(), lid.clone(), beat, value, additive), window, cx);
+                    let alt = event.modifiers.alt;
+                    let click_count = event.click_count.max(1) as u32;
+                    cb(
+                        &(tid.clone(), lid.clone(), beat, value, additive, alt, click_count),
+                        window,
+                        cx,
+                    );
                 },
             )
     });

@@ -277,6 +277,9 @@ pub struct SharedState {
     pub device_lost: AtomicBool,
     /// Playback plugin delay compensation (Phase W). Settings → Playback.
     pub pdc_enabled: AtomicBool,
+    /// Monotonic generation of the latency-compensation graph (bumped on PDC
+    /// toggle). Stamped into the offline-export snapshot for graph-version parity.
+    pub latency_graph_version: AtomicU64,
 }
 
 impl Default for SharedState {
@@ -338,6 +341,7 @@ impl Default for SharedState {
             mmcss_active: AtomicBool::new(false),
             device_lost: AtomicBool::new(false),
             pdc_enabled: AtomicBool::new(true),
+            latency_graph_version: AtomicU64::new(1),
         }
     }
 }
@@ -550,7 +554,23 @@ impl EngineInner {
     }
 
     pub fn set_pdc_enabled(&self, enabled: bool) {
-        self.shared.pdc_enabled.store(enabled, Ordering::Relaxed);
+        let prev = self.shared.pdc_enabled.swap(enabled, Ordering::Relaxed);
+        if prev != enabled {
+            // Latency-compensated graph changed; bump the generation so offline
+            // export can stamp/compare the version it rendered against.
+            self.shared
+                .latency_graph_version
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Monotonic generation of the realtime latency-compensation graph. Bumped
+    /// whenever Global Latency Sync (PDC) is toggled. Stamped into the offline
+    /// export snapshot so the exporter can report/verify it rendered against the
+    /// same graph generation as realtime playback.
+    #[inline]
+    pub fn latency_graph_version(&self) -> u64 {
+        self.shared.latency_graph_version.load(Ordering::Relaxed)
     }
 
     /// Current transport play flag (set/cleared only by Start/StopTransport).
@@ -3734,11 +3754,13 @@ mod bridge_insert_tests {
                     beat: 0.0,
                     value: 0.0,
                     curve: crate::runtime::RuntimeAutomationCurve::Linear,
+                    tension: 0.0,
                 },
                 crate::runtime::RuntimeAutomationPoint {
                     beat: 4.0,
                     value: 1.0,
                     curve: crate::runtime::RuntimeAutomationCurve::Linear,
+                    tension: 0.0,
                 },
             ],
         }
@@ -4168,6 +4190,7 @@ mod routing_tests {
                 beat: 0.0,
                 value,
                 curve: RuntimeAutomationCurve::Linear,
+                tension: 0.0,
             }],
         }
     }

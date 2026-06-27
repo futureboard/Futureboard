@@ -594,6 +594,45 @@ impl StudioLayout {
         false
     }
 
+    /// Route keys into the Add Automation (parameter) picker's search field while
+    /// the overlay is open, so typing filters parameters instead of falling
+    /// through to global DAW shortcuts (Space=play, Backspace=delete clip, …).
+    /// Mirrors `handle_plugin_picker_text_input`; the overlay is an in-window
+    /// popover (`OpenPopover::AutomationTargetPicker`), not a separate window.
+    pub(super) fn handle_automation_picker_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(
+            self.overlay.open_popover,
+            Some(OpenPopover::AutomationTargetPicker { .. })
+        ) {
+            return false;
+        }
+        if event.is_held && !is_repeatable_edit_key(event) {
+            return true;
+        }
+        if event.keystroke.key.as_str() == "escape" {
+            self.overlay.open_popover = None;
+            cx.notify();
+            return true;
+        }
+        // Feed every editing key (incl. Space/Backspace/arrows) into the field and
+        // CONSUME it: while the overlay owns the keyboard, nothing should reach the
+        // global transport/edit shortcuts (Space=play, Backspace=delete clip, …).
+        if self.automation_picker_search_input.is_focused(window) || is_text_input_key(event) {
+            let _ = self
+                .automation_picker_search_input
+                .handle_key_with_clipboard(event, Some(cx));
+            self.sync_text_input_target(TextMenuTarget::AutomationPickerSearch);
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     pub(super) fn text_input_mut(&mut self, target: TextMenuTarget) -> &mut TextInputState {
         match target {
             TextMenuTarget::CommandPalette => &mut self.command_palette_input,
@@ -780,6 +819,10 @@ impl StudioLayout {
             || (self.project_switcher.is_open
                 && self.project_switcher_search_input.is_focused(window))
             || (self.plugin_picker.is_open && self.plugin_picker_search_input.is_focused(window))
+            || (matches!(
+                self.overlay.open_popover,
+                Some(OpenPopover::AutomationTargetPicker { .. })
+            ) && self.automation_picker_search_input.is_focused(window))
             || self.browser_search_input.is_focused(window)
             || self.inspector_name_edit.name_input.is_focused(window)
             || self.inspector_name_edit.clip_name_input.is_focused(window)

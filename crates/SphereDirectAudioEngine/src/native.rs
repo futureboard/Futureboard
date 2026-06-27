@@ -787,6 +787,10 @@ impl AudioEngine {
         self.inner.set_pdc_enabled(enabled);
     }
 
+    pub fn latency_graph_version(&self) -> u64 {
+        self.inner.latency_graph_version()
+    }
+
     /// Multi-LOD peak summary for any audio format supported by the
     /// engine's decoder. The Native UI's waveform pipeline calls this
     /// instead of running its own decoder, so the LOD ladder and decode

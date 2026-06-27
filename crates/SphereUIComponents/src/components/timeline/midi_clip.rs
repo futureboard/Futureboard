@@ -273,15 +273,10 @@ pub fn midi_clip(
                             Colors::text_secondary()
                         })
                         .child(clip.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(8.0))
-                        .ml_auto()
-                        .flex_none()
-                        .text_color(Colors::text_muted())
-                        .child(format!("{:.1} bt", clip.duration_beats)),
                 ),
+            // Clip length text intentionally not rendered on the clip body — the
+            // name (flex_1) fills the bar, so no gap remains. Duration stays in the
+            // model and the inspector; resize/trim handles are unaffected.
         )
         // Left/right edge resize handles (absolute, on top). Each starts a
         // typed `ClipResizeDrag`; `stop_propagation` keeps the body move-drag

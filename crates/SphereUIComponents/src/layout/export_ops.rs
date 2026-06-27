@@ -43,6 +43,14 @@ impl StudioLayout {
             .folder_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
+        // Global Latency Sync (PDC): stamp the live engine's compensation state +
+        // graph generation into the export snapshot so the offline render uses the
+        // exact same latency-compensated graph as realtime playback. Falls back to
+        // the Playback setting, then the engine default (on) when no engine is up.
+        let (pdc_enabled, latency_graph_version) = match self.audio_bridge.engine.as_ref() {
+            Some(engine) => (engine.pdc_enabled(), engine.latency_graph_version()),
+            None => (self.settings.read(cx).current.playback.latency_compensation, 0),
+        };
         // Export renders plugins in-process from the saved VST3 state captured by
         // refresh_bridge_plugin_states above — the isolated offline graph has no
         // out-of-process bridge host attached.
@@ -51,6 +59,8 @@ impl StudioLayout {
             sample_rate,
             project_root.as_deref(),
             None,
+            pdc_enabled,
+            latency_graph_version,
         );
         let master_volume = volume_norm_to_linear(tl_state.master.volume);
         let content_end_beat = snapshot

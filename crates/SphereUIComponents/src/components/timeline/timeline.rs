@@ -134,6 +134,10 @@ pub struct Timeline {
     erase_preview_ids: HashSet<String>,
     /// In-flight automation point move. Mutated live; committed once on release.
     automation_drag: Option<crate::components::timeline::timeline_state::AutomationPointDrag>,
+    /// In-flight automation curve-tension drag (Alt+drag on a segment). Mutated
+    /// live; committed once on release. Never moves the points themselves.
+    automation_curve_drag:
+        Option<crate::components::timeline::timeline_state::AutomationCurveDrag>,
     /// In-flight automation marquee (rubber-band) selection. UI-only.
     automation_marquee: Option<crate::components::timeline::timeline_state::AutomationMarquee>,
     /// Automation control-lane actions that need studio-level handling (picker,

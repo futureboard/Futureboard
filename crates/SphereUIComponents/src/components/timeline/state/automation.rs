@@ -20,6 +20,23 @@ pub struct AutomationPointDrag {
     pub moved: bool,
 }
 
+/// In-flight automation curve-tension drag. Shapes one segment by adjusting the
+/// tension stored on its left point; the automation points themselves never
+/// move. Started with Alt+drag on a segment line.
+#[derive(Debug, Clone)]
+pub struct AutomationCurveDrag {
+    pub track_id: String,
+    pub lane_id: String,
+    /// Left point of the segment being shaped (tension lives on the left point).
+    pub left_point_id: u64,
+    /// Tension captured at drag start, so the gesture is relative.
+    pub start_tension: f32,
+    /// Normalized value captured at drag start, for the vertical-delta mapping.
+    pub start_value: f32,
+    /// Set once tension actually changed, so a pure click never dirties.
+    pub changed: bool,
+}
+
 /// In-flight automation marquee (rubber-band) selection in beat/value space.
 #[derive(Debug, Clone)]
 pub struct AutomationMarquee {
@@ -207,6 +224,10 @@ pub struct AutomationPoint {
     /// Normalized value in `0.0..=1.0`.
     pub value: f32,
     pub curve: AutomationCurve,
+    /// Per-segment curve tension in `-1.0..=1.0` for the outgoing (rightward)
+    /// segment of this point: `0` = straight, `> 0` eases in (exponential),
+    /// `< 0` eases out (logarithmic). Adjusted by dragging the curve line.
+    pub tension: f32,
     /// UI-only selection flag. Never serialized.
     pub selected: bool,
 }
@@ -218,6 +239,7 @@ impl AutomationPoint {
             beat: beat.max(0.0),
             value: value.clamp(0.0, 1.0),
             curve: AutomationCurve::Linear,
+            tension: 0.0,
             selected: false,
         }
     }
@@ -226,6 +248,12 @@ impl AutomationPoint {
         let mut p = Self::new(beat, value);
         p.curve = curve;
         p
+    }
+
+    /// Clamp a tension delta into the safe range and store it on this point's
+    /// outgoing segment.
+    pub fn set_tension(&mut self, tension: f32) {
+        self.tension = tension.clamp(-1.0, 1.0);
     }
 }
 
@@ -287,9 +315,10 @@ pub fn automation_y_to_value(y: f32, lane_height: f32) -> f32 {
 /// Evaluate an automation curve at `beat`. `points` must be sorted ascending by
 /// beat. With no points the `default` value is returned; before the first point
 /// the first point's value is held; after the last point the last value is
-/// held. Between points the leading point's [`AutomationCurve`] decides the
-/// shape (`Hold` steps, everything else interpolates linearly — `Smooth` is a
-/// TODO and currently behaves as `Linear`).
+/// held. Between points the leading point's curve/tension decides the shape via
+/// the shared [`DirectAudio::automation_curve_factor`] — the exact same math the
+/// realtime engine and offline exporter use, so the drawn curve, the heard
+/// curve, and the bounced curve are identical.
 pub fn evaluate_automation(points: &[AutomationPoint], beat: f64, default: f32) -> f32 {
     if points.is_empty() {
         return default;
@@ -307,15 +336,10 @@ pub fn evaluate_automation(points: &[AutomationPoint], beat: f64, default: f32) 
         let a = &points[i];
         let b = &points[i + 1];
         if beat >= a.beat && beat <= b.beat {
-            return match a.curve {
-                AutomationCurve::Hold => a.value,
-                // Linear + Smooth (Smooth TODO) interpolate linearly for now.
-                _ => {
-                    let span = (b.beat - a.beat).max(1.0e-6);
-                    let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
-                    a.value + (b.value - a.value) * t
-                }
-            };
+            let span = (b.beat - a.beat).max(1.0e-6);
+            let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
+            let factor = DirectAudio::automation_curve_factor(a.curve.to_tag(), a.tension, t);
+            return a.value + (b.value - a.value) * factor;
         }
     }
     points[last].value
@@ -648,6 +672,98 @@ impl TimelineState {
                 p.curve = curve;
             }
         }
+    }
+
+    /// Find the automation segment under `(beat, value)` and return its LEFT
+    /// point id (tension lives on the left point). Matches only when the cursor
+    /// is within `value_tol` of the *curve line* at `beat` and is bracketed by
+    /// two points. Used to start an Alt curve-tension drag / reset. Pure query.
+    pub fn automation_segment_left_point_at(
+        &self,
+        track_id: &str,
+        lane_id: &str,
+        beat: f32,
+        value: f32,
+        value_tol: f32,
+    ) -> Option<u64> {
+        let lane = self.automation_lane(track_id, lane_id)?;
+        if lane.points.len() < 2 {
+            return None;
+        }
+        // `beat` must sit strictly inside the authored range — outside it the
+        // curve is a flat hold with no shapeable segment.
+        if beat <= lane.points[0].beat || beat >= lane.points[lane.points.len() - 1].beat {
+            return None;
+        }
+        let mut left: Option<&AutomationPoint> = None;
+        for p in &lane.points {
+            if p.beat <= beat {
+                left = Some(p);
+            } else {
+                break;
+            }
+        }
+        let a = left?;
+        let curve_v = evaluate_automation(&lane.points, beat as f64, lane.target.default_value());
+        ((curve_v - value).abs() <= value_tol).then_some(a.id)
+    }
+
+    /// Current tension of a segment's left point (captured at drag start).
+    pub fn automation_segment_tension(
+        &self,
+        track_id: &str,
+        lane_id: &str,
+        left_point_id: u64,
+    ) -> f32 {
+        self.automation_lane(track_id, lane_id)
+            .and_then(|l| l.points.iter().find(|p| p.id == left_point_id))
+            .map(|p| p.tension)
+            .unwrap_or(0.0)
+    }
+
+    /// Set a segment's tension (clamped to `-1.0..=1.0`), forcing the curved
+    /// (Linear) kind so the tension is visible/audible. Committed edit — the
+    /// caller dirties once on release.
+    pub fn set_automation_segment_tension(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+        left_point_id: u64,
+        tension: f32,
+    ) {
+        if let Some(lane) = self.lane_mut(track_id, lane_id) {
+            if let Some(p) = lane.points.iter_mut().find(|p| p.id == left_point_id) {
+                p.curve = AutomationCurve::Linear;
+                p.set_tension(tension);
+            }
+        }
+        let playhead = self.transport.playhead_beats;
+        self.recompute_effective_volumes(playhead, "curve_edit");
+    }
+
+    /// Reset a segment back to a straight line (Linear, tension 0). Committed
+    /// edit. Returns whether anything changed (so a no-op double-click is free).
+    pub fn reset_automation_segment_curve(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+        left_point_id: u64,
+    ) -> bool {
+        let mut changed = false;
+        if let Some(lane) = self.lane_mut(track_id, lane_id) {
+            if let Some(p) = lane.points.iter_mut().find(|p| p.id == left_point_id) {
+                if p.tension != 0.0 || p.curve != AutomationCurve::Linear {
+                    p.curve = AutomationCurve::Linear;
+                    p.tension = 0.0;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let playhead = self.transport.playhead_beats;
+            self.recompute_effective_volumes(playhead, "curve_reset");
+        }
+        changed
     }
 
     /// Select a single point (or add to the selection when `additive`). UI-only.

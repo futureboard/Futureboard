@@ -239,16 +239,10 @@ pub fn audio_clip(
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(Colors::accent_primary())
                         .child(label)
-                }))
-                .child(
-                    div()
-                        .text_size(px(8.0))
-                        .ml_auto()
-                        .flex_none()
-                        .text_color(Colors::text_muted())
-                        // display duration e.g. "8.0 bt"
-                        .child(format!("{:.1} bt", clip.duration_beats)),
-                ),
+                })),
+            // Clip length text intentionally not rendered on the clip body — the
+            // name (flex_1) fills the bar, so no gap remains. Duration stays in the
+            // model and the inspector; resize/trim handles are unaffected.
         )
         .children((fade_in_w > 1.0).then(|| {
             div()

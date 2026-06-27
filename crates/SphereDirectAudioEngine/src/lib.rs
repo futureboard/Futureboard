@@ -77,6 +77,9 @@ pub use crate::latency_graph::{
     apply_pdc_delay_block, plan_runtime_latency_graph, strip_plugin_latency_samples,
     RuntimeLatencyGraph,
 };
+/// Shared automation curve shaping — the UI lane renderer calls this so the drawn
+/// curve matches realtime playback and offline export exactly.
+pub use crate::runtime::automation_curve_factor;
 pub use crate::native::{
     AudioBackend, AudioDeviceId, AudioEngine, EngineConfig, EngineDebugSnapshot, EngineDeviceInfo,
     EngineInsertStatus, EngineStats, DEFAULT_BUFFER_SIZE, DEFAULT_SAMPLE_RATE,

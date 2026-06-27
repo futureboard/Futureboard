@@ -1211,6 +1211,7 @@ impl Render for StudioLayout {
                         || this.handle_settings_dialog_key(event, window, cx)
                         || this.handle_add_track_dialog_key(event, window, cx)
                         || this.handle_plugin_picker_key(event, window, cx)
+                        || this.handle_automation_picker_key(event, window, cx)
                         || this.handle_project_switcher_key(event, window, cx)
                         || this.handle_inspector_key(event, window, cx)
                         || this.handle_browser_key(event, window, cx);

@@ -32,7 +32,9 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v18 persists enabled VSTi output channels per insert.
 /// v19 persists the per-instrument VSTi multi-out mixer collapse flag.
 /// v20 persists mixer tree expanded/pinned/hidden channel state.
-pub const PROJECT_VERSION: u32 = 20;
+/// v21 persists per-automation-point curve tension. Pre-v21 points load with
+/// tension 0.0 (a straight segment), so older projects are unchanged.
+pub const PROJECT_VERSION: u32 = 21;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -470,6 +472,7 @@ fn encode_automation_lane(w: &mut FbWriter, lane: &AutomationLane) {
         w.write_f32(p.beat);
         w.write_f32(p.value);
         w.write_u8(p.curve); // v2
+        w.write_f32(p.tension); // v21
     }
 }
 
@@ -964,7 +967,13 @@ fn decode_automation_lane(r: &mut FbReader, version: u32) -> Result<AutomationLa
         let beat = r.read_f32()?;
         let value = r.read_f32()?;
         let curve = if version >= 2 { r.read_u8()? } else { 0 };
-        points.push(AutomationPoint { beat, value, curve });
+        let tension = if version >= 21 { r.read_f32()? } else { 0.0 };
+        points.push(AutomationPoint {
+            beat,
+            value,
+            curve,
+            tension,
+        });
     }
     Ok(AutomationLane {
         id,

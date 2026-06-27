@@ -832,6 +832,34 @@ impl StudioLayout {
         self.keyboard_text_capture_live(window)
     }
 
+    pub(super) fn focused_widget_kind(&self, window: &Window) -> String {
+        if self.command_palette.is_open && self.command_palette_input.is_focused(window) {
+            "command_palette".to_string()
+        } else if self.project_switcher.is_open
+            && self.project_switcher_search_input.is_focused(window)
+        {
+            "project_switcher_search".to_string()
+        } else if self.plugin_picker.is_open && self.plugin_picker_search_input.is_focused(window) {
+            "add_insert_search".to_string()
+        } else if matches!(
+            self.overlay.open_popover,
+            Some(OpenPopover::AutomationTargetPicker { .. })
+        ) && self.automation_picker_search_input.is_focused(window)
+        {
+            "automation_picker_search".to_string()
+        } else if self.browser_search_input.is_focused(window) {
+            "browser_search".to_string()
+        } else if self.inspector_name_edit.name_input.is_focused(window) {
+            "inspector_track_name".to_string()
+        } else if self.inspector_name_edit.clip_name_input.is_focused(window) {
+            "inspector_clip_name".to_string()
+        } else if self.focus_handle.is_focused(window) {
+            "studio_shortcut_anchor".to_string()
+        } else {
+            "unknown".to_string()
+        }
+    }
+
     pub(super) fn context_entries(
         &self,
         target: &ContextTarget,
@@ -1145,8 +1173,8 @@ impl StudioLayout {
                 let mut entries = vec![ContextMenuEntry::Header("Add Automation".to_string())];
 
                 let push_group = |entries: &mut Vec<ContextMenuEntry>,
-                                      header: &str,
-                                      targets: &[AutomationTarget]| {
+                                  header: &str,
+                                  targets: &[AutomationTarget]| {
                     if targets.is_empty() {
                         return;
                     }

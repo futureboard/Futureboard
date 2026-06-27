@@ -479,8 +479,11 @@ impl StudioLayout {
                     parameters,
                 }) => {
                     if ok {
-                        changed |=
-                            self.apply_bridge_insert_parameters(&plugin_instance_id, parameters, cx);
+                        changed |= self.apply_bridge_insert_parameters(
+                            &plugin_instance_id,
+                            parameters,
+                            cx,
+                        );
                     } else {
                         eprintln!(
                             "[plugin-bridge] event PluginParameters failed instance={plugin_instance_id}"
@@ -3173,9 +3176,11 @@ impl StudioLayout {
                 .state
                 .insert_owner_ids_containing(plugin_instance_id);
             track_ids.into_iter().any(|track_id| {
-                timeline
-                    .state
-                    .set_insert_parameters(&track_id, plugin_instance_id, ui_params.clone())
+                timeline.state.set_insert_parameters(
+                    &track_id,
+                    plugin_instance_id,
+                    ui_params.clone(),
+                )
             })
         })
     }

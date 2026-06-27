@@ -1255,7 +1255,8 @@ mod tests {
 
         // Export snapshot: in-process kind + carried state, regardless of the
         // live bridge setting.
-        let exported = build_engine_project_snapshot_for_export(&state, 48_000, None, None, true, 0);
+        let exported =
+            build_engine_project_snapshot_for_export(&state, 48_000, None, None, true, 0);
         let insert = exported
             .tracks
             .iter()

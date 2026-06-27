@@ -307,8 +307,7 @@ pub fn bottom_panel(
                     BottomTab::EffectEditor,
                     active_tab,
                     on_tab_click,
-                ))
-
+                )),
         )
         // Tab Content — must declare itself as a flex container so the
         // active panel can `size_full` into the remaining space below the

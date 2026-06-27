@@ -23,8 +23,16 @@ impl PianoRoll {
                     pitch = (n.pitch as i32 + dpitch).clamp(0, 127) as u8;
                 }
             }
-            PianoDrag::Resize { id, new_dur, .. } if *id == n.id => {
-                duration = *new_dur;
+            PianoDrag::Resize {
+                prev_durs,
+                delta_dur,
+                ..
+            } => {
+                if let Some((_, prev_duration)) =
+                    prev_durs.iter().find(|(note_id, _)| *note_id == n.id)
+                {
+                    duration = (*prev_duration + *delta_dur).max(MIN_NOTE_BEATS);
+                }
             }
             _ => {}
         }
@@ -962,6 +970,7 @@ impl PianoRoll {
         div()
             .flex_1()
             .min_h_0()
+            .relative()
             .flex()
             .flex_row()
             // Left: piano keys.
@@ -1062,7 +1071,52 @@ impl PianoRoll {
                     // Single unified controller lane (velocity / CC / etc).
                     .children(lane_body),
             )
+            .children(self.render_scrollbars(cx, clip_id))
             .child(note_inspector)
+    }
+
+    fn render_scrollbars(&self, cx: &Context<Self>, clip_id: &str) -> Vec<gpui::AnyElement> {
+        let (view_w, view_h) = self.grid_view_size();
+        let (_, clip_len) = self.clip_meta(cx, clip_id);
+        let max_x = (clip_len * self.ppb - view_w).max(0.0);
+        let max_y = self.max_scroll_y();
+        let mut bars = Vec::new();
+
+        if max_y > 0.5 {
+            let track_h = view_h.max(1.0);
+            let thumb_h = (track_h * (view_h / (view_h + max_y))).clamp(24.0, track_h);
+            let thumb_y = ((self.scroll_y / max_y) * (track_h - thumb_h)).clamp(0.0, track_h);
+            bars.push(
+                div()
+                    .absolute()
+                    .right(px(3.0))
+                    .top(px(RULER_H + thumb_y))
+                    .w(px(5.0))
+                    .h(px(thumb_h))
+                    .rounded(px(3.0))
+                    .bg(Colors::with_alpha(Colors::text_faint(), 0.42))
+                    .into_any_element(),
+            );
+        }
+
+        if max_x > 0.5 {
+            let track_w = view_w.max(1.0);
+            let thumb_w = (track_w * (view_w / (view_w + max_x))).clamp(32.0, track_w);
+            let thumb_x = ((self.scroll_x / max_x) * (track_w - thumb_w)).clamp(0.0, track_w);
+            bars.push(
+                div()
+                    .absolute()
+                    .left(px(key_lane_width() + thumb_x))
+                    .bottom(px(if self.lane_visible { LANE_H + 3.0 } else { 3.0 }))
+                    .w(px(thumb_w))
+                    .h(px(5.0))
+                    .rounded(px(3.0))
+                    .bg(Colors::with_alpha(Colors::text_faint(), 0.42))
+                    .into_any_element(),
+            );
+        }
+
+        bars
     }
 
     pub(super) fn render_note_inspector(

@@ -324,7 +324,8 @@ pub(crate) fn performance_section(
 
     let (status_text, status_color) = match (render_mode, detected_count) {
         (RenderMode::Auto, _) => (
-            "Auto — accelerated GPUI paint; experimental GPU layers stay off until verified.".to_string(),
+            "Auto — accelerated GPUI paint; experimental GPU layers stay off until verified."
+                .to_string(),
             Colors::text_secondary(),
         ),
         (RenderMode::CpuRender, _) => (

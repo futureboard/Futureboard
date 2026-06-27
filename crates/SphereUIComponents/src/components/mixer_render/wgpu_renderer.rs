@@ -6,7 +6,7 @@
 //! so the backend enum, feature gating, and fallback wiring have a real seam for a
 //! future texture-interop path. It performs no GPU work and reports unavailable.
 
-use super::renderer::{MixerRenderer, MixerRenderOutput};
+use super::renderer::{MixerRenderOutput, MixerRenderer};
 use super::snapshot::MixerRenderSnapshot;
 
 /// Placeholder offscreen frame handle. Carries nothing until texture interop

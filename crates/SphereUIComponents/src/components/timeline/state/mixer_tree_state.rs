@@ -62,11 +62,7 @@ impl MixerTreeViewState {
         self.hidden_channel_ids.clear();
     }
 
-    pub fn from_project_lists(
-        expanded: &[String],
-        pinned: &[String],
-        hidden: &[String],
-    ) -> Self {
+    pub fn from_project_lists(expanded: &[String], pinned: &[String], hidden: &[String]) -> Self {
         Self {
             expanded_node_ids: expanded.iter().cloned().collect(),
             pinned_channel_ids: pinned.iter().cloned().collect(),

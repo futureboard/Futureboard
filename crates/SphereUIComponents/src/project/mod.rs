@@ -997,11 +997,12 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
         .iter()
         .map(project_insert_to_timeline)
         .collect();
-    tl.mixer_tree = crate::components::timeline::timeline_state::MixerTreeViewState::from_project_lists(
-        &project.mixer.tree_expanded_node_ids,
-        &project.mixer.tree_pinned_channel_ids,
-        &project.mixer.tree_hidden_channel_ids,
-    );
+    tl.mixer_tree =
+        crate::components::timeline::timeline_state::MixerTreeViewState::from_project_lists(
+            &project.mixer.tree_expanded_node_ids,
+            &project.mixer.tree_pinned_channel_ids,
+            &project.mixer.tree_hidden_channel_ids,
+        );
 
     tl.tracks = project
         .tracks

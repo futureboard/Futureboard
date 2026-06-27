@@ -96,8 +96,7 @@ impl MixerPanelView {
                 &timeline.state.tracks,
             );
         let hidden = timeline.state.mixer_tree.hidden_channel_ids.clone();
-        let strip_count =
-            mixer_render_item_count(&timeline.state.tracks, &collapsed, &hidden);
+        let strip_count = mixer_render_item_count(&timeline.state.tracks, &collapsed, &hidden);
 
         MixerPanelViewState {
             tracks: timeline.state.tracks.clone(),
@@ -158,7 +157,10 @@ impl Render for MixerPanelView {
         crate::perf::count("mixer_root_paint_count", 1);
 
         let owner_entity = self.owner.clone();
-        let callbacks = self.owner.read(cx).build_mixer_callbacks(owner_entity.clone());
+        let callbacks = self
+            .owner
+            .read(cx)
+            .build_mixer_callbacks(owner_entity.clone());
         let split = build_mixer_split(&self.owner, cx);
         let state = self.read_view_state(cx);
 
@@ -169,11 +171,7 @@ impl Render for MixerPanelView {
         }
 
         let _ = self.master_strip.update(cx, |master, _cx| {
-            master.sync_props(
-                callbacks.clone(),
-                split.clone(),
-                state.strip_available_px,
-            );
+            master.sync_props(callbacks.clone(), split.clone(), state.strip_available_px);
         });
 
         let panel_entity = cx.entity();
@@ -188,7 +186,10 @@ impl Render for MixerPanelView {
                 .flex_row()
                 .flex_1()
                 .min_h_0()
-                .child(mixer_center_lightweight(state.viewport_width, state.strip_available_px))
+                .child(mixer_center_lightweight(
+                    state.viewport_width,
+                    state.strip_available_px,
+                ))
                 .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
                 .child(self.master_strip.clone())
         } else {

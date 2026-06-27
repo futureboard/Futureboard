@@ -412,10 +412,11 @@ impl StudioLayout {
         AutomationTarget::PluginParameter {
             insert_id: insert_id.clone(),
             parameter_id: parameter_id.clone(),
-            parameter_name: crate::components::timeline::timeline_state::plugin_automation_display_name(
-                &insert.display_name,
-                &param.name,
-            ),
+            parameter_name:
+                crate::components::timeline::timeline_state::plugin_automation_display_name(
+                    &insert.display_name,
+                    &param.name,
+                ),
         }
     }
 
@@ -447,13 +448,12 @@ impl StudioLayout {
                 self.automation_picker_search_input
                     .focus_handle
                     .focus(window, cx);
-                self.overlay.open_popover = Some(
-                    super::studio_state::OpenPopover::AutomationTargetPicker {
+                self.overlay.open_popover =
+                    Some(super::studio_state::OpenPopover::AutomationTargetPicker {
                         track_id: track_id.to_string(),
                         x,
                         y,
-                    },
-                );
+                    });
                 cx.notify();
             }
             AutomationControlAction::HideAutomation => {
@@ -471,9 +471,12 @@ impl StudioLayout {
                 }
             }
             AutomationControlAction::AddLastTouched => {
-                let target = self.timeline.read(cx).state.last_touched_plugin_param_for_track(
-                    track_id,
-                ).map(|p| p.automation_target());
+                let target = self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .last_touched_plugin_param_for_track(track_id)
+                    .map(|p| p.automation_target());
                 if let Some(target) = target {
                     self.add_automation_target_for_track(track_id, target, cx);
                 }
@@ -537,9 +540,7 @@ impl StudioLayout {
             }
             let _ = owner.update(cx, |this, cx| {
                 let removed = this.timeline.update(cx, |timeline, _cx| {
-                    timeline
-                        .state
-                        .clear_all_automation_lanes(&track_id)
+                    timeline.state.clear_all_automation_lanes(&track_id)
                 });
                 if removed > 0 {
                     this.mark_dirty();

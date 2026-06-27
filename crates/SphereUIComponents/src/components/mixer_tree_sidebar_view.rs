@@ -87,12 +87,7 @@ impl MixerTreeSidebar {
         self.on_resize_end = on_resize_end;
     }
 
-    pub fn sync_chrome(
-        &mut self,
-        collapsed: bool,
-        width_px: f32,
-        show_only_selected_group: bool,
-    ) {
+    pub fn sync_chrome(&mut self, collapsed: bool, width_px: f32, show_only_selected_group: bool) {
         self.collapsed = collapsed;
         self.width_px = width_px;
         if self.show_only_selected_group != show_only_selected_group {
@@ -288,24 +283,20 @@ impl Render for MixerTreeSidebar {
 
         let cbs = callbacks.clone();
         let sidebar_entity = cx.entity().clone();
-        let list = uniform_list(
-            "mixer-tree-list",
-            row_count,
-            move |range, _window, _cx| {
-                range
-                    .map(|i| {
-                        tree_row_element(
-                            &rows[i],
-                            cbs.clone(),
-                            i,
-                            hovered == Some(i),
-                            sidebar_entity.clone(),
-                        )
-                        .into_any_element()
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
+        let list = uniform_list("mixer-tree-list", row_count, move |range, _window, _cx| {
+            range
+                .map(|i| {
+                    tree_row_element(
+                        &rows[i],
+                        cbs.clone(),
+                        i,
+                        hovered == Some(i),
+                        sidebar_entity.clone(),
+                    )
+                    .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        })
         .track_scroll(&scroll)
         .size_full()
         .bg(TREE_PANEL_BG());
@@ -416,7 +407,11 @@ fn tree_row_element(
         .text_size(px(9.0))
         .text_color(Colors::text_muted())
         .child(if row.has_children {
-            if row.expanded { "▾" } else { "▸" }
+            if row.expanded {
+                "▾"
+            } else {
+                "▸"
+            }
         } else {
             ""
         });
@@ -452,13 +447,17 @@ fn tree_row_element(
                 });
             }
         })
-        .when(hovered && !row.selected, |el| el.bg(Colors::surface_hover()))
+        .when(hovered && !row.selected, |el| {
+            el.bg(Colors::surface_hover())
+        })
         .when(row.selected, |el| {
             el.bg(Colors::accent_soft())
                 .border_l(px(2.0))
                 .border_color(Colors::accent_primary())
         })
-        .when(!row.selected, |el| el.border_l(px(2.0)).border_color(accent))
+        .when(!row.selected, |el| {
+            el.border_l(px(2.0)).border_color(accent)
+        })
         .child(disclosure)
         .when_some(row.track_color, |el, color| {
             el.child(

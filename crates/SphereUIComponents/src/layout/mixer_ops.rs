@@ -12,10 +12,12 @@ use crate::components::mixer_tree_model::{
     ensure_timeline_mixer_tree_defaults, expand_ancestors_for_channel, MixerTreeModel,
 };
 use crate::components::mixer_tree_sidebar::{
-    clamp_mixer_tree_sidebar_width, MixerTreeCallbacks, MIXER_TREE_SIDEBAR_DEFAULT_WIDTH,
-    MIXER_TREE_COLLAPSED_RAIL_WIDTH,
+    clamp_mixer_tree_sidebar_width, MixerTreeCallbacks, MIXER_TREE_COLLAPSED_RAIL_WIDTH,
+    MIXER_TREE_SIDEBAR_DEFAULT_WIDTH,
 };
-use crate::components::timeline::timeline_state::{self, collapsed_vsti_output_group_keys_from_tracks, TrackState};
+use crate::components::timeline::timeline_state::{
+    self, collapsed_vsti_output_group_keys_from_tracks, TrackState,
+};
 use crate::components::{external_mixer_debug, external_mixer_debug_enabled, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
@@ -125,8 +127,7 @@ impl StudioLayout {
             .map(|b| f32::from(b.size.width))
             .unwrap_or(1280.0);
         let mixer_viewport_width = (window_w - tree_w - 90.0).max(100.0);
-        let mixer_viewport_height =
-            (self.bottom_panel_state.height_px - 28.0 - 30.0).max(0.0);
+        let mixer_viewport_height = (self.bottom_panel_state.height_px - 28.0 - 30.0).max(0.0);
         let strip_available_px = mixer_viewport_height.max(STRIP_WIDTH);
         let _ = cx;
         (
@@ -152,10 +153,9 @@ impl StudioLayout {
     /// Meter-only UI refresh — isolated regions, never the StudioLayout root.
     pub(crate) fn notify_mixer_meter_regions(&mut self, cx: &mut Context<Self>) {
         let timeline = self.timeline.read(cx);
-        let master_sig =
-            crate::components::mixer_master_strip_view::mixer_master_meter_signature(
-                &timeline.state.master,
-            );
+        let master_sig = crate::components::mixer_master_strip_view::mixer_master_meter_signature(
+            &timeline.state.master,
+        );
         let channel_sig = mixer_channel_meter_signature(&timeline.state.tracks);
         let sig = master_sig ^ channel_sig.rotate_left(17);
         if sig == self.engine_sync.last_meter_notify_sig {
@@ -167,7 +167,9 @@ impl StudioLayout {
         let _ = self.timeline.update(cx, |_, cx| cx.notify());
 
         if self.mixer_panel_chrome_visible() {
-            let _ = self.mixer_panel.update(cx, |panel, cx| panel.on_meter_tick(cx));
+            let _ = self
+                .mixer_panel
+                .update(cx, |panel, cx| panel.on_meter_tick(cx));
             if self.external_windows.mixer.is_some() {
                 self.push_mixer_snapshot_to_window(cx);
             }
@@ -357,7 +359,11 @@ impl StudioLayout {
             .clone()
     }
 
-    pub(crate) fn ensure_mixer_tree_ui_hooks(&mut self, owner: Entity<Self>, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_mixer_tree_ui_hooks(
+        &mut self,
+        owner: Entity<Self>,
+        cx: &mut Context<Self>,
+    ) {
         if self.mixer_tree_ui_hooks.is_some() {
             return;
         }
@@ -420,11 +426,21 @@ impl StudioLayout {
         )
     }
 
-    pub(crate) fn mixer_focus_channel(&mut self, channel_id: &str, viewport_width: f32, cx: &mut Context<Self>) {
-        let collapsed = collapsed_vsti_output_group_keys_from_tracks(
-            &self.timeline.read(cx).state.tracks,
-        );
-        let hidden = self.timeline.read(cx).state.mixer_tree.hidden_channel_ids.clone();
+    pub(crate) fn mixer_focus_channel(
+        &mut self,
+        channel_id: &str,
+        viewport_width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let collapsed =
+            collapsed_vsti_output_group_keys_from_tracks(&self.timeline.read(cx).state.tracks);
+        let hidden = self
+            .timeline
+            .read(cx)
+            .state
+            .mixer_tree
+            .hidden_channel_ids
+            .clone();
         let tracks = self.timeline.read(cx).state.tracks.clone();
         if let Some(index) = mixer_strip_index_for_channel(&tracks, &collapsed, &hidden, channel_id)
         {
@@ -449,7 +465,10 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         self.timeline.update(cx, |timeline, _cx| {
-            timeline.state.mixer_tree.toggle_channel_visibility(channel_id);
+            timeline
+                .state
+                .mixer_tree
+                .toggle_channel_visibility(channel_id);
         });
         self.mark_dirty_view_only();
         self.push_mixer_snapshot_to_window(cx);
@@ -527,7 +546,8 @@ impl StudioLayout {
             return;
         }
         let delta = x - self.mixer_view.tree_resize_start_x;
-        let new_w = clamp_mixer_tree_sidebar_width(self.mixer_view.tree_resize_start_width_px + delta);
+        let new_w =
+            clamp_mixer_tree_sidebar_width(self.mixer_view.tree_resize_start_width_px + delta);
         if (new_w - self.mixer_view.tree_sidebar_width_px).abs() > 0.25 {
             self.mixer_view.tree_sidebar_width_px = new_w;
             self.refresh_mixer_tree_sidebar_entity(cx);
@@ -607,14 +627,13 @@ impl StudioLayout {
         });
 
         let owner_pin = owner.clone();
-        let on_toggle_pin: std::sync::Arc<
-            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
-        > = std::sync::Arc::new(move |id: &String, _w, cx| {
-            let id = id.clone();
-            StudioLayout::defer_update(&owner_pin, cx, move |layout, cx| {
-                layout.mixer_pin_channel(&id, cx);
+        let on_toggle_pin: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |id: &String, _w, cx| {
+                let id = id.clone();
+                StudioLayout::defer_update(&owner_pin, cx, move |layout, cx| {
+                    layout.mixer_pin_channel(&id, cx);
+                });
             });
-        });
 
         let owner_collapse = owner.clone();
         let on_collapse_all: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
@@ -643,20 +662,18 @@ impl StudioLayout {
         let owner_reset = owner.clone();
         let on_reset_visibility: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |_w, cx| {
-                let _ = owner_reset.update(cx, |layout, cx| {
-                    layout.mixer_reset_tree_visibility(cx)
-                });
+                let _ = owner_reset.update(cx, |layout, cx| layout.mixer_reset_tree_visibility(cx));
             });
 
         let owner_toggle_sidebar = owner.clone();
         let on_toggle_sidebar: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |_w, cx| {
-            let _ = owner_toggle_sidebar.update(cx, |layout, cx| {
-                layout.mixer_view.tree_sidebar_collapsed =
-                    !layout.mixer_view.tree_sidebar_collapsed;
-                layout.refresh_mixer_tree_sidebar_entity(cx);
-                cx.notify();
-            });
+                let _ = owner_toggle_sidebar.update(cx, |layout, cx| {
+                    layout.mixer_view.tree_sidebar_collapsed =
+                        !layout.mixer_view.tree_sidebar_collapsed;
+                    layout.refresh_mixer_tree_sidebar_entity(cx);
+                    cx.notify();
+                });
             });
 
         MixerTreeCallbacks {
@@ -822,8 +839,7 @@ impl StudioLayout {
         if self.external_windows.mixer.is_some() {
             return true;
         }
-        self.panels.mixer_docked
-            && self.active_bottom_tab == crate::components::BottomTab::Mixer
+        self.panels.mixer_docked && self.active_bottom_tab == crate::components::BottomTab::Mixer
     }
 
     /// Build the callback bundle used by the mixer. Every mutation lands in
@@ -1324,6 +1340,50 @@ impl StudioLayout {
                 });
             })
         };
+        let on_reorder_send: std::sync::Arc<
+            dyn Fn(&(String, String, usize), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(
+                move |(track_id, send_id, insertion_index): &(String, String, usize), _w, cx| {
+                    let track_id = track_id.clone();
+                    let send_id = send_id.clone();
+                    let insertion_index = *insertion_index;
+                    StudioLayout::defer_update(&this, cx, move |this, cx| {
+                        let changed = this.timeline.update(cx, |timeline, cx| {
+                            let before = timeline.state.send_order(&track_id);
+                            let after = timeline_state::TimelineState::reordered_send_ids(
+                                &before,
+                                &send_id,
+                                insertion_index,
+                            );
+                            if before == after {
+                                return false;
+                            }
+                            timeline.run_edit_command(
+                                EditCommand::ReorderSendSlot {
+                                    track_id: track_id.clone(),
+                                    before_order: before,
+                                    after_order: after,
+                                },
+                                cx,
+                            );
+                            true
+                        });
+                        if changed {
+                            this.mark_dirty();
+                            // Send order is modeled in session routing. The engine
+                            // snapshot dedup guard skips load_project when the graph
+                            // is effectively unchanged.
+                            this.audio_bridge.project_dirty = true;
+                            this.schedule_audio_project_sync(cx, true, "mixer_reorder_send");
+                            this.push_mixer_snapshot_to_window(cx);
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+        };
 
         MixerCallbacks {
             on_select_track,
@@ -1344,6 +1404,7 @@ impl StudioLayout {
             on_open_insert_editor,
             on_add_send,
             on_remove_send,
+            on_reorder_send,
         }
     }
 }

@@ -310,12 +310,17 @@ enum PianoDrag {
         grab_pitch: u8,
         clone_on_commit: bool,
     },
-    /// Resize a single note from its right edge (also used to drag-extend a
-    /// freshly drawn note). `new_dur` is the live length.
+    /// Resize notes from a right-edge handle. If the grabbed note is part of a
+    /// multi-selection, every selected note receives the same duration delta.
+    /// `prev_durs` snapshots each affected note so live geometry and undo stay
+    /// coherent without writing timeline state on mouse move.
     Resize {
         id: u64,
+        ids: Vec<u64>,
         start_x: f32,
         prev_dur: f32,
+        prev_durs: Vec<(u64, f32)>,
+        delta_dur: f32,
         new_dur: f32,
     },
     /// Drag a velocity bar. When the grabbed note is part of a multi-selection,
@@ -1558,22 +1563,40 @@ impl PianoRoll {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        self.selection = HashSet::from([id]);
+        let multi = self.selection.len() > 1 && self.selection.contains(&id);
+        if !multi {
+            self.selection = HashSet::from([id]);
+        }
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        let prev_dur = self
+        let selected = self.selection.clone();
+        let prev_durs: Vec<(u64, f32)> = self
             .timeline
             .read(cx)
             .state
             .midi_clip_notes(&clip_id)
-            .and_then(|notes| notes.iter().find(|n| n.id == id))
-            .map(|n| n.duration)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| selected.contains(&n.id))
+                    .map(|n| (n.id, n.duration))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let prev_dur = prev_durs
+            .iter()
+            .find(|(note_id, _)| *note_id == id)
+            .map(|(_, duration)| *duration)
             .unwrap_or_else(|| self.step_beats());
+        let ids: Vec<u64> = prev_durs.iter().map(|(note_id, _)| *note_id).collect();
         self.drag = PianoDrag::Resize {
             id,
+            ids,
             start_x: event.position.x.into(),
             prev_dur,
+            prev_durs,
+            delta_dur: 0.0,
             new_dur: prev_dur,
         };
         cx.notify();
@@ -1880,6 +1903,7 @@ impl PianoRoll {
             PianoDrag::Resize {
                 start_x,
                 prev_dur,
+                delta_dur,
                 new_dur,
                 ..
             } => {
@@ -1890,6 +1914,7 @@ impl PianoRoll {
                     let step = self.grid_res.beats();
                     d = ((d / step).round() * step).max(MIN_NOTE_BEATS);
                 }
+                *delta_dur = d - *prev_dur;
                 *new_dur = d;
                 cx.notify();
             }
@@ -2081,15 +2106,22 @@ impl PianoRoll {
             }
             PianoDrag::Resize {
                 id,
+                ids,
                 new_dur,
                 prev_dur,
+                prev_durs,
+                delta_dur,
                 ..
             } => {
                 if (new_dur - prev_dur).abs() < 0.0001 {
                     return;
                 }
-                self.commit_note_transform(cx, &[id], move |state, cid| {
-                    state.resize_midi_note(cid, id, new_dur)
+                let target_ids = if ids.is_empty() { vec![id] } else { ids };
+                self.commit_note_transform(cx, &target_ids, move |state, cid| {
+                    for (note_id, duration) in prev_durs {
+                        let next = (duration + delta_dur).max(MIN_NOTE_BEATS);
+                        state.resize_midi_note(cid, note_id, next);
+                    }
                 });
             }
             PianoDrag::Velocity { prev: orig, .. } => {
@@ -2127,11 +2159,11 @@ impl PianoRoll {
         match key {
             "up" if !ctrl && !self.selection.is_empty() => {
                 cx.stop_propagation();
-                self.transpose_selection(1, cx);
+                self.transpose_selection(if shift { 12 } else { 1 }, cx);
             }
             "down" if !ctrl && !self.selection.is_empty() => {
                 cx.stop_propagation();
-                self.transpose_selection(-1, cx);
+                self.transpose_selection(if shift { -12 } else { -1 }, cx);
             }
             "delete" | "backspace" if !self.selection.is_empty() => {
                 cx.stop_propagation();

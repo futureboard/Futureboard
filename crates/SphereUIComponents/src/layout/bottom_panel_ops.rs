@@ -160,9 +160,7 @@ impl StudioLayout {
         self.overlay.perf_metrics_popover_open
     }
 
-    pub(crate) fn status_bar_background_tasks(
-        &self,
-    ) -> &crate::components::BackgroundTaskStore {
+    pub(crate) fn status_bar_background_tasks(&self) -> &crate::components::BackgroundTaskStore {
         &self.background_tasks
     }
 

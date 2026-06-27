@@ -49,7 +49,10 @@ impl StudioLayout {
         // the Playback setting, then the engine default (on) when no engine is up.
         let (pdc_enabled, latency_graph_version) = match self.audio_bridge.engine.as_ref() {
             Some(engine) => (engine.pdc_enabled(), engine.latency_graph_version()),
-            None => (self.settings.read(cx).current.playback.latency_compensation, 0),
+            None => (
+                self.settings.read(cx).current.playback.latency_compensation,
+                0,
+            ),
         };
         // Export renders plugins in-process from the saved VST3 state captured by
         // refresh_bridge_plugin_states above — the isolated offline graph has no

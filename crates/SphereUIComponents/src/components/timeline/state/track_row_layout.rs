@@ -109,7 +109,10 @@ impl TrackRowLayout {
             let (height, automation_height) = if is_vsti_output_child_track_id(&track.id) {
                 (0.0, 0.0)
             } else {
-                (state.track_row_height(track), state.track_automation_height(track))
+                (
+                    state.track_row_height(track),
+                    state.track_automation_height(track),
+                )
             };
             rows.push(TrackRowLayoutEntry {
                 track_id: track.id.clone(),
@@ -297,11 +300,7 @@ impl TimelineState {
     /// `None` when the lane is not currently shown. Used by both the renderer
     /// (to place the row) and the interaction code (to map a window-y back to a
     /// normalized value within the correct sub-lane).
-    pub fn automation_sublane_geometry(
-        &self,
-        track_id: &str,
-        lane_id: &str,
-    ) -> Option<(f32, f32)> {
+    pub fn automation_sublane_geometry(&self, track_id: &str, lane_id: &str) -> Option<(f32, f32)> {
         let layout = self.track_row_layout();
         let row = layout.row_for_track(track_id)?;
         let track = self.find_track(track_id)?;

@@ -39,6 +39,14 @@ pub fn compute_filter_result(
 ) -> FilterResult {
     let plugins = index.plugins();
     let q = query.trim().to_ascii_lowercase();
+    let vendor_filter = filters
+        .vendor
+        .as_ref()
+        .map(|vendor| vendor.to_ascii_lowercase());
+    let category_filter = filters
+        .category
+        .as_ref()
+        .map(|category| category.to_ascii_lowercase());
 
     let mut counts = FilterCounts::default();
     let mut vendor_set = BTreeSet::new();
@@ -50,7 +58,7 @@ pub fn compute_filter_result(
         if !plugin.vendor.is_empty() {
             vendor_set.insert(plugin.vendor.clone());
         }
-        category_set.insert(normalized_category_label(plugin));
+        category_set.insert(index.category(idx).to_string());
 
         if !matches_sidebar(&filters.sidebar, plugin, prefs, debug_mode) {
             continue;
@@ -60,13 +68,13 @@ pub fn compute_filter_result(
                 continue;
             }
         }
-        if let Some(vendor) = &filters.vendor {
-            if !plugin.vendor.eq_ignore_ascii_case(vendor) {
+        if let Some(vendor) = vendor_filter.as_deref() {
+            if index.vendor_lower(idx) != vendor {
                 continue;
             }
         }
-        if let Some(category) = &filters.category {
-            if !normalized_category_label(plugin).eq_ignore_ascii_case(category) {
+        if let Some(category) = category_filter.as_deref() {
+            if index.category_lower(idx) != category {
                 continue;
             }
         }

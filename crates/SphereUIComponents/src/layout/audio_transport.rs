@@ -778,20 +778,18 @@ impl StudioLayout {
         let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return false;
         };
-        // Throttle meter polling to `PowerMode::meter_update_hz`. The audio
-        // poll fires at 60 Hz; on low-end GPUs that's too many meter writes
-        // and the resulting notify cascade is what drove FPS drops.
-        let power = crate::perf::power_mode();
-        // Cap meters to the slower of: the PowerMode rate (60/30/15) and the
-        // frame scheduler's meter rate (≤60 Hz). On a high-refresh DisplaySync
-        // monitor this keeps VU updates at 60 Hz instead of the full refresh;
-        // BatterySaver naturally slows them further.
-        let min_interval = Duration::from_secs_f32(1.0 / power.meter_update_hz().max(1.0))
-            .max(self.frame_scheduler.meter_min_interval());
-        if self.engine_sync.meter_applied_at.elapsed() < min_interval {
+        // Meter reads are lightweight snapshot pulls; render cadence comes from
+        // the frame scheduler so 120/144 Hz displays do not step at a fixed low
+        // FPS. Ballistics below use the actual elapsed time, so throttling or
+        // brief stalls do not change the apparent attack/release speed.
+        let min_interval = self.frame_scheduler.meter_min_interval();
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.engine_sync.meter_applied_at);
+        if elapsed < min_interval {
             return false;
         }
-        self.engine_sync.meter_applied_at = Instant::now();
+        self.engine_sync.meter_applied_at = now;
+        let meter_dt = elapsed.as_secs_f32().clamp(1.0 / 240.0, 0.1);
         let meters = engine.meters();
         let plugin_output_meters = meters.plugin_outputs.clone();
         if crate::forensic_trace::forensic_trace_enabled() {
@@ -840,10 +838,18 @@ impl StudioLayout {
                             track_meter.rms_r
                         );
                     }
-                    changed |= smooth_meter_value(&mut track.meter_level_l, next_l);
-                    changed |= smooth_meter_value(&mut track.meter_level_r, next_r);
-                    update_meter_hold(&mut track.meter_peak_hold_l, track.meter_level_l);
-                    update_meter_hold(&mut track.meter_peak_hold_r, track.meter_level_r);
+                    changed |= smooth_meter_value(&mut track.meter_level_l, next_l, meter_dt);
+                    changed |= smooth_meter_value(&mut track.meter_level_r, next_r, meter_dt);
+                    update_meter_hold(
+                        &mut track.meter_peak_hold_l,
+                        track.meter_level_l,
+                        meter_dt,
+                    );
+                    update_meter_hold(
+                        &mut track.meter_peak_hold_r,
+                        track.meter_level_r,
+                        meter_dt,
+                    );
                     update_meter_clip(
                         &mut track.meter_clip,
                         track_meter.peak_l,
@@ -856,13 +862,15 @@ impl StudioLayout {
             changed |= smooth_meter_value(
                 &mut master.meter_level_l,
                 meters.master_peak_l.clamp(0.0, 1.0) as f32,
+                meter_dt,
             );
             changed |= smooth_meter_value(
                 &mut master.meter_level_r,
                 meters.master_peak_r.clamp(0.0, 1.0) as f32,
+                meter_dt,
             );
-            update_meter_hold(&mut master.meter_peak_hold_l, master.meter_level_l);
-            update_meter_hold(&mut master.meter_peak_hold_r, master.meter_level_r);
+            update_meter_hold(&mut master.meter_peak_hold_l, master.meter_level_l, meter_dt);
+            update_meter_hold(&mut master.meter_peak_hold_r, master.meter_level_r, meter_dt);
             update_meter_clip(
                 &mut master.meter_clip,
                 meters.master_peak_l,
@@ -898,8 +906,8 @@ impl StudioLayout {
                     meter.peak
                 );
             }
-            changed |= smooth_meter_value(&mut entry.level, next);
-            update_meter_hold(&mut entry.peak_hold, entry.level);
+            changed |= smooth_meter_value(&mut entry.level, next, meter_dt);
+            update_meter_hold(&mut entry.peak_hold, entry.level, meter_dt);
             update_meter_clip(&mut entry.clip, meter.peak, meter.peak, entry.peak_hold);
         }
         self.mixer_view.vsti_output_meters.retain(|key, meter| {
@@ -907,8 +915,8 @@ impl StudioLayout {
                 return true;
             }
             let mut keep = false;
-            changed |= smooth_meter_value(&mut meter.level, 0.0);
-            update_meter_hold(&mut meter.peak_hold, meter.level);
+            changed |= smooth_meter_value(&mut meter.level, 0.0, meter_dt);
+            update_meter_hold(&mut meter.peak_hold, meter.level, meter_dt);
             update_meter_clip(&mut meter.clip, 0.0, 0.0, meter.peak_hold);
             if meter.level > 0.0 || meter.peak_hold > 0.0 || meter.clip {
                 keep = true;
@@ -1034,8 +1042,7 @@ impl StudioLayout {
         // forced sync retries it, so a failing load cannot spin the resync loop.
         if !force
             && ((self.audio_bridge.graph_fingerprint == Some(fingerprint)
-                && self.audio_bridge.last_project_signature.as_deref()
-                    == Some(signature.as_str()))
+                && self.audio_bridge.last_project_signature.as_deref() == Some(signature.as_str()))
                 || self.audio_bridge.last_failed_fingerprint == Some(fingerprint))
         {
             self.audio_bridge.project_dirty = false;
@@ -1057,13 +1064,14 @@ impl StudioLayout {
         self.audio_bridge.sync_started_at = Some(Instant::now());
         let sync_generation = self.audio_bridge.sync_generation;
         self.audio_bridge.sync_in_flight = true;
-        self.audio_bridge.engine_sync_count =
-            self.audio_bridge.engine_sync_count.saturating_add(1);
+        self.audio_bridge.engine_sync_count = self.audio_bridge.engine_sync_count.saturating_add(1);
         crate::perf::count("engine_sync_count", self.audio_bridge.engine_sync_count);
         self.audio_bridge.route_graph_version =
             self.audio_bridge.route_graph_version.saturating_add(1);
-        self.audio_bridge.route_graph_rebuild_count =
-            self.audio_bridge.route_graph_rebuild_count.saturating_add(1);
+        self.audio_bridge.route_graph_rebuild_count = self
+            .audio_bridge
+            .route_graph_rebuild_count
+            .saturating_add(1);
         crate::perf::count(
             "route_graph_rebuild_count",
             self.audio_bridge.route_graph_rebuild_count,

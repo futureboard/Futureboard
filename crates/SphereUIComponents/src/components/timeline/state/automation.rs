@@ -945,17 +945,20 @@ impl TimelineState {
         let target = self
             .automation_lane(track_id, lane_id)
             .map(|l| l.target.clone());
-        if let (Some(target), Some(track)) = (
-            target,
-            self.tracks.iter_mut().find(|t| t.id == track_id),
-        ) {
+        if let (Some(target), Some(track)) =
+            (target, self.tracks.iter_mut().find(|t| t.id == track_id))
+        {
             track.selected_automation_target = Some(target);
         }
     }
 
     /// Toggle a lane's enabled flag (read on/off). Committed edit — when off the
     /// lane keeps its points but stops driving the target. Returns the new state.
-    pub fn toggle_automation_lane_enabled(&mut self, track_id: &str, lane_id: &str) -> Option<bool> {
+    pub fn toggle_automation_lane_enabled(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+    ) -> Option<bool> {
         let lane = self.lane_mut(track_id, lane_id)?;
         lane.enabled = !lane.enabled;
         let enabled = lane.enabled;
@@ -1007,10 +1010,8 @@ impl TimelineState {
             .as_ref()
             .is_some_and(|t| !track.automation_lanes.iter().any(|l| l.target == *t))
         {
-            track.selected_automation_target = track
-                .automation_lanes
-                .first()
-                .map(|l| l.target.clone());
+            track.selected_automation_target =
+                track.automation_lanes.first().map(|l| l.target.clone());
         }
         let playhead = self.transport.playhead_beats;
         self.recompute_effective_volumes(playhead, "lane_remove");

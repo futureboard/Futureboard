@@ -5,7 +5,9 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window,
 };
 
-use crate::components::text_input::{text_field_with_callbacks, TextInputCallbacks, TextInputState};
+use crate::components::text_input::{
+    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+};
 use crate::components::timeline::timeline_state::{
     automation_target_menu_command, AutomationPickerModel, AutomationPickerPluginGroup,
     AutomationTarget,
@@ -15,8 +17,7 @@ use crate::overlay::{
 };
 use crate::theme::Colors;
 
-pub type AutomationTargetPickerCommandCb =
-    Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
+pub type AutomationTargetPickerCommandCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 pub type AutomationTargetPickerCloseCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 
 const PICKER_WIDTH: f32 = 360.0;
@@ -40,8 +41,7 @@ fn filter_plugin_group(
         .parameters
         .iter()
         .filter(|row| {
-            query_matches(query, &row.param_title)
-                || query_matches(query, &group.plugin_name)
+            query_matches(query, &row.param_title) || query_matches(query, &group.plugin_name)
         })
         .map(|row| {
             (
@@ -220,12 +220,7 @@ fn separator_label(text: &str) -> impl IntoElement {
         .gap(px(8.0))
         .px(px(SECTION_PAD))
         .py(px(6.0))
-        .child(
-            div()
-                .flex_1()
-                .h(px(1.0))
-                .bg(Colors::border_subtle()),
-        )
+        .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle()))
         .child(
             div()
                 .text_size(px(10.0))
@@ -233,12 +228,7 @@ fn separator_label(text: &str) -> impl IntoElement {
                 .text_color(Colors::text_muted())
                 .child(text.to_string()),
         )
-        .child(
-            div()
-                .flex_1()
-                .h(px(1.0))
-                .bg(Colors::border_subtle()),
-        )
+        .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle()))
 }
 
 fn plugin_section(
@@ -320,7 +310,9 @@ fn picker_row(
         row = row
             .cursor(gpui::CursorStyle::PointingHand)
             .hover(|s| s.bg(Colors::surface_raised()))
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| handler(window, cx));
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                handler(window, cx)
+            });
     }
     row
 }

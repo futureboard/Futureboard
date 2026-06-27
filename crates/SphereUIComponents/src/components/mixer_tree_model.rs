@@ -395,10 +395,9 @@ fn plugin_node(
             if vsti_output_child_insert_id(&t.id) != Some(slot.id.as_str()) {
                 return None;
             }
-            let bus_index = t
-                .id
-                .rsplit_once(":bus:")
-                .and_then(|(_, bus)| bus.parse::<u8>().ok())?;
+            let bus_index =
+                t.id.rsplit_once(":bus:")
+                    .and_then(|(_, bus)| bus.parse::<u8>().ok())?;
             Some((bus_index, t))
         })
         .collect();
@@ -443,7 +442,10 @@ fn build_hardware_output_nodes(output_device_channels: u32) -> Vec<MixerTreeNode
             let id = format!("{MIXER_HW_OUTPUT_PREFIX}{}", opt.id);
             MixerTreeNode {
                 id: id.clone(),
-                display_name: opt.label.replace("Output ", "Out ").replace(" (Stereo)", " Stereo"),
+                display_name: opt
+                    .label
+                    .replace("Output ", "Out ")
+                    .replace(" (Stereo)", " Stereo"),
                 kind: MixerTreeNodeKind::HardwareOutput,
                 channel_id: Some(id),
                 plugin_instance_id: None,
@@ -469,10 +471,7 @@ pub fn expand_ancestors_for_channel(
 }
 
 /// Seed default expanded groups during session install (not per-frame render).
-pub fn ensure_timeline_mixer_tree_defaults(
-    state: &mut TimelineState,
-    output_device_channels: u32,
-) {
+pub fn ensure_timeline_mixer_tree_defaults(state: &mut TimelineState, output_device_channels: u32) {
     if !state.mixer_tree.expanded_node_ids.is_empty() {
         return;
     }
@@ -558,6 +557,9 @@ mod tests {
         let plugin_node = &track_node.children[0];
         assert_eq!(plugin_node.kind, MixerTreeNodeKind::Plugin);
         assert_eq!(plugin_node.children.len(), 4);
-        assert!(plugin_node.children.iter().all(|c| c.kind == MixerTreeNodeKind::BusOutput));
+        assert!(plugin_node
+            .children
+            .iter()
+            .all(|c| c.kind == MixerTreeNodeKind::BusOutput));
     }
 }

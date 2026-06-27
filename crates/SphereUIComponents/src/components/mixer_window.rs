@@ -7,8 +7,8 @@ use std::{collections::HashSet, sync::Arc};
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, ParentElement, Point, Render, Styled, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind,
+    IntoElement, ParentElement, Point, Render, Styled, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::components::mixer_panel::{
@@ -55,6 +55,7 @@ pub struct MixerWindow {
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
     on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
+    dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
     focus_handle: FocusHandle,
 }
 
@@ -66,6 +67,7 @@ impl MixerWindow {
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
         on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
+        dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
         cx: &mut Context<Self>,
     ) -> Self {
         external_mixer_debug(&format!(
@@ -79,6 +81,7 @@ impl MixerWindow {
             on_close,
             on_mixer_scroll,
             on_mixer_split,
+            dispatch_command,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -93,7 +96,10 @@ impl MixerWindow {
 }
 
 impl Render for MixerWindow {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
         let viewport_width: f32 = window.bounds().size.width.into();
         let viewport_height: f32 = window.bounds().size.height.into();
         let MixerSnapshot {
@@ -115,6 +121,7 @@ impl Render for MixerWindow {
         let on_mixer_scroll = self.on_mixer_scroll.clone();
         let on_mixer_split = self.on_mixer_split.clone();
         let on_close = self.on_close.clone();
+        let dispatch_command = self.dispatch_command.clone();
         let tree_width = if tree_sidebar_enabled {
             if tree_sidebar_collapsed {
                 MIXER_TREE_COLLAPSED_RAIL_WIDTH
@@ -142,6 +149,19 @@ impl Render for MixerWindow {
             .font(crate::theme::ui_font())
             .bg(Colors::surface_window())
             .overflow_hidden()
+            .capture_key_down(move |event, _window, cx| {
+                let mods = event.keystroke.modifiers;
+                if !event.is_held
+                    && event.keystroke.key.eq_ignore_ascii_case("space")
+                    && !mods.control
+                    && !mods.alt
+                    && !mods.platform
+                    && !mods.function
+                {
+                    cx.stop_propagation();
+                    (dispatch_command)("transport:play-pause", cx);
+                }
+            })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar(
                 "Mixer",
@@ -186,6 +206,7 @@ pub fn open_mixer_window(
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
     on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
+    dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
     cx: &mut App,
 ) -> Result<WindowHandle<MixerWindow>, String> {
     external_mixer_debug(&format!(
@@ -226,6 +247,7 @@ pub fn open_mixer_window(
                 on_close,
                 on_mixer_scroll,
                 on_mixer_split,
+                dispatch_command,
                 cx,
             )
         })

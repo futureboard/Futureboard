@@ -31,11 +31,7 @@ const TREE_PANEL_BG: fn() -> gpui::Rgba = Colors::surface_panel_alt;
 pub struct MixerTreeResizeDrag;
 
 impl gpui::Render for MixerTreeResizeDrag {
-    fn render(
-        &mut self,
-        _w: &mut gpui::Window,
-        _cx: &mut gpui::Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _w: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
 }
@@ -198,15 +194,11 @@ pub fn mixer_tree_sidebar(
         ));
 
     let cbs = callbacks.clone();
-    let list = uniform_list(
-        "mixer-tree-list",
-        row_count,
-        move |range, _window, _cx| {
-            range
-                .map(|i| tree_row(&rows_for_list[i], cbs.clone(), i).into_any_element())
-                .collect::<Vec<_>>()
-        },
-    )
+    let list = uniform_list("mixer-tree-list", row_count, move |range, _window, _cx| {
+        range
+            .map(|i| tree_row(&rows_for_list[i], cbs.clone(), i).into_any_element())
+            .collect::<Vec<_>>()
+    })
     .track_scroll(scroll)
     .size_full()
     .bg(TREE_PANEL_BG());
@@ -245,7 +237,11 @@ fn toolbar_icon(
     btn.on_click(move |_e, w, cx| action(w, cx))
 }
 
-fn tree_row(row: &MixerTreeRow, callbacks: MixerTreeCallbacks, row_index: usize) -> impl IntoElement {
+fn tree_row(
+    row: &MixerTreeRow,
+    callbacks: MixerTreeCallbacks,
+    row_index: usize,
+) -> impl IntoElement {
     let node_id = row.node.id.clone();
     let channel_id = row.node.channel_id.clone();
     let depth = row.depth;
@@ -273,7 +269,11 @@ fn tree_row(row: &MixerTreeRow, callbacks: MixerTreeCallbacks, row_index: usize)
         .text_size(px(9.0))
         .text_color(Colors::text_muted())
         .child(if row.has_children {
-            if row.expanded { "▾" } else { "▸" }
+            if row.expanded {
+                "▾"
+            } else {
+                "▸"
+            }
         } else {
             ""
         });
@@ -303,7 +303,9 @@ fn tree_row(row: &MixerTreeRow, callbacks: MixerTreeCallbacks, row_index: usize)
                 .border_l(px(2.0))
                 .border_color(Colors::accent_primary())
         })
-        .when(!row.selected, |el| el.border_l(px(2.0)).border_color(accent))
+        .when(!row.selected, |el| {
+            el.border_l(px(2.0)).border_color(accent)
+        })
         .child(disclosure)
         .when_some(row.node.track_color, |el, color| {
             el.child(

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use gpui::{canvas, fill, point, px, size, Bounds, IntoElement, Pixels, Rgba, Styled};
 
-use super::renderer::{MixerRenderer, MixerRenderOutput};
+use super::renderer::{MixerRenderOutput, MixerRenderer};
 use super::snapshot::{MixerRenderSnapshot, MixerStripGeom};
 use crate::theme::Colors;
 
@@ -54,10 +54,20 @@ impl GpuiPaintMixerRenderer {
     fn rebuild_static(&mut self, snapshot: &MixerRenderSnapshot) {
         let mut quads: Vec<Quad> = Vec::with_capacity(snapshot.strips.len() * 4 + 4);
         for strip in &snapshot.strips {
-            push_static_strip(&mut quads, strip, snapshot.accent_bar_h, snapshot.separator_w);
+            push_static_strip(
+                &mut quads,
+                strip,
+                snapshot.accent_bar_h,
+                snapshot.separator_w,
+            );
         }
         if let Some(master) = &snapshot.master {
-            push_static_strip(&mut quads, master, snapshot.accent_bar_h, snapshot.separator_w);
+            push_static_strip(
+                &mut quads,
+                master,
+                snapshot.accent_bar_h,
+                snapshot.separator_w,
+            );
         }
         self.static_quads = Arc::new(quads);
     }
@@ -93,7 +103,10 @@ impl MixerRenderer for GpuiPaintMixerRenderer {
             self.rebuild_static(snapshot);
             self.static_key = Some(snapshot.static_key);
             self.static_rebuild_count = self.static_rebuild_count.saturating_add(1);
-            crate::perf::count("mixer_static_batch_rebuild_count", self.static_rebuild_count);
+            crate::perf::count(
+                "mixer_static_batch_rebuild_count",
+                self.static_rebuild_count,
+            );
             if crate::perf::mixer_gpu_debug_enabled() {
                 eprintln!(
                     "[mixer-gpu] static rebuild key={} quads={}",
@@ -105,7 +118,10 @@ impl MixerRenderer for GpuiPaintMixerRenderer {
 
         self.rebuild_dynamic(snapshot);
         self.dynamic_update_count = self.dynamic_update_count.saturating_add(1);
-        crate::perf::count("mixer_dynamic_snapshot_update_count", self.dynamic_update_count);
+        crate::perf::count(
+            "mixer_dynamic_snapshot_update_count",
+            self.dynamic_update_count,
+        );
 
         let meter_sig = snapshot.meter_signature();
         if meter_sig != self.last_meter_sig {

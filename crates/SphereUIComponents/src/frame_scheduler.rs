@@ -96,14 +96,14 @@ impl FrameRateMode {
     }
 }
 
-/// What kind of work a scheduled frame serves. Each class has its own cap so
-/// meters and background jobs never force the whole app to repaint at the
-/// continuous (playback) rate.
+/// What kind of work a scheduled frame serves. Meters follow the display
+/// cadence so high-refresh monitors animate smoothly; background work keeps a
+/// lower cap so progress UI cannot drive continuous full-rate repainting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameClass {
     /// Playback playhead, drag, scroll, zoom, active animations.
     Continuous,
-    /// Meter / VU updates. Capped to 60 Hz.
+    /// Meter / VU updates. Follows the continuous display cadence.
     Meter,
     /// Progress bars / background jobs. Capped to 30 Hz, region-invalidation.
     Background,
@@ -112,7 +112,6 @@ pub enum FrameClass {
 const MIN_REFRESH_HZ: u32 = 30;
 const MAX_REFRESH_HZ: u32 = 240;
 const FALLBACK_REFRESH_HZ: u32 = 60;
-const METER_CAP_HZ: u32 = 60;
 const BACKGROUND_CAP_HZ: u32 = 30;
 /// Floor for `Unlimited` so the poll loop never busy-spins.
 const UNLIMITED_FLOOR: Duration = Duration::from_millis(1);
@@ -150,9 +149,9 @@ pub fn frame_interval(mode: FrameRateMode, refresh_hz: u32, class: FrameClass) -
     };
     match class {
         FrameClass::Continuous => continuous,
-        // Never faster than 60 Hz, but honour a slower continuous rate
-        // (e.g. BatterySaver) so meters don't outrun the rest of the UI.
-        FrameClass::Meter => continuous.max(hz_to_interval(METER_CAP_HZ)),
+        // Meters are lightweight region repaints and should match display
+        // refresh instead of stepping at a fixed 60/30 Hz.
+        FrameClass::Meter => continuous,
         FrameClass::Background => continuous.max(hz_to_interval(BACKGROUND_CAP_HZ)),
     }
 }
@@ -349,15 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn meter_is_capped_at_60_but_respects_slower_continuous() {
-        // 144 Hz DisplaySync: continuous ~6.9ms, meter capped to 60 Hz (~16.6ms).
+    fn meter_follows_continuous_display_cadence() {
+        // 144 Hz DisplaySync: meters follow continuous refresh (~6.9ms).
         let meter = frame_interval(FrameRateMode::DisplaySync, 144, FrameClass::Meter);
         assert!(
-            (ms(meter) - 1000.0 / 60.0).abs() < 0.2,
+            (ms(meter) - 1000.0 / 144.0).abs() < 0.2,
             "meter was {}ms",
             ms(meter)
         );
-        // Battery saver continuous (~33ms) is slower than 60 Hz → meter follows it.
+        // Battery saver continuous (~33ms) still slows meters with the rest of the UI.
         let bs_meter = frame_interval(FrameRateMode::BatterySaver, 144, FrameClass::Meter);
         assert!(
             (ms(bs_meter) - 1000.0 / 30.0).abs() < 0.2,

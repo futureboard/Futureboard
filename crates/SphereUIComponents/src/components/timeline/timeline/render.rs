@@ -658,8 +658,8 @@ impl Render for Timeline {
 
         // Hover resolver: a normal move resolves the point/segment under the
         // cursor; a negative-sentinel payload (hover-out) clears this lane's hover.
-        let on_automation_hover = cx.listener(
-            |this, payload: &(String, String, f32, f32), _window, cx| {
+        let on_automation_hover =
+            cx.listener(|this, payload: &(String, String, f32, f32), _window, cx| {
                 let (track_id, lane_id, beat, value) =
                     (payload.0.clone(), payload.1.clone(), payload.2, payload.3);
                 if beat < 0.0 {
@@ -667,8 +667,7 @@ impl Render for Timeline {
                 } else {
                     this.update_automation_hover(&track_id, &lane_id, beat, value, cx);
                 }
-            },
-        );
+            });
         let on_automation_hover: crate::components::timeline::automation_lane::AutomationHoverCallback =
             std::sync::Arc::new(on_automation_hover);
 
@@ -684,8 +683,7 @@ impl Render for Timeline {
              _window,
              cx| {
                 use crate::components::timeline::automation_lane::AutomationLaneAction;
-                let (track_id, lane_id, action) =
-                    (payload.0.clone(), payload.1.clone(), payload.2);
+                let (track_id, lane_id, action) = (payload.0.clone(), payload.1.clone(), payload.2);
                 match action {
                     AutomationLaneAction::Activate => {
                         this.state.activate_automation_lane(&track_id, &lane_id);
@@ -962,7 +960,12 @@ impl Render for Timeline {
                         .unwrap_or_else(|| this.last_drag_position.unwrap_or_default());
                     let position = this.last_drag_position.unwrap_or(origin);
                     let (_, start_beat) = this.resolve_clip_drag_target(drag, origin, position);
-                    this.create_clip_clone_at(&drag.clip_id, &target_track_id, start_beat, cx);
+                    this.create_clip_clone_group_at(
+                        &drag.clip_id,
+                        &target_track_id,
+                        start_beat,
+                        cx,
+                    );
                 } else {
                     let drag_ids = this.clip_drag_selection_ids(&drag.clip_id);
                     let resolved_target_index = target_index.unwrap_or_else(|| {

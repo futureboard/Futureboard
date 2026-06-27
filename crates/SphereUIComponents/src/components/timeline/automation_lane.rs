@@ -112,7 +112,9 @@ pub fn automation_lane(
     let track_id = track_id.to_string();
     let lane_id = lane.id.clone();
     // Hover that targets THIS lane (drives the segment highlight + cursor).
-    let lane_hover = hover.filter(|h| h.matches_lane(&track_id, &lane_id)).cloned();
+    let lane_hover = hover
+        .filter(|h| h.matches_lane(&track_id, &lane_id))
+        .cloned();
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -153,7 +155,11 @@ pub fn automation_lane(
         let lid = lane_id.clone();
         header = header.on_mouse_down(gpui::MouseButton::Left, move |_e, window, cx| {
             cx.stop_propagation();
-            cb(&(tid.clone(), lid.clone(), AutomationLaneAction::Activate), window, cx);
+            cb(
+                &(tid.clone(), lid.clone(), AutomationLaneAction::Activate),
+                window,
+                cx,
+            );
         });
     }
 
@@ -322,7 +328,15 @@ pub fn automation_lane(
                     let alt = event.modifiers.alt;
                     let click_count = event.click_count.max(1) as u32;
                     cb(
-                        &(tid.clone(), lid.clone(), beat, value, additive, alt, click_count),
+                        &(
+                            tid.clone(),
+                            lid.clone(),
+                            beat,
+                            value,
+                            additive,
+                            alt,
+                            click_count,
+                        ),
                         window,
                         cx,
                     );
@@ -489,7 +503,8 @@ fn lane_envelope(
     let points = lane.points.clone();
 
     let lane_w = state.viewport.viewport_width.max(1.0);
-    let num_cols = lane_w.ceil().max(1.0) as usize;
+    let sample_step = 0.5_f32;
+    let sample_count = (lane_w / sample_step).ceil().max(1.0) as usize;
 
     // Hovered / actively-dragged segment → column range to emphasize. Uses the
     // SAME point geometry the curve is sampled from, so the highlight tracks the
@@ -503,16 +518,17 @@ fn lane_envelope(
             }
             let x0 = state.beats_to_x(points[i].beat);
             let x1 = state.beats_to_x(points[i + 1].beat);
-            let c0 = x0.floor().max(0.0) as usize;
-            let c1 = (x1.ceil().max(0.0) as usize).min(num_cols);
+            let c0 = (x0 / sample_step).floor().max(0.0) as usize;
+            let c1 = ((x1 / sample_step).ceil().max(0.0) as usize).min(sample_count);
             (c1 > c0).then_some((c0, c1, active))
         });
 
-    let mut samples: Vec<f32> = Vec::with_capacity(num_cols + 1);
-    for col in 0..=num_cols {
-        let beat = state.x_to_beat(col as f32);
+    let mut samples: Vec<(f32, f32)> = Vec::with_capacity(sample_count + 1);
+    for sample in 0..=sample_count {
+        let x = (sample as f32 * sample_step).min(lane_w);
+        let beat = state.x_to_beat(x);
         let v = evaluate_automation(&points, beat, default_value);
-        samples.push(automation_value_to_y(v, lane_height));
+        samples.push((x, automation_value_to_y(v, lane_height)));
     }
     let baseline_y = automation_value_to_y(default_value, lane_height);
 
@@ -552,20 +568,22 @@ fn lane_envelope(
                 size(px(lane_w), px(1.0)),
             );
             window.paint_quad(fill(bl, baseline_color));
-            for col in 0..num_cols {
-                let y0 = samples[col];
-                let y1 = samples[col + 1];
-                let top = y0.min(y1);
-                let h = (y0 - y1).abs().max(1.6);
-                let (col_color, col_w) = match highlight {
-                    Some((c0, c1, active)) if col >= c0 && col < c1 => {
-                        (highlight_color, if active { 3.0 } else { 2.2 })
+            for sample in 0..sample_count {
+                let (x0, y0) = samples[sample];
+                let (x1, y1) = samples[sample + 1];
+                let y = (y0 + y1) * 0.5;
+                let (col_color, col_w): (_, f32) = match highlight {
+                    Some((c0, c1, active)) if sample >= c0 && sample < c1 => {
+                        (highlight_color, if active { 3.4 } else { 2.4 })
                     }
-                    _ => (line_color, 1.0),
+                    _ => (line_color, 1.7),
                 };
+                let seg_w = (x1 - x0).max(sample_step) + 0.9;
+                let seg_h = col_w.max((y0 - y1).abs() + col_w);
+                let top = y - seg_h * 0.5;
                 let r = Bounds::new(
-                    bounds.origin + point(px(col as f32 - (col_w - 1.0) * 0.5), px(top)),
-                    size(px(col_w), px(h)),
+                    bounds.origin + point(px(x0 - 0.25), px(top)),
+                    size(px(seg_w), px(seg_h)),
                 );
                 window.paint_quad(fill(r, col_color));
             }

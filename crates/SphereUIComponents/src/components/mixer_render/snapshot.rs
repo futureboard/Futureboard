@@ -124,8 +124,13 @@ impl MixerRenderSnapshot {
         accent_bar_h: f32,
         separator_w: f32,
     ) -> Self {
-        let static_key =
-            Self::compute_static_key(&viewport, &strips, master.as_ref(), accent_bar_h, separator_w);
+        let static_key = Self::compute_static_key(
+            &viewport,
+            &strips,
+            master.as_ref(),
+            accent_bar_h,
+            separator_w,
+        );
         Self {
             viewport,
             strips,
@@ -185,7 +190,12 @@ mod tests {
     use super::*;
 
     fn rgba(r: f32) -> Rgba {
-        Rgba { r, g: 0.2, b: 0.3, a: 1.0 }
+        Rgba {
+            r,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        }
     }
 
     fn strip(x: f32, selected: bool, meter: f32) -> MixerStripGeom {
@@ -215,25 +225,48 @@ mod tests {
 
     #[test]
     fn static_key_stable_across_meter_only_changes() {
-        let a = MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
-        let b = MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.9)], None, 2.0, 1.0);
-        assert_eq!(a.static_key, b.static_key, "meter changes must not rebuild static batch");
-        assert_ne!(a.meter_signature(), b.meter_signature(), "meter change must move the meter signature");
+        let a =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
+        let b =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.9)], None, 2.0, 1.0);
+        assert_eq!(
+            a.static_key, b.static_key,
+            "meter changes must not rebuild static batch"
+        );
+        assert_ne!(
+            a.meter_signature(),
+            b.meter_signature(),
+            "meter change must move the meter signature"
+        );
     }
 
     #[test]
     fn static_key_stable_across_scroll_only_changes() {
-        let a = MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
-        let b = MixerRenderSnapshot::new(viewport(240.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
-        assert_eq!(a.static_key, b.static_key, "scroll only shifts the transform, not geometry");
+        let a =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
+        let b = MixerRenderSnapshot::new(
+            viewport(240.0),
+            vec![strip(0.0, false, 0.1)],
+            None,
+            2.0,
+            1.0,
+        );
+        assert_eq!(
+            a.static_key, b.static_key,
+            "scroll only shifts the transform, not geometry"
+        );
     }
 
     #[test]
     fn static_key_changes_on_selection_strip_set_and_size() {
-        let base = MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
+        let base =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
         let selected =
             MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, true, 0.1)], None, 2.0, 1.0);
-        assert_ne!(base.static_key, selected.static_key, "selection must rebuild static batch");
+        assert_ne!(
+            base.static_key, selected.static_key,
+            "selection must rebuild static batch"
+        );
 
         let added = MixerRenderSnapshot::new(
             viewport(0.0),
@@ -242,11 +275,17 @@ mod tests {
             2.0,
             1.0,
         );
-        assert_ne!(base.static_key, added.static_key, "adding a strip must rebuild");
+        assert_ne!(
+            base.static_key, added.static_key,
+            "adding a strip must rebuild"
+        );
 
         let mut tall = strip(0.0, false, 0.1);
         tall.height = 480.0;
         let resized = MixerRenderSnapshot::new(viewport(0.0), vec![tall], None, 2.0, 1.0);
-        assert_ne!(base.static_key, resized.static_key, "size change must rebuild");
+        assert_ne!(
+            base.static_key, resized.static_key,
+            "size change must rebuild"
+        );
     }
 }

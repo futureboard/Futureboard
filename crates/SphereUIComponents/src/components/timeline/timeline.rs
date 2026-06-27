@@ -136,8 +136,7 @@ pub struct Timeline {
     automation_drag: Option<crate::components::timeline::timeline_state::AutomationPointDrag>,
     /// In-flight automation curve-tension drag (Alt+drag on a segment). Mutated
     /// live; committed once on release. Never moves the points themselves.
-    automation_curve_drag:
-        Option<crate::components::timeline::timeline_state::AutomationCurveDrag>,
+    automation_curve_drag: Option<crate::components::timeline::timeline_state::AutomationCurveDrag>,
     /// In-flight automation marquee (rubber-band) selection. UI-only.
     automation_marquee: Option<crate::components::timeline::timeline_state::AutomationMarquee>,
     /// Hovered automation point / curve segment under the cursor. UI-only; drives
@@ -146,9 +145,8 @@ pub struct Timeline {
     automation_hover: Option<crate::components::timeline::timeline_state::AutomationHover>,
     /// Automation control-lane actions that need studio-level handling (picker,
     /// clear-all confirmation, last-touched). Set by `StudioLayout`.
-    on_automation_control: Option<
-        crate::components::timeline::automation_control_lane::AutomationControlCallback,
-    >,
+    on_automation_control:
+        Option<crate::components::timeline::automation_control_lane::AutomationControlCallback>,
     /// In-flight tempo-point drag on the global Tempo Track lane.
     tempo_drag: Option<TempoPointDrag>,
     /// In-flight time-signature marker drag on the global Time Signature lane.

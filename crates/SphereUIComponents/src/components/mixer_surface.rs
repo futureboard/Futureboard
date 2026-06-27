@@ -37,11 +37,13 @@ pub fn set_mixer_gpu_primitives_enabled(on: bool) {
 /// over the Setting (developer / QA override).
 fn env_override() -> Option<bool> {
     static FLAG: OnceLock<Option<bool>> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("FUTUREBOARD_MIXER_GPU").ok().as_deref() {
-        Some("1") | Some("true") | Some("on") => Some(true),
-        Some("0") | Some("false") | Some("off") => Some(false),
-        _ => None,
-    })
+    *FLAG.get_or_init(
+        || match std::env::var("FUTUREBOARD_MIXER_GPU").ok().as_deref() {
+            Some("1") | Some("true") | Some("on") => Some(true),
+            Some("0") | Some("false") | Some("off") => Some(false),
+            _ => None,
+        },
+    )
 }
 
 /// Whether the mixer should render its dense decoration on the GPU primitive

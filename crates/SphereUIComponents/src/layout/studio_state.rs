@@ -18,7 +18,9 @@ use super::context_menu_ops::ContextMenuRequest;
 
 #[derive(Debug, Clone)]
 pub enum OpenPopover {
-    Context { request: ContextMenuRequest },
+    Context {
+        request: ContextMenuRequest,
+    },
     /// Searchable automation target picker (instrument → effects → track).
     AutomationTargetPicker {
         track_id: String,

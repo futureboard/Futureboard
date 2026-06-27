@@ -69,6 +69,7 @@ impl InsertPickerWindow {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let search_focused = self.snapshot.search_input.is_focused(window);
         let (handled, snapshot) = self.owner.update(cx, |layout, cx| {
             if event.keystroke.key.as_str() == "escape" {
                 layout.plugin_picker = PluginPickerState::closed();
@@ -81,6 +82,21 @@ impl InsertPickerWindow {
         });
         self.set_snapshot(snapshot);
         if handled {
+            cx.stop_propagation();
+        }
+        let mods = event.keystroke.modifiers;
+        if !handled
+            && !search_focused
+            && !event.is_held
+            && event.keystroke.key.eq_ignore_ascii_case("space")
+            && !mods.control
+            && !mods.alt
+            && !mods.platform
+            && !mods.function
+        {
+            let _ = self.owner.update(cx, |layout, cx| {
+                layout.dispatch_command_id("transport:play-pause", cx);
+            });
             cx.stop_propagation();
         }
         if event.keystroke.key.as_str() == "escape" {

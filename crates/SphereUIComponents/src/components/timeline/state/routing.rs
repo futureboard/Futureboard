@@ -376,6 +376,53 @@ impl TimelineState {
         }
     }
 
+    pub fn send_order(&self, track_id: &str) -> Vec<String> {
+        self.tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .map(|track| track.sends.iter().map(|send| send.id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn set_send_order(&mut self, track_id: &str, ordered_ids: &[String]) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return false;
+        };
+        let before: Vec<String> = track.sends.iter().map(|send| send.id.clone()).collect();
+        let mut remaining = std::mem::take(&mut track.sends);
+        let mut reordered = Vec::with_capacity(remaining.len());
+        for wanted in ordered_ids {
+            if let Some(pos) = remaining.iter().position(|send| send.id == *wanted) {
+                reordered.push(remaining.remove(pos));
+            }
+        }
+        reordered.append(&mut remaining);
+        let after: Vec<String> = reordered.iter().map(|send| send.id.clone()).collect();
+        track.sends = reordered;
+        before != after
+    }
+
+    pub fn reordered_send_ids(
+        ids: &[String],
+        dragged_send_id: &str,
+        insertion_index: usize,
+    ) -> Vec<String> {
+        let Some(origin) = ids.iter().position(|id| id == dragged_send_id) else {
+            return ids.to_vec();
+        };
+        let dragged = ids[origin].clone();
+        let mut remaining = ids.to_vec();
+        remaining.remove(origin);
+        let target = if insertion_index > origin {
+            insertion_index.saturating_sub(1)
+        } else {
+            insertion_index
+        }
+        .min(remaining.len());
+        remaining.insert(target, dragged);
+        remaining
+    }
+
     pub fn toggle_send_enabled(&mut self, track_id: &str, send_id: &str) -> Option<bool> {
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
         let send = track.sends.iter_mut().find(|s| s.id == send_id)?;

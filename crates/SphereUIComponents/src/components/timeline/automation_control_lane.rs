@@ -23,7 +23,8 @@ pub enum AutomationControlAction {
 
 /// Payload: `(track_id, action, window_x, window_y)`.
 pub type AutomationControlCallback = std::sync::Arc<
-    dyn Fn(&(String, AutomationControlAction, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+    dyn Fn(&(String, AutomationControlAction, f32, f32), &mut gpui::Window, &mut gpui::App)
+        + 'static,
 >;
 
 /// UI-only management row rendered directly below the parent track and above
@@ -36,7 +37,9 @@ pub fn automation_control_lane(
     on_action: Option<AutomationControlCallback>,
 ) -> impl IntoElement {
     let track_id = track_id.to_string();
-    let last_touched = state.last_touched_plugin_param_for_track(&track_id).cloned();
+    let last_touched = state
+        .last_touched_plugin_param_for_track(&track_id)
+        .cloned();
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -44,7 +47,13 @@ pub fn automation_control_lane(
         hasher.finish() as usize
     };
 
-    let header = control_header(&track_id, track_color, last_touched.as_ref(), id_num, on_action);
+    let header = control_header(
+        &track_id,
+        track_color,
+        last_touched.as_ref(),
+        id_num,
+        on_action,
+    );
 
     // Right-side management strip stays on the neutral timeline canvas, not a
     // tinted block — only the left header carries any tint.
@@ -239,18 +248,14 @@ fn control_button(
             .border(px(1.0))
             .border_color(Colors::button_border())
             .hover(|s| s.bg(Colors::button_bg_hover())),
-        ControlButtonStyle::Ghost => btn
-            .text_color(Colors::button_text_muted())
-            .hover(|s| {
-                s.bg(Colors::button_bg_hover())
-                    .text_color(Colors::text_secondary())
-            }),
-        ControlButtonStyle::Danger => btn
-            .text_color(Colors::text_dim())
-            .hover(|s| {
-                s.bg(Colors::with_alpha(Colors::status_error(), 0.16))
-                    .text_color(Colors::status_error())
-            }),
+        ControlButtonStyle::Ghost => btn.text_color(Colors::button_text_muted()).hover(|s| {
+            s.bg(Colors::button_bg_hover())
+                .text_color(Colors::text_secondary())
+        }),
+        ControlButtonStyle::Danger => btn.text_color(Colors::text_dim()).hover(|s| {
+            s.bg(Colors::with_alpha(Colors::status_error(), 0.16))
+                .text_color(Colors::status_error())
+        }),
     };
 
     if let Some(cb) = cb {

@@ -5,7 +5,6 @@ mod audio_editor_host;
 pub mod background_tasks;
 mod bottom_panel;
 mod bottom_panel_shell;
-mod effect_editor_tab_view;
 pub mod box_list_view;
 pub mod color_picker;
 pub mod combo_box;
@@ -14,6 +13,7 @@ pub mod context_menu;
 pub mod controls;
 pub mod edit;
 mod editor_panel;
+mod effect_editor_tab_view;
 pub mod fader;
 pub mod file_browser;
 pub mod form;
@@ -27,8 +27,8 @@ pub mod menu_bar;
 pub mod menu_dropdown;
 pub mod message_box_dialog;
 pub mod midi_editor_window;
-pub mod mixer_panel;
 pub mod mixer_master_strip_view;
+pub mod mixer_panel;
 pub mod mixer_panel_view;
 pub mod mixer_render;
 pub mod mixer_surface;
@@ -81,11 +81,8 @@ pub use background_tasks::{
     BackgroundTaskProgress, BackgroundTaskStatus, BackgroundTaskStore, BackgroundTaskToggleCb,
     BackgroundTaskUpdate,
 };
-pub(crate) use bottom_panel_shell::BottomPanelShell;
-pub(crate) use effect_editor_tab_view::EffectEditorTabView;
-pub(crate) use status_bar_view::StatusBarView;
-pub(crate) use status_bar_view::status_content_signature;
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
+pub(crate) use bottom_panel_shell::BottomPanelShell;
 pub use box_list_view::{
     box_list_empty_state, box_list_group_label, box_list_icon_button, box_list_item,
     box_list_item_badge, box_list_item_content, box_list_item_leading_icon, box_list_item_subtitle,
@@ -104,6 +101,7 @@ pub use controls::{
     fb_section_label, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
 pub use editor_panel::ClipEditorPanel;
+pub(crate) use effect_editor_tab_view::EffectEditorTabView;
 pub use fader::fader;
 pub use icon::icon;
 pub use icon_button::icon_button;
@@ -120,8 +118,8 @@ pub use message_box_dialog::{
     MessageBoxResult, MessageBoxWindow, MESSAGE_BOX_WIDTH,
 };
 pub use midi_editor_window::{open_midi_editor_window, MidiEditorTarget, MidiEditorWindow};
-pub use mixer_panel::mixer_panel;
 pub use mixer_master_strip_view::MixerMasterStripView;
+pub use mixer_panel::mixer_panel;
 pub use mixer_panel_view::{docked_mixer_shell, MixerPanelView};
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::{inspector_debug, inspector_debug_enabled, right_panel};
@@ -154,6 +152,8 @@ pub use status_bar::{
     status_bar, status_bar_with_background_tasks, PerfMetricsToggleCb, StatusBarContent,
     StatusBarPerfMetrics,
 };
+pub(crate) use status_bar_view::status_content_signature;
+pub(crate) use status_bar_view::StatusBarView;
 pub use text_input::{text_field, TextInputAction, TextInputState};
 pub use virtual_keyboard::{
     VirtualKeyboardEventSink, VirtualKeyboardPanel, VirtualKeyboardPanelState,

@@ -25,9 +25,9 @@ use crate::components::text_input::{
 };
 use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{ClipType, TempoCurve};
+use crate::components::BottomPanelState;
 use crate::components::MixerWindow;
 use crate::components::{BackgroundTaskStore, CommandPaletteState};
-use crate::components::{BottomPanelState};
 use crate::overlay::{project_title_anchor, titlebar_label_anchor};
 use crate::paths::FutureboardPaths;
 use crate::project::recent::RecentProjectsStore;
@@ -161,6 +161,16 @@ pub struct RendererWarmup {
     pub gpu_active: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ShortcutDiagnostics {
+    last_key_event: String,
+    last_key_target: String,
+    last_key_consumed_by: String,
+    focused_widget_kind: String,
+    is_text_editing_context: bool,
+    transport_toggle_shortcut_count: u64,
+}
+
 impl RendererWarmup {
     /// Status text for the Welcome renderer row.
     pub fn status_text(&self) -> &'static str {
@@ -285,7 +295,8 @@ pub(crate) fn build_and_warm_audio_engine(
         output_device: None,
     };
 
-    let mut engine = DirectAudio::AudioEngine::new(audio_config).map_err(|error| error.to_string())?;
+    let mut engine =
+        DirectAudio::AudioEngine::new(audio_config).map_err(|error| error.to_string())?;
     eprintln!(
         "[audio] sphere_directaudioengine v{} ready (backend={:?}, sr={}, buf={})",
         engine.version(),
@@ -459,6 +470,9 @@ pub struct StudioLayout {
     /// [`crate::frame_scheduler::FrameRateMode`] + detected refresh rate and
     /// publishes the continuous poll cadence the audio loop reads.
     frame_scheduler: crate::frame_scheduler::FrameScheduler,
+    /// Last root key-routing decision. Exposed through debug/perf counters and
+    /// kept UI-only so shortcut diagnostics never touch the audio graph.
+    shortcut_diagnostics: ShortcutDiagnostics,
     /// Mixer-panel view state (scroll, insert/send section heights, splitter-drag
     /// anchors). Grouped into [`mixer_ops::MixerViewState`] (decomposition slice).
     mixer_view: mixer_ops::MixerViewState,
@@ -828,11 +842,8 @@ impl StudioLayout {
             browser_search_input: TextInputState::new("browser-search-input", cx.focus_handle())
                 .with_placeholder("Search...")
                 .blur_on_outside_click(true),
-            mixer_tree_filter_input: TextInputState::new(
-                "mixer-tree-filter",
-                cx.focus_handle(),
-            )
-            .with_placeholder("Filter channels…"),
+            mixer_tree_filter_input: TextInputState::new("mixer-tree-filter", cx.focus_handle())
+                .with_placeholder("Filter channels…"),
             inspector_name_edit: input_ops::InspectorNameEditState::new(cx),
             selected_insert: None,
             plugin_picker: PluginPickerState::closed(),
@@ -870,6 +881,7 @@ impl StudioLayout {
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
             frame_scheduler: crate::frame_scheduler::FrameScheduler::new(frame_rate_mode),
+            shortcut_diagnostics: ShortcutDiagnostics::default(),
             mixer_view: mixer_ops::MixerViewState::default(),
             mixer_tree_ui_hooks: None,
             mixer_tree_sidebar,
@@ -941,7 +953,11 @@ impl StudioLayout {
         .detach();
     }
 
-    fn install_audio_callbacks(&mut self, engine: &DirectAudio::AudioEngine, cx: &mut Context<Self>) {
+    fn install_audio_callbacks(
+        &mut self,
+        engine: &DirectAudio::AudioEngine,
+        cx: &mut Context<Self>,
+    ) {
         let seek_engine = engine.clone();
         let param_engine = engine.clone();
         let owner = cx.entity().clone();

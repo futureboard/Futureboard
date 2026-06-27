@@ -136,6 +136,13 @@ pub enum EditCommand {
         before_order: Vec<String>,
         after_order: Vec<String>,
     },
+    /// Reorder a track's aux sends. Sends are routed by stable send id, so the
+    /// existing send structs move in place and keep gain/enabled/pre-fader state.
+    ReorderSendSlot {
+        track_id: String,
+        before_order: Vec<String>,
+        after_order: Vec<String>,
+    },
     /// Batch per-track row height changes (layout/view — one undo entry per gesture).
     SetTrackHeights {
         prev: Vec<(String, f32)>,
@@ -167,6 +174,7 @@ impl EditCommand {
             EditCommand::SplitMidiNote { .. } => "Split MIDI Note",
             EditCommand::SetClipStretch { .. } => "Edit Stretch",
             EditCommand::ReorderFxSlot { .. } => "Reorder FX",
+            EditCommand::ReorderSendSlot { .. } => "Reorder Sends",
             EditCommand::SetTrackHeights { .. } => "Resize Track Height",
         }
     }
@@ -293,6 +301,13 @@ impl EditCommand {
             } => {
                 state.set_insert_order(track_id, after_order);
             }
+            EditCommand::ReorderSendSlot {
+                track_id,
+                after_order,
+                ..
+            } => {
+                state.set_send_order(track_id, after_order);
+            }
             EditCommand::SetTrackHeights { next, .. } => {
                 apply_track_heights_snapshot(state, next);
             }
@@ -393,6 +408,13 @@ impl EditCommand {
                 ..
             } => {
                 state.set_insert_order(track_id, before_order);
+            }
+            EditCommand::ReorderSendSlot {
+                track_id,
+                before_order,
+                ..
+            } => {
+                state.set_send_order(track_id, before_order);
             }
             EditCommand::SetTrackHeights { prev, .. } => {
                 apply_track_heights_snapshot(state, prev);

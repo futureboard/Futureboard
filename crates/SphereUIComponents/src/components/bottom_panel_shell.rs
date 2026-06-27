@@ -9,8 +9,8 @@ use gpui::{
 
 use crate::assets;
 use crate::components::bottom_panel::{BottomPanelResizeDrag, BottomTab};
-use crate::components::effect_editor_tab_view::EffectEditorTabView;
 use crate::components::editor_panel::ClipEditorPanel;
+use crate::components::effect_editor_tab_view::EffectEditorTabView;
 use crate::components::mixer_panel_view::{docked_mixer_shell, MixerPanelView};
 use crate::layout::StudioLayout;
 use crate::theme::Colors;
@@ -254,17 +254,15 @@ fn tab_button(
         .child(label);
 
     if active {
-        btn = btn
-            .bg(Colors::surface_hover())
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(0.0))
-                    .left(px(6.0))
-                    .right(px(6.0))
-                    .h(px(2.0))
-                    .bg(Colors::accent_primary()),
-            );
+        btn = btn.bg(Colors::surface_hover()).child(
+            div()
+                .absolute()
+                .bottom(px(0.0))
+                .left(px(6.0))
+                .right(px(6.0))
+                .h(px(2.0))
+                .bg(Colors::accent_primary()),
+        );
     } else {
         btn = btn.hover(|style| {
             style

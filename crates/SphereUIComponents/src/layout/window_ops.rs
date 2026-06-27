@@ -366,7 +366,8 @@ impl StudioLayout {
                                                 // Skip for batch creation (count > 1)
                                                 // to avoid opening many windows at once.
                                                 if count == 1
-                                                    && super::plugin_bridge_runtime::bridge_enabled()
+                                                    && super::plugin_bridge_runtime::bridge_enabled(
+                                                    )
                                                 {
                                                     timeline.state.set_insert_pending_editor_open(
                                                         &id, &slot_id, true,
@@ -710,6 +711,13 @@ impl StudioLayout {
             let _ =
                 split_owner.update(cx, |layout, cx| layout.apply_mixer_split_action(action, cx));
         });
+        let dispatch_owner = cx.entity().clone();
+        let dispatch_command: std::sync::Arc<dyn Fn(&'static str, &mut gpui::App) + Send + Sync> =
+            std::sync::Arc::new(move |command_id, cx| {
+                let _ = dispatch_owner.update(cx, |layout, cx| {
+                    layout.dispatch_command_id(command_id, cx);
+                });
+            });
 
         match open_mixer_window(
             owner_bounds,
@@ -719,6 +727,7 @@ impl StudioLayout {
             on_close,
             on_mixer_scroll,
             on_mixer_split,
+            dispatch_command,
             cx,
         ) {
             Ok(handle) => {

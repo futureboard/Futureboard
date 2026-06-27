@@ -8,14 +8,32 @@ use crate::components::plugin_picker::category::normalized_category_label;
 pub struct PluginSearchIndex {
     plugins: Vec<RegistryPlugin>,
     search_text: Vec<String>,
+    vendors_lower: Vec<String>,
+    categories: Vec<String>,
+    categories_lower: Vec<String>,
 }
 
 impl PluginSearchIndex {
     pub fn from_plugins(plugins: Vec<RegistryPlugin>) -> Self {
         let search_text = plugins.iter().map(build_search_text).collect::<Vec<_>>();
+        let categories = plugins
+            .iter()
+            .map(normalized_category_label)
+            .collect::<Vec<_>>();
+        let categories_lower = categories
+            .iter()
+            .map(|category| category.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let vendors_lower = plugins
+            .iter()
+            .map(|plugin| plugin.vendor.to_ascii_lowercase())
+            .collect::<Vec<_>>();
         Self {
             plugins,
             search_text,
+            vendors_lower,
+            categories,
+            categories_lower,
         }
     }
 
@@ -29,6 +47,24 @@ impl PluginSearchIndex {
 
     pub fn search_text(&self, index: usize) -> &str {
         self.search_text
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    pub fn vendor_lower(&self, index: usize) -> &str {
+        self.vendors_lower
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    pub fn category(&self, index: usize) -> &str {
+        self.categories.get(index).map(String::as_str).unwrap_or("")
+    }
+
+    pub fn category_lower(&self, index: usize) -> &str {
+        self.categories_lower
             .get(index)
             .map(String::as_str)
             .unwrap_or("")

@@ -800,7 +800,11 @@ impl Timeline {
         let curve_edit = alt || self.state.active_tool == TimelineTool::Pointer;
         if curve_edit {
             if let Some(left_id) = self.state.automation_segment_left_point_at(
-                track_id, &lane_id, beat, value, value_tol * 1.5,
+                track_id,
+                &lane_id,
+                beat,
+                value,
+                value_tol * 1.5,
             ) {
                 if double_click {
                     if self
@@ -817,9 +821,9 @@ impl Timeline {
                         active: false,
                     });
                 } else {
-                    let start_tension =
-                        self.state
-                            .automation_segment_tension(track_id, &lane_id, left_id);
+                    let start_tension = self
+                        .state
+                        .automation_segment_tension(track_id, &lane_id, left_id);
                     self.automation_curve_drag = Some(AutomationCurveDrag {
                         track_id: track_id.to_string(),
                         lane_id: lane_id.clone(),
@@ -919,9 +923,12 @@ impl Timeline {
                 self.automation_value_from_window_y(&drag.track_id, &drag.lane_id, window_y);
             const TENSION_GAIN: f32 = 2.4;
             const TENSION_GAIN_FINE: f32 = 0.6;
-            let gain = if fine { TENSION_GAIN_FINE } else { TENSION_GAIN };
-            let tension =
-                (drag.start_tension + (value - drag.start_value) * gain).clamp(-1.0, 1.0);
+            let gain = if fine {
+                TENSION_GAIN_FINE
+            } else {
+                TENSION_GAIN
+            };
+            let tension = (drag.start_tension + (value - drag.start_value) * gain).clamp(-1.0, 1.0);
             self.state.set_automation_segment_tension(
                 &drag.track_id,
                 &drag.lane_id,
@@ -1017,9 +1024,9 @@ impl Timeline {
         let usable = (AUTOMATION_SUBLANE_HEIGHT - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
         let beat_tol = 8.0 / ppb;
         let value_tol = 8.0 / usable;
-        let point_id =
-            self.state
-                .automation_point_at(track_id, lane_id, beat, value, beat_tol, value_tol);
+        let point_id = self
+            .state
+            .automation_point_at(track_id, lane_id, beat, value, beat_tol, value_tol);
         // Point priority: only test the segment when not already on a point.
         let segment_left_id = if point_id.is_some() {
             None
@@ -1346,6 +1353,98 @@ impl Timeline {
             return false;
         };
         self.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+        true
+    }
+
+    pub(super) fn create_clip_clone_group_at(
+        &mut self,
+        anchor_clip_id: &str,
+        target_track_id: &str,
+        anchor_start_beat: f32,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let selected = self.clip_drag_selection_ids(anchor_clip_id);
+        if selected.len() <= 1 {
+            return self.create_clip_clone_at(
+                anchor_clip_id,
+                target_track_id,
+                anchor_start_beat,
+                cx,
+            );
+        }
+
+        let Some((anchor_track, anchor_clip)) = self.state.find_clip(anchor_clip_id) else {
+            return false;
+        };
+        let Some(source_track_index) = self
+            .state
+            .tracks
+            .iter()
+            .position(|track| track.id == anchor_track.id)
+        else {
+            return false;
+        };
+        let Some(target_track_index) = self
+            .state
+            .tracks
+            .iter()
+            .position(|track| track.id == target_track_id)
+        else {
+            return false;
+        };
+
+        let beat_delta = anchor_start_beat - anchor_clip.start_beat;
+        let track_delta = target_track_index as isize - source_track_index as isize;
+        let max_index = self.state.tracks.len().saturating_sub(1) as isize;
+
+        let mut used_ids: std::collections::HashSet<String> = self
+            .state
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter().map(|clip| clip.id.clone()))
+            .collect();
+        let mut next_clip_id = || {
+            let mut n = 1u32;
+            loop {
+                let id = format!("clip-{n}");
+                if used_ids.insert(id.clone()) {
+                    return id;
+                }
+                n = n.saturating_add(1);
+            }
+        };
+
+        let mut clips = Vec::new();
+        for clip_id in selected {
+            let Some((source_track, source_clip)) = self.state.find_clip(&clip_id) else {
+                continue;
+            };
+            let Some(source_index) = self
+                .state
+                .tracks
+                .iter()
+                .position(|track| track.id == source_track.id)
+            else {
+                continue;
+            };
+            let target_index = (source_index as isize + track_delta).clamp(0, max_index) as usize;
+            let Some(track) = self.state.tracks.get(target_index) else {
+                continue;
+            };
+            let start = (source_clip.start_beat + beat_delta).max(0.0);
+            let clip = self.state.clone_clip_for_insert(
+                source_clip,
+                next_clip_id(),
+                format!("{} Copy", source_clip.name),
+                start,
+            );
+            clips.push((track.id.clone(), clip));
+        }
+
+        if clips.is_empty() {
+            return false;
+        }
+        self.run_edit_command(EditCommand::BatchCreateClips { clips }, cx);
         true
     }
 

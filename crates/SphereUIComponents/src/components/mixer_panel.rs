@@ -25,27 +25,27 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, AppContext, ClickEvent, DragMoveEvent, Empty, Entity,
-    InteractiveElement, IntoElement, MouseDownEvent, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, svg, App, AppContext, ClickEvent, DragMoveEvent, Empty, Entity, InteractiveElement,
+    IntoElement, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
 use std::collections::HashSet;
 
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
 use crate::components::knob::knob_bipolar;
+use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
+use crate::components::mixer_surface::{mixer_gpu_primitives_active, render_mixer_primitives};
+use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::components::panel::FxSlotDrag;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
-    is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range, vsti_output_bus_strip_indices,
-    vsti_output_child_channels_for_bus_layout, vsti_output_child_insert_id, InsertLoadStatus,
-    InsertSlotState, MasterBusState, SendSlotState, TrackState, TrackType, MASTER_TRACK_ID,
+    is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range,
+    vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
+    vsti_output_child_insert_id, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState,
+    TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
-use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
-use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
-use crate::components::mixer_surface::{mixer_gpu_primitives_active, render_mixer_primitives};
 use crate::theme::Colors;
 
 // ── Section dimensions ─────────────────────────────────────────────────────
@@ -164,6 +164,28 @@ impl Render for MixerSplitDrag {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SendSlotDrag {
+    track_id: String,
+    send_id: String,
+    target_name: String,
+}
+
+impl Render for SendSlotDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .h(px(20.0))
+            .rounded_sm()
+            .bg(Colors::surface_overlay())
+            .border(px(1.0))
+            .border_color(Colors::accent_primary())
+            .text_size(px(10.0))
+            .text_color(Colors::text_primary())
+            .child(format!("Send -> {}", self.target_name))
+    }
+}
+
 /// Maximum insert slots per track. Once reached, the trailing empty "+ Add
 /// Insert" slot and the INSERTS header "+" are hidden/disabled.
 const MAX_INSERT_SLOTS: usize = 8;
@@ -236,6 +258,11 @@ pub struct MixerCallbacks {
     /// Remove the named send `(track_id, send_id)`.
     pub on_remove_send:
         std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Drag-reorder commit for a send slot. `(track_id, dragged_send_id,
+    /// insertion_index)` where `insertion_index` is the visual gap.
+    pub on_reorder_send: std::sync::Arc<
+        dyn Fn(&(String, String, usize), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
 }
 
 /// Inert callbacks for fallback UI when the studio entity is unavailable.
@@ -253,6 +280,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_preset_drop =
         Arc::new(|_: &(std::path::PathBuf, String, usize), _: &mut Window, _: &mut App| {});
     let noop_add_send = Arc::new(|_: &(String, f32, f32), _: &mut Window, _: &mut App| {});
+    let noop_send_reorder = Arc::new(|_: &(String, String, usize), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
         on_volume_change: noop_vol,
@@ -272,6 +300,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_open_insert_editor: noop_insert_open.clone(),
         on_add_send: noop_add_send,
         on_remove_send: noop_insert_pair,
+        on_reorder_send: noop_send_reorder,
     }
 }
 
@@ -773,19 +802,15 @@ fn insert_chip(
     let bypass_pair = (track_id_owned.clone(), slot_id.clone());
     let remove_pair = (track_id_owned.clone(), slot_id.clone());
 
-    // Drag source: only the grip handle starts a reorder, so the chip's
-    // open-editor click and the ▲/▼/×/bypass controls keep their own hit-
-    // testing. The payload carries the stable plugin_instance_id, so reorder
-    // identity follows the instance — never the visual index (model only
-    // reorders existing slots; bypass/preset/editor/automation state come
-    // along). `.occlude()` stops a press on the grip from also opening the
-    // editor. ElementId includes the track id because the mixer renders every
-    // track's strips at once (the Inspector shows one track).
+    // Drag payload carries the stable plugin_instance_id, so reorder identity
+    // follows the instance rather than the visual index. The grip and the chip
+    // body both start the same drag; child controls occlude their own clicks.
     let drag_payload = FxSlotDrag {
         track_id: track_id_owned.clone(),
         insert_id: slot_id.clone(),
         display_name: slot.display_name.clone(),
     };
+    let chip_drag_payload = drag_payload.clone();
     let handle = drag_handle()
         .id(gpui::SharedString::from(format!(
             "mixer-fx-drag-{track_id}-{slot_id}"
@@ -859,6 +884,9 @@ fn insert_chip(
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
+        .on_drag(chip_drag_payload, |drag, _offset, _window, cx| {
+            cx.new(|_| drag.clone())
+        })
         .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
             eprintln!(
                 "[mixer] insert row clicked track_id={} insert_index={} plugin={} plugin_instance_id={}",
@@ -867,7 +895,7 @@ fn insert_chip(
             on_open(&open_target, w, cx);
         })
         .occlude()
-        // Grip drag handle (leftmost) — the only reorder drag source.
+        // Grip drag handle (leftmost) mirrors the whole-chip drag affordance.
         .child(handle)
         .child(div().flex_1().min_w(px(0.0)).truncate().child(display))
         // Bypass dot — small interactive square.
@@ -1145,6 +1173,7 @@ fn master_inserts_section(
 
 fn send_chip(
     track_id: &str,
+    send_index: usize,
     send: &SendSlotState,
     target_name: &str,
     callbacks: &MixerCallbacks,
@@ -1156,8 +1185,41 @@ fn send_chip(
     } else {
         (Colors::surface_input(), Colors::text_muted())
     };
+    let drag_payload = SendSlotDrag {
+        track_id: track_id.to_string(),
+        send_id: send.id.clone(),
+        target_name: target_name.to_string(),
+    };
+    let chip_drag_payload = drag_payload.clone();
+    let handle = drag_handle()
+        .id(gpui::SharedString::from(format!(
+            "mixer-send-drag-{}-{}",
+            track_id, send.id
+        )))
+        .occlude()
+        .on_drag(drag_payload, |drag, _offset, _window, cx| {
+            cx.new(|_| drag.clone())
+        });
+    let can_drop_track = track_id.to_string();
+    let drop_track = track_id.to_string();
+    let reorder = callbacks.on_reorder_send.clone();
     div()
         .id(gpui::SharedString::from(format!("send-chip-{}", send.id)))
+        .can_drop(move |dragged, _window, _cx| {
+            dragged
+                .downcast_ref::<SendSlotDrag>()
+                .is_some_and(|d| d.track_id == can_drop_track)
+        })
+        .drag_over::<SendSlotDrag>(|style, _drag, _window, _cx| drop_over_highlight(style))
+        .on_drop::<SendSlotDrag>(move |drag, window, cx| {
+            if drag.track_id == drop_track {
+                reorder(
+                    &(drop_track.clone(), drag.send_id.clone(), send_index),
+                    window,
+                    cx,
+                );
+            }
+        })
         .flex()
         .flex_none()
         .flex_row()
@@ -1171,6 +1233,11 @@ fn send_chip(
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_drag(chip_drag_payload, |drag, _offset, _window, cx| {
+            cx.new(|_| drag.clone())
+        })
+        .child(handle)
         .child(div().truncate().flex_1().child(format!("→ {target_name}")))
         .child(
             div()
@@ -1184,6 +1251,34 @@ fn send_chip(
                 })
                 .occlude(),
         )
+}
+
+fn send_drop_end(track_id: &str, gap: usize, callbacks: &MixerCallbacks) -> impl IntoElement {
+    let track_id_owned = track_id.to_string();
+    let can_drop_track = track_id_owned.clone();
+    let reorder = callbacks.on_reorder_send.clone();
+    div()
+        .id(gpui::SharedString::from(format!(
+            "mixer-send-drop-end-{track_id_owned}"
+        )))
+        .flex_none()
+        .h(px(6.0))
+        .mx(px(2.0))
+        .can_drop(move |dragged, _window, _cx| {
+            dragged
+                .downcast_ref::<SendSlotDrag>()
+                .is_some_and(|d| d.track_id == can_drop_track)
+        })
+        .drag_over::<SendSlotDrag>(|style, _drag, _window, _cx| drop_over_highlight(style))
+        .on_drop::<SendSlotDrag>(move |drag, window, cx| {
+            if drag.track_id == track_id_owned {
+                reorder(
+                    &(track_id_owned.clone(), drag.send_id.clone(), gap),
+                    window,
+                    cx,
+                );
+            }
+        })
 }
 
 fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoElement {
@@ -1243,7 +1338,7 @@ fn sends_section(
     if is_routing {
         chips = chips.child(empty_slot());
     } else {
-        for send in &track.sends {
+        for (send_index, send) in track.sends.iter().enumerate() {
             // Resolve the live target name (handles renames) with the stored
             // label as a fallback.
             let target_name = all_tracks
@@ -1251,7 +1346,16 @@ fn sends_section(
                 .find(|t| t.id == send.target_track_id)
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| send.target_name.clone());
-            chips = chips.child(send_chip(&track.id, send, &target_name, callbacks));
+            chips = chips.child(send_chip(
+                &track.id,
+                send_index,
+                send,
+                &target_name,
+                callbacks,
+            ));
+        }
+        if !track.sends.is_empty() {
+            chips = chips.child(send_drop_end(&track.id, track.sends.len(), callbacks));
         }
         chips = chips.child(add_send_button(&track.id, callbacks));
     }
@@ -1701,10 +1805,16 @@ fn vsti_output_sub_strip(
         if let Some((channel_l, channel_r)) =
             vsti_output_child_channels_for_bus_layout(bus_counts, bus_index)
         {
-            let meter_l =
-                vsti_output_meters.get(&vsti_output_meter_key(&parent_track.id, insert_id, channel_l));
-            let meter_r =
-                vsti_output_meters.get(&vsti_output_meter_key(&parent_track.id, insert_id, channel_r));
+            let meter_l = vsti_output_meters.get(&vsti_output_meter_key(
+                &parent_track.id,
+                insert_id,
+                channel_l,
+            ));
+            let meter_r = vsti_output_meters.get(&vsti_output_meter_key(
+                &parent_track.id,
+                insert_id,
+                channel_r,
+            ));
             if let Some(meter) = meter_l {
                 sub_track.meter_level_l = meter.level;
                 sub_track.meter_peak_hold_l = meter.peak_hold;
@@ -1717,8 +1827,7 @@ fn vsti_output_sub_strip(
             }
         }
     }
-    let is_selected =
-        selected_track_id == Some(child_track.id.as_str()) || focus_highlight;
+    let is_selected = selected_track_id == Some(child_track.id.as_str()) || focus_highlight;
     let select_id = child_track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =
@@ -2026,7 +2135,7 @@ pub fn vsti_output_meter_key(track_id: &str, insert_id: &str, channel: u8) -> St
 }
 
 #[derive(Clone, Copy)]
-enum MixerRenderItem {
+pub(crate) enum MixerRenderItem {
     Track {
         track_index: usize,
     },
@@ -2063,7 +2172,9 @@ pub fn mixer_strip_index_for_channel(
     channel_id: &str,
 ) -> Option<usize> {
     let items = collect_mixer_render_items(tracks, collapsed_vsti_output_groups, hidden_channels);
-    items.iter().position(|item| channel_id_for_render_item(tracks, item) == channel_id)
+    items
+        .iter()
+        .position(|item| channel_id_for_render_item(tracks, item) == channel_id)
 }
 
 pub fn mixer_scroll_x_for_strip_index(
@@ -2198,7 +2309,11 @@ pub fn mixer_center_lightweight(width: f32, height: f32) -> impl IntoElement {
         )
 }
 
-fn paint_mixer_center_grid(bounds: gpui::Bounds<gpui::Pixels>, width: f32, window: &mut gpui::Window) {
+fn paint_mixer_center_grid(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    width: f32,
+    window: &mut gpui::Window,
+) {
     use gpui::{fill, point, px, size, Bounds};
 
     let origin_x = f32::from(bounds.origin.x);
@@ -2214,10 +2329,7 @@ fn paint_mixer_center_grid(bounds: gpui::Bounds<gpui::Pixels>, width: f32, windo
         if x > width {
             break;
         }
-        let rect = Bounds::new(
-            point(px(origin_x + x), px(origin_y)),
-            size(px(1.0), px(h)),
-        );
+        let rect = Bounds::new(point(px(origin_x + x), px(origin_y)), size(px(1.0), px(h)));
         window.paint_quad(fill(rect, color));
     }
 }
@@ -2341,11 +2453,8 @@ pub fn mixer_panel(
     // exact pinned x is not known until layout). Opt-in / reversible.
     let gpu_active = mixer_gpu_primitives_active();
 
-    let strip_count = mixer_render_item_count(
-        tracks,
-        collapsed_vsti_output_groups,
-        hidden_mixer_channels,
-    );
+    let strip_count =
+        mixer_render_item_count(tracks, collapsed_vsti_output_groups, hidden_mixer_channels);
 
     // Empty mixer fast path — shell + tree (external) + cheap center + isolated master.
     if strip_count == 0 {
@@ -2495,11 +2604,8 @@ pub(crate) fn mixer_strip_scroller(
     crate::perf::count("mixer_strip_layout_count", 1);
     crate::perf::count("mixer_strip_paint_count", 1);
 
-    let render_items = collect_mixer_render_items(
-        tracks,
-        collapsed_vsti_output_groups,
-        hidden_mixer_channels,
-    );
+    let render_items =
+        collect_mixer_render_items(tracks, collapsed_vsti_output_groups, hidden_mixer_channels);
     let strip_count = render_items.len();
     crate::perf::count("mixer_strips", tracks.len() as u64);
 
@@ -2641,7 +2747,14 @@ fn mixer_master_strip_pinned(
     strip_available_px: f32,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("MixerMasterStrip");
-    master_strip(accent, master, on_master, callbacks, split, strip_available_px)
+    master_strip(
+        accent,
+        master,
+        on_master,
+        callbacks,
+        split,
+        strip_available_px,
+    )
 }
 
 #[cfg(test)]
@@ -2724,7 +2837,8 @@ mod collapse_filter_tests {
         // Collapsed: child strips filtered out, only the parent strip remains.
         let mut collapsed = HashSet::new();
         collapsed.insert(vsti_output_group_key(&track_id, &slot));
-        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed, &HashSet::new());
+        let collapsed_items =
+            collect_mixer_render_items(&state.tracks, &collapsed, &HashSet::new());
         assert_eq!(
             collapsed_items.len(),
             1,
@@ -2770,7 +2884,8 @@ mod collapse_filter_tests {
         // every child track for routing and meters.
         let mut collapsed = HashSet::new();
         collapsed.insert(vsti_output_group_key(&track_id, &slot));
-        let collapsed_items = collect_mixer_render_items(&state.tracks, &collapsed, &HashSet::new());
+        let collapsed_items =
+            collect_mixer_render_items(&state.tracks, &collapsed, &HashSet::new());
         assert_eq!(collapsed_items.len(), 1);
         assert_eq!(state.tracks.len(), 5);
     }

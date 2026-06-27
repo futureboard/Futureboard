@@ -143,9 +143,11 @@ pub(super) fn numbered_name_stem(name: &str) -> String {
     }
 }
 
-pub(super) fn smooth_meter_value(current: &mut f32, target: f32) -> bool {
+pub(super) fn smooth_meter_value(current: &mut f32, target: f32, dt_secs: f32) -> bool {
     let target = target.clamp(0.0, 1.0);
-    let rate = if target > *current { 0.72 } else { 0.18 };
+    let dt_frames = (dt_secs.clamp(1.0 / 240.0, 0.1) * 60.0).max(0.0);
+    let base_rate: f32 = if target > *current { 0.72 } else { 0.18 };
+    let rate = 1.0 - (1.0 - base_rate).powf(dt_frames);
     let next = (*current + (target - *current) * rate).clamp(0.0, 1.0);
     let changed = (*current - next).abs() > 0.001;
     *current = if next < 0.002 { 0.0 } else { next };
@@ -154,13 +156,13 @@ pub(super) fn smooth_meter_value(current: &mut f32, target: f32) -> bool {
 
 /// Update a peak-hold value: jump up instantly to a higher level, otherwise
 /// release slowly so the held peak lingers above the decaying meter bar
-/// (≈0.012 per poll tick → ≈1 s to fall a third of full scale at 30 Hz).
-pub(super) fn update_meter_hold(hold: &mut f32, level: f32) {
+/// (roughly a third of full scale per second, independent of display refresh).
+pub(super) fn update_meter_hold(hold: &mut f32, level: f32, dt_secs: f32) {
     let level = level.clamp(0.0, 1.0);
     *hold = if level >= *hold {
         level
     } else {
-        (*hold - 0.012).max(level)
+        (*hold - 0.36 * dt_secs.clamp(1.0 / 240.0, 0.1)).max(level)
     };
 }
 

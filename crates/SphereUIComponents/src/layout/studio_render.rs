@@ -856,10 +856,11 @@ impl Render for StudioLayout {
                     )
                 }
                 Some(OpenPopover::AutomationTargetPicker { track_id, x, y }) => {
-                    use crate::components::timeline::automation_target_picker::automation_target_picker_overlay;
                     use crate::components::text_input::TextInputCallbacks;
+                    use crate::components::timeline::automation_target_picker::automation_target_picker_overlay;
 
-                    self.automation_picker_query = self.automation_picker_search_input.value.clone();
+                    self.automation_picker_query =
+                        self.automation_picker_search_input.value.clone();
                     let model = self
                         .timeline
                         .read(cx)
@@ -1221,6 +1222,17 @@ impl Render for StudioLayout {
                     handled
                 });
                 if handled {
+                    let key = event.keystroke.key.clone();
+                    let _ = shortcut_keydown_target.update(cx, |this, _cx| {
+                        this.shortcut_diagnostics.last_key_event = key;
+                        this.shortcut_diagnostics.last_key_target = "focused-handler".to_string();
+                        this.shortcut_diagnostics.last_key_consumed_by =
+                            "pre-global-key-handler".to_string();
+                        this.shortcut_diagnostics.focused_widget_kind =
+                            this.focused_widget_kind(window);
+                        this.shortcut_diagnostics.is_text_editing_context =
+                            this.is_text_editing_context(window);
+                    });
                     return;
                 }
                 let focus = FocusContext {
@@ -1228,6 +1240,15 @@ impl Render for StudioLayout {
                         .read(cx)
                         .is_text_editing_context(window),
                 };
+                let focused_widget_kind = shortcut_keydown_target.read(cx).focused_widget_kind(window);
+                let key_for_diag = event.keystroke.key.clone();
+                let _ = shortcut_keydown_target.update(cx, |this, _cx| {
+                    this.shortcut_diagnostics.last_key_event = key_for_diag;
+                    this.shortcut_diagnostics.last_key_target = focused_widget_kind.clone();
+                    this.shortcut_diagnostics.last_key_consumed_by = "unhandled".to_string();
+                    this.shortcut_diagnostics.focused_widget_kind = focused_widget_kind.clone();
+                    this.shortcut_diagnostics.is_text_editing_context = focus.text_input_focused;
+                });
                 if key_debug() {
                     eprintln!(
                         "[key] key={:?} text_input_focused={} held={} (plugin editor, when active, \
@@ -1236,6 +1257,9 @@ impl Render for StudioLayout {
                     );
                 }
                 if focus.text_input_focused && is_text_input_key(event) {
+                    let _ = shortcut_keydown_target.update(cx, |this, _cx| {
+                        this.shortcut_diagnostics.last_key_consumed_by = "text-input".to_string();
+                    });
                     if key_debug() {
                         eprintln!(
                             "[key] ignored key={:?} reason=text-input-focused (typed into field)",
@@ -1265,6 +1289,10 @@ impl Render for StudioLayout {
                         )
                     });
                 if virtual_keyboard_handled {
+                    let _ = shortcut_keydown_target.update(cx, |this, _cx| {
+                        this.shortcut_diagnostics.last_key_consumed_by =
+                            "virtual-keyboard".to_string();
+                    });
                     if components::VirtualKeyboardPanel::should_prevent_default_key(
                         event.keystroke.key.as_str(),
                     ) {
@@ -1345,6 +1373,18 @@ impl Render for StudioLayout {
                         && event.keystroke.key.eq_ignore_ascii_case("space")
                     {
                         eprintln!("[KeyCommand] Spacebar -> TransportTogglePlay");
+                        let _ = shortcut_keydown_target.update(cx, |this, _cx| {
+                            this.shortcut_diagnostics.transport_toggle_shortcut_count = this
+                                .shortcut_diagnostics
+                                .transport_toggle_shortcut_count
+                                .saturating_add(1);
+                            this.shortcut_diagnostics.last_key_consumed_by =
+                                "global-transport-shortcut".to_string();
+                            crate::perf::count(
+                                "transport_toggle_shortcut_count",
+                                this.shortcut_diagnostics.transport_toggle_shortcut_count,
+                            );
+                        });
                     }
                     if key_debug() {
                         eprintln!("[key] dispatched command={command_id}");
@@ -1370,6 +1410,16 @@ impl Render for StudioLayout {
                     window.prevent_default();
                     cx.stop_propagation();
                     let _ = shortcut_keydown_target.update(cx, |this, cx| {
+                        this.shortcut_diagnostics.transport_toggle_shortcut_count = this
+                            .shortcut_diagnostics
+                            .transport_toggle_shortcut_count
+                            .saturating_add(1);
+                        this.shortcut_diagnostics.last_key_consumed_by =
+                            "spacebar-fallback".to_string();
+                        crate::perf::count(
+                            "transport_toggle_shortcut_count",
+                            this.shortcut_diagnostics.transport_toggle_shortcut_count,
+                        );
                         this.dispatch_command_id_from_bounds(
                             "transport:play-pause",
                             Some(window.bounds()),

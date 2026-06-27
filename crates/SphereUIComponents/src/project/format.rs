@@ -1525,31 +1525,31 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         (Vec::new(), Vec::new())
     };
 
-    let (tree_expanded_node_ids, tree_pinned_channel_ids, tree_hidden_channel_ids) = if version >= 20
-    {
-        let expanded_count = r.read_u32()? as usize;
-        let mut tree_expanded_node_ids = Vec::with_capacity(expanded_count);
-        for _ in 0..expanded_count {
-            tree_expanded_node_ids.push(r.read_str()?);
-        }
-        let pinned_count = r.read_u32()? as usize;
-        let mut tree_pinned_channel_ids = Vec::with_capacity(pinned_count);
-        for _ in 0..pinned_count {
-            tree_pinned_channel_ids.push(r.read_str()?);
-        }
-        let hidden_count = r.read_u32()? as usize;
-        let mut tree_hidden_channel_ids = Vec::with_capacity(hidden_count);
-        for _ in 0..hidden_count {
-            tree_hidden_channel_ids.push(r.read_str()?);
-        }
-        (
-            tree_expanded_node_ids,
-            tree_pinned_channel_ids,
-            tree_hidden_channel_ids,
-        )
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
-    };
+    let (tree_expanded_node_ids, tree_pinned_channel_ids, tree_hidden_channel_ids) =
+        if version >= 20 {
+            let expanded_count = r.read_u32()? as usize;
+            let mut tree_expanded_node_ids = Vec::with_capacity(expanded_count);
+            for _ in 0..expanded_count {
+                tree_expanded_node_ids.push(r.read_str()?);
+            }
+            let pinned_count = r.read_u32()? as usize;
+            let mut tree_pinned_channel_ids = Vec::with_capacity(pinned_count);
+            for _ in 0..pinned_count {
+                tree_pinned_channel_ids.push(r.read_str()?);
+            }
+            let hidden_count = r.read_u32()? as usize;
+            let mut tree_hidden_channel_ids = Vec::with_capacity(hidden_count);
+            for _ in 0..hidden_count {
+                tree_hidden_channel_ids.push(r.read_str()?);
+            }
+            (
+                tree_expanded_node_ids,
+                tree_pinned_channel_ids,
+                tree_hidden_channel_ids,
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
 
     Ok(FutureboardProject {
         id,

@@ -12,7 +12,6 @@ use crate::components::bottom_panel::{BottomPanelResizeDrag, BottomTab};
 use crate::components::effect_editor_tab_view::EffectEditorTabView;
 use crate::components::editor_panel::ClipEditorPanel;
 use crate::components::mixer_panel_view::{docked_mixer_shell, MixerPanelView};
-use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::layout::StudioLayout;
 use crate::theme::Colors;
 
@@ -21,7 +20,6 @@ const TABBAR_H: f32 = 28.0;
 pub struct BottomPanelShell {
     owner: Entity<StudioLayout>,
     mixer_panel: Entity<MixerPanelView>,
-    mixer_tree_sidebar: Entity<MixerTreeSidebar>,
     clip_editor: Entity<ClipEditorPanel>,
     effect_editor: Entity<EffectEditorTabView>,
     last_shell_key: u64,
@@ -31,14 +29,12 @@ impl BottomPanelShell {
     pub fn new(
         owner: Entity<StudioLayout>,
         mixer_panel: Entity<MixerPanelView>,
-        mixer_tree_sidebar: Entity<MixerTreeSidebar>,
         clip_editor: Entity<ClipEditorPanel>,
         effect_editor: Entity<EffectEditorTabView>,
     ) -> Self {
         Self {
             owner,
             mixer_panel,
-            mixer_tree_sidebar,
             clip_editor,
             effect_editor,
             last_shell_key: u64::MAX,
@@ -77,7 +73,6 @@ impl Render for BottomPanelShell {
         crate::perf::count("active_bottom_tab", tab_counter_id(active_tab));
 
         let panel_state = owner.bottom_panel_state();
-        let tree_enabled = owner.mixer_tree_sidebar_enabled();
         let owner_entity = self.owner.clone();
         let shell_entity = cx.entity();
 
@@ -140,8 +135,6 @@ impl Render for BottomPanelShell {
                     .w_full()
                     .child(render_active_tab(
                         active_tab,
-                        tree_enabled,
-                        &self.mixer_tree_sidebar,
                         &self.mixer_panel,
                         &self.clip_editor,
                         &self.effect_editor,
@@ -284,8 +277,6 @@ fn tab_button(
 
 fn render_active_tab(
     active_tab: BottomTab,
-    tree_enabled: bool,
-    tree_sidebar: &Entity<MixerTreeSidebar>,
     mixer_panel: &Entity<MixerPanelView>,
     clip_editor: &Entity<ClipEditorPanel>,
     effect_editor: &Entity<EffectEditorTabView>,
@@ -295,14 +286,7 @@ fn render_active_tab(
     crate::perf::count("bottom_panel_content_paint_count", 1);
 
     match active_tab {
-        BottomTab::Mixer => {
-            let tree = if tree_enabled {
-                Some(tree_sidebar.clone())
-            } else {
-                None
-            };
-            docked_mixer_shell(tree, tree_enabled, mixer_panel.clone()).into_any_element()
-        }
+        BottomTab::Mixer => docked_mixer_shell(mixer_panel.clone()).into_any_element(),
         BottomTab::Editor => clip_editor.clone().into_any_element(),
         BottomTab::EffectEditor => effect_editor.clone().into_any_element(),
     }

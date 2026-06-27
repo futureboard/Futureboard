@@ -23,6 +23,7 @@ use crate::theme::Colors;
 pub struct MixerPanelView {
     owner: Entity<StudioLayout>,
     timeline: Entity<Timeline>,
+    tree_sidebar: Entity<MixerTreeSidebar>,
     master_strip: Entity<MixerMasterStripView>,
     last_structure_key: u64,
     last_meter_sig: u64,
@@ -33,11 +34,13 @@ impl MixerPanelView {
     pub fn new(
         owner: Entity<StudioLayout>,
         timeline: Entity<Timeline>,
+        tree_sidebar: Entity<MixerTreeSidebar>,
         master_strip: Entity<MixerMasterStripView>,
     ) -> Self {
         Self {
             owner,
             timeline,
+            tree_sidebar,
             master_strip,
             last_structure_key: u64::MAX,
             last_meter_sig: u64::MAX,
@@ -213,6 +216,18 @@ impl Render for MixerPanelView {
                 .child(self.master_strip.clone())
         };
 
+        let body = if state.tree_enabled {
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h_0()
+                .child(self.tree_sidebar.clone())
+                .child(channel_row)
+        } else {
+            channel_row
+        };
+
         div()
             .flex()
             .flex_col()
@@ -226,7 +241,7 @@ impl Render for MixerPanelView {
                 (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
             })
             .child(mixer_sub_header(state.track_count))
-            .child(channel_row)
+            .child(body)
     }
 }
 
@@ -274,25 +289,14 @@ fn channel_meter_signature(
     hasher.finish()
 }
 
-/// Docked mixer shell: tree sidebar (sibling) + panel entity (center + master).
-pub fn docked_mixer_shell(
-    tree_sidebar: Option<Entity<MixerTreeSidebar>>,
-    tree_enabled: bool,
-    mixer_panel: Entity<MixerPanelView>,
-) -> impl IntoElement {
-    if tree_enabled {
-        let mut row = div().flex().flex_row().flex_1().min_h_0().size_full();
-        if let Some(sidebar) = tree_sidebar {
-            row = row.child(sidebar);
-        }
-        row.child(mixer_panel)
-    } else {
-        div()
-            .flex()
-            .flex_row()
-            .flex_1()
-            .min_h_0()
-            .size_full()
-            .child(mixer_panel)
-    }
+/// Docked mixer shell: the panel entity is the MixerPanelRoot and owns its body
+/// children, including the tree sidebar when enabled.
+pub fn docked_mixer_shell(mixer_panel: Entity<MixerPanelView>) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_h_0()
+        .size_full()
+        .child(mixer_panel)
 }

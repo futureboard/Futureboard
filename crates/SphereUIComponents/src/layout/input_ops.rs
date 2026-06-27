@@ -828,6 +828,10 @@ impl StudioLayout {
             || self.inspector_name_edit.clip_name_input.is_focused(window)
     }
 
+    pub(super) fn is_text_editing_context(&self, window: &Window) -> bool {
+        self.keyboard_text_capture_live(window)
+    }
+
     pub(super) fn context_entries(
         &self,
         target: &ContextTarget,

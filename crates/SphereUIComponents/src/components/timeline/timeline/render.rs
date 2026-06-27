@@ -258,6 +258,7 @@ impl Render for Timeline {
                     || this.range_select_drag.is_some()
                     || this.erase_clip_drag.is_some()
                     || this.automation_drag.is_some()
+                    || this.automation_curve_drag.is_some()
                     || this.automation_marquee.is_some()
                     || this.tempo_drag.is_some()
                     || this.ts_drag.is_some()
@@ -269,6 +270,7 @@ impl Render for Timeline {
             }
             if event.pressed_button == Some(gpui::MouseButton::Left)
                 && (this.automation_drag.is_some()
+                    || this.automation_curve_drag.is_some()
                     || this.automation_marquee.is_some()
                     || this.tempo_drag.is_some()
                     || this.ts_drag.is_some())
@@ -289,6 +291,7 @@ impl Render for Timeline {
                     this.update_automation_interaction(
                         event.position.x.into(),
                         event.position.y.into(),
+                        event.modifiers.shift,
                         cx,
                     );
                 }
@@ -652,6 +655,22 @@ impl Render for Timeline {
         );
         let on_automation_down: crate::components::timeline::automation_lane::AutomationDownCallback =
             std::sync::Arc::new(on_automation_down);
+
+        // Hover resolver: a normal move resolves the point/segment under the
+        // cursor; a negative-sentinel payload (hover-out) clears this lane's hover.
+        let on_automation_hover = cx.listener(
+            |this, payload: &(String, String, f32, f32), _window, cx| {
+                let (track_id, lane_id, beat, value) =
+                    (payload.0.clone(), payload.1.clone(), payload.2, payload.3);
+                if beat < 0.0 {
+                    this.clear_automation_hover_for_lane(&track_id, &lane_id, cx);
+                } else {
+                    this.update_automation_hover(&track_id, &lane_id, beat, value, cx);
+                }
+            },
+        );
+        let on_automation_hover: crate::components::timeline::automation_lane::AutomationHoverCallback =
+            std::sync::Arc::new(on_automation_hover);
 
         // Sub-lane header controls: activate / enable / clear / hide. Activation
         // is UI-only; enable/clear/hide are committed edits.
@@ -1320,8 +1339,10 @@ impl Render for Timeline {
                 Some(&self.erase_preview_ids),
                 Some(on_automation_down.clone()),
                 Some(on_automation_lane_action.clone()),
+                Some(on_automation_hover.clone()),
                 on_automation_control.clone(),
                 self.automation_marquee.as_ref(),
+                self.automation_hover.as_ref(),
             )))
             .children(timeline_marker_region_overlay(state).map(|overlay| {
                 div()

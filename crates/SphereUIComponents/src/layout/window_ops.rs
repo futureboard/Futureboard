@@ -714,6 +714,7 @@ impl StudioLayout {
         match open_mixer_window(
             owner_bounds,
             snapshot,
+            self.mixer_tree_sidebar.clone(),
             callbacks,
             on_close,
             on_mixer_scroll,

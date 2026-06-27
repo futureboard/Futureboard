@@ -610,6 +610,7 @@ impl StudioLayout {
             components::MixerPanelView::new(
                 studio_entity.clone(),
                 timeline.clone(),
+                mixer_tree_sidebar.clone(),
                 mixer_master_strip.clone(),
             )
         });
@@ -619,7 +620,6 @@ impl StudioLayout {
             components::BottomPanelShell::new(
                 studio_entity.clone(),
                 mixer_panel.clone(),
-                mixer_tree_sidebar.clone(),
                 clip_editor_panel.clone(),
                 effect_editor_tab.clone(),
             )
@@ -898,6 +898,9 @@ impl StudioLayout {
             autosave_in_flight: false,
         };
 
+        layout.ensure_mixer_tree_defaults_once(cx);
+        layout.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
+        layout.refresh_mixer_tree_sidebar_entity(cx);
         layout.spawn_audio_engine_warmup(cx);
         layout.sync_timeline_chrome_metrics(cx);
 

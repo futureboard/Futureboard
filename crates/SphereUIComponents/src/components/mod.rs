@@ -38,7 +38,7 @@ pub mod mixer_tree_sidebar;
 pub mod mixer_tree_sidebar_view;
 pub use mixer_tree_sidebar_view::MixerTreeSidebar;
 mod mixer_window;
-pub(crate) use mixer_window::external_mixer_debug;
+pub(crate) use mixer_window::{external_mixer_debug, external_mixer_debug_enabled};
 pub mod gpu_editor_diagnostics;
 pub mod native_editor_shell;
 pub mod panel;

@@ -4,11 +4,11 @@ use crate::components::timeline::automation_control_lane::{
     automation_control_lane, AutomationControlCallback,
 };
 use crate::components::timeline::automation_lane::{
-    automation_lane, AutomationDownCallback, AutomationLaneActionCallback,
+    automation_lane, AutomationDownCallback, AutomationHoverCallback, AutomationLaneActionCallback,
 };
 use crate::components::timeline::timeline_state::{
-    is_vsti_output_child_track_id, AutomationMarquee, TimelineState, AUTOMATION_CONTROL_LANE_HEIGHT,
-    AUTOMATION_SUBLANE_HEIGHT, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
+    is_vsti_output_child_track_id, AutomationHover, AutomationMarquee, TimelineState,
+    AUTOMATION_CONTROL_LANE_HEIGHT, AUTOMATION_SUBLANE_HEIGHT, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
@@ -54,8 +54,10 @@ pub fn track_list(
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
     on_automation_down: Option<AutomationDownCallback>,
     on_automation_lane_action: Option<AutomationLaneActionCallback>,
+    on_automation_hover: Option<AutomationHoverCallback>,
     on_automation_control: Option<AutomationControlCallback>,
     automation_marquee: Option<&AutomationMarquee>,
+    automation_hover: Option<&AutomationHover>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackList");
     let grid_width = state.viewport.viewport_width.max(1.0);
@@ -162,7 +164,9 @@ pub fn track_list(
                         state,
                         on_automation_down.clone(),
                         on_automation_lane_action.clone(),
+                        on_automation_hover.clone(),
                         automation_marquee,
+                        automation_hover,
                     )
                     .into_any_element(),
                 );

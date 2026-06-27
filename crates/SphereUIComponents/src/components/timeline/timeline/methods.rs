@@ -177,6 +177,7 @@ impl Timeline {
             automation_drag: None,
             automation_curve_drag: None,
             automation_marquee: None,
+            automation_hover: None,
             on_automation_control: None,
             tempo_drag: None,
             ts_drag: None,
@@ -217,6 +218,7 @@ impl Timeline {
             automation_drag: None,
             automation_curve_drag: None,
             automation_marquee: None,
+            automation_hover: None,
             on_automation_control: None,
             tempo_drag: None,
             ts_drag: None,
@@ -753,8 +755,8 @@ impl Timeline {
         cx: &mut Context<Self>,
     ) {
         use crate::components::timeline::timeline_state::{
-            AutomationCurveDrag, AutomationMarquee, AutomationPointDrag, TrackLaneMode,
-            AUTOMATION_LANE_PAD, AUTOMATION_SUBLANE_HEIGHT,
+            AutomationCurveDrag, AutomationHover, AutomationMarquee, AutomationPointDrag,
+            TrackLaneMode, AUTOMATION_LANE_PAD, AUTOMATION_SUBLANE_HEIGHT,
         };
         self.state.select_track(track_id);
         if self.state.track_lane_mode(track_id) != TrackLaneMode::Automation {
@@ -789,11 +791,14 @@ impl Timeline {
             return;
         }
 
-        // Alt is the curve-edit modifier: Alt+drag on a segment line shapes its
-        // tension; Alt+double-click resets it to a straight line. Only fires when
-        // the cursor is on the curve line (not a point, checked above), so it
-        // never disturbs point add / move / marquee selection.
-        if alt {
+        // Curve-segment editing on the curve line (not a point, checked above), so
+        // it never disturbs point add / move / marquee selection. It fires when
+        // either Alt is held (explicit modifier, works in any tool) or the Pointer
+        // tool is active (direct edit — the Pointer tool's plain drag on the lane
+        // would otherwise only marquee). Pen/Automation keep plain-click = add a
+        // point so curve drawing still works; Alt shapes tension there.
+        let curve_edit = alt || self.state.active_tool == TimelineTool::Pointer;
+        if curve_edit {
             if let Some(left_id) = self.state.automation_segment_left_point_at(
                 track_id, &lane_id, beat, value, value_tol * 1.5,
             ) {
@@ -804,17 +809,33 @@ impl Timeline {
                     {
                         self.mark_project_changed(cx);
                     }
+                    self.automation_hover = Some(AutomationHover {
+                        track_id: track_id.to_string(),
+                        lane_id,
+                        point_id: None,
+                        segment_left_id: Some(left_id),
+                        active: false,
+                    });
                 } else {
                     let start_tension =
                         self.state
                             .automation_segment_tension(track_id, &lane_id, left_id);
                     self.automation_curve_drag = Some(AutomationCurveDrag {
                         track_id: track_id.to_string(),
-                        lane_id,
+                        lane_id: lane_id.clone(),
                         left_point_id: left_id,
                         start_tension,
                         start_value: value,
                         changed: false,
+                    });
+                    // Mark the segment active so the renderer shows the strong
+                    // drag highlight (hover updates are suppressed during a drag).
+                    self.automation_hover = Some(AutomationHover {
+                        track_id: track_id.to_string(),
+                        lane_id,
+                        point_id: None,
+                        segment_left_id: Some(left_id),
+                        active: true,
                     });
                 }
                 cx.notify();
@@ -869,6 +890,7 @@ impl Timeline {
         &mut self,
         window_x: f32,
         window_y: f32,
+        fine: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         if let Some(drag) = self.automation_drag.clone() {
@@ -891,12 +913,15 @@ impl Timeline {
         if let Some(drag) = self.automation_curve_drag.clone() {
             // Vertical drag distance from the grab point maps to a tension delta;
             // the points never move. Dragging up raises tension (ease-in), down
-            // lowers it (ease-out); clamped to the safe range by the setter.
+            // lowers it (ease-out); clamped to the safe range by the setter. Shift
+            // = fine adjust (quarter gain) for precise shaping.
             let value =
                 self.automation_value_from_window_y(&drag.track_id, &drag.lane_id, window_y);
             const TENSION_GAIN: f32 = 2.4;
-            let tension = (drag.start_tension + (value - drag.start_value) * TENSION_GAIN)
-                .clamp(-1.0, 1.0);
+            const TENSION_GAIN_FINE: f32 = 0.6;
+            let gain = if fine { TENSION_GAIN_FINE } else { TENSION_GAIN };
+            let tension =
+                (drag.start_tension + (value - drag.start_value) * gain).clamp(-1.0, 1.0);
             self.state.set_automation_segment_tension(
                 &drag.track_id,
                 &drag.lane_id,
@@ -945,6 +970,11 @@ impl Timeline {
             if drag.changed {
                 self.mark_project_changed(cx);
             }
+            // Relax the strong drag highlight back to plain hover; the cursor is
+            // still on the segment, so keep it hovered (next move re-tests).
+            if let Some(hover) = self.automation_hover.as_mut() {
+                hover.active = false;
+            }
             handled = true;
         }
         if self.automation_marquee.take().is_some() {
@@ -954,6 +984,112 @@ impl Timeline {
             cx.notify();
         }
         handled
+    }
+
+    /// Update the hovered automation point / segment for `(track, lane)` from a
+    /// mouse-move at `(beat, value)`. Point hover wins over segment hover, and the
+    /// hit-test order/tolerances mirror [`Self::begin_automation_interaction`] so
+    /// the hover affordance always matches what a click would actually grab.
+    /// UI-only: notifies only when the hovered target changes (an idle move over
+    /// the same segment never repaints), and no-ops while a gesture owns the lane.
+    pub(super) fn update_automation_hover(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+        beat: f32,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::timeline::timeline_state::{
+            AutomationHover, TrackLaneMode, AUTOMATION_LANE_PAD, AUTOMATION_SUBLANE_HEIGHT,
+        };
+        if self.automation_drag.is_some()
+            || self.automation_curve_drag.is_some()
+            || self.automation_marquee.is_some()
+        {
+            return;
+        }
+        if self.state.track_lane_mode(track_id) != TrackLaneMode::Automation {
+            self.clear_automation_hover(cx);
+            return;
+        }
+        let ppb = self.state.viewport.pixels_per_beat.max(1.0);
+        let usable = (AUTOMATION_SUBLANE_HEIGHT - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
+        let beat_tol = 8.0 / ppb;
+        let value_tol = 8.0 / usable;
+        let point_id =
+            self.state
+                .automation_point_at(track_id, lane_id, beat, value, beat_tol, value_tol);
+        // Point priority: only test the segment when not already on a point.
+        let segment_left_id = if point_id.is_some() {
+            None
+        } else {
+            self.state.automation_segment_left_point_at(
+                track_id,
+                lane_id,
+                beat,
+                value,
+                value_tol * 1.5,
+            )
+        };
+        // Compare before building so an idle move over the same target allocates
+        // nothing (no String clones) and does not repaint — only a changed hover
+        // target builds + stores a new `AutomationHover`.
+        let unchanged = match self.automation_hover.as_ref() {
+            Some(h) => {
+                h.matches_lane(track_id, lane_id)
+                    && h.point_id == point_id
+                    && h.segment_left_id == segment_left_id
+                    && !h.active
+            }
+            None => point_id.is_none() && segment_left_id.is_none(),
+        };
+        if unchanged {
+            return;
+        }
+        self.automation_hover =
+            (point_id.is_some() || segment_left_id.is_some()).then(|| AutomationHover {
+                track_id: track_id.to_string(),
+                lane_id: lane_id.to_string(),
+                point_id,
+                segment_left_id,
+                active: false,
+            });
+        cx.notify();
+    }
+
+    /// Clear automation hover (cursor left the lane). Keeps the highlight while a
+    /// curve drag is active even if the cursor strays out of the lane bounds.
+    /// Notifies only when something actually changed.
+    pub(super) fn clear_automation_hover(&mut self, cx: &mut Context<Self>) {
+        if self.automation_curve_drag.is_some() {
+            return;
+        }
+        if self.automation_hover.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Clear hover only if it currently targets `(track, lane)` — the cursor left
+    /// that specific lane. Lane-scoped so leaving lane A never wipes a fresh hover
+    /// the cursor just established on lane B during a fast move.
+    pub(super) fn clear_automation_hover_for_lane(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.automation_curve_drag.is_some() {
+            return;
+        }
+        if self
+            .automation_hover
+            .as_ref()
+            .is_some_and(|h| h.matches_lane(track_id, lane_id))
+        {
+            self.automation_hover = None;
+            cx.notify();
+        }
     }
 
     pub(super) fn timeline_content_width(&self) -> f32 {

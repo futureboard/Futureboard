@@ -38,6 +38,21 @@ fn transport_freeze_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_TRANSPORT_FREEZE_DEBUG").is_some())
 }
 
+/// Cached `FUTUREBOARD_PDC_DEBUG` check. Used to gate the one-shot realtime
+/// latency-compensation dump on transport start/seek so the audio thread never
+/// touches the environment in steady state.
+fn pdc_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PDC_DEBUG").is_some())
+}
+
+/// `FUTUREBOARD_METRONOME_DEBUG=1` prints click scheduling decisions. Cached so
+/// the audio callback never reads the environment in steady state.
+fn metronome_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_METRONOME_DEBUG").is_some())
+}
+
 /// Logs the first N audio blocks after `StartTransport` when freeze debug is on.
 static POST_PLAY_CALLBACK_LOGS: AtomicU32 = AtomicU32::new(0);
 
@@ -233,9 +248,12 @@ impl LocalAudioState {
     #[inline]
     pub fn metronome_sample(
         &mut self,
-        project_sample: u64,
+        output_sample_position: u64,
+        click_render_sample_offset_in_block: u64,
         sample_rate: u32,
         transport_playing: bool,
+        graph_max_latency_samples: u32,
+        metronome_compensation_delay_samples: u32,
     ) -> f32 {
         if !self.metronome_enabled || self.metronome_suspended || !transport_playing {
             if !transport_playing {
@@ -245,7 +263,21 @@ impl LocalAudioState {
         }
 
         let sr = sample_rate.max(1) as f64;
-        while project_sample >= self.tempo_map.samples_at_beat(self.metronome_next_beat, sr) {
+        // The transport/playhead remains raw project time. Clicks are emitted at
+        // the output sample that carries the same project beat after realtime PDC
+        // and master-insert latency have made rendered tracks audible.
+        let compensation_delay = metronome_compensation_delay_samples as u64;
+        while {
+            let next_click_sample_raw =
+                self.tempo_map.samples_at_beat(self.metronome_next_beat, sr);
+            let next_click_sample_compensated =
+                next_click_sample_raw.saturating_add(compensation_delay);
+            output_sample_position >= next_click_sample_compensated
+        } {
+            let next_click_sample_raw =
+                self.tempo_map.samples_at_beat(self.metronome_next_beat, sr);
+            let next_click_sample_compensated =
+                next_click_sample_raw.saturating_add(compensation_delay);
             let accent = self
                 .time_signature_map
                 .metronome_accent_at_beat(self.metronome_next_beat);
@@ -258,6 +290,28 @@ impl LocalAudioState {
             self.metronome_click_phase_inc = freq / sr;
             self.metronome_click_gain = gain;
             self.metronome_click_remaining = self.metronome_click_len;
+            if metronome_debug_enabled() {
+                let compensated_audible_sample_position =
+                    output_sample_position.saturating_sub(compensation_delay);
+                eprintln!(
+                    "[metronome-sync] metronome_enabled={} raw_transport_sample_position={} \
+                     compensated_audible_sample_position={} graph_max_latency_samples={} \
+                     metronome_compensation_delay_samples={} next_click_sample_raw={} \
+                     next_click_sample_compensated={} click_render_sample_offset_in_block={} \
+                     tempo_at_click={:.3} time_signature_at_click={}/{} playback_graph_version=unknown",
+                    self.metronome_enabled,
+                    output_sample_position,
+                    compensated_audible_sample_position,
+                    graph_max_latency_samples,
+                    metronome_compensation_delay_samples,
+                    next_click_sample_raw,
+                    next_click_sample_compensated,
+                    click_render_sample_offset_in_block,
+                    self.tempo_map.bpm_at_beat(self.metronome_next_beat),
+                    self.metronome_ts_num,
+                    self.metronome_ts_den,
+                );
+            }
             self.metronome_next_beat = self
                 .time_signature_map
                 .next_metronome_click_after(self.metronome_next_beat);
@@ -281,6 +335,23 @@ impl LocalAudioState {
         self.metronome_click_remaining = self.metronome_click_remaining.saturating_sub(1);
         sample
     }
+}
+
+#[inline]
+pub(crate) fn metronome_graph_max_latency_samples(runtime: &RuntimeProject) -> u32 {
+    if runtime.pdc_enabled {
+        runtime.latency_graph.max_path_latency_samples
+    } else {
+        0
+    }
+}
+
+#[inline]
+pub(crate) fn metronome_compensation_delay_samples(runtime: &RuntimeProject) -> u32 {
+    // The metronome is mixed after project graph/master processing, so it needs
+    // the track-graph PDC delay plus latency added by master inserts.
+    metronome_graph_max_latency_samples(runtime)
+        .saturating_add(runtime.latency_graph.master_plugin_latency)
 }
 
 // ── f32 helper store/load ─────────────────────────────────────────────────────
@@ -401,6 +472,24 @@ pub fn drain_commands(
                     );
                 }
                 runtime.reset_midi_playback(pos);
+                // Clear stale PDC delay-line audio so the compensated tracks start
+                // settled and stay aligned with plugin/VSTi-latency tracks from the
+                // first audible block — parity with offline export's fresh-runtime
+                // + warmup start. Realtime-safe zero-fill; runs only on Start.
+                runtime.reset_pdc_delay_lines();
+                local.reset_metronome_schedule(pos, output_sample_rate);
+                if pdc_debug_enabled() {
+                    runtime.dump_latency_compensation_graph("StartTransport");
+                    eprintln!(
+                        "[metronome-sync] context=StartTransport metronome_enabled={} \
+                         raw_transport_sample_position={} graph_max_latency_samples={} \
+                         metronome_compensation_delay_samples={}",
+                        local.metronome_enabled,
+                        pos,
+                        metronome_graph_max_latency_samples(runtime),
+                        metronome_compensation_delay_samples(runtime),
+                    );
+                }
             }
             EngineCommand::StopTransport => {
                 if command_debug_enabled() {
@@ -429,6 +518,23 @@ pub fn drain_commands(
                 shared.position_samples.store(pos, Ordering::Relaxed);
                 local.reset_metronome_schedule(pos, output_sample_rate);
                 runtime.reset_midi_playback(pos);
+                // A seek repositions the playhead; the PDC delay lines still hold
+                // audio from the pre-seek position. Clear them so the compensated
+                // tracks refill from the new position and stay aligned (spec:
+                // "Seeking must reset and refill latency compensation buffers").
+                runtime.reset_pdc_delay_lines();
+                if pdc_debug_enabled() {
+                    runtime.dump_latency_compensation_graph("Seek");
+                    eprintln!(
+                        "[metronome-sync] context=Seek metronome_enabled={} \
+                         raw_transport_sample_position={} graph_max_latency_samples={} \
+                         metronome_compensation_delay_samples={}",
+                        local.metronome_enabled,
+                        pos,
+                        metronome_graph_max_latency_samples(runtime),
+                        metronome_compensation_delay_samples(runtime),
+                    );
+                }
             }
             EngineCommand::SetMetronomeEnabled(enabled) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -442,15 +548,15 @@ pub fn drain_commands(
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 transport::store_f64_bits(&shared.bpm_bits, bpm);
                 let map = crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(bpm);
-                local.set_tempo_map(map.clone(), pos, output_sample_rate);
                 let next_pos = runtime.apply_tempo_map(map, pos);
                 shared.position_samples.store(next_pos, Ordering::Relaxed);
+                local.set_tempo_map(runtime.tempo_map.clone(), next_pos, output_sample_rate);
             }
             EngineCommand::SetTempoMap(map) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
-                local.set_tempo_map(map.clone(), pos, output_sample_rate);
                 let next_pos = runtime.apply_tempo_map(map, pos);
                 shared.position_samples.store(next_pos, Ordering::Relaxed);
+                local.set_tempo_map(runtime.tempo_map.clone(), next_pos, output_sample_rate);
             }
             EngineCommand::SetTimeSignature(num, den) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -903,6 +1009,8 @@ fn fill_output_f32_inner(
                 );
             }
         }
+        let metronome_graph_max_samples = metronome_graph_max_latency_samples(runtime);
+        let metronome_delay_samples = metronome_compensation_delay_samples(runtime);
         if gen_tone {
             for frame in data.chunks_mut(channels) {
                 let tone_l = local.osc_l.next_sample() * TEST_TONE_AMPLITUDE * master_vol;
@@ -922,8 +1030,11 @@ fn fill_output_f32_inner(
                     [(callback_offset + i) * channels..(callback_offset + i) * channels + channels];
                 let click = local.metronome_sample(
                     segment_sample + i as u64,
+                    (callback_offset + i) as u64,
                     runtime.sample_rate,
                     transport_playing,
+                    metronome_graph_max_samples,
+                    metronome_delay_samples,
                 );
                 if click != 0.0 {
                     frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
@@ -960,6 +1071,8 @@ fn fill_output_f32_inner(
             runtime.bridge_preview_tail_samples = post_stop_tail_samples(runtime.sample_rate);
         }
     } else if channels >= 2 {
+        let metronome_graph_max_samples = metronome_graph_max_latency_samples(runtime);
+        let metronome_delay_samples = metronome_compensation_delay_samples(runtime);
         for frame in data.chunks_mut(channels) {
             let (tone_l, tone_r) = if gen_tone {
                 (
@@ -976,8 +1089,11 @@ fn fill_output_f32_inner(
             };
             let click = local.metronome_sample(
                 base_sample + frames,
+                frames,
                 runtime.sample_rate,
                 transport_playing,
+                metronome_graph_max_samples,
+                metronome_delay_samples,
             ) * master_vol;
             let l = (tone_l + proj_l + click).clamp(-1.0, 1.0);
             let r = (tone_r + proj_r + click).clamp(-1.0, 1.0);
@@ -994,6 +1110,8 @@ fn fill_output_f32_inner(
             frames += 1;
         }
     } else if channels == 1 {
+        let metronome_graph_max_samples = metronome_graph_max_latency_samples(runtime);
+        let metronome_delay_samples = metronome_compensation_delay_samples(runtime);
         for sample in data.iter_mut() {
             let tone = if gen_tone {
                 local.osc_l.next_sample() * TEST_TONE_AMPLITUDE * master_vol
@@ -1007,8 +1125,11 @@ fn fill_output_f32_inner(
             };
             let click = local.metronome_sample(
                 base_sample + frames,
+                frames,
                 runtime.sample_rate,
                 transport_playing,
+                metronome_graph_max_samples,
+                metronome_delay_samples,
             ) * master_vol;
             let v = (tone + (proj_l + proj_r) * 0.5 + click).clamp(-1.0, 1.0);
             *sample = v;
@@ -1285,4 +1406,41 @@ fn mix_monitor_input(
         .store(f32_store(out_peak_l.max(out_peak_r)), Ordering::Relaxed);
 
     (out_peak_l, out_peak_r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metronome_click_waits_for_compensation_delay() {
+        let mut local = LocalAudioState::new(48_000.0);
+        local.set_metronome_enabled(true, 0, 48_000);
+
+        for sample in 0..512 {
+            let click = local.metronome_sample(sample, sample, 48_000, true, 512, 512);
+            assert_eq!(click, 0.0, "click leaked before compensated sample {sample}");
+            assert_eq!(local.metronome_click_remaining, 0);
+        }
+
+        let first = local.metronome_sample(512, 512, 48_000, true, 512, 512);
+        assert_eq!(first, 0.0, "first click oscillator sample starts at phase zero");
+        assert!(
+            local.metronome_click_remaining > 0,
+            "click should arm exactly at raw click sample plus compensation delay"
+        );
+    }
+
+    #[test]
+    fn metronome_click_without_compensation_arms_on_raw_beat() {
+        let mut local = LocalAudioState::new(48_000.0);
+        local.set_metronome_enabled(true, 0, 48_000);
+
+        let first = local.metronome_sample(0, 0, 48_000, true, 0, 0);
+        assert_eq!(first, 0.0, "first click oscillator sample starts at phase zero");
+        assert!(
+            local.metronome_click_remaining > 0,
+            "uncompensated metronome should arm at the raw beat sample"
+        );
+    }
 }

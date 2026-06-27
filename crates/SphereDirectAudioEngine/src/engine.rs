@@ -3246,6 +3246,10 @@ where
                             frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
                         }
                     }
+                    let metronome_graph_max_samples =
+                        crate::backend::render::metronome_graph_max_latency_samples(&runtime);
+                    let metronome_delay_samples =
+                        crate::backend::render::metronome_compensation_delay_samples(&runtime);
                     let mut segment_sample = base_sample;
                     let mut callback_offset = 0usize;
                     let mut remaining = frames;
@@ -3260,8 +3264,11 @@ where
                                 ..(callback_offset + i) * ch + ch];
                             let click = metronome.metronome_sample(
                                 segment_sample + i as u64,
+                                (callback_offset + i) as u64,
                                 output_sample_rate,
                                 playing_local,
+                                metronome_graph_max_samples,
+                                metronome_delay_samples,
                             );
                             if click != 0.0 {
                                 frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
@@ -3307,6 +3314,10 @@ where
                             crate::backend::render::post_stop_tail_samples(runtime.sample_rate);
                     }
                 } else if ch >= 2 {
+                    let metronome_graph_max_samples =
+                        crate::backend::render::metronome_graph_max_latency_samples(&runtime);
+                    let metronome_delay_samples =
+                        crate::backend::render::metronome_compensation_delay_samples(&runtime);
                     for frame in data.chunks_mut(ch) {
                         let (tone_l, tone_r) = if gen_tone {
                             (
@@ -3323,8 +3334,11 @@ where
                         };
                         let click = metronome.metronome_sample(
                             base_sample + frames,
+                            frames,
                             output_sample_rate,
                             playing_local,
+                            metronome_graph_max_samples,
+                            metronome_delay_samples,
                         ) * master_vol;
                         let l = (tone_l + project_l + click).clamp(-1.0, 1.0);
                         let r = (tone_r + project_r + click).clamp(-1.0, 1.0);
@@ -3341,6 +3355,10 @@ where
                         frames += 1;
                     }
                 } else if ch == 1 {
+                    let metronome_graph_max_samples =
+                        crate::backend::render::metronome_graph_max_latency_samples(&runtime);
+                    let metronome_delay_samples =
+                        crate::backend::render::metronome_compensation_delay_samples(&runtime);
                     for sample in data.iter_mut() {
                         let tone = if gen_tone {
                             osc_l.next_sample() * TEST_TONE_AMPLITUDE * master_vol
@@ -3354,8 +3372,11 @@ where
                         };
                         let click = metronome.metronome_sample(
                             base_sample + frames,
+                            frames,
                             output_sample_rate,
                             playing_local,
+                            metronome_graph_max_samples,
+                            metronome_delay_samples,
                         ) * master_vol;
                         let value =
                             (tone + (project_l + project_r) * 0.5 + click).clamp(-1.0, 1.0);

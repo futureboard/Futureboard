@@ -16,7 +16,7 @@ use crate::components::mixer_tree_sidebar::{
     MIXER_TREE_COLLAPSED_RAIL_WIDTH,
 };
 use crate::components::timeline::timeline_state::{self, collapsed_vsti_output_group_keys_from_tracks, TrackState};
-use crate::components::{external_mixer_debug, MixerSnapshot};
+use crate::components::{external_mixer_debug, external_mixer_debug_enabled, MixerSnapshot};
 
 use super::engine_snapshot::volume_norm_to_linear;
 use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, StudioLayout};
@@ -192,7 +192,11 @@ impl StudioLayout {
             // Derived from the persisted per-instrument collapse flag (single
             // source of truth) — never a separate, drift-prone view cache.
             collapsed_vsti_output_groups: timeline.state.collapsed_vsti_output_group_keys(),
+            hidden_mixer_channels: timeline.state.mixer_tree.hidden_channel_ids.clone(),
             vsti_output_meters: self.mixer_view.vsti_output_meters.clone(),
+            tree_sidebar_enabled: self.mixer_view.tree_sidebar_enabled,
+            tree_sidebar_collapsed: self.mixer_view.tree_sidebar_collapsed,
+            tree_sidebar_width_px: self.mixer_view.tree_sidebar_width_px,
         }
     }
 
@@ -851,18 +855,29 @@ impl StudioLayout {
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
             let id = id.clone();
             let v = *v;
-            external_mixer_debug(&format!(
-                "mixer command dispatched set_volume id={id} v={v:.3}"
-            ));
+            // Per fader-drag-stutter fix: track gain is a *dynamic mixer parameter*,
+            // not a structural graph change. It is applied to the engine runtime
+            // live via the `SetTrackVolume` command below, so the drag must NOT
+            // enqueue a native engine sync (load_project / route-graph rebuild) on
+            // every mouse-move. Use `mark_dirty_view_only` (session-dirty for save,
+            // no engine sync); a later real edit still carries the volume down
+            // through the snapshot. See [[engine-sync-single-flight]].
+            crate::perf::count("mixer_fader_drag_update_count", 1);
+            if external_mixer_debug_enabled() {
+                external_mixer_debug(&format!(
+                    "mixer command dispatched set_volume id={id} v={v:.3}"
+                ));
+            }
             timeline_vol.update(cx, |t, cx| {
                 t.state.set_track_volume(&id, v);
                 cx.notify();
             });
             StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
-                this.mark_dirty();
+                this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
             });
             if let Some(engine) = audio_engine.as_ref() {
+                crate::perf::count("mixer_fader_audio_control_update_count", 1);
                 let _ = engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
             }
         });
@@ -875,18 +890,25 @@ impl StudioLayout {
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
             let id = id.clone();
             let v = *v;
-            external_mixer_debug(&format!(
-                "mixer command dispatched set_pan id={id} v={v:.3}"
-            ));
+            // Pan is a dynamic mixer parameter like volume — applied live via the
+            // `SetTrackPan` command, so the knob drag must not enqueue an engine
+            // sync per mouse-move. See the volume handler above.
+            crate::perf::count("mixer_fader_drag_update_count", 1);
+            if external_mixer_debug_enabled() {
+                external_mixer_debug(&format!(
+                    "mixer command dispatched set_pan id={id} v={v:.3}"
+                ));
+            }
             timeline_pan.update(cx, |t, cx| {
                 t.state.set_track_pan(&id, v);
                 cx.notify();
             });
             StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
-                this.mark_dirty();
+                this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
             });
             if let Some(engine) = audio_engine.as_ref() {
+                crate::perf::count("mixer_fader_audio_control_update_count", 1);
                 let _ = engine.update_track_param(&id, "pan", v as f64);
             }
         });
@@ -1055,16 +1077,22 @@ impl StudioLayout {
             dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |v: &f32, _w, cx| {
             let v = *v;
-            external_mixer_debug(&format!("mixer command dispatched master_volume v={v:.3}"));
+            // Master gain is applied live via `set_master_volume` (atomic) — the
+            // fader drag must not enqueue an engine sync per mouse-move.
+            crate::perf::count("mixer_fader_drag_update_count", 1);
+            if external_mixer_debug_enabled() {
+                external_mixer_debug(&format!("mixer command dispatched master_volume v={v:.3}"));
+            }
             timeline_master.update(cx, |t, cx| {
                 t.state.set_master_volume(v);
                 cx.notify();
             });
             StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
-                this.mark_dirty();
+                this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
             });
             if let Some(engine) = audio_engine.as_ref() {
+                crate::perf::count("mixer_fader_audio_control_update_count", 1);
                 let _ = engine.update_track_param(
                     "__master__",
                     "volume",

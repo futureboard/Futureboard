@@ -1226,7 +1226,7 @@ impl Render for StudioLayout {
                 let focus = FocusContext {
                     text_input_focused: shortcut_keydown_target
                         .read(cx)
-                        .text_input_has_focus(window),
+                        .is_text_editing_context(window),
                 };
                 if key_debug() {
                     eprintln!(
@@ -1351,6 +1351,30 @@ impl Render for StudioLayout {
                     }
                     let _ = shortcut_keydown_target.update(cx, |this, cx| {
                         this.dispatch_command_id_from_bounds(&command_id, Some(window.bounds()), cx);
+                        cx.notify();
+                    });
+                } else if event.keystroke.key.eq_ignore_ascii_case("space")
+                    && !event.is_held
+                    && !focus.text_input_focused
+                    && !mods.control
+                    && !mods.alt
+                    && !mods.platform
+                    && !mods.function
+                    && should_handle_global_transport_shortcut(&focus)
+                {
+                    if key_debug() {
+                        eprintln!(
+                            "[key] dispatched command=transport:play-pause reason=spacebar-fallback"
+                        );
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    let _ = shortcut_keydown_target.update(cx, |this, cx| {
+                        this.dispatch_command_id_from_bounds(
+                            "transport:play-pause",
+                            Some(window.bounds()),
+                            cx,
+                        );
                         cx.notify();
                     });
                 }

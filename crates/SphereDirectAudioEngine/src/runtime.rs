@@ -939,6 +939,59 @@ impl RuntimeProject {
         }
     }
 
+    /// Clear every track's PDC delay-line ring and rewind its write cursor.
+    ///
+    /// Realtime playback reuses one persistent `RuntimeProject`, so the PDC delay
+    /// lines retain whatever audio they last held. On a transport (re)start or a
+    /// seek that stale audio would be emitted for the first `max_path` samples of
+    /// the compensated (lower-latency) tracks, desyncing them from the
+    /// uncompensated / plugin-latency tracks at the very start of playback — the
+    /// exact "audio vs VSTi track out of sync in realtime, fine in export"
+    /// symptom. Offline export never hits this because it builds a *fresh*
+    /// runtime (zeroed delay lines) and primes them with a warmup pre-roll. This
+    /// gives realtime the same clean, settled start.
+    ///
+    /// Realtime-safe: only zero-fills preallocated buffers (no allocation, no
+    /// locking). Called from the command drain on Start/Seek — never per block.
+    pub fn reset_pdc_delay_lines(&mut self) {
+        for track in &mut self.tracks {
+            track.pdc_delay_l.fill(0.0);
+            track.pdc_delay_r.fill(0.0);
+            track.pdc_write_pos = 0;
+        }
+    }
+
+    /// One-shot dump of the resolved latency-compensation graph used by the
+    /// realtime callback (and, identically, by offline export). Gated by the
+    /// caller behind `FUTUREBOARD_PDC_DEBUG`; prints from whatever thread invokes
+    /// it (Start/Seek command drain), so it must stay flag-gated and one-shot —
+    /// never a per-block log. Mirrors the `[export-latency]` dump so realtime and
+    /// export compensation values can be compared field-by-field.
+    pub fn dump_latency_compensation_graph(&self, context: &str) {
+        let lg = &self.latency_graph;
+        eprintln!(
+            "[realtime-latency] context={context} pdc_enabled={} graph_max_latency_samples={} \
+             master_insert_latency_samples={} tracks={}",
+            self.pdc_enabled,
+            lg.max_path_latency_samples,
+            lg.master_plugin_latency,
+            self.tracks.len(),
+        );
+        for (idx, track) in self.tracks.iter().enumerate() {
+            eprintln!(
+                "[realtime-latency] track={} track_type={} track_reported_latency_samples={} \
+                 track_total_latency_samples={} track_compensation_delay_samples={} \
+                 realtime_delay_line_size_samples={}",
+                track.id,
+                track.track_type,
+                lg.track_plugin_latency.get(idx).copied().unwrap_or(0),
+                lg.track_output_latency.get(idx).copied().unwrap_or(0),
+                lg.track_pdc_delay.get(idx).copied().unwrap_or(0),
+                track.pdc_delay_l.len(),
+            );
+        }
+    }
+
     /// Refresh PDC planning when runtime-only bridge latency changes. The
     /// steady-state path scans existing tracks/inserts without allocation; graph
     /// rebuild + delay-line resize only happens when an observed latency differs
@@ -2953,6 +3006,88 @@ mod stretch_runtime_tests {
             build_clip_runtime(&clip, test_source(48_000), 2.0, 48_000).expect("runtime clip");
         assert_eq!(runtime_clip.duration_samples, 24_000);
         assert!((runtime_clip.source_read_rate - 2.0).abs() < f32::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod pdc_reset_tests {
+    use super::*;
+    use crate::types::{EngineRoutingSnapshot, EngineTrackSnapshot};
+
+    fn track_snapshot(id: &str, track_type: &str) -> EngineTrackSnapshot {
+        EngineTrackSnapshot {
+            id: id.to_string(),
+            track_type: track_type.to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: false,
+            input_source: Default::default(),
+            preview_mode: "stereo".to_string(),
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+        }
+    }
+
+    fn two_track_snapshot(sample_rate: u32) -> EngineProjectSnapshot {
+        EngineProjectSnapshot {
+            project_id: "pdc-reset".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate,
+            tracks: vec![
+                track_snapshot("audio-1", "audio"),
+                track_snapshot("master", "master"),
+            ],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate,
+                buffer_size: 512,
+            },
+        }
+    }
+
+    /// `reset_pdc_delay_lines` must zero every track's delay ring and rewind the
+    /// write cursor, so a transport (re)start/seek never replays stale audio that
+    /// would desync the compensated tracks from plugin/VSTi-latency tracks. This
+    /// is the realtime equivalent of export building a fresh, zeroed runtime.
+    #[test]
+    fn reset_pdc_delay_lines_clears_stale_audio() {
+        let mut cache = HashMap::new();
+        let snapshot = two_track_snapshot(48_000);
+        let mut runtime =
+            RuntimeProject::build(&snapshot, 48_000, &mut cache, None, true).expect("build");
+
+        // Simulate residual delay-line audio + a drifted write cursor as if a
+        // prior playback/seek left state behind.
+        for track in &mut runtime.tracks {
+            assert!(
+                !track.pdc_delay_l.is_empty(),
+                "delay lines are sized at build"
+            );
+            track.pdc_delay_l.fill(0.42);
+            track.pdc_delay_r.fill(-0.42);
+            track.pdc_write_pos = 7;
+        }
+
+        runtime.reset_pdc_delay_lines();
+
+        for track in &runtime.tracks {
+            assert!(track.pdc_delay_l.iter().all(|&s| s == 0.0));
+            assert!(track.pdc_delay_r.iter().all(|&s| s == 0.0));
+            assert_eq!(track.pdc_write_pos, 0);
+        }
     }
 }
 

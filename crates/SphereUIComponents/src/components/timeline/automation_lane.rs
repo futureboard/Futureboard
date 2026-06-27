@@ -1,7 +1,7 @@
 use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::timeline_state::{
-    automation_value_to_y, automation_y_to_value, evaluate_automation, AutomationLaneState,
-    AutomationMarquee, AutomationTarget, TimelineState, HEADER_WIDTH,
+    automation_value_to_y, automation_y_to_value, evaluate_automation, AutomationHover,
+    AutomationLaneState, AutomationMarquee, AutomationTarget, TimelineState, HEADER_WIDTH,
 };
 use crate::theme::Colors;
 use gpui::{
@@ -72,6 +72,13 @@ pub type AutomationLaneActionCallback = std::sync::Arc<
     dyn Fn(&(String, String, AutomationLaneAction), &mut gpui::Window, &mut gpui::App) + 'static,
 >;
 
+/// Sub-lane hover payload: `(track_id, lane_id, beat, value_norm)`. Fired on
+/// mouse-move over a lane so the editor can resolve the hovered point/segment;
+/// `beat` is snapped exactly like the mouse-down path so hover and click agree.
+pub type AutomationHoverCallback = std::sync::Arc<
+    dyn Fn(&(String, String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+>;
+
 /// Human category shown under the lane name in the sub-lane header.
 fn target_category(target: &AutomationTarget) -> &'static str {
     match target {
@@ -98,10 +105,14 @@ pub fn automation_lane(
     state: &TimelineState,
     on_automation_down: Option<AutomationDownCallback>,
     on_lane_action: Option<AutomationLaneActionCallback>,
+    on_automation_hover: Option<AutomationHoverCallback>,
     marquee: Option<&AutomationMarquee>,
+    hover: Option<&AutomationHover>,
 ) -> impl IntoElement {
     let track_id = track_id.to_string();
     let lane_id = lane.id.clone();
+    // Hover that targets THIS lane (drives the segment highlight + cursor).
+    let lane_hover = hover.filter(|h| h.matches_lane(&track_id, &lane_id)).cloned();
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -273,13 +284,23 @@ pub fn automation_lane(
     );
 
     // ── Right envelope + interaction area ────────────────────────────────────
-    let envelope = lane_envelope(lane, state, lane_height, marquee);
+    let envelope = lane_envelope(lane, state, lane_height, marquee, lane_hover.as_ref());
+
+    // Cursor reflects what the hovered region edits: a point handle (pointer) or a
+    // curve segment (vertical-resize = drag to shape tension). Built-in OS cursors
+    // — no custom-PNG hotspot, so they stay correct at 125% / 150% / 200% DPI.
+    // Empty lane is left untouched (keeps the active tool's cursor).
+    let hover_cursor: Option<gpui::CursorStyle> = match lane_hover.as_ref() {
+        Some(h) if h.point_id.is_some() => Some(gpui::CursorStyle::PointingHand),
+        Some(h) if h.segment_left_id.is_some() => Some(gpui::CursorStyle::ResizeUpDown),
+        _ => None,
+    };
 
     let interaction = on_automation_down.clone().map(|cb| {
         let state_for = state.clone();
         let tid = track_id.clone();
         let lid = lane_id.clone();
-        div()
+        let mut hit = div()
             .absolute()
             .inset_0()
             .id(("automation-lane-hit", id_num))
@@ -306,7 +327,50 @@ pub fn automation_lane(
                         cx,
                     );
                 },
-            )
+            );
+
+        if let Some(cursor) = hover_cursor {
+            hit = hit.cursor(cursor);
+        }
+
+        // Hover tracking: resolve the point/segment under the cursor on move, and
+        // clear it when the cursor leaves the lane. Same snapped beat as the click
+        // path so the hovered target matches what a click would grab.
+        if let Some(hover_cb) = on_automation_hover.clone() {
+            let state_for = state.clone();
+            let tid = track_id.clone();
+            let lid = lane_id.clone();
+            hit = hit.on_mouse_move(move |event: &gpui::MouseMoveEvent, window, cx| {
+                // Only resolve hover when not dragging — a pressed-button move is a
+                // gesture and is handled by the global timeline move handler.
+                if event.pressed_button.is_some() {
+                    return;
+                }
+                let wx: f32 = event.position.x.into();
+                let wy: f32 = event.position.y.into();
+                let lane_x = wx - SIDEBAR_WIDTH - HEADER_WIDTH;
+                let raw_beat = state_for.x_to_beats(lane_x);
+                let snapped_sec = state_for.snap_time(raw_beat * state_for.seconds_per_beat());
+                let beat = (snapped_sec / state_for.seconds_per_beat()).max(0.0);
+                let content_y = wy - APP_CHROME_HEIGHT - state_for.arrangement_content_top()
+                    + state_for.viewport.scroll_y;
+                let local_y = content_y - lane_y_abs;
+                let value = automation_y_to_value(local_y, lane_height);
+                hover_cb(&(tid.clone(), lid.clone(), beat, value), window, cx);
+            });
+        }
+        if let Some(hover_cb) = on_automation_hover.clone() {
+            let tid = track_id.clone();
+            let lid = lane_id.clone();
+            // Hover-out: an out-of-range beat/value signals "clear" to the handler
+            // (it resolves no point/segment there and drops the highlight).
+            hit = hit.on_hover(move |hovered, window, cx| {
+                if !*hovered {
+                    hover_cb(&(tid.clone(), lid.clone(), -1.0, -1.0), window, cx);
+                }
+            });
+        }
+        hit
     });
 
     // Right-side lane body: a TRANSLUCENT overlay so the timeline grid behind
@@ -419,12 +483,30 @@ fn lane_envelope(
     state: &TimelineState,
     lane_height: f32,
     marquee: Option<&AutomationMarquee>,
+    hover: Option<&AutomationHover>,
 ) -> impl IntoElement {
     let default_value = lane.target.default_value();
     let points = lane.points.clone();
 
     let lane_w = state.viewport.viewport_width.max(1.0);
     let num_cols = lane_w.ceil().max(1.0) as usize;
+
+    // Hovered / actively-dragged segment → column range to emphasize. Uses the
+    // SAME point geometry the curve is sampled from, so the highlight tracks the
+    // visible curve at any zoom/scroll. `(c0, c1, active)`.
+    let highlight: Option<(usize, usize, bool)> = hover
+        .and_then(|h| h.segment_left_id.map(|id| (id, h.active)))
+        .and_then(|(left_id, active)| {
+            let i = points.iter().position(|p| p.id == left_id)?;
+            if i + 1 >= points.len() {
+                return None;
+            }
+            let x0 = state.beats_to_x(points[i].beat);
+            let x1 = state.beats_to_x(points[i + 1].beat);
+            let c0 = x0.floor().max(0.0) as usize;
+            let c1 = (x1.ceil().max(0.0) as usize).min(num_cols);
+            (c1 > c0).then_some((c0, c1, active))
+        });
 
     let mut samples: Vec<f32> = Vec::with_capacity(num_cols + 1);
     for col in 0..=num_cols {
@@ -440,6 +522,14 @@ fn lane_envelope(
         Colors::with_alpha(Colors::automation_curve(), 0.85)
     } else {
         Colors::with_alpha(Colors::automation_curve(), 0.32)
+    };
+    // Hovered / dragged segment: same hue at full alpha, thicker line (width
+    // carries the emphasis). No accent, glow or gloss — keeps the lane's "only
+    // saturated element is the curve" rule. Active drag is thicker than hover.
+    let highlight_color = if enabled {
+        Colors::automation_curve()
+    } else {
+        Colors::with_alpha(Colors::automation_curve(), 0.5)
     };
     // Center/value reference line + a soft band behind the curve so the lane has
     // a quiet value guide rather than a single sharp line on a flat block.
@@ -467,11 +557,17 @@ fn lane_envelope(
                 let y1 = samples[col + 1];
                 let top = y0.min(y1);
                 let h = (y0 - y1).abs().max(1.6);
+                let (col_color, col_w) = match highlight {
+                    Some((c0, c1, active)) if col >= c0 && col < c1 => {
+                        (highlight_color, if active { 3.0 } else { 2.2 })
+                    }
+                    _ => (line_color, 1.0),
+                };
                 let r = Bounds::new(
-                    bounds.origin + point(px(col as f32), px(top)),
-                    size(px(1.0), px(h)),
+                    bounds.origin + point(px(col as f32 - (col_w - 1.0) * 0.5), px(top)),
+                    size(px(col_w), px(h)),
                 );
-                window.paint_quad(fill(r, line_color));
+                window.paint_quad(fill(r, col_color));
             }
         },
     )

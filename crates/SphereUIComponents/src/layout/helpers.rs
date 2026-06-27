@@ -41,7 +41,8 @@ pub(super) fn transport_command_from_id(command_id: &str) -> Option<TransportCom
 /// (Space, Enter, ...) should be handled by the workspace or left to the focused
 /// widget. Captured on the UI thread at the moment a key arrives.
 pub(super) struct FocusContext {
-    /// A Futureboard text field (search / rename / numeric edit) owns focus.
+    /// A live Futureboard text field (search / rename / numeric edit) owns
+    /// keyboard capture. Closed popovers with stale focus handles do not count.
     pub text_input_focused: bool,
 }
 

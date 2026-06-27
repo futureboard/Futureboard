@@ -37,6 +37,30 @@ pub struct AutomationCurveDrag {
     pub changed: bool,
 }
 
+/// Transient hover state for an automation lane — which point or curve segment
+/// the cursor is over. UI-only (never serialized); drives the per-segment
+/// highlight and the hover cursor. Point hover takes priority over segment
+/// hover, so at most one of `point_id` / `segment_left_id` is set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutomationHover {
+    pub track_id: String,
+    pub lane_id: String,
+    /// Hovered point id (wins over a segment when the cursor is near both).
+    pub point_id: Option<u64>,
+    /// Left point id of the hovered curve segment (tension lives on the left
+    /// point). `None` when the cursor is over a point or empty lane.
+    pub segment_left_id: Option<u64>,
+    /// True while the segment is being actively dragged (stronger highlight).
+    pub active: bool,
+}
+
+impl AutomationHover {
+    /// Whether this hover targets `(track_id, lane_id)`.
+    pub fn matches_lane(&self, track_id: &str, lane_id: &str) -> bool {
+        self.track_id == track_id && self.lane_id == lane_id
+    }
+}
+
 /// In-flight automation marquee (rubber-band) selection in beat/value space.
 #[derive(Debug, Clone)]
 pub struct AutomationMarquee {

@@ -6,8 +6,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    ParentElement, Point, Render, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    div, px, size, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
+    IntoElement, ParentElement, Point, Render, Styled, Window, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowKind,
 };
 
@@ -15,6 +15,8 @@ use crate::components::mixer_panel::{
     clamp_mixer_section_height_px, mixer_panel, MixerCallbacks, MixerSplit, MixerSplitAction,
     MixerSplitTarget, VstiOutputMeterState,
 };
+use crate::components::mixer_tree_sidebar::MIXER_TREE_COLLAPSED_RAIL_WIDTH;
+use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::Colors;
@@ -39,11 +41,16 @@ pub struct MixerSnapshot {
     pub mixer_split_active_target: Option<MixerSplitTarget>,
     /// Collapsed VSTi output strip groups keyed by `track_id:insert_id`.
     pub collapsed_vsti_output_groups: HashSet<String>,
+    pub hidden_mixer_channels: HashSet<String>,
     pub vsti_output_meters: std::collections::HashMap<String, VstiOutputMeterState>,
+    pub tree_sidebar_enabled: bool,
+    pub tree_sidebar_collapsed: bool,
+    pub tree_sidebar_width_px: f32,
 }
 
 pub struct MixerWindow {
     snapshot: MixerSnapshot,
+    tree_sidebar: Entity<MixerTreeSidebar>,
     callbacks: MixerCallbacks,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
@@ -54,6 +61,7 @@ pub struct MixerWindow {
 impl MixerWindow {
     pub fn new(
         snapshot: MixerSnapshot,
+        tree_sidebar: Entity<MixerTreeSidebar>,
         callbacks: MixerCallbacks,
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
@@ -66,6 +74,7 @@ impl MixerWindow {
         ));
         Self {
             snapshot,
+            tree_sidebar,
             callbacks,
             on_close,
             on_mixer_scroll,
@@ -96,13 +105,28 @@ impl Render for MixerWindow {
             mixer_send_section_px,
             mixer_split_active_target,
             collapsed_vsti_output_groups,
+            hidden_mixer_channels,
             vsti_output_meters,
+            tree_sidebar_enabled,
+            tree_sidebar_collapsed,
+            tree_sidebar_width_px,
         } = self.snapshot.clone();
         let mixer_callbacks = self.callbacks.clone();
         let on_mixer_scroll = self.on_mixer_scroll.clone();
         let on_mixer_split = self.on_mixer_split.clone();
         let on_close = self.on_close.clone();
-        let mixer_viewport_width = (viewport_width - 90.0).max(100.0);
+        let tree_width = if tree_sidebar_enabled {
+            if tree_sidebar_collapsed {
+                MIXER_TREE_COLLAPSED_RAIL_WIDTH
+            } else {
+                crate::components::mixer_tree_sidebar::clamp_mixer_tree_sidebar_width(
+                    tree_sidebar_width_px,
+                )
+            }
+        } else {
+            0.0
+        };
+        let mixer_viewport_width = (viewport_width - tree_width - 90.0).max(100.0);
         let mixer_viewport_height = (viewport_height - TITLEBAR_HEIGHT).max(0.0);
         let mixer_split = MixerSplit {
             insert_px: clamp_mixer_section_height_px(mixer_insert_section_px),
@@ -140,15 +164,15 @@ impl Render for MixerWindow {
                         selected_track_id.as_deref(),
                         mixer_callbacks,
                         &collapsed_vsti_output_groups,
-                        &std::collections::HashSet::new(),
+                        &hidden_mixer_channels,
                         &vsti_output_meters,
                         mixer_scroll_x,
                         mixer_viewport_width,
                         mixer_viewport_height,
                         on_mixer_scroll,
                         mixer_split,
-                        None,
-                        false,
+                        Some(self.tree_sidebar.clone()),
+                        tree_sidebar_enabled,
                     )),
             )
     }
@@ -157,6 +181,7 @@ impl Render for MixerWindow {
 pub fn open_mixer_window(
     owner_bounds: Bounds<gpui::Pixels>,
     snapshot: MixerSnapshot,
+    tree_sidebar: Entity<MixerTreeSidebar>,
     callbacks: MixerCallbacks,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
@@ -196,6 +221,7 @@ pub fn open_mixer_window(
         cx.new(|cx| {
             MixerWindow::new(
                 snapshot,
+                tree_sidebar,
                 callbacks,
                 on_close,
                 on_mixer_scroll,
@@ -207,11 +233,21 @@ pub fn open_mixer_window(
     .map_err(|e| e.to_string())
 }
 
+/// Cached check for the external-mixer debug flag. Read once and memoized so the
+/// hot fader/pan/knob drag path can skip building a `format!` message string on
+/// every mouse-move when the flag is off (the spec bans string allocation in the
+/// fader drag hot path).
+pub(crate) fn external_mixer_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("FUTUREBOARD_EXTERNAL_MIXER_DEBUG")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 pub(crate) fn external_mixer_debug(message: &str) {
-    if std::env::var("FUTUREBOARD_EXTERNAL_MIXER_DEBUG")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
+    if external_mixer_debug_enabled() {
         eprintln!("[external-mixer] {message}");
     }
 }

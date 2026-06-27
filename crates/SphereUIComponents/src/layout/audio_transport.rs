@@ -13,6 +13,14 @@ use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
 use super::transport_freeze_debug::{self, PlayWatchdog};
 use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout};
 
+/// Watchdog timeout for an in-flight native engine sync. A `load_project` that
+/// hangs (deadlock) never returns and would otherwise pin `sync_in_flight` and
+/// the "Sync native engine" task forever. Kept below the loading-session
+/// `GRAPH_SYNC_WAIT` (20s) so a stuck sync still resolves to a recoverable error
+/// before the session-install wait gives up. Generous enough that a large
+/// project / plugin instantiation does not trip a false positive.
+const SYNC_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Why the transport playhead is being repositioned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeekReason {
@@ -128,10 +136,28 @@ pub(crate) struct AudioBridgeState {
     pub media_dirty: bool,
     /// True while a background `load_project` (file decode) is running.
     pub sync_in_flight: bool,
-    /// Queued when media/project changes during an in-flight sync.
-    pub sync_pending: bool,
+    /// Fingerprint of the sync currently in flight (`Some` while `sync_in_flight`).
+    /// Coalesce/dedup decisions for new requests are made against this.
+    pub running_fingerprint: Option<u64>,
+    /// At most one coalesced sync queued behind the in-flight one. Holds the graph
+    /// fingerprint captured when it was queued; the reschedule rebuilds a fresh
+    /// snapshot and re-checks. `None` when nothing is pending.
+    pub pending_fingerprint: Option<u64>,
+    /// Reason carried by the coalesced pending sync.
+    pub pending_reason: Option<&'static str>,
     /// Preserves force=true for a pending sync queued behind an in-flight sync.
-    pub sync_pending_force: bool,
+    pub pending_force: bool,
+    /// Monotonic id of the in-flight sync. A `complete_audio_project_sync` whose
+    /// generation no longer matches (the watchdog timeout fired and superseded it)
+    /// is ignored — the freshness guard for an orphaned/hung load thread.
+    pub sync_generation: u64,
+    /// When the in-flight sync started — drives the watchdog timeout that prevents
+    /// a hung `load_project` from pinning `sync_in_flight` (and the task) forever.
+    pub sync_started_at: Option<Instant>,
+    /// Last graph fingerprint whose load failed. Not auto-retried from the dirty
+    /// poll (only a genuine graph change or an explicit forced sync retries it),
+    /// so a failing graph cannot spin the resync loop.
+    pub last_failed_fingerprint: Option<u64>,
     /// Monotonic UI-side route graph publication version for diagnostics.
     pub route_graph_version: u64,
     pub route_graph_in_flight_version: u64,
@@ -149,6 +175,17 @@ pub(crate) struct AudioBridgeState {
     pub engine_sync_count: u64,
     pub audio_load_project_count: u64,
     pub route_graph_rebuild_count: u64,
+    /// Single-flight diagnostics (drained via `crate::perf::count`). `request` =
+    /// every `schedule_audio_project_sync` call past the engine check; `completed`
+    /// / `failed` = terminal sync outcomes; `coalesced` = requests folded into the
+    /// running/pending sync without starting a new one; `timeout` = watchdog firings.
+    pub sync_request_count: u64,
+    pub sync_completed_count: u64,
+    pub sync_failed_count: u64,
+    pub sync_coalesced_count: u64,
+    pub sync_timeout_count: u64,
+    /// Reason string of the most recent sync request (diagnostics only).
+    pub last_sync_reason: &'static str,
     /// Start transport once the current background sync completes.
     pub play_after_sync: bool,
 }
@@ -164,8 +201,13 @@ impl Default for AudioBridgeState {
             project_dirty: true,
             media_dirty: true,
             sync_in_flight: false,
-            sync_pending: false,
-            sync_pending_force: false,
+            running_fingerprint: None,
+            pending_fingerprint: None,
+            pending_reason: None,
+            pending_force: false,
+            sync_generation: 0,
+            sync_started_at: None,
+            last_failed_fingerprint: None,
             route_graph_version: 0,
             route_graph_in_flight_version: 0,
             route_graph_in_flight_child_channels: 0,
@@ -174,6 +216,12 @@ impl Default for AudioBridgeState {
             engine_sync_count: 0,
             audio_load_project_count: 0,
             route_graph_rebuild_count: 0,
+            sync_request_count: 0,
+            sync_completed_count: 0,
+            sync_failed_count: 0,
+            sync_coalesced_count: 0,
+            sync_timeout_count: 0,
+            last_sync_reason: "init",
             play_after_sync: false,
         }
     }
@@ -533,6 +581,17 @@ impl StudioLayout {
             return false;
         }
 
+        // Watchdog: a hung `load_project` must not pin the sync lifecycle. If the
+        // in-flight sync has exceeded the timeout, fail it recoverably and free the
+        // state so a retry can proceed and the engine returns to ready.
+        if self.audio_bridge.sync_in_flight {
+            if let Some(started) = self.audio_bridge.sync_started_at {
+                if started.elapsed() >= SYNC_WATCHDOG_TIMEOUT {
+                    self.timeout_audio_project_sync(cx);
+                }
+            }
+        }
+
         if self.audio_bridge.project_dirty || self.audio_bridge.media_dirty {
             self.schedule_audio_project_sync(cx, false, "engine_dirty_poll");
         }
@@ -874,22 +933,16 @@ impl StudioLayout {
             self.audio_bridge.last_error = Some("audio engine unavailable".to_string());
             return;
         };
+        self.audio_bridge.sync_request_count =
+            self.audio_bridge.sync_request_count.saturating_add(1);
+        crate::perf::count("sync_request_count", self.audio_bridge.sync_request_count);
+        self.audio_bridge.last_sync_reason = reason;
 
-        if self.audio_bridge.sync_in_flight {
-            self.audio_bridge.sync_pending = true;
-            self.audio_bridge.sync_pending_force |= force;
-            if force {
-                self.audio_bridge.project_dirty = true;
-            }
-            self.queue_background_task(
-                "native-sync-pending",
-                crate::components::BackgroundTaskKind::NativeSync,
-                "Sync native engine",
-                Some("Queued behind current engine sync".to_string()),
-            );
-            return;
-        }
-
+        // Cheap gate: nothing to publish unless forced or the graph is dirty. Dirty
+        // is cleared the moment a sync is committed below, so a quiescent graph
+        // never reaches the (locking) snapshot build — this keeps the per-frame
+        // `engine_dirty_poll` from rebuilding a snapshot every tick while a sync is
+        // in flight.
         if !force && !self.audio_bridge.project_dirty && !self.audio_bridge.media_dirty {
             return;
         }
@@ -932,15 +985,58 @@ impl StudioLayout {
         );
         let signature = serde_json::to_string(&snapshot).unwrap_or_default();
         let fingerprint = graph_fingerprint_of(&signature);
-        // Graph-unchanged dedup. The same graph was already published to the audio
-        // thread, so skip the route-graph rebuild and `load_project` entirely. This
-        // covers `engine_dirty_poll` re-firing after `audio_project_sync_complete`
-        // published this graph, and a queued `audio_sync_pending` whose graph did
-        // not change. Fingerprint is the documented key; the exact signature check
-        // guards against an (astronomically unlikely) hash collision.
+
+        // Single-flight coalescing. A sync is already running; fold this request
+        // into at most one pending sync rather than starting a second. Only a
+        // genuinely different graph (or an explicit force) needs to run after the
+        // current sync — a poll re-fire for the same graph is counted and dropped.
+        // Dirty is cleared here because the running/pending sync now represents this
+        // request; that is what stops the poll from re-queuing every tick and
+        // pinning "Sync native engine" forever.
+        if self.audio_bridge.sync_in_flight {
+            // "Changed" vs the graph currently being synced and any already-queued
+            // pending graph — NOT vs the last *successful* graph, so a revert to a
+            // previously-published state mid-sync is still queued (the running sync
+            // is publishing a different graph and would otherwise win).
+            let changed = force
+                || (Some(fingerprint) != self.audio_bridge.running_fingerprint
+                    && Some(fingerprint) != self.audio_bridge.pending_fingerprint);
+            if changed {
+                self.audio_bridge.pending_fingerprint = Some(fingerprint);
+                self.audio_bridge.pending_reason = Some(reason);
+                self.audio_bridge.pending_force |= force;
+                self.queue_background_task(
+                    "native-sync-pending",
+                    crate::components::BackgroundTaskKind::NativeSync,
+                    "Sync native engine",
+                    Some("Queued behind current engine sync".to_string()),
+                );
+            } else {
+                self.audio_bridge.sync_coalesced_count =
+                    self.audio_bridge.sync_coalesced_count.saturating_add(1);
+                crate::perf::count(
+                    "sync_coalesced_count",
+                    self.audio_bridge.sync_coalesced_count,
+                );
+            }
+            self.audio_bridge.project_dirty = false;
+            self.audio_bridge.media_dirty = false;
+            return;
+        }
+
+        // Graph-unchanged / known-failed dedup. The same graph was already
+        // published to the audio thread (or just failed to load), so skip the
+        // route-graph rebuild and `load_project` entirely. This covers
+        // `engine_dirty_poll` re-firing after a completed sync. Fingerprint is the
+        // documented key; the exact signature check guards the (astronomically
+        // unlikely) hash collision. A known-failed graph is not auto-retried from
+        // the poll — only a real change (different fingerprint) or an explicit
+        // forced sync retries it, so a failing load cannot spin the resync loop.
         if !force
-            && self.audio_bridge.graph_fingerprint == Some(fingerprint)
-            && self.audio_bridge.last_project_signature.as_deref() == Some(signature.as_str())
+            && ((self.audio_bridge.graph_fingerprint == Some(fingerprint)
+                && self.audio_bridge.last_project_signature.as_deref()
+                    == Some(signature.as_str()))
+                || self.audio_bridge.last_failed_fingerprint == Some(fingerprint))
         {
             self.audio_bridge.project_dirty = false;
             self.audio_bridge.media_dirty = false;
@@ -951,6 +1047,15 @@ impl StudioLayout {
             return;
         }
 
+        // Commit to a new sync. Clear dirty now (not at completion): the in-flight
+        // sync captures this exact graph, so the poll must not re-trigger for it.
+        // A real edit during the sync re-dirties and is coalesced into `pending`.
+        self.audio_bridge.project_dirty = false;
+        self.audio_bridge.media_dirty = false;
+        self.audio_bridge.running_fingerprint = Some(fingerprint);
+        self.audio_bridge.sync_generation = self.audio_bridge.sync_generation.wrapping_add(1);
+        self.audio_bridge.sync_started_at = Some(Instant::now());
+        let sync_generation = self.audio_bridge.sync_generation;
         self.audio_bridge.sync_in_flight = true;
         self.audio_bridge.engine_sync_count =
             self.audio_bridge.engine_sync_count.saturating_add(1);
@@ -1017,7 +1122,7 @@ impl StudioLayout {
                 ))),
             };
             let _ = owner.update(cx, |this, cx| {
-                this.complete_audio_project_sync(cx, result, signature);
+                this.complete_audio_project_sync(cx, result, signature, sync_generation);
             });
             if !crate::shutdown::ShutdownState::global().is_shutting_down() {
                 let studio_id = owner.entity_id();
@@ -1032,11 +1137,27 @@ impl StudioLayout {
         cx: &mut Context<Self>,
         result: Result<(), DirectAudio::SphereAudioError>,
         signature: String,
+        generation: u64,
     ) {
+        // Freshness guard: ignore a completion that belongs to a superseded sync.
+        // The watchdog timeout (`timeout_audio_project_sync`) bumps the generation
+        // and frees the lifecycle when a `load_project` hangs; if that orphaned
+        // thread later returns, this stale completion must not clobber the current
+        // state or re-flag a task that already reached a terminal status.
+        if generation != self.audio_bridge.sync_generation {
+            return;
+        }
         self.audio_bridge.sync_in_flight = false;
-        let pending_sync_queued = self.audio_bridge.sync_pending;
+        self.audio_bridge.sync_started_at = None;
+        let finished_fingerprint = self.audio_bridge.running_fingerprint.take();
         match result {
             Ok(()) => {
+                self.audio_bridge.sync_completed_count =
+                    self.audio_bridge.sync_completed_count.saturating_add(1);
+                crate::perf::count(
+                    "sync_completed_count",
+                    self.audio_bridge.sync_completed_count,
+                );
                 eprintln!(
                     "[ROUTE GRAPH REBUILD]\nreason=audio_project_sync_complete\ngraph_version_before={}\ngraph_version_after={}\nnum_plugin_child_channels={}\nnum_routes_to_master={}\npublished_to_audio_thread=true",
                     self.audio_bridge
@@ -1047,32 +1168,33 @@ impl StudioLayout {
                     self.audio_bridge.route_graph_in_flight_master_routes
                 );
                 // Record the published graph's fingerprint so a later
-                // engine_dirty_poll / audio_sync_pending for the identical graph is
-                // deduped in `schedule_audio_project_sync` (no second rebuild).
-                self.audio_bridge.graph_fingerprint = Some(graph_fingerprint_of(&signature));
+                // engine_dirty_poll for the identical graph is deduped in
+                // `schedule_audio_project_sync` (no second rebuild). A successful
+                // publish also clears any prior failed-graph marker.
+                self.audio_bridge.graph_fingerprint =
+                    finished_fingerprint.or(Some(graph_fingerprint_of(&signature)));
                 self.audio_bridge.last_project_signature = Some(signature);
-                if !pending_sync_queued {
-                    self.audio_bridge.project_dirty = false;
-                    self.audio_bridge.media_dirty = false;
-                }
+                self.audio_bridge.last_failed_fingerprint = None;
                 self.audio_bridge.last_error = None;
                 self.complete_background_task(
                     "native-sync",
                     Some("Engine graph ready".to_string()),
                 );
-                self.complete_background_task("native-sync-pending", None);
             }
             Err(error) => {
+                self.audio_bridge.sync_failed_count =
+                    self.audio_bridge.sync_failed_count.saturating_add(1);
+                crate::perf::count("sync_failed_count", self.audio_bridge.sync_failed_count);
+                // Remember the failing graph so the poll does not re-run it every
+                // tick; a real change or an explicit forced retry resets this.
+                self.audio_bridge.last_failed_fingerprint = finished_fingerprint;
                 self.audio_bridge.last_error = Some(error.to_string());
                 eprintln!("[audio] load_project failed: {error}");
                 self.fail_background_task("native-sync", error.to_string());
-                // Clear dirty so a failed decode does not retry every poll tick.
-                if !pending_sync_queued {
-                    self.audio_bridge.project_dirty = false;
-                    self.audio_bridge.media_dirty = false;
-                }
             }
         }
+        // Dirty was already cleared when the sync was committed; a real edit during
+        // the sync re-dirtied and was coalesced into `pending_fingerprint` below.
 
         // Phase 2b: read back per-insert instantiation status now that the
         // runtime graph reflects this snapshot. A native-plugin insert that
@@ -1086,12 +1208,31 @@ impl StudioLayout {
             eprintln!("[PluginRestore] graph snapshot swapped generation=post_sync");
         }
 
-        let pending_sync = self.audio_bridge.sync_pending;
-        let pending_force = self.audio_bridge.sync_pending_force;
-        self.audio_bridge.sync_pending = false;
-        self.audio_bridge.sync_pending_force = false;
-        if pending_sync {
-            self.schedule_audio_project_sync(cx, pending_force, "audio_sync_pending");
+        // Reschedule a coalesced pending request — but only if it would actually do
+        // something. The captured pending fingerprint is a cheap pre-gate; the real
+        // dedup happens inside `schedule_audio_project_sync` against a freshly built
+        // snapshot. Re-flag dirty so that call clears the cheap dirty gate.
+        let pending = self.audio_bridge.pending_fingerprint.take();
+        let pending_force = std::mem::take(&mut self.audio_bridge.pending_force);
+        let pending_reason = self
+            .audio_bridge
+            .pending_reason
+            .take()
+            .unwrap_or("audio_sync_pending");
+        if pending.is_some() {
+            self.complete_background_task("native-sync-pending", None);
+        }
+        let needs_pending = match pending {
+            Some(pf) => {
+                pending_force
+                    || (self.audio_bridge.graph_fingerprint != Some(pf)
+                        && self.audio_bridge.last_failed_fingerprint != Some(pf))
+            }
+            None => false,
+        };
+        if needs_pending {
+            self.audio_bridge.project_dirty = true;
+            self.schedule_audio_project_sync(cx, pending_force, pending_reason);
             return;
         }
 
@@ -1099,6 +1240,39 @@ impl StudioLayout {
             self.audio_bridge.play_after_sync = false;
             self.start_native_playback(cx);
         }
+    }
+
+    /// Watchdog: free the sync lifecycle when a `load_project` hangs (a true
+    /// deadlock never returns, so the spawned join would otherwise pin
+    /// `sync_in_flight` and the "Sync native engine" task forever). Bumping the
+    /// generation makes the eventual (orphaned) completion a no-op. The engine
+    /// thread stays alive; the user can retry via any forced sync / reopening
+    /// audio settings. Driven from `poll_native_audio`.
+    pub(super) fn timeout_audio_project_sync(&mut self, cx: &mut Context<Self>) {
+        if !self.audio_bridge.sync_in_flight {
+            return;
+        }
+        self.audio_bridge.sync_generation = self.audio_bridge.sync_generation.wrapping_add(1);
+        self.audio_bridge.sync_in_flight = false;
+        self.audio_bridge.sync_started_at = None;
+        self.audio_bridge.last_failed_fingerprint = self.audio_bridge.running_fingerprint.take();
+        self.audio_bridge.pending_fingerprint = None;
+        self.audio_bridge.pending_reason = None;
+        self.audio_bridge.pending_force = false;
+        self.audio_bridge.project_dirty = false;
+        self.audio_bridge.media_dirty = false;
+        self.audio_bridge.sync_timeout_count =
+            self.audio_bridge.sync_timeout_count.saturating_add(1);
+        crate::perf::count("sync_timeout_count", self.audio_bridge.sync_timeout_count);
+        self.audio_bridge.last_error = Some("native engine sync timed out".to_string());
+        eprintln!(
+            "[audio] native engine sync timed out after {}s (recoverable) reason={}",
+            SYNC_WATCHDOG_TIMEOUT.as_secs(),
+            self.audio_bridge.last_sync_reason
+        );
+        self.fail_background_task("native-sync", "Native engine sync timed out (recoverable)");
+        self.complete_background_task("native-sync-pending", None);
+        cx.notify();
     }
 
     /// Read structured per-insert status from the engine and reconcile each
